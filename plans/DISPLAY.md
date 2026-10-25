@@ -93,7 +93,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 | Seat multiplexing (VT switch) | `chvt`/`VT_ACTIVATE`, `logind` seats | single text-vs-desktop boolean | `CAP_SEAT_ADMIN` foreground switch across sessions |
 | Controlling terminal / foreground | session leader + fg pgroup + `SIGTTIN/TTOU` | inherited fd table + `CAP_CONSOLE_READ` gate | per-console controlling-owner + fg handoff, capability-gated |
 | Multi-head / multi-seat | DRM connectors + `logind` seats | `consoles[0]` == "the display" | N independent seat objects, one owner each |
-| Text console vs. graphics on one surface | `KD_GRAPHICS` + fbcon `CON_IS_VISIBLE`; `printk` dropped, not retained | kernel fbcon paints the scan-out unconditionally | surface handover derived from the same lease; text **retained** and replayed, and a graphical hand-over held blank instead |
+| Text console vs. graphics on one surface | `KD_GRAPHICS` console mode (console_ioctl(2)) | kernel fbcon paints the scan-out unconditionally | surface handover derived from the same lease; text **retained** and replayed, and a graphical hand-over held blank instead |
 | Owner dies without releasing | master drops when the `fd` closes | nothing — the seat stays held by a dead task | task-exit reclaim of the lease, the surface, and the queued input |
 
 ## 2. Design — "better than Linux"
@@ -875,9 +875,8 @@ up at boot; a hotplug seat's display carries no kernel text console, so a
 desktop that takes a second head leaves the primary console painting its own
 screen — the right multi-head answer, for free.
 
-**Retained, not discarded — better than Linux.** Linux drops `printk` output
-that arrives while a VT is in `KD_GRAPHICS`; the bytes are gone from the screen
-for good. TAIRiX keeps interpreting them into the console's retained cell grid
+**Retained, not discarded.** Text written to a console while a graphical
+session holds the screen is never lost. TAIRiX keeps interpreting them into the console's retained cell grid
 and paints nothing, so taking the surface back repaints the whole screen
 *including everything written while it was away*. The user comes back to their
 shell exactly as they left it, with the desktop's diagnostics printed beneath —

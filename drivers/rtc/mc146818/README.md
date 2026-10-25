@@ -69,8 +69,8 @@ chip is never left frozen — so the chip cannot advance mid-write.
 * **The index port's NMI-mask bit is not preserved.** On PC hardware bit 7 of
   `0x70` masks NMI, and every register this driver selects has that bit clear,
   so a select leaves NMI unmasked. The port is write-only, so its current
-  state cannot be read back and preserved from a two-port grant; Linux's own
-  CMOS accessors behave the same way. NMI masking is a platform concern the
+  state cannot be read back and preserved from a two-port grant. NMI masking
+  is a platform concern the
   kernel owns, not this driver's.
 * **No plausibility judgement.** Whether a decoded date is a believable wall
   time is clock policy and belongs to `userland/system/timed`, the one holder

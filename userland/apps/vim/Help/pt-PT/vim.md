@@ -71,8 +71,8 @@ código.
 
 - `0` — a sessão terminou com um comando de saída, ou a ajuda curta
   foi mostrada.
-- `1` — o terminal falhou; a razão é impressa no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — o terminal falhou; a razão é impressa no erro padrão. Uma linha
+  de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

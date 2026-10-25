@@ -39,8 +39,12 @@ pipe end, or a pty end — all go through the **identical** code path: the share
 trait, because the kernel resolves every descriptor the process holds through
 one table.
 The module also carries the one `write_stderr_line` helper every command app's
-`Run` binary reports diagnostics through (best-effort, never the data stream),
-so the line-to-fd-2 loop is written once.
+`Run` binary reports diagnostics through (best-effort, never the data stream):
+formatted on the stack and written with its line ending in one write where it
+fits the buffer, so the line-to-fd-2 loop is written once and a line built from
+parts costs one syscall. `Stdout` and `Stderr` answer `at_terminal` from
+whether the kernel attests the console's size, so a pipe, a file or a UART is
+no terminal.
 
 `Stdout` and `Stderr` also implement `tairix_util::output::Output`, the byte
 stream every command engine writes through, so a `Run` binary hands its engine
@@ -66,6 +70,77 @@ Obtaining a *new* fd — opening a file under a capability, resolving a resource
 reference, creating a pipe — is owned by the filesystem and resource-reference
 subsystems, not this layer; the trait module exposes no `open` / `resolve` and
 so cannot widen authority.
+
+## Creating a file or directory
+
+A node is born with the mode its creator names, less the process's file mode
+creation mask, which the kernel applies on every create. `File::open` opens what
+exists and refuses flags carrying `CREATE` before any call; `File::create(path,
+flags, mode)` creates (an existing file keeps its own mode), as do `create` and
+`create_new` with a mode, `fs_mkdir(path, mode)` for a directory, and
+`replace_file`, whose mode is a first creation's (a replaced file keeps the
+original's, and its temporary is born owner-only). A creator that wants no
+narrower mode passes `tairix_abi::fs::FS_NEW_FILE_MODE` (`0o666`) or
+`FS_NEW_DIR_MODE` (`0o777`), which the initial mask `FS_INITIAL_UMASK` (`022`)
+narrows to `0o644` and `0o755`.
+`umask(mask)` replaces the mask, keeping its permission bits, and answers the
+one it replaced; `umask_get()` reads it. A child launched afterwards starts
+with the same mask.
+
+`Dir::create(path, mode)` and `Dir::make_dir(name, mode)` make a directory
+with `CREATE | DIRECTORY | EXCLUSIVE` and answer it open with no read or
+write access, so a mode set next through it (`dir.as_file().set_mode`) reaches
+the directory made, whatever its name holds by then — the race between a
+`mkdir` and a later `chmod` of the name is closed, which `mkdir -m` relies on.
+
+## Paths, directories and descriptors
+
+Every path-only function — `fs_open`, `fs_mkdir`, `fs_unlink`, `fs_rename`,
+`fs_chdir`, `fs_set_mode`, `fs_set_owner`, `fs_symlink`, `fs_readlink`,
+`fs_link`, `fs_realpath` and the openers built on them — passes `FD_CWD`, so a
+relative path starts at the working directory. The working directory holds the
+directory itself rather than a spelling of it: it follows the directory through
+a rename, and a removed one answers `NotFound`.
+
+A `Dir` is a place relative calls start from. `open_dir`, `open_file`,
+`create_file`, `make_dir`, `mkdir`, `unlink`, `rename`, `link`, `symlink`,
+`readlink`, `set_mode_at`, `set_owner_at` and `access` resolve a relative name
+from the directory the handle holds, wherever it has been moved, and an
+absolute one exactly as the free functions do; `chdir` makes it the working
+directory. `open_dir` opens the child directory itself, never through a link
+at its name, which answers `NotADirectory`. Each runs as the caller: a
+directory descriptor confers no authority. `rename` and `link` name each end
+by its own directory, carried to
+the kernel in a `PathAt` record. `unlink` and `rename` take an optional
+`NodeExpect`: with an `EXPECT_*` flag the kernel compares it under the volume's
+lock and answers `Stale`, changing nothing, when the name no longer holds the
+node it describes.
+
+A descriptor's own node is reached through `EMPTY_PATH` and an empty path:
+`File::set_mode`, `File::set_owner` and `Dir::chdir` are `fchmod`, `fchown`
+and `fchdir`, and `File::access` asks about the node held under the
+descriptor's authority. Extended attributes are reached
+through a descriptor only — `File::attr_keys`, `attr_value`, `attr_set` and
+`attr_remove` — so a caller meaning a link's own attributes opens it
+`NO_FOLLOW`.
+
+`tairix_rt::copy` puts the shared tree seam (`tairix_fscopy::tree`) over
+these handles: a `File` is a held node, a `Dir` a held directory whose
+children are reached by name and opened with `NO_FOLLOW` — through a final
+link only by `enter` and `follow` — and `WorkingDirectory` the `Roots` a
+tool's operands are opened from. A listing is decoded a batch at a time
+into the entries it names, so it is never held twice. Every command tool
+that walks or changes a tree runs through it, and so does `replace_file`.
+
+`access(path, want, flags)` asks whether the caller may read, write or run a
+node (`Access::READ`, `WRITE`, `EXEC`; empty asks only that it exists),
+answered as the caller: the node's mode, ACL and capability gate under the
+caller's identity, then the mount — writing on a read-only one is `ReadOnly`,
+running a file on a `noexec` one `PermissionDenied`. `NO_FOLLOW` asks about a
+link itself. The answer describes the moment it was given: it decides what a
+program asks or shows, as `rm` decides whether to ask before removing a file it
+may not write, and never stands in for the check the kernel makes again on the
+call that follows.
 
 ## Sequential and positional
 
@@ -129,7 +204,10 @@ A service that applies a document as it changes — the time service and the
 cooling service each follow `system.conf` — follows it through
 `follow::Followed`. The file's directory is watched once it exists, and its
 parent until then, so a service started before the volume holding the file is
-mounted follows it the moment the directory appears. `Followed::drain`
+mounted follows it the moment the directory appears; a directory that is
+there but refused, or is not a directory, is answered as unwatched with why,
+never waited for. A storm of changes reports at most once a second, the
+engine's own pacing. `Followed::drain`
 answers what a wake asks for: nothing, a re-read, or a re-follow because the
 watched directory came or went; a directory still changing after a bounded
 number of batches is simply read again. The verdict over one change batch

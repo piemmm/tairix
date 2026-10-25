@@ -83,8 +83,8 @@ the historical tool discards it.
 - `0` — the session ran (however the remote host ended it), or the short
   help was written.
 - `1` — the session could not be had: the host would not resolve, the socket
-  was refused, or the terminal could not be put into raw mode.
-- `2` — the command line was not understood.
+  was refused, or the terminal could not be put into raw mode. A command line
+  that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

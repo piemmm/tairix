@@ -75,8 +75,8 @@ continue avec le reste. Les options GNU `--output`, `--sync` et
 - `0` — le rapport a couvert tout ce qui était demandé (ou l'aide
   courte a été écrite).
 - `1` — un opérande n'a pas pu être rapporté, les filtres n'ont rien
-  laissé, ou la requête/la sortie a échoué.
-- `2` — la ligne de commande n'a pas été comprise.
+  laissé, ou la requête/la sortie a échoué. Une ligne de commande non
+  comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

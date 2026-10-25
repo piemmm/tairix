@@ -6,6 +6,8 @@
 //! bundle composer (which builds each bundle's `Run` and signs its
 //! `AppInfo`), so the payload a bundle carries and the bundle itself are
 //! found and named by one rule and can never describe different programs.
+//! The kernel's build script walks the driver tree for its bootstrap floor's
+//! manifests with the same walk and reads them with the same grammar.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -65,35 +67,64 @@ pub fn string_entry<'a>(manifest: &'a str, key: &str) -> Option<&'a str> {
         .and_then(|(_, value)| quoted_string(value))
 }
 
-/// Every program crate under `userland`, in a deterministic order.
+/// Every crate under `root` holding the manifest file `manifest`, in a
+/// deterministic order: the program crates under `userland` hold
+/// [`MANIFEST_SOURCE`].
 ///
-/// A program crate holds [`MANIFEST_SOURCE`] at `<class>/<crate>`, or at
-/// `<class>/<group>/<crate>` beneath a grouping directory that is not itself
-/// a crate — a game's own subtree, whose crates compose each other. `read`
-/// is told every directory whose listing the answer depends on, so a build
-/// script can rerun when a program is added anywhere the walk looks.
+/// Such a crate sits at `<class>/<crate>`, or at `<class>/<group>/<crate>`
+/// beneath a grouping directory that is not itself a crate — a game's own
+/// subtree, a bus's drivers. `read` is told every directory whose listing the
+/// answer depends on, so a build script can rerun when a crate is added
+/// anywhere the walk looks.
 ///
 /// # Errors
 ///
 /// A directory the walk cannot list.
-pub fn program_crates(userland: &Path, mut read: impl FnMut(&Path)) -> io::Result<Vec<PathBuf>> {
+pub fn manifest_crates(
+    root: &Path,
+    manifest: &str,
+    mut read: impl FnMut(&Path),
+) -> io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
-    for class in sorted_dirs(userland, &mut read)? {
+    for class in sorted_dirs(root, &mut read)? {
         for member in sorted_dirs(&class, &mut read)? {
             if member.join("Cargo.toml").is_file() {
-                if member.join(MANIFEST_SOURCE).is_file() {
+                if member.join(manifest).is_file() {
                     found.push(member);
                 }
                 continue;
             }
             for member_crate in sorted_dirs(&member, &mut read)? {
-                if member_crate.join(MANIFEST_SOURCE).is_file() {
+                if member_crate.join(manifest).is_file() {
                     found.push(member_crate);
                 }
             }
         }
     }
     Ok(found)
+}
+
+/// The `[package] name` a crate's `Cargo.toml` text gives, or `None` where
+/// it gives none as a plain quoted string.
+#[must_use]
+pub fn package_name(cargo_toml: &str) -> Option<&str> {
+    let mut in_package = false;
+    for raw in cargo_toml.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "name" {
+                return quoted_string(value.trim());
+            }
+        }
+    }
+    None
 }
 
 /// Whether `name` is a file a host's file manager leaves beside the files it
@@ -125,7 +156,10 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use super::{is_command_word, is_host_metadata, manifest_entries, quoted_string, string_entry};
+    use super::{
+        is_command_word, is_host_metadata, manifest_crates, manifest_entries, package_name,
+        quoted_string, string_entry,
+    };
 
     /// The files a host's file manager drops beside the ones it shows are
     /// passed over; a name that merely resembles one is not.
@@ -182,6 +216,46 @@ mod tests {
         for name in ["", "..", "a/b", "../etc", ".hidden", "a b", "a.app", "é"] {
             assert!(!is_command_word(name), "{name:?}");
         }
+    }
+
+    /// The name is the `[package]` table's own, never another table's or a
+    /// key that merely starts with it.
+    #[test]
+    fn a_package_name_is_the_package_tables_name() {
+        let manifest = "[workspace]\nname = \"no\"\n[package]\nnamespace = \"no\"\n\
+                        name = \"tairix-x\"\n[dependencies]\nname = \"no\"\n";
+        assert_eq!(package_name(manifest), Some("tairix-x"));
+        assert_eq!(package_name("[package]\nversion = \"1\"\n"), None);
+        assert_eq!(package_name("[package]\nname = tairix\n"), None);
+        assert_eq!(package_name("[dependencies]\nname = \"no\"\n"), None);
+    }
+
+    /// The walk finds a crate holding the manifest at either depth, never one
+    /// without it, and never looks inside a crate for another.
+    #[test]
+    fn the_walk_finds_each_crate_holding_the_manifest() {
+        let root =
+            std::env::temp_dir().join(std::format!("tairix-syshelp-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (dir, manifest) in [
+            ("class/held", true),
+            ("class/bare", false),
+            ("class/group/nested", true),
+            ("class/held/inner", true),
+        ] {
+            let dir = root.join(dir);
+            std::fs::create_dir_all(&dir).expect("a scratch tree");
+            std::fs::write(dir.join("Cargo.toml"), "").expect("a crate");
+            if manifest {
+                std::fs::write(dir.join("Floor.toml"), "").expect("a manifest");
+            }
+        }
+        let found = manifest_crates(&root, "Floor.toml", |_| {}).expect("walks");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            found,
+            vec![root.join("class/group/nested"), root.join("class/held")]
+        );
     }
 
     /// A key is matched exactly, before the first line that is not an entry,

@@ -34,7 +34,7 @@ const DISPLAY_NODES: [&str; 7] = ["hvs", "hdmi0", "hdmi1", "ddc0", "ddc1", "dvp"
 
 /// The base tree's labels for the firmware's own display devices, its
 /// framebuffer and its firmware-KMS planes. The firmware hands the display to
-/// the ARM only while both are disabled, as Linux's `vc4-kms-v3d` leaves them;
+/// the ARM only while both are disabled;
 /// otherwise it keeps driving the display and ignores the engine's notice.
 const FIRMWARE_DISPLAYS: [&str; 2] = ["fb", "firmwarekms"];
 

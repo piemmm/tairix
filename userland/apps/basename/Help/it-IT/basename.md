@@ -46,8 +46,8 @@ un nome.
 ## EXIT STATUS
 
 - `0` — i risultati (o la guida breve) sono stati scritti.
-- `1` — l'output non è stato consegnato.
-- `2` — la riga di comando non è stata compresa.
+- `1` — l'output non è stato consegnato. Anche una riga di comando non
+  compresa termina con `1`.
 
 ## ENVIRONMENT
 

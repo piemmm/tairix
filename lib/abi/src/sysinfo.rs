@@ -120,10 +120,10 @@ impl SysinfoQueryId {
     /// that expose no per-process secret, exactly like [`Self::UPTIME`].
     pub const LOAD_AVERAGE: Self = Self(9);
 
-    /// List the account directory: every account's uid and username, one
-    /// [`UserDirectoryRecord`] per account.
+    /// List the account directory: every account's uid, login group and
+    /// username, one [`UserDirectoryRecord`] per account.
     ///
-    /// Ungated: the pairing of a numeric uid with its account name is the
+    /// Ungated: an account's uid, login group and name are the
     /// `/etc/passwd`-class public directory every `ls -l`- or `top`-style
     /// display needs, and it carries **no** credential material — password
     /// records stay behind the capability-gated `users_db_read` syscall.
@@ -233,7 +233,7 @@ impl SysinfoQueryId {
     /// backtrace, the register file), paged by a [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_KERNEL` and is audited. The record is the
-    /// privileged-debugger analogue of a Linux kernel oops: it carries the
+    /// privileged-debugger analogue of a kernel crash report: it carries the
     /// absolute general-purpose register *values* — the one datum expressed
     /// absolute anywhere in this diagnostics surface — so it is gated on
     /// the same kernel-introspection capability as
@@ -780,7 +780,8 @@ pub enum IntrospectDomain {
     /// [`LoadAverage`].
     LoadAverage = 6,
     /// The account directory: every account, one packed
-    /// [`UserDirectoryRecord`] (uid + username, no credential material),
+    /// [`UserDirectoryRecord`] (uid, login group and username, no credential
+    /// material),
     /// with the syscall's `arg` naming the record offset to page from.
     UserDirectory = 7,
     /// Per-CPU execution-time accounting: every online CPU, one packed
@@ -1891,8 +1892,8 @@ pub struct ProcessRecord {
     /// behalf, never the length a call merely requested: a short read
     /// advances it by only what came back. It does **not** count pipe,
     /// pty, or resource reads, and it is not block-device traffic — a
-    /// cached read that never reaches storage still counts, exactly as
-    /// Linux's `rchar` does in `/proc/<pid>/io`. Saturates at [`u64::MAX`]
+    /// cached read that never reaches storage still counts. Saturates at
+    /// [`u64::MAX`]
     /// rather than wrapping. Consumers derive a rate from the delta between
     /// two samples, exactly as for [`cpu_time_ns`](Self::cpu_time_ns).
     pub io_bytes_read: u64,
@@ -2268,35 +2269,43 @@ impl LoadAverage {
 }
 
 /// One account entry in a [`SysinfoQueryId::USER_DIRECTORY`] response: the
-/// numeric uid and the account's username, and **nothing else** — no
-/// password material, home, shell, or grant set. The `/etc/passwd`-class
-/// public pairing a `top`/`ls -l`-style display renders.
+/// numeric uid, the account's login group and its username, and **nothing
+/// else** — no password material, home, shell, or grant set. The
+/// `/etc/passwd`-class public fields an `ls -l`-style display renders and a
+/// `chown OWNER:` resolves.
 ///
 /// Allocation-free: the name is stored inline in a fixed buffer with its
-/// valid length alongside.
+/// valid length alongside. The struct is laid out as it is encoded, so the
+/// generated C view reads the wire bytes directly.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct UserDirectoryRecord {
     /// The account's numeric user identifier.
     pub uid: u32,
+    /// The account's login (primary) group.
+    pub primary_gid: u32,
     /// Valid byte count in the inline name buffer
     /// (`<= MAX_USERNAME_LEN`); read the bytes through
     /// [`UserDirectoryRecord::name_bytes`].
     pub name_len: u8,
+    reserved: [u8; 3],
     name: [u8; MAX_USERNAME_LEN],
 }
 
 impl UserDirectoryRecord {
-    /// Encoded size on the wire: uid + name length + three reserved bytes
-    /// + the inline name buffer.
-    pub const WIRE_LEN: usize = 8 + MAX_USERNAME_LEN;
+    /// Byte offset of the inline name.
+    const NAME_AT: usize = 12;
 
-    /// Construct a record, copying up to [`MAX_USERNAME_LEN`] bytes
-    /// of `name`.
+    /// Encoded size on the wire: uid, login group, name length, three
+    /// reserved bytes, and the inline name buffer.
+    pub const WIRE_LEN: usize = Self::NAME_AT + MAX_USERNAME_LEN;
+
+    /// Construct the record of the account `uid`, whose login group is
+    /// `primary_gid`, copying up to [`MAX_USERNAME_LEN`] bytes of `name`.
     ///
     /// Returns [`Errno::LengthOutOfRange`] if `name` is longer than
     /// [`MAX_USERNAME_LEN`]; the name is never silently truncated.
-    pub fn new(uid: u32, name: &[u8]) -> Result<Self, Errno> {
+    pub fn new(uid: u32, primary_gid: u32, name: &[u8]) -> Result<Self, Errno> {
         if name.len() > MAX_USERNAME_LEN {
             return Err(Errno::LengthOutOfRange);
         }
@@ -2305,7 +2314,9 @@ impl UserDirectoryRecord {
         let name_len = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
         Ok(Self {
             uid,
+            primary_gid,
             name_len,
+            reserved: [0; 3],
             name: buf,
         })
     }
@@ -2321,9 +2332,9 @@ impl UserDirectoryRecord {
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u32(&mut out, 0, self.uid);
-        out[4] = self.name_len;
-        // out[5..8] reserved, already zero.
-        out[8..8 + MAX_USERNAME_LEN].copy_from_slice(&self.name);
+        put_u32(&mut out, 4, self.primary_gid);
+        out[8] = self.name_len;
+        out[Self::NAME_AT..].copy_from_slice(&self.name);
         out
     }
 
@@ -2336,15 +2347,17 @@ impl UserDirectoryRecord {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let name_len = bytes[4];
+        let name_len = bytes[8];
         if name_len as usize > MAX_USERNAME_LEN {
             return Err(Errno::LengthOutOfRange);
         }
         let mut name = [0u8; MAX_USERNAME_LEN];
-        name.copy_from_slice(&bytes[8..8 + MAX_USERNAME_LEN]);
+        name.copy_from_slice(&bytes[Self::NAME_AT..Self::WIRE_LEN]);
         Ok(Self {
             uid: read_u32(bytes, 0),
+            primary_gid: read_u32(bytes, 4),
             name_len,
+            reserved: [0; 3],
             name,
         })
     }
@@ -2357,7 +2370,8 @@ impl UserDirectoryRecord {
 /// render a gid as a name.
 ///
 /// Allocation-free: the name is stored inline in a fixed buffer with its
-/// valid length alongside.
+/// valid length alongside. The struct is laid out as it is encoded, so the
+/// generated C view reads the wire bytes directly.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct GroupDirectoryRecord {
@@ -2367,13 +2381,17 @@ pub struct GroupDirectoryRecord {
     /// (`<= MAX_GROUPNAME_LEN`); read the bytes through
     /// [`GroupDirectoryRecord::name_bytes`].
     pub name_len: u8,
+    reserved: [u8; 3],
     name: [u8; MAX_GROUPNAME_LEN],
 }
 
 impl GroupDirectoryRecord {
+    /// Byte offset of the inline name.
+    const NAME_AT: usize = 8;
+
     /// Encoded size on the wire: gid + name length + three reserved bytes
     /// + the inline name buffer.
-    pub const WIRE_LEN: usize = 8 + MAX_GROUPNAME_LEN;
+    pub const WIRE_LEN: usize = Self::NAME_AT + MAX_GROUPNAME_LEN;
 
     /// Construct a record, copying up to [`MAX_GROUPNAME_LEN`] bytes of
     /// `name`.
@@ -2392,6 +2410,7 @@ impl GroupDirectoryRecord {
         Ok(Self {
             gid,
             name_len,
+            reserved: [0; 3],
             name: buf,
         })
     }
@@ -2408,8 +2427,7 @@ impl GroupDirectoryRecord {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u32(&mut out, 0, self.gid);
         out[4] = self.name_len;
-        // out[5..8] reserved, already zero.
-        out[8..8 + MAX_GROUPNAME_LEN].copy_from_slice(&self.name);
+        out[Self::NAME_AT..].copy_from_slice(&self.name);
         out
     }
 
@@ -2429,10 +2447,11 @@ impl GroupDirectoryRecord {
             return Err(Errno::LengthOutOfRange);
         }
         let mut name = [0u8; MAX_GROUPNAME_LEN];
-        name.copy_from_slice(&bytes[8..8 + MAX_GROUPNAME_LEN]);
+        name.copy_from_slice(&bytes[Self::NAME_AT..Self::WIRE_LEN]);
         Ok(Self {
             gid: read_u32(bytes, 0),
             name_len,
+            reserved: [0; 3],
             name,
         })
     }
@@ -2675,7 +2694,7 @@ fn bounded(declared: u8, bound: usize) -> Result<u8, Errno> {
 /// is the remainder of the same monotonic sample instant, so
 /// `busy_ns + idle_ns` is that CPU's share of uptime at the sample. A
 /// consumer derives a utilisation percentage from the *deltas* of two
-/// samples, exactly as `top` reads `/proc/stat` on Linux; TAIRiX does not
+/// samples; TAIRiX does not
 /// account a user/system/nice/iowait split, so the honest vocabulary is
 /// busy and idle only.
 #[repr(C)]
@@ -7515,19 +7534,19 @@ mod tests {
 
     #[test]
     fn user_directory_record_round_trips_and_fails_closed() {
-        let rec = UserDirectoryRecord::new(1000, b"alice").expect("record");
+        let rec = UserDirectoryRecord::new(1000, 1001, b"alice").expect("record");
         assert_eq!(rec.name_bytes(), b"alice");
         let decoded = UserDirectoryRecord::from_bytes(&rec.to_le_bytes()).expect("round trip");
         assert_eq!(decoded, rec);
-        assert_eq!(decoded.uid, 1000);
+        assert_eq!((decoded.uid, decoded.primary_gid), (1000, 1001));
 
         let too_long = [b'x'; MAX_USERNAME_LEN + 1];
         assert_eq!(
-            UserDirectoryRecord::new(0, &too_long),
+            UserDirectoryRecord::new(0, 0, &too_long),
             Err(Errno::LengthOutOfRange)
         );
         let mut bytes = rec.to_le_bytes();
-        bytes[4] = u8::try_from(MAX_USERNAME_LEN + 1).unwrap();
+        bytes[8] = u8::try_from(MAX_USERNAME_LEN + 1).unwrap();
         assert_eq!(
             UserDirectoryRecord::from_bytes(&bytes),
             Err(Errno::LengthOutOfRange)
@@ -7561,6 +7580,38 @@ mod tests {
             GroupDirectoryRecord::from_bytes(&[0u8; GroupDirectoryRecord::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    /// Regression: both directory records placed their name four bytes past
+    /// the length in memory, so the C view generated from them read the
+    /// three reserved wire bytes as the name's first characters.
+    #[test]
+    fn the_directory_records_are_laid_out_as_they_are_encoded() {
+        use core::mem::{offset_of, size_of};
+
+        let user = UserDirectoryRecord::new(7, 9, b"ada").expect("record");
+        let wire = user.to_le_bytes();
+        assert_eq!(
+            size_of::<UserDirectoryRecord>(),
+            UserDirectoryRecord::WIRE_LEN
+        );
+        assert_eq!(offset_of!(UserDirectoryRecord, uid), 0);
+        assert_eq!(offset_of!(UserDirectoryRecord, primary_gid), 4);
+        assert_eq!(offset_of!(UserDirectoryRecord, name_len), 8);
+        let name_at = offset_of!(UserDirectoryRecord, name);
+        assert_eq!(&wire[name_at..name_at + 3], b"ada");
+        assert_eq!(wire[8], 3);
+
+        let group = GroupDirectoryRecord::new(9, b"ops").expect("record");
+        let wire = group.to_le_bytes();
+        assert_eq!(
+            size_of::<GroupDirectoryRecord>(),
+            GroupDirectoryRecord::WIRE_LEN
+        );
+        assert_eq!(offset_of!(GroupDirectoryRecord, gid), 0);
+        assert_eq!(offset_of!(GroupDirectoryRecord, name_len), 4);
+        let name_at = offset_of!(GroupDirectoryRecord, name);
+        assert_eq!(&wire[name_at..name_at + 3], b"ops");
     }
 
     #[test]
@@ -8408,15 +8459,13 @@ mod tests {
         use crate::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 
         let mut root = HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root);
-        for name in [&b"raspberrypi,4-model-b"[..], b"brcm,bcm2711"] {
+        for name in [&b"vendor,board"[..], b"vendor,soc"] {
             root.push_match_key(HwMatchKey::compatible(name).unwrap())
                 .unwrap();
         }
         root.push_match_key(HwMatchKey::virtio(1)).unwrap();
         let board = PlatformCompatible::of(&root);
-        assert!(board
-            .strings()
-            .eq([&b"raspberrypi,4-model-b"[..], b"brcm,bcm2711"]));
+        assert!(board.strings().eq([&b"vendor,board"[..], b"vendor,soc"]));
         let mut out = [0u8; PlatformCompatible::WIRE_MAX];
         let len = board.encode(&mut out).unwrap();
         assert_eq!(len, 2 * HwMatchKey::WIRE_LEN, "only compatible keys");

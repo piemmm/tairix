@@ -876,7 +876,7 @@ fn the_window_covering_the_registers_reaches_peripherals_and_another_memory() {
 /// Beside a peripheral aperture, a bus may map all memory one to one, a window
 /// that spans the registers too: the aperture, the narrower, is how the
 /// engines reach a FIFO, and the wide window still reaches memory. The shape
-/// is the Raspberry Pi 4 firmware tree's `/scb`, whose DMA4 engines name
+/// is a firmware tree's on-chip bus whose wide-address engines name
 /// peripherals at `0x4_7c000000`.
 #[test]
 fn a_memory_window_spanning_the_registers_beside_an_aperture_still_reaches_memory() {

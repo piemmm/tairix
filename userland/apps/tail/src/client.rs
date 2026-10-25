@@ -11,10 +11,11 @@ use tairix_util::tailwindow::{ByteWindow, LineWindow};
 use crate::command::{Command, Count, HeaderMode, Job, Source};
 use crate::error::TailError;
 use crate::io::{FileSource, Input, Output, Watcher};
+use tairix_util::banner::Banners;
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `tail`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `tail`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: tail [-qvz] [-c [+]num[suffix]] [-n [+]num[suffix]] [--] [file...]";
 
 /// `tail`'s own command word: the short-help switches render its own Help
@@ -191,26 +192,19 @@ pub fn run(
 
     let lines = matches!(job.count, Count::Lines(_));
     let mut all_ok = true;
-    let mut header_written = false;
+    let mut banners = Banners::new(out);
     let mut omitted_total: u64 = 0;
     for source in &job.sources {
         let (ok, omitted) = match source {
             Source::Stdin => {
                 if show_headers {
-                    write_header(out, "standard input", &mut header_written)
-                        .map_err(TailError::Output)?;
+                    banners.stdin(out).map_err(TailError::Output)?;
                 }
                 serve_stdin(&job, stdin, out, err)?
             }
-            Source::Path(path) => serve_path(
-                &job,
-                path,
-                files,
-                out,
-                err,
-                show_headers,
-                &mut header_written,
-            )?,
+            Source::Path(path) => {
+                serve_path(&job, path, files, out, err, show_headers, &mut banners)?
+            }
         };
         all_ok &= ok;
         omitted_total = omitted_total.saturating_add(omitted);
@@ -220,22 +214,6 @@ pub fn run(
         emit_omission_record(out, omitted_total, lines, job.from_start);
     }
     Ok(all_ok)
-}
-
-/// The `==> name <==` banner, preceded by a blank line for every header
-/// after the first, exactly as the GNU tool separates multi-file output.
-pub(crate) fn write_header(
-    out: &dyn Output,
-    name: &str,
-    header_written: &mut bool,
-) -> Result<(), Errno> {
-    let banner = if *header_written {
-        format!("\n==> {name} <==\n")
-    } else {
-        format!("==> {name} <==\n")
-    };
-    *header_written = true;
-    out.write_all(banner.as_bytes())
 }
 
 /// Serve standard input. A read failure is diagnosed and ends this source;
@@ -273,7 +251,7 @@ fn serve_path(
     out: &dyn Output,
     err: &dyn Output,
     show_headers: bool,
-    header_written: &mut bool,
+    banners: &mut Banners,
 ) -> Result<(bool, u64), TailError> {
     let mut buf = vec![0u8; READ_CHUNK];
     let first = match files.read(path, 0, &mut buf) {
@@ -290,7 +268,7 @@ fn serve_path(
         }
     };
     if show_headers {
-        write_header(out, path, header_written).map_err(TailError::Output)?;
+        banners.file(out, path).map_err(TailError::Output)?;
     }
 
     let mut engine = Engine::new(job);
@@ -545,6 +523,47 @@ mod tests {
 
     /// Run `args` against the fixtures, returning (all-ok, stdout, stderr,
     /// fd-3 records).
+    /// A capturing stream the kernel attests as a terminal.
+    #[derive(Default)]
+    struct Console(Sink);
+
+    impl Output for Console {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+            self.0.write_all(bytes)
+        }
+
+        fn at_terminal(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_header_escapes_its_name_at_a_terminal_and_keeps_it_in_a_pipe() {
+        let files = MemFiles::new(&[("e\u{1b}[2Jx", b"A\n")]);
+        let out = Console::default();
+        run(
+            command(&["-n1", "e\u{1b}[2Jx", "-"]),
+            None,
+            &files,
+            &MemStdin::new(b"S\n"),
+            &NoWatch,
+            &NoHelp,
+            &out,
+            &Sink::default(),
+        )
+        .expect("fixture output streams never fail");
+        assert_eq!(
+            out.0.bytes(),
+            "==> 'e'$'\\033''[2Jx' <==\nA\n\n==> standard input <==\nS\n".as_bytes()
+        );
+        let (_, piped, _, _) =
+            run_case(&["-n1", "e\u{1b}[2Jx", "-"], &files, &MemStdin::new(b"S\n"));
+        assert_eq!(
+            piped,
+            "==> e\u{1b}[2Jx <==\nA\n\n==> standard input <==\nS\n".as_bytes()
+        );
+    }
+
     fn run_case(
         args: &[&str],
         files: &MemFiles,

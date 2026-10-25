@@ -128,8 +128,7 @@ de la herramienta.
 
 - `0` — la sesión terminó con la `q` del usuario.
 - `1` — el directorio inicial no pudo listarse, o falló la vía del
-  terminal.
-- `2` — los argumentos no pudieron entenderse.
+  terminal. Una línea de órdenes no entendida también termina con `1`.
 
 ## SEE ALSO
 

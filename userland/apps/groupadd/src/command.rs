@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::GroupaddError;
-use tairix_util::argv::option_value;
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
 /// Maximum length of a group name, in bytes.
 ///
@@ -38,70 +38,45 @@ pub struct NewGroup {
     pub gid: Option<u32>,
 }
 
+/// What each of `groupadd`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Gid,
+    Help,
+}
+
+/// `groupadd`'s options and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('g', &["gid"], Flag::Gid),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `groupadd [-g GID] [--] NAME`:
-///
-/// * `-g` / `--gid` — numeric group id (auto-allocated when omitted).
-/// * `-h` / `-?` / `--help` — show the command's own short help (wins
-///   immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * any other `-…` — a [`GroupaddError::Usage`] error (fail closed).
-///
-/// `-g` accepts its value attached (`-g0`, `--gid=0`) or as the following
-/// argument (`-g 0`). Exactly one operand — the group name — is required.
+/// The grammar is `groupadd [-g GID] [--] NAME`, read as GNU's `getopt_long`
+/// reads it ([`Scan`]): options anywhere among the operands, clustered, a
+/// value attached (`-g0`, `--gid=0`) or following (`-g 0`), a long one by any
+/// unambiguous prefix, `--` ending them. `-g` is the numeric group id,
+/// auto-allocated when omitted; the help switches (`-h`, `-?`, `--help`)
+/// answer at once. Exactly one operand — the group name — is required.
 ///
 /// # Errors
 ///
-/// [`GroupaddError::Usage`] for an unrecognised option, a missing value, or a
-/// number of operands other than one. [`GroupaddError::BadId`] when the `-g`
-/// value is not a decimal id. [`GroupaddError::BadName`] when the operand is
-/// not a valid group name.
+/// [`GroupaddError::Option`] for an option `getopt` refuses.
+/// [`GroupaddError::Usage`] for a number of operands other than one.
+/// [`GroupaddError::BadId`] when the `-g` value is not a decimal id.
+/// [`GroupaddError::BadName`] when the operand is not a valid group name.
 pub fn parse(args: &[&str]) -> Result<Command, GroupaddError> {
     let mut gid: Option<u32> = None;
     let mut operands: Vec<String> = Vec::new();
-    let mut options_done = false;
-
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
-            }
-            if let Some(long) = arg.strip_prefix("--") {
-                let (name, inline) = match long.split_once('=') {
-                    Some((n, v)) => (n, Some(v)),
-                    None => (long, None),
-                };
-                match name {
-                    "help" => return Ok(Command::Help),
-                    "gid" => gid = Some(parse_id(value(inline, args, &mut index)?)?),
-                    _ => return Err(GroupaddError::Usage),
-                }
-                continue;
-            }
-            if let Some(rest) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                let mut chars = rest.chars();
-                let letter = chars.next().unwrap_or('-');
-                let attached = chars.as_str();
-                let inline = if attached.is_empty() {
-                    None
-                } else {
-                    Some(attached)
-                };
-                match letter {
-                    'h' | '?' => return Ok(Command::Help),
-                    'g' => gid = Some(parse_id(value(inline, args, &mut index)?)?),
-                    _ => return Err(GroupaddError::Usage),
-                }
-                continue;
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(GroupaddError::Option)? {
+            Arg::Operand(operand) => operands.push(String::from(operand)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Gid, value) => gid = value.map(parse_id).transpose()?,
         }
-        operands.push(String::from(arg));
     }
 
     if operands.len() != 1 {
@@ -112,22 +87,6 @@ pub fn parse(args: &[&str]) -> Result<Command, GroupaddError> {
         return Err(GroupaddError::BadName);
     }
     Ok(Command::Create(NewGroup { name, gid }))
-}
-
-/// Resolve the value of a value-taking option: the attached `inline` text when
-/// present, otherwise the following argument (which the caller's `index` is
-/// advanced past).
-///
-/// # Errors
-///
-/// [`GroupaddError::Usage`] when neither an attached value nor a following
-/// argument is available.
-fn value<'a>(
-    inline: Option<&'a str>,
-    args: &[&'a str],
-    index: &mut usize,
-) -> Result<&'a str, GroupaddError> {
-    option_value(inline, args, index).ok_or(GroupaddError::Usage)
 }
 
 /// Validate a group name against `[a-z_][a-z0-9_-]*` within [`MAX_NAME_LEN`].
@@ -174,7 +133,7 @@ fn parse_id(text: &str) -> Result<u32, GroupaddError> {
 mod tests {
     use super::{parse, validate_name, Command, NewGroup, MAX_NAME_LEN};
     use crate::error::GroupaddError;
-    use alloc::string::ToString;
+    use alloc::string::{String, ToString};
 
     fn create(name: &str, gid: Option<u32>) -> Command {
         Command::Create(NewGroup {
@@ -231,19 +190,41 @@ mod tests {
         assert_eq!(parse(&["staff", "wheel"]), Err(GroupaddError::Usage));
     }
 
-    #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "staff"]), Err(GroupaddError::Usage));
-        assert_eq!(parse(&["--frob", "staff"]), Err(GroupaddError::Usage));
-        // A `-u`-style option borrowed from `useradd` is not part of the
-        // `groupadd` grammar.
-        assert_eq!(parse(&["-u", "1", "staff"]), Err(GroupaddError::Usage));
+    /// `getopt`'s words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn a_missing_option_value_is_usage() {
-        assert_eq!(parse(&["staff", "-g"]), Err(GroupaddError::Usage));
-        assert_eq!(parse(&["-g"]), Err(GroupaddError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "staff"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frob", "staff"]),
+            "unrecognized option '--frob'"
+        );
+        // A `-u`-style option borrowed from `useradd` is not part of the
+        // `groupadd` grammar.
+        assert_eq!(refused(&["-u", "1", "staff"]), "invalid option -- 'u'");
+        assert_eq!(
+            refused(&["staff", "-g"]),
+            "option requires an argument -- 'g'"
+        );
+        assert_eq!(refused(&["-g"]), "option requires an argument -- 'g'");
+        assert_eq!(
+            refused(&["staff", "--gid"]),
+            "option '--gid' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--help=x", "staff"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// `getopt_long` reads `--gi 7` as `--gid 7`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--gi", "7", "wheel"]), Ok(create("wheel", Some(7))));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

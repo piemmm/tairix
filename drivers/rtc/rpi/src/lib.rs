@@ -39,10 +39,10 @@
 //! reports the chip unreadable instead of waiting on it — there is nothing to
 //! wait for.
 //!
-//! Reference: the Raspberry Pi firmware property interface
-//! (`RPI_FIRMWARE_GET_RTC_REG` / `RPI_FIRMWARE_SET_RTC_REG` and the register
-//! selectors), as the `rtc-rpi` driver in the Raspberry Pi Linux tree spells
-//! it.
+//! Reference: the Raspberry Pi firmware's mailbox property interface (its
+//! wiki page, for the frame and the per-tag response bit). The RTC tags and
+//! register selectors `lib/vcmailbox` holds are not published there and rest
+//! on the on-metal acceptance run.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

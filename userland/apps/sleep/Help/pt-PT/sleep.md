@@ -44,9 +44,9 @@ cadeia, por isso — ao contrário do GNU `sleep` — não tem a opção
 ## EXIT STATUS
 
 - `0` — o intervalo decorreu, ou foi escrita uma ajuda breve pedida.
-- `1` — a escrita da ajuda breve falhou.
-- `2` — a linha de comandos não foi compreendida (uma opção desconhecida,
-  um operando em falta ou um intervalo de tempo inválido).
+- `1` — a escrita da ajuda breve falhou. Uma linha de comandos não
+  compreendida (uma opção desconhecida, um operando em falta ou um
+  intervalo de tempo inválido) também termina com `1`.
 
 ## ENVIRONMENT
 

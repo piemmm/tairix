@@ -65,10 +65,9 @@ describes, and 4 GiB, each kept only where usable RAM lies both inside the
 window below the limit and above it, and each aligned down to the largest
 block so no block straddles two zones and buddies merge within one. 4 GiB is a
 boundary wherever RAM spans it because a PCI function a bus driver finds after
-boot may reach only 32 bits without the boot tree saying so — Linux's
-`ZONE_DMA32`. An ordinary request is served from the highest zone first, and
+boot may reach only 32 bits without the boot tree saying so. An ordinary request is served from the highest zone first, and
 from a lower one only while that zone keeps its **reserve**: a 256th of the
-usable RAM above it (Linux's default `lowmem_reserve_ratio`), at most a
+usable RAM above it, at most a
 quarter of the zone. So ordinary allocations on a busy machine fill high
 memory before low, and never the last of the low.
 
@@ -333,7 +332,7 @@ both views, and only then zeroes and frees the frame:
   RFENCE call per 64-hart window, and aarch64 owes nothing because its local
   flush is already the broadcast `tlbi vaae1is`, which reaches every ASID. A range is invalidated
   page by page only up to a ceiling — 33 pages on x86_64, 512 on aarch64, 64
-  on riscv64, Linux's values — and whole past it, so the span a batch below
+  on riscv64, tuning values any of which is correct — and whole past it, so the span a batch below
   shoots down costs no invalidation per page of its gaps.
 - **The snapshot.** The caller passes the `Retire` view the pages must leave
   (`SnapshotRetire` in `kernel/core`), which drops them under the registry's
@@ -1496,11 +1495,17 @@ properties:
   cached, so a later read fills only the hole and charges no entry twice; a
   directory's own entry in its parent goes whenever entries are added to or
   removed from it. Writes/truncates also drop the file's chunks
-  and stat, and on a format whose ids follow contents (FAT32's pack a
-  file's size and first cluster) the name's lookup, so the next access
-  learns the id the write gave it; create/remove/rename drop the affected
+  and stat; on a format whose ids follow contents (ADFS renumbers an
+  object whose data moves) no lookup or listing is kept at all, so the
+  next access learns the id a write gave it, and everything kept under the
+  id a write left goes with it; create/remove/rename drop the affected
   directory's *entire* lookup set (driver name matching may fold case),
-  its directory entries, and its stat; an unidentifiable mutation
+  its directory entries, and its stat, and remove/rename everything kept
+  for the removed, replaced or moved node, whose id a later node may take
+  (a FAT file's id is where its entry lies); an unpin that frees a node drops
+  everything kept under its id, as does any pin or unpin on a format that
+  reports a held node under a token (FAT32, ADFS), and releasing every pin
+  purges the cache; an unidentifiable mutation
   target purges the whole cache; a detected ledger imbalance poisons
   the cache (purge + admit nothing) while the driver keeps serving.
 - **Bounded and zeroing.** Payload copies are fallibly allocated
@@ -2097,15 +2102,15 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
 - **Reserve, don't read.** The handler validates the shape (page-aligned
   offset, non-zero length, no overflow), resolves the descriptor
   owner-checked against the kernel-trusted caller id (open for reading,
-  `OpenBacking::Path` only — a resource/pipe has no positional bytes), and
+  `OpenBacking::Node` only — a resource/pipe has no positional bytes), and
   charges the extent to the caller's shared `AddressSpaceBytes` accounting
   (one budget with `mem_map` and the stacks) in the step that checks it. It then
   *reserves address space only* out of the task's file-mapping window
   (`LiveSpace`'s file `AnonWindowMap`, sized by `user_windows` §7f) and
-  records a `FileRegion` — base, page-rounded length, resolved path,
-  page-aligned file offset, and the **mapping-time identity** (uid +
-  effective capability snapshot, the open-descriptor authority model; the
-  mapping survives a later `fs_close`).
+  records a `FileRegion` — base, page-rounded length, the descriptor's pinned
+  node with its authority, and page-aligned file offset. The
+  mapping survives a later `fs_close`, and a rename or unlink of the file:
+  it pages the node it mapped, never whatever stands at its path.
 - **Fault-driven backing.** A user-mode **read** data fault is offered to
   the resident `DispatchHook::resolve_user_fault` before the fatal path
   (each port's `fault::set_user_fault_resolver`, installed beside the
@@ -2115,10 +2120,13 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   fault to the resolver under the timer path's `swapgs` convention, and
   on success restores and `iretq`s into a retry). The resolver attributes
   the fault to the scheduler's current task, looks up the covering
-  `FileRegion`, reads the single covering page through the secured VFS
-  **under the mapping-time identity** (owner/mode/ACL re-applied on every
-  fault), and maps it read-only, never executable (`filemap::FILE_FLAGS`;
-  a short tail page is zero-filled past end-of-file). That one page is
+  `FileRegion`, reads the single covering page of its node as a read through
+  the descriptor would — as the process's **live** identity for a descriptor
+  it opened, as the captured identity of one conferred or granted, with the
+  filesystem capability and the node's mode and ACL checked on every fault —
+  and maps it read-only, never executable
+  (`filemap::FILE_FLAGS`; a short tail page is zero-filled past
+  end-of-file). That one page is
   published into the registry snapshot so the copy path sees it — one page,
   not a whole-space rebuild, which is what keeps reading an N-page mapping
   O(N) — and the task retries the faulting instruction. A **write** fault is offered through
@@ -2243,8 +2251,9 @@ and its architecture-neutral core lands here (staged in
   is not `Supported` the scan returns `ColdScanError::Unsupported` and the
   tier reclaims nothing there — reclaim is safe by omission, never by
   guessing (the fail-closed rule; a false-cold classification would cause
-  the very thrash the tier avoids). This is the same approximation Linux
-  page reclaim uses, with no per-page timestamp and no hot-path
+  the very thrash the tier avoids). This is the classic CLOCK
+  (second-chance) approximation of LRU (Corbató, 1968), with no per-page
+  timestamp and no hot-path
   allocation beyond the returned list.
 - **Per-port state.** Three of the four Tier-1 ports are live and declare
   `Supported`; wasm32 stays fail-closed by construction.

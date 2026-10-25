@@ -94,10 +94,7 @@ fn well_known_ouis_resolve() {
     let (_, table) = committed(DbKind::Oui);
     let ids = DevIds::parse(DbKind::Oui, &table).expect("committed table decodes");
     assert_eq!(ids.organisation(0x00_00_0c), Some("Cisco Systems, Inc"));
-    assert_eq!(
-        ids.organisation(0xb8_27_eb),
-        Some("Raspberry Pi Foundation")
-    );
+    assert_eq!(ids.organisation(0x00_50_56), Some("VMware, Inc."));
     // A locally administered address names no organisation.
     assert_eq!(ids.organisation(0x52_54_00), None);
 }

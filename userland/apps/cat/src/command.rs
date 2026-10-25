@@ -3,6 +3,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::CatError;
 
 /// One source `cat` reads from, in command-line order.
@@ -75,122 +77,85 @@ pub enum Command {
     Help,
 }
 
+/// What each of `cat`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    NumberNonblank,
+    Number,
+    SqueezeBlank,
+    ShowNonprinting,
+    ShowEnds,
+    ShowTabs,
+    ShowAll,
+    /// `-e`, which is `-vE`.
+    NonprintingEnds,
+    /// `-t`, which is `-vT`.
+    NonprintingTabs,
+    Unbuffered,
+    Help,
+}
+
+/// `cat`'s options, as GNU's `cat` spells them and in its order, and the
+/// reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('b', &["number-nonblank"], Flag::NumberNonblank),
+    Opt::flag('n', &["number"], Flag::Number),
+    Opt::flag('s', &["squeeze-blank"], Flag::SqueezeBlank),
+    Opt::flag('v', &["show-nonprinting"], Flag::ShowNonprinting),
+    Opt::flag('E', &["show-ends"], Flag::ShowEnds),
+    Opt::flag('T', &["show-tabs"], Flag::ShowTabs),
+    Opt::flag('A', &["show-all"], Flag::ShowAll),
+    Opt::letter('e', Takes::Nothing, Flag::NonprintingEnds),
+    Opt::letter('t', Takes::Nothing, Flag::NonprintingTabs),
+    Opt::letter('u', Takes::Nothing, Flag::Unbuffered),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is the GNU `cat` surface,
-/// `cat [-AbeEnstTuv] [--] [file...]`:
-///
-/// * `-A` / `--show-all` — equivalent to `-vET`.
-/// * `-b` / `--number-nonblank` — number non-empty output lines; overrides
-///   `-n`.
-/// * `-e` — equivalent to `-vE`.
-/// * `-E` / `--show-ends` — print `$` at the end of every line.
-/// * `-n` / `--number` — number every output line.
-/// * `-s` / `--squeeze-blank` — suppress repeated adjacent blank lines.
-/// * `-t` — equivalent to `-vT`.
-/// * `-T` / `--show-tabs` — print TAB as `^I`.
-/// * `-u` — accepted and ignored (output is already unbuffered).
-/// * `-v` / `--show-nonprinting` — `^`/`M-` notation for control and
-///   non-ASCII bytes, except LFD and TAB.
-/// * `-h` / `-?` / `--help` — the reserved short-help switches
-///   (plans/APPS.md §4; they win immediately).
-/// * `--` — end option parsing; every later argument is a path.
-/// * `-` — standard input.
-/// * any other option — a [`CatError::Usage`] error (fail closed; never a
-///   silently ignored token).
-///
-/// Short options bundle exactly as in the GNU tool: `-nE` is `-n -E`.
-/// With no path (or `-`) operand the single source is standard input.
+/// The grammar is the GNU `cat` surface, `cat [-AbeEnstTuv] [--] [file...]`,
+/// read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, clustered, a long one by any unambiguous prefix, `--`
+/// ending them. The help switches (`-h`, `-?`, `--help`) answer at once.
+/// `-b` overrides `-n` in either order. The `-` operand is standard input,
+/// and with no operand at all the single source is standard input.
 ///
 /// # Errors
 ///
-/// [`CatError::Usage`] for any unrecognised option before `--`.
+/// [`CatError::Option`] — an option `getopt` refuses, in its words.
 pub fn parse(args: &[&str]) -> Result<Command, CatError> {
     let mut render = Render::PLAIN;
     let mut number_all = false;
     let mut number_nonblank = false;
     let mut sources = Vec::new();
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done {
-            match arg {
-                "--" => {
-                    options_done = true;
-                    continue;
-                }
-                "--help" => return Ok(Command::Help),
-                "--show-all" => {
-                    render.show_nonprinting = true;
-                    render.show_ends = true;
-                    render.show_tabs = true;
-                    continue;
-                }
-                "--number-nonblank" => {
-                    number_nonblank = true;
-                    continue;
-                }
-                "--show-ends" => {
-                    render.show_ends = true;
-                    continue;
-                }
-                "--number" => {
-                    number_all = true;
-                    continue;
-                }
-                "--squeeze-blank" => {
-                    render.squeeze_blank = true;
-                    continue;
-                }
-                "--show-tabs" => {
-                    render.show_tabs = true;
-                    continue;
-                }
-                "--show-nonprinting" => {
-                    render.show_nonprinting = true;
-                    continue;
-                }
-                // An unrecognised long option is refused, never ignored.
-                _ if arg.starts_with("--") => return Err(CatError::Usage),
-                // A bundle of short flags (`-nE` is `-n -E`); the bare `-`
-                // stdin operand is not an option.
-                _ if arg.starts_with('-') && arg != "-" => {
-                    for flag in arg[1..].chars() {
-                        match flag {
-                            'A' => {
-                                render.show_nonprinting = true;
-                                render.show_ends = true;
-                                render.show_tabs = true;
-                            }
-                            'b' => number_nonblank = true,
-                            'e' => {
-                                render.show_nonprinting = true;
-                                render.show_ends = true;
-                            }
-                            'E' => render.show_ends = true,
-                            'n' => number_all = true,
-                            's' => render.squeeze_blank = true,
-                            't' => {
-                                render.show_nonprinting = true;
-                                render.show_tabs = true;
-                            }
-                            'T' => render.show_tabs = true,
-                            'u' => {}
-                            'v' => render.show_nonprinting = true,
-                            'h' | '?' => return Ok(Command::Help),
-                            _ => return Err(CatError::Usage),
-                        }
-                    }
-                    continue;
-                }
-                _ => {}
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(CatError::Option)? {
+            Arg::Operand("-") => sources.push(Source::Stdin),
+            Arg::Operand(path) => sources.push(Source::Path(String::from(path))),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::NumberNonblank, _) => number_nonblank = true,
+            Arg::Opt(Flag::Number, _) => number_all = true,
+            Arg::Opt(Flag::SqueezeBlank, _) => render.squeeze_blank = true,
+            Arg::Opt(Flag::ShowNonprinting, _) => render.show_nonprinting = true,
+            Arg::Opt(Flag::ShowEnds, _) => render.show_ends = true,
+            Arg::Opt(Flag::ShowTabs, _) => render.show_tabs = true,
+            Arg::Opt(Flag::ShowAll, _) => {
+                render.show_nonprinting = true;
+                render.show_ends = true;
+                render.show_tabs = true;
             }
+            Arg::Opt(Flag::NonprintingEnds, _) => {
+                render.show_nonprinting = true;
+                render.show_ends = true;
+            }
+            Arg::Opt(Flag::NonprintingTabs, _) => {
+                render.show_nonprinting = true;
+                render.show_tabs = true;
+            }
+            Arg::Opt(Flag::Unbuffered, _) => {}
         }
-        sources.push(if arg == "-" {
-            Source::Stdin
-        } else {
-            Source::Path(String::from(arg))
-        });
     }
     render.numbering = if number_nonblank {
         Numbering::NonBlank
@@ -208,8 +173,7 @@ pub fn parse(args: &[&str]) -> Result<Command, CatError> {
 #[cfg(test)]
 mod tests {
     use super::{parse, Command, Numbering, Render, Source};
-    use crate::error::CatError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
 
     fn path(name: &str) -> Source {
@@ -404,12 +368,45 @@ mod tests {
         );
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x"]), Err(CatError::Usage));
-        assert_eq!(parse(&["--frobnicate"]), Err(CatError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frobnicate"]),
+            "unrecognized option '--frobnicate'"
+        );
         // A bundle with one bad flag is refused whole.
-        assert_eq!(parse(&["-nx"]), Err(CatError::Usage));
+        assert_eq!(refused(&["-nx"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--number=3"]),
+            "option '--number' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `cat --squ --show-e` as
+    /// `cat --squeeze-blank --show-ends`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--squ", "--show-e"]),
+            Ok(Command::Concat {
+                render: Render {
+                    squeeze_blank: true,
+                    show_ends: true,
+                    ..Render::PLAIN
+                },
+                sources: vec![Source::Stdin],
+            })
+        );
+        assert_eq!(
+            refused(&["--num"]),
+            "option '--num' is ambiguous; possibilities: '--number-nonblank' '--number'"
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //!
 //! The NTP protocol itself lives in [`tairix_net::ntp`] — this crate owns no
 //! wire format and no retry policy. What it owns is the clock policy a
-//! Raspberry Pi forces on us: a machine with no RTC boots knowing nothing and
+//! board with no RTC forces on us: such a machine boots knowing nothing and
 //! must correct itself at once, while a machine with a working RTC must *not*
 //! query a public server on every reboot just because it can.
 //!

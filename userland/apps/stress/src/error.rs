@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+use tairix_util::getopt::Refusal;
+
 /// Everything that can end a `stress` run abnormally.
 ///
 /// A worker's *typed refusal* (a resource limit, `ENOSPC`, a capability
@@ -10,8 +12,11 @@ use core::fmt;
 /// that end the run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StressError {
-    /// The command line is outside the closed option grammar — reported
-    /// with the usage banner, exit 2.
+    /// An option `getopt` refuses, worded as it words it — reported with
+    /// where the help is, exit 1.
+    Option(Refusal),
+    /// An operand, a malformed value, or a command line naming no run the
+    /// tool can make — reported with where the help is, exit 1.
     Usage,
     /// The run could not be set up or torn down: the reason is stated on
     /// stderr and the run exits 1 (fail loud, never silent).
@@ -21,6 +26,7 @@ pub enum StressError {
 impl fmt::Display for StressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("usage error"),
             Self::Fatal(reason) => f.write_str(reason),
         }

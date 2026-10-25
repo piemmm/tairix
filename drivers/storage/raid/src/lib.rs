@@ -67,7 +67,7 @@ pub use service::{
     write_superblock, Assembled, MaintenanceResume, ServiceError,
 };
 
-use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey, HW_VIRTUAL_BUS_COMPATIBLE};
+use tairix_abi::{compatible_key, CapabilityId, DriverBindKey, HW_VIRTUAL_BUS_COMPATIBLE};
 
 /// Bind priority of the array-composer key.
 ///
@@ -92,8 +92,5 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// synthetic virtual bus the kernel's hardware-tree bootstrap publishes.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(HW_VIRTUAL_BUS_COMPATIBLE) {
-        Ok(key) => key,
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(HW_VIRTUAL_BUS_COMPATIBLE),
 )];

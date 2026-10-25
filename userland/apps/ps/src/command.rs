@@ -1,5 +1,7 @@
 //! The parsed shape of a `ps` command line.
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::PsError;
 
 /// One thing the `ps` tool can do.
@@ -23,54 +25,48 @@ pub enum Command {
     Help,
 }
 
+/// What each of `ps`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    All,
+    Help,
+}
+
+/// `ps`'s options and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('e', &["all"], Flag::All),
+    Opt::letter('A', Takes::Nothing, Flag::All),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `ps [-e | -A | --all] [-h | -?]`:
+/// The grammar is `ps [-e | -A | --all] [-h | -?]`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options clustered, a long one by any
+/// unambiguous prefix, `--` ending them.
 ///
 /// * `-e` / `-A` / `--all` — list every process (the POSIX "all" selectors),
 ///   which the service gates on `CAP_SYSINFO_GLOBAL`.
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md §4; they win immediately).
-/// * `--` — end option parsing.
 ///
-/// `ps` takes no file operands. It **fails closed**: an unknown option, an
-/// unknown letter inside a cluster, or any positional operand is a
-/// [`PsError::Usage`] rather than a silently ignored token.
+/// `ps` takes no file operands. It **fails closed**: any positional operand
+/// is a [`PsError::Usage`] rather than a silently ignored token.
 ///
 /// # Errors
 ///
-/// [`PsError::Usage`] for any input outside the grammar above.
+/// * [`PsError::Option`] — an option `getopt` refuses, in its words.
+/// * [`PsError::Usage`] — a positional operand.
 pub fn parse(args: &[&str]) -> Result<Command, PsError> {
     let mut all = false;
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
-            }
-            if let Some(name) = arg.strip_prefix("--") {
-                match name {
-                    "all" => all = true,
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(PsError::Usage),
-                }
-                continue;
-            }
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in letters.chars() {
-                    match letter {
-                        'e' | 'A' => all = true,
-                        'h' | '?' => return Ok(Command::Help),
-                        _ => return Err(PsError::Usage),
-                    }
-                }
-                continue;
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(PsError::Option)? {
+            Arg::Operand(_) => return Err(PsError::Usage),
+            Arg::Opt(Flag::All, _) => all = true,
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
-        // `ps` accepts no positional operands.
-        return Err(PsError::Usage);
     }
     Ok(Command::List { all })
 }
@@ -79,6 +75,7 @@ pub fn parse(args: &[&str]) -> Result<Command, PsError> {
 mod tests {
     use super::{parse, Command};
     use crate::error::PsError;
+    use alloc::string::{String, ToString};
 
     #[test]
     fn no_arguments_lists_the_callers_own_processes() {
@@ -100,11 +97,27 @@ mod tests {
         assert_eq!(parse(&["-eh"]), Ok(Command::Help));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x"]), Err(PsError::Usage));
-        assert_eq!(parse(&["--frob"]), Err(PsError::Usage));
-        assert_eq!(parse(&["-ex"]), Err(PsError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-ex"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--all=x"]),
+            "option '--all' doesn't allow an argument"
+        );
+    }
+
+    /// `getopt_long` reads `ps --al` as `ps --all`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--al"]), Ok(Command::List { all: true }));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

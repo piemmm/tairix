@@ -55,8 +55,8 @@ d'usage et aucun lien n'est créé. `--` termine l'analyse des options.
 
 - `0` — le lien a été créé (ou l'aide courte a été écrite).
 - `1` — le système de fichiers a refusé le lien, ou la sortie a échoué ;
-  la raison est affichée sur la sortie d'erreur standard.
-- `2` — la ligne de commande n'a pas été comprise.
+  la raison est affichée sur la sortie d'erreur standard. Une ligne de
+  commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

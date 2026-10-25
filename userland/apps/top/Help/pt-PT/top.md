@@ -80,8 +80,7 @@ carregam:
 
 - `0` — a sessão terminou com `q`, ou a ajuda curta foi mostrada.
 - `1` — o serviço ou o terminal falhou; a razão é impressa no erro
-  padrão.
-- `2` — a linha de comandos não foi compreendida.
+  padrão. Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

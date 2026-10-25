@@ -15,9 +15,9 @@
 //! service names and `-r` governs host names, so `ss -rn` resolves hosts
 //! and leaves ports numeric.
 
-use alloc::format;
 use alloc::string::{String, ToString};
 use core::fmt;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan};
 use tairix_util::quote::quote;
 
 /// A parsed `ss` invocation.
@@ -68,8 +68,8 @@ pub struct Options {
 /// Why an argument vector was not a valid `ss` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// An option that is not part of the surface.
-    UnknownOption(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A positional operand: `ss` takes options only (its filter-expression
     /// grammar is not implemented), so a bare word is a usage error rather
     /// than a silently ignored argument.
@@ -79,7 +79,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::UnexpectedOperand(word) => {
                 write!(f, "unexpected operand {word}", word = quote(word))
             }
@@ -87,69 +87,120 @@ impl fmt::Display for ParseError {
     }
 }
 
+/// What each of `ss`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Tcp,
+    Udp,
+    All,
+    Listening,
+    Numeric,
+    Resolve,
+    Processes,
+    Ipv4,
+    Ipv6,
+    NoHeader,
+    Summary,
+    Help,
+}
+
+/// `ss`'s options, as iproute2 `ss` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('t', &["tcp"], Flag::Tcp),
+    Opt::flag('u', &["udp"], Flag::Udp),
+    Opt::flag('a', &["all"], Flag::All),
+    Opt::flag('l', &["listening"], Flag::Listening),
+    Opt::flag('n', &["numeric"], Flag::Numeric),
+    Opt::flag('r', &["resolve"], Flag::Resolve),
+    Opt::flag('p', &["processes"], Flag::Processes),
+    Opt::flag('4', &["ipv4"], Flag::Ipv4),
+    Opt::flag('6', &["ipv6"], Flag::Ipv6),
+    Opt::flag('H', &["no-header"], Flag::NoHeader),
+    Opt::flag('s', &["summary"], Flag::Summary),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse an argument vector (without the program name).
 ///
-/// `--` ends option parsing; any operand (before or after it) is a usage
-/// error, since `ss`'s filter-expression grammar is not implemented.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options clustered, a long
+/// one by any unambiguous prefix, `--` ending them. The help switches (`-?`,
+/// `--help`) and `-s` answer at once.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] naming the offending argument; the caller reports it
-/// with the usage banner and exits `2`.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::UnexpectedOperand`] — any operand, before or after `--`:
+///   `ss`'s filter-expression grammar is not implemented.
+///
+/// The caller reports each, then where the help is, and exits `1`.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut options = Options::default();
-    let mut options_ended = false;
-    for arg in args {
-        let arg = *arg;
-        if options_ended || arg == "-" || !arg.starts_with('-') {
-            return Err(ParseError::UnexpectedOperand(arg.to_string()));
-        }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            match long {
-                "help" => return Ok(Command::Help),
-                "tcp" => options.tcp = true,
-                "udp" => options.udp = true,
-                "all" => options.all = true,
-                "listening" => options.listening = true,
-                "numeric" => options.numeric = true,
-                "resolve" => options.resolve = true,
-                "processes" => options.processes = true,
-                "ipv4" => options.ipv4 = true,
-                "ipv6" => options.ipv6 = true,
-                "no-header" => options.no_header = true,
-                "summary" => return Ok(Command::Summary),
-                _ => return Err(ParseError::UnknownOption(arg.to_string())),
-            }
-            continue;
-        }
-        for flag in arg[1..].chars() {
-            match flag {
-                '?' => return Ok(Command::Help),
-                't' => options.tcp = true,
-                'u' => options.udp = true,
-                'a' => options.all = true,
-                'l' => options.listening = true,
-                'n' => options.numeric = true,
-                'r' => options.resolve = true,
-                'p' => options.processes = true,
-                '4' => options.ipv4 = true,
-                '6' => options.ipv6 = true,
-                'H' => options.no_header = true,
-                's' => return Ok(Command::Summary),
-                other => return Err(ParseError::UnknownOption(format!("-{other}"))),
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(word) => return Err(ParseError::UnexpectedOperand(word.to_string())),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Summary, _) => return Ok(Command::Summary),
+            Arg::Opt(flag, _) => options.set(flag),
         }
     }
     Ok(Command::Report(options))
 }
 
+impl Options {
+    /// Apply the switch `flag` names.
+    fn set(&mut self, flag: Flag) {
+        match flag {
+            Flag::Tcp => self.tcp = true,
+            Flag::Udp => self.udp = true,
+            Flag::All => self.all = true,
+            Flag::Listening => self.listening = true,
+            Flag::Numeric => self.numeric = true,
+            Flag::Resolve => self.resolve = true,
+            Flag::Processes => self.processes = true,
+            Flag::Ipv4 => self.ipv4 = true,
+            Flag::Ipv6 => self.ipv6 = true,
+            Flag::NoHeader => self.no_header = true,
+            Flag::Summary | Flag::Help => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
+
+    use tairix_util::getopt::Refusal;
+
     use super::{parse, Command, Options, ParseError};
+
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-Q"]), "invalid option -- 'Q'");
+        assert_eq!(refused(&["-tQ"]), "invalid option -- 'Q'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--tcp=1"]),
+            "option '--tcp' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        let long = parse(&["--tc", "--list", "--proc"]).unwrap();
+        assert_eq!(long, parse(&["-t", "-l", "-p"]).unwrap());
+        assert_eq!(parse(&["--sum"]), Ok(Command::Summary));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
+        assert_eq!(
+            refused(&["--ipv"]),
+            "option '--ipv' is ambiguous; possibilities: '--ipv4' '--ipv6'"
+        );
+    }
 
     #[test]
     fn no_arguments_reports_with_defaults() {
@@ -184,10 +235,13 @@ mod tests {
 
     #[test]
     fn an_unknown_option_fails_closed() {
-        assert_eq!(parse(&["-z"]), Err(ParseError::UnknownOption("-z".into())));
+        assert_eq!(
+            parse(&["-z"]),
+            Err(ParseError::Option(Refusal::UnknownShort('z')))
+        );
         assert_eq!(
             parse(&["--bogus"]),
-            Err(ParseError::UnknownOption("--bogus".into()))
+            Err(ParseError::Option(Refusal::UnknownLong("--bogus".into())))
         );
     }
 

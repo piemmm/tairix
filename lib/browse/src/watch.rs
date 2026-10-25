@@ -909,7 +909,7 @@ impl WatchedDirectory {
                 }
             }
         };
-        let dir = match tairix_rt::open_dir(path.as_bytes()) {
+        let dir = match tairix_rt::Dir::open(path.as_bytes()) {
             Ok(dir) => dir,
             Err(err) => {
                 let err = Errno::from_syscall(err);

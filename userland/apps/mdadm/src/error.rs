@@ -73,8 +73,8 @@ impl fmt::Display for ResolveError {
 /// Why an `mdadm` invocation did not complete.
 ///
 /// A usage error (a command line that does not parse) is reported by the
-/// `Run` binary before the engine runs and exits `2`; these are the runtime
-/// outcomes that exit `1`.
+/// `Run` binary before the engine runs; these are the runtime outcomes.
+/// Either exits `1`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MdadmError {
     /// A read was refused: the caller lacks `CAP_SYSINFO_HW`.

@@ -82,8 +82,8 @@ resposta não é descartada como faz a ferramenta histórica.
 - `0` — a sessão realizou-se (qualquer que tenha sido o fim dado pelo
   anfitrião), ou a ajuda breve foi escrita.
 - `1` — a sessão não foi possível: o anfitrião não foi resolvido, o socket foi
-  recusado, ou o terminal não passou a modo cru.
-- `2` — a linha de comandos não foi compreendida.
+  recusado, ou o terminal não passou a modo cru. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

@@ -206,8 +206,8 @@ impl<'a> Fdt<'a> {
     ///
     /// Returns `None` if the tree contains no `/memory` node with a
     /// readable `reg` property. A machine whose RAM spans several ranges
-    /// (the Raspberry Pi 4 carries windows below the MMIO hole, between
-    /// 1 GiB and 4 GiB, and above 4 GiB) describes them as further `reg`
+    /// (windows below an MMIO hole, between 1 GiB and 4 GiB, and above
+    /// 4 GiB, say) describes them as further `reg`
     /// pairs and further `/memory` nodes; a boot path that must see the
     /// machine's whole RAM iterates [`Self::each_memory_region`] instead.
     #[must_use]
@@ -450,7 +450,7 @@ impl<'a> Fdt<'a> {
 
     /// The firmware-provided random seed from `/chosen/rng-seed`, if present.
     ///
-    /// Boot firmware and loaders (U-Boot, the Raspberry Pi firmware, and
+    /// Boot firmware and loaders (U-Boot, a board's own firmware, and
     /// QEMU's `virt` board) place a block of entropy in the device tree's
     /// `/chosen` node for the kernel to fold into its CSPRNG seed — the
     /// well-established hand-off every general-purpose kernel consumes. The
@@ -584,7 +584,7 @@ impl<'a> Fdt<'a> {
     /// document order.
     ///
     /// This is the device tree's identity of the boot-relevant CPU model
-    /// (e.g. `sifive,u74-mc`, `arm,cortex-a72`), which the architecture
+    /// (a `<vendor>,<core>` string), which the architecture
     /// ports map to a human-readable processor name for the boot facts.
     /// Returns `None` — never a guess — when the tree has no cpu node,
     /// the node carries no `compatible`, the property is empty, or its
@@ -1409,7 +1409,7 @@ mod tests {
 
     #[test]
     fn each_memory_region_reports_every_reg_pair_and_every_memory_node() {
-        // Pi 4 (8 GiB) shape: one /memory node whose reg carries the
+        // An 8 GiB shape: one /memory node whose reg carries the
         // below-hole window plus the 1 GiB..4 GiB window, and a second
         // /memory node for the range above 4 GiB.
         let mut b = FdtWriter::new();
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn each_cpu_reads_spin_table_release_addresses() {
-        // The Pi 4 stock-firmware shape: the boot CPU has no release
+        // A spin-table firmware shape: the boot CPU has no release
         // address; each secondary declares `enable-method = "spin-table"`
         // and a two-cell `cpu-release-addr`.
         let blob = crate::fixture::arm_with_spin_table_cpus(
@@ -1816,9 +1816,9 @@ mod tests {
 
     #[test]
     fn boot_cpu_compatible_reads_the_first_string() {
-        let blob = tree_with_cpu_compatible(Some(b"sifive,u74-mc\0riscv\0"));
+        let blob = tree_with_cpu_compatible(Some(b"vendor,core\0riscv\0"));
         let fdt = Fdt::new(&blob).expect("valid fdt");
-        assert_eq!(fdt.boot_cpu_compatible(), Some("sifive,u74-mc"));
+        assert_eq!(fdt.boot_cpu_compatible(), Some("vendor,core"));
     }
 
     #[test]

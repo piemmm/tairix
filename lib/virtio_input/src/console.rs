@@ -2,7 +2,7 @@
 //! P10 chunk 5d-2-ii).
 //!
 //! [`VirtioInput`](crate::VirtioInput) decodes the device's eventq into
-//! [`InputEvent`] key edges whose `code` is the raw Linux `evdev` keycode
+//! [`InputEvent`] key edges whose `code` is the raw evdev keycode
 //! (virtio-input reports in the `evdev` namespace, virtio 1.1 §5.8). This
 //! module is the producer half: it tracks the held modifiers and the
 //! caps-/num-lock state and resolves each printable or named key edge into
@@ -28,7 +28,7 @@ use tairix_abi::input::KeyInput;
 use tairix_input::{Key, ModifierKey, ModifierSide, ModifierState, NamedKey};
 use tairix_keymap::{key_input, modifier_change};
 
-/// Linux `evdev` keycodes this producer recognises (`input-event-codes.h`).
+/// evdev keycodes this producer recognises (FreeBSD's `input-event-codes.h`).
 /// Only the constants the resolver and the modifier/lock tracking name are
 /// listed; the resolution tables below carry the rest inline.
 mod code {

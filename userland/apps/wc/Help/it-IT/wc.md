@@ -34,6 +34,15 @@ con operandi `file`.
 Un input illeggibile viene segnalato sullo standard error e
 l'esecuzione continua con l'input successivo.
 
+Su un terminale, ogni nome che compare nell'output viene messo tra
+virgolette dove una shell ne avrebbe bisogno, e ogni carattere di
+controllo o altro carattere invisibile al suo interno viene scritto in
+forma di escape, così che un nome non possa comandare né riordinare lo
+schermo; GNU lo mostra invariato. Una pipe o un file riceve il nome byte
+per byte. Un nome che contiene un carattere di nuova riga viene messo
+tra virgolette anche in una pipe, come fa GNU `wc`, perché ogni
+conteggio resti in una sola riga.
+
 ## OPTIONS
 
 - `-c, --bytes` — stampare il numero di byte.
@@ -63,8 +72,7 @@ l'esecuzione continua con l'input successivo.
 
 - `0` — ogni input è stato contato (o la guida breve è stata scritta).
 - `1` — un input non è stato leggibile, o l'output non è stato
-  consegnato.
-- `2` — la riga di comando non è stata compresa.
+  consegnato. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

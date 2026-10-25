@@ -381,6 +381,48 @@ fn the_filesystem_vocabulary_reports_the_volume() {
     assert_eq!(id, device);
 }
 
+/// GNU 9.4's default report keeps its indentation and column widths: the
+/// mode zero-padded to four digits, the ids right-aligned.
+#[test]
+fn the_default_report_is_laid_out_as_gnu_lays_it_out() {
+    let fs = tree();
+    let mounts = MockMounts(vec![mount("/vol", "arxfs", 4096)]);
+    let names = MockNames(None);
+    let (out, _, clean) = go(&["/vol/file"], &fs, &mounts, &names);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("  File: "), "{out}");
+    assert!(lines[1].starts_with("  Size: "), "{out}");
+    assert!(lines[3].starts_with("Access: (0"), "{out}");
+    assert!(
+        lines[3].contains("  Uid: (") && lines[3].contains(")   Gid: ("),
+        "{out}"
+    );
+    assert_eq!(
+        lines.get(7).map(|line| &line[..8]),
+        Some(" Birth: "),
+        "{out}"
+    );
+    assert!(clean);
+}
+
+/// GNU 9.4's default `-f` layout: the name in double quotes, and the block
+/// size beside the fundamental one.
+#[test]
+fn the_default_filesystem_report_is_laid_out_as_gnu_lays_it_out() {
+    let fs = tree();
+    let mounts = MockMounts(vec![mount("/vol", "arxfs", 4096)]);
+    let names = MockNames(None);
+    let (out, _, clean) = go(&["-f", "/vol/file"], &fs, &mounts, &names);
+    let mut lines = out.lines();
+    assert_eq!(lines.next(), Some("  File: \"/vol/file\""));
+    assert!(lines.next().is_some_and(|id| id.starts_with("    ID: ")));
+    assert_eq!(
+        lines.next(),
+        Some("Block size: 4096       Fundamental block size: 4096")
+    );
+    assert!(clean);
+}
+
 #[test]
 fn an_absent_operand_is_diagnosed_and_the_run_continues() {
     let fs = tree();
@@ -402,7 +444,7 @@ fn the_default_and_terse_forms_render_every_field_they_name() {
     // mode in both spellings.
     assert!(full.contains("'/vol/link' -> '../real/name'"), "{full}");
     assert!(full.contains("symbolic link"), "{full}");
-    assert!(full.contains("(777/lrwxrwxrwx)"), "{full}");
+    assert!(full.contains("(0777/lrwxrwxrwx)"), "{full}");
     assert!(full.ends_with('\n'), "{full}");
     // The terse form is one line of space-separated fields.
     let (terse, _, _) = go(&["-t", "/vol/file"], &fs, &mounts, &names);
@@ -421,4 +463,51 @@ fn help_falls_back_to_the_usage_banner() {
     let (out, _, clean) = go(&["-?"], &fs, &mounts, &names);
     assert_eq!(out, USAGE);
     assert!(clean);
+}
+
+/// A capturing stream the kernel attests as a terminal.
+#[derive(Default)]
+struct Console(MockOut);
+
+impl Output for Console {
+    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+        self.0.write_all(bytes)
+    }
+
+    fn at_terminal(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_name_is_escaped_at_a_terminal_and_kept_in_a_pipe() {
+    let fs = MockFs {
+        nodes: vec![(
+            String::from("/vol/e\u{1b}x"),
+            stat_of(FileKind::Regular, 0o100_644),
+        )],
+        ..MockFs::default()
+    };
+    let mounts = MockMounts(vec![mount("/vol", "arxfs", 4096)]);
+    let names = MockNames(None);
+    for args in [&["-c", "%n"][..], &["-f", "-c", "%n"][..]] {
+        let mut argv = args.to_vec();
+        argv.push("/vol/e\u{1b}x");
+        let out = Console::default();
+        let err = MockOut::default();
+        let reporter = Reporter {
+            fs: &fs,
+            mounts: &mounts,
+            names: &names,
+            out: &out,
+            err: &err,
+        };
+        assert!(run(parse(&argv).expect("parse"), None, &reporter, &NoHelp).expect("run"));
+        assert_eq!(out.0.text(), "'/vol/e'$'\\033''x'\n", "{args:?}");
+        assert_eq!(
+            go(&argv, &fs, &mounts, &names).0,
+            "/vol/e\u{1b}x\n",
+            "{args:?}"
+        );
+    }
 }

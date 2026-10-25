@@ -78,9 +78,8 @@ option parsing, so a file or command beginning with a dash is reachable.
   did not run.
 - `1` — the lock could not be taken for a reason waiting would not fix,
   or the command could not be run; the reason is printed on standard
-  error.
-- `2` — the command line was not understood; nothing was locked and
-  nothing ran.
+  error. A command line that was not understood exits `1` too, with
+  nothing locked and nothing run.
 - `126` — the command was found but could not be run.
 - `127` — the command was not found.
 

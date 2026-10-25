@@ -147,6 +147,16 @@ every supplier needs is defined here once:
 - **`refusal`** is the errno a protocol reply carries for a refusal from the
   hardware a supplier drives: what the hardware cannot do is `NotSupported`,
   what another holder has `Busy`, anything else its own `Errno`.
+- **`irqline::IrqLines`** is what every `irqline-v1` supplier keeps about
+  its lines: which consumer holds each, the trigger it holds it with, and
+  the wait it has posted. A wait is believed only for a line the kernel
+  attests its caller holds; a line stays with a holder that lives and is
+  taken from one that ended (`Reclaimed`); a firing answers the posted wait,
+  or is latched to answer the next one at once; and an ended consumer's
+  lines are released and its watch dropped. The controller's registers stay
+  its own behind **`irqline::LineHardware`** — the selector's shape,
+  readying a line, arming it for a wait, masking it on release — and its
+  decisions are **`irqline::LineRecord`**s.
 - **`serve::Service`** binds the endpoint so only a caller whose grant covers
   it may call, gathers it, peer exits and the supplier's bound interrupt lines
   into one wait set (`Service::bind`), and serves the supplier until the
@@ -157,13 +167,15 @@ every supplier needs is defined here once:
   between the two, so readiness means bound. `serve::log_event` and
   `serve::instance_field` write its records.
 - **`serve::DeviceChannel`** is a device channel — an endpoint the driver
-  loaded for a node serves to the one service that uses the device: the id
-  its node is given in a block, bound restricted-sender requiring the
-  service's capability. **`serve::publish_channel`** then publishes the
+  loaded for a node serves to the services that use the device: the id its
+  node is given in a block, bound restricted-sender requiring their
+  capability. Where other principals hold that capability too, the
+  protocol's own loop admits its callers: the network channel answers the
+  network stack alone. **`serve::publish_channel`** then publishes the
   channel node naming it, with whatever facts it states, so the service finds
   the channel in the tree only once it serves. The audio and network channels,
   the GPIO header and every temperature sensor bind and publish through these
-  two.
+  two. A consumer finds the channel with `HwNode::channel_endpoint`.
 - **`serve::thermal_sensor`** serves a `ThermalSensor` on its node's sensor
   channel for the life of the driver, as `serve::rtc` serves a clock chip.
 - **`testkit`**, behind the `test-support` feature, is the kernel a

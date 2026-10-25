@@ -62,10 +62,12 @@ authority (every query is capability-checked at the broker).
 itself touches the kernel or a terminal. The two operations that reach
 the outside world are injected seams:
 
-- `ProcessHost` — launch / wait / signal / poll a job, and
-  `change_directory`. Failures come back as the stable `Errno` the kernel
-  returns, so the shell invents no parallel error vocabulary
-  (`AGENTS.md` §2.2).
+- `ProcessHost` — launch / wait / signal / poll a job, change, name and
+  identify the working directory (`change_directory`, `working_directory`,
+  `directory_identity`), and read / set the process's file mode creation
+  mask (`umask`).
+  Failures come back as the stable `Errno` the kernel returns, so the shell
+  invents no parallel error vocabulary (`AGENTS.md` §2.2).
 - `Console` — write stdout / stderr.
 - `GlobFs` — the read-only view filename generation walks: a directory's
   entries and the kind of the node a path names. A shell built without one
@@ -88,7 +90,7 @@ without a kernel.
    input lines (`CommandList::feed_here_doc_line`, bounded and fail-closed)
    before the list runs.
 3. Expansion, once per command and in bash's order: braces
-   (`src/brace.rs`), `$`-parameters keeping each character's quoting
+   (`src/brace.rs`), `$`-parameters keeping which text was typed unquoted
    (`env::Environment::expand_marked`), then filename generation
    (`src/pathexp.rs`, over the shared `lib/glob` matcher); an unquoted word
    left empty is dropped (`src/expand.rs`).
@@ -104,17 +106,44 @@ without a kernel.
 ## Builtins
 
 `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-`ulimit`, `elevate`, `shopt`, `help`. A builtin runs inside the shell process
-because it mutates or reads shell-side state (the environment, the
-working directory, the job table, the exit request, the process's own
-resource limits, or — for `elevate` — the controlling terminal its
-echo-off password prompt must own, or for `shopt` the session's options);
-everything else is launched externally.
+`ulimit`, `umask`, `elevate`, `shopt`, `help`. A builtin runs inside the
+shell process because it mutates or reads shell-side state (the
+environment, the working directory, the job table, the exit request, the
+process's own resource limits and file mode creation mask, or — for
+`elevate` — the controlling terminal its echo-off password prompt must own,
+or for `shopt` the session's options); everything else is launched
+externally.
+
+`cd [-L | -P [-e]] [directory]` and `pwd [-L | -P]` follow POSIX. `cd -L`,
+the default, applies a relative operand to `PWD` as written — each `..`
+removing the component before it once that is found to be a directory, and
+never climbing above a root — enters the result and keeps it in `PWD`, so
+`cd link` then `cd ..` returns to where the link is. `cd -P` enters the
+operand as the kernel resolves it and sets `PWD` to the directory's own path
+(`fs_getcwd`); with `-e` it fails when that path cannot be learned. `cd`
+alone goes to `HOME`, `cd -` to `OLDPWD`, printing it, and every change sets
+`OLDPWD`. `pwd -L` prints `PWD` while it reaches the working directory, by
+directory identity, and `pwd -P` the directory's own path. Before the first
+prompt the shell keeps an inherited `PWD` only while it names the working
+directory, and otherwise takes `PWD` from the working directory; it never
+changes directory to follow `PWD`. `CDPATH` is not read.
+
+`umask [-S] [mode]` reports and sets the process's file mode creation mask,
+which every command launched afterwards inherits: alone it prints the mask
+in four octal digits (`0022`), `-S` the permissions it leaves
+(`u=rwx,g=rx,o=rx`). An octal `mode` is the mask itself; a symbolic one,
+read by the one grammar `chmod` reads (`tairix_util::mode`), edits the
+permissions the mask leaves, so `umask g-w` adds group write to the mask. A
+mode that is no mask — a letter beyond `r`, `w` and `x`, a copy, an octal
+operator — is refused with status 1 and changes nothing. A redirection
+creates its target `0666` less the mask, as every POSIX shell does.
 
 `shopt [-pqsu] [-o] [optname ...]` sets and reports bash's filename
 generation options (`dotglob`, `extglob`, `failglob`, `globstar`,
 `nocaseglob`, `nullglob`, and `noglob` through `-o`), all off by default as
-bash's are.
+bash's are. A non-empty `GLOBIGNORE` removes the paths its `:`-separated
+patterns match and, as in bash, lets wildcards match names beginning with
+`.` as `dotglob` does, so `rm *` then removes `.profile` too.
 
 `elevate <user> <program> [argument ...]` (`plans/CAPABILITY_USE.md` CU5)
 posts one synchronous IPC call to this console's login supervisor, which
@@ -132,8 +161,9 @@ authority and zeroises the password buffer on every path.
 process's own resource limits (`AGENTS.md` §24.3) over the `LimitStore`
 seam: `-a` (or no operand) lists every resource, `-H`/`-S` select the
 hard/soft bound, and a `<value>` (a decimal or `unlimited`) sets it.
-`<resource>` is a canonical `LimitKind` name, all of which `ulimit -a` lists.
-Lowering a bound is free;
+`<resource>` is a canonical `LimitKind` name, all of which `ulimit -a` lists;
+`-n` names `open-files`, as bash spells it, and flags may run together
+(`ulimit -Sn 256`). Lowering a bound is free;
 raising a hard bound is gated kernel-side on `CAP_RLIMIT_RAISE` and a
 denial is reported, never hidden (§2.9).
 
@@ -143,8 +173,9 @@ denial is reported, never hidden (§2.9).
 (unterminated quote, dangling escape), a grammatical one (empty
 command, redirection with no target, unterminated `${...}`), a
 here-document whose body is unterminated or over-length, or an expansion
-that could not complete (a `failglob` miss, a malformed pattern, an
-unreadable directory, an over-large expansion). A line that does not parse
+that could not complete (a `failglob` miss, a malformed pattern, a
+directory it could not read or a path it could not look up, an over-large
+expansion, memory refused). A line that does not parse
 or expand runs **nothing**; `$?` is `2` for a fault in the line as written
 and `1` for an expansion failure. A redirection target that expands to no
 word or several is `ambiguous redirect`, failing only its own command (or the
@@ -179,11 +210,11 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 
 - Expansion does not field-split, and a variable's value is never read as
   a filename pattern — zsh's rules rather than bash's.
-- The supported parameter expansions are `$NAME`, `${NAME}`, and `$?`.
-  Spellings of unimplemented expansions (tilde, command substitution,
-  arithmetic) stay inert word text except where running them would change
-  command meaning — process substitution and compound commands fail closed
-  with a parse error.
+- The supported parameter expansions are `$NAME`, `${NAME}`, and `$?`. Tilde
+  expansion is unimplemented and `~` stays word text; command substitution,
+  arithmetic expansion, process substitution and compound commands fail
+  closed with a parse error, as reading them as text would change what the
+  command does.
 - A redirection on a builtin fails closed with status 1: builtins write
   through the `Console` seam, and silently sending a redirected stream to
   the terminal would be worse than refusing.
@@ -195,7 +226,11 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 rules, the parser's pipelines/redirections/connectors and its fail-closed
 grammar errors, `$`-expansion, here-document collection (quoting, `<<-`
 tab stripping, source order, the size bound, and the fail-closed paths),
-every builtin, foreground status propagation, the command-not-found path,
+every builtin (`umask`'s octal, `-S` and symbolic forms as bash 5.2 gives
+them, and its refusals; `cd -L`/`-P`/`-e`/`-` and `pwd -L`/`-P` over a
+tree holding a link, with the start-up settling of `PWD`), foreground
+status propagation, the
+command-not-found path,
 background job tracking, the `Done`-before-prompt reporting of finished
 jobs, connector short-circuiting, `!` negation, `|&` lowering,
 prefix-assignment scoping, multios merging (and its fail-closed

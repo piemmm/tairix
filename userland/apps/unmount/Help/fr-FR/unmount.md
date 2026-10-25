@@ -17,13 +17,17 @@ d'informations système.
 
 Un volume dont le périphérique a été retiré alors qu'il portait
 encore des écritures non validées reste visible comme
-`unavailable-dirty` (ou `unavailable-lost`), et un `unmount` simple
-refuse : les données retenues sont conservées pour une réinsertion
-vérifiée. `--force` est la sortie délibérée — les données retenues
-sont abandonnées, le volume est retiré et la perte est consignée
-dans le journal d'audit. Sur un volume sain, `--force` vide et
-détache toujours proprement ; rien n'est abandonné quand une
-validation propre est possible.
+`unavailable-dirty` (ou `unavailable-lost`) dans la liste des
+montages, et un `unmount` simple refuse : les données retenues sont
+conservées pour une réinsertion vérifiée. Un `unmount` simple est
+aussi refusé pour un volume sur lequel des fichiers sont encore
+ouverts, ou qu'un programme a pour répertoire de travail. `--force`
+est la sortie délibérée — les fichiers encore ouverts sur le volume en
+sont coupés, un programme qui y travaille reste dans un répertoire qui
+n'existe plus, les données retenues sont abandonnées, le volume est
+retiré et ce qui a été sacrifié est consigné dans le journal d'audit.
+Sur un volume sain, `--force` vide et détache toujours proprement ;
+rien n'est abandonné quand une validation propre est possible.
 
 Le détachement exige l'autorité de montage (`CAP_FS_MOUNT`) ; le
 noyau la vérifie et audite chaque décision. Les volumes de démarrage
@@ -31,9 +35,10 @@ permanents et les liaisons de vue du système ne se détachent pas.
 
 ## OPTIONS
 
-- `-f, --force` — démontage forcé : retirer le volume même quand ses
-  données ne peuvent pas être validées, en abandonnant les données
-  retenues.
+- `-f, --force` — démontage forcé : retirer le volume même quand des
+  fichiers y sont ouverts, qu'un programme y travaille ou que ses
+  données non validées ne peuvent pas être validées, en coupant du
+  volume les fichiers ouverts et en abandonnant les données retenues.
 - `-?, --help` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES
@@ -42,14 +47,14 @@ permanents et les liaisons de vue du système ne se détachent pas.
 - `unmount /Storage/usb1` — la même chose, nommé par son point de
   montage.
 - `unmount --force usb1` — retirer un volume indisponible en
-  abandonnant ses données retenues.
+  abandonnant ses données retenues non validées.
 
 ## EXIT STATUS
 
 - `0` — le volume a été détaché (ou l'aide courte a été écrite).
 - `1` — le volume est introuvable, non détachable, ou le noyau a
-  refusé le détachement.
-- `2` — la ligne de commande n'a pas été comprise.
+  refusé le détachement. Une ligne de commande non comprise sort aussi
+  avec `1`.
 
 ## ENVIRONMENT
 

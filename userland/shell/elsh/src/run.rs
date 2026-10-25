@@ -63,7 +63,7 @@ mod program {
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
     use tairix_abi::time::Time64;
-    use tairix_abi::{CapabilityId, Errno, FileKind, InputMode, LimitKind, ResourceLimit};
+    use tairix_abi::{CapabilityId, Errno, FileId, FileKind, InputMode, LimitKind, ResourceLimit};
     use tairix_elsh::{
         parse_invocation, Console, Denied, DirEntryInfo, DirLister, Elevator, Environment, GlobFs,
         Invocation, LaunchError, LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire,
@@ -77,7 +77,7 @@ mod program {
     };
     use tairix_resref::SelectorDomain;
     use tairix_rt::io::{write_stderr_line, Read, StdInfo, Stderr, Stdin, Stdout, Write};
-    use tairix_util::quote::quote_if_needed;
+    use tairix_util::quote::quote_subject;
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
     /// and standard error (fd 2) through the shared `tairix_rt::io` layer — the
@@ -176,7 +176,7 @@ mod program {
             dir: &str,
             each: &mut dyn FnMut(&str, FileKind) -> core::ops::ControlFlow<()>,
         ) -> Result<(), Errno> {
-            let listing = tairix_rt::open_dir(dir.as_bytes()).map_err(Errno::from_syscall)?;
+            let listing = tairix_rt::Dir::open(dir.as_bytes()).map_err(Errno::from_syscall)?;
             // A listing read from inside another's visit has a buffer of its own.
             let mut own = Vec::new();
             let mut kept = self.batch.try_borrow_mut();
@@ -445,8 +445,8 @@ mod program {
         };
         for open in opens {
             match open {
-                PlannedOpen::Path { path, flags } => {
-                    let ret = tairix_rt::fs_open(path.as_bytes(), *flags);
+                PlannedOpen::Path { path, flags, mode } => {
+                    let ret = tairix_rt::fs_open(path.as_bytes(), *flags, *mode);
                     if ret < 0 {
                         return fail(&fds, pending_write, Errno::from_syscall(ret));
                     }
@@ -705,7 +705,7 @@ mod program {
     /// component states the reason (fail loud); the job itself keeps its
     /// own exit status.
     fn report_pump_error(action: &str, err: Errno) {
-        write_stderr_line(&alloc::format!("shell: redirection: {action}: {err}"));
+        write_stderr_line(format_args!("shell: redirection: {action}: {err}"));
     }
 
     /// Read the value-backed `reference` through the System Information API
@@ -730,9 +730,9 @@ mod program {
         // The planner rendered this from a parsed reference, so it should
         // always re-parse; a malformed one is refused, never guessed at.
         let parsed = tairix_resref::parse(reference).map_err(|_| {
-            write_stderr_line(&alloc::format!(
+            write_stderr_line(format_args!(
                 "shell: redirection: {reference}: not a resource reference",
-                reference = quote_if_needed(reference)
+                reference = quote_subject(reference)
             ));
             // The kernel resolver's own errno for a malformed reference, so
             // a spelling refusal reads the same wherever it is caught.
@@ -743,9 +743,9 @@ mod program {
         // the shared wording — which names the capability a denial wanted —
         // is stated here against the reference itself.
         let value = tairix_procinfo::read_value(&parsed, now, &IpcTransport).map_err(|err| {
-            write_stderr_line(&alloc::format!(
+            write_stderr_line(format_args!(
                 "shell: redirection: {reference}: {err}",
-                reference = quote_if_needed(reference)
+                reference = quote_subject(reference)
             ));
             err.to_errno()
         })?;
@@ -955,24 +955,37 @@ mod program {
             None
         }
 
-        fn change_directory(&self, path: &str) -> Result<String, Errno> {
-            // The kernel — not the shell — resolves the path (relative to the
-            // process's current working directory), re-authorises it as a
-            // searchable directory, and only then moves the process. A refusal
-            // surfaces as its `Errno`; the shell holds no ambient filesystem
-            // authority of its own.
-            let ret = tairix_rt::fs_chdir(path.as_bytes());
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
+        fn change_directory(&self, path: &str) -> Result<(), Errno> {
+            // The kernel resolves the path and requires a directory the shell
+            // may search, under the shell's own identity.
+            match tairix_rt::fs_chdir(path.as_bytes()) {
+                0 => Ok(()),
+                ret => Err(Errno::from_syscall(ret)),
             }
-            // Report the resolved absolute directory the kernel settled on
-            // (for the prompt and `cd`'s echo). A normalised absolute path
-            // never exceeds `FS_PATH_MAX`, so this buffer always holds it.
-            let mut buf = alloc::vec![0u8; tairix_abi::FS_PATH_MAX];
-            let n = tairix_rt::fs_getcwd(&mut buf).map_err(Errno::from_syscall)?;
-            core::str::from_utf8(&buf[..n])
-                .map(String::from)
-                .map_err(|_| Errno::OutOfRange)
+        }
+
+        fn working_directory(&self) -> Result<String, Errno> {
+            // The kernel answers a whole path or none, never past its bound.
+            let mut buf = tairix_util::fallible::filled(tairix_abi::FS_PATH_MAX, 0u8)
+                .ok_or(Errno::OutOfMemory)?;
+            let len = tairix_rt::fs_getcwd(&mut buf).map_err(Errno::from_syscall)?;
+            buf.truncate(len);
+            String::from_utf8(buf).map_err(|_| Errno::OutOfRange)
+        }
+
+        fn directory_identity(&self, path: &str) -> Result<FileId, Errno> {
+            let directory = tairix_rt::File::open(path.as_bytes(), OpenFlags::DIRECTORY)
+                .map_err(Errno::from_syscall)?;
+            Ok(directory.stat().map_err(Errno::from_syscall)?.id)
+        }
+
+        fn umask(&self) -> u32 {
+            tairix_rt::umask_get()
+        }
+
+        fn set_umask(&self, mask: u32) {
+            // What it replaced is the builtin's to show, not this seam's.
+            let _ = tairix_rt::umask(mask);
         }
     }
 
@@ -1132,6 +1145,7 @@ mod program {
             .with_limits(&limits)
             .with_elevator(&elevator)
             .with_filesystem(&fs);
+        shell.settle_working_directory();
         tairix_elsh::run_repl(
             &mut shell,
             &console,

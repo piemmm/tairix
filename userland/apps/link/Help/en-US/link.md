@@ -53,8 +53,8 @@ may be linked.
 
 - `0` — the link was created (or the short help was written).
 - `1` — the filesystem refused the link, or the output failed; the reason
-  is printed on standard error.
-- `2` — the command line was not understood.
+  is printed on standard error. A command line that was not understood
+  exits `1` too.
 
 ## ENVIRONMENT
 

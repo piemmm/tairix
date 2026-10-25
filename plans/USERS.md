@@ -113,8 +113,8 @@ Status: **U1–U4 done**.
    ceiling∩manifest, never from identity.
 
 8. **The user directory lists both halves.** The ungated
-   `USER_DIRECTORY` introspection serves the compiled `(uid, username)`
-   rows first (`tairix_users::system_account_directory()`), then the
+   `USER_DIRECTORY` introspection serves the compiled `(uid, login group,
+   username)` rows first (`tairix_users::system_account_directory()`), then the
    on-disk human records, so `ls -l`/`ps`/`top` render system-account
    names with no volume mounted and nothing is fabricated beyond the
    two real halves. The `users_admin` `ListUsers` view remains the

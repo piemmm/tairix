@@ -268,6 +268,8 @@ impl<B: Block> Ext4<B> {
     }
 
     /// Set regular file `ino`'s length to `size`, freeing what lies past it.
+    /// A file with no link left is one a hold keeps, listed on the orphan chain
+    /// already.
     pub(crate) fn truncate_file(
         &mut self,
         ino: u32,
@@ -282,7 +284,8 @@ impl<B: Block> Ext4<B> {
         set_size(raw, size);
         put_stamps(raw, self.now(), &[Stamp::Modify, Stamp::Change]);
         if size < current {
-            self.cut_blocks(ino, raw, size.div_ceil(bs), false)?;
+            let listed = le16(raw, INODE_LINKS) == 0;
+            self.cut_blocks(ino, raw, size.div_ceil(bs), listed)?;
             self.zero_tail(ino, raw, size)?;
         }
         self.note_size(size);

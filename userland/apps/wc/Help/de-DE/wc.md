@@ -34,6 +34,15 @@ vorrücken.
 Eine unlesbare Eingabe wird auf der Standardfehlerausgabe gemeldet,
 und der Lauf fährt mit der nächsten Eingabe fort.
 
+An einem Terminal wird jeder ausgegebene Name dort in Anführungszeichen
+gesetzt, wo eine Shell sie bräuchte, und jedes Steuer- oder sonst
+unsichtbare Zeichen darin maskiert geschrieben, sodass ein Name den
+Bildschirm weder steuern noch umordnen kann; GNU gibt ihn unverändert
+aus. Eine Pipe oder eine Datei erhält den Namen Byte für Byte. Ein Name,
+der einen Zeilenumbruch enthält, wird auch in einer Pipe in
+Anführungszeichen gesetzt, wie es GNU `wc` tut, damit jede Zählung in
+einer Zeile bleibt.
+
 ## OPTIONS
 
 - `-c, --bytes` — die Bytezahl ausgeben.
@@ -64,8 +73,8 @@ und der Lauf fährt mit der nächsten Eingabe fort.
 - `0` — jede Eingabe wurde gezählt (oder die Kurzhilfe wurde
   geschrieben).
 - `1` — eine Eingabe konnte nicht gelesen oder die Ausgabe nicht
-  zugestellt werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  zugestellt werden. Eine nicht verstandene Befehlszeile endet ebenfalls
+  mit `1`.
 
 ## ENVIRONMENT
 

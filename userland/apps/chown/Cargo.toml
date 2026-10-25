@@ -1,6 +1,6 @@
 [package]
 name = "tairix-chown"
-description = "TAIRiX `chown` CLI: change file owner and group (`userland/apps/` — `PLAN.md` Stage 6)."
+description = "TAIRiX `chown` CLI: change file owner and group (`userland/apps/` — a plans/APPS.md command app)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,14 +11,41 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The `Run` binary's freestanding userland runtime is an optional,
+# on-by-default feature, so the host test build of the library never links
+# the runtime's `_start`, allocator or panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The `tairix-chown` library and the tool's `Run` binary, a freestanding
+# program on the native targets and an inert host stub elsewhere.
+[[bin]]
+name = "tairix-chown-run"
+path = "src/run.rs"
+
 [dependencies]
-# The stable `Errno` is the only thing `chown` needs from the workspace: the
-# tool changes a path's owner through an injected filesystem seam that speaks
-# the frozen `Errno`, so it invents no parallel error set and never
-# links a kernel or driver crate.
+# `Errno`, `FileStat` and the id word that leaves an owner unchanged.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The `Output` stream the engine writes through.
+# The command-line scan, the `Output` stream, carried failures and the one
+# quoting of a name in a report.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
-# The one path-spelling grammar: `join` places a child inside a directory,
-# so this tool carries no second path parser.
-tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
+# The shared tree seam every operand is opened and every tree walked through.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
+# The one help engine and its own-bundle short help.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+[dev-dependencies]
+# The in-memory tree and its attacker hook the walk and race tests drive.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
+
+# For the freestanding `Run` binary alone: the userland runtime, the help
+# engine's own-bundle `HelpSource`, and the System Information client the
+# account and group directories are read through.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -265,8 +265,7 @@ live.
 
 - `0` — the session ended by the user's `q`.
 - `1` — the starting directory could not be listed, or the terminal
-  path failed.
-- `2` — the arguments could not be understood.
+  path failed. A command line that was not understood exits `1` too.
 
 ## SEE ALSO
 

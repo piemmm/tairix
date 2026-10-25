@@ -247,7 +247,7 @@ fn bind_table_accepted_and_signed() {
     reset_register_calls();
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
-    let key = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("compatible fits");
+    let key = HwMatchKey::compatible(b"vendor,sd-host").expect("compatible fits");
     let img = build_signed_image_with_bind_keys(
         &sk,
         DriverKind::UserSpace,
@@ -268,7 +268,7 @@ fn bind_table_accepted_and_signed() {
 fn tampered_bind_table_refused_by_signature() {
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
-    let key = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("compatible fits");
+    let key = HwMatchKey::compatible(b"vendor,sd-host").expect("compatible fits");
     let mut img = build_signed_image_with_bind_keys(
         &sk,
         DriverKind::UserSpace,

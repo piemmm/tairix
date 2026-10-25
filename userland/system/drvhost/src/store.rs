@@ -340,13 +340,6 @@ mod tests {
         }
     }
 
-    fn compat(s: &[u8]) -> HwMatchKey {
-        match HwMatchKey::compatible(s) {
-            Ok(key) => key,
-            Err(_) => unreachable!("test compatible strings fit HW_COMPATIBLE_MAX"),
-        }
-    }
-
     /// Build a `.rxe` image with the given capabilities, bind keys, and
     /// payload. The signature fields are left zeroed: the scan never
     /// verifies the signature (the load gate does), so a
@@ -400,7 +393,7 @@ mod tests {
     #[test]
     fn the_scan_reads_each_manifest_and_none_of_the_program() {
         let caps: Vec<u16> = (0..tairix_abi::DRIVER_MANIFEST_MAX_CAPABILITIES).collect();
-        let keys = [DriverBindKey::new(5, compat(b"brcm,bcm2711-genet-v5"));
+        let keys = [DriverBindKey::new(5, tairix_abi::compatible_key!(b"vendor,nic"));
             DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
         let mut store = MemStore::new();
         store.insert(
@@ -424,34 +417,37 @@ mod tests {
     #[test]
     fn well_formed_bundles_become_candidates_in_enumeration_order() {
         let usb_keys = [DriverBindKey::new(5, HwMatchKey::pci(0, 0, 0x0C_0330))];
-        let emmc_keys = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
+        let emmc_keys = [DriverBindKey::new(
+            5,
+            tairix_abi::compatible_key!(b"vendor,sd-host"),
+        )];
         let mut src = MemStore::new();
         src.insert(
             "/System/Drivers/bus_usb",
             build_image(&[2], &usb_keys, b"payload-usb"),
         );
         src.insert(
-            "/System/Drivers/emmc2",
+            "/System/Drivers/sd",
             build_image(&[2], &emmc_keys, b"payload-emmc"),
         );
         let sink = RecordingSink::new();
         let store = scan_store(
             &src,
-            &["/System/Drivers/emmc2", "/System/Drivers/bus_usb"],
+            &["/System/Drivers/sd", "/System/Drivers/bus_usb"],
             &sink,
         );
         assert_eq!(store.len(), 2);
         assert_eq!(store.skipped(), 0);
         assert!(!store.is_empty());
         // Enumeration order is preserved.
-        assert_eq!(store.drivers()[0].path(), "/System/Drivers/emmc2");
+        assert_eq!(store.drivers()[0].path(), "/System/Drivers/sd");
         assert_eq!(store.drivers()[1].path(), "/System/Drivers/bus_usb");
         assert_eq!(store.drivers()[0].bind_keys(), &emmc_keys);
         assert_eq!(store.drivers()[1].bind_keys(), &usb_keys);
         // The borrowed candidate view is index-aligned with `drivers()`.
         let candidates = store.candidates();
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].path, "/System/Drivers/emmc2");
+        assert_eq!(candidates[0].path, "/System/Drivers/sd");
         assert_eq!(candidates[0].bind_keys, &emmc_keys);
         // Two accepted candidates audited, no skips.
         assert_eq!(
@@ -470,7 +466,10 @@ mod tests {
 
     #[test]
     fn unreadable_bundle_is_skipped_and_logged_and_scan_continues() {
-        let keys = [DriverBindKey::new(5, compat(b"arm,pl011"))];
+        let keys = [DriverBindKey::new(
+            5,
+            tairix_abi::compatible_key!(b"arm,pl011"),
+        )];
         let mut src = MemStore::new();
         src.insert("/System/Drivers/uart", build_image(&[], &keys, b""));
         let sink = RecordingSink::new();
@@ -499,7 +498,10 @@ mod tests {
 
     #[test]
     fn malformed_manifest_is_skipped() {
-        let keys = [DriverBindKey::new(5, compat(b"arm,pl011"))];
+        let keys = [DriverBindKey::new(
+            5,
+            tairix_abi::compatible_key!(b"arm,pl011"),
+        )];
         let mut img = build_image(&[], &keys, b"");
         img[0] ^= 0xFF; // corrupt the magic
         let mut src = MemStore::new();
@@ -517,7 +519,10 @@ mod tests {
 
     #[test]
     fn invalid_bind_key_is_skipped() {
-        let keys = [DriverBindKey::new(5, compat(b"arm,pl011"))];
+        let keys = [DriverBindKey::new(
+            5,
+            tairix_abi::compatible_key!(b"arm,pl011"),
+        )];
         let mut img = build_image(&[], &keys, b"");
         // Corrupt the first bind entry's reserved field (header + no caps).
         let bind_start = ParsedImage::HEADER_LEN;
@@ -596,9 +601,9 @@ mod tests {
         let sink = RecordingSink::new();
         let store = scan_store(&src, &["/System/Drivers/bus_usb"], &sink);
         let candidates = store.candidates();
-        let vl805 = [HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330)];
+        let controller = [HwMatchKey::pci(0xABCD, 0x1234, 0x0C_0330)];
         assert_eq!(
-            tairix_devmatch::resolve(&vl805, &candidates),
+            tairix_devmatch::resolve(&controller, &candidates),
             tairix_devmatch::MatchResolution::Winner {
                 candidate: 0,
                 priority: 5,

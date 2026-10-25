@@ -20,13 +20,16 @@ shipped one (`AGENTS.md` §2.4 / §9).
 | `open`                | Validate the boot sector (BPB) and compute layout.|
 | `root`                | The root directory at the BPB's root cluster.     |
 | `lookup`              | Scan a directory's entries for a name.            |
-| `node_info`           | Report `{ kind, size }` from the node token.      |
+| `node_info`           | Read a file's short entry; walk a directory's chain. |
 | `read_at`             | Walk the FAT cluster chain and copy file bytes.   |
 | `read_dir`            | Hand a visitor a directory's entries in on-disk order, from a cursor. |
+| `parent`              | Read a directory's `..` entry.                    |
 | `create`              | Write a new LFN set + 8.3 entry; alloc a dir cluster for a directory. |
 | `write_at`            | Extend/chain clusters, zero-fill gaps, write bytes, update the entry. |
 | `truncate`            | Free the tail chain (shrink) or zero-extend (grow); update the entry. |
-| `remove`              | Free the cluster chain and mark the entry + its LFN run deleted. |
+| `remove`              | Mark the entry + its LFN run deleted and free the chain, unless a pin holds the node. |
+| `pin` / `unpin`       | Count the kernel's holds on a node; the last unpin of a removed one frees it. |
+| `release_pins`        | Release every hold, freeing each removed node a pin kept. |
 | `flush`               | No-op: every mutation writes straight through to the device. |
 
 ## Long file names (VFAT)
@@ -62,17 +65,54 @@ last cluster is a bad chain, a chain walk stops at the volume's cluster
 count, a directory walk at the format's 65,536 entries, and a move's walk up
 `..` links at a link that comes round again or names no parent.
 
-A listed entry's `allocated` is the clusters its size needs, as Linux
-reports it; only a directory, whose entry records no size, has its chain
+A listed entry's `allocated` is the clusters its size needs; only a
+directory, whose entry records no size, has its chain
 walked. A listing therefore never costs a file's size.
 
-A `NodeId` is self-describing: it packs the entry's first cluster, a
-directory flag, and (for files) the size, so `node_info` needs no extra
-I/O and no in-memory inode table. A file's id therefore changes when a write
-moves its size or first cluster, which the driver declares
-(`NodeIdentity::ContentDerived`): the cache in front of a mounted volume looks
-the name up again after writing through it. An id carrying no validity bit,
-`NodeId::NONE` among them, names nothing.
+## Node ids
+
+A file's own `NodeId` is the place of its short entry: the entry's device
+byte offset over 32, with bit 63 set. A directory's is its first cluster, with
+a directory flag and a validity flag set, so the two never collide and neither
+is `NodeId::NONE`. A file's own id is also the number `stat` reports.
+
+A file's entry holds its size, first cluster and stamps, and a write or a
+truncation rewrites it where it lies, so the id lasts through them. A rename
+writes the entry afresh at a new place and a removal frees it, so neither
+keeps the id. Every operation by a file's own id reads the entry first and
+answers `NotFound` for anything but a file's short entry in the data region —
+a freed slot, a long-name fragment, a `.` entry, a directory's entry, a label
+— so an id a removal or a rename left behind names nothing until a new entry
+takes its slot. An id is good for a write only until the next name change in
+its directory.
+
+A directory's parent is the one its `..` entry names, and the root's is the
+root. A directory whose first cluster is free, as a removed one's is,
+answers `NotFound`, and takes no new entry.
+
+## Pins
+
+A file the kernel pins is reported under a token, bit 62 and a number the
+mount never gives twice, by lookups and listings until its last unpin, while
+`stat` goes on reporting its entry's place; a rename carries the token to the
+file's new entry. A pin therefore changes the id a file is reported under,
+and the driver declares `NodeIdentity::ContentDerived`. A pinned directory
+keeps its own id: its first cluster is not freed while a pin holds it. Every
+table a pin is recorded in grows fallibly, so a hold that cannot be recorded
+is refused with `OutOfMemory`.
+
+A removal of a pinned file, or a rename replacing it, deletes its entry but
+keeps its chain: the pin keeps the file's first cluster, size and stamps, the
+file reads, writes and truncates through its token, and `stat` reports no
+name and the number its entry had. A removed directory a pin holds keeps its
+cluster but takes no entries: a lookup in it, its parent and a creation or
+move into it answer `NotFound`, and it lists nothing. The last unpin frees
+either (`Unpinned::Freed`), and `release_pins` frees every one.
+
+No pin outlives the mount. FAT keeps no orphan record, and planting one would
+show other systems an entry or a field they do not expect, so a crash with a
+deleted file still pinned leaves its chain allocated and named by no entry: a
+lost chain for the format's own checker to reclaim.
 
 ## FAT type detection
 
@@ -88,12 +128,11 @@ decoupled: the driver addresses the volume in bytes through
 
 ## Writing
 
-Writes address their target as a `(dir, name)` pair, because a FAT file's
-length and starting cluster live in its **parent directory entry**, not
-in a self-describing `NodeId` (`AGENTS.md` §2.4 — the symmetric counter
-to `FilesystemRead`). Each created entry is written as a VFAT long-name
-set bound to an 8.3 short alias taking the lowest `~N` tail no live alias
-holds, so an arbitrary, case-preserving name round-trips through a later
+Writes and truncations take the file's id, its entry's place or its pin's
+token; create, remove and rename take a `(dir, name)` pair. Each created entry is written
+as a VFAT long-name set bound to an 8.3 short alias taking the lowest `~N`
+tail no live alias holds, so an arbitrary, case-preserving name round-trips
+through a later
 read. One walk of the directory chooses both the tail and the run of free
 slots the set takes. Free clusters are found by scanning the FAT;
 directories grow by one zeroed cluster at a time when their entry slots
@@ -126,9 +165,11 @@ is written as the zero date FAT reads as none, which reads back as
 `Time64::UNIX_EPOCH`. FAT keeps no metadata-change stamp, so `changed` is
 always that.
 
-A listing carries the stamps, but a stat by node reports none: FAT keeps
-them only in the directory entry, which a node id does not reach
-(`plans/OPEN-DEFECTS.md` D802).
+A listing carries every entry's stamps, and a stat by node reports the
+same: a file's from the entry its id locates, a directory's from its entry
+in the parent its `..` names. The root, which no entry names, has none, nor
+has a directory whose `..` is damaged or names a parent not holding it; such
+a directory still stats.
 
 ## End-to-end QEMU vertical
 
@@ -157,9 +198,10 @@ the driver makes no permission decisions (§5.4 — the VFS is the policy
 point, the driver is raw structural I/O). Every node reports one fixed
 record, system-owned with `0755` for a directory and `0644` for a file; a
 volume attached as removable media is mounted under the storage-group
-identity map instead. A creation's owner stamp stores nothing, so a new node
-is owned as every node is, and an explicit mode or owner change is refused
-as one the format cannot hold (`NotSupported`). Names match ignoring ASCII case, as
+identity map instead. A create ignores the record it is given, which FAT has
+nowhere to keep, so a new node is owned as every node is, and an explicit
+mode or owner change is refused as one the format cannot hold
+(`NotSupported`). Names match ignoring ASCII case, as
 the format requires, and the driver declares that rule
 (`NameMatching::AsciiCaseInsensitive`), so the VFS applies it to a no-replace
 rename: `B.TXT` beside `b.txt` is a clash, and a rename to a case variant of an

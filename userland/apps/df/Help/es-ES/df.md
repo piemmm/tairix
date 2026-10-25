@@ -74,8 +74,8 @@ están disponibles.
 - `0` — el informe cubrió todo lo pedido (o se escribió la ayuda
   breve).
 - `1` — no se pudo informar de un operando, los filtros no dejaron
-  nada, o falló la consulta o la salida.
-- `2` — la línea de órdenes no se entendió.
+  nada, o falló la consulta o la salida. Una línea de órdenes no
+  entendida también termina con `1`.
 
 ## ENVIRONMENT
 

@@ -14,7 +14,7 @@ mod sparse;
 use mem_block::MemBlock;
 use sparse::sparse;
 use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind,
+    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
 };
 use tairix_drv_fs_ext4::{Ext4, Generation};
 
@@ -132,9 +132,15 @@ fn read_whole(fs: &mut Ext4<MemBlock>, file: NodeId, len: usize) -> Vec<u8> {
 fn write_mapped_file(image: Vec<u8>) -> (Vec<u8>, u32) {
     let mut fs = open(image);
     let root = fs.root();
-    fs.create(root, NAME, NodeKind::RegularFile)
+    let node = fs
+        .create(
+            root,
+            NAME,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
-    fs.write_all(root, NAME, 0, &body()).expect("write");
+    fs.write_all(node, 0, &body()).expect("write");
     let mut fs = open(fs.into_block().expect("the volume closes").data);
     let root = fs.root();
     let file = fs.lookup(root, NAME).expect("the file is listed");
@@ -207,9 +213,15 @@ fn a_file_past_two_gibibytes_raises_a_revision_0_volume_before_marking_it() {
     pristine[SB_FIRST_INO..SB_INODE_SIZE + 2].fill(0);
     let mut fs = open(pristine);
     let root = fs.root();
-    fs.create(root, NAME, NodeKind::RegularFile)
+    let node = fs
+        .create(
+            root,
+            NAME,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
-    fs.truncate(root, NAME, 3 << 30).expect("a hole past 2 GiB");
+    fs.truncate(node, 3 << 30).expect("a hole past 2 GiB");
     let image = fs.into_block().expect("the volume closes").data;
     assert_eq!(le32(&image, SB_REV_LEVEL), 1);
     assert_eq!(le32(&image, SB_FIRST_INO), 11);
@@ -227,7 +239,12 @@ fn an_attribute_block_number_has_no_high_half_without_64bit() {
     let mut fs = open(sparse(EXT2));
     let root = fs.root();
     let file = fs
-        .create(root, NAME, NodeKind::RegularFile)
+        .create(
+            root,
+            NAME,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     let mut image = fs.into_block().expect("the volume closes").data;
     let ino = u32::try_from(file.raw()).expect("an inode number");

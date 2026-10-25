@@ -4,7 +4,8 @@
 //! matched network node, brings its device online and publishes a child
 //! *device-channel* hardware-tree node: `compatible = "tairix,netchan"`,
 //! carrying the reserved call-endpoint id it bound as an
-//! [`HwResourceKind::Endpoint`] grant request. Emitting that node bumps the
+//! [`HwResourceKind::Endpoint`](tairix_abi::hwtree::HwResourceKind::Endpoint)
+//! grant request. Emitting that node bumps the
 //! hardware-tree generation, waking the device manager's reactive loop.
 //!
 //! This module is the pure policy for that reaction: recognise a `netchan`
@@ -24,7 +25,6 @@
 use alloc::collections::BTreeMap;
 
 use tairix_abi::driver::net_channel::NETCHAN_NODE_COMPATIBLE;
-use tairix_abi::hwtree::{HwMatchKind, HwResourceKind};
 use tairix_abi::net_ipc::{
     validate_if_name, NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings, IF_NAME_LEN,
 };
@@ -162,27 +162,6 @@ impl NetBindState {
     }
 }
 
-/// If `node` is a NIC device-channel node — its match keys carry the
-/// [`NETCHAN_NODE_COMPATIBLE`] `compatible` string — return the call-endpoint id
-/// it published as an [`HwResourceKind::Endpoint`] grant request.
-///
-/// Returns [`None`] for any other node, and for a `netchan` node that
-/// carries no endpoint resource (a malformed emission — never guessed at).
-#[must_use]
-pub fn netchan_endpoint(node: &HwNode) -> Option<u64> {
-    let is_netchan = node.match_keys().iter().any(|key| {
-        key.kind() == Some(HwMatchKind::Compatible)
-            && key.compatible_bytes() == NETCHAN_NODE_COMPATIBLE
-    });
-    if !is_netchan {
-        return None;
-    }
-    node.resources()
-        .iter()
-        .find(|resource| resource.kind() == Some(HwResourceKind::Endpoint))
-        .map(tairix_abi::HwResource::base)
-}
-
 /// The stable hardware location of the NIC that emitted the `netchan`
 /// `node`: the lowest register-window base of its **parent** device node in
 /// `nodes` (the driver's matched node — a `netchan` is emitted as a child of
@@ -226,7 +205,7 @@ pub fn bind_new_channels(
 ) {
     state.deferred = false;
     for node in nodes {
-        let Some(endpoint) = netchan_endpoint(node) else {
+        let Some(endpoint) = node.channel_endpoint(NETCHAN_NODE_COMPATIBLE) else {
             continue;
         };
         if state.bound.contains_key(&endpoint) {
@@ -448,26 +427,6 @@ mod tests {
         for n in 0..16 {
             validate_if_name(&iface_name(n)).expect("derived name is valid");
         }
-    }
-
-    #[test]
-    fn a_netchan_node_yields_its_endpoint_others_yield_none() {
-        assert_eq!(
-            netchan_endpoint(&netchan_node(2, 0x4E43_4841_4E00)),
-            Some(0x4E43_4841_4E00)
-        );
-        // A non-netchan node (a plain network device awaiting its driver).
-        let mut plain = HwNode::new(3, HW_NODE_ROOT, HwDeviceClass::Network);
-        plain
-            .push_match_key(HwMatchKey::compatible(b"virtio,mmio").expect("key"))
-            .expect("push");
-        assert_eq!(netchan_endpoint(&plain), None);
-        // A netchan node with no endpoint resource is malformed → None.
-        let mut no_ep = HwNode::new(4, HW_NODE_ROOT, HwDeviceClass::Network);
-        no_ep
-            .push_match_key(HwMatchKey::compatible(NETCHAN_NODE_COMPATIBLE).expect("key"))
-            .expect("push");
-        assert_eq!(netchan_endpoint(&no_ep), None);
     }
 
     #[test]

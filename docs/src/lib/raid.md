@@ -281,8 +281,7 @@ every copy and drops any that cannot, keeping at least one durable copy or
 failing closed.
 
 A **missing member** — a slot the array is defined to have but which holds no
-device — is a first-class `MemberState::Absent`, the equivalent of a Linux md
-"removed" slot. `MirrorArray::assemble` is given the array's *full* member
+device — is a first-class `MemberState::Absent`. `MirrorArray::assemble` is given the array's *full* member
 table, one `MirrorMember::absent()` per missing copy, so the assembled array
 counts the empty slot toward its member count and reports `Degraded` for the
 reduced redundancy rather than silently presenting as a smaller, optimal
@@ -471,8 +470,8 @@ four members (two data + P + Q).
 Each stripe reserves *two* chunks: a **P** syndrome (bytewise XOR of the data
 chunks, exactly RAID5's parity) and a **Q** syndrome, the Reed-Solomon sum
 `Q = Σ gᵏ·Dₖ` over the finite field GF(2^8) (`lib/*` `gf256`, generator `{02}`,
-reducing polynomial `0x11d` — the same field the Linux RAID6 implementation
-uses, so the layout is a well-understood one). For a stripe `s` the P member is
+reducing polynomial `0x11d` — the field of H. P. Anvin's "The mathematics of
+RAID-6"). For a stripe `s` the P member is
 `p = (n - 1) - (s mod n)` and the Q member is `q = (p + 1) mod n`; the `n - 2`
 data chunks fill the remaining members in ascending order after `q`, with data
 position `k` carrying Q coefficient `gᵏ`. Both syndrome slots rotate one member
@@ -536,8 +535,7 @@ classification. It needs at least five members (two data + P + Q + R).
 Each stripe reserves *three* chunks: a **P** syndrome (bytewise XOR of the data
 chunks), a **Q** syndrome (`Q = Σ gᵏ·Dₖ`), and an **R** syndrome
 (`R = Σ g²ᵏ·Dₖ`), all over the finite field GF(2^8) (`lib/*` `gf256`, generator
-`{02}`, reducing polynomial `0x11d` — the same field the Linux RAID6/RAID-Z
-implementations use). For a stripe `s` the P member is `p = (n - 1) - (s mod n)`,
+`{02}`, reducing polynomial `0x11d`). For a stripe `s` the P member is `p = (n - 1) - (s mod n)`,
 the Q member is `q = (p + 1) mod n`, and the R member is `r = (q + 1) mod n`;
 the `n - 3` data chunks fill the remaining members in ascending order after `r`,
 with data position `k` carrying Q coefficient `gᵏ` and R coefficient `g²ᵏ`. All
@@ -926,8 +924,8 @@ The six compositions above are siblings over the same block seam (`AGENTS.md`
 [`tairix_abi::driver::block::Block`](../drivers/block.md) device to the filesystem
 layer once it has *discovered* an array and resolved its `RaidLevel`,
 regardless of which level composes it. `RaidArray` is that single
-composed-device abstraction (`AGENTS.md` §27), modelled on Linux md's
-per-personality dispatch: it is an enum over the six engines that forwards
+composed-device abstraction (`AGENTS.md` §27): it is an enum over the six
+engines that forwards
 both the `Block` I/O path (`geometry`/`medium`/`read`/`write`/`flush`/
 the class-aware and discard/health surface) and the level-agnostic observation,
 maintenance, and reconfiguration operations, so neither the autoloaded serve

@@ -211,10 +211,10 @@ refusal stated.
 - `0` — the listing, value, short help, or change was completed.
 - `1` — the settings could not be read or changed (for example the
   caller may not change the machine's settings, or may not read its
-  network settings), or the output could not be delivered.
-- `2` — the command line was not understood, the key is unknown, the
-  value is outside the key's set, or the change would leave the network
-  configuration inconsistent.
+  network settings), the key is unknown, the value is outside the key's
+  set, the change would leave the network configuration inconsistent, or
+  the output could not be delivered. A command line that was not
+  understood exits `1` too.
 
 ## ENVIRONMENT
 

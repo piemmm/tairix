@@ -3,25 +3,21 @@
 //! service holding `CAP_GPIO` drives a header line over `gpio-header-v1`. A
 //! line has one holder at a time, of either kind.
 //!
-//! A level line is masked by disabling its detection as it fires and re-armed
-//! by its consumer's next wait. An edge line's detection stays enabled while
-//! held, and one that fires with no wait posted is latched here and answers
-//! the next wait at once, so no edge is lost and no level can storm.
+//! A level line's detection is enabled by its consumer's wait and disabled as
+//! it fires. An edge line's is enabled by every wait and disabled only when an
+//! edge fires with no wait posted: that edge is latched here and answers the
+//! next wait at once, so no edge is lost and a line that keeps firing wakes
+//! the driver at most once between waits.
 
 use tairix_abi::driver::gpio::{
     encode_lines, encode_status, HeaderLines, HeaderRequest, Holder, LineEntry, LineState,
     LineTable, Polarity, HEADER_MAX_REPLY, HEADER_REQUEST_LEN,
 };
-use tairix_abi::driver::irqline::{encode_reply, IrqLineRequest, IRQLINE_MAX_REPLY};
-use tairix_abi::hwlink::LinkRequest;
-use tairix_abi::hwtree::HwResource;
 use tairix_abi::{DriverError, Errno, ProcId};
+use tairix_drvrt::irqline::{IrqLines, LineHardware, LineRecord};
 use tairix_drvrt::{refusal, Recorder, Supplier, SupplierHost};
 
-use crate::block::{Block, Function, Trigger};
-
-/// The most lines a controller of the family has.
-pub const LINES_MAX: usize = 64;
+use crate::block::{Block, Function, Trigger, LINES};
 
 /// The bank interrupts a controller raises: GPIO 0–27, 28–45, and 46 up.
 pub const BANK_INTERRUPTS: usize = 3;
@@ -32,6 +28,9 @@ pub const HEADER_CALLS_PER_WAKE: usize = 8;
 
 /// The first line of each bank interrupt's group.
 const BANK_FIRST_LINE: [u8; BANK_INTERRUPTS] = [0, 28, 46];
+
+/// A holder's slot for every line.
+const SLOTS: usize = LINES as usize;
 
 /// The header endpoint, as the controller serves it.
 pub trait HeaderPort {
@@ -58,88 +57,121 @@ pub trait HeaderPort {
     fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno>;
 }
 
-/// Which protocol a line is held through.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Role {
-    /// An interrupt, over `irqline-v1`.
-    Interrupt,
-    /// A header output, over `gpio-header-v1`.
-    Output,
-}
-
 /// A decision the controller records.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Record {
-    /// A line was taken.
+    /// A decision about a line held as an interrupt.
+    Interrupt(LineRecord),
+    /// A header line was claimed as an output.
     Claimed {
         /// The line.
         line: u8,
         /// Its holder.
         holder: ProcId,
-        /// How it is held.
-        role: Role,
     },
-    /// A line an ended consumer held was taken by its link's next holder.
-    Reclaimed {
+    /// A header line was returned to an input, by its holder or with its end.
+    Released {
         /// The line.
         line: u8,
-        /// The consumer that had held it.
-        from: ProcId,
     },
-    /// A request was refused.
+    /// A header request was refused.
     Refused {
         /// The caller, when the kernel could say.
         caller: Option<ProcId>,
         /// Why.
         reason: Errno,
     },
-    /// A line was given back, by its holder or with its end.
-    Released {
-        /// The line.
-        line: u8,
-    },
-    /// A line fired while its consumer could not be answered.
-    Unanswered {
-        /// The line.
-        line: u8,
-    },
 }
 
-enum Held {
-    Interrupt {
-        owner: ProcId,
-        request: LinkRequest,
-        trigger: Trigger,
-        posted: Option<u64>,
-        latched: bool,
-    },
-    Output {
-        holder: ProcId,
-        polarity: Polarity,
-        asserted: bool,
-    },
+impl From<LineRecord> for Record {
+    fn from(record: LineRecord) -> Self {
+        Self::Interrupt(record)
+    }
 }
 
-impl Held {
-    const fn holder(&self) -> ProcId {
-        match self {
-            Self::Interrupt { owner, .. } => *owner,
-            Self::Output { holder, .. } => *holder,
+/// A header line driven as an output.
+struct Output {
+    holder: ProcId,
+    polarity: Polarity,
+    asserted: bool,
+}
+
+/// The block, as the holders of its lines drive it.
+struct Pins<'r> {
+    block: Block<'r>,
+    /// The lines whose bank interrupt is bound, a bit per line.
+    interruptible: u64,
+    outputs: [Option<Output>; SLOTS],
+}
+
+impl Pins<'_> {
+    /// The header output `line` is held as.
+    fn output(&self, line: u8) -> Option<&Output> {
+        self.outputs.get(usize::from(line))?.as_ref()
+    }
+}
+
+impl LineHardware for Pins<'_> {
+    type Trigger = Trigger;
+
+    /// The binding's two cells, the line and its trigger, on a line whose
+    /// bank interrupt is bound.
+    fn select(&self, selector: &[u32]) -> Result<(u8, Trigger), Errno> {
+        let [line, trigger] = *selector else {
+            return Err(Errno::OutOfRange);
+        };
+        let line = u8::try_from(line)
+            .ok()
+            .filter(|&line| line < LINES)
+            .ok_or(Errno::OutOfRange)?;
+        let trigger = Trigger::from_cell(trigger).ok_or(Errno::NotSupported)?;
+        if self.interruptible & (1 << line) == 0 {
+            return Err(Errno::NotSupported);
         }
+        Ok((line, trigger))
+    }
+
+    /// Set to an input, unless driven as a header output or routed to a
+    /// peripheral.
+    fn take(&mut self, line: u8) -> Result<(), Errno> {
+        if self.output(line).is_some() {
+            return Err(Errno::Busy);
+        }
+        if let Function::Alternate(_) = self.block.function(line).map_err(refusal)? {
+            return Err(Errno::Busy);
+        }
+        self.block.set_direction(line, false).map_err(refusal)
+    }
+
+    /// An edge is armed by every wait, so the edge after a latched one is
+    /// caught; a level only for a wait its firing answers, as a level that
+    /// still stands would latch again at once.
+    fn arm(&mut self, line: u8, trigger: Trigger, posted: bool) -> Result<(), Errno> {
+        if trigger.is_level() && !posted {
+            return Ok(());
+        }
+        self.block.detect(line, trigger, true).map_err(refusal)
+    }
+
+    fn release(&mut self, line: u8, trigger: Trigger) {
+        // A register that will not take the write leaves nothing to do: the
+        // line is no longer anybody's either way.
+        let _ = self
+            .block
+            .detect(line, trigger, false)
+            .and_then(|()| self.block.clear_events(1 << line));
     }
 }
 
 /// One controller's lines and who holds each.
 pub struct Controller<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> {
-    block: Block<'r>,
+    pins: Pins<'r>,
+    lines: IrqLines<Trigger, SLOTS>,
     links: S,
     header: Option<H>,
     lent: HeaderLines,
     banks: usize,
-    interruptible: u64,
     log: L,
-    endpoint: u64,
-    lines: [Option<Held>; LINES_MAX],
 }
 
 impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, H, L> {
@@ -164,7 +196,7 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
             Some((port, lent)) => (Some(port), lent),
             None => (None, HeaderLines::default()),
         };
-        let last = block.lines().saturating_sub(1);
+        let last = LINES - 1;
         let lines_mask = HeaderLines::span(0, last).mask();
         let interruptible = BANK_FIRST_LINE
             .iter()
@@ -181,189 +213,40 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
             })
             & lines_mask;
         Ok(Self {
-            block,
+            pins: Pins {
+                block,
+                interruptible,
+                outputs: [const { None }; SLOTS],
+            },
+            lines: IrqLines::new(endpoint),
             links,
             header,
             lent: HeaderLines::from_mask(lent.mask() & lines_mask),
             banks: banks.min(BANK_INTERRUPTS),
-            interruptible,
             log,
-            endpoint,
-            lines: [const { None }; LINES_MAX],
         })
-    }
-
-    fn wait(&mut self, ticket: u64, caller: ProcId, request: &LinkRequest) -> Result<(), Errno> {
-        if request.endpoint() != self.endpoint {
-            return Err(Errno::OutOfRange);
-        }
-        if !self
-            .links
-            .caller_holds(ticket, &HwResource::request(request))?
-        {
-            return Err(Errno::PermissionDenied);
-        }
-        let [line, trigger] = *request.selector() else {
-            return Err(Errno::OutOfRange);
-        };
-        let line = u8::try_from(line)
-            .ok()
-            .filter(|&line| line < self.block.lines())
-            .ok_or(Errno::OutOfRange)?;
-        let trigger = Trigger::from_cell(trigger).ok_or(Errno::NotSupported)?;
-        if self.interruptible & (1 << line) == 0 {
-            return Err(Errno::NotSupported);
-        }
-        self.claim_interrupt(line, caller, request, trigger)?;
-        let slot = usize::from(line);
-        let (level, latched) = match &mut self.lines[slot] {
-            Some(Held::Interrupt {
-                trigger,
-                posted,
-                latched,
-                ..
-            }) => {
-                if posted.is_some() {
-                    return Err(Errno::Busy);
-                }
-                let latched = core::mem::take(latched);
-                if !latched {
-                    *posted = Some(ticket);
-                }
-                (trigger.is_level().then_some(*trigger), latched)
-            }
-            _ => return Err(Errno::NotFound),
-        };
-        if latched {
-            self.answer_wait(ticket, Ok(()));
-            return Ok(());
-        }
-        if let Some(level) = level {
-            // Armed only once the wait is held, so its firing finds it.
-            if let Err(err) = self.block.detect(line, Some(level)) {
-                if let Some(Held::Interrupt { posted, .. }) = &mut self.lines[slot] {
-                    *posted = None;
-                }
-                return Err(refusal(err));
-            }
-        }
-        Ok(())
-    }
-
-    /// Make `line` `caller`'s interrupt, as its link `request` allows.
-    fn claim_interrupt(
-        &mut self,
-        line: u8,
-        caller: ProcId,
-        request: &LinkRequest,
-        trigger: Trigger,
-    ) -> Result<(), Errno> {
-        match &self.lines[usize::from(line)] {
-            Some(Held::Interrupt {
-                owner,
-                request: held,
-                ..
-            }) if *owner == caller => {
-                return if held == request {
-                    Ok(())
-                } else {
-                    Err(Errno::Busy)
-                };
-            }
-            Some(Held::Interrupt { owner, .. }) => {
-                // Two nodes may name one line; it stays with a holder that
-                // lives, and a watch refused as gone says it does not.
-                let from = *owner;
-                match self.links.watch(from) {
-                    Ok(()) => return Err(Errno::Busy),
-                    Err(Errno::NotFound) => {}
-                    Err(reason) => return Err(reason),
-                }
-                self.release(line);
-                self.log.record(Record::Reclaimed { line, from });
-            }
-            Some(Held::Output { .. }) => return Err(Errno::Busy),
-            None => {}
-        }
-        if let Function::Alternate(_) = self.block.function(line).map_err(refusal)? {
-            return Err(Errno::Busy);
-        }
-        self.links.watch(caller)?;
-        self.block.set_direction(line, false).map_err(refusal)?;
-        let detect = (!trigger.is_level()).then_some(trigger);
-        self.block.detect(line, detect).map_err(refusal)?;
-        self.lines[usize::from(line)] = Some(Held::Interrupt {
-            owner: caller,
-            request: *request,
-            trigger,
-            posted: None,
-            latched: false,
-        });
-        self.log.record(Record::Claimed {
-            line,
-            holder: caller,
-            role: Role::Interrupt,
-        });
-        Ok(())
-    }
-
-    /// Give `line` back: its detection off and its latch cleared, or an
-    /// output returned to an input.
-    fn release(&mut self, line: u8) {
-        let Some(held) = self.lines[usize::from(line)].take() else {
-            return;
-        };
-        // A register that will not take the write leaves nothing to do: the
-        // line is no longer anybody's either way.
-        let _ = match held {
-            Held::Interrupt { .. } => self
-                .block
-                .detect(line, None)
-                .and_then(|()| self.block.clear_events(1 << line)),
-            Held::Output { .. } => self.block.set_direction(line, false),
-        };
-        self.log.record(Record::Released { line });
-    }
-
-    fn answer_wait(&mut self, ticket: u64, outcome: Result<(), Errno>) -> bool {
-        let mut out = [0u8; IRQLINE_MAX_REPLY];
-        encode_reply(&mut out, outcome)
-            .is_ok_and(|len| self.links.reply(ticket, &out[..len]).is_ok())
     }
 
     /// Answer every held line whose event has latched.
     fn fired(&mut self) -> Result<(), DriverError> {
-        let fired = self.block.events()?;
+        let fired = self.pins.block.events()?;
         if fired == 0 {
             return Ok(());
         }
-        // A level stands until serviced, so its detection goes off before its
-        // status is cleared, or it would latch again at once.
+        // Disarmed before its status is cleared: a level, which stands until
+        // serviced and would latch again at once, and an edge no wait is
+        // posted for, which stays latched here until its next wait re-arms it.
         for line in HeaderLines::from_mask(fired).iter() {
-            let level = match &self.lines[usize::from(line)] {
-                Some(Held::Interrupt { trigger, .. }) => trigger.is_level(),
-                _ => true,
-            };
-            if level {
-                self.block.detect(line, None)?;
+            let disarm = self
+                .lines
+                .held(line)
+                .filter(|&(trigger, posted)| trigger.is_level() || !posted);
+            if let Some((trigger, _)) = disarm {
+                self.pins.block.detect(line, trigger, false)?;
             }
         }
-        self.block.clear_events(fired)?;
-        for line in HeaderLines::from_mask(fired).iter() {
-            let Some(Held::Interrupt {
-                posted, latched, ..
-            }) = &mut self.lines[usize::from(line)]
-            else {
-                continue;
-            };
-            let Some(ticket) = posted.take() else {
-                *latched = true;
-                continue;
-            };
-            if !self.answer_wait(ticket, Ok(())) {
-                self.log.record(Record::Unanswered { line });
-            }
-        }
+        self.pins.block.clear_events(fired)?;
+        self.lines.fired(fired, &mut self.links, &mut self.log);
         Ok(())
     }
 
@@ -401,23 +284,24 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
     /// Every lent line and how it stands, as `caller` sees it.
     fn table(&self, caller: ProcId) -> Result<LineTable, Errno> {
         let mut table = LineTable::default();
-        for line in self.lent.iter() {
-            let state = match &self.lines[usize::from(line)] {
-                Some(Held::Interrupt { .. }) => LineState::Interrupt,
-                Some(Held::Output {
-                    holder, asserted, ..
-                }) => LineState::Output {
-                    holder: if *holder == caller {
+        for routed in self.pins.block.functions(self.lent) {
+            let (line, function) = routed.map_err(refusal)?;
+            let state = if self.lines.held(line).is_some() {
+                LineState::Interrupt
+            } else if let Some(output) = self.pins.output(line) {
+                LineState::Output {
+                    holder: if output.holder == caller {
                         Holder::Caller
                     } else {
                         Holder::Other
                     },
-                    asserted: *asserted,
-                },
-                None => match self.block.function(line).map_err(refusal)? {
+                    asserted: output.asserted,
+                }
+            } else {
+                match function {
                     Function::Alternate(function) => LineState::Peripheral { function },
                     Function::Input | Function::Output => LineState::Free,
-                },
+                }
             };
             table.push(LineEntry { line, state })?;
         }
@@ -434,19 +318,18 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
             } => self.claim_output(caller, line, polarity, asserted),
             HeaderRequest::Drive { line, asserted } => {
                 let polarity = self.own_output(caller, line)?;
-                self.block
+                self.pins
+                    .block
                     .drive(line, polarity.level(asserted))
                     .map_err(refusal)?;
-                if let Some(Held::Output { asserted: held, .. }) =
-                    &mut self.lines[usize::from(line)]
-                {
-                    *held = asserted;
+                if let Some(Some(output)) = self.pins.outputs.get_mut(usize::from(line)) {
+                    output.asserted = asserted;
                 }
                 Ok(())
             }
             HeaderRequest::Release { line } => {
                 self.own_output(caller, line)?;
-                self.release(line);
+                self.release_output(line);
                 self.unwatch_if_idle(caller);
                 Ok(())
             }
@@ -463,19 +346,25 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
         if !self.lent.contains(line) {
             return Err(Errno::NotFound);
         }
-        if self.lines[usize::from(line)].is_some() {
+        if self.lines.held(line).is_some() || self.pins.output(line).is_some() {
             return Err(Errno::Busy);
         }
-        if let Function::Alternate(_) = self.block.function(line).map_err(refusal)? {
+        if let Function::Alternate(_) = self.pins.block.function(line).map_err(refusal)? {
             return Err(Errno::Busy);
         }
         self.links.watch(caller)?;
         // The level first, so the line never shows a glitch as it turns.
-        self.block
+        self.pins
+            .block
             .drive(line, polarity.level(asserted))
-            .and_then(|()| self.block.set_direction(line, true))
+            .and_then(|()| self.pins.block.set_direction(line, true))
             .map_err(refusal)?;
-        self.lines[usize::from(line)] = Some(Held::Output {
+        let slot = self
+            .pins
+            .outputs
+            .get_mut(usize::from(line))
+            .ok_or(Errno::NotFound)?;
+        *slot = Some(Output {
             holder: caller,
             polarity,
             asserted,
@@ -483,7 +372,6 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
         self.log.record(Record::Claimed {
             line,
             holder: caller,
-            role: Role::Output,
         });
         Ok(())
     }
@@ -493,22 +381,36 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
         if !self.lent.contains(line) {
             return Err(Errno::NotFound);
         }
-        match &self.lines[usize::from(line)] {
-            Some(Held::Output {
-                holder, polarity, ..
-            }) if *holder == caller => Ok(*polarity),
-            Some(_) => Err(Errno::PermissionDenied),
-            None => Err(Errno::NotFound),
+        match (self.pins.output(line), self.lines.held(line)) {
+            (Some(output), _) if output.holder == caller => Ok(output.polarity),
+            (None, None) => Err(Errno::NotFound),
+            _ => Err(Errno::PermissionDenied),
+        }
+    }
+
+    /// Return the header output `line` to an input.
+    fn release_output(&mut self, line: u8) {
+        let held = self
+            .pins
+            .outputs
+            .get_mut(usize::from(line))
+            .and_then(Option::take);
+        if held.is_some() {
+            // A register that will not take the write leaves nothing to do:
+            // the line is no longer anybody's either way.
+            let _ = self.pins.block.set_direction(line, false);
+            self.log.record(Record::Released { line });
         }
     }
 
     fn unwatch_if_idle(&mut self, peer: ProcId) {
-        if !self
-            .lines
+        let drives = self
+            .pins
+            .outputs
             .iter()
             .flatten()
-            .any(|held| held.holder() == peer)
-        {
+            .any(|output| output.holder == peer);
+        if !drives && !self.lines.holds(peer) {
             self.links.unwatch(peer);
         }
     }
@@ -520,12 +422,6 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
         {
             let _ = port.reply(ticket, &out[..len]);
         }
-    }
-
-    fn refuse_wait(&mut self, ticket: u64, caller: Option<ProcId>, reason: Errno) {
-        self.log.record(Record::Refused { caller, reason });
-        // A caller that ends before its answer arrives has nobody left to tell.
-        let _ = self.answer_wait(ticket, Err(reason));
     }
 
     /// Serve the header calls queued, at most [`HEADER_CALLS_PER_WAKE`].
@@ -550,16 +446,13 @@ impl<'r, S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Controller<'r, S, 
 impl<S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Supplier for Controller<'_, S, H, L> {
     /// An interrupt-line call: a wait, answered when its line fires.
     fn serve(&mut self, ticket: u64, frame: &[u8]) {
-        let caller = match self.links.caller(ticket) {
-            Ok(caller) => caller,
-            Err(reason) => return self.refuse_wait(ticket, None, reason),
-        };
-        let outcome = IrqLineRequest::decode(frame).and_then(|request| match request {
-            IrqLineRequest::Wait(request) => self.wait(ticket, caller, &request),
-        });
-        if let Err(reason) = outcome {
-            self.refuse_wait(ticket, Some(caller), reason);
-        }
+        self.lines.serve(
+            ticket,
+            frame,
+            &mut self.pins,
+            &mut self.links,
+            &mut self.log,
+        );
     }
 
     /// The bank interrupts come first, then the header endpoint.
@@ -571,16 +464,18 @@ impl<S: SupplierHost, H: HeaderPort, L: Recorder<Record>> Supplier for Controlle
         }
     }
 
-    /// Give back every line `peer` held.
+    /// Give back every line `peer` held, of either kind.
     fn peer_exited(&mut self, peer: ProcId) {
-        for line in 0..self.block.lines() {
-            if self.lines[usize::from(line)]
-                .as_ref()
-                .is_some_and(|held| held.holder() == peer)
+        for line in 0..LINES {
+            if self
+                .pins
+                .output(line)
+                .is_some_and(|output| output.holder == peer)
             {
-                self.release(line);
+                self.release_output(line);
             }
         }
-        self.links.unwatch(peer);
+        self.lines
+            .peer_exited(peer, &mut self.pins, &mut self.links, &mut self.log);
     }
 }

@@ -1228,7 +1228,7 @@ mod tests {
         let lister = MapLister::new(&[(".", &[])]);
         let resources = MapResources::new(&[(
             SelectorDomain::LimitKind,
-            &["open-streams", "processes", "stack-bytes"],
+            &["open-files", "processes", "stack-bytes"],
         )]);
         let result = super::complete(
             "cat info:limits/",
@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(
             inserts(&result.candidates),
             [
-                "info:limits/open-streams/",
+                "info:limits/open-files/",
                 "info:limits/processes/",
                 "info:limits/stack-bytes/"
             ]
@@ -1267,7 +1267,7 @@ mod tests {
     fn a_final_placeholder_closes_the_word() {
         let lister = MapLister::new(&[(".", &[])]);
         let resources = MapResources::new(&[
-            (SelectorDomain::LimitKind, &["open-streams", "processes"]),
+            (SelectorDomain::LimitKind, &["open-files", "processes"]),
             (SelectorDomain::ReclaimClass, &["clean-file-data"]),
         ]);
 
@@ -1281,7 +1281,7 @@ mod tests {
         );
         assert_eq!(
             inserts(&limits.candidates),
-            ["stats:limits/open-streams", "stats:limits/processes"]
+            ["stats:limits/open-files", "stats:limits/processes"]
         );
         assert!(
             limits.candidates.iter().all(|c| c.closing == Some(' ')),

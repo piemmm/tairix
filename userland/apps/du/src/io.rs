@@ -10,6 +10,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use tairix_abi::{Errno, FileId, FileKind};
 
+pub use tairix_abi::fs::FinalLink;
+
 /// The metadata of one filesystem node, as `du` consumes it: what it is,
 /// its apparent byte length, the on-disk bytes its data actually
 /// occupies (the `fs_stat` `allocated` field, which the mounted format
@@ -54,14 +56,15 @@ pub struct Entry {
 /// VFS checks every path per-inode under the caller's attested identity,
 /// and a refusal surfaces as the exact [`Errno`] the kernel chose.
 pub trait Walk {
-    /// The metadata of `path`.
+    /// The metadata of `path`, through a final link or of the link itself as
+    /// `link` says.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::NotFound`] for
     /// a missing path or [`Errno::PermissionDenied`] when the caller may
     /// not reach it.
-    fn stat(&self, path: &str) -> Result<Metadata, Errno>;
+    fn stat(&self, path: &str, link: FinalLink) -> Result<Metadata, Errno>;
 
     /// The entries of the directory at `path`, each carrying the metadata
     /// the listing reported for it.

@@ -172,7 +172,7 @@ fn walk_dir<F>(
     let mut unheld = false;
     let listed = vfs.list_via_secured(
         cred,
-        &vfs.cover(&dir_path),
+        &dir_path,
         fs,
         FinalLink::Follow,
         &mut DirPosition::default(),
@@ -456,7 +456,7 @@ impl DriverImageReader {
         let parsed = Path::parse(path)?;
         self.vfs.read_bounded_via_secured(
             &cred,
-            &self.vfs.cover(&parsed),
+            &parsed,
             fs,
             MAX_DRIVER_IMAGE_LEN as u64,
             len,

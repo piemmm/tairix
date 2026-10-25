@@ -1,7 +1,7 @@
 //! Id maps: how a bus's requester ids reach a target. `iommu-map` and
 //! `iommu-map-mask` name translation units, `msi-map` and `msi-map-mask` MSI
-//! controllers (Linux `Documentation/devicetree/bindings/pci/pci-iommu.txt`
-//! and `pci-msi.txt`).
+//! controllers (dt-schema `pci/pci-iommu.yaml` and `pci/pci-host-bridge.yaml`,
+//! taken under BSD-2-Clause).
 
 use core::ops::RangeInclusive;
 

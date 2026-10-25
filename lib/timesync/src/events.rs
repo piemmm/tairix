@@ -86,7 +86,7 @@ pub const RTC_CLOCK_SET: EventId = EventId(23_013);
 pub const RTC_NO_READING: EventId = EventId(23_014);
 
 /// No RTC answered, or the one that did refused the read. Not an error on a
-/// board that has no clock chip (a Raspberry Pi 3/4); the clock simply waits
+/// board that has no clock chip; the clock simply waits
 /// for the network.
 pub const RTC_UNAVAILABLE: EventId = EventId(23_015);
 

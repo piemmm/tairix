@@ -42,8 +42,8 @@ removível.
 
 - `0` — o nome foi removido (ou a ajuda breve foi escrita).
 - `1` — o sistema de ficheiros recusou a remoção, ou a saída falhou; a
-  razão é impressa no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+  razão é impressa no erro padrão. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

@@ -73,8 +73,8 @@ nicht verfügbar.
 - `0` — der Bericht deckte alles Angefragte ab (oder die Kurzhilfe
   wurde ausgegeben).
 - `1` — ein Operand konnte nicht gemeldet werden, die Filter ließen
-  nichts übrig, oder Abfrage/Ausgabe schlugen fehl.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  nichts übrig, oder Abfrage/Ausgabe schlugen fehl. Eine nicht
+  verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

@@ -50,6 +50,18 @@ collegamento pendente si elenca quindi normalmente; solo una postura che
 lo risolve (`-L`, o `-H` per un operando) segnala una destinazione
 irraggiungibile.
 
+I nomi sono virgolettati perché i caratteri scomodi siano visibili e si
+possano reincollare senza rischi in una shell: su un terminale il valore
+predefinito è `shell-escape` (un nome con spazi o metacaratteri è
+virgolettato, i caratteri di controllo sono mostrati come escape
+`$'…'`), altrove è `literal` (i nomi così come sono). `-N`, `-Q`, `-b` e
+`--quoting-style` scelgono lo stile, e `-q` mostra i caratteri di
+controllo come `?`. Con `-F` e `--file-type`, un nome che contiene `*`,
+`=`, `>`, `@` o `|` è virgolettato dagli stili shell, e con `-Q` e `-b`
+quel carattere riceve un escape, così il nome non può passare per un
+suffisso indicatore. Il `-F` di GNU lascia un `*` senza marcatura,
+perciò lì un nome che termina con esso sembra un eseguibile.
+
 ## OPTIONS
 
 - `-t` — ordinare per la marca temporale mostrata, la più recente per
@@ -199,9 +211,12 @@ irraggiungibile.
 ## EXIT STATUS
 
 - `0` — ogni operando è stato elencato.
-- `1` — un operando non è stato ispezionato o una directory non è
-  stata letta, oppure l'output non è stato consegnato.
-- `2` — la riga di comando non è stata compresa.
+- `1` — un problema minore: una voce o una sottodirectory dentro un
+  elenco non è stata ispezionata o letta.
+- `2` — un problema grave: la riga di comando non è stata compresa, un
+  operando non è stato ispezionato o letto, `-R` ha raggiunto di nuovo
+  una directory attraverso un collegamento, la memoria si è esaurita,
+  oppure l'output non è stato consegnato.
 
 ## ENVIRONMENT
 

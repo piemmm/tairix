@@ -39,8 +39,8 @@ processo è stato eseguito per ultimo (`CPU`), e il nome del comando
 
 - `0` — l'elenco è stato scritto.
 - `1` — il servizio ha rifiutato o è fallito, oppure l'elenco non è
-  stato consegnato.
-- `2` — la riga di comando non è stata compresa.
+  stato consegnato. Anche una riga di comando non compresa termina
+  con `1`.
 
 ## ENVIRONMENT
 

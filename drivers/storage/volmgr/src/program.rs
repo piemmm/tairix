@@ -224,13 +224,7 @@ fn probe_device<S: tairix_drvrt::GrantSyscalls>(
     };
     let window = &mut window[..BLK_DATA_LEN];
 
-    // The one wait-set this program's block transport parks its replies on.
-    // The kernel reclaims it when this process exits.
-    let Ok(waitset) = u64::try_from(tairix_rt::waitset_create()) else {
-        return Err(end(DriverExit::NoService, &[]));
-    };
-    let mut client = match RemoteBlock::connect_read_only(RtBlkCall::new(endpoint, waitset), window)
-    {
+    let mut client = match RemoteBlock::connect_read_only(RtBlkCall::new(endpoint), window) {
         Ok(client) => client,
         Err(err) => {
             log_hex_event(

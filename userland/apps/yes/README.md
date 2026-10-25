@@ -16,9 +16,9 @@ The output is built once into a bounded block (whole lines, up to 4 KiB)
 so the endless writer pays one write per block rather than one per line;
 a full stream backing blocks the write kernel-side, so the tool never
 idle-spins. The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths. Its only dependency is
-the shared `tairix-help` crate, so it never links a kernel or driver
-crate. Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
+`unwrap`/`expect`/`panic!` in production paths. It depends only on the
+shared `tairix-help` and `tairix-util` crates, so it never links a kernel
+or driver crate. Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
 authorises every path per-inode under the caller's attested identity.
 
@@ -35,8 +35,7 @@ yes [string...]
 
 - `0` — a requested short help was served.
 - `1` — the output stopped accepting bytes (the tool's one stop
-  condition).
-- `2` — the command line was not understood.
+  condition). A command line that was not understood exits `1` too.
 
 ## Stability
 

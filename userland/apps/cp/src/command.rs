@@ -1,9 +1,11 @@
 //! The parsed shape of a `cp` command line.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use tairix_fscopy::{Attributes, Sparse};
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
 use crate::error::CpError;
 
@@ -65,6 +67,11 @@ pub struct Options {
     /// destination keeps them by default, every one (`--preserve=xattr`), or
     /// none (`--no-preserve=xattr`).
     pub attributes: Attributes,
+    /// Whether a file or directory the copy makes is born with its source's
+    /// permission bits, under the umask, as GNU's is by default; with
+    /// `--no-preserve=mode` it is born with the mode a new node takes when
+    /// nothing names one.
+    pub source_modes: bool,
 }
 
 /// What a non-directory source becomes at the destination.
@@ -113,6 +120,7 @@ impl Options {
         preserve_links: false,
         sparse: Sparse::Auto,
         attributes: Attributes::Carry,
+        source_modes: true,
     };
 }
 
@@ -137,136 +145,79 @@ pub enum Command {
     Help,
 }
 
-/// What one `--name[=value]` argument asked for, beyond the options it
-/// already recorded.
-enum Long {
-    /// A short-help switch: nothing else on the command line matters.
-    Help,
-    /// `--target-directory=dir`, carrying the directory.
-    TargetDirectory(String),
-    /// `--no-target-directory`.
+/// What each of `cp`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Recursive,
+    Force,
+    Interactive,
+    NoClobber,
+    Verbose,
+    TargetDirectory,
     NoTargetDirectory,
-    /// The option was recorded in the caller's [`Options`].
-    Recorded,
+    Link,
+    SymbolicLink,
+    NoDereference,
+    Dereference,
+    /// `-H`.
+    DereferenceOperands,
+    /// `-d`, which is `-P` and `--preserve=links`.
+    NoDereferencePreserveLinks,
+    Preserve,
+    NoPreserve,
+    Sparse,
+    /// An option refused rather than honoured in part, carrying its own
+    /// spelling for the refusal.
+    Unsupported(&'static str),
+    Help,
 }
 
-/// Apply one `--name[=value]` argument. `arg` carries its `--` prefix so a
-/// refusal names the option exactly as the caller spelled it.
-///
-/// # Errors
-///
-/// [`CpError::Usage`] for an unrecognised option, an empty `-t` value or an
-/// unknown `--sparse`/`--no-preserve` value, and [`CpError::Unsupported`]
-/// for `-a`/`--archive` and the `--preserve` members this system cannot
-/// honour completely.
-fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
-    let name = &arg[2..];
-    if let Some(dir) = name.strip_prefix("target-directory=") {
-        if dir.is_empty() {
-            return Err(CpError::Usage);
-        }
-        return Ok(Long::TargetDirectory(String::from(dir)));
-    }
-    if let Some(when) = name.strip_prefix("sparse=") {
-        options.sparse = match when {
-            "auto" => Sparse::Auto,
-            "always" => Sparse::Always,
-            "never" => Sparse::Never,
-            _ => return Err(CpError::Usage),
-        };
-        return Ok(Long::Recorded);
-    }
-    if let Some(list) = name.strip_prefix("preserve=") {
-        for member in list.split(',') {
-            match member {
-                "links" => options.preserve_links = true,
-                "xattr" => options.attributes = Attributes::Require,
-                // Every other member includes a node's mode, owner or
-                // timestamps, which this tool does not set.
-                _ => return Err(CpError::Unsupported(String::from(arg))),
-            }
-        }
-        return Ok(Long::Recorded);
-    }
-    if let Some(list) = name.strip_prefix("no-preserve=") {
-        for member in list.split(',') {
-            match member {
-                "links" => options.preserve_links = false,
-                "xattr" => options.attributes = Attributes::Skip,
-                "all" => {
-                    options.preserve_links = false;
-                    options.attributes = Attributes::Skip;
-                }
-                // Already never preserved, so already as asked.
-                "mode" | "ownership" | "timestamps" | "context" => {}
-                _ => return Err(CpError::Usage),
-            }
-        }
-        return Ok(Long::Recorded);
-    }
-    match name {
-        "recursive" => options.recursive = true,
-        "force" => options.force = true,
-        "interactive" => options.clobber = Clobber::Prompt,
-        "no-clobber" => options.clobber = Clobber::Skip,
-        "verbose" => options.verbose = true,
-        "no-target-directory" => return Ok(Long::NoTargetDirectory),
-        "link" => options.contents = Contents::HardLink,
-        "symbolic-link" => options.contents = Contents::SymbolicLink,
-        "no-dereference" => options.dereference = Dereference::Never,
-        "dereference" => options.dereference = Dereference::Always,
-        // `-a` is `-dR --preserve=all`, and `--preserve=all` includes the
-        // timestamps no call can set yet, so it is refused rather than
-        // delivered as a silently narrower `-dR`.
-        "archive" | "preserve" => return Err(CpError::Unsupported(String::from(arg))),
-        "help" => return Ok(Long::Help),
-        _ => return Err(CpError::Usage),
-    }
-    Ok(Long::Recorded)
-}
+/// `cp`'s options, as GNU's `cp` spells them and in its order, and the
+/// reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::letter('a', Takes::Nothing, Flag::Unsupported("-a")),
+    Opt::long(&["archive"], Takes::Nothing, Flag::Unsupported("--archive")),
+    Opt::letter('d', Takes::Nothing, Flag::NoDereferencePreserveLinks),
+    Opt::flag('L', &["dereference"], Flag::Dereference),
+    Opt::flag('f', &["force"], Flag::Force),
+    Opt::letter('H', Takes::Nothing, Flag::DereferenceOperands),
+    Opt::flag('i', &["interactive"], Flag::Interactive),
+    Opt::flag('l', &["link"], Flag::Link),
+    Opt::flag('n', &["no-clobber"], Flag::NoClobber),
+    Opt::flag('P', &["no-dereference"], Flag::NoDereference),
+    Opt::long(&["no-preserve"], Takes::Value, Flag::NoPreserve),
+    Opt::flag('T', &["no-target-directory"], Flag::NoTargetDirectory),
+    Opt::long(&["preserve"], Takes::Attached, Flag::Preserve),
+    Opt::flag('r', &["recursive"], Flag::Recursive),
+    Opt::letter('R', Takes::Nothing, Flag::Recursive),
+    Opt::long(&["sparse"], Takes::Value, Flag::Sparse),
+    Opt::flag('s', &["symbolic-link"], Flag::SymbolicLink),
+    Opt::valued('t', &["target-directory"], Flag::TargetDirectory),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
 /// The grammar is the GNU `cp` surface,
-/// `cp [-dfHilLnPrRsvT] [-t dir] [--] source... dest`:
+/// `cp [-dfHilLnPrRsvT] [-t dir] [--] source... dest`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// clustered, a long one by any unambiguous prefix, `--` ending them. The
+/// help switches (`-h`, `-?`, `--help`) answer at once. The later of `-i`
+/// and `-n`, of `-l` and `-s`, and of `-H`, `-L` and `-P` wins; `-d` is `-P`
+/// with `--preserve=links`. The values:
 ///
-/// * `-r` / `-R` / `--recursive` — copy directories and their contents.
-/// * `-f` / `--force` — remove an unwritable destination and retry.
-/// * `-i` / `--interactive` — ask before overwriting an existing file.
-/// * `-n` / `--no-clobber` — never overwrite an existing file.
-/// * `-l` / `--link` — a second name for the source's node, not a copy.
-/// * `-s` / `--symbolic-link` — a symbolic link naming the source.
-/// * `-P` / `--no-dereference` — reproduce every link source as a link.
-/// * `-L` / `--dereference` — follow every link source.
-/// * `-H` — follow the operands' links, not those met inside a tree.
 /// * `--preserve=LIST` — `links` keeps two sources' shared node shared, and
 ///   `xattr` makes every extended attribute a copy must carry, failing one
 ///   the destination cannot keep.
 /// * `--no-preserve=LIST` — `xattr` carries no extended attribute, `links`
-///   copies a shared node twice; `mode`, `ownership` and `timestamps` are
-///   already not preserved.
+///   copies a shared node twice, `mode` makes each new node in the default
+///   mode rather than its source's; `ownership` and `timestamps` are already
+///   not preserved.
 /// * `--sparse=WHEN` — `auto` keeps a sparse file's holes, `always` also
 ///   leaves its stored zeros unwritten, `never` writes every byte.
-/// * `-d` — `-P` and `--preserve=links` together.
-/// * `-a` / `--archive` and the other `--preserve` members — a
-///   [`CpError::Unsupported`] refusal: `--preserve=all` includes the
-///   timestamps no call can set here, so they are not honoured in part.
-/// * `-v` / `--verbose` — report each copy.
-/// * `-t dir` / `--target-directory=dir` — copy every source into `dir`.
-/// * `-T` / `--no-target-directory` — treat the destination as a normal
-///   file (exactly one source).
-/// * `-h` / `--help` — print the usage banner (wins immediately).
-/// * `--` — end option parsing; every later argument is a path.
-/// * any other `-…` — a [`CpError::Usage`] error (fail closed; never a
-///   silently ignored token).
-/// * anything else (including the bare `-`) — a path.
-///
-/// Short options may be combined into one argument (e.g. `-rf` is
-/// `-r -f`); an unrecognised letter anywhere in such a cluster is a usage
-/// error. As in the GNU tool, the later of `-i` / `-n` wins, `-t` takes
-/// its directory either attached (`-tdir`) or as the next argument, and
-/// `-t` with `-T` is a usage error.
 ///
 /// Without `-t`, the last path operand is the destination and the rest are
 /// the sources; at least two path operands are required. With `-t`, every
@@ -274,75 +225,46 @@ fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
 ///
 /// # Errors
 ///
-/// [`CpError::Usage`] for any unrecognised option before `--`, a missing
-/// `-t` value, `-t` combined with `-T`, or too few path operands.
+/// * [`CpError::Option`] — an option `getopt` refuses, in its words.
+/// * [`CpError::Unsupported`] — `-a`/`--archive` and the `--preserve`
+///   members this system cannot honour completely: `--preserve=all`
+///   includes the timestamps no call can set here, so they are not honoured
+///   in part.
+/// * [`CpError::Usage`] — an empty `-t` directory, an unknown `--sparse` or
+///   `--no-preserve` value, `-t` combined with `-T`, or too few path
+///   operands.
 pub fn parse(args: &[&str]) -> Result<Command, CpError> {
     let mut options = Options::DEFAULT;
     let mut target_dir: Option<String> = None;
     let mut no_target_dir = false;
     let mut operands = Vec::new();
-    let mut options_done = false;
-    let mut iter = args.iter().copied();
-    while let Some(arg) = iter.next() {
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(CpError::Option)? {
+            Arg::Operand(path) => operands.push(String::from(path)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            // `-a` is `-dR --preserve=all`, and `--preserve=all` includes the
+            // timestamps no call can set yet, so it is refused rather than
+            // delivered as a silently narrower `-dR`.
+            Arg::Opt(Flag::Unsupported(switch), _) => {
+                return Err(CpError::Unsupported(String::from(switch)));
             }
-            if arg.starts_with("--") {
-                match apply_long(arg, &mut options)? {
-                    Long::Help => return Ok(Command::Help),
-                    Long::TargetDirectory(dir) => target_dir = Some(dir),
-                    Long::NoTargetDirectory => no_target_dir = true,
-                    Long::Recorded => {}
-                }
-                continue;
+            Arg::Opt(Flag::TargetDirectory, dir) => {
+                let dir = dir.filter(|dir| !dir.is_empty()).ok_or(CpError::Usage)?;
+                target_dir = Some(String::from(dir));
             }
-            // A short-option cluster is a leading `-` followed by at least one
-            // letter (the bare `-` is a path, not an option).
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for (pos, letter) in letters.char_indices() {
-                    match letter {
-                        'r' | 'R' => options.recursive = true,
-                        'f' => options.force = true,
-                        'i' => options.clobber = Clobber::Prompt,
-                        'n' => options.clobber = Clobber::Skip,
-                        'v' => options.verbose = true,
-                        'T' => no_target_dir = true,
-                        'l' => options.contents = Contents::HardLink,
-                        's' => options.contents = Contents::SymbolicLink,
-                        'P' => options.dereference = Dereference::Never,
-                        'L' => options.dereference = Dereference::Always,
-                        'H' => options.dereference = Dereference::Operands,
-                        // GNU's `-d` is exactly this pair.
-                        'd' => {
-                            options.dereference = Dereference::Never;
-                            options.preserve_links = true;
-                        }
-                        'a' => return Err(CpError::Unsupported(String::from("-a"))),
-                        't' => {
-                            // The value is the rest of the cluster
-                            // (`-tdir`) or the next argument (`-t dir`).
-                            let rest = &letters[pos + letter.len_utf8()..];
-                            let dir = if rest.is_empty() {
-                                iter.next().ok_or(CpError::Usage)?
-                            } else {
-                                rest
-                            };
-                            if dir.is_empty() {
-                                return Err(CpError::Usage);
-                            }
-                            target_dir = Some(String::from(dir));
-                            break;
-                        }
-                        'h' | '?' => return Ok(Command::Help),
-                        _ => return Err(CpError::Usage),
-                    }
-                }
-                continue;
+            Arg::Opt(Flag::NoTargetDirectory, _) => no_target_dir = true,
+            Arg::Opt(Flag::Preserve, list) => options.preserve(list)?,
+            Arg::Opt(Flag::NoPreserve, list) => options.no_preserve(list.unwrap_or_default())?,
+            Arg::Opt(Flag::Sparse, when) => {
+                options.sparse = match when {
+                    Some("auto") => Sparse::Auto,
+                    Some("always") => Sparse::Always,
+                    Some("never") => Sparse::Never,
+                    _ => return Err(CpError::Usage),
+                };
             }
+            Arg::Opt(flag, _) => options.set(flag),
         }
-        operands.push(String::from(arg));
     }
     if no_target_dir && target_dir.is_some() {
         return Err(CpError::Usage);
@@ -372,6 +294,81 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
         sources,
         dest,
     })
+}
+
+impl Options {
+    /// Apply the flag `flag` names.
+    fn set(&mut self, flag: Flag) {
+        match flag {
+            Flag::Recursive => self.recursive = true,
+            Flag::Force => self.force = true,
+            Flag::Interactive => self.clobber = Clobber::Prompt,
+            Flag::NoClobber => self.clobber = Clobber::Skip,
+            Flag::Verbose => self.verbose = true,
+            Flag::Link => self.contents = Contents::HardLink,
+            Flag::SymbolicLink => self.contents = Contents::SymbolicLink,
+            Flag::NoDereference => self.dereference = Dereference::Never,
+            Flag::Dereference => self.dereference = Dereference::Always,
+            Flag::DereferenceOperands => self.dereference = Dereference::Operands,
+            Flag::NoDereferencePreserveLinks => {
+                self.dereference = Dereference::Never;
+                self.preserve_links = true;
+            }
+            Flag::TargetDirectory
+            | Flag::NoTargetDirectory
+            | Flag::Preserve
+            | Flag::NoPreserve
+            | Flag::Sparse
+            | Flag::Unsupported(_)
+            | Flag::Help => {}
+        }
+    }
+
+    /// Apply `--preserve[=LIST]`.
+    ///
+    /// # Errors
+    ///
+    /// [`CpError::Unsupported`], naming the option as `--preserve=LIST`, for
+    /// a bare `--preserve` or any member but `links` and `xattr`.
+    fn preserve(&mut self, list: Option<&str>) -> Result<(), CpError> {
+        let Some(list) = list else {
+            return Err(CpError::Unsupported(String::from("--preserve")));
+        };
+        for member in list.split(',') {
+            match member {
+                "links" => self.preserve_links = true,
+                "xattr" => self.attributes = Attributes::Require,
+                // Every other member includes a node's mode, owner or
+                // timestamps, which this tool does not set.
+                _ => return Err(CpError::Unsupported(format!("--preserve={list}"))),
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply `--no-preserve=LIST`.
+    ///
+    /// # Errors
+    ///
+    /// [`CpError::Usage`] for a member `cp` does not know.
+    fn no_preserve(&mut self, list: &str) -> Result<(), CpError> {
+        for member in list.split(',') {
+            match member {
+                "links" => self.preserve_links = false,
+                "xattr" => self.attributes = Attributes::Skip,
+                "mode" => self.source_modes = false,
+                "all" => {
+                    self.preserve_links = false;
+                    self.attributes = Attributes::Skip;
+                    self.source_modes = false;
+                }
+                // Already never preserved, so already as asked.
+                "ownership" | "timestamps" | "context" => {}
+                _ => return Err(CpError::Usage),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -514,9 +511,13 @@ mod tests {
         );
         assert_eq!(parse(&["-t", "dst", "a", "b"]), Ok(expected.clone()));
         assert_eq!(parse(&["-tdst", "a", "b"]), Ok(expected.clone()));
+        assert_eq!(
+            parse(&["--target-directory", "dst", "a", "b"]),
+            Ok(expected.clone())
+        );
         assert_eq!(parse(&["--target-directory=dst", "a", "b"]), Ok(expected));
-        // A missing or empty value is a usage error.
-        assert_eq!(parse(&["a", "-t"]), Err(CpError::Usage));
+        // A missing value is refused by `getopt`, an empty one by `cp`.
+        assert_eq!(refused(&["a", "-t"]), "option requires an argument -- 't'");
         assert_eq!(parse(&["--target-directory=", "a"]), Err(CpError::Usage));
         // With -t, at least one source is still required.
         assert_eq!(parse(&["-t", "dst"]), Err(CpError::Usage));
@@ -587,6 +588,7 @@ mod tests {
                 "`--preserve=links`",
                 "`--preserve=xattr`",
                 "`--no-preserve=xattr`",
+                "`--no-preserve=mode`",
                 "`--sparse=WHEN`",
                 "`-d`",
                 "`-v, --verbose`",
@@ -714,6 +716,21 @@ mod tests {
         );
     }
 
+    /// GNU 9.4: a new copy takes its source's bits unless `--no-preserve`
+    /// names `mode`, alone or through `all`.
+    #[test]
+    fn source_modes_are_kept_unless_no_preserve_names_mode() {
+        let source_modes = |args: &[&str]| match parse(args) {
+            Ok(Command::Copy { options, .. }) => options.source_modes,
+            other => panic!("expected a copy: {other:?}"),
+        };
+        assert!(source_modes(&["a", "b"]));
+        assert!(source_modes(&["--no-preserve=xattr", "a", "b"]));
+        assert!(!source_modes(&["--no-preserve=mode", "a", "b"]));
+        assert!(!source_modes(&["--no-preserve=timestamps,mode", "a", "b"]));
+        assert!(!source_modes(&["--no-preserve=all", "a", "b"]));
+    }
+
     #[test]
     fn sparse_takes_auto_always_or_never() {
         let sparse = |args: &[&str]| match parse(args) {
@@ -727,18 +744,61 @@ mod tests {
             sparse(&["--sparse=never", "--sparse=auto", "a", "b"]),
             Sparse::Auto
         );
+        assert_eq!(sparse(&["--sparse", "always", "a", "b"]), Sparse::Always);
         assert_eq!(
             parse(&["--sparse=sometimes", "a", "b"]),
             Err(CpError::Usage)
         );
-        assert_eq!(parse(&["--sparse", "a", "b"]), Err(CpError::Usage));
+        assert_eq!(
+            refused(&["a", "b", "--sparse"]),
+            "option '--sparse' requires an argument"
+        );
+    }
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "a", "b"]), Err(CpError::Usage));
-        assert_eq!(parse(&["--frobnicate", "a", "b"]), Err(CpError::Usage));
-        assert_eq!(parse(&["-rx", "a", "b"]), Err(CpError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "a", "b"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frobnicate", "a", "b"]),
+            "unrecognized option '--frobnicate'"
+        );
+        // A bundle with one bad flag is refused whole.
+        assert_eq!(refused(&["-rx", "a", "b"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["a", "--target-directory"]),
+            "option '--target-directory' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--force=1", "a", "b"]),
+            "option '--force' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `cp --rec --verb a b` as `cp --recursive --verbose a b`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--rec", "--verb", "a", "b"]),
+            Ok(copy_with(
+                Options {
+                    recursive: true,
+                    verbose: true,
+                    ..Options::DEFAULT
+                },
+                &["a"],
+                "b",
+            ))
+        );
+        assert_eq!(
+            refused(&["--no", "a", "b"]),
+            "option '--no' is ambiguous; possibilities: '--no-clobber' '--no-dereference' \
+             '--no-preserve' '--no-target-directory'"
+        );
     }
 
     #[test]

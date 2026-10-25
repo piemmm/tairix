@@ -49,6 +49,20 @@ stockée, non résolue, c'est-à-dire ce que le lien contient. Un lien qui
 pend se liste donc normalement ; seule une posture qui le résout (`-L`, ou
 `-H` pour un opérande) signale une cible inatteignable.
 
+Les noms sont mis entre guillemets afin que les caractères gênants
+soient visibles et puissent être recollés sans risque dans un shell :
+sur un terminal, la valeur par défaut est `shell-escape` (un nom
+contenant des espaces ou des métacaractères est mis entre guillemets,
+les caractères de contrôle sont affichés sous forme d'échappements
+`$'…'`), et ailleurs c'est `literal` (les noms tels quels). `-N`, `-Q`,
+`-b` et `--quoting-style` choisissent le style, et `-q` affiche les
+caractères de contrôle comme `?`. Sous `-F` et `--file-type`, un nom
+contenant `*`, `=`, `>`, `@` ou `|` est mis entre guillemets par les
+styles shell et ce caractère y est échappé par `-Q` et `-b`, si bien
+qu'il ne peut pas passer pour un suffixe indicateur. Le `-F` de GNU
+laisse un `*` non marqué, de sorte que, là, un nom qui se termine par ce
+caractère passe pour un exécutable.
+
 ## OPTIONS
 
 - `-t` — trier par l'horodatage affiché, le plus récent en premier.
@@ -198,9 +212,12 @@ pend se liste donc normalement ; seule une posture qui le résout (`-L`, ou
 ## EXIT STATUS
 
 - `0` — chaque opérande a été listé.
-- `1` — un opérande n'a pas pu être inspecté ou un répertoire n'a pas
-  pu être lu, ou la sortie n'a pas pu être délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — un problème mineur : une entrée ou un sous-répertoire au sein
+  d'un listage n'a pas pu être inspecté ou lu.
+- `2` — un problème grave : la ligne de commande n'a pas été comprise,
+  un opérande n'a pas pu être inspecté ou lu, `-R` a de nouveau atteint
+  un répertoire par un lien, la mémoire a manqué, ou la sortie n'a pas
+  pu être délivrée.
 
 ## ENVIRONMENT
 

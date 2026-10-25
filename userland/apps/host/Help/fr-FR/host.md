@@ -47,9 +47,10 @@ dépassement de délai sur la sortie d'erreur.
 
 - `0` — au moins une adresse a été trouvée (ou l'aide courte a été écrite).
 - `1` — le nom n'a résolu aucune adresse (réponse négative, dépassement de
-  délai ou échec du résolveur).
-- `2` — la ligne de commande n'a pas été comprise, ou la sortie n'a pas pu
-  être écrite.
+  délai ou échec du résolveur). Une ligne de commande non comprise sort aussi
+  avec `1`.
+- `2` — aucune socket DNS n'a pu être ouverte, ou la sortie n'a pas pu être
+  écrite.
 
 ## ENVIRONMENT
 

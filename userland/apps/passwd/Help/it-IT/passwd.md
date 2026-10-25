@@ -46,8 +46,8 @@ essere memorizzato.
 - `0` — la password è stata sostituita.
 - `1` — il database ha rifiutato o non ha potuto completare la sostituzione,
   le due digitazioni differivano, non c'era casualità disponibile, o il
-  record era malformato; la ragione è stampata sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+  record era malformato; la ragione è stampata sull'errore standard. Anche
+  una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

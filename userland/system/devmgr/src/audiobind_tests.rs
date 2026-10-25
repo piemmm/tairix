@@ -103,28 +103,6 @@ fn two_devices() -> Vec<HwNode> {
     ]
 }
 
-#[test]
-fn only_an_audiochan_node_carrying_an_endpoint_is_recognised() {
-    assert_eq!(
-        audiochan_endpoint(&audiochan_node(1, 2, 4_242)),
-        Some(4_242)
-    );
-    // A node of the right class but the wrong compatible string.
-    let mut other = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Audio);
-    other
-        .push_match_key(HwMatchKey::compatible(b"tairix,netchan").expect("key"))
-        .expect("push key");
-    other
-        .push_resource(HwResource::endpoint(9))
-        .expect("push endpoint");
-    assert_eq!(audiochan_endpoint(&other), None);
-    // The right node with no endpoint resource is malformed, never guessed.
-    let mut bare = HwNode::new(3, HW_NODE_ROOT, HwDeviceClass::Audio);
-    bare.push_match_key(HwMatchKey::compatible(AUDIOCHAN_NODE_COMPATIBLE).expect("key"))
-        .expect("push key");
-    assert_eq!(audiochan_endpoint(&bare), None);
-}
-
 /// Node ids are handed out in discovery order; a place is not, so the same
 /// devices discovered in another order keep their locations.
 #[test]
@@ -140,7 +118,7 @@ fn a_location_names_the_place_and_not_the_discovery_order() {
     let place = |nodes: &[HwNode], endpoint: u64| {
         let channel = nodes
             .iter()
-            .find(|node| audiochan_endpoint(node) == Some(endpoint))
+            .find(|node| node.channel_endpoint(AUDIOCHAN_NODE_COMPATIBLE) == Some(endpoint))
             .expect("a channel");
         device_location(nodes, channel).expect("placed")
     };

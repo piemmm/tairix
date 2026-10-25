@@ -772,7 +772,7 @@ Where the driver's window is *enforced*. The design and its measurements are
 the WB-D1 entry in §8; this section holds the parts of it a reader of §2/§5
 needs to know.
 
-**It belongs above the driver, where Linux also puts it.** ARXFS owns no
+**It belongs above the driver.** ARXFS owns no
 thread and runs only inside a caller's operation, so it can check its window
 but never wait for it. The kernel therefore runs the timer: one task parks on
 the soonest deadline any mounted volume has published and calls the ordinary

@@ -2174,7 +2174,7 @@ mod tests {
                         4096,
                     ),
                     ResourceLimitRecord::new(
-                        LimitKind::OpenStreams,
+                        LimitKind::OpenFiles,
                         ResourceLimit::new(16, 32).expect("well-formed"),
                         5,
                     ),
@@ -2463,7 +2463,7 @@ mod tests {
                 "<irq>" => "27",
                 // `fixture_cpu_times` carries CPUs 0 and 1.
                 "<cpu>" => "0",
-                "<kind>" => "open-streams",
+                "<kind>" => "open-files",
                 // `RECLAIM_CLASS_NAMES`, served by `fixture_reclaim`.
                 "<class>" => "clean-file-data",
                 other => panic!("no fixture sample for placeholder {other}"),
@@ -2933,9 +2933,9 @@ mod tests {
     #[test]
     fn info_limits_bounds_are_public_facts() {
         let fixture = Fixture::new();
-        let soft = resolve_str("info:limits/open-streams/soft", &fixture).expect("ok");
+        let soft = resolve_str("info:limits/open-files/soft", &fixture).expect("ok");
         assert_eq!(soft.authorization, Authorization::Unprivileged);
-        assert_eq!(soft.query(), "info:limits/open-streams/soft");
+        assert_eq!(soft.query(), "info:limits/open-files/soft");
         match soft.payload {
             ResponsePayload::Info(v) => {
                 assert_eq!(v.value(), "16");
@@ -2943,7 +2943,7 @@ mod tests {
             }
             _ => panic!("expected info value"),
         }
-        let hard = resolve_str("info:limits/open-streams/hard", &fixture).expect("ok");
+        let hard = resolve_str("info:limits/open-files/hard", &fixture).expect("ok");
         match hard.payload {
             ResponsePayload::Info(v) => assert_eq!(v.value(), "32"),
             _ => panic!("expected info value"),
@@ -2998,9 +2998,9 @@ mod tests {
         impl crate::transport::Transport for Scrambled {
             fn query(&self, _request: &[u8]) -> Result<Vec<u8>, Errno> {
                 let mut out = Vec::new();
-                // `OpenStreams` sits where `AddressSpaceBytes` (slot 0) belongs.
+                // `OpenFiles` sits where `AddressSpaceBytes` (slot 0) belongs.
                 for kind in [
-                    LimitKind::OpenStreams,
+                    LimitKind::OpenFiles,
                     LimitKind::AddressSpaceBytes,
                     LimitKind::Processes,
                     LimitKind::StackBytes,
@@ -3012,7 +3012,7 @@ mod tests {
                 Ok(out)
             }
         }
-        let reference = parse("info:limits/open-streams/soft").expect("parse");
+        let reference = parse("info:limits/open-files/soft").expect("parse");
         assert_eq!(
             resolve(&reference, now(), &Scrambled),
             Err(ResolveInfoError::Malformed)

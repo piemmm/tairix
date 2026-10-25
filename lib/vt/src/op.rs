@@ -59,8 +59,8 @@ impl EraseMode {
 // wider enum does not sit on the character-printing hot path.
 #[allow(clippy::large_enum_variant)]
 pub enum Op {
-    /// Print one character at the cursor; a control character, which is no
-    /// glyph, prints as U+FFFD.
+    /// Print one character at the cursor; a hidden character
+    /// (`tairix_visible::is_hidden`), which is no glyph, prints as U+FFFD.
     Print(char),
     /// Bell (`BEL`).
     Bell,

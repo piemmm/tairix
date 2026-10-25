@@ -67,8 +67,8 @@ qu'un périphérique à plusieurs interfaces n'apparaît qu'une fois.
 
 - `0` — la liste (ou l'aide courte) a été écrite.
 - `1` — la requête de l'arbre matériel a été refusée ou a échoué, ou
-  la sortie n'a pas pu être écrite.
-- `2` — la ligne de commande n'a pas été comprise.
+  la sortie n'a pas pu être écrite. Une ligne de commande non comprise
+  sort aussi avec `1`.
 
 ## ENVIRONMENT
 

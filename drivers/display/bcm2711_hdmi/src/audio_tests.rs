@@ -516,6 +516,50 @@ fn the_sample_divider_is_the_best_fraction_within_its_fields() {
     assert!((n / m - ratio).abs() / ratio < 1e-6);
 }
 
+/// The divider is as near as any fraction the fields can hold: checked
+/// against every denominator they allow, with its two nearest numerators.
+#[test]
+fn no_fraction_the_fields_hold_is_nearer_than_the_divider() {
+    const N_MAX: u64 = (1 << 24) - 1;
+    const M_MAX: u64 = 256;
+    // Error of `p/q` from `num/den`, as a fraction over `q * den`.
+    let error = |p: u64, q: u64, num: u64, den: u64| {
+        (
+            (u128::from(p) * u128::from(den)).abs_diff(u128::from(q) * u128::from(num)),
+            u128::from(q),
+        )
+    };
+    let less = |(ea, qa): (u128, u128), (eb, qb): (u128, u128)| ea * qb < eb * qa;
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut draw = |bound: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        (state >> 33) % bound + 1
+    };
+    let mut cases = vec![(1, 3), (2, 7), (N_MAX * 3, 2), (108_000_000, 44_100)];
+    cases.extend((0..400).map(|_| (draw(400_000_000), draw(200_000))));
+    for (num, den) in cases {
+        let Some((p, q)) = sample_divider(num, den) else {
+            panic!("{num}/{den} has a fraction in the fields");
+        };
+        assert!(p <= N_MAX && q <= M_MAX, "{num}/{den} -> {p}/{q}");
+        let got = error(p, q, num, den);
+        // The error is convex in `p`, so the nearest numerator the field holds
+        // is a nearest unbounded one clamped into it.
+        for q in 1..=M_MAX {
+            let floor = u128::from(q) * u128::from(num) / u128::from(den);
+            for p in [floor, floor + 1] {
+                let p = u64::try_from(p).unwrap_or(N_MAX).clamp(1, N_MAX);
+                assert!(
+                    !less(error(p, q, num, den), got),
+                    "{num}/{den}: {p}/{q} is nearer than the divider's"
+                );
+            }
+        }
+    }
+}
+
 /// A transmitter whose sound cannot be had still drives its video: its links
 /// beside the sound's are all it needs, and every audio request is refused
 /// rather than reaching a path it does not have.

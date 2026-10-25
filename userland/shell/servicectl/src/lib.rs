@@ -20,10 +20,11 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependencies are `lib/abi` and the
-//! shared help engine, so this userland tool never links a kernel or driver
-//! crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in production
-//! paths: every refusal renders as a terse line and sets the exit status.
+//! `no_std` (with `alloc`); the only dependencies are `lib/abi`, the shared
+//! help engine, and `lib/util`'s quoting and command-line scanner, so this
+//! userland tool never links a kernel or driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths: every refusal renders as a
+//! terse line and sets the exit status.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -37,4 +38,4 @@ pub mod session;
 mod session_tests;
 
 pub use command::{parse, Command, UsageError, USAGE};
-pub use session::{dispatch, report_usage, run, run_enrol, ControlChannel, Exit, ToolIo};
+pub use session::{dispatch, run, run_enrol, ControlChannel, Exit, ToolIo};

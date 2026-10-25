@@ -54,9 +54,9 @@ domain on the link is `local`.
 ## EXIT STATUS
 
 - `0` — the command ran its course (or the short help was written).
-- `1` — the discovery service refused the request or is not running.
-- `2` — the command line was not understood, or the output could not be
-  written.
+- `1` — the discovery service refused the request or is not running. A
+  command line that was not understood exits `1` too.
+- `2` — the output could not be written.
 
 ## ENVIRONMENT
 

@@ -1,4 +1,4 @@
-//! Bare-metal boot pipeline for the aarch64 (Raspberry Pi 4)
+//! Bare-metal boot pipeline for the aarch64
 //! `tairix-kernel` binary — `plans/PI.md` Stage P1.
 //!
 //! [`boot`] is the single entry point. It is called from the binary's
@@ -9,10 +9,10 @@
 //!
 //! # Scope at Stage P1 (and what is deliberately staged later)
 //!
-//! P1 stands up the production aarch64 kernel *image*: the boot stub,
-//! the Raspberry Pi 4 linker script (`aarch64-rpi4.ld`, load `0x8_0000`),
-//! and this binary, with the aarch64 architecture port selected as the
-//! kernel's arch (the single selection point).
+//! P1 stands up the production aarch64 kernel *image*: the boot stub, the
+//! board linker script `build.rs` selects, and this binary, with the aarch64
+//! architecture port selected as the kernel's arch (the single selection
+//! point).
 //! On the boot CPU it enables FP/SIMD, brings up the console, constructs
 //! the [`Aarch64Arch`] handle, records a boot audit line, and parks
 //! fail-closed (never silently reset).
@@ -27,23 +27,23 @@
 //!
 //! [`boot`] also points the GIC driver at the controller the firmware tree
 //! describes ([`tairix_arch_aarch64::gic::configure_from_fdt`]) — the QEMU
-//! `virt` GICv2 or GICv3, or the Pi 4's GIC-400 — and reads the `/memory` window
-//! (`first_memory_region`), so neither the interrupt-controller base nor
-//! the RAM base is the `virt` assumption any longer. The byte-wise FDT
-//! reader makes both walks MMU-off-safe (`plans/PI.md` W17); a missing or
-//! malformed tree leaves the fail-safe `virt` defaults in place.
+//! `virt` GICv2 or GICv3, or the GIC a board describes — and reads the
+//! `/memory` window (`first_memory_region`), so neither the
+//! interrupt-controller base nor the RAM base is the `virt` assumption any
+//! longer. The byte-wise FDT reader makes both walks MMU-off-safe
+//! (`plans/PI.md` W17); a missing or malformed tree leaves the fail-safe
+//! `virt` defaults in place.
 //!
 //! # P2: board-discovered console
 //!
 //! Before logging, [`boot`] points the console at the UART the firmware
 //! device tree describes ([`tairix_arch_aarch64::console::configure_from_fdt`]).
 //! On the QEMU `virt` board this re-confirms the default PL011 base; on a
-//! Raspberry Pi it selects the Pi's PL011 (or the BCM2835 AUX mini-UART)
-//! at its high-peripheral base, so the boot line prints on real hardware
-//! and under `-M raspi3b`. The FDT reader accesses the blob byte-wise, so
-//! the walk is safe with the MMU still off (no multi-byte Device-memory
-//! load — `plans/PI.md` W17). A missing or malformed tree leaves the
-//! `virt` default in place (fail closed).
+//! board it selects the PL011 or mini-UART the tree describes, at its
+//! discovered base, so the boot line prints on real hardware. The FDT reader
+//! accesses the blob byte-wise, so the walk is safe with the MMU still off
+//! (no multi-byte Device-memory load — `plans/PI.md` W17). A missing or
+//! malformed tree leaves the `virt` default in place (fail closed).
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -89,8 +89,8 @@ include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 /// 512 covers the whole low canonical VA range (`[0, 512 GiB)`), so the
 /// kernel image, stack, the firmware DTB, and the board MMIO window are
 /// all reachable whatever their physical addresses — the QEMU `virt`
-/// board (RAM at `0x4000_0000`, GIC/PL011 in the first GiB) and the
-/// Raspberry Pi 4 (RAM at `0`, MMIO in gigapage 3) alike, with no
+/// board (RAM at `0x4000_0000`, GIC/PL011 in the first GiB) and a board
+/// with RAM at `0` and MMIO in gigapage 3 alike, with no
 /// `cfg(board)` fork.
 /// [`AddressSpace::new_identity_gigapages`] maps the gigapages holding
 /// the *discovered* console/GIC MMIO Device and the rest — the kernel's
@@ -117,24 +117,21 @@ static BOOT_PAGE_TABLES: PageTablePool<1> = PageTablePool::new();
 /// renumbered.
 const KERNEL_BOOT_AARCH64_REACHED: EventId = EventId(4097);
 
-/// Audit event: the boot path discovered the BCM2711 PCIe root complex
-/// (the VL805 USB host's parent bridge) and recorded its address windows
-/// for the keyboard-service bring-up. Logged once, post-MMU, so a metal
-/// capture shows the discovered chipset windows the in-kernel USB chain
-/// will program — the first half of "what hardware did we find" when a
-/// keyboard is silent. Sits in the `kernel/core`-owned `4000..5000` range,
-/// clear of the boot-reached id above and the x86_64 pipeline's
-/// `4098`/`4099`; the id is part of the audit contract and may not be
-/// renumbered.
+/// Audit event: the boot path discovered the platform PCIe root complex the
+/// port describes and recorded its address windows. Logged once, post-MMU,
+/// so a metal capture shows the windows found when a device behind it is
+/// silent. In the `kernel/core`-owned `4000..5000` range, clear of the ids
+/// around it; part of the audit contract, never renumbered.
 const KERNEL_PCIE_DISCOVERED: EventId = EventId(4100);
 
-/// Audit event: the boot path asked the `VideoCore` firmware to run the ARM
-/// cores at their full rate, before anything else ran. Logged once, post-MMU,
-/// so a metal capture states the speed the rest of boot actually ran at — the
-/// firmware leaves the clock at `arm_freq_min` until something asks, and a
-/// board silently stuck there is otherwise only visible as everything being
-/// slow. Sits in the `kernel/core`-owned `4000..5000` range, clear of the ids
-/// above; the id is part of the audit contract and may not be renumbered.
+/// Audit event: the boot path asked the firmware that owns the ARM clock to
+/// run the cores at their full rate, before anything else ran. Logged once,
+/// post-MMU, so a metal capture states the speed the rest of boot actually
+/// ran at — the firmware leaves the clock at `arm_freq_min` until something
+/// asks, and a board silently stuck there is otherwise only visible as
+/// everything being slow. Sits in the `kernel/core`-owned `4000..5000` range,
+/// clear of the ids above; the id is part of the audit contract and may not
+/// be renumbered.
 const KERNEL_CPU_CLOCK_RAISED: EventId = EventId(4101);
 
 /// Audit event: a started secondary CPU left the kernel dispatch loop
@@ -157,15 +154,15 @@ const fn yes_no(value: bool) -> &'static str {
 
 extern "C" {
     /// First byte of the kernel image — the board load address — defined
-    /// by the board linker script (`aarch64-rpi4.ld` / `aarch64-virt.ld`).
+    /// by the board linker script `build.rs` selects.
     /// With [`__kernel_end`] it brackets the image extent whose identity
     /// gigapages must stay Normal (executable) whatever the discovered
     /// MMIO layout says ([`identity_device_mask`]).
     static __kernel_start: u8;
     /// One byte past the end of the kernel image, including the boot heap,
-    /// defined by the board linker script (`aarch64-rpi4.ld` /
-    /// `aarch64-virt.ld`). The usable physical-memory region the allocator
-    /// receives begins at the next page boundary after this address.
+    /// defined by the board linker script `build.rs` selects. The usable
+    /// physical-memory region the allocator receives begins at the next page
+    /// boundary after this address.
     static __kernel_end: u8;
 }
 
@@ -351,8 +348,8 @@ pub fn boot(
     // optimisation (`plans/PI.md` watch-out).
     //
     // This is the boot's sharpest cliff: enabling translation against a
-    // mis-typed identity map wedged the metal Pi 4B the instant the MMU
-    // came on.
+    // mis-typed identity map wedged metal hardware the instant the MMU came
+    // on.
     let boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
 
@@ -500,25 +497,25 @@ pub fn boot(
 /// mask.
 ///
 /// Runs entirely pre-MMU, and must: the discovered bases decide which
-/// gigapages the map types Device, and on the Pi 4 the PL011/GIC-400 live
-/// in gigapage 3 while the kernel image at `0x8_0000` must keep gigapage 0
-/// Normal — executable — or the instruction fetch after `switch` faults
-/// with the vectors not yet installed. Every other non-Device gigapage
-/// stays *invalid*: on real silicon a Normal write-back executable mapping
-/// of unbacked address space invites speculative fetches into windows
-/// nothing answers, which wedged the metal Pi 4B at the instant
-/// translation enabled while QEMU (which answers every address) stayed
-/// green. A null, unreadable, or incomplete tree leaves the `virt`
-/// defaults in place (fail closed); a facility with no discovered base
-/// contributes the console base as a harmless duplicate input.
+/// gigapages the map types Device, and a board's UART and GIC may lie
+/// gigapages away from the kernel image, whose own must stay Normal —
+/// executable — or the instruction fetch after `switch` faults with the
+/// vectors not yet installed. Every other non-Device gigapage stays
+/// *invalid*: on real silicon a Normal write-back executable mapping of
+/// unbacked address space invites speculative fetches into windows nothing
+/// answers, which wedged metal hardware at the instant translation enabled
+/// while QEMU (which answers every address) stayed green. A null,
+/// unreadable, or incomplete tree leaves the `virt` defaults in place (fail
+/// closed); a facility with no discovered base contributes the console base
+/// as a harmless duplicate input.
 fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_WORDS]) {
     let early = configure_mmio_from_dtb(dtb);
     let (console_base, _) = console::current();
     let (distributor_base, cpu_interface_base) = gic::current();
     let video_doorbell = early.video.map_or(console_base as u64, |v| v.doorbell_base);
-    // The BCM2711 PCIe root complex's register block and outbound window
-    // (where the enumerated VL805 BAR lives) are mapped by the autoloaded
-    // user-space bus driver, so they must be typed Device like the UART/GIC.
+    // The platform PCIe root complex's register block and outbound window
+    // (where enumerated BARs live) are mapped by its autoloaded user-space
+    // bus driver, so they must be typed Device like the UART/GIC.
     let (pcie_regs, pcie_outbound) = early
         .pcie
         .map_or((console_base as u64, console_base as u64), |p| {
@@ -573,12 +570,12 @@ fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_
 /// Record the discovered PCIe root-complex windows once, post-MMU.
 ///
 /// Purely a metal diagnostic: the windows themselves reach the autoloaded
-/// user-space bus driver as resource grants on the discovered
-/// `brcm,bcm2711-pcie` hardware-tree node, not through any kernel-side
-/// stash (`plans/PI.md` P10 D5d). A capture then shows which register
-/// block and inbound/outbound apertures were found, so a silent keyboard
-/// can be bisected against the hardware actually present rather than
-/// guessed at. Allocation-free hex rendering on the caller's stack.
+/// user-space bus driver as resource grants on the discovered root
+/// complex's hardware-tree node, not through any kernel-side stash
+/// (`plans/PI.md` P10 D5d). A capture then shows which register block and
+/// inbound/outbound apertures were found, so a silent device can be bisected
+/// against the hardware actually present rather than guessed at.
+/// Allocation-free hex rendering on the caller's stack.
 fn log_pcie_discovery(log_sink: &'static (dyn Sink + Sync), pcie: &platform::PcieDiscovery) {
     let mut regs_base_buf = [0u8; 16];
     let mut regs_len_buf = [0u8; 16];
@@ -593,7 +590,7 @@ fn log_pcie_discovery(log_sink: &'static (dyn Sink + Sync), pcie: &platform::Pci
         &Event {
             level: Level::Info,
             id: KERNEL_PCIE_DISCOVERED,
-            message: "aarch64: discovered brcm,bcm2711-pcie root complex (vl805 usb host bridge)",
+            message: "aarch64: discovered a PCIe root complex",
             fields: &[
                 Field {
                     key: "regs_base_hex",
@@ -661,8 +658,8 @@ fn log_pcie_discovery(log_sink: &'static (dyn Sink + Sync), pcie: &platform::Pci
 /// windows the allocator may use.
 ///
 /// The windows are first clipped out of Device-typed gigapages: memory is
-/// typed at 1 GiB granularity and Device wins for a shared gigapage (the
-/// Pi 4's below-4 GiB window ends inside the gigapage holding its
+/// typed at 1 GiB granularity and Device wins for a shared gigapage (a
+/// board's below-4 GiB window may end inside the gigapage holding its
 /// UART/GIC/PCIe), so RAM there would be mapped Device — atomics on it are
 /// unpredictable — and must never reach the map or the allocator.
 /// Reclaiming those bytes needs 2 MiB-granular typing (`plans/APPS.md` I4
@@ -761,10 +758,9 @@ fn build_cpu_topology_and_arch(
 /// (`plans/PI.md` P5), never an assumed one (no `cfg(board)` fork).
 ///
 /// A `/psci` node selects PSCI `CPU_ON` over its conduit (`hvc` at
-/// EL2-hosted, `smc` at EL3-hosted — the Pi 4 with `armstub8.bin`); a
-/// PSCI-less tree whose cpu nodes declare `enable-method = "spin-table"`
-/// (the Pi 4's stock firmware) selects the spin-table release over the
-/// declared per-CPU `cpu-release-addr` words, aligned to the dense ids. A
+/// EL2-hosted, `smc` at EL3-hosted); a PSCI-less tree whose cpu nodes
+/// declare `enable-method = "spin-table"` selects the spin-table release over
+/// the declared per-CPU `cpu-release-addr` words, aligned to the dense ids. A
 /// tree that declares neither leaves the mechanism unset, and bring-up
 /// fails closed at the start site rather than guessing.
 fn select_secondary_start(
@@ -799,12 +795,11 @@ fn select_secondary_start(
 /// map, with the firmware device-tree blob reserved out of it.
 ///
 /// An absent or malformed discovery fails closed to a status string rather
-/// than a panic. The blob must be reserved because the QEMU `virt`/Pi
-/// firmware lands it high in RAM, above the kernel image the map already
-/// reserves: left usable, the frame allocator or the early-boot RAM
-/// self-test (which writes a word of every usable page) would clobber the tree the
-/// later root-storage bind and device discovery re-parse. An absent tree
-/// reserves nothing.
+/// than a panic. The blob must be reserved because firmware lands it high in
+/// RAM, above the kernel image the map already reserves: left usable, the
+/// frame allocator or the early-boot RAM self-test (which writes a word of
+/// every usable page) would clobber the tree the later root-storage bind and
+/// device discovery re-parse. An absent tree reserves nothing.
 fn build_boot_memory_layout(
     ram_windows: &[(u64, u64)],
     dtb: u64,
@@ -868,7 +863,8 @@ struct BootStatus {
     boot_root: u64,
     /// Low word of the Device gigapage mask (gigapages 0..64 — both
     /// supported boards keep their MMIO below 64 GiB), so a metal capture
-    /// shows what the identity map typed Device (`virt`: 0x1; Pi 4: 0x8).
+    /// shows what the identity map typed Device (`virt`: 0x1; a board with
+    /// its MMIO in gigapage 3: 0x8).
     device_gigapages: u64,
     /// At least one usable `/memory` window survived the Device clip.
     ram_discovered: &'static str,
@@ -883,9 +879,9 @@ struct BootStatus {
     /// The counter rate came from the tree rather than `CNTFRQ_EL0`.
     timer_hz_from_tree: &'static str,
     /// The generic-timer counter rate every `busy_delay_us` settle is
-    /// measured against. A value far from the board crystal (the Pi 4's
-    /// 54 MHz = `0x337_f980`) means firmware mis-programmed `CNTFRQ_EL0`,
-    /// which stretches every bring-up settle proportionally.
+    /// measured against. A value far from the board's crystal means firmware
+    /// mis-programmed `CNTFRQ_EL0`, which stretches every bring-up settle
+    /// proportionally.
     timer_hz: u64,
     /// Which secondary-start mechanism the tree selected.
     smp_start_method: &'static str,
@@ -968,7 +964,7 @@ fn log_boot_line(log_sink: &'static (dyn Sink + Sync), status: &BootStatus) {
         &Event {
             level: status.level,
             id: KERNEL_BOOT_AARCH64_REACHED,
-            message: "tairix-kernel aarch64 (raspberry pi 4): reached stage-p1 boot init point",
+            message: "tairix-kernel aarch64: reached stage-p1 boot init point",
             fields: &fields,
         },
     );
@@ -1111,7 +1107,7 @@ fn prepare_secondary_bringup(cpu_mpidrs: &[u64]) -> bool {
 /// installed **only** when its window sits in an already-Device-mapped
 /// gigapage, so a read on the lockup path can never fault; a component in
 /// an unmapped gigapage — or a tree that describes no debug components
-/// (QEMU `virt`, the stock Pi 4 firmware DTB) — installs nothing, and the
+/// (QEMU `virt`, a stock firmware DTB) — installs nothing, and the
 /// sampler reports `Unsupported` (fail closed, the buddy detector runs
 /// unchanged). Allocation failure or a table with no reachable component is
 /// a silent no-op — a diagnostic aid never aborts the boot.
@@ -1276,9 +1272,9 @@ fn audit_root_storage_binding(
     // virtio-blk bind key is the device id read from the transport. Probe
     // each slot's `DeviceID` through the MMIO bus driver and emit a probed
     // virtio-block child node into the same buffered tree so the gate can
-    // bind the root *and* the kthread's autoload sees a faithful tree. The
-    // Raspberry Pi 4 tree describes no `virtio,mmio` node, so
-    // `virtio_mmio_bus_from_dtb` returns `NotFound` and this is a no-op there
+    // bind the root *and* the kthread's autoload sees a faithful tree. A
+    // tree that describes no `virtio,mmio` node makes
+    // `virtio_mmio_bus_from_dtb` return `NotFound`, so this is a no-op there
     // — it is the QEMU `virt`-board path, additive and metal-neutral.
     // SAFETY: `dtb`/`total` bound the firmware blob `Fdt::from_ptr` validated
     // above; it is identity-mapped and immutable for the kernel's life, and
@@ -1321,8 +1317,14 @@ fn audit_root_storage_binding(
     // validated at boot, identity-mapped and immutable for the kernel's life,
     // MMU on.
     if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
-        let mut lpis =
-            crate::aarch64_messages::discover(&fdt, gic_redistributors, gic_redistributor_stride);
+        let mut lpis = crate::aarch64_messages::discover(
+            &fdt,
+            gic_redistributors,
+            gic_redistributor_stride,
+            crate::aarch64_messages::first_lpi_line(
+                crate::aarch64::gic_irq::msi_mux().map(tairix_kernel_core::MsiMuxLines::lines),
+            ),
+        );
         let intx = IntxOnGic(gic::find_gic(&fdt).and_then(|gic| gic.phandle));
         crate::pci_fdt::seed(&fdt, &PciPort, &intx, &mut lpis, &mut sink, log_sink);
         crate::aarch64_messages::publish(lpis.into_routes());
@@ -1585,8 +1587,8 @@ fn enter_kernel_core(
     // user-space device manager observes the same inventory the kernel
     // discovered (Design D).
     .with_hw_tree(hw_tree)
-    // Serve the `fs_*` syscalls through the production filesystem service
-    // (`PREREQUISITES.md` P-A): it routes each operation through the secured
+    // Serve the `fs_*` syscalls through the production filesystem service:
+    // it routes each operation through the secured
     // VFS against the late-installed read-only `/System` mount and resolves
     // caller groups against the late-installed identity table. Both cells
     // fail closed (`NotImplemented`) until the disk-owning task publishes the
@@ -1605,7 +1607,7 @@ fn enter_kernel_core(
     // mount task wires its audit sink and pressure gauge, so this changes
     // no boot behaviour until that install lands.
     .with_volume_service(&crate::volume_service::VOLUME_SERVICE)
-    // Resolve a spawn-as-user switch (`PREREQUISITES.md` P-C) against the
+    // Resolve a spawn-as-user switch against the
     // same set-once identity cell the filesystem service resolves caller
     // groups against and the root-unlock kthread publishes the on-disk
     // accounts into. Until that install a switch fails closed; the default
@@ -1639,11 +1641,10 @@ struct EarlyDiscovered {
     /// `0` when no readable tree was found — the blob's RAM extent must
     /// stay in the identity map for the post-MMU walks.
     dtb_len: u64,
-    /// The BCM2711 PCIe root-complex windows, when the tree describes a
-    /// `brcm,bcm2711-pcie` bridge (`plans/PI.md` P10): the controller
-    /// register block and outbound MMIO window must be folded into the
-    /// identity Device mask. `None` on a board with no bridge (the QEMU
-    /// `virt` shape).
+    /// The platform PCIe root complex's windows, when the tree describes the
+    /// one the port knows (`plans/PI.md` P10): its register block and
+    /// outbound MMIO window must be folded into the identity Device mask.
+    /// `None` on a board with none (the QEMU `virt` shape).
     pcie: Option<platform::PcieDiscovery>,
     /// The gigapages holding a generic ECAM host's configuration region,
     /// which the kernel maps in its own regime (`plans/IOMMU.md` IOM13).
@@ -1708,9 +1709,9 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     out.dtb_len = fdt.total_size() as u64;
     out.console = console::configure_from_fdt(&fdt).is_some();
     // Bring the discovered console's line up before the first log byte:
-    // on real Pi 4 silicon UART0 stays silent until GPIO 14/15 are muxed
-    // to the PL011 and its line registers are programmed — QEMU's
-    // powered-up PL011 masks the omission (`uart_init`).
+    // on real silicon a UART can stay silent until its pins are muxed to it
+    // and its line registers are programmed — QEMU's powered-up PL011 masks
+    // the omission (`uart_init`).
     uart_init::init_from_fdt(&fdt);
     out.gic = gic::configure_from_fdt(&fdt).is_some();
     gic::for_each_window(&fdt, |base, len| {
@@ -1722,9 +1723,9 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
             *word |= window;
         }
     });
-    // Ask the firmware for full speed before anything else runs. On a Pi the
-    // ARM clock is the firmware's, and it leaves it at `arm_freq_min` — 600
-    // MHz on a board rated at 1.5 GHz — until an OS driver asks otherwise, so
+    // Ask the firmware for full speed before anything else runs. Where the
+    // ARM clock is the firmware's, it leaves it at `arm_freq_min` — 600 MHz
+    // on a board rated at 1.5 GHz — until an OS driver asks otherwise, so
     // mounting the root volume, unlocking it, and reaching a login would all
     // run at 40% of the machine's speed. The frequency driver `devmgr`
     // autoloads takes over from here; this is the floor beneath it, and it
@@ -1769,10 +1770,10 @@ struct Discovered {
     /// Every `/memory` window `(base, size)` discovered from the firmware
     /// tree, in tree order — the RAM extents the `BootMemoryMap`
     /// (`plans/PI.md` P6c-1) reserves the kernel image out of and hands
-    /// the allocator. A machine like the Pi 4 (8 GiB) declares several
-    /// (below the MMIO hole, 1 GiB..4 GiB, and above 4 GiB); reading only
-    /// the first under-reported an 8 GiB board as ~1 GiB. Empty when the
-    /// tree declares none (fail closed — no memory map is built).
+    /// the allocator. An 8 GiB board may declare several (below the MMIO
+    /// hole, 1 GiB..4 GiB, and above 4 GiB); reading only the first
+    /// under-reported one as ~1 GiB. Empty when the tree declares none (fail
+    /// closed — no memory map is built).
     ram_windows: Vec<(u64, u64)>,
     /// The generic-timer counter frequency (Hz) to seed the handle and
     /// the P4 live timer with: the `/timer` `clock-frequency` override
@@ -1794,11 +1795,10 @@ struct Discovered {
     /// to a single-CPU map).
     cpu_mpidrs: Vec<u64>,
     /// `(affinity, cpu-release-addr)` for every cpu node that declares
-    /// the `spin-table` enable method (the Pi 4's stock firmware), in
-    /// tree order — aligned to the dense map by
-    /// [`crate::cpu_topology::align_release_addrs`] and used for
-    /// bring-up only when the tree declares no PSCI node. Empty when
-    /// none are declared or the walk fails (fail closed).
+    /// the `spin-table` enable method, in tree order — aligned to the dense
+    /// map by [`crate::cpu_topology::align_release_addrs`] and used for
+    /// bring-up only when the tree declares no PSCI node. Empty when none
+    /// are declared or the walk fails (fail closed).
     cpu_spin_releases: Vec<(u64, u64)>,
     /// A GICv3's redistributor regions, in tree order; empty on a GICv2.
     gic_redistributors: Vec<gicv3::RedistributorRegion>,
@@ -1858,9 +1858,8 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     }
     out.ram_windows = windows;
     // P4: prefer the board's `/timer` `clock-frequency` over the
-    // `CNTFRQ_EL0` register, so the Pi 4's 54 MHz crystal is honoured
-    // when the firmware tree declares it (no
-    // `cfg(board)` fork).
+    // `CNTFRQ_EL0` register, so the crystal the firmware tree declares is
+    // honoured (no `cfg(board)` fork).
     out.timer_hz_from_tree = fdt::timer_clock_frequency(&fdt).is_some_and(|hz| hz != 0);
     out.timer_hz = timer_frequency_hz(&fdt);
     // P5: discover the PSCI conduit (`hvc`/`smc`) the firmware tree
@@ -1868,11 +1867,11 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     // board's conduit rather than an assumed one.
     out.psci_method = fdt::psci_method(&fdt);
     // Collect every `/cpus/cpu@*` affinity so the bring-up starts the
-    // cores the board *declares* (the Pi 4's four Cortex-A72s), never an
-    // assumed count — along with each node's spin-table release word,
-    // the PSCI-less start channel. A malformed walk discards the
-    // partial lists — the boot then sizes for the one running core
-    // rather than trusting a truncated inventory (fail closed).
+    // cores the board *declares*, never an assumed count — along with each
+    // node's spin-table release word, the PSCI-less start channel. A
+    // malformed walk discards the partial lists — the boot then sizes for
+    // the one running core rather than trusting a truncated inventory (fail
+    // closed).
     let mut cpus = Vec::new();
     let mut spin_releases = Vec::new();
     if fdt
@@ -1904,26 +1903,17 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     // never runs the unlock kthread) still gets it. A tree without a
     // representable console interrupt leaves `login` on the polled path (fail
     // closed — `login` then keeps re-polling, never errors).
-    if let Some(intid) = crate::aarch64::root_unlock::console_spi(&fdt) {
+    if let Some(intid) =
+        tairix_arch_aarch64::console::find_console(&fdt).and_then(|console| console.intid)
+    {
         crate::aarch64::gic_irq::set_uart_console_intid(intid);
     }
-    // Configure the BCM2711 root-complex MSI controller the `msi_alloc`
-    // syscall drives: point it at the discovered RC register base and record
-    // the shared GIC SPI its internal MSI controller raises (the
-    // `brcm,bcm2711-pcie` node's second `interrupts` entry). A tree with no
-    // such node leaves the controller unconfigured and `msi_alloc` fails
-    // closed (the QEMU `virt` shape). Done post-MMU because both the
-    // register-base store and the SPI `OnceCell` need the MMU on, exactly
-    // like the console-interrupt record above.
-    #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-    if let (Some(pcie), Some(msi_intid)) = (
-        platform::pcie_bringup(&fdt),
-        crate::aarch64::root_unlock::pcie_msi_spi(&fdt),
-    ) {
-        if let Ok(base) = usize::try_from(pcie.regs_phys) {
-            tairix_arch_aarch64::brcm_msi::configure(base, pcie.inbound_size);
-            crate::aarch64::gic_irq::set_brcm_msi_spi(msi_intid);
-        }
+    // The chained message multiplexer the tree describes, if any, backs
+    // `msi_alloc`; with none, `msi_alloc` fails closed (the QEMU `virt`
+    // shape). Post-MMU, as it publishes through atomics, like the
+    // console-interrupt record above.
+    if let Some(mux) = tairix_arch_aarch64::msimux::configure_from_fdt(&fdt) {
+        crate::aarch64::gic_irq::install_msi_mux(mux);
     }
     out
 }

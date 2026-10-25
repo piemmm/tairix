@@ -78,8 +78,7 @@ padrão consultivo (fd 3).
 - `0` — a execução foi concluída (as recusas tipificadas dos
   trabalhadores são resultados esperados e não a fazem falhar).
 - `1` — um trabalhador falhou realmente, ou a execução não pôde ser
-  preparada.
-- `2` — a linha de comandos não foi compreendida.
+  preparada. Uma linha de comandos não compreendida também termina com `1`.
 - `130` / `143` — `Ctrl-C` / `Terminate` terminou a execução, após o
   desmantelamento dos trabalhadores e a remoção dos ficheiros de
   trabalho.

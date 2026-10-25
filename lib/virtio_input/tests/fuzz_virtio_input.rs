@@ -10,7 +10,7 @@
 //! surface's driver sends when the device stops reporting leaves nothing down.
 //!
 //! The device double speaks the virtio 1.1 §5.8 layout itself, and draws its
-//! event codes from those the Linux `input-event-codes.h` namespaces name,
+//! event codes from those the evdev namespaces name,
 //! which the device logic keeps private. A plain `cargo test` runs the
 //! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
 //! fuzz` extends it to a wall-clock budget.

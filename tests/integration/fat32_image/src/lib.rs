@@ -199,7 +199,7 @@ pub fn build_image() -> Vec<u8> {
 mod tests {
     use super::*;
     use tairix_abi::driver::block::{Block, BlockGeometry};
-    use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+    use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
     use tairix_abi::DriverError;
     use tairix_drv_fs_fat32::Fat32;
 
@@ -282,10 +282,16 @@ mod tests {
     fn a_fresh_file_round_trips_through_create_write_and_read() {
         let mut fs = mount();
         let root = fs.root();
-        fs.create(root, NEW_FILE_NAME, NodeKind::RegularFile)
+        let file = fs
+            .create(
+                root,
+                NEW_FILE_NAME,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create new file");
         let written = fs
-            .write_at(root, NEW_FILE_NAME, 0, NEW_FILE_CONTENT)
+            .write_at(file, 0, NEW_FILE_CONTENT)
             .expect("write new file");
         assert_eq!(written, NEW_FILE_CONTENT.len());
 
@@ -299,9 +305,15 @@ mod tests {
     fn the_planted_file_survives_a_second_file_being_written() {
         let mut fs = mount();
         let root = fs.root();
-        fs.create(root, NEW_FILE_NAME, NodeKind::RegularFile)
+        let file = fs
+            .create(
+                root,
+                NEW_FILE_NAME,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create new file");
-        fs.write_at(root, NEW_FILE_NAME, 0, NEW_FILE_CONTENT)
+        fs.write_at(file, 0, NEW_FILE_CONTENT)
             .expect("write new file");
 
         let node = fs

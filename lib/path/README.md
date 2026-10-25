@@ -10,16 +10,18 @@ tools. That lexing and normalisation is identical wherever it happens, so it
 lives here once and every consumer imports it, rather than each embedding a
 private path parser. The shell does not own a path parser; it links this one.
 
-## Two spellings beside the parser
+## Three spellings beside the parser
 
-`leaf_name(path)` is the POSIX base name (trailing `/`s ignored, a bare root
-naming itself, and a `Name:/` alias root playing exactly the role POSIX gives
-`/`), and `join(parent, name)` appends a child with exactly one separator so a
-child of a root is `/name` and never `//name`. Both are purely lexical, like
-`parse`: they resolve nothing and open nothing. They live here because more
-than one consumer needs them — a tool that names the link `ln -s target`
-creates, a browser that spells a resolved link target — and a private copy per
-consumer is the duplication the charter forbids.
+`leaf_name(path)` is the POSIX base name and `dir_name(path)` the POSIX dir
+name (trailing `/`s ignored, a bare root naming itself, a lone relative
+component in `.`, and a `Name:/` alias root playing exactly the role POSIX
+gives `/`), and `join(parent, name)` appends a child with exactly one
+separator so a child of a root is `/name` and never `//name`. All three are
+purely lexical, like `parse`: they resolve nothing and open nothing. They live
+here because more than one consumer needs them — a tool that names the link
+`ln -s target` creates, `dirname`, `cp` telling a source named twice from
+another name for its node, a browser that spells a resolved link target — and
+a private copy per consumer is the duplication the charter forbids.
 
 ## A spelling step, not a resolver
 
@@ -50,9 +52,16 @@ than being invented speculatively here.
 
 ## API
 
-- `parse(input) -> Result<Path, PathError>` — the only fallible step.
-- `Path::root() / components() / alias() / is_absolute()` and a `Display` that
-  renders the canonical human spelling.
+- `parse(input) -> Result<Path, PathError>` — a spelling's root and its
+  normalised components.
+- `steps(input) -> Result<(Root, Steps), PathError>` — the root, and the
+  steps as spelled read one at a time, `.` dropped and `..` kept as
+  `Step::Up`, for a resolver that applies each `..` to the directory it
+  actually reached and holds the steps under a bound of its own. Names are
+  checked exactly as `parse` checks them, and the first refusal ends the
+  steps.
+- `Path::root() / components() / alias() / volume_id() / is_absolute() /
+  prefix(len)` and a `Display` that renders the canonical human spelling.
 - `validate_file_name(name) -> Result<(), PathError>` — the one shared rule for
   a single **leaf name** (one file or directory name, not a path): non-empty,
   not `.`/`..`, no `/`, no control character or `:`, within `MAX_COMPONENT_LEN`
@@ -64,6 +73,16 @@ than being invented speculatively here.
   when relative), by the same rule `parse` applies, examining nothing after
   it: the shell's filename generation splits a word's root off before reading
   the rest as a pattern.
+- `alias_root_len(input) -> Option<usize>` — the byte length of a leading
+  `Name:/` alias-root prefix, so a lexical tool (`basename`, `dirname`) treats
+  an alias root as POSIX treats `/` without resolving anything.
+- `is_relative_spelling(input) -> bool` — whether the grammar reads a
+  spelling as relative to the working directory: no leading `/` and no `:`
+  before its first `/`. A listed name holding a `:` (a foreign volume's
+  `Home:`) would read as a root leading a relative path, so the shell's
+  filename generation writes such a path from `./`.
+- `is_hidden_name(name) -> bool` — whether a directory entry is a hidden item
+  a listing leaves out unless asked for everything: a name beginning with `.`.
 - `PathError` — why a string or name was rejected.
 - `MAX_PATH_LEN` / `MAX_COMPONENTS` / `MAX_COMPONENT_LEN` / `MAX_ALIAS_LEN` — the
   fixed security bounds on an untrusted path string; the path and component

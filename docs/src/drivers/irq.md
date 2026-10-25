@@ -9,8 +9,8 @@ driver: an `InterruptLine` link (`plans/SUPPLIERS.md` SL4) served over
 
 ## Discovery
 
-The shared device-tree walk finds a node's interrupt parent as Linux's
-`of_irq_find_parent` does, and `interrupts-extended` names it per specifier
+The shared device-tree walk finds a node's interrupt parent as the Devicetree
+Specification v0.4 §2.4 defines it, and `interrupts-extended` names it per specifier
 and wins over `interrupts`. A specifier on the root controller stays an `Irq`
 grant at its position. One on any other node marked `interrupt-controller`
 becomes a link to that node: the endpoint its node id names in
@@ -33,6 +33,9 @@ root lines.
 - **The consumer side** is `tairix_linkclient::IrqLineClient`: a blocking
   `wait`, or a `post_wait` its serve loop wakes on and `reap_wait` collects,
   beside any direct `Irq` it binds.
+- **The supplier side** is `tairix_drvrt::irqline::IrqLines`, the one
+  definition of these rules every controller's driver keeps its lines by,
+  over its own registers (`LineHardware`).
 
 The BCM2835-family GPIO controller serves the same service for its lines;
 see [GPIO-controller drivers](./gpio.md).

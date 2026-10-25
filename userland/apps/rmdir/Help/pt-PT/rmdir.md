@@ -21,9 +21,9 @@ e depois `a`. A raiz nua de um caminho (`/` ou uma raiz de alias como
 
 Com `--ignore-fail-on-non-empty`, a recusa «diretório não vazio» não é
 um erro — o operando (ou o percurso de `-p`) simplesmente para aí.
-Nenhuma outra recusa é tolerada. A primeira falha genuína para a
-execução antes de qualquer operando posterior. `--` termina a análise
-de opções: cada argumento posterior é um caminho.
+Nenhuma outra recusa é tolerada. Um operando que não pode ser removido é
+reportado e o seguinte é removido mesmo assim. `--` termina a análise de
+opções: cada argumento posterior é um caminho.
 
 ## OPTIONS
 
@@ -49,8 +49,8 @@ de opções: cada argumento posterior é um caminho.
 - `0` — todas as remoções tiveram êxito (uma recusa tolerada por
   `--ignore-fail-on-non-empty` não é uma falha).
 - `1` — uma falha do sistema de ficheiros ou da saída; a razão é
-  impressa no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+  impressa no erro padrão. Uma linha de comandos não compreendida também
+  termina com `1`.
 
 ## ENVIRONMENT
 

@@ -55,6 +55,8 @@ struct MockIo {
     region_len: usize,
     live: usize,
     short: Vec<(usize, usize, u32)>,
+    /// What the next mapping is refused with, standing for a grant gone.
+    refuse_map: Option<Errno>,
 }
 
 impl MockIo {
@@ -67,6 +69,7 @@ impl MockIo {
             region_len: ring_len(),
             live: 0,
             short: Vec::new(),
+            refuse_map: None,
         }
     }
 
@@ -112,6 +115,9 @@ impl ChannelIo for MockIo {
 
     fn map(&mut self, _grant: u64, owner: ProcId) -> Result<MockRegion, Errno> {
         assert_eq!(owner, MIXER, "only the attested caller's grant is mapped");
+        if let Some(err) = self.refuse_map.take() {
+            return Err(err);
+        }
         self.live += 1;
         Ok(MockRegion {
             storage: vec![0; self.region_len + REGION_ALIGN_PADDING],
@@ -356,4 +362,24 @@ fn a_device_left_clocking_starts_with_its_sources_held_down() {
         dispatcher.server.audio().pending == AudioInterrupt::NONE,
         "nothing is reported before a region is attached"
     );
+}
+
+/// A re-attach whose mapping is refused leaves the endpoint detached, its old
+/// region gone, and the device's events masked once nothing is attached,
+/// never attached over no region.
+#[test]
+fn a_re_attach_refused_its_mapping_leaves_the_endpoint_detached() {
+    let mut dispatcher = dispatcher();
+    ready(&mut dispatcher, 0);
+    assert!(dispatcher.server.audio().events_enabled);
+    dispatcher.io.refuse_map = Some(Errno::NotFound);
+    let attached = dispatcher.io.call(&attach(0, RING_FRAMES));
+    dispatcher.on_call();
+    assert_eq!(
+        decode_status_reply(dispatcher.io.reply(attached)),
+        Err(Errno::NotFound)
+    );
+    assert!(!dispatcher.server.is_attached(0));
+    assert_eq!(dispatcher.io.live, 0, "the old region was given back");
+    assert!(!dispatcher.server.audio().events_enabled);
 }

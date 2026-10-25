@@ -1,7 +1,7 @@
 # `tairix-drv-display-bcm2711-hdmi` — Raspberry Pi 4 HDMI transmitters
 
 Each of the BCM2711's two HDMI blocks as an `encoder-v1` encoder and an
-`audiochan-v1` audio device, driven as Linux's `vc4_hdmi` drives it: the
+`audiochan-v1` audio device: the
 display engine (`bcm2711_hvs`) takes the encoder through a mode set's steps,
 the mixer (`audiod`) drives the audio endpoint, and this driver finds the
 sink, chooses the mode, programs the block and plays the sink's audio

@@ -33,12 +33,13 @@
 //!
 //! # Fail closed
 //!
-//! An unknown option, a missing option value, or a number of operands other
-//! than zero or two is a [`MountError::Usage`]; an unknown `-o`/`-t` value is
-//! a [`MountError::BadOption`]. A listing transport failure surfaces the
-//! underlying [`Errno`](tairix_abi::Errno) as [`MountError::Service`], a
-//! refused or failed attach as [`MountError::Mount`], and a terminal write
-//! failure as [`MountError::Output`]. There is no panic.
+//! An option `getopt` refuses is a [`MountError::Option`], in its words; a
+//! number of operands other than zero or two is a [`MountError::Usage`]; an
+//! unknown `-o`/`-t` value is a [`MountError::BadOption`]. A listing
+//! transport failure surfaces the underlying [`Errno`](tairix_abi::Errno) as
+//! [`MountError::Service`], a refused or failed attach as
+//! [`MountError::Mount`], and a terminal write failure as
+//! [`MountError::Output`]. There is no panic.
 //!
 //! # Module map
 //!
@@ -49,10 +50,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependencies are the
-//! audited `lib/abi` and `lib/procinfo` crates, so this userland tool never
-//! links a kernel or driver crate. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths.
+//! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
+//! and `lib/procinfo` crates and the shared `lib/util` command-line scanner,
+//! so this userland tool never links a kernel or driver crate. No `unsafe`,
+//! and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

@@ -35,7 +35,6 @@ pub mod command;
 pub use client::{run, Output, RunError};
 pub use command::{parse, Command};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when the bundle's own `Help/` tree is
-/// unavailable.
+/// The usage banner the short-help switches print when the bundle's own
+/// `Help/` tree is unavailable.
 pub const USAGE: &str = "usage: groupdel [--] NAME\n";

@@ -32,8 +32,8 @@ recebe apenas a restauração da disciplina de entrada.
 ## EXIT STATUS
 
 - `0` — o terminal foi restaurado.
-- `1` — a saída não pôde ser entregue.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — a saída não pôde ser entregue. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

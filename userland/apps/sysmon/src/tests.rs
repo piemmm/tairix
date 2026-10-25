@@ -2,6 +2,7 @@
 //! interval/degradation logic and the renderer/loop driven over in-memory
 //! `sysinfo` and tty channels.
 
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -538,15 +539,36 @@ fn delay_accepts_the_gnu_spellings_and_clamps_zero() {
 
 #[test]
 fn malformed_delays_and_operands_are_usage_errors() {
-    for args in [
-        &["-d"][..],
-        &["-d", "abc"][..],
-        &["-d", "1.2.3"][..],
-        &["-x"][..],
-        &["operand"][..],
-    ] {
+    for args in [&["-d", "abc"][..], &["-d", "1.2.3"][..], &["operand"][..]] {
         assert_eq!(parse(args), Err(SysmonError::Usage));
     }
+}
+
+/// GNU 9.4's words for each refusal.
+fn refused(args: &[&str]) -> alloc::string::String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+    assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+    assert_eq!(refused(&["-d"]), "option requires an argument -- 'd'");
+    assert_eq!(
+        refused(&["--delay"]),
+        "option '--delay' requires an argument"
+    );
+    assert_eq!(
+        refused(&["--help=x"]),
+        "option '--help' doesn't allow an argument"
+    );
+}
+
+/// `getopt_long` reads `sysmon --del=5` as `sysmon --delay=5`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(parse(&["--del=5"]), Ok(Command::Run { delay_tenths: 50 }));
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
 /// Every locale's `OPTIONS` section documents exactly the switches this

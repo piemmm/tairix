@@ -33,16 +33,15 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
     use core::cell::RefCell;
 
     use tairix_abi::Errno;
-    use tairix_cat::{parse, run, FileSource, Input, USAGE};
+    use tairix_cat::{parse, run, FileSource, Input};
     use tairix_help::BundleHelp;
     use tairix_procinfo::{NamedSource, OpenError};
-    use tairix_rt::io::{self, write_stderr_line, Read, Stdin, Stdout};
-    use tairix_util::quote::quote_if_needed;
+    use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout};
+    use tairix_util::quote::quote_subject;
 
     /// The production [`FileSource`]: the shared open-by-name view of a
     /// readable source. It adds no authority — every path check stays
@@ -86,14 +85,14 @@ mod program {
 
     /// State why an `info:`/`state:`/`stats:` operand could not be read.
     ///
-    /// The `cat: <errno>` line printed afterwards cannot say which resource was
-    /// refused or which grant it wanted; the shared wording can. A stream or
+    /// The `cat: name: <errno>` line printed afterwards cannot say which grant
+    /// the resource wanted; the shared wording can. A stream or
     /// path refusal needs no extra line — the errno says it.
     fn report_open_refusal(path: &str, err: OpenError) {
         if let OpenError::Value(value) = err {
-            write_stderr_line(&format!(
+            write_stderr_line(format_args!(
                 "cat: {path}: {value}",
-                path = quote_if_needed(path)
+                path = quote_subject(path)
             ));
         }
     }
@@ -113,18 +112,18 @@ mod program {
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` on a read or output failure, `2` on a
-    /// usage error (a malformed argument vector or an unrecognised option).
+    /// Exit codes: `0` on success, `1` on a read or output failure or a
+    /// command line not understood, as GNU's `cat` ends.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("cat") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            write_stderr_line(USAGE);
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("cat", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -136,10 +135,12 @@ mod program {
             &RtStdin,
             &BundleHelp::new("cat"),
             &Stdout,
+            &Stderr,
         ) {
-            Ok(()) => 0,
+            Ok(true) => 0,
+            Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("cat: {err}"));
+                write_stderr_line(format_args!("cat: {err}"));
                 1
             }
         }

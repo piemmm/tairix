@@ -60,8 +60,8 @@ quando lista apenas os seus próprios fluxos.
 ## EXIT STATUS
 
 - `0` — o comando foi concluído.
-- `1` — foi recusado, ou não pôde ser executado.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — foi recusado, ou não pôde ser executado. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

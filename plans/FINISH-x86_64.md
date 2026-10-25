@@ -63,8 +63,8 @@ Missing, in the order the chain needs it:
 
 - **One boot display path, the real one.** The boot's screen is the UEFI
   **GOP** framebuffer, set up by OVMF, handed over by the first-party loader in
-  the multiboot2 framebuffer tag — the same chain a physical UEFI machine runs,
-  and the model Linux's `efifb`/`simpledrm` uses. A discovered display engine
+  the multiboot2 framebuffer tag — the same chain a physical UEFI machine runs.
+  A discovered display engine
   that hosts the console — virtio-gpu in QEMU
   (`plans/FIX-DISPLAY-ACCELERATION.md` C) — takes the screen over from it, as
   the HVS does from the Pi's firmware framebuffer. Rejected alternatives:

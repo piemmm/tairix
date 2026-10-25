@@ -56,8 +56,8 @@ operando.
 - `0` — a conta foi criada.
 - `1` — a base de dados recusou ou falhou a criação (por exemplo uma
   capacidade em falta, um id duplicado ou um grupo desconhecido); a
-  razão é impressa no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+  razão é impressa no erro padrão. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

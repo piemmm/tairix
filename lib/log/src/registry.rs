@@ -113,22 +113,10 @@ pub const DMA_ENGINE: EventRange = EventRange::new(24_200, 24_300);
 pub const CLOCK: EventRange = EventRange::new(24_300, 24_400);
 /// The codec side.
 pub const CODEC: EventRange = EventRange::new(24_400, 24_500);
-/// The `VideoCore` mailbox driver.
-pub const VCMAILBOX: EventRange = EventRange::new(24_500, 24_600);
-/// The Broadcom second-level interrupt controller driver.
-pub const BRCMSTB_L2: EventRange = EventRange::new(24_600, 24_700);
-/// The Raspberry Pi firmware clock driver.
-pub const RPI_FIRMWARE_CLOCK: EventRange = EventRange::new(24_700, 24_800);
 /// The display encoder side.
 pub const ENCODER: EventRange = EventRange::new(24_800, 24_900);
-/// The BCM2711 display engine driver.
-pub const BCM2711_HVS: EventRange = EventRange::new(24_900, 24_910);
-/// The BCM2711 HDMI driver.
-pub const BCM2711_HDMI: EventRange = EventRange::new(24_910, 24_920);
 /// The virtio-gpu display driver.
 pub const VIRTIO_GPU: EventRange = EventRange::new(24_920, 24_930);
-/// The BCM2835-family GPIO controller driver.
-pub const GPIO_BCM2835: EventRange = EventRange::new(24_930, 24_940);
 /// Link-local service discovery.
 pub const DISCOVERYD: EventRange = EventRange::new(25_000, 26_000);
 /// The userland runtime.
@@ -275,15 +263,15 @@ pub const OWNERS: &[Owner] = &[
         crates: &["lib/codec"],
     },
     Owner {
-        range: VCMAILBOX,
+        range: EventRange::new(24_500, 24_600),
         crates: &["drivers/bus/mailbox/vcmailbox"],
     },
     Owner {
-        range: BRCMSTB_L2,
+        range: EventRange::new(24_600, 24_700),
         crates: &["drivers/irq/brcmstb_l2"],
     },
     Owner {
-        range: RPI_FIRMWARE_CLOCK,
+        range: EventRange::new(24_700, 24_800),
         crates: &["drivers/clock/rpi_firmware"],
     },
     Owner {
@@ -291,11 +279,11 @@ pub const OWNERS: &[Owner] = &[
         crates: &["lib/encoder"],
     },
     Owner {
-        range: BCM2711_HVS,
+        range: EventRange::new(24_900, 24_910),
         crates: &["drivers/display/bcm2711_hvs"],
     },
     Owner {
-        range: BCM2711_HDMI,
+        range: EventRange::new(24_910, 24_920),
         crates: &["drivers/display/bcm2711_hdmi"],
     },
     Owner {
@@ -359,8 +347,12 @@ pub const OWNERS: &[Owner] = &[
         crates: &["userland/system/settingsd"],
     },
     Owner {
-        range: GPIO_BCM2835,
+        range: EventRange::new(24_930, 24_940),
         crates: &["drivers/gpio/bcm2835"],
+    },
+    Owner {
+        range: EventRange::new(24_940, 24_950),
+        crates: &["drivers/storage/emmc2"],
     },
     Owner {
         range: THERMALD,

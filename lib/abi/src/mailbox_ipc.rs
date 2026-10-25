@@ -1,10 +1,11 @@
 //! The firmware property-mailbox IPC protocol (`plans/PI.md` P10 D3).
 //!
-//! Under Design D the `VideoCore` mailbox moves out of the kernel into a
-//! user-space **service driver** (`drivers/bus/mailbox/vcmailbox`): it owns
+//! A platform's firmware property mailbox is served from user space by a
+//! **service driver**: it owns
 //! the discovered doorbell MMIO window and the DMA-backed property buffer and
 //! answers *synchronous* property-channel exchanges from other user-space
-//! drivers (e.g. the VL805 USB firmware reload, `drivers/bus/usb/vl805`). A
+//! drivers (a controller whose firmware must be reloaded before bring-up,
+//! say). A
 //! caller reaches the service through the kernel's synchronous call-endpoint
 //! surface ([`SyscallNumber::IPC_CALL`](crate::SyscallNumber::IPC_CALL)) named
 //! at the well-known [`MAILBOX_ENDPOINT`].
@@ -16,7 +17,7 @@
 //! payload.
 //!
 //! The payload both directions carry is a fixed
-//! [`MAILBOX_PROPERTY_WORDS`]-word `VideoCore` property buffer (the exact
+//! [`MAILBOX_PROPERTY_WORDS`]-word firmware property buffer (the exact
 //! buffer the board-neutral [`MailboxChannel`] seam exchanges); the request
 //! is that buffer encoded little-endian, and a
 //! successful reply is a status word of `0` followed by the firmware's
@@ -26,10 +27,10 @@ use crate::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use crate::le::{put_i32, put_u32, read_i32, read_u32};
 use crate::Errno;
 
-/// Well-known kernel-owned call-endpoint id of the user-space `VideoCore`
-/// mailbox service (`plans/PI.md` P10 D3).
+/// Well-known kernel-owned call-endpoint id of the user-space firmware
+/// property-mailbox service (`plans/PI.md` P10 D3).
 ///
-/// The `vcmailbox` service creates one synchronous call endpoint under this
+/// The mailbox service creates one synchronous call endpoint under this
 /// reserved id with [`SyscallNumber::CALL_CREATE`](crate::SyscallNumber::CALL_CREATE);
 /// a driver that needs a firmware property exchange names it as the
 /// `endpoint` argument to [`SyscallNumber::IPC_CALL`](crate::SyscallNumber::IPC_CALL).
@@ -166,7 +167,7 @@ pub struct Served {
 /// Serve one request frame: decode it, let `admit` judge it, run the property
 /// exchange over `channel`, and encode the framed reply into `reply`.
 ///
-/// This is the wire-level server transformation the user-space `vcmailbox`
+/// This is the wire-level server transformation the user-space mailbox
 /// service runs between [`call_recv`](crate::SyscallNumber::CALL_RECV) and
 /// [`call_reply`](crate::SyscallNumber::CALL_REPLY): the hardware mechanism
 /// (the doorbell window + DMA property buffer) lives behind `channel`, and

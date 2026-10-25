@@ -292,7 +292,8 @@ one of the latest document; every Save as keeps its own, its file already
 made. Closing writes them all at once, each where it would have gone. A
 document opened into a window replaces only one with nothing under way. The
 loop takes in every answer and queued event, then paints each window once; a
-keystroke repaints the rows it changed and the status band, never the window,
+keystroke repaints the rows it changed — every row below it where it moved
+bytes or rows — and the status band, never the window,
 and a present the desktop refuses is that window's alone. The process does not
 end under a save still being written, even when the desktop's channel is lost.
 A window's title fits the document's name to the title field

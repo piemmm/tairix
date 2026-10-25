@@ -1,5 +1,7 @@
 //! The parsed shape of a `sysinfo` command line.
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan};
+
 use crate::error::SysinfoError;
 
 /// One thing the `sysinfo` tool can do.
@@ -141,9 +143,11 @@ pub enum Command<'a> {
 /// [`Command`].
 ///
 /// The grammar is a single subcommand optionally followed by flags. It
-/// **fails closed**: an unknown subcommand, an unknown flag, or a stray
-/// trailing argument is a [`SysinfoError::Usage`] rather than a silently
-/// ignored token.
+/// **fails closed** rather than silently ignore a token: an unknown subcommand
+/// or a stray trailing argument is a [`SysinfoError::Usage`], and an option
+/// `getopt` refuses after `processes` or `audio` a [`SysinfoError::Option`].
+/// Those two read their `-a` / `--all` as GNU's `getopt_long` reads it
+/// ([`Scan`]); `audio` takes it at most once.
 ///
 /// Recognised forms:
 ///
@@ -152,6 +156,7 @@ pub enum Command<'a> {
 /// | (none)                | [`Command::Help`]                |
 /// | `help`, `-h`, `-?`, `--help` | [`Command::Help`]         |
 /// | `processes`, `ps`     | [`Command::Processes`] (`--all`/`-a` for the global view) |
+/// | `audio`, `sound`      | [`Command::Audio`] (`--all`/`-a` for every stream) |
 /// | `memory`, `mem`       | [`Command::Memory`]              |
 /// | `hardware`, `hw`      | [`Command::Hardware`]            |
 /// | `identity`, `id`      | [`Command::Identity`]            |
@@ -179,15 +184,16 @@ pub enum Command<'a> {
 ///
 /// # Errors
 ///
-/// [`SysinfoError::Usage`] for any input outside the grammar above, including
-/// `show`/`describe` with no operand or with more than one.
+/// * [`SysinfoError::Option`] — an option `getopt` refuses, in its words.
+/// * [`SysinfoError::Usage`] — any other input outside the grammar above,
+///   including `show`/`describe` with no operand or with more than one.
 pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, SysinfoError> {
     let Some((&subcommand, rest)) = args.split_first() else {
         return Ok(Command::Help);
     };
     match subcommand {
         "help" | "-h" | "-?" | "--help" => no_more(rest).map(|()| Command::Help),
-        "processes" | "ps" => parse_processes(rest),
+        "processes" | "ps" => all_switches(rest).map(|n| Command::Processes { all: n > 0 }),
         "memory" | "mem" => no_more(rest).map(|()| Command::Memory),
         "hardware" | "hw" => no_more(rest).map(|()| Command::Hardware),
         "identity" | "id" => no_more(rest).map(|()| Command::Identity),
@@ -204,7 +210,11 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, SysinfoError> {
         "storage" | "io" => no_more(rest).map(|()| Command::Storage),
         "raid" | "arrays" => no_more(rest).map(|()| Command::Raid),
         "dma" | "iommu" => no_more(rest).map(|()| Command::Dma),
-        "audio" | "sound" => parse_audio(rest),
+        "audio" | "sound" => match all_switches(rest)? {
+            0 => Ok(Command::Audio { all: false }),
+            1 => Ok(Command::Audio { all: true }),
+            _ => Err(SysinfoError::Usage),
+        },
         "show" => one_operand(rest).map(|reference| Command::Show { reference }),
         "describe" => one_operand(rest).map(|reference| Command::Describe { reference }),
         _ => Err(SysinfoError::Usage),
@@ -222,27 +232,27 @@ fn one_operand<'a>(args: &[&'a str]) -> Result<&'a str, SysinfoError> {
     }
 }
 
-/// Parse the flags accepted by the `processes` subcommand.
-///
-/// The returned command borrows nothing, so its lifetime is free to be the
-/// caller's.
-fn parse_processes(args: &[&str]) -> Result<Command<'static>, SysinfoError> {
-    let mut all = false;
-    for &arg in args {
-        match arg {
-            "--all" | "-a" => all = true,
-            _ => return Err(SysinfoError::Usage),
-        }
-    }
-    Ok(Command::Processes { all })
+/// What `processes`'s and `audio`'s one option means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    All,
 }
 
-fn parse_audio(args: &[&str]) -> Result<Command<'static>, SysinfoError> {
-    match args {
-        [] => Ok(Command::Audio { all: false }),
-        ["--all" | "-a"] => Ok(Command::Audio { all: true }),
-        _ => Err(SysinfoError::Usage),
+/// `processes`'s and `audio`'s one option.
+const ALL_OPTIONS: &[Opt<Flag>] = &[Opt::flag('a', &["all"], Flag::All)];
+
+/// How many times `args` gives `-a` / `--all`, read as GNU's `getopt_long`
+/// reads it ([`Scan`]). Fails closed on an operand: neither subcommand takes
+/// one.
+fn all_switches(args: &[&str]) -> Result<usize, SysinfoError> {
+    let mut given = 0;
+    for arg in Scan::new(ALL_OPTIONS, args, Order::Permute) {
+        match arg.map_err(SysinfoError::Option)? {
+            Arg::Opt(Flag::All, _) => given += 1,
+            Arg::Operand(_) => return Err(SysinfoError::Usage),
+        }
     }
+    Ok(given)
 }
 
 /// Reject any trailing argument for a subcommand that takes none.
@@ -256,6 +266,8 @@ fn no_more(args: &[&str]) -> Result<(), SysinfoError> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
+
     use super::{parse, Command};
     use crate::error::SysinfoError;
 
@@ -352,9 +364,28 @@ mod tests {
         assert_eq!(parse(&["frobnicate"]), Err(SysinfoError::Usage));
     }
 
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_flag_is_usage() {
-        assert_eq!(parse(&["ps", "--everything"]), Err(SysinfoError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(
+            refused(&["ps", "--everything"]),
+            "unrecognized option '--everything'"
+        );
+        assert_eq!(refused(&["ps", "-x"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["audio", "--all=yes"]),
+            "option '--all' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["ps", "--al"]), Ok(Command::Processes { all: true }));
+        assert_eq!(parse(&["sound", "--a"]), Ok(Command::Audio { all: true }));
     }
 
     #[test]

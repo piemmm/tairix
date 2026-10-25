@@ -27,6 +27,15 @@
 //! [`NetChannelRequest::Detach`](tairix_abi::driver::net_channel::NetChannelRequest::Detach)
 //! returns the server to detached.
 //!
+//! # Who may call
+//!
+//! The channel's kernel gate, `CAP_NET_RAW`, is held by the tools that open
+//! echo sockets as well as by the network stack, so [`NetChannelServer::admit`]
+//! answers the stack alone: a caller whose attested origin is not the stack's
+//! service account is refused, and once a stack has attached so is any other
+//! instance, save to ask the facts or to attach in its place as a restarted
+//! stack does.
+//!
 //! # Fail closed
 //!
 //! Every reply is a fully-encoded `netchan-v1` frame. A service call before
@@ -37,13 +46,14 @@
 
 use tairix_abi::driver::net::{LinkState, Net};
 use tairix_abi::driver::net_channel::{
-    encode_facts_reply, encode_service_reply, AttachParams, McastGroups, RxFilterPolicy,
+    self, encode_facts_reply, encode_service_reply, AttachParams, McastGroups, RxFilterPolicy,
     NET_CHANNEL_FACTS_REPLY_LEN, NET_CHANNEL_SERVICE_REPLY_LEN,
 };
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
+use tairix_abi::net::from_network_stack;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use tairix_abi::Errno;
+use tairix_abi::{Errno, Origin, ProcId};
 use tairix_net::rxfilter::RxClassifier;
 
 /// What a driver's drain loop should do next, given the service report it
@@ -285,6 +295,9 @@ struct Attached {
     /// Numeric IPC endpoint the driver `ipc_send`s a receive-frames notify
     /// to (the stack bound and owns it).
     notify_endpoint: u64,
+    /// The stack instance that attached, the one whose calls drive the
+    /// channel.
+    stack: ProcId,
 }
 
 /// The driver-side handler of one NIC device channel.
@@ -367,9 +380,11 @@ impl<N: Net> NetChannelServer<N> {
     }
 
     /// Answer [`NetChannelRequest::Attach`](tairix_abi::driver::net_channel::NetChannelRequest::Attach):
-    /// validate the offered geometry against the device and, on success,
-    /// move to attached. Returns the status frame; on refusal the server is
-    /// left unchanged (fail closed — a rejected attach never half-binds).
+    /// from `stack`: validate the offered geometry against the device and, on
+    /// success, move to attached by it. Returns the status frame. An attach
+    /// replaces any before it, whose region the process has already given
+    /// back, so a refused one leaves the server detached (fail closed — a
+    /// rejected attach never half-binds).
     ///
     /// Both directions' slots must be able to carry the device's largest
     /// frame (its MTU plus the Ethernet header), and a transmit slot must
@@ -378,12 +393,13 @@ impl<N: Net> NetChannelServer<N> {
     /// needs, or a super-frame slot larger than the driver can stage, is
     /// refused rather than silently dropping oversize frames later.
     #[must_use]
-    pub fn attach(&mut self, params: AttachParams) -> [u8; STATUS_REPLY_LEN] {
-        let result = self.try_attach(params);
+    pub fn attach(&mut self, params: AttachParams, stack: ProcId) -> [u8; STATUS_REPLY_LEN] {
+        let result = self.try_attach(params, stack);
         encode_status_reply(result)
     }
 
-    fn try_attach(&mut self, params: AttachParams) -> Result<(), Errno> {
+    fn try_attach(&mut self, params: AttachParams, stack: ProcId) -> Result<(), Errno> {
+        self.attached = None;
         let facts = self
             .net
             .device_facts()
@@ -404,8 +420,36 @@ impl<N: Net> NetChannelServer<N> {
             geometry: params.geometry,
             class: params.class,
             notify_endpoint: params.notify_endpoint,
+            stack,
         });
         Ok(())
+    }
+
+    /// Whether `caller` may make `request`: the network stack alone, and once
+    /// it has attached only the instance that attached, save to ask the
+    /// facts or to attach in its place, as a restarted stack does.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for any other caller.
+    pub fn admit(
+        &self,
+        request: &net_channel::NetChannelRequest,
+        caller: &Origin,
+    ) -> Result<(), Errno> {
+        if !from_network_stack(caller) {
+            return Err(Errno::PermissionDenied);
+        }
+        let opening = matches!(
+            request,
+            net_channel::NetChannelRequest::Facts | net_channel::NetChannelRequest::Attach(_)
+        );
+        match &self.attached {
+            Some(attached) if !opening && attached.stack != caller.proc_id() => {
+                Err(Errno::PermissionDenied)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Answer [`NetChannelRequest::Service`](tairix_abi::driver::net_channel::NetChannelRequest::Service):

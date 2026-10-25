@@ -689,7 +689,7 @@ not retried forever. `interfaces::Interfaces::recover` drives each synchronous
 reset attempt, the serve loop arming its wait from `wait_timeout` and retrying
 on the grace one-shot, since a faulted controller raises no further interrupt
 (xHCI §4.24.1). A controller reset does not remove the controller's children —
-the Linux USB core's reset-and-verify model (`usb_reset_and_verify_device`):
+each is kept and re-verified:
 after a successful reset each node is matched by identity to the index now
 serving its device (`Interfaces::reconcile` over `UsbDevice::device_identity`,
 bus position plus descriptor identity and serial number), so a device that came
@@ -1135,8 +1135,8 @@ Design: `docs/src/lib/raid.md`.
 **Landed (the composed-device dispatch — `RaidArray`):** once an array is
 *discovered* and its `RaidLevel` resolved, a serve process presents exactly one
 logical `Block` device regardless of level. That single composed-device
-abstraction is the shared `raid::RaidArray` enum (§27, modelled on Linux md's
-per-personality dispatch): an allocation-free dispatch layer over the four
+abstraction is the shared `raid::RaidArray` enum (§27, one dispatch arm per
+level): an allocation-free dispatch layer over the four
 engines that forwards the whole `Block` I/O path *and* the level-agnostic
 surface — observation (`level`/`health`/`member_count`/`array_geometry`/
 `member_state`/`needs_resync`/`scrubbing`/`scrub_cursor`), self-maintenance
@@ -1387,8 +1387,8 @@ engine, dispatch, scheduler, and record (§2.2) and follows the same staging.
   `MemberState`/`MemberRole`/`ArrayHealth` vocabulary and `member_faulting`
   classification. Each stripe reserves *two* rotating chunks: a P (XOR) syndrome
   and a Q (Reed-Solomon `Q = Σ gᵏ·Dₖ`) syndrome over GF(2^8) — the first-party
-  `raid::gf256` field (generator `{02}`, polynomial `0x11d`, the Linux-RAID6
-  field), with `mul`/`inv`/`gpow` proven host-side (identity/commutativity/
+  `raid::gf256` field (generator `{02}`, polynomial `0x11d`, the RAID-6 field
+  of H. P. Anvin's *The mathematics of RAID-6*), with `mul`/`inv`/`gpow` proven host-side (identity/commutativity/
   associativity/distributivity, every non-zero inverse, and the generator's
   full period 255). Its complete behaviour is proven host-side over a
   fault-injecting `Block` double: a single lost chunk is reconstructed from P and
@@ -1552,7 +1552,7 @@ came only from the single node it was matched to:
 3. **The composer is a singleton anchored to a durable node.** The kernel's
    arch-neutral hardware-tree bootstrap publishes one synthetic
    `tairix,virtual-bus` node under the root — the anchor every *virtual* block
-   composition needs (Linux's `virtual` bus, not a device list, so §18.5 is
+   composition needs (a structural node, not a device list, so §18.5 is
    untouched). `devmgr` matches the RAID driver to it and loads exactly **one**
    composer: no leader election, no well-known-id race, and array nodes hang
    off a parent whose lifetime is the subsystem's, not any member's.
@@ -1831,18 +1831,12 @@ the critical path and land first.
   **Defects fixed en route (§2.18).** Three, each a consequence of the composer
   being the first *long-lived* consumer of machinery previously driven only by
   run-to-completion programs:
-  - **`RtBlkCall` minted a wait-set it could never free.** A wait-set is
-    reclaimed only when its owning process exits, which made a self-minted set
-    invisible in volmgr (one transport, then exit) and an unbounded kernel-memory
-    leak in the composer, which opens a member transport on *every* assembly
-    attempt — so an array that can never be assembled would leak a set per
-    backoff-timed retry, indefinitely (§4, §26.3, §24.1). The transport now takes
-    the wait-set from its caller (`RtBlkCall::new(endpoint, waitset)`) and treats
-    an already-present `CallReply` membership as success, so one set carries every
-    member of a multi-device consumer; volmgr mints its one set at startup. This
-    is the complete shape of the primitive (§27) rather than a new syscall: a
-    process can create a wait-set but not destroy one, so the object's lifetime
-    must belong to the process, not to a transient transport.
+  - **`RtBlkCall` owns its wait-set.** Each transport waits on a set of its
+    own, holding only its endpoint's `CallReply` member and closed when the
+    transport drops, so a composer reconnecting a member on every assembly
+    attempt holds a set per open member and no more, and a removed member's
+    endpoint, whose member the kernel keeps ready, wakes only its own
+    transport.
   - **A failed publish stranded its endpoint and window.** Binding an array's
     endpoint, creating its window, and emitting its node can each fail, and
     neither a bound endpoint nor a created region can be handed back to the

@@ -10,7 +10,8 @@
 //! * `open` never panics for any device contents — it returns `Ok` for
 //!   a genuinely valid volume and `Err` (fail closed) for everything
 //!   else — and a volume that mounts is walked (directories, lookups,
-//!   attributes, stats) without panicking either.
+//!   attributes, stats) and has a file driven through a pin without
+//!   panicking either.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws
 //! pseudo-random images, and a structured sweep flips bytes of real
@@ -25,12 +26,17 @@
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeKind,
+    NodeSecurity,
 };
 use tairix_abi::DriverError;
 use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
 use tairix_fuzzseed::Prng;
 
 const BLOCK_SIZE: u32 = 512;
+
+// What the harness's creations ask for, which ADFS has nowhere to keep.
+const FILE_RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
+const DIR_RECORD: NodeSecurity = NodeSecurity::new(0o755, 0, 0);
 
 /// The smallest volume of each map flavour keeps the sweep affordable.
 const BASES: [(AdfsVariant, usize); 3] = [
@@ -124,15 +130,35 @@ fn walk(fs: &mut Adfs<MemBlock>) {
             entries.push((*entry, name.to_vec()));
             DirVisit::Take
         });
+        let _ = fs.parent(dir);
         for (entry, name) in entries {
             let _ = fs.lookup(dir, &name);
             let _ = fs.node_info(entry.node);
+            let _ = fs.parent(entry.node);
             let _ = fs.get_attr(entry.node, b"acorn.attr", &mut [0u8; 16]);
             if matches!(entry.info.kind, NodeKind::Directory) && depth < 8 {
                 stack.push((entry.node, depth + 1));
             }
         }
     }
+}
+
+/// Create a file and drive it through a pin, as the kernel holds an open
+/// file across its removal: pin, write, read back, remove, unpin.
+fn pin_round_trip(fs: &mut Adfs<MemBlock>) {
+    let root = fs.root();
+    let Ok(file) = fs.create(root, b"Pinned", NodeKind::RegularFile, &FILE_RECORD) else {
+        return;
+    };
+    let Ok(pinned) = fs.pin(file) else {
+        return;
+    };
+    if fs.write_all(pinned, 0, b"pinned body").is_ok() {
+        let _ = fs.read_at(pinned, 0, &mut [0u8; 11]);
+    }
+    let _ = fs.remove(root, b"Pinned");
+    let _ = fs.node_info(pinned);
+    let _ = fs.unpin(pinned);
 }
 
 /// The single invariant: opening an arbitrary image returns a
@@ -144,6 +170,7 @@ fn exercise(image: &[u8]) {
     if let Ok(mut fs) = Adfs::open(dev) {
         walk(&mut fs);
         let _ = fs.stats();
+        pin_round_trip(&mut fs);
     }
 }
 
@@ -159,13 +186,14 @@ fn formatted_image(variant: AdfsVariant, bytes: usize) -> Vec<u8> {
     )
     .expect("format a blank fuzz device");
     let root = fs.root();
-    fs.create(root, b"Sub", NodeKind::Directory)
+    fs.create(root, b"Sub", NodeKind::Directory, &DIR_RECORD)
         .expect("create dir");
     let sub = fs.lookup(root, b"Sub").expect("dir resolves");
     for (dir, name) in [(root, &b"one"[..]), (root, b"two"), (sub, b"three")] {
-        fs.create(dir, name, NodeKind::RegularFile)
+        let file = fs
+            .create(dir, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create file");
-        fs.write_at(dir, name, 0, &[0xA5u8; 700]).expect("write");
+        fs.write_at(file, 0, &[0xA5u8; 700]).expect("write");
     }
     let node = fs.lookup(root, b"one").expect("file resolves");
     fs.set_attr(node, b"acorn.filetype", b"fff")

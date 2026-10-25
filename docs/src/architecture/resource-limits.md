@@ -42,7 +42,7 @@ ABI discipline as the syscall table (`AGENTS.md` §9): versioned, hashed, and
 frozen from the first release.
 
 - **`LimitKind`** is the closed, versioned set of resources a limit can
-  govern. Today: `AddressSpaceBytes` (the `mem_map` capacity), `OpenStreams`
+  govern. Today: `AddressSpaceBytes` (the `mem_map` capacity), `OpenFiles`
   (the descriptor-table capacity), `Processes` (the `spawn` fan-out),
   `StackBytes` (the per-task stack), `Threads` (the threads one process may
   hold — see the [threads page](./threads.md)), `PinnedMemoryBytes` (the bytes a
@@ -105,6 +105,7 @@ hardware-sized bound from the installed RAM, soft and hard:
 | Kind | Default |
 |---|---|
 | `PinnedMemoryBytes` | RAM / 8 |
+| `OpenFiles` | one descriptor per 64 KiB, at least 1024 |
 | `FileLocks` | one record per 64 KiB, at least 256 |
 | `DirWatches` | one watch per 2 MiB, at least 64 |
 | `IpcQueueBytes` | RAM / 16, at least 16 MiB |
@@ -190,6 +191,15 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   `sysinfo limits` query reports for `pinned-memory-bytes` is the whole
   footprint while pinned and zero otherwise — the budget is only consumed
   by a live pin.
+- **`OpenFiles` on every descriptor a process gains.** `fs_open`,
+  `resource_open`, `fd_redeem` and `fd_redeem_from`, `pipe_create` and
+  `pty_create` all allocate from one table, and an allocation that would carry
+  it past the soft bound is refused with `LimitExceeded` before anything is
+  recorded: a pair needs room for both ends, and a refused redemption stays
+  pending. A descriptor pins its node and holds its open file description in
+  the kernel heap, which is what the bound protects. The standard streams a
+  spawner wires into a child count but are never refused. The live usage is
+  the number of descriptors the table holds.
 - **`DirWatches` on `fs_watch`.** Each armed watch is charged to the arming
   process and released when its open file description closes; a watch past
   the soft bound is refused with `LimitExceeded` and arms nothing. A watch's
@@ -212,11 +222,11 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
 The live usage `sysinfo limits` reports for each charged kind is what the
 process holds now.
 
-The remaining `LimitKind`s (`OpenStreams`, `Processes`) carry their
-soft/hard bounds and inherit correctly, but their *consuming-path*
-enforcement is not yet wired; until it is, those ceilings are observed and
-settable but not yet acted on at the descriptor/spawn path, and their
-reported usage stays an honest zero (no live accounter yet).
+The remaining `LimitKind`, `Processes`, carries its soft/hard bounds and
+inherits correctly, but its *consuming-path* enforcement is not yet wired;
+until it is, that ceiling is observed and settable but not yet acted on at
+the spawn path, and its reported usage stays an honest zero (no live
+accounter yet).
 
 `KernelMemoryStats::user_resident_bytes` is **not** one of those honest
 zeroes any more: it is the live sum of the mapped pages of every registered
@@ -256,7 +266,8 @@ ulimit [-a] [-H | -S] [<resource> [<value>]]
   decimal byte/count or the word `unlimited` (`RLIMIT_INFINITY`).
 
 `<resource>` is one of the canonical `LimitKind` names
-(`LimitKind::name`): `address-space-bytes`, `open-streams`, `processes`,
+(`LimitKind::name`), and `-n` stands for `open-files`, as bash spells it:
+`address-space-bytes`, `open-files`, `processes`,
 `stack-bytes`, `pinned-memory-bytes`, `threads`, `file-locks`,
 `dir-watches`, `ipc-queue-bytes`, `wait-sets`, `wait-set-members`. An unknown
 resource, an unknown flag, a malformed value, or a

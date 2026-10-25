@@ -112,8 +112,7 @@ Sans requête, l'aide courte est affichée.
 
 - `0` — la requête a été répondue et affichée.
 - `1` — le service a refusé ou échoué, ou le résultat n'a pas pu être
-  délivré.
-- `2` — la ligne de commande n'a pas été comprise.
+  délivré. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

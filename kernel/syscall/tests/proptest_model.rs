@@ -33,9 +33,9 @@ use core::cell::RefCell;
 use proptest::prelude::*;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange, OpenFlags,
-    PowerAction, RandomFlags, RealpathMode, SeekRegion, SyscallNumber, SyscallSpec, UnlinkFlags,
-    SYSCALLS, SYSCALL_MAX_ARGS,
+    AbiType, AtFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
+    OpenFlags, PowerAction, RandomFlags, RealpathMode, SeekRegion, SyscallNumber, SyscallSpec,
+    UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
@@ -832,9 +832,11 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_open(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _flags: OpenFlags,
+        _mode: u32,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -922,16 +924,29 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn fs_mkdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_mkdir(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _mode: u32,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_umask(&self, _c: &CallerContext<'_>, _mask: Option<u32>) -> SyscallResult {
         self.bump();
         Ok(0)
     }
     fn fs_unlink(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _flags: UnlinkFlags,
+        _expect: u64,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -939,11 +954,10 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_rename(
         &self,
         _c: &CallerContext<'_>,
-        _src: u64,
-        _src_len: usize,
-        _dst: u64,
-        _dst_len: usize,
+        _from: u64,
+        _to: u64,
         _flags: tairix_abi::RenameFlags,
+        _expect: u64,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -953,6 +967,7 @@ impl SyscallHandlers for CountingHandlers {
         _c: &CallerContext<'_>,
         _target: u64,
         _target_len: usize,
+        _dirfd: u32,
         _link: u64,
         _link_len: usize,
     ) -> SyscallResult {
@@ -962,6 +977,7 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_readlink(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _out: u64,
@@ -974,9 +990,7 @@ impl SyscallHandlers for CountingHandlers {
         &self,
         _c: &CallerContext<'_>,
         _existing: u64,
-        _existing_len: usize,
-        _link: u64,
-        _link_len: usize,
+        _new: u64,
         _flags: LinkFlags,
     ) -> SyscallResult {
         self.bump();
@@ -1009,6 +1023,7 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_realpath(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _out: u64,
@@ -1021,9 +1036,11 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_set_mode(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _mode: u32,
+        _flags: AtFlags,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -1031,10 +1048,24 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_set_owner(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _uid: u32,
         _gid: u32,
+        _flags: AtFlags,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_access(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _want: tairix_abi::Access,
+        _flags: AtFlags,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -1042,8 +1073,7 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_attr_get(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
         _value_out: u64,
@@ -1055,8 +1085,7 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_attr_set(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
         _value: u64,
@@ -1068,8 +1097,7 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_attr_list(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _index: u64,
         _key_out: u64,
         _key_out_len: usize,
@@ -1080,8 +1108,7 @@ impl SyscallHandlers for CountingHandlers {
     fn fs_attr_remove(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
     ) -> SyscallResult {
@@ -1148,7 +1175,14 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_chdir(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _flags: AtFlags,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }
@@ -1234,10 +1268,18 @@ fn populate_valid_args(spec: &SyscallSpec, args: &mut [u64; SYSCALL_MAX_ARGS]) {
         *slot = match spec.args[i] {
             AbiType::U32 | AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint => 1,
             AbiType::Cap => u64::from(CapabilityId::FS_MOUNT.as_u16()),
-            AbiType::UserPtr => 0x1000,
+            AbiType::UserPtr | AbiType::UserPtrOrNull => 0x1000,
             AbiType::Len => 64,
             AbiType::I32 | AbiType::I64 | AbiType::Unit | AbiType::Errno => 0,
         };
+    }
+    // `1` in the flags slot is a read, and an open that does not create names
+    // no mode; flags asking no expectation name no expectation; and a working
+    // directory is never reached as a link kept.
+    match spec.number {
+        SyscallNumber::FS_OPEN | SyscallNumber::FS_UNLINK => args[4] = 0,
+        SyscallNumber::FS_RENAME | SyscallNumber::FS_CHDIR => args[3] = 0,
+        _ => {}
     }
 }
 

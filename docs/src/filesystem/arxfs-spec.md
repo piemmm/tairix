@@ -1129,14 +1129,27 @@ resumable is on-disk state:
   read-only mount leaves the set alone.
 - A node the set names has no names left (`nlink == 0`), and no operation may
   give it one: a stale handle asking to hard-link it is refused, because a live
-  name over blocks the reclaim is about to free would lose data.
+  name over blocks the reclaim is about to free would lose data. Every other
+  call through a stale handle answers `NotFound`, as for a freed node — a byte
+  write included, since no name could ever read back what it stored — unless
+  the kernel holds the node.
+- **Holds defer the reclaim.** The kernel pins the nodes its open files name. A
+  held node that loses its last name is published in the set like any other,
+  but the drain passes it over: it keeps its data, takes byte reads and writes,
+  truncates and changes to its record and attributes, and its last unpin
+  reclaims it in the same bounded steps. No hold outlives the mount, so a crash
+  leaves only the set, and the next writable mount finishes the delete. A
+  removed directory a hold keeps lists nothing, answers `NotFound` to lookup and
+  to `parent`, and takes no entry.
 - `truncate` needs no set entry, because it frees **downward** and publishes the
   shorter size at each boundary it reaches. Every intermediate state is a
   shorter version of the same file, never one of the original length with holes
   where its data had been, so an interrupted truncate needs no resumption to be
   consistent — only to be finished, which the caller may simply ask for again.
 - `check` reclaims an orphan the same way, by naming it in the set, for the same
-  reason: an orphan may be arbitrarily large.
+  reason: an orphan may be arbitrarily large. A node the kernel holds is no
+  orphan, and the entries of a directory the set names — an orphan, or a
+  removed one the kernel holds — name nothing when `check` counts names.
 
 The set needs no incompatible-feature bit. A reader that did not understand it
 would leave the inodes it names unreachable and allocated — recoverable by
@@ -1231,6 +1244,10 @@ Minimum acceptance tests:
   last unlink frees the storage and no earlier one does, a rename that replaces
   a destination decrements the replaced inode, and the `hardlinks` feature is
   declared on first use and rolled back with a failed creation;
+- a held node keeps its data past its last name and is reclaimed by its last
+  unpin, a removed held directory takes no entries, the drain and `check` pass
+  held nodes over, a held unlinked node a crash leaves is drained by the next
+  mount, and a node neither named nor held answers `NotFound` to every call;
 - extended attributes round-trip across every namespace and a remount, keys are
   case-sensitive, an unknown namespace and an oversize key/value/count are
   refused, a set that overflows its block fails closed leaving the prior set

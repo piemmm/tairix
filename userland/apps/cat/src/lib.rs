@@ -30,10 +30,11 @@
 //!
 //! # Fail closed
 //!
-//! An unknown option is a [`CatError::Usage`] that reads nothing; a source
-//! that cannot be read surfaces the underlying [`Errno`](tairix_abi::Errno)
-//! as [`CatError::Read`] and stops; a failed terminal write is
-//! [`CatError::Output`]. There is no partial-guess path and no panic.
+//! An option `getopt` refuses is a [`CatError::Option`] that reads
+//! nothing; a source that cannot be read is reported as [`CatError::Read`]
+//! — `cat: name: reason` — and the next is still read; a failed terminal
+//! write is [`CatError::Output`]. There is no partial-guess path and no
+//! panic.
 //!
 //! # Module map
 //!

@@ -76,7 +76,7 @@ un record `summary` al termine.
 
 - `0` — ogni file è stato riprodotto, o la riproduzione è stata fermata senza esclusioni.
 - `1` — un file non ha potuto essere riprodotto, o la riproduzione non ha potuto continuare.
-- `2` — la riga di comando non è stata compresa.
+  Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

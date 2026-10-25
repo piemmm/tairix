@@ -87,8 +87,7 @@ principale.
 - `0` — la richiesta è riuscita (o l'aiuto è stato scritto).
 - `1` — una capacità è stata negata, un nome non si è risolto, il
   compositore ha rifiutato la richiesta, o l'output non ha potuto essere
-  scritto.
-- `2` — la riga di comando non è stata compresa.
+  scritto. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

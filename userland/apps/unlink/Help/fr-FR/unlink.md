@@ -42,8 +42,8 @@ supprimable.
 
 - `0` — le nom a été supprimé (ou l'aide courte a été écrite).
 - `1` — le système de fichiers a refusé la suppression, ou la sortie a
-  échoué ; la raison est affichée sur la sortie d'erreur standard.
-- `2` — la ligne de commande n'a pas été comprise.
+  échoué ; la raison est affichée sur la sortie d'erreur standard. Une
+  ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

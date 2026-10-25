@@ -24,7 +24,7 @@ implementing the same [`SchedulerPolicy`] contract so the rest of the
 kernel is agnostic to which one an image links:
 
 * **CFQ** (`kernel/sched/cfq`, feature `scheduler-cfq`) — a
-  *non-tickless*, Linux-CFS-like Completely-Fair-Queuing policy (see
+  *non-tickless* Completely-Fair-Queuing policy (see
   [CFQ policy](#cfq-policy-scheduler-cfq)).
 * **EEVDF** (`kernel/sched/eevdf`, feature `scheduler-eevdf`) — the
   **default**. A fully *tickless* Earliest-Eligible-Virtual-Deadline-First
@@ -41,11 +41,11 @@ because it lives in the contract, not the policy.
 
 ## CFQ policy (`scheduler-cfq`)
 
-**CFQ — Completely Fair Queuing** is modelled on
-Linux's Completely Fair Scheduler (Molnar, 2007). Each task carries a
-virtual runtime `vruntime`; on each CPU the ready task with the
-*smallest* `vruntime` is dispatched next — the leftmost node of Linux
-CFS's red-black tree, here the top of a min-heap keyed by
+**CFQ — Completely Fair Queuing** orders tasks by virtual time, in the
+fair-queuing lineage (Demers, Keshav & Shenker, 1989; Waldspurger & Weihl's
+stride scheduling, 1995). Each task carries a virtual runtime `vruntime`; on
+each CPU the ready task with the *smallest* `vruntime` is dispatched next —
+the top of a min-heap keyed by
 `(vruntime, seq, TaskId)` (`O(log n)` pick and insert; nothing is removed
 from the middle, since a stale entry is discarded when picked, and a push
 reserves its room fallibly). A dispatch charges the running task
@@ -55,7 +55,7 @@ briefly and parks while a CPU-bound task consumes a full quantum; a
 heavier-weighted task's `vruntime` rises more slowly for the same elapsed
 service. The result is proportional CPU-time share, with no band ever
 starved (every `vruntime` advances monotonically). The three `Priority`
-bands map to a 4:2:1 weight ratio (the CFS "nice level" analog). The
+bands map to a 4:2:1 weight ratio (the analogue of POSIX `nice` levels). The
 weights, `SCALE`, and the charge are the shared proportional-share
 accounting in `kernel/sched/api`'s `share` module, which CFQ and EEVDF both
 use. `SCALE` is 4, the least common multiple of the weights: virtual
@@ -63,7 +63,7 @@ runtime counts raw port ticks, and a multi-gigahertz counter scaled any
 further would saturate `u64` within hours of CPU time. A per-CPU
 monotonic `min_vruntime` floor places a joining or migrated task one
 `SLEEPER_CREDIT` (one tick of service at the lightest weight) *ahead* of
-the front of the CPU's timeline — the CFS `place_entity` sleeper credit. The credit is what
+the front of the CPU's timeline. The credit is what
 makes a woken task sort **strictly** before the population that has been
 running: placing it merely level with the leftmost ready entry leaves the
 `(vruntime, seq, TaskId)` tie-break to settle the pick, which hands the CPU to
@@ -88,13 +88,13 @@ one-shot only when a CPU is *contended* and disarm for a sole runnable
 task (so a quiet core takes no timer interrupts), CFQ keeps a
 fixed-frequency periodic quantum tick armed for *any* running task —
 including a lone CPU-bound one — so the timer interrupt fires at a steady
-`HZ` cadence exactly like Linux's scheduler tick. Concretely
+`HZ` cadence, the classic periodic tick. Concretely
 `Scheduler::dispatch` calls [`SchedulerArch::set_preemption`]`(true)`
 unconditionally while a task runs; only a genuinely idle CPU (nothing
 runnable at all) disarms, in `Scheduler::step`.
 
-A fired tick does not blindly context-switch, though. As in Linux
-(`check_preempt_tick`), the kernel's return-to-user preempt point
+A fired tick does not blindly context-switch, though. The kernel's
+return-to-user preempt point
 (`kernel/core`'s `preempt_current`) reschedules only when the switch would
 change what runs — there is another runnable task on the CPU, or pending
 interrupt-context work (a device-IRQ deferred wake, an elapsed timed
@@ -616,7 +616,7 @@ that *owes* progress is judged — fail closed). See `plans/WATCHDOG.md`.
 
 - A **soft lockup** is a CPU that keeps taking interrupts but stops returning
   to the scheduler. The dispatch loop stamps a **progress** heartbeat once per
-  iteration (`watchdog::note_progress`, the tickless analogue of a Linux
+  iteration (`watchdog::note_progress`, the tickless analogue of a per-CPU
   watchdog thread being scheduled); the armed preemption tick samples it
   (`watchdog::check_stall`) — it only fires on a *contended* CPU, so a lone,
   preemptible task is never falsely flagged — and a heartbeat older than

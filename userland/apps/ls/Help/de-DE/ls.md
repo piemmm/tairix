@@ -51,6 +51,18 @@ zeigende Verknüpfung wird daher normal aufgelistet; nur eine auflösende
 Haltung (`-L`, oder `-H` für einen Operanden) meldet ein unerreichbares
 Ziel.
 
+Namen werden angeführt, damit störende Zeichen sichtbar sind und sich
+gefahrlos wieder in eine Shell einfügen lassen: am Terminal ist der
+Standard `shell-escape` (ein Name mit Leer- oder Metazeichen wird
+angeführt, Steuerzeichen erscheinen als `$'…'`-Escapes), sonst `literal`
+(Namen unverändert). `-N`, `-Q`, `-b` und `--quoting-style` wählen den
+Stil, und `-q` zeigt Steuerzeichen als `?`. Unter `-F` und `--file-type`
+wird ein Name, der `*`, `=`, `>`, `@` oder `|` enthält, von den
+Shell-Stilen angeführt, und `-Q` und `-b` maskieren dieses Zeichen
+darin, sodass er nicht als Kennzeichnungssuffix durchgehen kann. GNUs
+`-F` lässt einen `*` unmarkiert, weshalb dort ein darauf endender Name
+wie eine ausführbare Datei wirkt.
+
 ## OPTIONS
 
 - `-t` — nach dem angezeigten Zeitstempel sortieren, den neuesten
@@ -197,10 +209,13 @@ Ziel.
 ## EXIT STATUS
 
 - `0` — jeder Operand wurde aufgelistet.
-- `1` — ein Operand konnte nicht untersucht oder ein Verzeichnis
-  nicht gelesen werden, oder die Ausgabe konnte nicht zugestellt
+- `1` — ein kleines Problem: ein Eintrag oder ein Unterverzeichnis
+  innerhalb einer Auflistung konnte nicht untersucht oder gelesen
   werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `2` — ein ernstes Problem: die Befehlszeile wurde nicht verstanden,
+  ein Operand konnte nicht untersucht oder gelesen werden, `-R`
+  erreichte ein Verzeichnis über eine Verknüpfung erneut, der Speicher
+  ging aus, oder die Ausgabe konnte nicht zugestellt werden.
 
 ## ENVIRONMENT
 

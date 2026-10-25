@@ -32,6 +32,13 @@ Quando del contenuto iniziale non viene mostrato, un record informativo
 l'output né lo stato di uscita. Un file non leggibile è segnalato sullo
 standard error e l'esecuzione continua con il file successivo.
 
+Su un terminale, ogni nome che compare nell'output viene messo tra
+virgolette dove una shell ne avrebbe bisogno, e ogni carattere di
+controllo o altro carattere invisibile al suo interno viene scritto in
+forma di escape, così che un nome non possa comandare né riordinare lo
+schermo; GNU lo mostra invariato. Una pipe o un file riceve il nome byte
+per byte.
+
 ## OPTIONS
 
 - `-c, --bytes <num>` — stampare gli ultimi `num` byte di ogni file; con
@@ -64,8 +71,8 @@ standard error e l'esecuzione continua con il file successivo.
 
 - `0` — ogni file è stato stampato (o l'aiuto breve è stato scritto).
 - `1` — un file non ha potuto essere letto, o l'output non ha potuto
-  essere consegnato.
-- `2` — la riga di comando non è stata compresa.
+  essere consegnato. Anche una riga di comando non compresa termina con
+  `1`.
 
 ## ENVIRONMENT
 

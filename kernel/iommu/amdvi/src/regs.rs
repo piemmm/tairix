@@ -22,7 +22,9 @@ pub(crate) const WINDOW: usize = STATUS + 8;
 pub(crate) const CONTROL_IOMMU: u64 = 1 << 0;
 pub(crate) const CONTROL_EVENT_LOG: u64 = 1 << 2;
 pub(crate) const CONTROL_EVENT_INTERRUPT: u64 = 1 << 3;
-/// One second, the invalidation timeout Linux sets.
+/// Invalidation time-out of one second (`InvTimeOut` = 100b, AMD IOMMU
+/// specification 48882, IOMMU Control Register bits 7:5): ample for a
+/// healthy unit, short enough that a lost completion surfaces.
 pub(crate) const CONTROL_TIMEOUT_1S: u64 = 0b100 << 5;
 pub(crate) const CONTROL_COHERENT: u64 = 1 << 10;
 pub(crate) const CONTROL_COMMANDS: u64 = 1 << 12;

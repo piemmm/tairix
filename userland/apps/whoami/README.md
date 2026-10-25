@@ -14,7 +14,8 @@ TAIRiX has no `/etc/passwd` and no ambient identity file. The uid comes
 from the caller's kernel-attested origin record (the ungated `self_origin`
 syscall — a pure self-observer), and the uid → name pairing comes from the
 ungated `USER_DIRECTORY` query the System Information API serves
-(`sysinfod`; the public uid + username directory, no credential material)
+(`sysinfod`; the public uid, login group and username directory, no
+credential material)
 through the shared `lib/procinfo` account-directory walk — the same one
 `top`'s `USER` column uses, never a second copy. A uid with no directory
 entry is the GNU `cannot find name for user ID` diagnostic; a failed
@@ -23,11 +24,11 @@ missing name.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `tairix-abi`, `tairix-procinfo`, and `tairix-help` crates, so it
-never links a kernel or driver crate. Its manifest (`AppInfo.toml`)
-requests `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session
-baseline — and the secured VFS still authorises every path per-inode under
-the caller's attested identity.
+shared `tairix-abi`, `tairix-procinfo`, `tairix-util`, and `tairix-help`
+crates, so it never links a kernel or driver crate. Its manifest
+(`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within
+the session baseline — and the secured VFS still authorises every path
+per-inode under the caller's attested identity.
 
 ## Usage
 
@@ -38,8 +39,8 @@ whoami
 ```
 
 Exit codes: `0` when the name (or a requested short help) was written; `1`
-when the identity read, the directory lookup, or the output failed; `2` on
-a usage error.
+when the identity read, the directory lookup, or the output failed, or on a
+usage error.
 
 ## Layout
 

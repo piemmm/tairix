@@ -44,8 +44,9 @@
 //!
 //! # Fail closed
 //!
-//! An unknown option, a missing `-g`, or anything other than exactly one
-//! name operand is a [`UseraddError::Usage`] that creates nothing; a login
+//! An option `getopt` refuses is a [`UseraddError::Option`], and a missing
+//! `-g` or anything other than exactly one name operand a
+//! [`UseraddError::Usage`], neither creating anything; a login
 //! name that is not a valid `[a-z_][a-z0-9_-]*` (within the length bound) is a
 //! [`UseraddError::BadName`]; a `-u`/`-g`/`-G` value that is not a decimal id
 //! is a [`UseraddError::BadId`]; a name already present is a

@@ -31,8 +31,7 @@ parent's, and the gate stays open while any holder holds it. See
 
 - **A floor above the parent's rate is refused**, never met with less.
 - **The HDMI resets the block also holds are not served.** An HDMI block is
-  brought up by programming it; Linux's reset of it through this block does
-  nothing.
+  brought up by programming it, and the HDMI driver asks for no reset.
 - **A gate the firmware left open is described, never closed unasked.**
 - **Runtime unload** closes nothing: a gate closes with its last holder's
   release or end, which this driver sees while it lives.
@@ -53,5 +52,6 @@ to 24308.
 
 ## References
 
-- Linux `drivers/clk/bcm/clk-bcm2711-dvp.c` — the gate register and bits.
+- The gate register and its bits: documented nowhere public; the metal run
+  confirms them (`plans/PI.md` P14).
 - `plans/SOUND.md` SND19f — the staged design this driver lands.

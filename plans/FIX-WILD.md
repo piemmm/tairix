@@ -65,8 +65,8 @@ Stage 2 implementation notes — validated against the code (coded next):
     `x29`=fp @ 29, `ELR_EL1`=pc @ 31, `SP_EL0`=sp @ 33 (byte 264, two words
     past `ELR_FRAME_INDEX`). No assembly change; `fp_valid = true`.
   - *riscv64:* `trap::TrapFrame` saves `ra`/`t*`/`a*` + `s0`..`s11` +
-    `sepc`/`sstatus`/`user_sp` — the full-GPR save on trap entry Linux's
-    `pt_regs` does, pinned by the `offset_of!` asserts against `trap.s`. `s0`
+    `sepc`/`sstatus`/`user_sp` — a full-GPR save on trap entry, pinned by
+    the `offset_of!` asserts against `trap.s`. `s0`
     is the fp, `sepc` the pc, `user_sp` the sp; `fp_valid = true`.
   - *x86_64:* the `#PF` stub passes `*const interrupts::SavedRegs` (r8, =
     `%rsp` before the `subq $8`, giving `rbp`=fp and the full GPR set) and
@@ -94,8 +94,8 @@ Stage 2 implementation notes — validated against the code (coded next):
   frame, and the fault address are **load-/region-relative offsets, never
   absolute** (no ASLR oracle). The raw **GP register *values*** are the one
   datum carried absolute, and only there — a privileged debugger's dump
-  gated behind an existing `CAP_SYSINFO_*` member (`CAP_SYSINFO_KERNEL`),
-  matching Linux's privilege-gated oops. The shared audit log still carries
+  gated behind an existing `CAP_SYSINFO_*` member (`CAP_SYSINFO_KERNEL`).
+  The shared audit log still carries
   only the coarse non-leaking descriptors (Stage 1). Confirm this split with
   the maintainer before coding if a stricter no-absolute-register posture is
   wanted.

@@ -36,8 +36,8 @@ reset
 ## Exit status
 
 - `0` — the terminal was restored (or short help served).
-- `1` — the output could not be delivered.
-- `2` — the command line was not understood.
+- `1` — the output could not be delivered. A command line that was not
+  understood exits `1` too.
 
 ## Stability
 

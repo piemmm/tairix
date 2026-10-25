@@ -5,14 +5,19 @@
 //! them out through [`provision_settings_dirs`], so no two volumes can differ
 //! in who owns which.
 
-use tairix_abi::driver::filesystem::{NodeId, NodeSecurity};
+use tairix_abi::driver::filesystem::{NodeId, NodeKind, NodeSecurity};
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::time::TIME_STATE_DIR;
 use tairix_abi::SERVICE_OVERRIDES_DIR;
 
 use crate::provision::{SERVICES_GID, SETTINGSD_UID, SYSTEM_GID, SYSTEM_UID, TIMED_UID};
 use crate::record::{Gid, Uid};
-use crate::shape::{ShapeError, ShapeTree};
+use crate::shape::{claim_dir, ensure_dir, ShapeError, ShapeTree};
+
+/// The record a directory the walks make on the way is born with: the system
+/// user's, as the image's own skeleton is.
+const SYSTEM_DIR: NodeSecurity =
+    NodeSecurity::created(NodeKind::Directory, SYSTEM_UID.0, SYSTEM_GID.0);
 
 /// The view path every [`SETTINGS_DIRS`] directory is directly beneath.
 pub const SETTINGS_ROOT: &str = "/System/Settings";
@@ -96,7 +101,8 @@ pub const fn default_dir_security(which: SystemConfigFile) -> NodeSecurity {
 
 /// Lay out the directory each settings document's image default is planted
 /// in on the read-only `/System` volume whose root is `volume`, with
-/// [`default_dir_security`].
+/// [`default_dir_security`]; a directory missing on the way is born the
+/// system user's.
 ///
 /// # Errors
 ///
@@ -109,15 +115,12 @@ where
     for which in [SystemConfigFile::System, SystemConfigFile::Network] {
         let path = which.volume_path();
         let dirs = path.rsplit_once('/').map_or("", |(dirs, _)| dirs);
+        let (above, leaf) = dirs.rsplit_once('/').unwrap_or(("", dirs));
         let mut node = volume;
-        for name in dirs.split('/') {
-            node = match tree.child(node, name)? {
-                Some((found, true)) => found,
-                Some((_, false)) => return Err(ShapeError::Occupied),
-                None => tree.create_dir(node, name)?,
-            };
+        for name in above.split('/').filter(|name| !name.is_empty()) {
+            node = ensure_dir(tree, node, name, SYSTEM_DIR)?.ok_or(ShapeError::Occupied)?;
         }
-        tree.stamp(node, default_dir_security(which))?;
+        claim_dir(tree, node, leaf, default_dir_security(which))?;
     }
     Ok(())
 }
@@ -138,12 +141,8 @@ where
     T: ShapeTree + ?Sized,
 {
     for dir in SETTINGS_DIRS {
-        let node = match tree.child(settings, dir.name())? {
-            Some((node, true)) => node,
-            Some((_, false)) => return Err(ShapeError::Occupied),
-            None => tree.create_dir(settings, dir.name())?,
-        };
-        tree.stamp(node, NodeSecurity::new(dir.mode, dir.uid.0, dir.gid.0))?;
+        let security = NodeSecurity::new(dir.mode, dir.uid.0, dir.gid.0);
+        claim_dir(tree, settings, dir.name(), security)?;
     }
     Ok(())
 }

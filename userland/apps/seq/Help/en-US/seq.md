@@ -18,10 +18,16 @@ usually positive when `first` is below `last` and negative when it is
 above, and may not be zero. `last` may be `inf` to count forever. The
 default output precision follows the operands' spellings (`seq 1 0.25 2`
 prints two decimal places), and plain integer runs are generated exactly,
-however large the numbers.
+however large the numbers. A hexadecimal number with an uppercase exponent
+(`0X1P-1`) is read as one with a lowercase exponent is; GNU `seq` reads its
+layout as an integer's and prints the wrong numbers.
 
 Option scanning stops at the first operand, and a leading negative
 number is an operand, not an option: `seq -5 5` counts from -5.
+
+A diagnostic shows the format, and an unknown directive in it, with any
+control or other invisible character escaped, so neither can command the
+terminal; GNU prints the directive as it is.
 
 ## OPTIONS
 
@@ -49,9 +55,9 @@ number is an operand, not an option: `seq -5 5` counts from -5.
 ## EXIT STATUS
 
 - `0` — the sequence (or a requested short help) was written.
-- `1` — the output stopped accepting bytes.
-- `2` — the command line was not understood (an unrecognised option, an
-  invalid number, a zero increment, or a bad format).
+- `1` — the output stopped accepting bytes. A command line that was not
+  understood (an unrecognised option, an invalid number, a zero
+  increment, or a bad format) exits `1` too.
 
 ## ENVIRONMENT
 

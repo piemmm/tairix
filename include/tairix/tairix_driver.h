@@ -259,13 +259,14 @@ typedef struct tairix_node_times {
 } tairix_node_times_t;
 
 /* Structural metadata about a filesystem node; `kind` is a TAIRIX_NODE_KIND_*.
-* `nlink` counts the directory entries naming the node; `times` carries its
-* four timestamps, read in the same structural read as kind/size; and
-* `content_gen` names the version of its data, 0 where the volume keeps
-* none. */
+* `nlink` counts the directory entries naming the node; `ino` is its number
+* as stat reports it; `times` carries its four timestamps, read in the same
+* structural read as kind/size; and `content_gen` names the version of its
+* data, 0 where the volume keeps none. */
 typedef struct tairix_node_info {
     uint8_t kind;
     uint32_t nlink;
+    uint64_t ino;
     uint64_t size;
     uint64_t allocated;
     tairix_node_times_t times;

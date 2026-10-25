@@ -3,8 +3,9 @@
 The strictly justified shared-utility crate: every item here is used by
 **two or more** independent crates (`AGENTS.md` §2.3, §3), and promoting
 code into it requires a `PLAN.md` note naming those callers. `no_std`
-(the C-locale engines use `alloc`; `fmt` and `size` are allocation-free)
-and panic-free throughout.
+and panic-free throughout. Members hold text and buffers on the heap, so a
+crate that must link no allocator takes nothing from here: the rule for a
+hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
 
 ## Members
 
@@ -30,15 +31,21 @@ and panic-free throughout.
   refusing a value and a settings surface offering the choices read the
   same definition rather than each keeping a copy that would drift.
 * `cfloat` — C-locale `printf(3)` floating-point rendering shared by the
-  `seq` and `printf` command apps (`plans/APPS.md`): one `FloatDirective`
+  `seq`, `printf` and `ping` command apps (`plans/APPS.md`): one `FloatDirective`
   (the five printf flags, width, precision, `efga`/`EFGA` conversions)
   rendering an IEEE 754 `f64` exactly as C's `printf` renders a `double`
   in the C locale — rounding, padding, alternate forms, special values —
-  so the tools that promise printf semantics share one definition. A
-  consumer whose GNU counterpart computes in `long double` documents
-  that divergence at its own surface.
-* `cnum` — C-locale `strtod(3)` scanning shared by the same two apps:
-  `scan_double` reads the longest leading subject sequence (whitespace,
+  so the tools that promise printf semantics share one definition. It
+  writes into any `fmt::Write` in bounded memory: only the digits an `f64`
+  carries are held, and the zeros past them and the padding are written as
+  they go, so a sink that flushes takes a field of any width or precision
+  without holding it. `rounded` answers the value a rendering reads back
+  as, which `seq`'s last-value rule compares. A consumer whose GNU
+  counterpart computes in `long double` documents that divergence at its
+  own surface.
+* `cnum` — C-locale `strtod(3)` scanning shared by `seq`, `printf`, `sleep`
+  and `tail`, and by the numbers the SVG decoder and OpenRaster's layer stack
+  read: `scan_double` reads the longest leading subject sequence (whitespace,
   sign, decimal or hexadecimal float, `inf`/`infinity`,
   `nan`/`nan(n-char-seq)`) with C's `endptr` measure, composing hex
   floats with exact one-step nearest-even rounding down to the
@@ -62,18 +69,18 @@ and panic-free throughout.
   needs — the hardware tree — doubling its buffer from a starting size on
   each `BufferTooSmall`, so the device manager, the System Information
   service and the cooling service read a tree of any size the one way.
-* `fmt` — no-allocation numeric formatters that render task / port /
-  capability identifiers into `lib/log`'s structured field values
-  without touching an allocator on the hot path. Promoted from
-  `kernel/sec` once `kernel/ipc` became the second caller; both consume
-  it today.
+* `fmt` — no-allocation numeric formatters that render identifiers, counts,
+  addresses and byte runs into `lib/log`'s structured field values without
+  touching an allocator on the hot path: the kernel's audit and syscall
+  fields, the drivers' and services' log fields, and the QEMU verticals'
+  expected lines.
 * `size` — the GNU coreutils size vocabulary shared by the `du` and
   `df` command apps (`plans/APPS.md`): the `-B`/`--block-size` grammar
   (`512`, `1K`, `1MiB`, `1GB`, `c`/`w`/`b` byte suffixes, and the
   `human-readable`/`si` rendering words, parsed fail-closed into a
   `SizeScale`), ceiling block scaling (`blocks_ceil` — a partially used
   block is a used block, so usage is never under-reported), and the
-  GNU `human_ceiling` renderings (`format_human`: one decimal below ten
+  GNU's human-readable sizes, rounded up (`format_human`: one decimal below ten
   units, an integer otherwise, re-tiering a rounded-up amount, in
   powers of 1024 or 1000). Values are `u128` internally so a 100 TB+
   volume's byte totals can never overflow (`AGENTS.md` §26.6).
@@ -101,13 +108,16 @@ and panic-free throughout.
   plain type, given a blank that covers a whole element (an enum's widest
   variant, a type with no padding), so a cache's pixels or a freed kernel
   stack are erased the same way; and `Wiped<N>` is a fixed-size buffer that
-  wipes itself at the end of its scope. A plain
-  `fill(0)` before the bytes are freed or reused is a dead store the
-  optimiser may delete outright, so every credential buffer in the tree —
-  the `lib/rt` elevation client, the shell's `elevate` builtin, the login
-  supervisor's elevation broker, and the masked entry in
-  `lib/controls` — erases through this one implementation rather than its
-  own. Its volatile stores are why `cargo xtask miri` interprets the crate's
+  wipes itself at the end of its scope, and `WipedBuf` its twin sized at run
+  time, which never grows past the block it was made with, since a buffer
+  that moved to a larger block would leave a copy in the one it outgrew. A
+  plain `fill(0)` before the bytes are freed or reused is a dead store the
+  optimiser may delete outright, so every credential, key and secret buffer
+  in the tree — the elevation client, prompt and broker, the greeter's and
+  the lock's passwords, the masked entry in `lib/controls`, the build's
+  signing keys, the network services' cookie keys — and every cache a later
+  holder must not read erases through this one implementation rather than
+  its own. Its volatile stores are why `cargo xtask miri` interprets the crate's
   suite, bar the four tests that hold `mathf` to the host's libm, whose results
   the interpreter perturbs on purpose.
 * `defer` — the one way an interactive surface hands a piece of slow work to
@@ -140,16 +150,36 @@ and panic-free throughout.
   reaches a loop's wait-set are `tairix_rt::work`, which every app-side
   consumer drives it through. Consumed by the terminal's settings publisher
   and the Settings application's applier (both via `tairix_rt::work`), the
-  desktop
-  session's settings publisher, the session's program-catalogue scan, the
-  file manager's bundle scan, the document host's queue
-  (`tairix_window::docapp`, which TextEdit and Paint run in), and Paint's
-  decode queue.
-* `argv` — resolving a value-taking option's value from a command line,
-  attached (`-u0`, `--uid=0`) or as the following argument (`-u 0`), so
-  every GNU-shaped command app agrees on what a trailing `--uid` is. The
-  caller names the usage error; the resolver reports only the absence.
-  Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
+  desktop session's settings publisher, the session's program-catalogue scan,
+  the file manager's bundle scan, the document host's queue
+  (`tairix_window::docapp`, which TextEdit and Paint run in), Paint's decode
+  queue, the Date & Time, Music and `netmap` work queues, and WinterSun's
+  terrain desk.
+* `banner` — the `==> name <==` banner `head` and `tail` set before each of
+  several sources: `Banners` writes a blank line before every banner but the
+  first, names standard input as GNU does, and shows a file's name as the
+  output shows names (`quote::output_style`), so a hostile name escapes only
+  at a terminal. Consumers: `head`, `tail`.
+* `argv` — `choose` resolves a word argument (`--total=au`) to its one
+  choice — the word spelled exactly, or the only one it prefixes — and
+  `BadWord` refuses one as GNU does, `ambiguous argument 'e' for
+  '--output-error'` or `invalid argument …`, then `Valid arguments are:`
+  and each word on its line, read from the same table `choose` read.
+  Consumers: `tail`, `tee`, `wc`.
+* `getopt` — GNU `getopt_long`'s reading of a command line, once for every
+  command app. A tool lists its options in an `Opt` table and `Scan` walks
+  its arguments: short options clustered (`-sf`), a value attached (`-tdir`,
+  `--target-directory=dir`) or following (`-t dir`), a long option by any
+  unambiguous prefix (`--verb`, read by the same prefix rule as `choose`),
+  `--` ending the options, and operands among them unless the tool's `Order`
+  ends them at the first operand. An argument it cannot read is a `Refusal`
+  worded as GNU's: `invalid option -- 'x'`, `unrecognized option '--name'`,
+  `option requires an argument -- 'f'`, `option '--quiet' doesn't allow an
+  argument`, `option '--s' is ambiguous; possibilities: …`. Consumers: every
+  command app that takes options — `cat`, `cp`, `df`, `du`, `head`, `ls`,
+  `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo` and the
+  rest, the desktop session's command line (`applib`) and the file
+  manager's.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry (`floor`,
   `sqrt`, `sin`, `atan2`, `exp`, `ln`, …) with no external libm, so the glyph
   rasteriser (`lib/fontface`), the SVG decoder (`lib/svg`), the raster
@@ -171,6 +201,23 @@ and panic-free throughout.
   samples pays one four-multiply rotation a sample rather than a series; the ribbon of
   light (`lib/ribbon`) and the retro games screensaver's floor both sweep
   through it.
+* `mode` — the one reading of a file mode a command line spells, shared by
+  `chmod`, `mkdir -m` and the shell's `umask`. `Mode::parse` takes an octal
+  value of any length up to `7777`, or GNU's symbolic grammar
+  `[ugoa]*([-+=]([rwxXst]*|[ugo]))+|[-+=][0-7]+`: permission letters, a
+  field's bits copied (`g=u`), or octal after an operator (`=644`), clauses
+  joined by commas. `Mode::resolve` gives the bits it makes of a node's: a
+  clause naming no field changes every field but the bits the umask holds
+  (though `=` still clears them all first), as GNU's `chmod` does; `s` sets
+  the owner's and the group's set-ID bits and `t` the sticky bit, each only
+  for the field carrying it; and on a directory the set-ID bits stay as they
+  are unless the mode names them — with `s`, octal after an operator, or an
+  octal value of five digits or more — so a group-inheriting directory stays
+  one. A creator that wants no narrower mode passes `lib/abi`'s
+  `FS_NEW_FILE_MODE` (`0o666`) or `FS_NEW_DIR_MODE` (`0o777`), which the
+  kernel narrows by the creator's umask, and `mkdir -m` resolves its mode
+  from the second. `umask` keeps only what a mask can hold: an octal value's
+  permission bits, or clauses of `r`, `w` and `x`.
 * `retry` — the two retry schedules. `RetryLadder` is for waiting on
   something that has not appeared yet and has no readiness event: a
   bounded, doubling one-shot ladder, so a boot on which the thing never
@@ -181,7 +228,8 @@ and panic-free throughout.
   forgotten once a restart stays up for a stable window. What fails may be
   killed on purpose by a crafted input, and restarting it at once would
   hand the sender a process spawn per input. The service manager's restart
-  policy and `lib/sandbox`'s supervised worker pace through it.
+  policy, the device manager's driver reloads, `lib/sandbox`'s supervised
+  worker and the desktop session's retry of a refused lock pace through it.
 * `space` — three-dimensional vectors, orthonormal frames and rigid poses.
   `Vec3` is a point, a direction or any triple combined component by
   component; `Frame` an orthonormal basis, built from a normal (Duff et al.'s
@@ -197,6 +245,12 @@ and panic-free throughout.
   `-n -N` elide modes and `tail`'s `-c N` / `-n N` last-N modes are two
   policies over one mechanism whose memory cost is N, never the input
   size — a 100 TB+ file is a constant-memory read.
+* `hex` — hexadecimal text for byte strings: `digits` spells a byte as two
+  lowercase digits, and `decode_into` reads a string in either case straight
+  into the caller's buffer, answering whether it spelled exactly that many
+  bytes, so a key is never staged where its holder cannot erase it. The
+  build's signing key set, `mkimage`'s root key file, `tools/cc`'s checksum
+  pins and the zone-store compiler's source pins read the one definition.
 * `hexdump` — the classic hex dump's shape as every hex view draws it:
   `BYTES_PER_ROW` bytes a row, an offset column `offset_digits` wide (never
   narrower than eight digits, wider only past 4 GiB), and `ascii_of`, which
@@ -224,24 +278,42 @@ and panic-free throughout.
   keeping the kernel's reason for a refused write and routing either stream's
   advisory to fd 3, so a `Run` binary hands its engine the standard streams
   themselves. `lib/procinfo` reads every byte stream as a line sink.
-* `quote` — GNU coreutils' quoting styles. `quote` is how a diagnostic, a `-v`
-  report or a prompt names a file or an operand (GNU's `quoteaf`: always
-  quoted, hidden characters as `$'…'`); `quote_if_needed` is `printf`'s `%q`
-  and the bare names some messages carry (`quotef`); a `Quoted` in any `Style`
-  is `ls`'s `--quoting-style`, `hiding` is its `-q`, and `marking` names the
-  characters a context must keep apart from the text around the name (GNU's
-  `quote_these_too`: the `:` of an `ls -R` heading, `-b`'s space, an indicator
-  style's suffixes), which force the shell styles to quote and take a backslash
-  in the C ones. Each formats into its destination without allocating. The
-  hidden characters are `utf8::is_hidden`'s,
-  so a name holding a bidirectional or zero-width character is escaped where
-  GNU leaves it raw; and the shell styles always write the minimal quoting,
-  where GNU 9.4 prefixes `''` to a name holding a `'` that ends in an escape
-  and, when such a name also begins with one, answers with a word that no
-  longer reads back as the name, and backslashes a marked character inside
-  `"…"`, where a shell keeps the backslash. Every command app's messages, `ls` and
-  `printf` write names through it, so a name a foreign volume carries never
-  reaches a terminal raw.
+  `report_failure` writes the one `tool: failure` line every command app
+  names a failure by, and `Carried` is the run built on it: `absorb` and
+  `carry` report a `Failure` the run carries past — a failed operand, or an
+  entry of a walk, as GNU's tools carry on — and remember that one
+  happened, so the run ends with status 1, while a fatal one (the command
+  line, the terminal, a prompt) is handed back to end the run;
+  `silenced` keeps the report and not the status, for `-f`. A refused
+  report is itself fatal, through `Failure::unreported`. `at_terminal` says
+  whether the stream is a terminal, which decides how a name from elsewhere
+  is written to it (`quote::output_style`): `false` by default, and answered
+  for `Stdout`/`Stderr` in `lib/rt` by the kernel's terminal-size
+  attestation, the probe `ls` decides by.
+* `quote` — GNU coreutils' quoting styles and the three ways a command names
+  text from elsewhere. `quote` names a file inside a message's sentence, a
+  `-v` report or a prompt (always quoted, hidden characters as `$'…'`);
+  `quote_subject` names the file a `name: reason` line leads with (quoted
+  where a shell needs it or where it holds a `:` of its own, which would pass
+  for the one ending the name); `output_style` is how a command writes a name
+  to its standard output — escaped where a shell needs it at a terminal the
+  kernel attests (`output::Output::at_terminal`), the name's own bytes
+  anywhere else, so a pipe carries what is there; and `quote_if_needed` is
+  `printf`'s `%q`. A `Quoted` in any `Style` is `ls`'s `--quoting-style`,
+  `hiding` is its `-q`, and `marking` names the characters a context must keep
+  apart from the text around the name (the `:` of an `ls -R` heading or a
+  `name: reason` line, `-b`'s space, an indicator style's suffixes), which
+  force the shell styles to quote and take a backslash in the C ones. Each
+  formats into its destination without allocating. Three deliberate
+  departures from GNU 9.4: the hidden characters are `lib/visible`'s `is_hidden`'s, so
+  a name holding a bidirectional or zero-width character is escaped where GNU
+  leaves it raw; the shell styles keep GNU's form save its two faults with a
+  name holding a `'` that ends in an escape — a needless leading `''`, and,
+  when such a name also begins with an escape, a dropped `$` that stops the
+  word reading back as the name; and a marked character takes no backslash
+  inside `"…"`, where a shell keeps the backslash. Every command app's
+  messages, `ls` and `printf` write names through it, so a name a foreign
+  volume carries never reaches a terminal raw.
 * `report` — a file's structure as a person reads it: `Builder` writes heading
   lines and records (offset, name, length, what it declares) with facts
   beneath them, and holds a report to `MAX_REPORT_LINES` lines of at most
@@ -250,30 +322,29 @@ and panic-free throughout.
   or hash as one run of hex. The picture reports (`lib/image`) and the
   executable and manifest reports (`lib/binfmt`) build with it, and
   `lib/sandbox` carries every report over its one reply, so each is cut,
-  escaped and capped by the same rule.
+  escaped and capped by the same rule; `fstree` and TextEdit show the
+  `ReportLine`s it holds.
+* `seconds` — `parse_seconds`, the decimal-seconds operand a network tool's
+  timing option takes (`ping -i 0.2`, `traceroute -w 2.5`), as nanoseconds:
+  whole seconds and up to nine fractional digits, no sign, exponent or unit,
+  bounded to `MAX_SECONDS` (a year), so its nanosecond form cannot overflow
+  and a typo cannot become a multi-day wait.
 * `utf8` — `sequence_len`, the length of the UTF-8 sequence a byte begins,
   or `None` for a byte no well-formed sequence begins with (Unicode Table
   3-7: a continuation byte, the always-overlong `0xC0`/`0xC1`, or a lead
   past U+10FFFF). `lib/syntax`'s lexers step over one character by it,
   `wc` counts characters by it, and TextEdit decodes its grid by it, so no
-  hand-written decoder admits a lead the standard rejects. `is_hidden` is the
-  one rule for which characters draw nothing yet can hide, reorder or break
-  the text around them — a C0 or C1 control, a line or paragraph separator,
-  an interlinear-annotation control, or any default-ignorable code point
-  (bidirectional controls, zero-width characters, fillers, variation
-  selectors, tags). TextEdit draws them as `[U+202E]` tokens, `lib/net`'s
-  `DisplayLabel` escapes them in what a peer names itself, and `lib/devids`
-  refuses a database that holds one, so text from elsewhere is escaped by one
-  rule. `shown` answers a name as a surface shows it, each hidden character
-  U+FFFD, and `Shown` formats any `Display` that way without allocating: the
-  rows `procinfo::field_lossy` decodes (process names, volume labels, mount
-  targets) and a GUI application's `stderr` reports (`app::report`) pass
-  through them. `fold` and `folded` are the letters a reader looks a name up by — a
-  Latin-1 letter folded to the letter it is written on, every letter in lower
-  case — and `reader_order` the order a list of names is read in: the folded
-  letters, then the bytes, so distinct names never compare equal. The place
-  chooser matches by the fold, and `lib/tz`'s place listing and Settings' region
-  list sort by the order.
+  hand-written decoder admits a lead the standard rejects. `shown` answers a
+  name as a surface shows it, each of `lib/visible`'s hidden characters U+FFFD
+  and borrowed where there is none: the rows `procinfo::field_lossy` decodes
+  (process names, volume labels, mount targets) and the names the file
+  manager and the document host show pass through it. `fold` and `folded` are
+  the letters a reader looks a name up by — a Latin-1 letter folded to the letter it is written on, every letter in
+  lower case — and `reader_order` the order a list of names is read in: the
+  folded letters, then the bytes, so distinct names never compare equal. The
+  place chooser and the program library's search match by the fold, and
+  `lib/tz`'s place listing, Settings' region list and the program library sort
+  by the order.
 
 ## How to grow the crate
 

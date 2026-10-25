@@ -5,7 +5,8 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_procinfo::{CallError, ListError};
-use tairix_util::quote::quote_if_needed;
+use tairix_util::getopt::Refusal;
+use tairix_util::quote::quote_subject;
 
 /// Why an `unmount` invocation did not complete.
 ///
@@ -14,8 +15,9 @@ use tairix_util::quote::quote_if_needed;
 /// diagnostic names what the user typed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnmountError {
-    /// The command line was not understood (unknown option, or a number
-    /// of operands other than one).
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// A number of operands other than one.
     Usage,
     /// No mounted filesystem matches the named volume.
     NotFound(String),
@@ -63,13 +65,14 @@ impl From<ListError> for UnmountError {
 impl fmt::Display for UnmountError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
-            Self::NotFound(name) => write!(f, "{name}: not mounted", name = quote_if_needed(name)),
+            Self::NotFound(name) => write!(f, "{name}: not mounted", name = quote_subject(name)),
             Self::NotDetachable(name) => {
                 write!(
                     f,
                     "{name}: not a detachable volume",
-                    name = quote_if_needed(name)
+                    name = quote_subject(name)
                 )
             }
             Self::Detach {

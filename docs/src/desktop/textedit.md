@@ -14,7 +14,7 @@ UTF-8 and control bytes round-trip exactly.
   A control byte is drawn as `[x03]`, a byte that is not UTF-8 as `[xC3]`,
   and every other character that draws nothing on its own — a bidirectional
   control, a zero-width or format character, a variation selector or tag
-  (`tairix_util::utf8::is_hidden`) — as `[U+202E]`, each in its own syntax
+  (`tairix_visible::is_hidden`) — as `[U+202E]`, each in its own syntax
   colour and each one caret stop — an editor that hides those can be made to
   show code other than the code that runs. A line longer
   than `MAX_ROW_BYTES` continues on further rows, each scrolled through like
@@ -170,7 +170,9 @@ These decisions are `tairix_window::document`'s, shared with every document
 application, and host-tested.
 The loop takes in every answer and every queued event, then shows the
 pointer's shape and declares its tip once a window, then paints each window
-once, a keystroke repainting the rows it changed and the status band;
+once, a keystroke repainting the rows it changed — every row below it
+where it moved bytes or rows — and the status band, and a drag that scrolls
+repainting the rows it moved;
 a present the desktop refuses is that window's alone, said once and repainted
 whole at its next chance. The process does not end under a save still being
 written, even when the desktop's channel is lost — every window is closed

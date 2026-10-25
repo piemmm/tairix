@@ -1,5 +1,5 @@
 //! `plans/DHCP.md` D4c QEMU integration test: boot the production riscv64
-//! (QEMU `virt` / SiFive) `tairix-kernel` pipeline against the shared
+//! (QEMU `virt`) `tairix-kernel` pipeline against the shared
 //! `dhcp6-net-root` whole-disk image — whose always-readable `/System` volume
 //! carries the **kernel-signed virtio-net driver bundle** (cross-compiled for
 //! riscv64) and a planted `/System/Defaults/Network/network.conf` — with a

@@ -81,9 +81,10 @@ cyrhaeddodd yr ateb ag ef mewn maes `ttl=`, fel y mae `iputils`.
 ## EXIT STATUS
 
 - `0` — derbyniwyd o leiaf un ateb (neu ysgrifennwyd y cymorth byr).
-- `1` — ni chafodd unrhyw gais ateb.
-- `2` — ni ddeallwyd y llinell orchymyn, ni ddatryswyd y nod, neu ni ellid
-  agor y soced.
+- `1` — ni chafodd unrhyw gais ateb. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
+- `2` — ni ddatryswyd y nod, ni ellid agor y soced, neu ni ellid derbyn nac
+  ysgrifennu ateb.
 
 ## ENVIRONMENT
 

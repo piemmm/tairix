@@ -12,21 +12,23 @@
 //! [`tairix_arch_api::conformance`] suite over its real `*Arch`,
 //! `SideChannel`, and `MemoryTags` handles.
 
+use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
+use tairix_abi::{HwDeviceClass, HwNode, MsiMessage, HW_NODE_ROOT};
 use tairix_arch_api::conformance;
 use tairix_arch_api::context::{
     self, ContextSwitch, KernelStackRegion, PrepareError, TaskContext, TaskEntry,
 };
 use tairix_arch_api::cpufeatures::{CpuFeatures, FeatureProfile, FeatureSupport};
 use tairix_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
+use tairix_arch_api::msimux::{self, MsiMultiplexer, MsiMuxError, MsiMuxShape};
 use tairix_arch_api::percpu;
 use tairix_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use tairix_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMitigation};
 use tairix_arch_api::timer::{self, TickFn, Timer};
 use tairix_arch_api::{CoreType, CpuFeatureSet};
-use tairix_arch_api::{CpuId, PerCpu, SchedulerArch};
+use tairix_arch_api::{CpuId, IrqControlError, IrqController, PerCpu, SchedulerArch};
 use tairix_sync::FnCell;
 
 #[derive(Default)]
@@ -200,4 +202,77 @@ fn context_switch_vertical_runs_over_a_handle() {
     context::conformance::run_all(&DoubleContextSwitch);
     let dynamic: &dyn ContextSwitch = &DoubleContextSwitch;
     context::conformance::run_all(dynamic);
+}
+
+/// A faithful multiplexer of `vectors` vectors over one pending word, or none
+/// where `vectors` is zero.
+struct DoubleMultiplexer {
+    vectors: u32,
+    pending: AtomicU64,
+}
+
+impl DoubleMultiplexer {
+    fn new(vectors: u32) -> Self {
+        Self {
+            vectors,
+            pending: AtomicU64::new(0),
+        }
+    }
+
+    fn raise(&self, vector: u32) {
+        self.pending.fetch_or(1 << vector, Ordering::SeqCst);
+    }
+
+    fn admit(&self, vector: u32) -> Result<(), IrqControlError> {
+        if vector < self.vectors {
+            Ok(())
+        } else {
+            Err(IrqControlError::OutOfRange)
+        }
+    }
+}
+
+impl IrqController for DoubleMultiplexer {
+    fn mask(&self, vector: u32) -> Result<(), IrqControlError> {
+        self.admit(vector)
+    }
+    fn unmask(&self, vector: u32) -> Result<(), IrqControlError> {
+        self.admit(vector)
+    }
+}
+
+impl MsiMultiplexer for DoubleMultiplexer {
+    fn shape(&self) -> Option<MsiMuxShape> {
+        NonZeroU32::new(self.vectors).map(|vectors| MsiMuxShape {
+            vectors,
+            parent_line: 52,
+        })
+    }
+    fn enable(&self) -> Result<(), MsiMuxError> {
+        self.shape().ok_or(MsiMuxError::NotSupported)?;
+        Ok(())
+    }
+    fn message(&self, vector: u32) -> Result<MsiMessage, MsiMuxError> {
+        self.shape().ok_or(MsiMuxError::NotSupported)?;
+        self.admit(vector).map_err(|_| MsiMuxError::OutOfRange)?;
+        Ok(MsiMessage {
+            address: 0x0F_FFFF_FFFC,
+            data: 0x6540 | vector,
+        })
+    }
+    fn drain(&self, fire: &mut dyn FnMut(u32)) {
+        let pending = self.pending.load(Ordering::SeqCst);
+        for vector in (0..self.vectors).filter(|vector| pending & (1 << vector) != 0) {
+            fire(vector);
+            self.pending.fetch_and(!(1 << vector), Ordering::SeqCst);
+        }
+    }
+}
+
+#[test]
+fn msi_multiplexer_verticals_run_over_a_handle() {
+    let mux = DoubleMultiplexer::new(32);
+    msimux::conformance::run_discovered(&mux, &mut |vector| mux.raise(vector));
+    let dynamic: &dyn MsiMultiplexer = &DoubleMultiplexer::new(0);
+    msimux::conformance::run_undiscovered(dynamic);
 }

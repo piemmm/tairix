@@ -107,7 +107,8 @@ pub const DEFAULT_LANG: &str = "en-US";
 /// These are the identity- and locale-carrying variables a POSIX login sets
 /// (`USER`, `LOGNAME`, `HOME`, `SHELL`, `PWD`, `TERM`, `LANG`), filled from
 /// the authenticated account so the shell's prompt and `$USER`/`$HOME`/…
-/// reflect the real user rather than a guess. No `PATH` is exported: the
+/// reflect the real user rather than a guess. `PWD` names `directory`, the one
+/// the session is started in. No `PATH` is exported: the
 /// fixed lookup prefix (`lib/cmdres`) already names every program store, the
 /// system pair and the user's own, so there is nothing further to search. Shell-owned
 /// variables (`OLDPWD`, `ELSH_PROMPT`) and the hostname default are the
@@ -118,7 +119,7 @@ pub const DEFAULT_LANG: &str = "en-US";
 /// (the screen lock's prompt, the desktop's account capsule) and must do so
 /// exactly as the login screen just did.
 #[must_use]
-pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
+pub fn session_environment(user: &AuthenticatedUser, directory: &str) -> Vec<String> {
     use alloc::format;
     alloc::vec![
         format!("USER={}", user.username),
@@ -126,7 +127,7 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
         format!("{ENV_SHOWN_NAME}={}", user.shown_name),
         format!("HOME={}", user.home),
         format!("SHELL={}", user.shell),
-        format!("PWD={}", user.home),
+        format!("PWD={directory}"),
         format!("TERM={DEFAULT_TERM}"),
         format!("LANG={DEFAULT_LANG}"),
     ]
@@ -146,6 +147,20 @@ pub fn session_program(user: &AuthenticatedUser, kind: SessionKind) -> &str {
         SessionKind::Text => &user.shell,
         SessionKind::Graphical => DESKTOP_RUN_PATH,
     }
+}
+
+/// Where a session starts when its home cannot be entered as its account.
+pub const SESSION_FALLBACK_DIRECTORY: &str = "/";
+
+/// Whether a session spawn refused with `errno` may have been refused its home
+/// rather than its program, so the session is worth starting at
+/// [`SESSION_FALLBACK_DIRECTORY`].
+#[must_use]
+pub const fn home_refusal(errno: Errno) -> bool {
+    matches!(
+        errno,
+        Errno::NotFound | Errno::PermissionDenied | Errno::NotADirectory | Errno::LinkLoop
+    )
 }
 
 /// How login starts a program that begins a session — a user's shell or
@@ -457,6 +472,21 @@ mod tests {
     use tairix_caps::CapabilitySet;
 
     #[test]
+    fn only_a_refusal_a_directory_can_give_retries_a_session_at_the_root() {
+        for errno in [
+            Errno::NotFound,
+            Errno::PermissionDenied,
+            Errno::NotADirectory,
+            Errno::LinkLoop,
+        ] {
+            assert!(super::home_refusal(errno), "{errno:?}");
+        }
+        for errno in [Errno::OutOfMemory, Errno::BadMagic, Errno::LengthOutOfRange] {
+            assert!(!super::home_refusal(errno), "{errno:?}");
+        }
+    }
+
+    #[test]
     fn a_session_is_started_as_its_account_anchoring_a_session_of_its_own() {
         let attach = super::session_attach(1000);
         assert_eq!(attach.target_uid, 1000);
@@ -491,11 +521,10 @@ mod tests {
             home: "/Users/ada".to_string(),
             shell: "/System/Commands/elsh.app/Run".to_string(),
         };
-        let env = session_environment(&user);
-        // The identity is drawn from the account, and PWD starts at home. The
-        // shown name travels beside the login name rather than instead of it:
-        // a desktop names and marks the account on screen, and it must do so
-        // as the login screen just did.
+        let env = session_environment(&user, &user.home);
+        // The shown name travels beside the login name rather than instead of
+        // it: a desktop names and marks the account on screen, and it must do
+        // so as the login screen just did.
         assert!(env.contains(&"USER=ada".to_string()));
         assert!(env.contains(&"LOGNAME=ada".to_string()));
         assert!(env.contains(&"FULLNAME=Ada Lovelace".to_string()));
@@ -513,6 +542,10 @@ mod tests {
         for entry in &env {
             assert!(entry.contains('='), "malformed entry: {entry:?}");
         }
+        // A session started at the root says so, and keeps the account's home.
+        let fallback = session_environment(&user, super::SESSION_FALLBACK_DIRECTORY);
+        assert!(fallback.contains(&"PWD=/".to_string()));
+        assert!(fallback.contains(&"HOME=/Users/ada".to_string()));
     }
 
     #[test]

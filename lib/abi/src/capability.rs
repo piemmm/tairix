@@ -70,7 +70,7 @@ impl CapabilityId {
     /// Map a device's memory-mapped register window into a driver's
     /// address space.
     ///
-    /// Granted to user-space bus drivers (`drivers/bus/pcie_brcm`,
+    /// Granted to user-space bus drivers (a PCIe root-complex driver,
     /// `drivers/bus/mmio`) that must read and write a device's
     /// register block (a PCI memory BAR, a virtio-MMIO transport
     /// slot). Holders may call the kernel's MMIO-map facility, which
@@ -243,17 +243,17 @@ impl CapabilityId {
     /// Call the user-space firmware property-mailbox service
     /// (`plans/PI.md` P10 D3).
     ///
-    /// The send-side gate on the `VideoCore` mailbox call endpoint
+    /// The send-side gate on the firmware mailbox call endpoint
     /// ([`crate::mailbox_ipc::MAILBOX_ENDPOINT`]): a driver that needs a
-    /// firmware property exchange — e.g. the VL805 USB firmware reload
-    /// (`drivers/bus/usb/vl805`) — holds this capability, and the
-    /// `vcmailbox` service creates the endpoint with it as the required
+    /// firmware property exchange — a controller whose firmware must be
+    /// reloaded before bring-up, say — holds this capability, and the
+    /// mailbox service creates the endpoint with it as the required
     /// sender capability. The mailbox reconfigures hardware (framebuffer,
-    /// clocks, PCIe firmware), so reaching it is privileged rather than
+    /// clocks, controller firmware), so reaching it is privileged rather than
     /// ambient (no ambient authority; capability
     /// checks before state touches): an ordinary task cannot drive the
     /// firmware mailbox. Holding it is not holding the firmware: the service
-    /// forwards only the tags `lib/vcmailbox`'s policy admits for the
+    /// forwards only the tags its policy admits for the
     /// capabilities the kernel attests the caller holds, and refuses the rest.
     pub const MAILBOX: Self = Self(25);
     /// Emit a structured diagnostic record to the system log through the

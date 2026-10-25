@@ -20,8 +20,12 @@
 //!
 //! A wrapper that deliberately *replaces* a method rather than forwarding
 //! it says so by asserting the replacement instead
-//! ([`assert_security_replaced`]), so the divergence is declared and
+//! ([`assert_unrecorded_security_mapped`]), so the divergence is declared and
 //! reviewed rather than invisible.
+//!
+//! The hold methods have no defaults, but a wrapper can still answer them
+//! itself; only the driver counts holds and defers a deletion, so those are
+//! what the suite checks.
 //!
 //! The premise is itself tested: `fscache_tests` runs the whole suite
 //! against a bare [`RwMockFs`], so the fixture can never quietly stop
@@ -34,12 +38,12 @@ use alloc::boxed::Box;
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
     FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeKind, NodeSecurity,
-    VolumeHost,
+    SecurityAcl, SecuritySubject, Unpinned, VolumeHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
-use tairix_abi::SeekRegion;
+use tairix_abi::{CapabilityId, SeekRegion};
 
-use super::memfs::{RwMockFs, SYSTEM_ONLY_NAME};
+use super::memfs::{RwMockFs, ADMIN_RECORD, SYSTEM_ONLY_NAME};
 
 /// The regular file the fixture holds, with [`FILE_BODY`] as its contents.
 pub const FILE_NAME: &[u8] = b"file";
@@ -64,28 +68,30 @@ pub const SPARSE_HOLE: u64 = 64;
 /// The caller wraps this and hands the wrapper to the `assert_*`
 /// functions, which re-resolve everything by name through the wrapper's
 /// own [`FilesystemRead::root`] and [`FilesystemRead::lookup`] — so the
-/// suite uses only the trait surface and never needs the fixture's ids.
+/// suite uses only the trait surface and never needs the fixture's ids. As
+/// its ids are declared to follow contents, a byte write goes through an id
+/// resolved since the last.
 #[must_use]
 pub fn fixture() -> RwMockFs {
     let mut fs = RwMockFs::new().with_content_derived_ids();
     let root = fs.root();
     let file = fs
-        .create(root, FILE_NAME, NodeKind::RegularFile)
+        .create(root, FILE_NAME, NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("the fixture creates a file");
-    fs.write_at(root, FILE_NAME, 0, FILE_BODY)
+    fs.write_at(file, 0, FILE_BODY)
         .expect("the fixture fills the file");
-    let _ = file;
-    fs.create_link(root, LINK_NAME, FILE_NAME)
+    fs.create_link(root, LINK_NAME, FILE_NAME, &ADMIN_RECORD)
         .expect("the fixture creates a symbolic link");
     let dir = fs
-        .create(root, DIR_NAME, NodeKind::Directory)
+        .create(root, DIR_NAME, NodeKind::Directory, &ADMIN_RECORD)
         .expect("the fixture creates a directory");
     // An ownerless format's node beside recorded ones, which a wrapper that
     // answers ownership itself would report as recorded.
     fs.forget_ownership(dir);
-    fs.create(root, SPARSE_NAME, NodeKind::RegularFile)
+    let sparse = fs
+        .create(root, SPARSE_NAME, NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("the fixture creates a sparse file");
-    fs.write_at(root, SPARSE_NAME, SPARSE_HOLE, FILE_BODY)
+    fs.write_at(sparse, SPARSE_HOLE, FILE_BODY)
         .expect("the fixture writes past a hole");
     fs
 }
@@ -129,12 +135,45 @@ pub fn assert_read_forwards<W: FilesystemRead + ?Sized>(wrapper: &mut W) {
         .expect("`node_info` is not being forwarded");
     assert_eq!(info.kind, NodeKind::RegularFile);
     assert_eq!(info.size, FILE_BODY.len() as u64);
+    assert_eq!(
+        info.ino,
+        file.raw(),
+        "the node's number is not the id the wrapper answered for it, so a \
+         watch keyed on one never sees a change reported against the other"
+    );
+
+    let dir = child(wrapper, DIR_NAME);
+    assert_eq!(
+        wrapper.parent(dir),
+        Ok(root),
+        "`parent` is not being forwarded"
+    );
+    assert_eq!(wrapper.parent(root), Ok(root), "the root answers itself");
+    assert_eq!(
+        wrapper.parent(file),
+        Err(DriverError::Unsupported),
+        "a file has no `..`, and the wrapper invented one"
+    );
 
     let mut bytes = [0u8; 32];
     let read = wrapper
         .read_at(file, 0, &mut bytes[..FILE_BODY.len()])
         .expect("`read_at` is not being forwarded");
     assert_eq!(&bytes[..read], FILE_BODY);
+
+    let held = wrapper.pin(file).expect("`pin` is not being forwarded");
+    assert_eq!(wrapper.pin(file), Ok(held), "every hold answers one id");
+    assert_eq!(
+        wrapper.unpin(held),
+        Ok(Unpinned::Held),
+        "`unpin` is not being forwarded: only the driver counts holds"
+    );
+    assert_eq!(wrapper.unpin(held), Ok(Unpinned::Released));
+    assert_eq!(
+        wrapper.unpin(held),
+        Err(DriverError::NotFound),
+        "an unpin with no hold outstanding is the driver's to refuse"
+    );
 
     // The method whose default refusal reads as "this format has no
     // symbolic links" — a claim about the format, made by a wrapper.
@@ -185,13 +224,13 @@ pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapp
     let file = child(wrapper, FILE_NAME);
 
     let made = wrapper
-        .create(root, b"created", NodeKind::RegularFile)
+        .create(root, b"created", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("`create` is not being forwarded");
     assert_ne!(made.raw(), 0);
 
     // Both defaults that make a *creating* call refuse: a wrapper that
     // leaves them silently reports the volume as link-incapable.
-    match wrapper.create_link(root, b"created-link", FILE_NAME) {
+    match wrapper.create_link(root, b"created-link", FILE_NAME, &ADMIN_RECORD) {
         Ok(node) => assert_ne!(node.raw(), 0),
         Err(DriverError::Unsupported) => panic!(
             "`create_link` answered `Unsupported` on a driver that creates \
@@ -209,11 +248,12 @@ pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapp
     }
 
     let written = wrapper
-        .write_at(root, b"created", 0, b"bytes")
+        .write_at(made, 0, b"bytes")
         .expect("`write_at` is not being forwarded");
     assert_eq!(written, b"bytes".len());
+    let made = child(wrapper, b"created");
     wrapper
-        .truncate(root, b"created", 1)
+        .truncate(made, 1)
         .expect("`truncate` is not being forwarded");
     wrapper
         .rename(root, b"created", root, b"renamed")
@@ -222,13 +262,14 @@ pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapp
         .remove(root, b"renamed")
         .expect("`remove` is not being forwarded");
     // A punch whose default refuses as a format limit.
-    wrapper
-        .create(root, b"punched", NodeKind::RegularFile)
+    let punched = wrapper
+        .create(root, b"punched", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("`create` is not being forwarded");
     wrapper
-        .write_at(root, b"punched", 0, FILE_BODY)
+        .write_at(punched, 0, FILE_BODY)
         .expect("`write_at` is not being forwarded");
-    match wrapper.punch(root, b"punched", 0, 4) {
+    let punched = child(wrapper, b"punched");
+    match wrapper.punch(punched, 0, 4) {
         Ok(()) => {}
         Err(DriverError::Unsupported) => panic!(
             "`punch` answered `Unsupported` on a driver that keeps holes: the \
@@ -245,9 +286,59 @@ pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapp
     wrapper
         .remove(root, b"punched")
         .expect("`remove` is not being forwarded");
+    assert_deferred_deletion_reaches_the_driver(wrapper);
     wrapper.flush().expect("`flush` is not being forwarded");
     assert_volume_host_forwards(wrapper);
     assert_allocation_class_forwards(wrapper);
+}
+
+/// A removed node is kept only by a hold the driver itself recorded, and
+/// freed only by an unpin or a release that reached it.
+fn assert_deferred_deletion_reaches_the_driver<W: FilesystemRead + FilesystemWrite + ?Sized>(
+    wrapper: &mut W,
+) {
+    let root = wrapper.root();
+    let doomed = wrapper
+        .create(root, b"doomed", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("`create` is not being forwarded");
+    wrapper
+        .write_at(doomed, 0, FILE_BODY)
+        .expect("`write_at` is not being forwarded");
+    let doomed = child(wrapper, b"doomed");
+    let held = wrapper.pin(doomed).expect("`pin` is not being forwarded");
+    wrapper
+        .remove(root, b"doomed")
+        .expect("`remove` is not being forwarded");
+    let mut bytes = [0u8; 32];
+    assert_eq!(
+        wrapper.read_at(held, 0, &mut bytes),
+        Ok(FILE_BODY.len()),
+        "the hold never reached the driver, which freed the node at its removal"
+    );
+    assert_eq!(wrapper.node_info(held).map(|info| info.nlink), Ok(0));
+    assert_eq!(
+        wrapper.unpin(held),
+        Ok(Unpinned::Freed),
+        "`unpin` is not being forwarded"
+    );
+    assert_eq!(wrapper.node_info(held), Err(DriverError::NotFound));
+
+    wrapper
+        .create(root, b"gone", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("`create` is not being forwarded");
+    let gone = child(wrapper, b"gone");
+    let gone = wrapper.pin(gone).expect("`pin` is not being forwarded");
+    wrapper
+        .remove(root, b"gone")
+        .expect("`remove` is not being forwarded");
+    wrapper
+        .release_pins()
+        .expect("`release_pins` is not being forwarded");
+    assert_eq!(
+        wrapper.node_info(gone),
+        Err(DriverError::NotFound),
+        "`release_pins` is not being forwarded: the removed node is still held"
+    );
 }
 
 /// The mount handle the suite installs its write-back timer under.
@@ -301,12 +392,12 @@ fn assert_volume_host_forwards<W: FilesystemWrite + ?Sized>(wrapper: &mut W) {
 fn assert_allocation_class_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapper: &mut W) {
     let root = wrapper.root();
     assert_eq!(
-        wrapper.create(root, SYSTEM_ONLY_NAME, NodeKind::RegularFile),
+        wrapper.create(root, SYSTEM_ONLY_NAME, NodeKind::RegularFile, &ADMIN_RECORD),
         Err(DriverError::NoSpace),
         "an ordinary create of the system's name is refused"
     );
     wrapper.set_allocation_class(AllocationClass::System);
-    let created = wrapper.create(root, SYSTEM_ONLY_NAME, NodeKind::RegularFile);
+    let created = wrapper.create(root, SYSTEM_ONLY_NAME, NodeKind::RegularFile, &ADMIN_RECORD);
     wrapper.set_allocation_class(AllocationClass::Ordinary);
     created.expect(
         "`set_allocation_class` is not being forwarded: the system's own \
@@ -317,9 +408,14 @@ fn assert_allocation_class_forwards<W: FilesystemRead + FilesystemWrite + ?Sized
         .expect("`remove` is not being forwarded");
 }
 
-/// Every [`FilesystemSecurity`] method reaches the inner driver, and a
-/// stored record survives the round trip.
-pub fn assert_security_forwards<W: FilesystemRead + FilesystemSecurity + ?Sized>(wrapper: &mut W) {
+/// Every [`FilesystemSecurity`] method reaches the inner driver, a stored
+/// record survives the round trip, and a create hands its record through
+/// whole.
+pub fn assert_security_forwards<
+    W: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
+>(
+    wrapper: &mut W,
+) {
     let file = child(wrapper, FILE_NAME);
     let dir = child(wrapper, DIR_NAME);
     assert_eq!(wrapper.records_ownership(file), Ok(true));
@@ -345,17 +441,27 @@ pub fn assert_security_forwards<W: FilesystemRead + FilesystemSecurity + ?Sized>
         "the wrapper did not carry the stored record through"
     );
 
-    wrapper
-        .stamp_owner(file, changed.uid + 1, changed.gid + 1)
-        .expect("`stamp_owner` is not being forwarded");
-    let stamped = wrapper
-        .security(file)
-        .expect("`security` is not being forwarded");
+    // A wrapper rebuilding the record would lose its gate and its ACL.
+    let mut record = NodeSecurity::new(0o640, 4242, 4343);
+    record.required_cap = Some(CapabilityId::AUDIT_READ);
+    record
+        .push_acl(SecurityAcl {
+            subject: SecuritySubject::Group(4444),
+            perms: 0b100,
+        })
+        .expect("an ACL entry");
+    let root = wrapper.root();
+    let made = wrapper
+        .create(root, b"recorded", NodeKind::RegularFile, &record)
+        .expect("`create` is not being forwarded");
     assert_eq!(
-        (stamped.mode, stamped.uid, stamped.gid),
-        (changed.mode, changed.uid + 1, changed.gid + 1),
-        "the wrapper did not carry the owner stamp through"
+        wrapper.security(made),
+        Ok(record),
+        "the wrapper did not hand the creation record through"
     );
+    wrapper
+        .remove(root, b"recorded")
+        .expect("`remove` is not being forwarded");
 }
 
 /// The wrapper *maps* the record of a node whose ownership the format does
@@ -367,23 +473,13 @@ pub fn assert_unrecorded_security_mapped<W: FilesystemRead + FilesystemSecurity 
     wrapper: &mut W,
 ) {
     let dir = child(wrapper, DIR_NAME);
-    let mapped = wrapper
+    wrapper
         .security(dir)
         .expect("a mapping wrapper still answers a record");
     assert_eq!(
         wrapper.set_security(dir, NodeSecurity::new(0o700, 1, 1)),
         Err(DriverError::Unsupported),
         "a mapped record is mount policy, so storing one is refused whole"
-    );
-    assert_eq!(
-        wrapper.stamp_owner(dir, 1, 1),
-        Ok(()),
-        "a creation on a mapped volume is not refused"
-    );
-    assert_eq!(
-        wrapper.security(dir).expect("record"),
-        mapped,
-        "and takes the mapped owner, like every other unrecorded node"
     );
 }
 

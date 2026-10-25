@@ -84,7 +84,7 @@ strumento storico.
   stato scritto l'aiuto breve.
 - `1` — la sessione non è stata possibile: l'host non è stato risolto, il
   socket è stato rifiutato, o il terminale non è passato in modo grezzo.
-- `2` — la riga di comando non è stata compresa.
+  Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

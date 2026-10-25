@@ -51,11 +51,11 @@
 //!
 //! # Fail closed
 //!
-//! An unrecognised option or no operand is [`ReadlinkError::Usage`] and
-//! nothing is printed. A refused read is reported (under `-v`) and the run
-//! continues to the remaining operands, exiting non-zero — the GNU
-//! behaviour. No `unsafe`, and no `unwrap`/`expect`/`panic!` in production
-//! paths.
+//! An option `getopt` refuses ([`ReadlinkError::Option`]) or no operand
+//! ([`ReadlinkError::Usage`]) prints nothing. A refused read is reported
+//! (under `-v`) and the run continues to the remaining operands, exiting
+//! non-zero — the GNU behaviour. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -70,11 +70,11 @@ use core::fmt;
 
 use tairix_abi::{Errno, RealpathMode};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_util::quote::quote_if_needed;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+use tairix_util::quote::{output_style, quote_subject, Quoted};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `readlink`'s own Help tree is
-/// unavailable.
+/// The usage banner the short-help switches print when `readlink`'s own
+/// Help tree is unavailable.
 pub const USAGE: &str = "\
 usage: readlink [-fem] [-nz] [-q | -s | -v] [--] file...
 
@@ -103,8 +103,10 @@ const OWN_WORD: &str = "readlink";
 /// Why a `readlink` invocation did not complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReadlinkError {
-    /// The command line carried an unrecognised option or named no operand.
-    /// The caller should print [`USAGE`]. Nothing is printed.
+    /// An option `getopt` refuses, worded as it words it. Nothing is
+    /// printed.
+    Option(Refusal),
+    /// The command line named no operand. Nothing is printed.
     Usage,
     /// Writing a target or a diagnostic failed. Carries the underlying
     /// [`Errno`]; a stream that stops accepting bytes is fatal.
@@ -114,6 +116,7 @@ pub enum ReadlinkError {
 impl fmt::Display for ReadlinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
@@ -168,59 +171,63 @@ pub enum Command {
     },
 }
 
-/// Parse an argument vector (without the program name).
+/// What each of `readlink`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Canonicalize,
+    CanonicalizeExisting,
+    CanonicalizeMissing,
+    NoNewline,
+    Quiet,
+    Verbose,
+    Zero,
+    Help,
+}
+
+/// `readlink`'s options, as GNU's `readlink` spells them, and the reserved
+/// help switches (`readlink` has no `-h`, as GNU's has none).
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('f', &["canonicalize"], Flag::Canonicalize),
+    Opt::flag('e', &["canonicalize-existing"], Flag::CanonicalizeExisting),
+    Opt::flag('m', &["canonicalize-missing"], Flag::CanonicalizeMissing),
+    Opt::flag('n', &["no-newline"], Flag::NoNewline),
+    Opt::flag('q', &["quiet"], Flag::Quiet),
+    Opt::flag('s', &["silent"], Flag::Quiet),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('z', &["zero"], Flag::Zero),
+    Opt::long(&["help"], Takes::Nothing, Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// Parse an argument vector (without the program name), read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// clustered, a long one by any unambiguous prefix, `--` ending them. The
+/// help switches (`-?`, `--help`) answer at once. The last of `-f`, `-e`
+/// and `-m`, and of `-q`/`-s` and `-v`, wins.
 ///
 /// # Errors
 ///
-/// * [`ReadlinkError::Usage`] on an unrecognised option or no operand.
+/// * [`ReadlinkError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ReadlinkError::Usage`] — no operand is named.
 pub fn parse(args: &[&str]) -> Result<Command, ReadlinkError> {
     let mut options = Options::default();
     let mut paths = Vec::new();
-    let mut options_ended = false;
-    for &arg in args {
-        if !options_ended {
-            if arg == "--" {
-                options_ended = true;
-                continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ReadlinkError::Option)? {
+            Arg::Operand(path) => paths.push(String::from(path)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Canonicalize, _) => options.canonicalize = Some(RealpathMode::Final),
+            Arg::Opt(Flag::CanonicalizeExisting, _) => {
+                options.canonicalize = Some(RealpathMode::Existing);
             }
-            if let Some(word) = arg.strip_prefix("--") {
-                match word {
-                    "no-newline" => options.no_newline = true,
-                    "zero" => options.zero = true,
-                    "verbose" => options.verbose = true,
-                    "silent" | "quiet" => options.verbose = false,
-                    "canonicalize" => options.canonicalize = Some(RealpathMode::Final),
-                    "canonicalize-existing" => {
-                        options.canonicalize = Some(RealpathMode::Existing);
-                    }
-                    "canonicalize-missing" => {
-                        options.canonicalize = Some(RealpathMode::Missing);
-                    }
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(ReadlinkError::Usage),
-                }
-                continue;
+            Arg::Opt(Flag::CanonicalizeMissing, _) => {
+                options.canonicalize = Some(RealpathMode::Missing);
             }
-            // A short-option cluster is a leading `-` followed by at least
-            // one letter (the bare `-` is a path, not an option).
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in letters.chars() {
-                    match letter {
-                        'n' => options.no_newline = true,
-                        'z' => options.zero = true,
-                        'v' => options.verbose = true,
-                        'q' | 's' => options.verbose = false,
-                        'f' => options.canonicalize = Some(RealpathMode::Final),
-                        'e' => options.canonicalize = Some(RealpathMode::Existing),
-                        'm' => options.canonicalize = Some(RealpathMode::Missing),
-                        '?' => return Ok(Command::Help),
-                        _ => return Err(ReadlinkError::Usage),
-                    }
-                }
-                continue;
-            }
+            Arg::Opt(Flag::NoNewline, _) => options.no_newline = true,
+            Arg::Opt(Flag::Quiet, _) => options.verbose = false,
+            Arg::Opt(Flag::Verbose, _) => options.verbose = true,
+            Arg::Opt(Flag::Zero, _) => options.zero = true,
         }
-        paths.push(String::from(arg));
     }
     if paths.is_empty() {
         return Err(ReadlinkError::Usage);
@@ -299,6 +306,8 @@ pub fn run(
         trailing = true;
     }
     let mut clean = true;
+    // A NUL-ended record is for a program, which wants the target's own bytes.
+    let names = output_style(out.at_terminal() && !options.zero);
     let last = paths.len() - 1;
     for (index, path) in paths.iter().enumerate() {
         let answer = match options.canonicalize {
@@ -307,7 +316,7 @@ pub fn run(
         };
         match answer {
             Ok(target) => {
-                out.write_all(target.as_bytes())
+                out.write_all(format!("{}", Quoted::new(&target, names)).as_bytes())
                     .map_err(ReadlinkError::Output)?;
                 if trailing || index != last {
                     out.write_all(&[options.delimiter()])
@@ -318,7 +327,7 @@ pub fn run(
                 clean = false;
                 if options.verbose {
                     err.write_all(
-                        format!("readlink: {path}: {errno}\n", path = quote_if_needed(path))
+                        format!("readlink: {path}: {errno}\n", path = quote_subject(path))
                             .as_bytes(),
                     )
                     .map_err(ReadlinkError::Output)?;

@@ -23,8 +23,8 @@ use crate::error::ManError;
 use crate::io::{BundleStore, Console};
 use crate::source::ScopedHelp;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `man`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `man`'s own Help tree
+/// is unavailable.
 pub const USAGE: &str = "usage: man [-h | -?] <command> [topic]";
 
 /// `man`'s own command word: its short-help switches render its own Help

@@ -14,6 +14,8 @@ publish.workspace = true
 # refused screen lock retries on, and the vectors, frames and poses
 # (`tairix_util::space`) the retro games' wireframe craft are placed in.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one rule for a hidden character.
+tairix-visible = { path = "../../../lib/visible", version = "=0.0.0" }
 # The single shared theme definition: the session owns the runtime
 # `ThemeRegistry`, performs the light/dark switch on it, and hands the active
 # theme out to the rest of the desktop. `lib/theme` is the one definition the

@@ -406,8 +406,8 @@ fn groups_db(profile: ImageProfile) -> Result<String, MkimageError> {
     Ok(db.serialise())
 }
 
-/// Build the debug-profile log-attestation key file image
-/// (`PREREQUISITES.md` P-E): a fresh random [`tairix_log::LogAttestationKey`]
+/// Build the debug-profile log-attestation key file image:
+/// a fresh random [`tairix_log::LogAttestationKey`]
 /// drawn from `entropy`, serialised to its on-disk form. Only a debug image
 /// bakes a key; an installer image's per-installation key is generated at
 /// first boot (baking one common key into every installer image would be a
@@ -728,7 +728,7 @@ fn volume_key_to_hex(key: &VolumeKey) -> WipedBuf {
 mod tests {
     use super::*;
     use device::{MemBlock, SECTOR_BYTES};
-    use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+    use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
     use tairix_abi::CapabilityId;
     use tairix_drv_fs_arxfs::ARXFS;
     use tairix_drv_fs_fat32::Fat32;
@@ -964,7 +964,12 @@ mod tests {
 
         // A read-only mount refuses mutation fail-closed, as read-only.
         assert_eq!(
-            sys.create(sys_root, b"x", NodeKind::Directory),
+            sys.create(
+                sys_root,
+                b"x",
+                NodeKind::Directory,
+                &NodeSecurity::created(NodeKind::Directory, 0, 0)
+            ),
             Err(DriverError::ReadOnly)
         );
     }

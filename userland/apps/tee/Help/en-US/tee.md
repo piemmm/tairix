@@ -55,8 +55,8 @@ kernel work rather than being accepted and ignored.
   help was served); a standard-output failure tolerated by a `-nopipe`
   mode does not change this.
 - `1` — an output failed in a way the selected mode counts, or input
-  could not be read.
-- `2` — the command line was not understood.
+  could not be read. A command line that was not understood exits `1`
+  too.
 
 ## ENVIRONMENT
 

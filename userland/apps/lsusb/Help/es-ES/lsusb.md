@@ -66,8 +66,8 @@ varias interfaces aparece una sola vez.
 
 - `0` — el listado (o la ayuda breve) se escribió.
 - `1` — la consulta del árbol de hardware fue rechazada o falló, o la
-  salida no pudo escribirse.
-- `2` — la línea de comandos no se entendió.
+  salida no pudo escribirse. Una línea de comandos no entendida
+  también termina con `1`.
 
 ## ENVIRONMENT
 

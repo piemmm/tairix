@@ -44,8 +44,8 @@
 //!
 //! None of it arms a timer. Both edges ride transitions the dispatch loop was
 //! making anyway, and the utilisation filter is advanced lazily at the moment
-//! somebody reads it. On a machine with no frequency driver — every port but
-//! the Raspberry Pi today — the governor's whole cost is one relaxed load per
+//! somebody reads it. On a machine with no frequency driver the governor's
+//! whole cost is one relaxed load per
 //! dispatch step, and nothing at all beyond that.
 
 mod domain;

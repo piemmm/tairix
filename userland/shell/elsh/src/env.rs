@@ -1,7 +1,8 @@
 //! The shell's mutable state and the variable-expansion phase.
 //!
-//! An [`Environment`] holds the shell variables, the working directory, and
-//! the exit status of the most recently completed pipeline (`$?`). It owns
+//! An [`Environment`] holds the shell variables — `PWD` among them, the
+//! working directory's path — and the exit status of the most recently
+//! completed pipeline (`$?`). It owns
 //! parameter expansion: turning a parsed [`Word`] — still a list of
 //! [`Segment`]s — into its text.
 //!
@@ -15,15 +16,16 @@
 //! scanned; [`Segment::Literal`] runs (single quotes, backslash escapes) are
 //! emitted verbatim, so a quoted or escaped `$` is never expanded.
 //!
-//! Expansion keeps, beside each character, whether it stands for itself:
-//! quoted or escaped text, and every variable's value. A value is never
-//! re-read as a wildcard — the zsh rule — so only pattern characters typed
-//! unquoted reach filename generation.
+//! Expansion keeps, beside its text, where it holds text typed unquoted;
+//! the rest — quoted or escaped text, and every variable's value — stands
+//! for itself. A value is never re-read as a wildcard — the zsh rule — so
+//! only pattern characters typed unquoted reach filename generation.
 
 use alloc::borrow::Cow;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_glob::Mark;
 
@@ -47,12 +49,11 @@ pub const DEFAULT_HOSTNAME: &str = "tairix";
 /// The user name the prompt shows when the session exported no `USER`.
 const DEFAULT_USER: &str = "user";
 
-/// Mutable shell state: variables, working directory, and `$?`.
+/// Mutable shell state: variables and `$?`.
 #[derive(Clone, Debug)]
 pub struct Environment {
     vars: BTreeMap<String, String>,
     exported: BTreeSet<String>,
-    cwd: String,
     last_status: i32,
 }
 
@@ -63,27 +64,14 @@ impl Default for Environment {
 }
 
 impl Environment {
-    /// A fresh environment with no variables and the working directory at the
-    /// root (`/`).
+    /// A fresh environment with no variables.
     #[must_use]
     pub fn new() -> Self {
         Self {
             vars: BTreeMap::new(),
             exported: BTreeSet::new(),
-            cwd: String::from("/"),
             last_status: 0,
         }
-    }
-
-    /// The current working directory.
-    #[must_use]
-    pub fn cwd(&self) -> &str {
-        &self.cwd
-    }
-
-    /// Replace the working directory.
-    pub fn set_cwd(&mut self, path: impl Into<String>) {
-        self.cwd = path.into();
     }
 
     /// The exit status of the last completed pipeline.
@@ -142,27 +130,28 @@ impl Environment {
             .collect()
     }
 
-    /// Expand a parsed word's parameters into its text, quotes removed, and
-    /// charge it to `budget` as one word.
+    /// Expand a parsed word's parameters into its text, quotes removed,
+    /// charged to `budget`.
     ///
     /// # Errors
     ///
     /// [`ParseError::UnterminatedExpansion`] if a `${` is never closed by
-    /// `}`, and [`ParseError::ExpansionTooLarge`] when the text would pass
-    /// what `budget` has left.
+    /// `}`, [`ParseError::UnsupportedSubstitution`] for a command substitution
+    /// or arithmetic expansion, [`ParseError::ExpansionTooLarge`] when the
+    /// text would pass what `budget` has left, and [`ParseError::OutOfMemory`]
+    /// when the heap refuses it.
     pub(crate) fn expand_word(
         &self,
         word: &Word,
         budget: &mut Budget,
     ) -> Result<String, ParseError> {
-        let text = self.expand_marked(word, budget)?.text();
-        budget.charge(text.len())?;
-        Ok(text)
+        Ok(self.expand_marked(word, budget)?.text)
     }
 
-    /// Expand a parsed word's parameters, keeping which characters stand for
-    /// themselves; refused before it grows past what `budget` has left, which
-    /// the caller then charges for what it keeps.
+    /// Expand a parsed word's parameters, keeping where it holds text typed
+    /// unquoted. Its length is learned first, so it is refused before
+    /// anything is copied when it would pass what `budget` has left, and its
+    /// text is charged.
     ///
     /// # Errors
     ///
@@ -170,95 +159,90 @@ impl Environment {
     pub(crate) fn expand_marked(
         &self,
         word: &Word,
-        budget: &Budget,
+        budget: &mut Budget,
     ) -> Result<Expansion, ParseError> {
-        let mut out = Expansion {
-            marks: Vec::new(),
-            quoted: false,
+        let room = budget.remaining();
+        let mut len = 0usize;
+        self.pieces(word, &mut |piece, _| {
+            len = len
+                .checked_add(piece.len())
+                .filter(|total| *total <= room)
+                .ok_or(ParseError::ExpansionTooLarge)?;
+            Ok(())
+        })?;
+        let mut expansion = Expansion {
+            text: budget.string(len)?,
+            unquoted: Vec::new(),
+            quoted: word
+                .iter()
+                .any(|segment| !matches!(segment, Segment::Expandable(_))),
         };
-        let mut room = Room {
-            used: 0,
-            limit: budget.remaining(),
-        };
-        for segment in word {
-            match segment {
-                Segment::Literal(s) => {
-                    out.quoted = true;
-                    room.take(s)?;
-                    out.marks
-                        .extend(s.chars().map(|ch| Mark { ch, literal: true }));
-                }
-                Segment::QuotedExpandable(s) => {
-                    out.quoted = true;
-                    self.expand_into(s, true, &mut out.marks, &mut room)?;
-                }
-                Segment::Expandable(s) => self.expand_into(s, false, &mut out.marks, &mut room)?,
-            }
-        }
-        Ok(out)
+        self.pieces(word, &mut |piece, literal| {
+            expansion.push(piece, literal);
+            Ok(())
+        })?;
+        Ok(expansion)
     }
 
-    /// Expand `source`'s parameters onto `out`, its own characters marked
-    /// literal when `quoted` and every expanded value marked literal, each
-    /// piece taken from `room` before it is copied.
-    fn expand_into(
+    /// Hand `word`'s expansion to `each` a piece at a time, in order, with
+    /// whether the piece stands for itself: quoted or escaped text, and every
+    /// parameter's value.
+    fn pieces(
         &self,
-        source: &str,
-        quoted: bool,
-        out: &mut Vec<Mark>,
-        room: &mut Room,
+        word: &Word,
+        each: &mut dyn FnMut(&str, bool) -> Result<(), ParseError>,
     ) -> Result<(), ParseError> {
-        fn value(text: &str, out: &mut Vec<Mark>, room: &mut Room) -> Result<(), ParseError> {
-            room.take(text)?;
-            out.extend(text.chars().map(|ch| Mark { ch, literal: true }));
-            Ok(())
-        }
-        room.take(source)?;
-        let chars: Vec<char> = source.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] != '$' {
-                out.push(Mark {
-                    ch: chars[i],
-                    literal: quoted,
-                });
-                i += 1;
-                continue;
-            }
-            i += 1;
-            match chars.get(i) {
-                Some('{') => {
-                    i += 1;
-                    let start = i;
-                    while i < chars.len() && chars[i] != '}' {
-                        i += 1;
-                    }
-                    if i >= chars.len() {
-                        return Err(ParseError::UnterminatedExpansion);
-                    }
-                    let name: String = chars[start..i].iter().collect();
-                    i += 1; // consume '}'
-                    value(&self.value_of(&name), out, room)?;
-                }
-                Some('?') => {
-                    i += 1;
-                    value(&self.last_status.to_string(), out, room)?;
-                }
-                Some(&c) if is_name_start(c) => {
-                    let start = i;
-                    while i < chars.len() && is_name_char(chars[i]) {
-                        i += 1;
-                    }
-                    let name: String = chars[start..i].iter().collect();
-                    value(&self.value_of(&name), out, room)?;
-                }
-                _ => out.push(Mark {
-                    ch: '$',
-                    literal: quoted,
-                }),
+        for segment in word {
+            match segment {
+                Segment::Literal(text) => each(text, true)?,
+                Segment::QuotedExpandable(text) => self.parameters(text, true, each)?,
+                Segment::Expandable(text) => self.parameters(text, false, each)?,
             }
         }
         Ok(())
+    }
+
+    /// `source`'s pieces: its own text, standing for itself when `quoted`,
+    /// with each parameter it names replaced by its value.
+    fn parameters(
+        &self,
+        source: &str,
+        quoted: bool,
+        each: &mut dyn FnMut(&str, bool) -> Result<(), ParseError>,
+    ) -> Result<(), ParseError> {
+        // The lexer refuses these in a word; a here-document body reaches
+        // expansion without it.
+        if source.contains('`') {
+            return Err(ParseError::UnsupportedSubstitution);
+        }
+        let mut rest = source;
+        while let Some((before, after)) = rest.split_once('$') {
+            each(before, quoted)?;
+            if after.starts_with('(') {
+                return Err(ParseError::UnsupportedSubstitution);
+            }
+            rest = if let Some(braced) = after.strip_prefix('{') {
+                let (name, after) = braced
+                    .split_once('}')
+                    .ok_or(ParseError::UnterminatedExpansion)?;
+                each(&self.value_of(name), true)?;
+                after
+            } else if let Some(after) = after.strip_prefix('?') {
+                each(&self.last_status.to_string(), true)?;
+                after
+            } else if after.starts_with(is_name_start) {
+                let end = after
+                    .find(|c: char| !is_name_char(c))
+                    .unwrap_or(after.len());
+                let (name, after) = after.split_at(end);
+                each(&self.value_of(name), true)?;
+                after
+            } else {
+                each("$", quoted)?;
+                after
+            };
+        }
+        each(rest, quoted)
     }
 
     fn value_of(&self, name: &str) -> Cow<'_, str> {
@@ -280,10 +264,11 @@ impl Environment {
     /// program store, so the shell has nothing of its own to add. The shell-owned
     /// variables — `HOSTNAME` (the prompt host, defaulting to
     /// [`DEFAULT_HOSTNAME`] until the system hostname is provisioned),
-    /// `PWD`/`OLDPWD`, and the prompt format `ELSH_PROMPT`
-    /// ([`DEFAULT_PROMPT`]) — are filled here. The lookup seam keeps this
-    /// pure and host-testable: production passes a closure over the runtime's
-    /// environment accessor, tests pass a map.
+    /// `PWD`/`OLDPWD` (the inherited `PWD`, else `HOME`, which the shell then
+    /// settles against its working directory), and the prompt format
+    /// `ELSH_PROMPT` ([`DEFAULT_PROMPT`]) — are filled here. The lookup seam
+    /// keeps this pure and host-testable: production passes a closure over
+    /// the runtime's environment accessor, tests pass a map.
     pub fn seed_interactive(&mut self, inherited: impl Fn(&str) -> Option<String>) {
         let take = |name: &str, default: &str| -> String {
             inherited(name)
@@ -312,9 +297,8 @@ impl Environment {
         self.export("PWD", pwd.clone());
         // OLDPWD is defined from the first prompt (equal to PWD until the
         // first `cd`), so `$OLDPWD` and `cd -` are never unset surprises.
-        self.export("OLDPWD", pwd.clone());
+        self.export("OLDPWD", pwd);
         self.set("ELSH_PROMPT", take("ELSH_PROMPT", DEFAULT_PROMPT));
-        self.set_cwd(pwd);
     }
 
     /// The `USER` value for the prompt, or [`DEFAULT_USER`] when unset.
@@ -331,10 +315,11 @@ impl Environment {
             .unwrap_or(DEFAULT_HOSTNAME)
     }
 
-    /// The working directory for the prompt, with the user's `HOME`
-    /// abbreviated to `~` (exactly `~` at home, `~/rest` beneath it).
+    /// The working directory for the prompt — `PWD`, empty when unset — with
+    /// the user's `HOME` abbreviated to `~` (exactly `~` at home, `~/rest`
+    /// beneath it).
     fn prompt_cwd(&self) -> String {
-        let cwd = self.cwd();
+        let cwd = self.get("PWD").unwrap_or_default();
         if let Some(home) = self.get("HOME").filter(|h| !h.is_empty()) {
             if cwd == home {
                 return "~".to_string();
@@ -382,36 +367,47 @@ impl Environment {
     }
 }
 
-/// How much text one word's expansion may still produce: what the line's
-/// budget had left when it began.
-struct Room {
-    used: usize,
-    limit: usize,
-}
-
-impl Room {
-    fn take(&mut self, text: &str) -> Result<(), ParseError> {
-        self.used = self.used.saturating_add(text.len());
-        if self.used > self.limit {
-            return Err(ParseError::ExpansionTooLarge);
-        }
-        Ok(())
-    }
-}
-
-/// A word after parameter expansion: each character marked literal when it
-/// stands for itself, and whether any part of the word was quoted — which
-/// keeps an empty result as an empty argument rather than no argument.
+/// A word after parameter expansion: its text, quoting removed; where it
+/// holds text typed unquoted, the only text that can be pattern syntax; and
+/// whether any part of the word was quoted, which keeps an empty result as
+/// an empty argument rather than no argument.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Expansion {
-    pub(crate) marks: Vec<Mark>,
+    pub(crate) text: String,
+    /// The byte ranges of `text` typed unquoted, in order.
+    pub(crate) unquoted: Vec<Range<usize>>,
     pub(crate) quoted: bool,
 }
 
 impl Expansion {
-    /// The text, quoting removed.
-    pub(crate) fn text(&self) -> String {
-        self.marks.iter().map(|mark| mark.ch).collect()
+    /// Append `piece`, as typed unquoted unless it stands for itself.
+    fn push(&mut self, piece: &str, literal: bool) {
+        let at = self.text.len();
+        self.text.push_str(piece);
+        if literal || piece.is_empty() {
+            return;
+        }
+        match self.unquoted.last_mut() {
+            Some(run) if run.end == at => run.end = self.text.len(),
+            _ => self.unquoted.push(at..self.text.len()),
+        }
+    }
+
+    /// The characters typed unquoted.
+    pub(crate) fn unquoted_chars(&self) -> impl Iterator<Item = char> + '_ {
+        self.unquoted
+            .iter()
+            .flat_map(|run| self.text.get(run.clone()).unwrap_or_default().chars())
+    }
+
+    /// Each character as the matcher reads it: literal unless typed unquoted.
+    pub(crate) fn marks(&self) -> impl Iterator<Item = Mark> + '_ {
+        let mut runs = self.unquoted.iter().peekable();
+        self.text.char_indices().map(move |(at, ch)| {
+            while runs.next_if(|run| run.end <= at).is_some() {}
+            let literal = runs.peek().is_none_or(|run| run.start > at);
+            Mark { ch, literal }
+        })
     }
 }
 
@@ -550,13 +546,13 @@ mod tests {
         );
     }
 
-    /// A word stops growing at what the line has left, before the value
-    /// that would pass it is copied, and is charged once as a word.
+    /// A word stops growing at what the line has left, before anything of it
+    /// is copied, and is charged its text.
     #[test]
     fn a_word_s_expansion_stops_at_what_the_budget_has_left() {
         let mut env = Environment::new();
         env.set("A", "abcd");
-        let word_cost = "abcdabcd".len() + core::mem::size_of::<String>();
+        let word_cost = "abcdabcd".len();
         let mut budget = Budget::new(word_cost);
         assert_eq!(
             env.expand_word(&expandable("$A$A"), &mut budget).as_deref(),
@@ -568,9 +564,28 @@ mod tests {
             Err(ParseError::ExpansionTooLarge)
         );
         assert_eq!(
-            env.expand_marked(&expandable("$A$A"), &Budget::new(7)),
+            env.expand_marked(&expandable("$A$A"), &mut Budget::new(7)),
             Err(ParseError::ExpansionTooLarge)
         );
+    }
+
+    #[test]
+    fn only_text_typed_unquoted_is_marked_as_pattern_syntax() {
+        let mut env = Environment::new();
+        env.set("V", "*v");
+        let word = vec![
+            Segment::Expandable("a$V*".to_string()),
+            Segment::Literal("?".to_string()),
+            Segment::QuotedExpandable("[".to_string()),
+            Segment::Expandable("]".to_string()),
+        ];
+        let expansion = env
+            .expand_marked(&word, &mut Budget::new(MAX_EXPANSION_BYTES))
+            .expect("expands");
+        assert_eq!(expansion.text, "a*v*?[]");
+        assert_eq!(expansion.unquoted_chars().collect::<String>(), "a*]");
+        let literal: alloc::vec::Vec<bool> = expansion.marks().map(|mark| mark.literal).collect();
+        assert_eq!(literal, [false, true, true, false, true, true, false]);
     }
 
     #[test]
@@ -622,10 +637,9 @@ mod tests {
         // LOGNAME defaults to USER when not separately inherited.
         assert_eq!(env.get("LOGNAME"), Some("ada"));
         assert_eq!(env.get("HOME"), Some("/Users/ada"));
-        // PWD/OLDPWD and the working directory follow HOME.
+        // PWD/OLDPWD follow HOME.
         assert_eq!(env.get("PWD"), Some("/Users/ada"));
         assert_eq!(env.get("OLDPWD"), Some("/Users/ada"));
-        assert_eq!(env.cwd(), "/Users/ada");
         // The standard variables are exported to children.
         let exported: alloc::vec::Vec<&str> =
             env.exported_vars().into_iter().map(|(n, _)| n).collect();
@@ -663,10 +677,10 @@ mod tests {
         // At home the working directory renders as `~`.
         assert_eq!(env.render_prompt(), "ada@babbage ~% ");
         // Beneath home it is `~/rest`.
-        env.set_cwd("/Users/ada/Documents");
+        env.export("PWD", "/Users/ada/Documents");
         assert_eq!(env.render_prompt(), "ada@babbage ~/Documents% ");
         // Outside home the absolute path is shown.
-        env.set_cwd("/Storage/disk");
+        env.export("PWD", "/Storage/disk");
         assert_eq!(env.render_prompt(), "ada@babbage /Storage/disk% ");
     }
 

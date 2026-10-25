@@ -204,7 +204,7 @@ mod program {
 
     impl Service for ProbeService {
         fn handle(&mut self, _request: &[u8]) -> Vec<u8> {
-            let open_denied = is_denied(tairix_rt::fs_open(SBX_PATH, OpenFlags::READ));
+            let open_denied = is_denied(tairix_rt::fs_open(SBX_PATH, OpenFlags::READ, 0));
             let spawn_denied = is_denied(tairix_rt::spawn(SBX_PATH));
             vec![u8::from(open_denied), u8::from(spawn_denied)]
         }

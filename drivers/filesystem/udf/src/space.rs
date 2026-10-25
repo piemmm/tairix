@@ -193,7 +193,11 @@ impl Space {
             .ok_or(DriverError::DeviceFault)
     }
 
-    fn is_free(&mut self, io: &mut impl Pages, block: u32) -> Result<bool, DriverError> {
+    /// Whether `block` is free; one past the partition never is.
+    pub(crate) fn is_free(&mut self, io: &mut impl Pages, block: u32) -> Result<bool, DriverError> {
+        if block >= self.bits {
+            return Ok(false);
+        }
         let (page, within) = self.locate(block);
         Ok(self.byte(io, page, within)? & (1 << (block % 8)) != 0)
     }
@@ -316,15 +320,18 @@ fn low_bits(count: u32) -> u8 {
 mod tests {
     use super::*;
 
-    /// A bitmap every block of which is taken, its header in block 0.
-    struct Taken {
+    /// A bitmap of `bits` blocks, its header in block 0 and every byte past it
+    /// `fill`: every block taken at `0`, every one free at `0xFF`.
+    struct Bitmap {
         bits: u32,
+        fill: u8,
     }
 
-    impl Pages for Taken {
+    impl Pages for Bitmap {
         fn read_page(&mut self, at: LbAddr, out: &mut [u8]) -> Result<(), DriverError> {
-            out.fill(0);
+            out.fill(self.fill);
             if at.block == 0 {
+                out[..usize::try_from(HEADER).expect("a header")].fill(0);
                 out[0..2].copy_from_slice(&TAG_SBD.to_le_bytes());
                 out[16..20].copy_from_slice(&self.bits.to_le_bytes());
                 out[20..24].copy_from_slice(&self.bits.div_ceil(8).to_le_bytes());
@@ -341,12 +348,33 @@ mod tests {
 
     #[test]
     fn a_search_reaching_the_last_block_a_partition_can_hold_ends_there() {
-        let mut io = Taken { bits: u32::MAX };
+        let mut io = Bitmap {
+            bits: u32::MAX,
+            fill: 0,
+        };
         let start = LbAddr {
             block: 0,
             partition: 0,
         };
         let mut space = Space::open(&mut io, start, 512, u32::MAX, Some(0)).expect("opens");
         assert_eq!(space.find_free(&mut io, u32::MAX - 20, u32::MAX), Ok(None));
+    }
+
+    /// A block number past the partition, as a forged node id may carry, is
+    /// never free, however the bytes past the bitmap read.
+    #[test]
+    fn a_block_past_the_partition_is_never_free() {
+        let mut io = Bitmap {
+            bits: 64,
+            fill: 0xFF,
+        };
+        let start = LbAddr {
+            block: 0,
+            partition: 0,
+        };
+        let mut space = Space::open(&mut io, start, 512, 64, Some(64)).expect("opens");
+        assert_eq!(space.is_free(&mut io, 63), Ok(true));
+        assert_eq!(space.is_free(&mut io, 64), Ok(false));
+        assert_eq!(space.is_free(&mut io, u32::MAX), Ok(false));
     }
 }

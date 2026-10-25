@@ -56,5 +56,8 @@ Metal acceptance is the HDMI hotplug run (`plans/SOUND.md` SND19q).
 
 ## References
 
-- The Linux `irq-brcmstb-l2` driver, for the register layouts.
+- The `brcm,l2-intc` device-tree binding (dual GPL-2.0-only OR BSD-2-Clause,
+  taken under BSD-2-Clause), for the compatibles.
+- OpenBSD `sys/dev/fdt/bcmstbintc.c` (ISC), for the level layout. The edge
+  layout is held to the on-metal hotplug run (`plans/SOUND.md` SND19q).
 - `plans/SOUND.md` SND19e — the staged design this driver lands.

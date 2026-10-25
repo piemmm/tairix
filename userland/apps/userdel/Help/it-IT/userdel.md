@@ -25,8 +25,7 @@ Il database decide che cosa può essere rimosso. Rifiuta l'eliminazione dell'ult
 ## EXIT STATUS
 
 - `0` — l'account è stato eliminato.
-- `1` — il database ha rifiutato o non ha potuto completare l'eliminazione (per esempio una capacità mancante, un account sconosciuto o l'ultimo amministratore); la ragione è stampata sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+- `1` — il database ha rifiutato o non ha potuto completare l'eliminazione (per esempio una capacità mancante, un account sconosciuto o l'ultimo amministratore); la ragione è stampata sull'errore standard. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

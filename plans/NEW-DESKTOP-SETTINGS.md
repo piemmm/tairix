@@ -1343,14 +1343,14 @@ guarantees.
 the only other account read — `users_db_read` under `CAP_USERS_READ` — answers
 the credential database itself. Settings takes neither.
 
-`USER_DIRECTORY` answers uid and username alone, which is not a Users pane. The
-pane is therefore built from three reads of *different* authority, rather than
-from one ungated query widened until it is enough:
+`USER_DIRECTORY` answers uid, login group and username alone, which is not a
+Users pane. The pane is therefore built from three reads of *different*
+authority, rather than from one ungated query widened until it is enough:
 
-- **The roster** — every account's uid and username — is the existing ungated
-  `USER_DIRECTORY`, walked paged. A sibling ungated `GROUP_DIRECTORY` answers
-  gid and group name on the same ground and nothing else: rendering a gid is
-  the same display need as rendering a uid.
+- **The roster** — every account's uid, login group and username — is the
+  existing ungated `USER_DIRECTORY`, walked paged. A sibling ungated
+  `GROUP_DIRECTORY` answers gid and group name on the same ground and nothing
+  else: rendering a gid is the same display need as rendering a uid.
 - **The caller's own account** — full name, shell, home, primary gid, group
   memberships — is read for the uid the kernel attests, ungated, because a
   principal reading its own record crosses no boundary.

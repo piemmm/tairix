@@ -19,9 +19,12 @@
 //! * **the board augmentation** the shared walk cannot know: the
 //!   `VideoCore` mailbox's DMA property-buffer carve, the GENET MAC's DMA
 //!   reach read from its parent bus, the EMMC2 SD host's translated DMA
-//!   windows, the BCM2711 PCIe host bridge's
+//!   windows and the firmware-switched rails its supplies name
+//!   (`sd_supply`), the BCM2711 PCIe host bridge's
 //!   inbound aperture and outbound window, the Broadcom DMA binding's
-//!   channel mask, which counts channels across the whole DMA block, and the
+//!   channel mask, which counts channels across the whole DMA block, the
+//!   lines a Raspberry Pi's GPIO block lends its header, the AVS monitor's
+//!   window, which the one temperature sensor inside it takes, and the
 //!   display engine's fixed wiring — its pixel valves and the HDMI encoders
 //!   they feed — which the tree leaves implicit;
 //! * **`pcie_bringup`**, the pre-MMU read of those PCIe windows the
@@ -36,7 +39,9 @@ use crate::fdt::{gic_intid_from_cells, Fdt};
 use tairix_abi::driver::encoder::ENCODER_ENDPOINTS;
 use tairix_abi::driver::gpio::HeaderLines;
 use tairix_abi::hwlink::{LinkDuty, LinkRequest};
-use tairix_abi::{DmaCoherence, HwNode, HwProperty, HwResource};
+use tairix_abi::{
+    DmaCoherence, HwDeviceClass, HwNode, HwProperty, HwResource, HW_NODE_MAX_RESOURCES,
+};
 use tairix_arch_api::fdtwalk::push_dma_windows;
 use tairix_arch_api::fdtwalk::{emitted, FdtPlatform};
 use tairix_fdt::{
@@ -50,6 +55,7 @@ use tairix_fdt::{
 // declares it as the limit the property buffer is carved below.
 use tairix_vcmailbox::{
     APERTURE_LIMIT, DISPLAY_ENGINE_COMPATIBLE, ENGINE_OUTPUTS, MAILBOX_COMPATIBLE,
+    SD_HOST_COMPATIBLE,
 };
 
 /// Length of the DMA-visible property-buffer carve the mailbox node
@@ -90,22 +96,6 @@ pub const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
 /// its bind table; this is the discovery side of that contract.
 pub const GENET_COMPATIBLE: &[u8] = b"brcm,bcm2711-genet-v5";
 
-/// `compatible` string of the BCM2711's second SD host (EMMC2), the Pi 4's
-/// SD card slot.
-///
-/// It masters DMA through its parent bus's `dma-ranges` — a window the
-/// firmware rewrites per `SoC` stepping — so its emission carries the
-/// translated windows it reaches memory through, which its host carves the
-/// ADMA2 staging within and translates device addresses by. The
-/// bootstrap-floor `drivers/storage/emmc2` driver states the same identity in
-/// its bind table; this is the discovery side of that contract.
-pub const EMMC2_COMPATIBLE: &[u8] = b"brcm,bcm2711-emmc2";
-
-/// The Broadcom DMA binding's channel mask, which numbers channels across the
-/// whole DMA block rather than from the node's own first channel.
-/// The BCM2835's GPIO controller, the Pi 3's.
-const BCM2835_GPIO_COMPATIBLE: &[u8] = b"brcm,bcm2835-gpio";
-
 /// The `compatible` vendor prefix of every Raspberry Pi board's root.
 const RASPBERRY_PI_VENDOR: &[u8] = b"raspberrypi,";
 
@@ -123,6 +113,8 @@ const AVS_MONITOR_COMPATIBLE: &[u8] = b"brcm,bcm2711-avs-monitor";
 /// its own.
 const AVS_THERMAL_COMPATIBLE: &[u8] = b"brcm,bcm2711-thermal";
 
+/// The Broadcom DMA binding's channel mask, which numbers channels across the
+/// whole DMA block rather than from the node's own first channel.
 const BRCM_DMA_CHANNEL_MASK: &str = "brcm,dma-channel-mask";
 
 /// The Broadcom DMA block's channel register stride, and the page its
@@ -139,9 +131,9 @@ pub struct Aarch64Fdt {
     /// Whether the tree describes a Raspberry Pi, whose header the chip's GPIO
     /// block leads.
     raspberry_pi: bool,
-    /// The translated window of the AVS monitor holding an enabled
-    /// temperature sensor, which the sensor takes from it.
-    avs_sensor_window: Option<(u64, u64)>,
+    /// The enabled temperature sensor directly inside an enabled AVS
+    /// monitor, which takes the monitor's window.
+    avs_sensor: Option<AvsSensor>,
     /// Each display engine output the tree describes, in
     /// [`ENGINE_OUTPUTS`]' order.
     outputs: [Option<OutputWiring>; ENGINE_OUTPUTS.len()],
@@ -198,19 +190,33 @@ fn is_raspberry_pi(fdt: &Fdt<'_>) -> bool {
     })
 }
 
-/// The translated window of the AVS monitor directly above an enabled
-/// temperature sensor.
-fn avs_sensor_window(fdt: &Fdt<'_>) -> Option<(u64, u64)> {
+/// A temperature sensor inside an AVS monitor: its node and the monitor's,
+/// each by where it sits in the tree, and the monitor's translated window.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct AvsSensor {
+    node: usize,
+    monitor: usize,
+    window: (u64, u64),
+}
+
+/// The first enabled temperature sensor directly inside an enabled AVS
+/// monitor.
+fn avs_sensor(fdt: &Fdt<'_>) -> Option<AvsSensor> {
     let mut monitors = [None; MAX_WALK_DEPTH];
     scan_translated(fdt, |node, levels, depth| {
         if node.is_compatible(AVS_THERMAL_COMPATIBLE) && node.is_operational() {
             return depth
                 .checked_sub(1)
-                .and_then(|parent| monitors.get(parent).copied().flatten());
+                .and_then(|parent| monitors.get(parent).copied().flatten())
+                .map(|(monitor, window)| AvsSensor {
+                    node: node.offset(),
+                    monitor,
+                    window,
+                });
         }
         if let Some(slot) = monitors.get_mut(depth) {
             *slot = if node.is_compatible(AVS_MONITOR_COMPATIBLE) && node.is_operational() {
-                translated_reg(node, depth, levels, 0)
+                translated_reg(node, depth, levels, 0).map(|window| (node.offset(), window))
             } else {
                 None
             };
@@ -286,7 +292,7 @@ impl FdtPlatform for Aarch64Fdt {
         Self {
             gic: crate::gic::find_gic(fdt).and_then(|gic| gic.phandle),
             raspberry_pi: is_raspberry_pi(fdt),
-            avs_sensor_window: avs_sensor_window(fdt),
+            avs_sensor: avs_sensor(fdt),
             outputs: engine_outputs(fdt),
         }
     }
@@ -301,6 +307,13 @@ impl FdtPlatform for Aarch64Fdt {
                 crate::gic::is_gic_compatible(name) || name == crate::gic::ITS_COMPATIBLE
             })
         })
+    }
+
+    /// The SD host the board's tree names `emmc2@…`, outside the generic
+    /// stems, is a storage device.
+    fn class(&self, node: &Node<'_>) -> Option<HwDeviceClass> {
+        node.is_compatible(SD_HOST_COMPATIBLE)
+            .then_some(HwDeviceClass::Storage)
     }
 
     /// The Broadcom binding's mask converted to the generic, node-relative
@@ -354,13 +367,15 @@ impl FdtPlatform for Aarch64Fdt {
 
     fn grants_window(&self, node: &Node<'_>, name: Option<&[u8]>) -> bool {
         let engine_owned = name == Some(HDMI_INTERRUPT_WINDOW) && is_engine_encoder(node);
-        let sensor_owned =
-            self.avs_sensor_window.is_some() && node.is_compatible(AVS_MONITOR_COMPATIBLE);
+        let sensor_owned = self
+            .avs_sensor
+            .is_some_and(|sensor| sensor.monitor == node.offset());
         !engine_owned && !sensor_owned
     }
 
     fn augment(
         &self,
+        fdt: &Fdt<'_>,
         node: &Node<'_>,
         depth: usize,
         levels: &[BusLevel<'_>],
@@ -395,22 +410,25 @@ impl FdtPlatform for Aarch64Fdt {
                 let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len, coherence));
             }
         }
-        if names_compatible(EMMC2_COMPATIBLE) {
+        // The SD host masters DMA through its bus's `dma-ranges`, rewritten per
+        // `SoC` stepping, and its card's supplies are lines the firmware switches.
+        if names_compatible(SD_HOST_COMPATIBLE) {
             push_dma_windows(depth, levels, coherence, hw);
+            push_sd_rails(fdt, node, hw);
         }
-        if self.raspberry_pi
-            && (names_compatible(crate::uart_init::GPIO_COMPATIBLE)
-                || names_compatible(BCM2835_GPIO_COMPATIBLE))
-        {
+        if self.raspberry_pi && names_compatible(crate::uart_init::GPIO_COMPATIBLE) {
             let lines = HeaderLines::span(PI_HEADER_FIRST, PI_HEADER_LAST);
             let _ = hw.push_resource(HwResource::property(
                 HwProperty::GpioHeaderLines,
                 lines.mask(),
             ));
         }
-        if let Some((base, len)) = self
-            .avs_sensor_window
-            .filter(|_| names_compatible(AVS_THERMAL_COMPATIBLE))
+        if let Some(AvsSensor {
+            window: (base, len),
+            ..
+        }) = self
+            .avs_sensor
+            .filter(|sensor| sensor.node == node.offset())
         {
             let _ = hw.push_resource(HwResource::mmio(base, len));
         }
@@ -468,14 +486,30 @@ impl FdtPlatform for Aarch64Fdt {
     }
 }
 
+/// State the rails the SD host `node`'s supplies name, both or neither.
+fn push_sd_rails(fdt: &Fdt<'_>, node: &Node<'_>, hw: &mut HwNode) {
+    let Some((io, power)) = crate::sd_supply::sd_rails(fdt, node) else {
+        return;
+    };
+    // A power rail whose delays its record cannot carry is no rail, and a
+    // node without room for the pair carries neither.
+    let Some(power) = HwResource::power_rail(power) else {
+        return;
+    };
+    if hw.resources().len() + 2 <= HW_NODE_MAX_RESOURCES {
+        let _ = hw.push_resource(HwResource::io_rail(io));
+        let _ = hw.push_resource(power);
+    }
+}
+
 /// The [`PlatformDiscovery`](tairix_arch_api::PlatformDiscovery)
 /// implementation the boot path constructs: the shared walk over this
 /// port's [`Aarch64Fdt`].
 pub type FdtDiscovery<'a> = tairix_arch_api::fdtwalk::FdtDiscovery<'a, Aarch64Fdt>;
 
-/// The BCM2711 PCIe root-complex address windows the in-kernel USB
-/// keyboard bring-up needs (`plans/PI.md` P10), read from the
-/// `brcm,bcm2711-pcie` node — never compiled-in.
+/// The BCM2711 PCIe root-complex address windows the boot path types Device
+/// and points the root complex's MSI controller at (`plans/PI.md` P10), read
+/// from the `brcm,bcm2711-pcie` node — never compiled-in.
 ///
 /// The same three windows the [`FdtDiscovery`] walk emits on the bridge's
 /// hardware-tree node (the controller `reg`, the inbound `dma-ranges`
@@ -506,6 +540,19 @@ pub struct PcieDiscovery {
     pub outbound_pcie_base: u64,
     /// Byte length of the outbound MMIO window.
     pub outbound_size: u64,
+}
+
+/// The GIC INTID the [`PCIE_COMPATIBLE`] root complex's internal MSI
+/// controller raises: the node's second `interrupts` specifier (the first is
+/// the root complex's own). [`None`] without such a node, a second
+/// specifier, or a GIC line this port routes.
+#[must_use]
+pub fn pcie_msi_intid(fdt: &Fdt<'_>) -> Option<u32> {
+    let node = fdt.find_compatible(PCIE_COMPATIBLE)?;
+    let interrupts = node.property("interrupts")?;
+    let kind = interrupts.read_be_u32(12).ok()?;
+    let number = interrupts.read_be_u32(16).ok()?;
+    gic_intid_from_cells(kind, number)
 }
 
 /// Discover the BCM2711 PCIe root complex's three address windows from the
@@ -583,15 +630,18 @@ fn parent_dma_aperture(depth: usize, levels: &[BusLevel<'_>]) -> Option<(u64, u6
 
 #[cfg(test)]
 mod tests {
-    use super::{display_engine, pcie_bringup, FdtDiscovery, EMMC2_COMPATIBLE};
-    use crate::fdt::{Fdt, GIC_PPI_INTID_BASE};
+    use super::{display_engine, pcie_bringup, pcie_msi_intid, FdtDiscovery, PCIE_COMPATIBLE};
+    use crate::fdt::{gic_intid_from_cells, Fdt, GIC_PPI_INTID_BASE};
     use crate::gic::MIN_SPI_INTID;
+    use crate::raspi_fixture as fixture;
+    use crate::raspi_fixture::raspi_like_arm;
     use std::vec::Vec;
-    use tairix_abi::{HwDeviceClass, HwNode, HwResource, HwResourceKind};
+    use tairix_abi::driver::supply::{IoRail, PowerRail};
+    use tairix_abi::{HwDeviceClass, HwNode, HwResource, HwResourceKind, HW_NODE_MAX_RESOURCES};
     use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
-    use tairix_fdt::fixture;
-    use tairix_fdt::fixture::{arm_with_cpus, raspi_like_arm, virt_like_arm};
+    use tairix_fdt::fixture::{arm_with_cpus, virt_like_arm};
     use tairix_fdt::write::FdtWriter;
+    use tairix_vcmailbox::SD_HOST_COMPATIBLE;
 
     #[test]
     fn passes_platform_discovery_conformance() {
@@ -643,8 +693,9 @@ mod tests {
     }
 
     /// A Pi-shaped tree: the board named at the root, the GPIO block, and the
-    /// AVS monitor holding the temperature sensor its thermal zone reads.
-    fn pi_cooling_tree(root_compatible: &[u8]) -> Vec<u8> {
+    /// AVS monitor holding the temperature sensor its thermal zone reads;
+    /// with `stray`, a second node naming the sensor sits beside the monitor.
+    fn pi_cooling_tree(root_compatible: &[u8], stray: bool) -> Vec<u8> {
         let cells =
             |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
         let mut b = FdtWriter::new();
@@ -661,6 +712,11 @@ mod tests {
         b.prop_str("compatible", "brcm,bcm2711-gpio");
         b.prop("reg", &cells(&[0x7e20_0000, 0xb4]));
         b.end_node();
+        if stray {
+            b.begin_node("thermal");
+            b.prop_str("compatible", "brcm,bcm2711-thermal");
+            b.end_node();
+        }
         b.begin_node("avs-monitor@7d5d2000");
         b.prop(
             "compatible",
@@ -689,10 +745,13 @@ mod tests {
         use tairix_abi::driver::gpio::HeaderLines;
         use tairix_abi::HwProperty;
 
-        let pi = discover_all(&pi_cooling_tree(b"raspberrypi,4-model-b\0brcm,bcm2711\0"));
+        let pi = discover_all(&pi_cooling_tree(
+            b"raspberrypi,4-model-b\0brcm,bcm2711\0",
+            false,
+        ));
         let lines = by_key(&pi, b"brcm,bcm2711-gpio").property(HwProperty::GpioHeaderLines);
         assert_eq!(lines, Some(HeaderLines::span(2, 27).mask()));
-        let other = discover_all(&pi_cooling_tree(b"acme,board\0brcm,bcm2711\0"));
+        let other = discover_all(&pi_cooling_tree(b"acme,board\0brcm,bcm2711\0", false));
         assert_eq!(
             by_key(&other, b"brcm,bcm2711-gpio").property(HwProperty::GpioHeaderLines),
             None
@@ -703,7 +762,7 @@ mod tests {
     fn the_avs_sensor_takes_its_monitor_s_window_and_its_zone_s_calibration() {
         use tairix_abi::driver::thermal::ThermalCalibration;
 
-        let nodes = discover_all(&pi_cooling_tree(b"raspberrypi,4-model-b\0"));
+        let nodes = discover_all(&pi_cooling_tree(b"raspberrypi,4-model-b\0", false));
         let sensor = by_key(&nodes, b"brcm,bcm2711-thermal");
         assert_eq!(mmio_windows(sensor), [(0xfd5d_2000, 0xf00)]);
         assert_eq!(
@@ -718,6 +777,30 @@ mod tests {
             mmio_windows(monitor).is_empty(),
             "one node holds the registers"
         );
+        assert_eq!(
+            sensor.property(tairix_abi::HwProperty::ThermalZone),
+            Some(tairix_abi::driver::thermal::ThermalZone::Processor.as_u64()),
+            "the processor's zone reads it"
+        );
+    }
+
+    #[test]
+    fn only_the_sensor_inside_the_monitor_takes_its_window() {
+        let nodes = discover_all(&pi_cooling_tree(b"raspberrypi,4-model-b\0", true));
+        let sensors: Vec<&HwNode> = nodes
+            .iter()
+            .filter(|n| {
+                n.match_keys()
+                    .iter()
+                    .any(|k| k.compatible_bytes() == b"brcm,bcm2711-thermal")
+            })
+            .collect();
+        assert_eq!(sensors.len(), 2);
+        assert!(
+            mmio_windows(sensors[0]).is_empty(),
+            "a node beside the monitor takes nothing"
+        );
+        assert_eq!(mmio_windows(sensors[1]), [(0xfd5d_2000, 0xf00)]);
     }
 
     #[test]
@@ -1173,6 +1256,30 @@ mod tests {
     }
 
     #[test]
+    fn the_msi_controller_s_interrupt_is_the_root_complex_s_second() {
+        let tree = |interrupts: &[u32]| {
+            let mut b = FdtWriter::new();
+            b.begin_node("");
+            b.begin_node("pcie@7d500000");
+            b.prop("compatible", &[PCIE_COMPATIBLE, b"\0"].concat());
+            let cells: Vec<u8> = interrupts.iter().flat_map(|v| v.to_be_bytes()).collect();
+            b.prop("interrupts", &cells);
+            b.end_node();
+            b.end_node();
+            b.build()
+        };
+        let both = tree(&[0, 147, 4, 0, 148, 4]);
+        assert_eq!(
+            pcie_msi_intid(&Fdt::new(&both).expect("valid fdt")),
+            gic_intid_from_cells(0, 148)
+        );
+        let one = tree(&[0, 147, 4]);
+        assert_eq!(pcie_msi_intid(&Fdt::new(&one).expect("valid fdt")), None);
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
+        assert_eq!(pcie_msi_intid(&Fdt::new(&blob).expect("valid fdt")), None);
+    }
+
+    #[test]
     fn emits_the_pcie_bridge_with_its_outbound_window() {
         let nodes = discover_all(&scb_pcie_tree());
         let pcie = by_key(&nodes, b"brcm,bcm2711-pcie");
@@ -1431,7 +1538,7 @@ mod tests {
         // The tree the firmware leaves on a B0-stepping part: the host reaches
         // only the first GiB, at bus addresses 0xC000_0000 up.
         let nodes = discover_all(&emmc2_tree(0xc000_0000, 0, 0x4000_0000));
-        let emmc2 = by_key(&nodes, EMMC2_COMPATIBLE);
+        let emmc2 = by_key(&nodes, SD_HOST_COMPATIBLE);
         assert_eq!(emmc2.class(), Some(HwDeviceClass::Storage));
         assert_eq!(mmio_windows(emmc2), [(0xfe34_0000, 0x100)]);
         assert_eq!(
@@ -1446,8 +1553,141 @@ mod tests {
         // The firmware widens the window on a C0 part to the whole low bus,
         // untranslated; the node follows the tree rather than the stepping.
         let nodes = discover_all(&emmc2_tree(0, 0, 0xfc00_0000));
-        let emmc2 = by_key(&nodes, EMMC2_COMPATIBLE);
+        let emmc2 = by_key(&nodes, SD_HOST_COMPATIBLE);
         assert_eq!(dma_resources(emmc2), [(0xfc00_0000, 0xfc00_0000, 0)]);
+    }
+
+    /// The firmware's GPIO expander's phandle in [`sd_supply_tree`].
+    const EXPANDER: u32 = 0xb;
+
+    /// A Pi-4-shaped SD supply wiring: the GPIO expander, as `controller`
+    /// names it, and one SD host per `(io line, power line)` in `hosts`, each
+    /// naming a `regulator-gpio` I/O rail and a `regulator-fixed` power rail
+    /// of its own on those lines, the power rail carrying `card_extra`.
+    fn sd_supply_tree(
+        controller: &str,
+        hosts: &[(u32, u32)],
+        card_extra: Option<(&str, u32)>,
+    ) -> Vec<u8> {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.begin_node("gpio");
+        b.prop_str("compatible", controller);
+        b.prop_u32("#gpio-cells", 2);
+        b.prop_u32("phandle", EXPANDER);
+        b.end_node();
+        for (index, &(io_line, power_line)) in (0u32..).zip(hosts) {
+            let (io, power) = (0x40 + 2 * index, 0x41 + 2 * index);
+            b.begin_node(&std::format!("regulator-sd-io@{index}"));
+            b.prop_str("compatible", "regulator-gpio");
+            b.prop("gpios", &be_cells(&[EXPANDER, io_line, 0]));
+            b.prop("states", &be_cells(&[1_800_000, 1, 3_300_000, 0]));
+            b.prop_u32("regulator-settling-time-us", 5000);
+            b.prop_u32("phandle", io);
+            b.end_node();
+            b.begin_node(&std::format!("regulator-sd-vcc@{index}"));
+            b.prop_str("compatible", "regulator-fixed");
+            b.prop("enable-active-high", &[]);
+            b.prop("gpio", &be_cells(&[EXPANDER, power_line, 0]));
+            if let Some((name, value)) = card_extra {
+                b.prop_u32(name, value);
+            }
+            b.prop_u32("phandle", power);
+            b.end_node();
+            b.begin_node(&std::format!("mmc@{index}"));
+            b.prop_str("compatible", "brcm,bcm2711-emmc2");
+            b.prop_u32("vqmmc-supply", io);
+            b.prop_u32("vmmc-supply", power);
+            b.end_node();
+        }
+        b.end_node();
+        b.build()
+    }
+
+    /// Every SD host the walk emits, in tree order.
+    fn sd_hosts(nodes: &[HwNode]) -> Vec<&HwNode> {
+        nodes
+            .iter()
+            .filter(|n| {
+                n.match_keys()
+                    .iter()
+                    .any(|k| k.compatible_bytes() == SD_HOST_COMPATIBLE)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_sd_host_carries_the_rails_its_own_supplies_name() {
+        let nodes = discover_all(&sd_supply_tree(
+            "raspberrypi,firmware-gpio",
+            &[(4, 6), (2, 3)],
+            Some(("off-on-delay-us", 3000)),
+        ));
+        let rails: Vec<_> = sd_hosts(&nodes)
+            .iter()
+            .map(|host| (host.io_rail(), host.power_rail()))
+            .collect();
+        let io = |line| IoRail {
+            line,
+            level_1v8: Some(true),
+            level_3v3: Some(false),
+            settle_us: 5000,
+        };
+        let power = |line| PowerRail {
+            line,
+            active_low: false,
+            startup_us: 0,
+            off_on_us: 3000,
+        };
+        assert_eq!(
+            rails,
+            [(Some(io(4)), Some(power(6))), (Some(io(2)), Some(power(3)))]
+        );
+    }
+
+    #[test]
+    fn a_rail_on_another_controller_states_none() {
+        let nodes = discover_all(&sd_supply_tree("brcm,bcm2711-gpio", &[(4, 6)], None));
+        let host = sd_hosts(&nodes)[0];
+        assert_eq!((host.io_rail(), host.power_rail()), (None, None));
+    }
+
+    #[test]
+    fn a_node_without_room_for_both_rails_states_neither() {
+        let tree = sd_supply_tree("raspberrypi,firmware-gpio", &[(4, 6)], None);
+        let fdt = Fdt::new(&tree).expect("valid fdt");
+        let host = fdt.find_compatible(SD_HOST_COMPATIBLE).expect("an SD host");
+        let mut roomy = HwNode::new(1, 0, HwDeviceClass::Storage);
+        super::push_sd_rails(&fdt, &host, &mut roomy);
+        assert!(roomy.io_rail().is_some() && roomy.power_rail().is_some());
+        let mut cramped = HwNode::new(2, 0, HwDeviceClass::Storage);
+        while cramped.resources().len() + 1 < HW_NODE_MAX_RESOURCES {
+            cramped
+                .push_resource(HwResource::mmio(0x1000, 0x100))
+                .expect("room");
+        }
+        super::push_sd_rails(&fdt, &host, &mut cramped);
+        assert_eq!((cramped.io_rail(), cramped.power_rail()), (None, None));
+    }
+
+    #[test]
+    fn a_power_rail_kept_on_or_too_slow_for_its_record_states_none() {
+        for extra in [
+            ("regulator-always-on", 0),
+            ("off-on-delay-us", PowerRail::MAX_DELAY_US + 1),
+        ] {
+            let nodes = discover_all(&sd_supply_tree(
+                "raspberrypi,firmware-gpio",
+                &[(4, 6)],
+                Some(extra),
+            ));
+            let host = sd_hosts(&nodes)[0];
+            assert_eq!(
+                (host.io_rail(), host.power_rail()),
+                (None, None),
+                "{extra:?}"
+            );
+        }
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //! gain. Its whole authority over the part is the I²C target channel its
 //! node's link names, so it reaches no other device on the bus.
 //!
-//! References: TI SLASE91, the `PCM512x` datasheet; Linux
-//! `sound/soc/codecs/pcm512x.c` for the consumer-mode sequence.
+//! Reference: TI SLAS763C, the `PCM512x` datasheet, its 3-wire mode (8.3.6.3)
+//! for the consumer-mode sequence.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -19,7 +19,7 @@ use tairix_abi::driver::audio::{GainRange, Rate, RateSet, RateSupport};
 use tairix_abi::driver::codec::{Codec, CodecFacts, DaiFormat, DaiFormats, DaiLink, SampleWidths};
 use tairix_abi::driver::i2c::I2cPort;
 use tairix_abi::{
-    CapabilityId, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey,
+    compatible_key, CapabilityId, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost,
 };
 use tairix_i2c::Device;
 
@@ -43,12 +43,7 @@ const BIND_PRIORITY: u16 = 10;
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(PCM5122_COMPATIBLE) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(PCM5122_COMPATIBLE),
 )];
 
 const PAGE: u8 = 0;
@@ -93,7 +88,8 @@ const VOLUME_QUIETEST: i32 = 254;
 const STEP_MILLIBEL: i32 = 50;
 
 /// Reads of the analogue mute a stop waits through, and the pause between
-/// them: 10 ms in all, the time Linux allows the soft-mute ramp.
+/// them: 10 ms in all, past the default soft-mute ramp (a 1 dB step a sample,
+/// SLAS763C Table 92) from 0 dB at every rate from 11.025 kHz.
 const MUTE_SETTLE_READS: u32 = 50;
 const MUTE_SETTLE_US: u32 = 200;
 

@@ -59,6 +59,12 @@ durch eine Gerätenummer bezeichnet, also ist `%d` diese Kennung dezimal
 und `%D` hexadezimal; ein Vergleich der `%d` zweier Dateien beantwortet
 weiterhin genau „liegen diese auf einem Datenträger?".
 
+An einem Terminal wird jeder ausgegebene Name dort in Anführungszeichen
+gesetzt, wo eine Shell sie bräuchte, und jedes Steuer- oder sonst
+unsichtbare Zeichen darin maskiert geschrieben, sodass ein Name den
+Bildschirm weder steuern noch umordnen kann; GNU gibt ihn unverändert
+aus. Eine Pipe oder eine Datei erhält den Namen Byte für Byte.
+
 ## OPTIONS
 
 - `-L, --dereference` — beschreiben, was eine symbolische Verknüpfung
@@ -83,9 +89,9 @@ weiterhin genau „liegen diese auf einem Datenträger?".
 
 - `0` — jeder Operand wurde beschrieben (oder die Kurzhilfe geschrieben).
 - `1` — mindestens ein Operand war nicht lesbar, oder die Ausgabe ist
-  fehlgeschlagen.
-- `2` — die Befehlszeile wurde nicht verstanden, oder ihr Format nannte
-  eine Direktive, die dieses System nicht bedienen kann.
+  fehlgeschlagen. Eine Befehlszeile, die nicht verstanden wurde oder
+  deren Format eine Direktive nannte, die dieses System nicht bedienen
+  kann, endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

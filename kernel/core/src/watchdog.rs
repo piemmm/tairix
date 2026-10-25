@@ -621,8 +621,8 @@ fn kernel_line_names() -> Option<&'static (dyn KernelInternalLines + Sync)> {
 /// the CPU *itself* (through [`note_kernel_breadcrumb`]) as it runs.
 ///
 /// This is the diagnosis a hard-locked CPU can still give on a board with
-/// no non-maskable interrupt channel (the Raspberry Pi 4's GICv2 in the
-/// non-secure world): a CPU wedged with maskable interrupts off cannot be
+/// no non-maskable interrupt channel (a GICv2 in the non-secure world): a
+/// CPU wedged with maskable interrupts off cannot be
 /// sampled by its own watchdog IRQ, nor interrupted by a buddy's IPI, so
 /// its last watchdog-sampled context (`wd_ctx_pc`) is stale — the innocent
 /// syscall-entry PC it last returned to (`sampled=pre_silence`). The

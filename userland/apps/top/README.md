@@ -26,8 +26,8 @@ model rather than emitting escape sequences by hand (`AGENTS.md` §2.2).
   `K`/`M`/`G`/`T`/`P`/`E` suffix (the shared `tairix_procinfo::format_size`,
   whose ladder reaches exbibytes so no `u64` outgrows the column). `USER`
   resolves through
-  the ungated, secret-free `USER_DIRECTORY` sysinfo query (uid + username,
-  never credential material), degrading to the numeric uid when the name
+  the ungated, secret-free `USER_DIRECTORY` sysinfo query (uid, login group
+  and username, never credential material), degrading to the numeric uid when the name
   cannot be resolved.
 - The state letters follow the GNU convention where the states correspond
   (`S` sleeping, `T` stopped, `Z` zombie) plus TAIRiX's running/runnable
@@ -95,7 +95,8 @@ distinction is the OS-image runtime linking model the charter governs.
 ## Layering & safety
 
 `no_std` (with `alloc`). It links only `lib/*` crates — `lib/abi`,
-`lib/procinfo`, and the OS `lib/curses`/`lib/termcap`/`lib/vt` — never a
-kernel or driver crate (`AGENTS.md` §17.4). No `unsafe`, no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9), and nothing
-writes to fd 3 (`stdinfo`, §20).
+`lib/procinfo`, `lib/help`, `lib/util`, and the OS
+`lib/curses`/`lib/termcap`/`lib/vt` — never a kernel or driver crate
+(`AGENTS.md` §17.4). No `unsafe`, no `unwrap`/`expect`/`panic!` in
+production paths (`AGENTS.md` §2.9), and nothing writes to fd 3
+(`stdinfo`, §20).

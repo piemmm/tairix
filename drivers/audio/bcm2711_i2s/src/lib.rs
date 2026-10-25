@@ -15,7 +15,9 @@
 pub mod interface;
 pub mod pcm;
 
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the block's registers, the DMA, clock and codec endpoints its links name,
@@ -40,12 +42,7 @@ const BIND_PRIORITY: u16 = 10;
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(I2S_COMPATIBLE) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(I2S_COMPATIBLE),
 )];
 
 /// Handle marker [`register`] returns; the host re-issues its own. `"I2SA"`.

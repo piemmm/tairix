@@ -1,6 +1,6 @@
 //! One HDMI transmitter as an `encoder-v1` encoder: its connector found from
-//! the hotplug lines and the sink's EDID, and a mode set's steps programmed as
-//! Linux's `vc4_hdmi` takes a BCM2711 block through them.
+//! the hotplug lines and the sink's EDID, and a mode set's steps programmed
+//! into the block.
 
 use tairix_abi::driver::clock;
 use tairix_abi::driver::display::{Polarity, Scan, Timing};
@@ -32,11 +32,12 @@ const RECENTER_BUDGET_US: u64 = 1_000;
 /// The pause a poll of one of those takes between reads.
 const POLL_US: u32 = 1_000;
 /// How long a sink is given to see the link scrambled before it is told
-/// again, as Linux's `vc4_hdmi_scrambling_wq` waits.
+/// again.
 const SCRAMBLER_CHECK_US: u64 = 1_000_000;
 
 /// The bytes one packet slot holds: its words alternate three bytes and four,
-/// as `vc4_hdmi_write_infoframe` lays a frame out.
+/// an HDMI packet's three header bytes, then each of its four seven-byte
+/// subpackets as four and three.
 const SLOT_BYTES: usize = {
     let mut bytes = 0;
     let mut word = 0;
@@ -370,8 +371,8 @@ where
     }
 
     /// Read whether a sink is connected and, when it is, its description;
-    /// answers whether the connector moved. A scrambled link the sink no
-    /// longer runs scrambled is lost, as Linux's `vc4_hdmi_reset_link` finds.
+    /// answers whether the connector moved. A scrambled link whose sink reads
+    /// its SCDC scrambling back off is lost.
     fn read_connector(&mut self) -> Result<bool, DriverError> {
         let before = self.connector();
         self.connected = self.regs.core.read32(core::HOTPLUG)? & core::HOTPLUG_CONNECTED != 0;
@@ -447,8 +448,7 @@ where
     /// The clocks, PHY and timing for `chosen`.
     fn set_up(&mut self, chosen: &Chosen) -> Result<(), DriverError> {
         let tmds_hz = u64::from(chosen.timing.clock_khz) * 1_000;
-        // A state machine clock infinitesimally faster than the pixel clock
-        // is the firmware's rule; Linux keeps a margin of one percent.
+        // The state machine clock is held one percent over the pixel clock.
         self.holds.video = Some(tmds_hz / 100 * 101);
         self.settle_hsm()?;
         floored(self.bvb.floor(bvb_hz(tmds_hz)))?;
@@ -469,8 +469,7 @@ where
         self.set_timings(&chosen.timing)
     }
 
-    /// The timing registers, as `vc5_hdmi_set_timings` lays them out for an
-    /// RGB link of eight bits a channel.
+    /// The timing registers, for an RGB link of eight bits a channel.
     fn set_timings(&self, timing: &Timing) -> Result<(), DriverError> {
         let core_regs = &self.regs.core;
         let line = timing.horizontal;
@@ -756,8 +755,8 @@ where
         self.scrambler_check_us
     }
 
-    /// Ask the sink whether it sees the link scrambled, and tell it again
-    /// until it does, as Linux's `vc4_hdmi_scrambling_wq` does.
+    /// Ask the sink whether it sees the link scrambled (SCDC
+    /// `Scrambler_Status`), and tell it again until it does.
     fn expired(&mut self) -> Result<bool, DriverError> {
         self.scrambler_check_us = None;
         if !self.scrambling()? {

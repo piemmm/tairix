@@ -112,9 +112,10 @@ puede ignorar.
 - `0` — se completó el listado, cambio, rescan o ayuda corta.
 - `1` — fallo de almacén, paquete o salida (por ejemplo, el llamador no
   puede cambiar el catálogo de toda la máquina); el motivo se indica en
-  el flujo de diagnóstico.
-- `2` — no se entendió la línea de comandos, la carpeta o entrada es
-  desconocida, o el paquete no puede registrarse según lo solicitado.
+  el flujo de diagnóstico. Una línea de comandos no entendida (incluida
+  una carpeta `--category` desconocida) también termina con `1`.
+- `2` — la entrada es desconocida, o el paquete no puede registrarse
+  según lo solicitado.
 
 ## ENVIRONMENT
 

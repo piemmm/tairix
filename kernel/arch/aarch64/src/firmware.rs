@@ -16,19 +16,27 @@
 //!
 //! # Boot CPU, before the MMU
 //!
-//! Every exchange here runs from the boot CPU before `enable_mmu_and_vectors`:
-//! with the data caches still off the CPU↔firmware exchange is coherent by
-//! construction, so no cache maintenance is needed, and there is no other
-//! thread to serialise against. That is also why the property buffer is a
-//! plain cell rather than a lock — an atomic read-modify-write on MMU-off
-//! Device-typed memory is architecturally UNPREDICTABLE, the constraint that
-//! orders the whole aarch64 boot (`plans/PI.md` P6c-2).
+//! Every boot-time exchange runs from the boot CPU before
+//! `enable_mmu_and_vectors`: with the data caches still off the
+//! CPU↔firmware exchange is coherent by construction, so no cache maintenance
+//! is needed, and there is no other thread to serialise against. That is also
+//! why the property buffer is a plain cell rather than a lock — an atomic
+//! read-modify-write on MMU-off Device-typed memory is architecturally
+//! UNPREDICTABLE, the constraint that orders the whole aarch64 boot
+//! (`plans/PI.md` P6c-2).
 //!
-//! Nothing here runs again. The kernel's one later exchange is the storage
-//! floor's: the SD-card bring-up asks for the EMMC2 clock and drives the card's
-//! supplies (`sd_supply`), before the user-space `vcmailbox` service can load
-//! from the card it brings up. From then on that service alone owns the
-//! doorbell.
+//! # The storage floor's channel
+//!
+//! The kernel's one later exchange is its storage floor's: it lends the SD
+//! host's driver a channel to the firmware
+//! ([`with_floor_channel`](crate::firmware::with_floor_channel)) for that
+//! driver's bring-up alone — over a cacheable buffer the floor carves,
+//! cleaned and invalidated around each exchange — before the user-space
+//! `vcmailbox` service can load from the card the bring-up reaches. Each
+//! request is admitted for the driver of the SD host's node exactly as that
+//! service would admit it (`tairix_vcmailbox::admit_request`), so the driver
+//! is never lent the rest of the firmware's interface. From then on the
+//! service alone owns the doorbell.
 //!
 //! # Fail closed
 //!
@@ -37,7 +45,10 @@
 //! answer all yield `None`. The console then keeps the UART and the clock
 //! keeps whatever rate the firmware had chosen; nothing is guessed at.
 
+use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+use tairix_abi::{DriverError, HwNode, MmioMapper, RegisterWindow};
 use tairix_fdt::Fdt;
+use tairix_sync::SpinLock;
 
 /// Compatible string of the BCM283x/BCM2711 firmware mailbox doorbell.
 ///
@@ -45,9 +56,19 @@ use tairix_fdt::Fdt;
 /// so this discovery and the `vcmailbox` service driver's `BIND_KEYS` cannot
 /// diverge.
 use tairix_vcmailbox::{
-    query_clock_rate, set_clock_rate, ClockRateQuery, FirmwareClock, MailboxTransport,
-    MAILBOX_COMPATIBLE,
+    admit_request, arm_physical_to_bus, query_clock_rate, set_clock_rate, BufferCoherency,
+    ClockRateQuery, FirmwareClock, MailboxError, MailboxTransport, MmioMailbox, APERTURE_LIMIT,
+    DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET, MAILBOX_COMPATIBLE, MAILBOX_REGS_LEN_BYTES,
+    PROPERTY_LEN_BYTES,
 };
+
+/// Bytes of the property buffer the storage floor carves for its channel to
+/// the firmware: one property message.
+pub const FLOOR_BUFFER_LEN: usize = PROPERTY_LEN_BYTES;
+
+/// The exclusive CPU-physical bound that buffer must lie below: the
+/// firmware's aperture.
+pub const FLOOR_BUFFER_LIMIT: u64 = APERTURE_LIMIT;
 
 /// A firmware mailbox doorbell located in a flattened device tree.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -112,6 +133,88 @@ pub fn raise_over(transport: &mut dyn MailboxTransport) -> Option<u32> {
     set_clock_rate(transport, FirmwareClock::Arm, ceiling).ok()
 }
 
+/// The doorbell transport over the mapped `regs` and property `buffer`, the
+/// buffer addressed as the firmware's bus sees it: the one construction the
+/// boot path and the storage floor share.
+fn mailbox_over(
+    regs: RegisterWindow,
+    buffer: RegisterWindow,
+    coherency: BufferCoherency,
+) -> Option<MmioMailbox> {
+    let bus = arm_physical_to_bus(buffer.phys_base(), DEFAULT_BUS_ALIAS).ok()?;
+    MmioMailbox::with_coherency(regs, buffer, bus, DEFAULT_POLL_BUDGET, coherency).ok()
+}
+
+/// Run `body` with the storage floor's channel to the firmware: over the
+/// doorbell `fdt` names, mapped through `map`, and the cacheable property
+/// `buffer` the floor carved below [`FLOOR_BUFFER_LIMIT`], admitting each
+/// request for the driver of `node`.
+///
+/// `body` is handed `None` when there is no `buffer`, the tree names no
+/// doorbell as long as the register block, or the doorbell cannot be mapped.
+/// The channel lives for `body` alone.
+pub fn with_floor_channel<R>(
+    fdt: &Fdt<'_>,
+    map: &dyn MmioMapper,
+    buffer: Option<RegisterWindow>,
+    node: &HwNode,
+    body: impl FnOnce(Option<&dyn MailboxChannel>) -> R,
+) -> R {
+    let mailbox = buffer
+        .zip(find_mailbox(fdt))
+        .and_then(|(buffer, doorbell)| {
+            let whole =
+                usize::try_from(doorbell.len).is_ok_and(|len| len >= MAILBOX_REGS_LEN_BYTES);
+            let regs = whole
+                .then(|| map.map_window(doorbell.base, MAILBOX_REGS_LEN_BYTES).ok())
+                .flatten()?;
+            let coherency = BufferCoherency::new(clean_invalidate_buffer, clean_invalidate_buffer);
+            mailbox_over(regs, buffer, coherency)
+        });
+    let channel = mailbox.map(|mailbox| FloorChannel::new(mailbox, node));
+    body(
+        channel
+            .as_ref()
+            .map(|channel| channel as &dyn MailboxChannel),
+    )
+}
+
+/// Clean and invalidate the property buffer at `base` around the firmware's
+/// DMA of it: the mailbox names the buffer by its physical address, which the
+/// kernel's identity direct map makes its CPU address too.
+fn clean_invalidate_buffer(base: u64, len: usize) {
+    if let Ok(start) = usize::try_from(base) {
+        crate::kernel_arch::clean_invalidate_dcache_range(start, len);
+    }
+}
+
+/// The storage floor's channel to the firmware: each request admitted for the
+/// driver of `node`, as the mailbox service admits it, before it reaches the
+/// doorbell.
+struct FloorChannel<'n, T> {
+    transport: SpinLock<T>,
+    node: &'n HwNode,
+}
+
+impl<'n, T: MailboxTransport> FloorChannel<'n, T> {
+    const fn new(transport: T, node: &'n HwNode) -> Self {
+        Self {
+            transport: SpinLock::new(transport),
+            node,
+        }
+    }
+}
+
+impl<T: MailboxTransport> MailboxChannel for FloorChannel<'_, T> {
+    fn exchange(&self, message: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
+        admit_request(message, Some(self.node)).map_err(|_| DriverError::PermissionDenied)?;
+        self.transport
+            .lock()
+            .exchange(message)
+            .map_err(MailboxError::as_driver_error)
+    }
+}
+
 /// Run `body` against a transport over `mailbox`'s doorbell and the shared
 /// property buffer.
 ///
@@ -142,8 +245,7 @@ mod metal {
 
     use tairix_abi::RegisterWindow;
     use tairix_vcmailbox::{
-        arm_physical_to_bus, MailboxTransport, MmioMailbox, DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET,
-        MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
+        BufferCoherency, MailboxTransport, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
     };
 
     use super::DiscoveredMailbox;
@@ -175,7 +277,6 @@ mod metal {
         // `PropertyBuffer`): no other reference to the buffer exists.
         let buffer_ptr = unsafe { NonNull::new_unchecked(PROPERTY_BUFFER.0.get().cast::<u8>()) };
         let buffer_phys = buffer_ptr.as_ptr() as u64;
-        let buffer_bus = arm_physical_to_bus(buffer_phys, DEFAULT_BUS_ALIAS).ok()?;
         let doorbell_ptr = NonNull::new(usize::try_from(mailbox.base).ok()? as *mut u8)?;
         // SAFETY: `mailbox.base` is the FDT-discovered, `ranges`-translated
         // CPU-physical doorbell window (boot runs identity-addressed), at
@@ -188,17 +289,118 @@ mod metal {
         };
         let buffer =
             unsafe { RegisterWindow::from_mapping(buffer_phys, buffer_ptr, PROPERTY_LEN_BYTES) };
-        let mut transport = MmioMailbox::new(regs, buffer, buffer_bus, DEFAULT_POLL_BUDGET).ok()?;
+        // The caches are off, so the buffer agrees with the firmware as it is.
+        let mut transport = super::mailbox_over(regs, buffer, BufferCoherency::none())?;
         Some(body(&mut transport))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{find_mailbox, raise_over};
-    use tairix_fdt::fixture::raspi_like_arm;
+    use core::ptr::NonNull;
+
+    use super::{find_mailbox, raise_over, with_floor_channel, FloorChannel};
+    use crate::raspi_fixture::raspi_like_arm;
+    use tairix_abi::driver::mailbox::MailboxChannel;
+    use tairix_abi::driver::supply::{IoRail, PowerRail};
+    use tairix_abi::{
+        DriverError, HwDeviceClass, HwNode, HwResource, MmioMapError, MmioMapper, RegisterWindow,
+    };
     use tairix_fdt::Fdt;
     use tairix_vcmailbox::mock::MockFirmware;
+    use tairix_vcmailbox::{
+        encode_clock_rate_query, encode_clock_rate_write, encode_gpio_state_write, ClockRateQuery,
+        FirmwareClock, PROPERTY_LEN_BYTES, SD_HOST_KEY,
+    };
+
+    /// The SD host's node, its rails on expander lines 4 and 6.
+    fn sd_host() -> HwNode {
+        let mut node = HwNode::new(3, 0, HwDeviceClass::Storage);
+        node.push_match_key(SD_HOST_KEY).expect("room");
+        node.push_resource(HwResource::io_rail(IoRail {
+            line: 4,
+            level_1v8: Some(true),
+            level_3v3: Some(false),
+            settle_us: 5000,
+        }))
+        .expect("room");
+        let power = PowerRail {
+            line: 6,
+            active_low: false,
+            startup_us: 0,
+            off_on_us: 0,
+        };
+        node.push_resource(HwResource::power_rail(power).expect("fits"))
+            .expect("room");
+        node
+    }
+
+    /// Regression: the floor drove the doorbell with no admission, so the SD
+    /// bring-up could send the firmware any request at all.
+    #[test]
+    fn the_floor_channel_forwards_for_its_node_only_what_the_service_would() {
+        let node = sd_host();
+        let channel = FloorChannel::new(MockFirmware::healthy(), &node);
+        let mut own_line = encode_gpio_state_write(4, true);
+        assert_eq!(channel.exchange(&mut own_line), Ok(()));
+        assert!(channel.transport.lock().gpio_high(4));
+        let mut clock = encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Current);
+        assert_eq!(channel.exchange(&mut clock), Ok(()));
+        let mut other_line = encode_gpio_state_write(5, true);
+        let mut arm = encode_clock_rate_write(FirmwareClock::Arm, 1_500_000_000);
+        for message in [&mut other_line, &mut arm] {
+            assert_eq!(
+                channel.exchange(message),
+                Err(DriverError::PermissionDenied)
+            );
+        }
+        let firmware = channel.transport.lock();
+        assert!(
+            !firmware.gpio_high(5),
+            "a refused request never reaches the firmware"
+        );
+        assert_eq!(firmware.arm.hz, MockFirmware::healthy().arm.hz);
+    }
+
+    /// A mapper that maps nothing.
+    struct Unmapped;
+
+    impl MmioMapper for Unmapped {
+        fn map_window(&self, _phys: u64, _len: usize) -> Result<RegisterWindow, MmioMapError> {
+            Err(MmioMapError::Unsupported)
+        }
+    }
+
+    #[test]
+    fn no_buffer_no_doorbell_or_an_unmapped_doorbell_lends_no_channel() {
+        #[repr(align(16))]
+        struct Buffer([u8; PROPERTY_LEN_BYTES]);
+
+        let node = sd_host();
+        let lends_none = |fdt: &Fdt<'_>, buffer: Option<RegisterWindow>| {
+            with_floor_channel(fdt, &Unmapped, buffer, &node, |channel| channel.is_none())
+        };
+        let pi = raspi_like_arm(0x7e20_1000, 0x7e21_5040);
+        let pi = Fdt::new(&pi).expect("valid fdt");
+        assert!(lends_none(&pi, None));
+
+        let mut backing = Buffer([0; PROPERTY_LEN_BYTES]);
+        let base = NonNull::from(&mut backing.0).cast::<u8>();
+        let window = || {
+            // SAFETY: `base` is `backing`, 16-byte aligned and
+            // `PROPERTY_LEN_BYTES` long, which outlives every window taken
+            // over it; no exchange is ever made over one, as no doorbell maps.
+            unsafe { RegisterWindow::from_mapping(0x1000, base, PROPERTY_LEN_BYTES) }
+        };
+        assert!(lends_none(&pi, Some(window())), "the doorbell does not map");
+
+        let mut builder = tairix_fdt::write::FdtWriter::new();
+        builder.begin_node("");
+        builder.end_node();
+        let empty_tree = builder.build();
+        let empty = Fdt::new(&empty_tree).expect("valid fdt");
+        assert!(lends_none(&empty, Some(window())), "no doorbell named");
+    }
 
     #[test]
     fn finds_the_mailbox_in_a_raspi_tree() {

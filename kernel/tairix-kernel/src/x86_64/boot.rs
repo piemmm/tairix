@@ -2121,8 +2121,8 @@ fn discover_io_apics(
         let pin_count = (u32::from(ioapic.max_redirection_entry()) + 1)
             .min(tairix_arch_x86_64::apic::IOAPIC_ADDRESSABLE_PINS);
         // Two blocks claiming one GSI would leave it reaching either: refuse
-        // the later block, as Linux does, masking every pin so none firmware
-        // left armed raises a vector the pool hands another line.
+        // the later block, masking every pin so none firmware left armed
+        // raises a vector the pool hands another line.
         if !gsis_free(
             &blocks,
             gsi_base,

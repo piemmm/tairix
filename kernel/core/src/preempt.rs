@@ -147,7 +147,7 @@ pub trait PreemptCompetitor: Sync {
     /// nothing pending and a failed immediate suspension: neither path
     /// reaches the dispatch that normally arms the next deadline. The CPU
     /// therefore keeps re-checking its run queue at the steady HZ cadence
-    /// (the Linux scheduler-tick model) and promptly picks up work later
+    /// and promptly picks up work later
     /// enqueued here *without* an IPI — a task drained back from overflow,
     /// a rebalance. Re-arms only the timer; it never reschedules-to-self,
     /// so it incurs none of the address-space/TLB churn a gratuitous
@@ -311,9 +311,7 @@ fn count_preemption(cpu: CpuId) {
 /// left running — the periodic tick still fired, but rescheduling to the
 /// *same* sole task every quantum has no scheduling effect and only churns
 /// the per-dispatch user-address-space switch, which starves the task's own
-/// forward progress.
-/// This mirrors Linux's `check_preempt_tick`, which preempts only when a
-/// competitor should run.
+/// forward progress: a tick preempts only when a competitor should run.
 ///
 /// Where no switch happens, a non-tickless policy's periodic deadline is
 /// re-armed: without it a CPU whose lone task keeps running would fall

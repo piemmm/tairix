@@ -24,8 +24,8 @@ use tairix_log::{SegmentError, SegmentReader, Stream};
 pub const LOGS_ROOT: &str = "/System/Logs";
 
 /// Absolute path of the per-installation **log-attestation key** the journal
-/// principal reads at startup to seal `audit`/`security` segments
-/// (`PREREQUISITES.md` P-E). A secret, owner-read/write-only under the
+/// principal reads at startup to seal `audit`/`security` segments.
+/// A secret, owner-read/write-only under the
 /// read-only `/System/Security/Keys` (the installer/image writes it there).
 pub const LOG_ATTESTATION_KEY_PATH: &str = "/System/Security/Keys/LogAttestation";
 

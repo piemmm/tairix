@@ -43,9 +43,9 @@ así que —a diferencia de GNU `sleep`— no tiene la opción `--version`.
 ## EXIT STATUS
 
 - `0` — el intervalo transcurrió, o se escribió una ayuda breve solicitada.
-- `1` — la escritura de la ayuda breve falló.
-- `2` — no se entendió la línea de órdenes (una opción desconocida, un
-  operando ausente o un intervalo de tiempo no válido).
+- `1` — la escritura de la ayuda breve falló. Una línea de órdenes no
+  entendida (una opción desconocida, un operando ausente o un intervalo de
+  tiempo no válido) también termina con `1`.
 
 ## ENVIRONMENT
 

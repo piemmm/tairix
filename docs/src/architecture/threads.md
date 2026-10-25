@@ -23,7 +23,7 @@ What a thread has of its own, and what belongs to the group:
 | Scheduler task, priority, run state | Address space and every mapping in it |
 | Kernel stack (guarded arena slot) | Capability record, credentials, attested name |
 | User stack + its unbacked guard page | Descriptor table and standard streams |
-| psABI thread pointer | Resource limits, working directory, I/O counters |
+| psABI thread pointer | Resource limits, working directory and umask, I/O counters |
 | Signal-intake and kill-gate state | IPC ports, IRQ bindings, shared memory, wait-sets, seat leases |
 
 The single shared capability record is a **security** decision, not a

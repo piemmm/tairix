@@ -1,8 +1,7 @@
 //! The transmitter's audio endpoint: linear PCM from a cyclic DMA buffer into
 //! the MAI, framed as IEC 60958 subframes, its clock regenerated at the sink
-//! from N and CTS, the audio `InfoFrame` placing its channels — as Linux's
-//! `vc4_hdmi` audio prepares a BCM2711 block — and its facts following the
-//! sink on the connector.
+//! from N and CTS, the audio `InfoFrame` placing its channels, and its facts
+//! following the sink on the connector.
 //!
 //! The MAI runs on the audio clock whether or not the link sends, so a stream
 //! outlives an output brought down: when the link is up again its N and CTS
@@ -48,7 +47,7 @@ const MAI_RATES: [(u32, u32); 7] = [
 ];
 
 /// The MAI's FIFO thresholds on the BCM2711: its panic and DMA request
-/// levels, as Linux sets them for a fifth-generation block.
+/// levels.
 const MAI_THRESHOLDS: u32 = (0x10 << 24) | (0x10 << 16) | (0x1C << 8) | 0x1C;
 
 /// The largest numerator and denominator the MAI's sample clock divides by.
@@ -241,37 +240,57 @@ pub(crate) fn n_cts(clock_khz: u32, rate: Rate) -> Option<(u32, u32)> {
     Some((n, cts))
 }
 
-/// The best fraction of `numerator` over `denominator` within the MAI's
-/// bounds, as Linux's `rational_best_approximation` finds it: a convergent of
-/// the continued fraction, or the semiconvergent nearer than the last.
+/// The fraction nearest `numerator` over `denominator` whose terms fit the
+/// MAI's fields: the last convergent of its continued fraction that fits, or
+/// the largest semiconvergent past it that fits where that is nearer, the
+/// convergent kept on a tie (Wikipedia, "Simple continued fraction", best
+/// rational approximations).
 pub(crate) fn sample_divider(numerator: u64, denominator: u64) -> Option<(u64, u64)> {
-    let (mut n, mut d) = (numerator, denominator);
-    let (mut n0, mut d0, mut n1, mut d1) = (0u64, 1u64, 1u64, 0u64);
-    while d != 0 {
-        let a = n / d;
-        let previous = d;
-        d = n % d;
-        n = previous;
-        let n2 = n0.checked_add(a.checked_mul(n1)?)?;
-        let d2 = d0.checked_add(a.checked_mul(d1)?)?;
-        if n2 > SMP_N_MAX || d2 > SMP_M_MAX {
-            let t = [
-                (SMP_M_MAX - d0).checked_div(d1),
-                (SMP_N_MAX - n0).checked_div(n1),
-            ]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(u64::MAX);
-            if d1 == 0 || 2 * t > a || (2 * t == a && d0 * previous > d1 * d) {
-                n1 = n0 + t * n1;
-                d1 = d0 + t * d1;
-            }
-            break;
+    let fits = |p: u64, q: u64| p <= SMP_N_MAX && q <= SMP_M_MAX;
+    // The two convergents before the next, `h/k` the later: `1/0` and `0/1`
+    // open the recurrence.
+    let (mut h0, mut k0, mut h1, mut k1) = (0u64, 1u64, 1u64, 0u64);
+    let (mut rest, mut divisor) = (numerator, denominator);
+    let best = loop {
+        if divisor == 0 {
+            break (h1, k1);
         }
-        (n0, d0, n1, d1) = (n1, d1, n2, d2);
-    }
-    (n1 != 0 && d1 != 0).then_some((n1, d1))
+        let term = rest / divisor;
+        (rest, divisor) = (divisor, rest % divisor);
+        let next = term
+            .checked_mul(h1)
+            .and_then(|p| p.checked_add(h0))
+            .zip(term.checked_mul(k1).and_then(|q| q.checked_add(k0)));
+        match next {
+            Some((p, q)) if fits(p, q) => (h0, k0, h1, k1) = (h1, k1, p, q),
+            _ => {
+                let most = [
+                    (SMP_N_MAX - h0).checked_div(h1),
+                    (SMP_M_MAX - k0).checked_div(k1),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(0);
+                let semi = (h0 + most * h1, k0 + most * k1);
+                break if k1 == 0 || (most > 0 && nearer(semi, (h1, k1), numerator, denominator)) {
+                    semi
+                } else {
+                    (h1, k1)
+                };
+            }
+        }
+    };
+    (best.0 != 0 && best.1 != 0).then_some(best)
+}
+
+/// Whether `a` lies strictly nearer `numerator / denominator` than `b`, both
+/// compared exactly.
+fn nearer(a: (u64, u64), b: (u64, u64), numerator: u64, denominator: u64) -> bool {
+    let error = |(p, q): (u64, u64)| {
+        (u128::from(p) * u128::from(denominator)).abs_diff(u128::from(q) * u128::from(numerator))
+    };
+    error(a) * u128::from(b.1) < error(b) * u128::from(a.1)
 }
 
 impl<R, C, P, D, L, M> Hdmi<R, C, P, D, L, M>
@@ -356,8 +375,7 @@ where
         gate.and(hsm)
     }
 
-    /// Set the MAI up for `setup`, its sample clock divided from
-    /// `audio_hz`, as Linux's `vc4_hdmi_audio_startup` and `_prepare` do.
+    /// Set the MAI up for `setup`, its sample clock divided from `audio_hz`.
     fn mai_up(&self, setup: &Setup, audio_hz: u64) -> Result<(), DriverError> {
         let channels = u32::from(setup.allocation.channels);
         let mask = (1u32 << channels) - 1;
@@ -404,8 +422,7 @@ where
         )
     }
 
-    /// Take the MAI down, its `InfoFrame` stopped, as Linux's
-    /// `vc4_hdmi_audio_shutdown` and `_reset` do; every step runs whatever
+    /// Take the MAI down, its `InfoFrame` stopped; every step runs whatever
     /// fails.
     fn mai_down(&self) -> Result<(), DriverError> {
         let quiet = self.mai(hd::MAI_CTL, hd::MAI_DLATE | hd::MAI_ERRORE | hd::MAI_ERRORF);

@@ -9,23 +9,37 @@ rm — supprimer des fichiers et des répertoires
 ## DESCRIPTION
 
 Supprime chaque opérande fichier, dans l'ordre. Un opérande qui n'est
-pas un répertoire est délié ; un opérande répertoire n'est supprimé
-qu'avec `-r` (qui supprime son contenu en profondeur d'abord, puis le
-répertoire lui-même) ou, s'il est vide, avec `-d`.
+pas un répertoire est délié — un lien symbolique est lui-même supprimé,
+jamais ce qu'il désigne ; un opérande répertoire n'est supprimé qu'avec
+`-r` (qui supprime son contenu en profondeur d'abord, puis le répertoire
+lui-même) ou, s'il est vide, avec `-d`. Dans les deux cas, un opérande
+dont le dernier composant est `.` ou `..` est refusé, comme l'exige
+POSIX.
 
 Avec `-f`, un opérande qui n'existe pas est ignoré silencieusement et
 aucune question n'est jamais posée. `-i` demande sur la sortie
-d'erreur avant chaque suppression et avant de descendre dans un
-répertoire ; `-I` demande une seule fois avant de supprimer plus de
-trois opérandes ou avant une suppression récursive. Une question
-déclinée ignore l'objet (ou toute l'exécution, pour `-I`) sans
-erreur ; une réponse illisible ne vaut jamais consentement. Le
-dernier de `-f`, `-i` et `-I` l'emporte.
+d'erreur avant chaque suppression, en nommant ce qu'il supprimerait
+(`remove regular empty file 'a'?`, `remove symbolic link 'l'?`), et
+avant de descendre dans un répertoire qui contient quelque chose ; `-I`
+demande une seule fois avant de supprimer plus de trois opérandes ou
+avant une suppression récursive. Une question déclinée conserve l'objet
+(ou ignore toute l'exécution, pour `-I`) sans erreur ; une réponse
+illisible ne vaut jamais consentement. Le dernier de `-f`, `-i` et `-I`
+l'emporte.
 
-L'opérande `/` est refusé sous `--preserve-root`, le comportement par
-défaut. Le premier échec arrête l'exécution avant tout opérande
-ultérieur. `--` termine l'analyse des options : chaque argument
-ultérieur est un chemin.
+Sans `-f`, lorsque l'entrée standard est un terminal, un fichier sur
+lequel l'appelant n'a pas le droit d'écrire fait l'objet d'une question
+avant d'être supprimé (`remove write-protected regular file 'x'?`) et
+n'est supprimé que sur une réponse commençant par `y` ou `Y` ; un lien
+symbolique ne fait jamais l'objet d'une question. Sous `-i`, la question
+nomme aussi la protection.
+
+Un chemin impossible à examiner, à lire ou à supprimer est signalé, et
+les autres sont tout de même supprimés ; un répertoire qui contient
+encore quelque chose est conservé sans un mot. Une suppression récursive
+de `/`, quelle qu'en soit l'écriture, est refusée sous
+`--preserve-root`, le comportement par défaut. `--` termine l'analyse
+des options : chaque argument ultérieur est un chemin.
 
 ## OPTIONS
 
@@ -39,8 +53,10 @@ ultérieur est un chemin.
   opérandes, ou avant une suppression récursive.
 - `-v, --verbose` — signaler chaque suppression sous la forme
   `removed 'file'`.
-- `--preserve-root` — refuser de supprimer `/` (le défaut).
-- `--no-preserve-root` — autoriser la suppression de `/`.
+- `--preserve-root` — refuser de supprimer `/` récursivement (le
+  défaut).
+- `--no-preserve-root` — autoriser la suppression de `/`. L'option n'est
+  acceptée qu'écrite en toutes lettres.
 - `-h, -?, --help` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES
@@ -54,9 +70,9 @@ ultérieur est un chemin.
 
 - `0` — chaque suppression a réussi (une question déclinée et un saut
   `-f` ne sont pas des échecs).
-- `1` — un échec du système de fichiers, de la question ou de la
-  sortie ; la raison est imprimée sur la sortie d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — un chemin n'a pas pu être supprimé, ou une question ou la sortie
+  a échoué ; chaque raison est imprimée sur la sortie d'erreur. Une
+  ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

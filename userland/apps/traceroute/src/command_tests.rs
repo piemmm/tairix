@@ -115,13 +115,13 @@ fn out_of_range_values_fail_closed() {
 fn a_missing_value_or_target_fails_closed() {
     assert_eq!(
         parse(&["host", "-m"]),
-        Err(ParseError::MissingValue(String::from("-m")))
+        Err(ParseError::Option(Refusal::MissingShortValue('m')))
     );
     assert_eq!(parse(&["-n"]), Err(ParseError::MissingTarget));
-    assert!(matches!(
+    assert_eq!(
         parse(&["-x", "host"]),
-        Err(ParseError::UnknownOption(_))
-    ));
+        Err(ParseError::Option(Refusal::UnknownShort('x')))
+    );
 }
 
 /// Every locale's `OPTIONS` documents the switches this parser accepts, read
@@ -163,4 +163,40 @@ fn help_documents_the_parser_switches() {
             );
         }
     }
+}
+
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-Q", "host"]), "invalid option -- 'Q'");
+    assert_eq!(refused(&["-nQ", "host"]), "invalid option -- 'Q'");
+    assert_eq!(refused(&["--frob", "host"]), "unrecognized option '--frob'");
+    assert_eq!(
+        refused(&["host", "-q"]),
+        "option requires an argument -- 'q'"
+    );
+    assert_eq!(
+        refused(&["host", "--wait"]),
+        "option '--wait' requires an argument"
+    );
+    assert_eq!(
+        refused(&["--icmp=1", "host"]),
+        "option '--icmp' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let config = config(&["--max=9", "--sim", "8", "--ic", "host"]);
+    assert_eq!(config.max_hops.get(), 9);
+    assert_eq!(config.sim_queries.get(), 8);
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
+    assert_eq!(
+        refused(&["--m", "9", "host"]),
+        "option '--m' is ambiguous; possibilities: '--module' '--max-hops'"
+    );
 }

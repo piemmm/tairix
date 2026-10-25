@@ -23,6 +23,7 @@ allocate does not belong in this crate.
 | `SeqLock<T>` | Read-mostly `T: Copy` data where readers must never block (vDSO time, statistics counters). | Multiple concurrent writers; large payloads. | Sequence-counter validation with `Acquire` re-sample. | Readers safe at any IRQ; writers must serialise themselves. |
 | `OnceCell<T>` / `Once<T>` | Set-once or lazy-init data. **No panic on poison** — the API returns `Result`. | Inside interrupt context against the same cell as the initialiser (busy loop). | `Release` publication; `Acquire` observation. | Process / kernel-thread only. |
 | `FnCell<F>` | A callback slot a port fills at boot and a trap path reads — timer tick, syscall dispatcher, fault handler, spin service. | Anything that is not a thin function pointer (the `FnPtr` bound rejects it), or a slot needing a captured environment. | `Release` publication; `Acquire` observation. | Any IRQ level: the load is one atomic read and never spins. |
+| `claims` | A vector or slot allocator's map over `AtomicU64` words: claim the lowest free bit, give one back. | A slot needing more state than one bit, or a release while something may still use the slot. | `AcqRel` claim; `Release` release. | Any IRQ level: lock-free, holding nothing between calls. |
 
 ### When a critical section may *sleep* — `SleepLock` (kernel-side)
 
@@ -252,7 +253,7 @@ The bounds are pinned by
   invariant live in
   [`lib/sync/tests/rwlock_fairness.rs`](../../../lib/sync/tests/rwlock_fairness.rs).
 - **Loom-based concurrency tests** for `SpinLock`, `RwLock`, `McsLock`,
-  `SeqLock` and `OnceCell` live in
+  `SeqLock`, `OnceCell` and `claims` live in
   [`lib/sync/tests/loom.rs`](../../../lib/sync/tests/loom.rs). They are
   gated behind `#[cfg(loom)]` and driven by `cargo xtask loom`, which is
   a `ci` stage: `loom` substitutes its own atomics for `core`'s, so it

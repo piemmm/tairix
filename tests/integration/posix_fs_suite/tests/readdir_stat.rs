@@ -5,123 +5,76 @@ use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn readdir_lists_created_children() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("alpha")), &mut fs)
+    vol.create(owner, &vol_path("alpha"), new_file())
         .expect("create alpha");
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("beta")), &mut fs)
+    vol.create(owner, &vol_path("beta"), new_file())
         .expect("create beta");
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("gamma")), &mut fs)
+    vol.mkdir(owner, &vol_path("gamma"), new_dir())
         .expect("mkdir gamma");
 
-    let mut names: Vec<(NodeKind, String)> = vfs
-        .list_all_via_secured(
-            &owner,
-            &vfs.cover(&path(MOUNT)),
-            &mut fs,
-            FinalLink::Follow,
-            usize::MAX,
-        )
-        .expect("list mount root")
-        .into_iter()
-        .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
-        .collect();
-    names.sort_by(|a, b| a.1.cmp(&b.1));
+    let entries = vol.list(owner, MOUNT).expect("list mount root");
+    let mut names = kinds(&entries);
+    names.sort_by_key(|&(_, name)| name);
     assert_eq!(
         names,
         [
-            (NodeKind::RegularFile, String::from("alpha")),
-            (NodeKind::RegularFile, String::from("beta")),
-            (NodeKind::Directory, String::from("gamma")),
+            (FileKind::Regular, "alpha"),
+            (FileKind::Regular, "beta"),
+            (FileKind::Directory, "gamma"),
         ]
     );
 }
 
 #[test]
 fn readdir_of_a_file_is_not_a_directory() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("file")), &mut fs)
+    vol.create(owner, &vol_path("file"), new_file())
         .expect("create");
     assert_eq!(
-        vfs.list_all_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("file")),
-            &mut fs,
-            FinalLink::Follow,
-            usize::MAX
-        ),
-        Err(VfsError::NotADirectory)
+        vol.list(owner, &vol_path("file")),
+        Err(Errno::NotADirectory)
     );
 }
 
 #[test]
 fn readdir_of_empty_directory_is_empty() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("empty")), &mut fs)
+    vol.mkdir(owner, &vol_path("empty"), new_dir())
         .expect("mkdir");
-    let names = vfs
-        .list_all_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("empty")),
-            &mut fs,
-            FinalLink::Follow,
-            usize::MAX,
-        )
-        .expect("list");
-    assert!(names.is_empty());
+    let entries = vol.list(owner, &vol_path("empty")).expect("list");
+    assert!(entries.is_empty());
 }
 
 #[test]
 fn stat_reports_size_after_writes() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("sized")), &mut fs)
+    vol.create(owner, &vol_path("sized"), new_file())
         .expect("create");
-    vfs.write_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("sized")),
-        &mut fs,
-        0,
-        b"twelve bytes",
-    )
-    .expect("write");
+    vol.write(owner, &vol_path("sized"), 0, b"twelve bytes")
+        .expect("write");
 
-    let info = vfs
-        .stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("sized")),
-            &mut fs,
-            FinalLink::Follow,
-        )
+    let info = vol
+        .stat(owner, &vol_path("sized"), FinalLink::Follow)
         .expect("stat");
-    assert_eq!(info.kind, NodeKind::RegularFile);
+    assert_eq!(info.kind, FileKind::Regular);
     assert_eq!(info.size, 12);
 }
 
 #[test]
 fn stat_of_a_missing_path_is_not_found() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-
+    let vol = arxfs_volume(false);
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("ghost")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.size),
-        Err(VfsError::NotFound)
+        vol.stat(ROOT.caller(), &vol_path("ghost"), FinalLink::Follow)
+            .map(|info| info.size),
+        Err(Errno::NotFound)
     );
 }

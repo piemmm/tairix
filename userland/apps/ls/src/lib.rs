@@ -53,8 +53,9 @@
 //!
 //! # Fail closed
 //!
-//! An unknown option is a [`LsError::Usage`] that lists nothing; a failed
-//! terminal write is [`LsError::Output`] and is the one failure that stops
+//! An option `getopt` refuses ([`LsError::Option`]), or a value `ls` cannot
+//! read ([`LsError::Usage`]), lists nothing; a failed terminal write is
+//! [`LsError::Output`] and is the one failure that stops
 //! the run — with nowhere to write, there is nothing left to do. Every other
 //! refusal is reported and skipped, never guessed at, and nothing panics.
 //!

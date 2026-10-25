@@ -7,10 +7,9 @@
 
 use super::*;
 
-use crate::fs::memfs::RwMockFs;
-use crate::fs::perm::{Credentials, Metadata, Mode};
+use crate::fs::memfs::{RwMockFs, ADMIN_RECORD};
+use crate::fs::test_volume::{mounted, path, read_path, Account};
 use crate::fs::wrapper_conformance as conformance;
-use crate::fs::{Attachment, Path, Vfs, VfsError};
 use crate::test_pressure::{free_for, pressured, unpressured, TestSource};
 use crate::test_sink::TestSink;
 
@@ -20,8 +19,8 @@ use alloc::vec::Vec;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 
 use tairix_abi::driver::DriverHandle;
+use tairix_abi::Errno;
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::{GroupId, UserId};
 use tairix_reclaim::PressureBand;
 
 /// A driver wrapper counting every structural call, so a test can prove
@@ -75,6 +74,11 @@ impl<F: FilesystemRead> FilesystemRead for Counting<F> {
         self.inner.lookup(dir, name)
     }
 
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        self.calls += 1;
+        self.inner.parent(dir)
+    }
+
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         self.calls += 1;
         self.inner.read_at(file, offset, buf)
@@ -90,12 +94,33 @@ impl<F: FilesystemRead> FilesystemRead for Counting<F> {
         self.calls += 1;
         self.inner.read_dir(dir, cursor, after, visit)
     }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.calls += 1;
+        self.inner.pin(node)
+    }
+
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        self.calls += 1;
+        self.inner.unpin(pinned)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        self.calls += 1;
+        self.inner.release_pins()
+    }
 }
 
 impl<F: FilesystemWrite> FilesystemWrite for Counting<F> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
         self.calls += 1;
-        self.inner.create(dir, name, kind)
+        self.inner.create(dir, name, kind, record)
     }
 
     fn create_link(
@@ -103,9 +128,10 @@ impl<F: FilesystemWrite> FilesystemWrite for Counting<F> {
         dir: NodeId,
         name: &[u8],
         target: &[u8],
+        record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         self.calls += 1;
-        self.inner.create_link(dir, name, target)
+        self.inner.create_link(dir, name, target, record)
     }
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
@@ -113,31 +139,19 @@ impl<F: FilesystemWrite> FilesystemWrite for Counting<F> {
         self.inner.link(dir, name, node)
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
         self.calls += 1;
-        self.inner.write_at(dir, name, offset, data)
+        self.inner.write_at(file, offset, data)
     }
 
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         self.calls += 1;
-        self.inner.truncate(dir, name, size)
+        self.inner.truncate(file, size)
     }
 
-    fn punch(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        len: u64,
-    ) -> Result<(), DriverError> {
+    fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
         self.calls += 1;
-        self.inner.punch(dir, name, offset, len)
+        self.inner.punch(file, offset, len)
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
@@ -186,11 +200,6 @@ impl<F: FilesystemSecurity> FilesystemSecurity for Counting<F> {
         self.inner.set_security(node, security)
     }
 
-    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
-        self.calls += 1;
-        self.inner.stamp_owner(node, uid, gid)
-    }
-
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
         self.calls += 1;
         self.inner.records_ownership(node)
@@ -228,13 +237,13 @@ fn calls(cache: &CachedFs<Counting<RwMockFs>>) -> u64 {
 fn fixture(contents: &[u8]) -> CachedFs<Counting<RwMockFs>> {
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    fs.create(root, b"dir", NodeKind::Directory, &ADMIN_RECORD)
+        .expect("mkdir");
     let dir = fs.lookup(root, b"dir").expect("dir resolves");
-    fs.create(dir, b"file.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(dir, b"file.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    let written = fs
-        .write_at(dir, b"file.txt", 0, contents)
-        .expect("seed contents");
+    let written = fs.write_at(file, 0, contents).expect("seed contents");
     assert_eq!(written, contents.len());
     CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
 }
@@ -255,13 +264,13 @@ fn fixture_with_control(
 ) -> CachedFs<Counting<RwMockFs>> {
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    fs.create(root, b"dir", NodeKind::Directory, &ADMIN_RECORD)
+        .expect("mkdir");
     let dir = fs.lookup(root, b"dir").expect("dir resolves");
-    fs.create(dir, b"file.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(dir, b"file.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    let written = fs
-        .write_at(dir, b"file.txt", 0, contents)
-        .expect("seed contents");
+    let written = fs.write_at(file, 0, contents).expect("seed contents");
     assert_eq!(written, contents.len());
     CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
         .with_cache_control(control)
@@ -339,7 +348,6 @@ fn cache_hit_and_miss_return_identical_results() {
 #[test]
 fn write_invalidates_cached_data_and_stat() {
     let mut cache = fixture(b"before");
-    let dir = dir_of(&mut cache);
     let file = file_of(&mut cache);
 
     let mut buf = [0u8; 16];
@@ -348,9 +356,7 @@ fn write_invalidates_cached_data_and_stat() {
     let stale_size = cache.node_info(file).expect("stat").size;
     assert_eq!(stale_size, 6);
 
-    let written = cache
-        .write_at(dir, b"file.txt", 0, b"after!!")
-        .expect("write");
+    let written = cache.write_at(file, 0, b"after!!").expect("write");
     assert_eq!(written, 7);
 
     let mut fresh = [0u8; 16];
@@ -363,14 +369,13 @@ fn write_invalidates_cached_data_and_stat() {
 #[test]
 fn truncate_invalidates_cached_data_and_stat() {
     let mut cache = fixture(b"truncate me");
-    let dir = dir_of(&mut cache);
     let file = file_of(&mut cache);
 
     let mut buf = [0u8; 16];
     cache.read_at(file, 0, &mut buf).expect("warm");
     cache.node_info(file).expect("warm stat");
 
-    cache.truncate(dir, b"file.txt", 8).expect("truncates");
+    cache.truncate(file, 8).expect("truncates");
 
     assert_eq!(cache.node_info(file).expect("stat").size, 8);
     let mut fresh = [0u8; 16];
@@ -429,6 +434,152 @@ fn rename_invalidates_both_names_and_keeps_contents() {
     assert_eq!(&fresh[..n], b"movable");
 }
 
+/// A rename drops what the cache kept for the moved file, so a node that
+/// takes the id a renamed file left — as a FAT file's new entry does when it
+/// lands in a moved file's old slot — inherits neither its bytes nor its size.
+#[test]
+fn a_node_taking_a_renamed_files_old_id_inherits_nothing_of_it() {
+    let mut fs = RwMockFs::new()
+        .with_renumbering_renames()
+        .with_reused_numbers();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"before", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, b"movable").expect("seed");
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    let mut buf = [0u8; 16];
+    assert_eq!(cache.read_at(file, 0, &mut buf), Ok(7), "warm the data");
+    assert_eq!(cache.node_info(file).expect("warm the stat").size, 7);
+
+    cache
+        .rename(root, b"before", root, b"after")
+        .expect("renames");
+    let newcomer = cache
+        .create(root, b"newcomer", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    assert_eq!(newcomer, file, "the newcomer took the id the move left");
+    assert_eq!(cache.node_info(newcomer).expect("stat").size, 0);
+    assert_eq!(cache.read_at(newcomer, 0, &mut buf), Ok(0));
+
+    let moved = cache
+        .lookup(root, b"after")
+        .expect("the moved file resolves");
+    assert_eq!(cache.read_at(moved, 0, &mut buf), Ok(7));
+    assert_eq!(&buf[..7], b"movable");
+}
+
+/// A freed node's id may be the next node's, so the unpin that frees it
+/// leaves nothing cached under it: the newcomer reads as the new node it is.
+#[test]
+fn the_unpin_that_frees_a_node_drops_what_is_kept_under_its_id() {
+    let mut fs = RwMockFs::new().with_reused_numbers();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"doomed", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, b"stale").expect("seed");
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    let held = cache.pin(file).expect("pin");
+    cache.remove(root, b"doomed").expect("unlink");
+    let mut buf = [0u8; 8];
+    assert_eq!(cache.read_at(held, 0, &mut buf), Ok(5), "warm the data");
+    assert_eq!(cache.node_info(held).expect("warm the stat").nlink, 0);
+
+    assert_eq!(cache.unpin(held), Ok(Unpinned::Freed));
+    let newcomer = cache
+        .create(root, b"newcomer", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    assert_eq!(newcomer, held, "the newcomer took the freed id");
+    assert_eq!(cache.node_info(newcomer).expect("stat").size, 0);
+    assert_eq!(cache.read_at(newcomer, 0, &mut buf), Ok(0));
+}
+
+/// A stable format keeps a held node's id, so a hold and its release drop
+/// nothing the cache kept.
+#[test]
+fn a_hold_on_a_stable_format_keeps_what_is_cached() {
+    let mut cache = fixture(b"kept");
+    let file = file_of(&mut cache);
+    cache.node_info(file).expect("warm the stat");
+    let held = cache.pin(file).expect("pin");
+    assert_eq!(held, file);
+    assert_eq!(cache.unpin(held), Ok(Unpinned::Released));
+    let before = calls(&cache);
+    cache.node_info(file).expect("a hit");
+    assert_eq!(calls(&cache), before, "the stat was kept");
+}
+
+/// On a format whose ids follow contents a pin and an unpin each move the id
+/// a node is reported under, so each drops what the cache kept for it.
+#[test]
+fn a_hold_on_a_content_derived_format_drops_what_its_ids_kept() {
+    let mut fs = RwMockFs::new().with_content_derived_ids();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, b"body").expect("seed");
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    cache.node_info(file).expect("warm the stat");
+    let held = cache.pin(file).expect("pin");
+    let before = calls(&cache);
+    cache.node_info(held).expect("stat");
+    assert_eq!(calls(&cache) - before, 1, "the pin dropped the stat");
+    assert_eq!(cache.unpin(held), Ok(Unpinned::Released));
+    let before = calls(&cache);
+    cache.node_info(file).expect("stat");
+    assert_eq!(calls(&cache) - before, 1, "so did the unpin");
+}
+
+/// Releasing every hold completes every deferred deletion, so nothing the
+/// cache kept survives it.
+#[test]
+fn releasing_every_hold_purges_the_cache() {
+    let mut cache = fixture(b"kept");
+    let file = file_of(&mut cache);
+    let mut buf = [0u8; 8];
+    cache.read_at(file, 0, &mut buf).expect("warm the data");
+    cache.pin(file).expect("pin");
+    assert!(cache.accounting().total_bytes() > 0);
+    assert_eq!(cache.release_pins(), Ok(()));
+    assert_eq!(cache.accounting().total_bytes(), 0);
+    assert_eq!(
+        cache.unpin(file),
+        Err(DriverError::NotFound),
+        "no hold is left"
+    );
+}
+
+/// On a format whose ids follow contents the cache keeps no name, so the
+/// lookup after a write that renumbered a file answers its new id rather
+/// than the one the write left behind.
+#[test]
+fn a_lookup_after_a_renumbering_write_answers_the_new_id() {
+    let mut fs = RwMockFs::new().with_renumbering_writes();
+    let root = fs.root();
+    fs.create(root, b"moving", NodeKind::RegularFile, &ADMIN_RECORD)
+        .expect("create");
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    let file = cache.lookup(root, b"moving").expect("resolves");
+    cache.node_info(file).expect("warm the stat");
+
+    cache.write_at(file, 0, b"moved").expect("write");
+    let moved = cache.lookup(root, b"moving").expect("resolves again");
+    assert_ne!(moved, file, "the write renumbered the file");
+    let mut body = [0u8; 8];
+    let read = cache
+        .read_at(moved, 0, &mut body)
+        .expect("reads the new id");
+    assert_eq!(&body[..read], b"moved");
+    assert_eq!(cache.node_info(moved).expect("stat").size, 5);
+
+    // Nothing is kept by name, so every lookup reaches the driver.
+    let before = calls(&cache);
+    cache.lookup(root, b"moving").expect("resolves");
+    assert_eq!(calls(&cache) - before, 1);
+}
+
 #[test]
 fn the_link_surface_reaches_the_driver_through_the_cache() {
     // The cache is a wrapper, and a wrapper that quietly left these at their
@@ -438,7 +589,7 @@ fn the_link_surface_reaches_the_driver_through_the_cache() {
     let dir = dir_of(&mut cache);
 
     cache
-        .create_link(dir, b"alias", b"file.txt")
+        .create_link(dir, b"alias", b"file.txt", &ADMIN_RECORD)
         .expect("the driver behind the cache creates symbolic links");
     let link = cache.lookup(dir, b"alias").expect("the link resolves");
     let mut target = [0u8; 16];
@@ -481,7 +632,7 @@ fn a_change_through_one_name_refreshes_a_listing_holding_another() {
     let dir = dir_of(&mut cache);
     let file = file_of(&mut cache);
     cache
-        .create(root, b"other", NodeKind::Directory)
+        .create(root, b"other", NodeKind::Directory, &ADMIN_RECORD)
         .expect("mkdir");
     let other = cache.lookup(root, b"other").expect("other resolves");
     let first_listed_info = |cache: &mut CachedFs<Counting<RwMockFs>>, dir| {
@@ -505,11 +656,11 @@ fn a_change_through_one_name_refreshes_a_listing_holding_another() {
         "warm the other listing"
     );
     cache
-        .write_at(dir, b"file.txt", 4, b" grown")
+        .write_at(file, 4, b" grown")
         .expect("write through the first name");
     assert_eq!(first_listed_info(&mut cache, other).size, 10, "a write");
     cache
-        .truncate(dir, b"file.txt", 2)
+        .truncate(file, 2)
         .expect("truncate through the first name");
     assert_eq!(first_listed_info(&mut cache, other).size, 2, "a truncate");
 }
@@ -533,7 +684,7 @@ fn refilling_a_hole_in_a_cached_listing_charges_each_entry_once() {
     let dir = dir_of(&mut cache);
     for name in [&b"a"[..], b"b", b"c"] {
         cache
-            .create(dir, name, NodeKind::RegularFile)
+            .create(dir, name, NodeKind::RegularFile, &ADMIN_RECORD)
             .expect("create");
     }
     listed(&mut cache, dir, 0, &[]).expect("warm the listing");
@@ -543,11 +694,11 @@ fn refilling_a_hole_in_a_cached_listing_charges_each_entry_once() {
         .next()
         .map(|(_, entry)| entry.name.clone())
         .expect("a cached entry");
-    cache.lookup(dir, &first).expect("the first entry resolves");
+    let node = cache.lookup(dir, &first).expect("the first entry resolves");
     let charged = cache.accounting().class_bytes(ReclaimClass::FsMetadata);
     let slots = cache.lru_meta.len();
 
-    cache.write_at(dir, &first, 0, b"x").expect("write");
+    cache.write_at(node, 0, b"x").expect("write");
     let relisted = listed(&mut cache, dir, 0, &[]).expect("relist");
 
     assert_eq!(relisted.len(), 4);
@@ -572,7 +723,7 @@ fn a_change_to_a_node_drops_exactly_the_listing_entries_naming_it() {
     let file = file_of(&mut cache);
     for name in [&b"other"[..], b"unrelated"] {
         cache
-            .create(root, name, NodeKind::Directory)
+            .create(root, name, NodeKind::Directory, &ADMIN_RECORD)
             .expect("mkdir");
     }
     let other = cache.lookup(root, b"other").expect("other resolves");
@@ -581,10 +732,15 @@ fn a_change_to_a_node_drops_exactly_the_listing_entries_naming_it() {
         .expect("unrelated resolves");
     cache.link(other, b"alias", file).expect("a second name");
     cache
-        .create(unrelated, b"bystander", NodeKind::RegularFile)
+        .create(
+            unrelated,
+            b"bystander",
+            NodeKind::RegularFile,
+            &ADMIN_RECORD,
+        )
         .expect("create");
     cache
-        .create(dir, b"sibling", NodeKind::RegularFile)
+        .create(dir, b"sibling", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
     let warm = |cache: &mut CachedFs<Counting<RwMockFs>>| {
         for listing in [root, dir, other, unrelated] {
@@ -614,7 +770,7 @@ fn a_change_to_a_node_drops_exactly_the_listing_entries_naming_it() {
     assert_eq!(cached(&cache, unrelated), vec![b"bystander".to_vec()]);
 
     warm(&mut cache);
-    cache.write_at(dir, b"file.txt", 0, b"more").expect("write");
+    cache.write_at(file, 0, b"more").expect("write");
     assert!(
         cached(&cache, other).is_empty(),
         "a write drops the other name's entry"
@@ -624,7 +780,7 @@ fn a_change_to_a_node_drops_exactly_the_listing_entries_naming_it() {
 
     warm(&mut cache);
     cache
-        .create(other, b"added", NodeKind::RegularFile)
+        .create(other, b"added", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
     assert!(
         !cached(&cache, root).contains(&b"other".to_vec()),
@@ -643,7 +799,7 @@ fn create_invalidates_directory_listings() {
     assert_eq!(names_of(&mut cache, dir), vec![b"file.txt".to_vec()]);
 
     cache
-        .create(dir, b"second.txt", NodeKind::RegularFile)
+        .create(dir, b"second.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("creates");
 
     let fresh = names_of(&mut cache, dir);
@@ -671,66 +827,51 @@ fn set_security_invalidates_the_cached_record() {
 }
 
 #[test]
-fn security_change_is_seen_by_the_secured_vfs_permission_check() {
+fn security_change_is_seen_by_the_services_permission_check() {
     // The VFS is the policy point; this proves a *cached* security
     // record cannot let a caller keep an authorisation the stored
     // record no longer grants.
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"Users", NodeKind::Directory)
+    fs.create(root, b"Users", NodeKind::Directory, &ADMIN_RECORD)
         .expect("mkdir");
     let users = fs.lookup(root, b"Users").expect("resolves");
-    fs.create(users, b"open.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(users, b"open.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    fs.write_at(users, b"open.txt", 0, b"visible")
-        .expect("seed");
-    let file = fs.lookup(users, b"open.txt").expect("resolves");
+    fs.write_at(file, 0, b"visible").expect("seed");
     // World-readable to start with.
     fs.set_security(file, NodeSecurity::new(0o644, 1, 1))
         .expect("open mode");
 
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
-    let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
-    {
-        let driver = DriverHandle::from_raw(1).expect("handle");
-        let mut mounts = vfs.mounts_write();
-        mounts
-            .attach(Attachment::new(
-                driver,
-                None,
-                tairix_abi::driver::filesystem::MountFlags::default(),
-            ))
-            .expect("attach");
-        mounts.back_root(driver).expect("backs root");
-    }
-
-    let caps = CapabilitySet::empty();
-    let other = Credentials {
-        uid: UserId(42),
-        gid: GroupId(42),
-        supplementary_gids: &[],
-        caps: &caps,
+    let cache = CachedFs::new(fs, budget(), owner(), unpressured(), sink());
+    let other = Account {
+        uid: 42,
+        gid: 42,
+        groups: &[],
     };
-    let path = Path::parse("/Users/open.txt").expect("parses");
+    let serving = mounted(cache, false, &[other]);
+    let caps = CapabilitySet::empty();
+    let open_txt = path("Users/open.txt");
+    let read = |buf: &mut [u8]| read_path(&serving.service, other.uid, &caps, &open_txt, 0, buf);
 
     // Warm read under world-readable mode succeeds (and caches the
     // security record).
     let mut buf = [0u8; 16];
-    let n = vfs
-        .read_via_secured(&other, &vfs.cover(&path), &mut cache, 0, &mut buf)
-        .expect("world-readable read succeeds");
+    let n = read(&mut buf).expect("world-readable read succeeds");
     assert_eq!(&buf[..n], b"visible");
 
     // Tighten to owner-only through the same (cache-wrapped) driver.
-    cache
+    serving.drivers[0]
+        .lock()
         .set_security(file, NodeSecurity::new(0o600, 1, 1))
         .expect("tightens");
 
     // The same caller is now refused: the cached record was
     // invalidated, so the permission check sees the tightened mode.
     assert_eq!(
-        vfs.read_via_secured(&other, &vfs.cover(&path), &mut cache, 0, &mut buf),
-        Err(VfsError::PermissionDenied),
+        read(&mut buf),
+        Err(Errno::PermissionDenied),
         "a cached security record never outlives a security change"
     );
 }
@@ -882,9 +1023,10 @@ fn eviction_honours_budget_and_hysteresis_and_takes_data_first() {
     let contents = vec![0x5Au8; EVICTION_STREAM_BYTES];
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"big", NodeKind::RegularFile)
+    let big = fs
+        .create(root, b"big", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    fs.write_at(root, b"big", 0, &contents).expect("seed");
+    fs.write_at(big, 0, &contents).expect("seed");
     let mut cache = CachedFs::new(
         Counting::new(fs),
         CacheBudget::from_backing(256 * 1024),
@@ -967,7 +1109,7 @@ fn a_listing_resumed_by_cursor_lists_the_rest_once() {
     let mut cache = fixture(b"x");
     let dir = dir_of(&mut cache);
     cache
-        .create(dir, b"second.txt", NodeKind::RegularFile)
+        .create(dir, b"second.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("creates");
     let (first, name) = first_listed(&mut cache, dir, 0, &[])
         .expect("lists")
@@ -982,7 +1124,6 @@ fn a_listing_resumed_by_cursor_lists_the_rest_once() {
 #[test]
 fn eof_short_chunk_is_authoritative_until_invalidated() {
     let mut cache = fixture(b"short");
-    let dir = dir_of(&mut cache);
     let file = file_of(&mut cache);
 
     let mut buf = [0u8; 16];
@@ -992,9 +1133,7 @@ fn eof_short_chunk_is_authoritative_until_invalidated() {
     assert_eq!(cache.read_at(file, 100, &mut buf).expect("reads"), 0);
 
     // Growing the file invalidates the EOF marker.
-    cache
-        .write_at(dir, b"file.txt", 5, b" grown")
-        .expect("grows");
+    cache.write_at(file, 5, b" grown").expect("grows");
     let n = cache.read_at(file, 0, &mut buf).expect("re-reads");
     assert_eq!(&buf[..n], b"short grown");
 }
@@ -1063,9 +1202,10 @@ fn empty_and_zero_budget_cache_still_serves_correctly() {
     // A zero budget admits nothing; every operation still round-trips.
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    fs.write_at(root, b"f", 0, b"uncached").expect("seed");
+    fs.write_at(file, 0, b"uncached").expect("seed");
     let mut cache = CachedFs::new(
         Counting::new(fs),
         CacheBudget::from_backing(0),
@@ -1088,11 +1228,13 @@ fn pressured_fixture(contents: &[u8]) -> (&'static TestSource, CachedFs<Counting
     let (source, pressure) = pressured(free_for(PressureBand::Normal));
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    fs.create(root, b"dir", NodeKind::Directory, &ADMIN_RECORD)
+        .expect("mkdir");
     let dir = fs.lookup(root, b"dir").expect("dir resolves");
-    fs.create(dir, b"file.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(dir, b"file.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    fs.write_at(dir, b"file.txt", 0, contents).expect("seed");
+    fs.write_at(file, 0, contents).expect("seed");
     let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink());
     let dir = {
         let root = cache.root();
@@ -1112,9 +1254,10 @@ fn admission_follows_each_classs_band_ceiling() {
     let (source, pressure) = pressured(free_for(PressureBand::Mild));
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    fs.write_at(root, b"f", 0, b"still served").expect("seed");
+    fs.write_at(file, 0, b"still served").expect("seed");
     let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink());
 
     // Mild pressure preserves metadata and begins reclaiming file data, so
@@ -1307,9 +1450,10 @@ fn normal_operation_emits_no_audit_records() {
     let captured = sink();
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    fs.write_at(root, b"f", 0, b"quiet").expect("seed");
+    fs.write_at(file, 0, b"quiet").expect("seed");
     let mut cache = CachedFs::new(
         Counting::new(fs),
         budget(),

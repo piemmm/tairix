@@ -50,8 +50,8 @@ ganze Seite ausgegeben.
 
 - `0` — die Seite wurde angezeigt.
 - `1` — der Befehl oder sein Hilfedokument wurde nicht gefunden, oder die
-  Seite konnte nicht ausgegeben werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Seite konnte nicht ausgegeben werden. Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

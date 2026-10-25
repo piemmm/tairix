@@ -73,8 +73,8 @@ it plays, an `omission` record for each file left out or cut short, and a
 ## EXIT STATUS
 
 - `0` — every file played, or playback was stopped with none left out.
-- `1` — a file could not be played, or playback could not go on.
-- `2` — the command line was not understood.
+- `1` — a file could not be played, or playback could not go on. A
+  command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

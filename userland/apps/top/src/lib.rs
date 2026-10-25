@@ -32,13 +32,13 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`). It links only `lib/*` crates —
-//! the audited `lib/abi`, the shared `lib/procinfo`, and the OS-provided
-//! `lib/curses`/`lib/termcap`/`lib/vt` — never a kernel or driver crate. `lib/curses` is the curated `/System/Libraries/`
-//! Terminal/TUI class, dynamically linked at runtime; in
-//! the workspace it is an ordinary cargo path dependency. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths; nothing
-//! writes to fd 3 (`stdinfo`).
+//! `no_std` (with `alloc`). It links only `lib/*` crates — the audited
+//! `lib/abi`, the shared `lib/procinfo`, `lib/help`, and `lib/util`, and the
+//! OS-provided `lib/curses`/`lib/termcap`/`lib/vt` — never a kernel or driver
+//! crate. `lib/curses` is the curated `/System/Libraries/` Terminal/TUI
+//! class, dynamically linked at runtime; in the workspace it is an ordinary
+//! cargo path dependency. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths; nothing writes to fd 3 (`stdinfo`).
 
 #![no_std]
 #![forbid(unsafe_code)]

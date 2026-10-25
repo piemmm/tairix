@@ -6,7 +6,8 @@
 configuration-space owner's `topology` walk (`PciTopology`, `Topology`),
 and the shared bus-driver locate primitives (`find_function_by_class`,
 `assign_and_map_bar`, `bus_to_cpu_phys`, and the `USB_CONTROLLER_CLASS`
-PCI class code) the xHCI driver and the BCM2711 PCIe bus driver both use;
+PCI class code) the xHCI driver and a root-complex bus driver both use, and
+the `ConfigSpace` / `ConfigAddress` seam `mechanism_supplied` takes;
 changing the seam surface is governed by `AGENTS.md` §9.
 
 PCI/PCIe configuration-access **library** (`lib/*`, not a driver crate):
@@ -21,12 +22,12 @@ function's requester-id aliases and isolation group (`topology.rs`;
 `plans/IOMMU.md` IOM8). It lives in
 `lib/` because PCI configuration access is shared bus-protocol logic a
 `drivers/*` crate may not reach through a sibling driver (`AGENTS.md`
-§17.4) — the kernel boot pipeline, the user-space `drivers/bus/pcie_brcm`
+§17.4) — the kernel boot pipeline, a user-space root-complex bus
 driver, and the host tests all compose it through the seams above. This
 mirrors `lib/usb` ↔ `drivers/bus/usb`.
 
-Configuration space is reached through one of three access mechanisms,
-selected at construction by the caller:
+Configuration space is reached through one of three constructors,
+selected by the caller:
 
 - **Mechanism #1** (`0xCF8` / `0xCFC`, x86_64) — the legacy I/O-port
   bridge (`mechanism_one`), behind the `tairix_abi::PortIo` seam. The two
@@ -37,15 +38,15 @@ selected at construction by the caller:
   access: configuration space is mapped flat into MMIO, one 4 KiB
   block per `(bus, device, function)`, reached through a
   capability-checked `tairix_abi::RegisterWindow`.
-- **BCM2711 windowed** (`mechanism_brcm`) — the Raspberry Pi 4 root
-  complex's index/data window pair inside the controller's own register
-  block, used to reach its VL805 USB host controller after the link is
-  trained.
+- **Supplied** (`mechanism_supplied`) — a root complex that reaches
+  configuration space another way (an index/data window inside its own
+  register block, say) implements `ConfigSpace` in its own bus driver and
+  hands it here.
 
 The enumeration, capability-walk, BAR-sizing, and window/MSI-X hand-off
 core is mechanism-agnostic: it is parameterised over the `ConfigSpace`
-trait, which all three bridges implement. Mechanism #1 reaches the legacy
-256 bytes only; ECAM and the BCM2711 window reach a function's whole 4 KiB,
+trait, which every mechanism implements. Mechanism #1 reaches the legacy
+256 bytes only; ECAM and a supplied mechanism reach a function's whole 4 KiB,
 its extended capabilities included, and a register a mechanism cannot reach
 reads all-ones.
 
@@ -59,11 +60,10 @@ reads all-ones.
 | SMBus             | QEMU `q35` (`8086:2930`)                           |
 | virtio-net-pci    | `1AF4:1041` (modern transitional)                  |
 | virtio-blk-pci    | `1AF4:1042` (modern, virtio-1.x cap layout)        |
-| VL805 xHCI (PCIe) | Pi 4 (BCM2711) USB host, `1106:3483`, over ECAM    |
 
 The `q35` fixture in `src/tests.rs` reproduces that PCI topology byte
-for byte over mechanism #1; the VL805 fixture lays a flat ECAM region
-(a root-port bridge plus the `1106:3483` xHCI) and drives the same
+for byte over mechanism #1; the xHCI fixture lays a flat ECAM region
+(a root-port bridge plus the `abcd:1234` xHCI) and drives the same
 enumeration core over `EcamConfigSpace`. The live surface uses the
 same core through the [`Bus`] trait.
 
@@ -96,7 +96,8 @@ pointer).
   driver never synthesises a pointer (`AGENTS.md` §4). The message
   itself is built by the architecture layer (e.g.
   `tairix_arch_x86_64::irq::msi_message`); the bus driver copies it
-  verbatim. Legacy MSI and INTx routing are not implemented.
+  verbatim. A function with only legacy MSI is given one vector
+  (`route_msi`), and its INTx pin is switched on and off (`set_intx`).
   Ring 0 reaches `route_msix` through the frozen `abi-v1`
   `tairix_abi::MsixBus` seam.
 - The library holds no global state: all state lives in the `Pci<C>`
@@ -111,8 +112,9 @@ pointer).
 - The PIO-bridge round-trip test against a recording mock, and the
   ECAM offset-encoding + round-trip / out-of-window sentinel tests.
 - The exact `q35` device-list assertion (mechanism #1) and the
-  VL805-over-ECAM enumeration + MSI-X capability-decode assertions.
-- The BCM2711 windowed-access round-trip and bus-bound refusal tests.
+  xHCI-over-ECAM enumeration + MSI-X capability-decode assertions.
+- The supplied-mechanism constructor test (a supplied mechanism's own
+  tests live in its bus driver).
 - Capability-list and BAR-sizing walkers, including the virtio-1.x
   configuration-structure decode.
 - The MSI-X routing hand-off: programming a table entry and turning MSI-X

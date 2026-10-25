@@ -10,8 +10,8 @@
 ///
 /// The high bit of `index | (len - 1 - index)` is set exactly when
 /// `index >= len`, so shifting its complement arithmetically spreads that
-/// verdict into an all-ones or all-zero mask (Linux's
-/// `array_index_mask_nospec`). Two optimisation barriers keep it a plain
+/// verdict into an all-ones or all-zero mask. Two optimisation barriers
+/// keep it a plain
 /// data dependency: without the first, the compiler folds the mask to all
 /// ones from the caller's own bounds check; without the second, it lowers
 /// the mask to a `csel`/`cmov`, whose flags an Arm core may predict.

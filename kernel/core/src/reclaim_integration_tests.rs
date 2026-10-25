@@ -11,7 +11,7 @@
 //! flapping cannot churn rebuilds), and the work-avoided benchmark
 //! evidence behind the retention policy.
 
-use crate::fs::memfs::RwMockFs;
+use crate::fs::memfs::{RwMockFs, ADMIN_RECORD};
 use crate::fs::CachedFs;
 use crate::launch_cache::LaunchCache;
 use crate::test_bundle::verified_app;
@@ -53,11 +53,13 @@ fn warmed_pair(
 
     let mut fs = RwMockFs::new();
     let root = fs.root();
-    fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    fs.create(root, b"dir", NodeKind::Directory, &ADMIN_RECORD)
+        .expect("mkdir");
     let dir = fs.lookup(root, b"dir").expect("dir resolves");
-    fs.create(dir, b"file.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(dir, b"file.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    fs.write_at(dir, b"file.txt", 0, contents).expect("seed");
+    fs.write_at(file, 0, contents).expect("seed");
     let mut fs_cache = CachedFs::new(
         fs,
         budget(),
@@ -254,12 +256,8 @@ fn a_mutation_during_forced_drain_is_never_served_stale() {
     // the caches are empty.
     source.set_free(free_for(PressureBand::Severe));
     touch(&mut fs_cache, &mut launch);
-    let dir = {
-        let root = fs_cache.root();
-        fs_cache.lookup(root, b"dir").expect("dir resolves")
-    };
     fs_cache
-        .write_at(dir, b"file.txt", 0, b"after mutation!")
+        .write_at(file, 0, b"after mutation!")
         .expect("mutate under pressure");
 
     // Recovery back to normal: hysteresis walks the band up one step

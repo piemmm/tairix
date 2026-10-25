@@ -1,4 +1,4 @@
-//! Bare-metal boot pipeline for the riscv64 (QEMU `virt` / SiFive)
+//! Bare-metal boot pipeline for the riscv64
 //! `tairix-kernel` binary — `plans/PI.md` RV-P1 / RV-P2.
 //!
 //! [`boot`] is the single entry point. The binary's
@@ -963,8 +963,8 @@ pub fn enable_paging_and_direct_map(dtb: u64) -> Result<(), BootError> {
 /// `log_sink` / `audit_sink` are the `&'static` sinks installed in the
 /// [`BootInfo`]: in production both are the port's SBI-backed
 /// [`tairix_arch_riscv64::SERIAL_SINK`]; a QEMU integration test
-/// substitutes an audit sink that flips the `SiFive` Test device on
-/// `AuditEvent::BootCompleted`.
+/// substitutes an audit sink that flips the test `syscon` device QEMU's
+/// `virt` machine provides on `AuditEvent::BootCompleted`.
 ///
 /// `log_level` is the initial global log filter `kernel_main` installs
 /// (`BootInfo::log_level`). Production passes [`Level::Info`]; an audit
@@ -1134,8 +1134,7 @@ fn log_reached(sink: &(dyn Sink + Sync), hartid: u64, dtb: u64, mmu_on: bool) {
         &Event {
             level,
             id: KERNEL_BOOT_RISCV64_REACHED,
-            message:
-                "tairix-kernel riscv64 (qemu virt / sifive): reached rv-p2 paged boot init point",
+            message: "tairix-kernel riscv64: reached rv-p2 paged boot init point",
             fields: &[
                 Field {
                     key: "boot_hart_ok",
@@ -1378,7 +1377,7 @@ pub fn try_boot(
 /// `try_boot`, so the `virt`-board virtio-MMIO aperture the device tree
 /// describes keeps its physical address and the side-effect-free `DeviceID`
 /// reads land on mapped Device memory. A board whose tree describes no
-/// `virtio,mmio` node (a bare SiFive part) makes `virtio_mmio_bus_from_dtb`
+/// `virtio,mmio` node makes `virtio_mmio_bus_from_dtb`
 /// return `NotFound`, so the probe is a no-op there — additive and
 /// metal-neutral.
 ///

@@ -9,23 +9,36 @@ rm — eliminar archivos y directorios
 ## DESCRIPTION
 
 Elimina cada operando de archivo, en orden. Un operando que no es un
-directorio se desenlaza; un operando de directorio solo se elimina
-con `-r` (que elimina su contenido en profundidad primero y luego el
-directorio mismo) o, cuando está vacío, con `-d`.
+directorio se desenlaza —se elimina el propio enlace simbólico,
+nunca lo que nombra—; un operando de directorio solo se elimina con
+`-r` (que elimina su contenido en profundidad primero y luego el
+directorio mismo) o, cuando está vacío, con `-d`. En ambos casos se
+rechaza un operando cuyo último componente es `.` o `..`, como exige
+POSIX.
 
 Con `-f`, un operando que no existe se omite en silencio y nunca se
 hace una pregunta. `-i` pregunta por la salida de error estándar
-antes de cada eliminación y antes de descender a un directorio; `-I`
-pregunta una sola vez antes de eliminar más de tres operandos o antes
-de una eliminación recursiva. Una pregunta rechazada omite el objeto
-(o toda la ejecución, con `-I`) sin error; una respuesta ilegible
+antes de cada eliminación, nombrando lo que eliminaría
+(`remove regular empty file 'a'?`, `remove symbolic link 'l'?`), y
+antes de descender a un directorio que contenga algo; `-I` pregunta
+una sola vez antes de eliminar más de tres operandos o antes de una
+eliminación recursiva. Una pregunta rechazada conserva el objeto (u
+omite toda la ejecución, con `-I`) sin error; una respuesta ilegible
 nunca se considera consentimiento. El último de `-f`, `-i` e `-I`
 gana.
 
-El operando `/` se rechaza bajo `--preserve-root`, el comportamiento
-predeterminado. El primer fallo detiene la ejecución antes de
-cualquier operando posterior. `--` termina el análisis de opciones:
-cada argumento posterior es una ruta.
+Sin `-f`, cuando la entrada estándar es una terminal, se pregunta por un
+archivo en el que el llamante no puede escribir antes de eliminarlo
+(`remove write-protected regular file 'x'?`), y solo se elimina con una
+respuesta que empiece por `y` o `Y`; nunca se pregunta por un enlace
+simbólico. Con `-i`, la pregunta también nombra la protección.
+
+Una ruta que no puede inspeccionarse, leerse o eliminarse se
+notifica y las demás se eliminan de todos modos; un directorio que
+sigue conteniendo algo se conserva sin decir nada. Una eliminación
+recursiva de `/`, se escriba como se escriba, se rechaza bajo
+`--preserve-root`, el comportamiento predeterminado. `--` termina el
+análisis de opciones: cada argumento posterior es una ruta.
 
 ## OPTIONS
 
@@ -39,9 +52,10 @@ cada argumento posterior es una ruta.
   operandos, o antes de una eliminación recursiva.
 - `-v, --verbose` — informar de cada eliminación como
   `removed 'file'`.
-- `--preserve-root` — negarse a eliminar `/` (el comportamiento
-  predeterminado).
-- `--no-preserve-root` — permitir eliminar `/`.
+- `--preserve-root` — negarse a eliminar `/` recursivamente (el
+  comportamiento predeterminado).
+- `--no-preserve-root` — permitir eliminar `/`. Solo se acepta sin
+  abreviar.
 - `-h, -?, --help` — mostrar la ayuda corta de esta orden.
 
 ## EXAMPLES
@@ -55,9 +69,9 @@ cada argumento posterior es una ruta.
 
 - `0` — todas las eliminaciones tuvieron éxito (una pregunta
   rechazada y una omisión por `-f` no son fallos).
-- `1` — un fallo del sistema de archivos, de la pregunta o de la
-  salida; el motivo se imprime en la salida de error estándar.
-- `2` — la línea de órdenes no se entendió.
+- `1` — una ruta no pudo eliminarse, o falló una pregunta o la
+  salida; cada motivo se imprime en la salida de error estándar. Una
+  línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

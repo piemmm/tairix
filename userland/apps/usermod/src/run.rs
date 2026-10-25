@@ -25,15 +25,12 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_useradmin::AdminChannel;
-    use tairix_usermod::{parse, run, USAGE};
+    use tairix_usermod::{parse, run};
 
     /// The production [`AdminChannel`]: the `users_admin` syscall. It adds
     /// no authority — every rule stays kernel-side, and a refusal surfaces
@@ -46,24 +43,20 @@ mod program {
         }
     }
 
-    /// Write the usage banner to fd 2 byte-exact (it carries its own
-    /// trailing newline), best-effort on the already-failing path.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point.
     ///
-    /// Exit codes: `0` on success, `1` on a refused or failed operation,
-    /// `2` on a usage error.
+    /// Exit codes: `0` on success, `1` on a refused or failed operation or
+    /// a command line that was not understood.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("usermod") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("usermod", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         match run(
@@ -75,7 +68,7 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("usermod: {err}"));
+                write_stderr_line(format_args!("usermod: {err}"));
                 1
             }
         }

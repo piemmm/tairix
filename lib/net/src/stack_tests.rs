@@ -2583,7 +2583,7 @@ fn tcp_v4_tx_segmentation_offload_matches_the_software_path() {
     // compare each produced TCP segment to the reference.
     let super_tcp = &off_out.frames[0].bytes[IP_TCP..];
     // The super-segment's checksum field holds the length-0 pseudo-header
-    // partial sum (Linux `CHECKSUM_PARTIAL` for GSO): the device adds each
+    // partial sum: the device adds each
     // segment's own length when it splits.
     let field = u16::from_be_bytes([super_tcp[16], super_tcp[17]]);
     let expected_partial = Checksum::ipv4_pseudo(V4_A, V4_B, PROTOCOL_TCP, 0).partial();

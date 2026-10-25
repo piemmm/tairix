@@ -161,6 +161,7 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Sparse files (holes) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Symbolic links | ✓ target as node data | ✓ fast + slow | ✓ | ✓ | ✓ |
 | Hard links | ✓ `nlink`, freed at zero | ✓ count honoured, authors none | ✓ | ✓ | ✓ |
+| A file unlinked while open kept to its last close, reclaimed after a crash | ✓ pending-delete set | ✓ orphan list | ✓ | ✓ | ✓ |
 | Crash consistency | ✓ COW + write barrier | ✓ journal | ✓ COW | ✓ journal | ✓ COW |
 | Multi-device / RAID | — | — | ✓ | — | ✓ |
 | Online scrub | ✓ verify + metadata repair | — | ✓ | ✓ | ✓ |
@@ -203,6 +204,10 @@ no ambient root, signed code) are designed in from the kernel up.
 | Per-app blob store handed over as a bounded delegation (§16.3, §24.4) | An app reading or overwriting another app's bulk data; one app filling the volume through a store no per-user quota can see | ✓ | ✓ | ✓ | ✓ |
 | Per-app scratch the service names, that nothing can open (§16.3) | An app reading another app's temporary files — or its own from an earlier run — through a name it could ask for | ✓ | ✓ | ✓ | ✓ |
 | Descriptor delegation attenuates by mode *and* byte extent, never widens (§5.2) | A delegated descriptor conveying more access than its grantor opened, or growing a file without limit | ✓ | ✓ | ✓ | ✓ |
+| Open files bound to the node they opened, never re-resolved by path (§5.4) | A rename, a planted link or a volume attached in another's place redirecting an open descriptor onto a different file | ✓ | ✓ | ✓ | ✓ |
+| Sticky shared directories (§5.3) | Another user removing, renaming or replacing your entries in a shared drop folder | ✓ | ✓ | ✓ | ✓ |
+| Tree tools walk by descriptor, removals and moves held to what they read (§5.4) | A directory swapped for a link mid-walk steering `rm -r`, `chmod -R`, `chown -R`, `cp -r`, `mv`, `fstree` or the file manager's paste and delete onto another tree | ✓ | ✓ | ✓ | ✓ |
+| A new node is born with its creator's mode less its umask; staged copies are owner-only (§5.3) | A private file's copy, or a tree being moved, readable by others while it is built | ✓ | ✓ | ✓ | ✓ |
 | Machine settings written by one service behind `CAP_SETTINGS_WRITE`, which only an elevated administrator holds (§5.2, §16.2) | Any program of a session — or a compromised one — rewriting the login policy, the clock's sources or the interfaces' addresses; the network addressing read by an account it does not concern | ✓ | ✓ | ✓ | — |
 | Capability gate guards an inode's name, not only its content (§5.3) | Unlinking or renaming a gated directory aside and planting an ungated replacement | ✓ | ✓ | ✓ | ✓ |
 | Speculation hardening at every user entry and return: registers scrubbed, buffers cleared, straight-line speculation trapped (§19.1) | A speculative kernel gadget fed user-chosen registers; MDS / MMIO-stale-data sampling of kernel data; speculation past the return | ✓ | ✓ | ✓ in-order | ✓ host |

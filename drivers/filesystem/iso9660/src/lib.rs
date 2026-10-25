@@ -29,7 +29,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
+    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeStats,
 };
 use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
@@ -259,6 +259,16 @@ struct Walk {
     end: u64,
 }
 
+/// Which entries [`Iso9660::listed`] resolves: a listing's every one, a
+/// lookup's by name, a climb's by the directory it holds.
+#[derive(Clone, Copy)]
+enum Wanted<'a> {
+    All,
+    Named(&'a [u8]),
+    /// The directory whose `.` record opens this extent.
+    Directory(u32),
+}
+
 /// What [`Iso9660::listed`] makes of the records at a walk's position.
 // One per record walked, returned once and never held in bulk.
 #[allow(clippy::large_enum_variant)]
@@ -479,7 +489,7 @@ impl<B: Block> Iso9660<B> {
         let (content, size, allocated) = match kind {
             NodeKind::Directory => {
                 let (start, end, allocated) = if let Some(child) = found.child {
-                    self.relocated(child)?
+                    self.directory_at(child)?
                 } else {
                     let start = self.data_start(&raw.record);
                     let len = u64::from(raw.record.data_len);
@@ -516,6 +526,7 @@ impl<B: Block> Iso9660<B> {
             info: NodeInfo {
                 kind,
                 nlink,
+                ino: node_id(raw.address).raw(),
                 size,
                 allocated,
                 times,
@@ -542,9 +553,9 @@ impl<B: Block> Iso9660<B> {
         blocks * self.block_bytes()
     }
 
-    /// The directory a Rock Ridge `CL` relocated to `extent`: its records'
-    /// byte range and allocation, read from its `.` record.
-    fn relocated(&mut self, extent: u32) -> Result<(u64, u64, u64), DriverError> {
+    /// The directory whose `.` record opens `extent`, as a Rock Ridge `CL` or
+    /// `PL` names one: its records' byte range and allocation.
+    fn directory_at(&mut self, extent: u32) -> Result<(u64, u64, u64), DriverError> {
         let dot = self.record_alone(self.volume.block_offset(extent))?;
         if dot.identifier() != [0] || !dot.record.is_dir() || dot.record.extent != extent {
             return Err(DriverError::DeviceFault);
@@ -630,15 +641,47 @@ impl<B: Block> Iso9660<B> {
         }
     }
 
+    /// The records of the directory in `extent`: the root's where its record
+    /// places them, any other's from the `.` record opening the extent.
+    fn walk_of(&mut self, extent: u32) -> Result<Walk, DriverError> {
+        if extent == self.root_extent()? {
+            return self.directory(self.root);
+        }
+        let (pos, end, _) = self.directory_at(extent)?;
+        Ok(Walk { pos, end })
+    }
+
+    /// The extent the root directory's record names.
+    fn root_extent(&self) -> Result<u32, DriverError> {
+        Ok(self.volume.mounted().root(self.volume.flavour)?.extent)
+    }
+
+    /// The extent of the parent of the directory whose records `walk` spans:
+    /// the one its `..` record names or, for a directory Rock Ridge
+    /// relocated, the one the `PL` entry there names.
+    fn parent_extent(&mut self, mut walk: Walk) -> Result<u32, DriverError> {
+        let dot = self
+            .next_record(&mut walk)?
+            .ok_or(DriverError::DeviceFault)?;
+        let dotdot = self
+            .next_record(&mut walk)?
+            .ok_or(DriverError::DeviceFault)?;
+        if dot.identifier() != [0] || dotdot.identifier() != [1] || !dotdot.record.is_dir() {
+            return Err(DriverError::DeviceFault);
+        }
+        let found = self.system_use(&dotdot)?;
+        Ok(found.parent.unwrap_or(dotdot.record.extent))
+    }
+
     /// What the records at `walk`'s position list as, consuming the parts of
-    /// a multi-extent file — a node resolved only where its name is `wanted`,
-    /// when one is. A record sharing the name `previous` listed is that
-    /// file's older version, which ECMA-119 orders after the newest.
+    /// a multi-extent file — a node resolved only where it is the one
+    /// `wanted`. A record sharing the name `previous` listed is that file's
+    /// older version, which ECMA-119 orders after the newest.
     fn listed(
         &mut self,
         walk: &mut Walk,
         previous: &mut Option<Name>,
-        wanted: Option<&[u8]>,
+        wanted: Wanted<'_>,
     ) -> Result<Option<Listed>, DriverError> {
         let Some(raw) = self.next_record(walk)? else {
             return Ok(None);
@@ -660,7 +703,17 @@ impl<B: Block> Iso9660<B> {
             return Ok(Some(Listed::Skipped));
         }
         *previous = Some(name.clone());
-        if wanted.is_some_and(|wanted| !self.name_matching().matches(name.as_bytes(), wanted)) {
+        let unwanted = match wanted {
+            Wanted::All => false,
+            Wanted::Named(wanted) => !self.name_matching().matches(name.as_bytes(), wanted),
+            Wanted::Directory(extent) => {
+                let holds = found
+                    .child
+                    .or_else(|| raw.record.is_dir().then_some(raw.record.extent));
+                holds != Some(extent)
+            }
+        };
+        if unwanted {
             return Ok(Some(Listed::Skipped));
         }
         let Some(node) = self.resolve(&raw, found, parts)? else {
@@ -953,7 +1006,7 @@ impl<B: Block> FilesystemRead for Iso9660<B> {
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
         let mut walk = self.directory(dir)?;
         let mut previous = None;
-        while let Some(listed) = self.listed(&mut walk, &mut previous, Some(name))? {
+        while let Some(listed) = self.listed(&mut walk, &mut previous, Wanted::Named(name))? {
             if let Listed::Entry { id, .. } = listed {
                 return Ok(id);
             }
@@ -1021,7 +1074,7 @@ impl<B: Block> FilesystemRead for Iso9660<B> {
             Name::from_bytes(after)
         };
         loop {
-            let Some(listed) = self.listed(&mut walk, &mut previous, None)? else {
+            let Some(listed) = self.listed(&mut walk, &mut previous, Wanted::All)? else {
                 return Ok(());
             };
             let Listed::Entry { name, node, id } = listed else {
@@ -1036,6 +1089,43 @@ impl<B: Block> FilesystemRead for Iso9660<B> {
                 return Ok(());
             }
         }
+    }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        if dir == self.root {
+            return Ok(dir);
+        }
+        let walk = self.directory(dir)?;
+        let up = self.parent_extent(walk)?;
+        if up == self.root_extent()? {
+            return Ok(self.root);
+        }
+        let walk = self.walk_of(up)?;
+        let grandparent = self.parent_extent(walk)?;
+        let mut walk = self.walk_of(grandparent)?;
+        let mut previous = None;
+        while let Some(listed) = self.listed(&mut walk, &mut previous, Wanted::Directory(up))? {
+            if let Listed::Entry { id, .. } = listed {
+                return Ok(id);
+            }
+        }
+        // No entry of the grandparent holds the parent: the tree disagrees
+        // with itself.
+        Err(DriverError::DeviceFault)
+    }
+
+    /// A finished disc changes under no one, so a hold needs no record: the
+    /// node's own id names it for as long as the disc is mounted.
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.node(node).map(|_| node)
+    }
+
+    fn unpin(&mut self, _pinned: NodeId) -> Result<Unpinned, DriverError> {
+        Ok(Unpinned::Released)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 
@@ -1111,6 +1201,7 @@ impl<B: Block> FilesystemWrite for Iso9660<B> {
         _dir: NodeId,
         _name: &[u8],
         _kind: NodeKind,
+        _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         Err(DriverError::ReadOnly)
     }
@@ -1120,6 +1211,7 @@ impl<B: Block> FilesystemWrite for Iso9660<B> {
         _dir: NodeId,
         _name: &[u8],
         _target: &[u8],
+        _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         Err(DriverError::ReadOnly)
     }
@@ -1130,25 +1222,18 @@ impl<B: Block> FilesystemWrite for Iso9660<B> {
 
     fn write_at(
         &mut self,
-        _dir: NodeId,
-        _name: &[u8],
+        _file: NodeId,
         _offset: u64,
         _data: &[u8],
     ) -> Result<usize, DriverError> {
         Err(DriverError::ReadOnly)
     }
 
-    fn truncate(&mut self, _dir: NodeId, _name: &[u8], _size: u64) -> Result<(), DriverError> {
+    fn truncate(&mut self, _file: NodeId, _size: u64) -> Result<(), DriverError> {
         Err(DriverError::ReadOnly)
     }
 
-    fn punch(
-        &mut self,
-        _dir: NodeId,
-        _name: &[u8],
-        _offset: u64,
-        _len: u64,
-    ) -> Result<(), DriverError> {
+    fn punch(&mut self, _file: NodeId, _offset: u64, _len: u64) -> Result<(), DriverError> {
         Err(DriverError::ReadOnly)
     }
 
@@ -1183,10 +1268,6 @@ impl<B: Block> FilesystemSecurity for Iso9660<B> {
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
-        Err(DriverError::ReadOnly)
-    }
-
-    fn stamp_owner(&mut self, _node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
         Err(DriverError::ReadOnly)
     }
 

@@ -2,14 +2,28 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
-use tairix_util::argv::option_value;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
-/// The command line was not understood: an unknown option, a missing
-/// value, a non-decimal id, a contradictory lock request, or an operand
-/// count other than one. Nothing is modified.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageError;
+/// Why the command line was not understood. Nothing is modified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UsageError {
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// A non-decimal id, a contradictory lock request, an operand count
+    /// other than one, or a line that asks for no change.
+    Usage,
+}
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::Usage => f.write_str("invalid usage"),
+        }
+    }
+}
 
 /// Which lock state a command line asked for.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -76,101 +90,82 @@ pub enum Command {
     Help,
 }
 
+/// What each of `usermod`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Comment,
+    Home,
+    Shell,
+    Gid,
+    Groups,
+    Grants,
+    Lock,
+    Unlock,
+    Help,
+}
+
+/// `usermod`'s options and the reserved help switches. `--grants`, the
+/// capability ceiling, is a TAIRiX concept with no shadow-utils counterpart,
+/// so it is long-only and cannot collide with a shadow-utils switch.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('c', &["comment"], Flag::Comment),
+    Opt::valued('d', &["home"], Flag::Home),
+    Opt::valued('s', &["shell"], Flag::Shell),
+    Opt::valued('g', &["gid"], Flag::Gid),
+    Opt::valued('G', &["groups"], Flag::Groups),
+    Opt::long(&["grants"], Takes::Value, Flag::Grants),
+    Opt::flag('L', &["lock"], Flag::Lock),
+    Opt::flag('U', &["unlock"], Flag::Unlock),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name).
 ///
 /// The grammar is
 /// `usermod [-c COMMENT] [-d HOME] [-s SHELL] [-g GID] [-G LIST] [-L | -U]
-/// [--grants LIST] [--] NAME`:
+/// [--grants LIST] [--] NAME`, read as GNU's `getopt_long` reads it
+/// ([`Scan`]): options anywhere among the operands, clustered, a value
+/// attached (`-g0`, `--gid=0`) or following, a long one by any unambiguous
+/// prefix, `--` ending them. The help switches (`-h`, `-?`, `--help`) answer
+/// at once.
 ///
-/// * `-c` / `--comment` — the account comment / display name.
-/// * `-d` / `--home` — the home directory.
-/// * `-s` / `--shell` — the login shell.
-/// * `-g` / `--gid` — the numeric primary group id.
-/// * `-G` / `--groups` — the comma-separated numeric supplementary set,
-///   which **replaces** the current one (GNU's `-a` append is deliberately
-///   absent: the syscall takes whole sets, and an append that silently read
-///   a stale listing would be worse than an explicit replacement).
-/// * `-L` / `--lock`, `-U` / `--unlock` — the lock state; naming both is a
-///   usage error rather than a guess.
-/// * `--grants` — the comma-separated capability ceiling, a TAIRiX concept
-///   with no coreutils counterpart, so it is spelled long-only and cannot
-///   collide with a shadow-utils switch.
-/// * `-h` / `-?` / `--help` — this command's own short help (wins
-///   immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-///
-/// Each value-taking option accepts its value attached (`-g0`,
-/// `--gid=0`) or as the following argument. Exactly one operand — the
-/// account name — is required, and a line that asks for no change at all
-/// is a usage error rather than a no-op run.
+/// `-G` **replaces** the supplementary set: GNU's `-a` append is
+/// deliberately absent, because the syscall takes whole sets and an append
+/// that silently read a stale listing would be worse than an explicit
+/// replacement. `-L` with `-U` is refused rather than guessed at. Exactly
+/// one operand — the account name — is required, and a line that asks for
+/// no change at all is refused rather than run as a no-op.
 ///
 /// # Errors
 ///
-/// [`UsageError`] for an unrecognised option, a missing value, a
-/// non-decimal id, both lock switches, an operand count other than one, or
-/// an empty change set.
+/// [`UsageError::Option`] for an option `getopt` refuses, and
+/// [`UsageError::Usage`] for a non-decimal id, both lock switches, an
+/// operand count other than one, or an empty change set.
 pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
     let mut changes = Changes::default();
     let mut operands: Vec<&str> = Vec::new();
-    let mut options_done = false;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if options_done {
-            operands.push(arg);
-            continue;
-        }
-        if arg == "--" {
-            options_done = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            let (name, inline) = match long.split_once('=') {
-                Some((name, value)) => (name, Some(value)),
-                None => (long, None),
-            };
-            match name {
-                "help" => return Ok(Command::Help),
-                "comment" => changes.comment = Some(text(inline, args, &mut index)?),
-                "home" => changes.home = Some(text(inline, args, &mut index)?),
-                "shell" => changes.shell = Some(text(inline, args, &mut index)?),
-                "gid" => changes.primary_gid = Some(id(inline, args, &mut index)?),
-                "groups" => {
-                    changes.supplementary_gids = Some(id_list(inline, args, &mut index)?);
-                }
-                "grants" => changes.grants = Some(text(inline, args, &mut index)?),
-                "lock" => set_lock(&mut changes, Lock::Locked)?,
-                "unlock" => set_lock(&mut changes, Lock::Unlocked)?,
-                _ => return Err(UsageError),
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(UsageError::Option)? {
+            Arg::Operand(operand) => operands.push(operand),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Comment, value) => changes.comment = value.map(String::from),
+            Arg::Opt(Flag::Home, value) => changes.home = value.map(String::from),
+            Arg::Opt(Flag::Shell, value) => changes.shell = value.map(String::from),
+            Arg::Opt(Flag::Gid, value) => changes.primary_gid = value.map(id).transpose()?,
+            Arg::Opt(Flag::Groups, value) => {
+                changes.supplementary_gids = value.map(id_list).transpose()?;
             }
-            continue;
+            Arg::Opt(Flag::Grants, value) => changes.grants = value.map(String::from),
+            Arg::Opt(Flag::Lock, _) => set_lock(&mut changes, Lock::Locked)?,
+            Arg::Opt(Flag::Unlock, _) => set_lock(&mut changes, Lock::Unlocked)?,
         }
-        if let Some(rest) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-            let mut chars = rest.chars();
-            let letter = chars.next().ok_or(UsageError)?;
-            let attached = chars.as_str();
-            let inline = (!attached.is_empty()).then_some(attached);
-            match letter {
-                'h' | '?' => return Ok(Command::Help),
-                'c' => changes.comment = Some(text(inline, args, &mut index)?),
-                'd' => changes.home = Some(text(inline, args, &mut index)?),
-                's' => changes.shell = Some(text(inline, args, &mut index)?),
-                'g' => changes.primary_gid = Some(id(inline, args, &mut index)?),
-                'G' => changes.supplementary_gids = Some(id_list(inline, args, &mut index)?),
-                'L' => set_lock(&mut changes, Lock::Locked)?,
-                'U' => set_lock(&mut changes, Lock::Unlocked)?,
-                _ => return Err(UsageError),
-            }
-            continue;
-        }
-        operands.push(arg);
     }
     let [name] = operands.as_slice() else {
-        return Err(UsageError);
+        return Err(UsageError::Usage);
     };
     if changes.is_empty() {
-        return Err(UsageError);
+        return Err(UsageError::Usage);
     }
     Ok(Command::Modify {
         name: String::from(*name),
@@ -181,7 +176,7 @@ pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
 /// Record a lock request, refusing a line that asks for both states.
 fn set_lock(changes: &mut Changes, lock: Lock) -> Result<(), UsageError> {
     match changes.lock {
-        Some(held) if held != lock => Err(UsageError),
+        Some(held) if held != lock => Err(UsageError::Usage),
         _ => {
             changes.lock = Some(lock);
             Ok(())
@@ -189,32 +184,20 @@ fn set_lock(changes: &mut Changes, lock: Lock) -> Result<(), UsageError> {
     }
 }
 
-/// An option's value as owned text.
-fn text(inline: Option<&str>, args: &[&str], index: &mut usize) -> Result<String, UsageError> {
-    option_value(inline, args, index)
-        .map(String::from)
-        .ok_or(UsageError)
-}
-
 /// An option's value as a decimal id.
-fn id(inline: Option<&str>, args: &[&str], index: &mut usize) -> Result<u32, UsageError> {
-    option_value(inline, args, index)
-        .and_then(|value| value.parse::<u32>().ok())
-        .ok_or(UsageError)
+fn id(value: &str) -> Result<u32, UsageError> {
+    value.parse::<u32>().map_err(|_| UsageError::Usage)
 }
 
 /// An option's value as a comma-separated decimal id list.
 ///
 /// An empty string is the empty set — how a caller clears a supplementary
 /// membership — while an empty *element* (`1,,2`) is malformed.
-fn id_list(inline: Option<&str>, args: &[&str], index: &mut usize) -> Result<Vec<u32>, UsageError> {
-    let raw = option_value(inline, args, index).ok_or(UsageError)?;
-    if raw.is_empty() {
+fn id_list(value: &str) -> Result<Vec<u32>, UsageError> {
+    if value.is_empty() {
         return Ok(Vec::new());
     }
-    raw.split(',')
-        .map(|part| part.parse::<u32>().map_err(|_| UsageError))
-        .collect()
+    value.split(',').map(id).collect()
 }
 
 #[cfg(test)]

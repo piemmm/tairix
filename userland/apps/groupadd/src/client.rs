@@ -9,8 +9,8 @@ use crate::command::Command;
 use crate::error::GroupaddError;
 use crate::io::{GroupDb, GroupSpec, Output};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `groupadd`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `groupadd`'s own
+/// Help tree is unavailable.
 pub const USAGE: &str = "\
 usage: groupadd [-g GID] [--] NAME
 

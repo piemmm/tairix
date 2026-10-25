@@ -24,7 +24,7 @@ use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::Errno;
 use tairix_browse::render::progress_cancel_at;
 use tairix_browse::DeletePlan;
-use tairix_fscopy::AttrError;
+use tairix_fscopy::op::OpError;
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::{MotionInteraction, MotionTheme, Theme};
 
@@ -221,17 +221,16 @@ pub const fn create_refusal(error: Errno) -> &'static str {
     }
 }
 
-/// Why a copy's extended attributes could not be carried: the source would
-/// not give them, or the copy would not take them.
+/// Why a copy could not write what it made, from the kernel's answer: as a
+/// create's refusal where the two share a cause.
 #[must_use]
-pub const fn attribute_refusal(error: &AttrError) -> &'static str {
+pub const fn write_refusal(error: Errno) -> &'static str {
     match error {
-        AttrError::Read(error) => {
-            device_refusal(*error, "the source's extended attributes could not be read")
+        Errno::OutOfMemory => NO_MEMORY,
+        Errno::AlreadyExists | Errno::NoSpace | Errno::PermissionDenied | Errno::ReadOnly => {
+            create_refusal(error)
         }
-        AttrError::Write { error, .. } => {
-            device_refusal(*error, "a copy's extended attributes could not be set")
-        }
+        _ => device_refusal(error, "the destination could not be written"),
     }
 }
 
@@ -250,6 +249,56 @@ pub const fn remove_refusal(error: Errno) -> &'static str {
 /// Why a folder could not be pasted where its own copy, or itself, would
 /// land inside it.
 pub const INTO_ITSELF: &str = "a folder cannot be put inside itself";
+
+/// Why an operation ran out of the memory it needed.
+const NO_MEMORY: &str = "there was not enough memory for it";
+
+/// Why an item could not be reached through the folder holding it, from the
+/// kernel's answer.
+#[must_use]
+pub const fn reach_refusal(error: Errno) -> &'static str {
+    match error {
+        Errno::PermissionDenied => "the folder holding it may not be read",
+        Errno::NotFound => "it was no longer there",
+        Errno::OutOfMemory => NO_MEMORY,
+        _ => device_refusal(error, "the folder holding it could not be read"),
+    }
+}
+
+/// Why the folder a paste lands in could not be reached, from the kernel's
+/// answer.
+#[must_use]
+pub const fn destination_refusal(error: Errno) -> &'static str {
+    match error {
+        Errno::PermissionDenied => "the destination folder may not be read",
+        Errno::NotFound => "the destination folder was no longer there",
+        Errno::OutOfMemory => NO_MEMORY,
+        _ => device_refusal(error, "the destination folder could not be read"),
+    }
+}
+
+/// The words an operation's refusal is stated in: `verb` and the entry it
+/// stopped at, by the name the user sees, or `item`, the item asked for,
+/// where the refusal names no entry.
+#[must_use]
+pub fn operation_refusal(verb: &str, item: &[impl AsRef<str>], error: &OpError) -> String {
+    let reason = match error {
+        OpError::IntoItself => INTO_ITSELF,
+        OpError::KindMismatch(_) => "an item of another kind has its name at the destination",
+        OpError::Read(_, errno) => read_refusal(*errno),
+        OpError::Write(_, errno) => write_refusal(*errno),
+        OpError::Rename(_, errno) => move_refusal(*errno),
+        OpError::Remove(_, errno) => remove_refusal(*errno),
+        OpError::Attribute { errno, .. } => {
+            device_refusal(*errno, "its extended attributes could not be carried")
+        }
+        OpError::Changed(_) => "it changed meanwhile, so it was left as it is",
+    };
+    match error.path() {
+        Some(path) => item_refusal(verb, &[tairix_path::leaf_name(path)], reason),
+        None => item_refusal(verb, item, reason),
+    }
+}
 
 /// Why an item could not be renamed into place, from the kernel's answer.
 #[must_use]
@@ -285,17 +334,20 @@ pub const fn change_refusal(error: Errno) -> &'static str {
         Errno::NotFound => "it was no longer there",
         Errno::NotSupported => "its volume cannot store that",
         Errno::NoSpace => "its volume has no room for it",
+        Errno::Stale => "it is no longer what this window showed",
         _ => device_refusal(error, "the volume refused it"),
     }
 }
 
-/// Why a folder could not be listed, from the kernel's answer.
+/// Why an item could not be looked at, opened, listed or read, from the
+/// kernel's answer.
 #[must_use]
 pub const fn read_refusal(error: Errno) -> &'static str {
     match error {
-        Errno::PermissionDenied => "a folder in it may not be read",
-        Errno::NotFound => "a folder in it was no longer there",
-        _ => device_refusal(error, "a folder in it could not be read"),
+        Errno::PermissionDenied => "it may not be read",
+        Errno::NotFound => "it was no longer there",
+        Errno::OutOfMemory => NO_MEMORY,
+        _ => device_refusal(error, "it could not be read"),
     }
 }
 

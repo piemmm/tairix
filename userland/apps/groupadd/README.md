@@ -70,8 +70,8 @@ underlying `Errno` as `GroupaddError::Lookup`, and a refused or failed
 creation as `GroupaddError::Create`. There is no panic (`AGENTS.md`
 §2.9).
 
-Exit codes: `0` on success, `1` on a registry or output failure, `2` on
-a usage error.
+Exit codes: `0` on success, `1` on a registry or output failure or a
+usage error.
 
 ## Tests
 

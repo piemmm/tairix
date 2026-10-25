@@ -8,7 +8,7 @@
 use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
 use tairix_abi::DriverError;
 
-use crate::check::{ck, list_names, want_err};
+use crate::check::{ck, list_names, want_err, DIR_RECORD, FILE_RECORD};
 use crate::{RamBlock, SoakFs};
 
 // Note: `FilesystemWrite` is reached through the `SoakFs` supertrait, so
@@ -74,12 +74,12 @@ fn write_and_verify<F: SoakFs>(
     seed: u64,
 ) -> Result<(), String> {
     let body = content(seed, file, len);
-    ck(
-        fs.create(dir, name, NodeKind::RegularFile),
+    let created = ck(
+        fs.create(dir, name, NodeKind::RegularFile, &FILE_RECORD),
         "create file",
         seed,
     )?;
-    let n = ck(fs.write_at(dir, name, 0, &body), "write_at", seed)?;
+    let n = ck(fs.write_at(created, 0, &body), "write_at", seed)?;
     if n != len {
         return Err(format!(
             "seed {seed:#x}: write_at short write: {n} of {len}"
@@ -148,7 +148,7 @@ pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64, format: F::Format) -> R
         (b"delta", 1),
     ];
     ck(
-        fs.create(root, b"sub", NodeKind::Directory),
+        fs.create(root, b"sub", NodeKind::Directory, &DIR_RECORD),
         "create dir",
         seed,
     )?;
@@ -173,8 +173,9 @@ pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64, format: F::Format) -> R
     }
 
     // Truncate one file shorter and confirm the prefix survives.
-    ck(fs.truncate(root, b"alpha", 2048), "truncate", seed)?;
     {
+        let alpha = ck(fs.lookup(root, b"alpha"), "lookup alpha", seed)?;
+        ck(fs.truncate(alpha, 2048), "truncate", seed)?;
         let node = ck(fs.lookup(root, b"alpha"), "lookup truncated", seed)?;
         let info = ck(fs.node_info(node), "node_info truncated", seed)?;
         if info.size != 2048 {
@@ -215,20 +216,23 @@ pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64, format: F::Format) -> R
 
     // --- Fail-closed extremes. ---
     want_err(
-        fs.create(root, b"alpha", NodeKind::RegularFile).err(),
+        fs.create(root, b"alpha", NodeKind::RegularFile, &FILE_RECORD)
+            .err(),
         DriverError::AlreadyExists,
         "duplicate create",
         seed,
     )?;
     want_err(
-        fs.create(root, b"", NodeKind::RegularFile).err(),
+        fs.create(root, b"", NodeKind::RegularFile, &FILE_RECORD)
+            .err(),
         DriverError::LengthOutOfRange,
         "empty name",
         seed,
     )?;
     let oversize = vec![b'x'; 1024];
     want_err(
-        fs.create(root, &oversize, NodeKind::RegularFile).err(),
+        fs.create(root, &oversize, NodeKind::RegularFile, &FILE_RECORD)
+            .err(),
         DriverError::LengthOutOfRange,
         "oversize name",
         seed,
@@ -269,15 +273,15 @@ fn exercise_exhaustion<F: SoakFs>(
             ));
         }
         let name = format!("fill{idx:06}").into_bytes();
-        match fs.create(root, &name, NodeKind::RegularFile) {
-            Ok(_) => {}
+        let file = match fs.create(root, &name, NodeKind::RegularFile, &FILE_RECORD) {
+            Ok(file) => file,
             Err(DriverError::NoSpace) => break,
             Err(e) => {
                 return Err(format!("seed {seed:#x}: fill create: unexpected {e:?}"));
             }
-        }
+        };
         let body = content(seed, fill_base + idx, FILL_FILE_BYTES);
-        match fs.write_at(root, &name, 0, &body) {
+        match fs.write_at(file, 0, &body) {
             Ok(_) => {
                 last_fill = Some(name);
                 idx += 1;
@@ -296,16 +300,12 @@ fn exercise_exhaustion<F: SoakFs>(
         ));
     };
     ck(fs.remove(root, &victim), "remove fill victim", seed)?;
-    ck(
-        fs.create(root, b"after", NodeKind::RegularFile),
+    let after = ck(
+        fs.create(root, b"after", NodeKind::RegularFile, &FILE_RECORD),
         "create after free",
         seed,
     )?;
     let probe = vec![0xCDu8; 4096];
-    ck(
-        fs.write_at(root, b"after", 0, &probe),
-        "write after free",
-        seed,
-    )?;
+    ck(fs.write_at(after, 0, &probe), "write after free", seed)?;
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! aarch64 (Raspberry Pi 4) PID 1 (`init`) spawn seam — `plans/PI.md`
+//! aarch64 PID 1 (`init`) spawn seam — `plans/PI.md`
 //! P6c-3.
 //!
 //! [`Aarch64InitSpawn`] implements the architecture-neutral
@@ -88,14 +88,14 @@ impl InitSpawn for Aarch64InitSpawn {
         // program's first `svc` is handled rather than faulting.
         //
         // The window length is derived from the Device/RAM gigapage masks
-        // the boot path discovered and installed (`virt`: 2 GiB; Pi 4:
-        // 4 GiB — its UART/GIC live in gigapage 3), never a board
+        // the boot path discovered and installed (`virt`: 2 GiB; 4 GiB for a
+        // board whose UART and GIC live in gigapage 3), never a board
         // constant: a window truncated short of the MMIO gigapage would
         // drop the console and interrupt controller from the active map
-        // the instant PID 1's root is switched to — exactly the metal
-        // Pi 4 silence after "boot completed" (`plans/PI.md`). An empty
-        // window (no masks configured) or one reaching the user region
-        // at `INIT_USER_BIAS` fails closed.
+        // the instant PID 1's root is switched to — the metal silence after
+        // "boot completed" `plans/PI.md` records. An empty window (no masks
+        // configured) or one reaching the user region at `INIT_USER_BIAS`
+        // fails closed.
         let identity_gib = configured_identity_gigapages();
         let identity_limit = (identity_gib as u64) << 30;
         if identity_gib == 0 || identity_limit > INIT_USER_BIAS {
@@ -235,18 +235,10 @@ impl InitSpawn for Aarch64InitSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
-        // The VL805 USB keyboard now comes up entirely in user space: the
-        // boot path's `FdtDiscovery` already emits the discovered
-        // `brcm,bcm2711-pcie` node (with its register window + outbound
-        // bus-window + inbound DMA grants) and the VideoCore mailbox node into
-        // the hardware tree, and `devmgr` autoloads the signed
-        // `/System/Drivers/` bundles against them — the PCIe root-complex
-        // driver binds the bridge and emits the VL805 PCI function, the VL805
-        // driver reloads the controller firmware over the mailbox and emits
-        // the `usb,xhci` node, and the keyboard driver binds that, brings the
-        // controller up, and pumps key edges into the input arbiter (`plans/PI.md`
-        // P10 D5d — drivers in user space). There is no
-        // in-kernel keyboard bring-up to start here.
+        // A USB keyboard comes up entirely in user space: `devmgr` autoloads
+        // the bus, host-controller and HID drivers against the nodes discovery
+        // emitted (`plans/PI.md` P10 D5d), so there is no in-kernel keyboard
+        // bring-up to start here.
 
         // Start the in-kernel root-unlock service alongside PID 1
         // (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)).
@@ -256,7 +248,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // root — prompting on the primary console for an encrypted root's
         // passphrase — and publishes the users database into `LATE_USERS_DB` so
         // `login` can authenticate. With no bound disk (the QEMU `virt`
-        // shape without a planted root, a headless Pi) it starts nothing,
+        // shape without a planted root, a headless board) it starts nothing,
         // opens the console-0 gate, and PID 1 runs unchanged.
         let _unlock_started = crate::aarch64::root_unlock::spawn_if_present(ctx);
 

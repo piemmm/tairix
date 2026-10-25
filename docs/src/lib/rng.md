@@ -111,7 +111,7 @@ kernel-only, non-swappable memory. It is the whole chain in one type:
 entropy pool → CsRng (HMAC-DRBG) → FastRng<2048> (ChaCha12) → userland
 ```
 
-Exactly Linux's shape, with an extra NIST-approved stage in front. `CsRng` is
+The DRBG stands between the pool and the stream generator. `CsRng` is
 the *authority*: it keys the fast generator at seed time and re-keys it at
 every boundary. `FastRng` is what every served byte comes from, so a userland
 request costs a cipher block rather than a DRBG generate. The reserve keeps
@@ -302,8 +302,8 @@ HAL and the `IrqTable` in `kernel/core`.
 ## `FastRng`: buffered ChaCha12 with fast key erasure
 
 `FastRng` is Bernstein's fast-key-erasure construction over `lib/crypto`'s
-audited ChaCha12 — the same shape as OpenBSD's `arc4random` and Linux's
-`get_random_u64`. One refill runs the cipher once under the current key and a
+audited ChaCha12 — the shape OpenBSD's `arc4random` takes over ChaCha20. One
+refill runs the cipher once under the current key and a
 fixed nonce, producing `FAST_REFILL_BYTES` (256, exactly four cipher blocks,
 so none is generated and thrown away) of keystream:
 

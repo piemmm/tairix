@@ -237,8 +237,8 @@ impl Default for TcpConfig {
             congestion: CongestionAlgorithm::Cubic,
             tso_max_payload: 0,
             // RFC 1122 §4.2.3.6: keepalive is off unless explicitly enabled.
-            // The intervals mirror the long-standing BSD/Linux defaults
-            // (2 h idle, 75 s probe spacing, 9 probes) so an enabled
+            // The intervals — 2 h idle, RFC 1122's floor, then nine probes
+            // 75 s apart — are chosen so an enabled
             // connection does not probe a merely-quiet peer aggressively.
             enable_keepalive: false,
             keepalive_idle: Duration64::from_secs(7200),

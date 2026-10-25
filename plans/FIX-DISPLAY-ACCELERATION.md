@@ -124,7 +124,7 @@ post-write cache maintenance and its interrupt-mask type. The console/seat
 layout moves into one `kernel/tairix-kernel` module every port calls.
 
 - **D152** closes here: a fatal report never waits on the render lock. Once
-  every other CPU has stopped it is broken (`bust_spinlocks`), so a report
+  every other CPU has stopped it is broken, so a report
   raised with the lock held still renders; while a peer that would not stop
   may be painting, a write renders only where the lock is free. Regression
   tests: a panic with the lock held reaches the sink; the lock is broken only
@@ -266,8 +266,9 @@ read unless the caller holds that seat's live lease.
   notify and answered on the used-ring interrupt (`RequestQueue` carries one
   batch at a time), so the frame is free when the call returns
   (`Presented::Shown`). The batch relies on the device processing its control
-  queue in order, as every virtio-gpu device does and Linux's driver relies
-  on. A frame given back while shown keeps its resource until replaced; a
+  queue in order, which QEMU's device does and virtio 1.2 does not require
+  (§2.6, §5.7.6). A frame given back while shown keeps its resource until
+  replaced; a
   backing whose detach the device never answered is never unmapped, and a
   resource an unanswered batch may have made (a frame's, the console's, the
   pointer's) is unreferenced before its memory is reused or given back.
@@ -298,7 +299,7 @@ read unless the caller holds that seat's live lease.
   transfers it and issues `UPDATE_CURSOR` on the cursor queue, `MoveCursor`
   issues `MOVE_CURSOR`.
 - HVS: a top display-list plane; `MoveCursor` rewrites its position words in
-  the live list, as Linux's `vc4` async cursor update does.
+  the live list, so moving the pointer presents nothing.
 - The WM gives the plane the pointer whenever the pointer is one sprite that
   fits it; a trail or the halo composites in software. A pointer that moves
   while on the plane damages nothing. The session moves the cursor once per

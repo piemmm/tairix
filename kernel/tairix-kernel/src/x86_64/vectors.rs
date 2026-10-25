@@ -8,9 +8,10 @@
 //! interrupt a pin raised has left every CPU. A machine's pins therefore cost
 //! vectors only as their lines are used, however many its IO-APICs carry.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
 
 use tairix_arch_x86_64::irq::{EXTERNAL_VECTOR_COUNT, EXTERNAL_VECTOR_FIRST};
+use tairix_sync::claims;
 
 const WORDS: usize = EXTERNAL_VECTOR_COUNT.div_ceil(64);
 
@@ -44,28 +45,8 @@ impl VectorPool {
     /// Claim the lowest free vector, or [`None`] when every one is claimed.
     #[must_use]
     pub fn claim(&self) -> Option<u8> {
-        for (word, claimed) in self.claimed.iter().enumerate() {
-            let first = word * 64;
-            let usable = (EXTERNAL_VECTOR_COUNT - first).min(64);
-            let mask = u64::MAX >> (64 - usable);
-            let mut current = claimed.load(Ordering::Acquire);
-            while !current & mask != 0 {
-                let bit = (!current & mask).trailing_zeros();
-                match claimed.compare_exchange_weak(
-                    current,
-                    current | (1 << bit),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        let offset = u8::try_from(first + bit as usize).ok()?;
-                        return EXTERNAL_VECTOR_FIRST.checked_add(offset);
-                    }
-                    Err(seen) => current = seen,
-                }
-            }
-        }
-        None
+        let index = claims::claim_lowest(&self.claimed, EXTERNAL_VECTOR_COUNT)?;
+        EXTERNAL_VECTOR_FIRST.checked_add(u8::try_from(index).ok()?)
     }
 
     /// Give `vector` back: one nothing can raise any more. A vector outside
@@ -78,7 +59,7 @@ impl VectorPool {
         else {
             return;
         };
-        self.claimed[index / 64].fetch_and(!(1 << (index % 64)), Ordering::Release);
+        claims::release(&self.claimed, index);
     }
 }
 

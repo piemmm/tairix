@@ -1,6 +1,7 @@
 //! The workspace walk the source scans share.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
@@ -51,7 +52,7 @@ pub(super) fn for_each_file(
 /// ignored directory once. Empty where git cannot say, so the walk then scans
 /// more rather than less; a tracked file is never among them.
 fn ignored(root: &Path) -> BTreeSet<String> {
-    let listed = Command::new("git")
+    let listed = git_in(root, std::env::vars_os())
         .args([
             "ls-files",
             "-z",
@@ -60,7 +61,6 @@ fn ignored(root: &Path) -> BTreeSet<String> {
             "--exclude-standard",
             "--directory",
         ])
-        .current_dir(root)
         .output();
     match listed {
         Ok(listed) if listed.status.success() => listed
@@ -75,6 +75,20 @@ fn ignored(root: &Path) -> BTreeSet<String> {
             .collect(),
         _ => BTreeSet::new(),
     }
+}
+
+/// `git` run in `root` and only there: a `GIT_*` variable in `inherited` — a
+/// hook exports `GIT_DIR` and `GIT_WORK_TREE` — would point it at another
+/// repository.
+fn git_in(root: &Path, inherited: impl IntoIterator<Item = (OsString, OsString)>) -> Command {
+    let mut git = Command::new("git");
+    for (name, _) in inherited {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            git.env_remove(name);
+        }
+    }
+    git.current_dir(root);
+    git
 }
 
 /// Whether `name` is a Rust source file. Any case counts: a `#[path]` module
@@ -95,18 +109,35 @@ pub(super) fn relative(base: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
     use std::path::Path;
-    use std::process::Command;
 
-    use super::{for_each_file, is_rust};
+    use super::{for_each_file, git_in, is_rust};
 
     fn git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let status = git_in(root, std::env::vars_os())
             .args(args)
-            .current_dir(root)
             .status()
             .expect("git runs");
         assert!(status.success(), "git {args:?}");
+    }
+
+    /// A repository a hook names in the environment is never the one git
+    /// acts on, and the rest of the environment passes through.
+    #[test]
+    fn git_runs_in_its_root_whatever_a_hook_exported() {
+        let inherited = [
+            ("GIT_DIR", "/elsewhere/.git"),
+            ("GIT_WORK_TREE", "/elsewhere"),
+            ("PATH", "/bin"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let git = git_in(Path::new("/scratch"), inherited);
+        let envs: Vec<_> = git.get_envs().collect();
+        assert!(envs.contains(&(OsStr::new("GIT_DIR"), None)));
+        assert!(envs.contains(&(OsStr::new("GIT_WORK_TREE"), None)));
+        assert!(envs.iter().all(|(name, _)| *name != "PATH"));
+        assert_eq!(git.get_current_dir(), Some(Path::new("/scratch")));
     }
 
     /// What git ignores and does not track is passed over; a tracked file is

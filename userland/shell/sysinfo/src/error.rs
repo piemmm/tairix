@@ -3,6 +3,7 @@
 use core::fmt;
 use tairix_abi::Errno;
 use tairix_procinfo::{CallError, ListError, ResolveInfoError};
+use tairix_util::getopt::Refusal;
 
 /// Why a `sysinfo` invocation did not complete.
 ///
@@ -10,10 +11,12 @@ use tairix_procinfo::{CallError, ListError, ResolveInfoError};
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SysinfoError {
-    /// The command line did not name a known query, or carried an
-    /// unrecognised argument. The caller should print [`crate::USAGE`].
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// The command line did not name a known query, or carried a stray
+    /// argument.
     Usage,
     /// The service refused the query because the caller lacks the
     /// capability the query declares. Distinguished
@@ -73,6 +76,7 @@ impl From<ResolveInfoError> for SysinfoError {
 impl fmt::Display for SysinfoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::PermissionDenied => {
                 f.write_str("permission denied: this query requires a capability you do not hold")

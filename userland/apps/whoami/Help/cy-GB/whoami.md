@@ -36,8 +36,7 @@ Nid yw'r gorchymyn yn derbyn operandau; mae ymresymiad yn wall
 - `0` — ysgrifennwyd yr enw (neu'r cymorth byr y gofynnwyd amdano).
 - `1` — methodd darllen yr hunaniaeth, ymholiad y cyfeiriadur neu'r
   allbwn, neu nid yw'r cyfeiriadur yn cynnwys enw ar gyfer y dynodwr
-  defnyddiwr.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  defnyddiwr. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

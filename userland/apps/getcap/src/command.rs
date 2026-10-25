@@ -3,6 +3,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan};
+
 use crate::error::GetcapError;
 
 /// One thing the `getcap` tool can do.
@@ -20,52 +22,40 @@ pub enum Command {
     Help,
 }
 
+/// What each of `getcap`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Recursive,
+    Help,
+}
+
+/// `getcap`'s options and its help switches (`-h` and `--help`).
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('R', &["recursive"], Flag::Recursive),
+    Opt::flag('h', &["help"], Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `getcap [-R] [--] file...`:
-///
-/// * `-R` / `--recursive` — descend into directories.
-/// * `-h` / `--help` — print the usage banner (wins immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * any other `-…` — a [`GetcapError::Usage`] error (fail closed; never a
-///   silently ignored token).
-/// * anything else — an operand.
+/// The grammar is `getcap [-R] [--] file...`, read as GNU's `getopt_long`
+/// reads it ([`Scan`]): options anywhere among the operands, clustered, a
+/// long one by any unambiguous prefix, `--` ending them. The help switches
+/// (`-h`, `--help`) answer at once.
 ///
 /// # Errors
 ///
-/// [`GetcapError::Usage`] for any unrecognised option before `--`, or when no
-/// file operand is given.
+/// * [`GetcapError::Option`] — an option `getopt` refuses, in its words.
+/// * [`GetcapError::Usage`] — no file operand is given.
 pub fn parse(args: &[&str]) -> Result<Command, GetcapError> {
     let mut recursive = false;
     let mut files = Vec::new();
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
-            }
-            if let Some(name) = arg.strip_prefix("--") {
-                match name {
-                    "recursive" => recursive = true,
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(GetcapError::Usage),
-                }
-                continue;
-            }
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in letters.chars() {
-                    match letter {
-                        'R' => recursive = true,
-                        'h' => return Ok(Command::Help),
-                        _ => return Err(GetcapError::Usage),
-                    }
-                }
-                continue;
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(GetcapError::Option)? {
+            Arg::Operand(file) => files.push(String::from(file)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Recursive, _) => recursive = true,
         }
-        files.push(String::from(arg));
     }
     if files.is_empty() {
         return Err(GetcapError::Usage);
@@ -77,7 +67,7 @@ pub fn parse(args: &[&str]) -> Result<Command, GetcapError> {
 mod tests {
     use super::{parse, Command};
     use crate::error::GetcapError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
     fn report(recursive: bool, files: &[&str]) -> Command {
@@ -122,14 +112,30 @@ mod tests {
     #[test]
     fn lowercase_r_is_not_recursive_and_is_usage() {
         // `getcap` spells recursive `-R`; a bare `-r` is not an option.
-        assert_eq!(parse(&["-r", "/f"]), Err(GetcapError::Usage));
+        assert_eq!(refused(&["-r", "/f"]), "invalid option -- 'r'");
+    }
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "/f"]), Err(GetcapError::Usage));
-        assert_eq!(parse(&["--frob", "/f"]), Err(GetcapError::Usage));
-        assert_eq!(parse(&["-Rx", "/f"]), Err(GetcapError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "/f"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob", "/f"]), "unrecognized option '--frob'");
+        // A bundle with one bad flag is refused whole.
+        assert_eq!(refused(&["-Rx", "/f"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--recursive=1", "/f"]),
+            "option '--recursive' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--rec", "/d"]), Ok(report(true, &["/d"])));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

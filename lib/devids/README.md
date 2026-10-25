@@ -47,7 +47,7 @@ The raw download is untrusted input whose strings end up on users'
 terminals and desktops, so `textdb::parse` is strict and fail-closed: the
 whole file must match the shared line grammar (never skip-and-continue), names
 must be valid UTF-8 with no character that hides or reorders text
-(`tairix_util::utf8::is_hidden`: no control, so no terminal escape injection,
+(`tairix_visible::is_hidden`: no control, so no terminal escape injection,
 and no bidirectional control or zero-width character, so no name passes for
 another or hides text from a refresh's reviewer), ids are exact-width lowercase
 hex in every emitted scope, duplicates within a scope reject the import, and

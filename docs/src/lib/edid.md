@@ -37,8 +37,8 @@ A source names the timing it sends by a code whatever list the sink gave it
 in. `video_code` finds a timing's CTA-861 code, a 59.94 Hz variant's
 included, the lower of two that differ only in aspect; `hdmi_video_code`
 finds the HDMI 1.4 code of one of the four 4K timings, which a source sends
-to any HDMI sink in its vendor-specific `InfoFrame`, as Linux's
-`drm_mode_hdmi_vic` has it, since a sink older than CTA-861-F knows no CTA
+to any HDMI sink in its vendor-specific `InfoFrame` (HDMI 1.4b §8.2.3),
+since a sink older than CTA-861-F knows no CTA
 code for them.
 
 `Avi::pack` packs the AVI `InfoFrame` — the CTA code and its picture aspect,

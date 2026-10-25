@@ -130,8 +130,8 @@ piano dello strumento.
 
 - `0` — la sessione è terminata con la `q` dell'utente.
 - `1` — la directory iniziale non è stata elencabile, o il percorso del
-  terminale è fallito.
-- `2` — gli argomenti non sono stati compresi.
+  terminale è fallito. Anche una riga di comando non compresa termina
+  con `1`.
 
 ## SEE ALSO
 

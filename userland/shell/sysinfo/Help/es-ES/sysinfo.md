@@ -112,7 +112,7 @@ Sin consulta, se muestra la ayuda corta.
 
 - `0` — la consulta fue respondida y mostrada.
 - `1` — el servicio rechazó o falló, o el resultado no pudo entregarse.
-- `2` — la línea de comandos no fue comprendida.
+  Una línea de comandos no comprendida también termina con `1`.
 
 ## ENVIRONMENT
 

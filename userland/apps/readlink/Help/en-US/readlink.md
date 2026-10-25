@@ -41,6 +41,12 @@ tool *calls* it rather than walking links itself. A second copy of the
 algorithm that disagreed by one rule would print a path the filesystem
 resolves differently.
 
+On a terminal, each path the output shows is quoted where a shell would
+need it, and any control or other invisible character in it is written
+as an escape, so a path cannot command or rearrange the screen; GNU
+shows it unchanged. A pipe, a file, or `-z` output receives the path
+byte for byte.
+
 ## OPTIONS
 
 - `-f, --canonicalize` — print the canonical path; every component but
@@ -68,9 +74,8 @@ resolves differently.
 
 - `0` — every operand's target was printed (or the short help was
   written).
-- `1` — at least one read was refused, or the output failed.
-- `2` — the command line was not understood, or named a
-  canonicalisation switch.
+- `1` — at least one read was refused, or the output failed. A command
+  line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

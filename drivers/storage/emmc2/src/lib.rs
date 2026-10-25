@@ -30,6 +30,13 @@
 //! metal drives it over a capability-gated [`RegisterWindow`] ([`IrqSdhci`]),
 //! host tests over a register-level mock controller and card.
 //!
+//! # Bootstrap floor
+//!
+//! The kernel opens the card for its root volume through [`floor::open`],
+//! over the host it lends: the node's register window, DMA inside its
+//! window, its interrupt line, and the firmware channel the base clock and
+//! the card's supplies are asked through.
+//!
 //! # Capabilities
 //!
 //! Loading requires [`CapabilityId::DRV_LOAD`]; mapping the discovered
@@ -40,15 +47,17 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 use tairix_abi::blkio::{
     BlkDeviceName, BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkTransport,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
-use tairix_abi::driver::timing::Delay;
+use tairix_abi::driver::timing::CompletionWait;
 use tairix_abi::driver::{BufferClass, CompletionSignal};
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, RegisterBlock,
     RegisterWindow,
 };
 use tairix_dma_barrier::{dma_rmb, dma_wmb};
@@ -58,6 +67,7 @@ mod bringup;
 pub mod bus;
 pub mod card;
 pub mod command;
+pub mod floor;
 pub mod host;
 pub mod regs;
 pub mod trace;
@@ -82,17 +92,18 @@ const REGISTER_HANDLE_MARKER: u64 = 0x5344_5000_0000_0001;
 const BIND_PRIORITY: u16 = 10;
 
 /// This driver's hardware bind table: the BCM2711 EMMC2 SD host, matched by
-/// the device-tree `compatible` string `brcm,bcm2711-emmc2`. The single
-/// source the signed manifest's bind table is authored from.
+/// its device-tree `compatible` string through
+/// [`tairix_vcmailbox::SD_HOST_KEY`], the one key the platform's discovery
+/// and the firmware's admission name it by too. Its `Floor.toml` restates it
+/// for the kernel's build to sign.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(b"brcm,bcm2711-emmc2") {
-        Ok(key) => key,
-        // A too-long literal is a compile-time const-eval error here, never a
-        // runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    tairix_vcmailbox::SD_HOST_KEY,
 )];
+
+/// The path the kernel's bootstrap floor names this driver by: the class,
+/// then the part as the leaf, never a vendor namespace.
+pub const FLOOR_PATH: &str = "/System/Drivers/storage/bcm2711_emmc2";
 
 /// Upper bound on register polls, and on completion parks, while waiting
 /// for a controller event: a defence against an unresponsive controller,
@@ -199,21 +210,6 @@ pub enum DmaArea {
     Table,
 }
 
-/// The environment the metal [`IrqSdhci`] host runs the engine in: the
-/// completion park and the timed wait.
-///
-/// The driver is generic over `lib/abi` only, so it cannot name the kernel's
-/// IRQ-wait machinery; the kernel supplies an implementation that blocks the
-/// calling task on the controller's bound interrupt line, and sleeps it for
-/// the [`Delay`] intervals, while a host test supplies inline ones. The
-/// outcome is the driver ABI's [`CompletionSignal`].
-pub trait CompletionWait: Delay {
-    /// Block until the controller signals on its interrupt line or the
-    /// implementation's bounded budget elapses; the caller re-reads
-    /// `INTERRUPT` on a fire and fails closed on a timeout.
-    fn await_irq(&self) -> CompletionSignal;
-}
-
 /// The signalling voltage of the card's I/O rail.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SignalVoltage {
@@ -221,17 +217,6 @@ pub enum SignalVoltage {
     V3_3,
     /// 1.8 V, the UHS-I signalling.
     V1_8,
-}
-
-impl SignalVoltage {
-    /// The rail's voltage in microvolts, as a regulator's states name it.
-    #[must_use]
-    pub const fn microvolts(self) -> u32 {
-        match self {
-            Self::V3_3 => 3_300_000,
-            Self::V1_8 => 1_800_000,
-        }
-    }
 }
 
 /// The card's switchable supplies, as the board wires them.
@@ -266,9 +251,10 @@ pub struct Board<'a> {
     pub supply: Option<&'a mut dyn CardSupply>,
 }
 
-/// The metal SDHCI host: the capability-gated [`RegisterWindow`], a
-/// [`CompletionWait`] that parks on the controller's interrupt line, and —
-/// on the fast path — the two DMA staging slabs.
+/// The metal SDHCI host: the capability-gated [`RegisterWindow`], the
+/// host's [`CompletionWait`], which parks on the controller's interrupt line
+/// and times the bring-up's intervals, and — on the fast path — the two DMA
+/// staging slabs.
 pub struct IrqSdhci<W: CompletionWait> {
     window: RegisterWindow,
     waiter: W,

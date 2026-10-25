@@ -30,13 +30,12 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
 
     use tairix_abi::{Errno, RealpathMode};
     use tairix_help::BundleHelp;
-    use tairix_readlink::{parse, run, Filesystem, USAGE};
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_readlink::{parse, run, Filesystem};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
     /// The production [`Filesystem`] over `fs_readlink` and `fs_realpath`.
     struct RtFilesystem;
@@ -55,21 +54,17 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when every target was printed, `1` when a read was
-    /// refused or the output failed, `2` on a usage error (a malformed
-    /// argument vector, or an unrecognised option).
+    /// refused, the output failed or the command line was not understood,
+    /// as GNU's `readlink` ends.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            let _ = Stderr.write_all(USAGE.as_bytes());
-            return 2;
+        let Some(arguments) = tairix_help::arguments("readlink") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("readlink: {err}"));
-                let _ = Stderr.write_all(USAGE.as_bytes());
-                return 2;
+                tairix_help::report_misuse("readlink", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -86,7 +81,7 @@ mod program {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("readlink: {err}"));
+                write_stderr_line(format_args!("readlink: {err}"));
                 1
             }
         }

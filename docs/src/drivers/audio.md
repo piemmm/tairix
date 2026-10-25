@@ -49,7 +49,7 @@ codec's handful of discrete rates *and* a USB Audio Class 2 clock source's
 continuous range, because modelling only the first would force a continuous
 device to publish an invented list.
 
-An endpoint's `resolution` is ALSA's significant bits: where a converter
+An endpoint's `resolution` is the significant bits of its samples: where a converter
 resolves fewer bits than the encoding it takes carries — a 24-bit sample in a
 32-bit container — the facts say so, and the mixer quantises, dithered, to
 that grid rather than leaving the device to truncate. USB Audio states its
@@ -480,7 +480,8 @@ and the codec's driver its part.
   mixer's, dithered; the codec's rates within the block's 8 kHz to 384 kHz;
   and the codec's gain.
 * **Each sample has a slot as wide as itself, two slots a frame**, in the
-  link's framing as Linux's `bcm2835-i2s` programs it. Where this side drives
+  link's framing, set in the block's `MODE_A` and `TXC_A` fields (BCM2711 ARM
+  Peripherals, 7.9). Where this side drives
   the bit clock the clock manager runs it at the rate times the frame's bits,
   and a clock made more than 100 ppm off is refused; where the codec drives
   it, the block follows.

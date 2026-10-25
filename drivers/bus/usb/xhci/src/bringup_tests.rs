@@ -28,7 +28,7 @@ use super::{
 };
 use tairix_usb::XhciOpenStage;
 
-/// The controller's register BAR base/len the HCD maps (the metal VL805 BAR0
+/// The controller's register BAR base/len the HCD maps (a metal BAR0
 /// is 4 KiB).
 const BAR_BASE: u64 = 0x6000_0000;
 const BAR_LEN: usize = 0x1000;
@@ -227,7 +227,7 @@ fn diagnostic_localises_a_setup_stall() {
 
 #[test]
 fn derives_a_bus_window_bar_and_translated_dma_aperture() {
-    // The Pi 4 shape: the BAR is granted as an outbound PCIe-bus window (the
+    // A bridged shape: the BAR is granted as an outbound PCIe-bus window (the
     // HCD names it by its far-side bus address), and the DMA constraint is a
     // translated inbound viewport whose device-visible top is the far-side base
     // plus extent.

@@ -31,11 +31,12 @@ fn a_plaintext_volume_keeps_its_files_across_a_remount_with_no_key() {
     let payload = alloc::vec![0x3Cu8; 512 * 5 + 17];
     let mut fs = fmt_plain(512, 256);
     let root = fs.root();
-    fs.create(root, name, NodeKind::RegularFile)
+    let file = fs
+        .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.create(root, b"folder", NodeKind::Directory)
+    fs.create(root, b"folder", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir");
-    assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(file, 0, &payload), Ok(payload.len()));
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut back = ARXFS::open(
@@ -63,9 +64,10 @@ fn a_plaintext_volume_stores_names_and_content_as_written_and_an_encrypted_one_n
     let payload = marked_payload();
     let at_rest = |mut fs: ARXFS<MemBlock>| {
         let root = fs.root();
-        fs.create(root, name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+        assert_eq!(fs.write_at(file, 0, &payload), Ok(payload.len()));
         fs.into_block().expect("the volume closes").bytes()
     };
 
@@ -130,9 +132,10 @@ fn rotted_plaintext_content_is_caught_and_never_returned() {
     let payload = marked_payload();
     let mut fs = fmt_plain(512, 512);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"f", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(f, 0, &payload), Ok(payload.len()));
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
     let at = bytes
         .windows(16)
@@ -225,9 +228,10 @@ fn a_plaintext_volume_checks_sound_and_is_rescued_with_no_key() {
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
     let body = incompressible(cap + cap / 2);
-    fs.create(root, b"doc", NodeKind::RegularFile)
+    let doc = fs
+        .create(root, b"doc", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"doc", 0, &body).expect("write");
+    fs.write_at(doc, 0, &body).expect("write");
     let doc_ino = u32::try_from(fs.lookup(root, b"doc").expect("lookup").raw()).unwrap();
     assert_eq!(check_full(&mut fs).structure, StructureVerdict::Sound);
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
@@ -315,7 +319,7 @@ fn a_reformat_leaves_no_superblock_of_the_volume_before_it() {
         .expect("format the first volume");
     let root = old.root();
     for name in [b"a".as_slice(), b"b", b"c", b"d"] {
-        old.create(root, name, NodeKind::RegularFile)
+        old.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         old.commit().expect("commit");
     }
@@ -414,9 +418,10 @@ fn stored_content_hash(
     publish_boot_hash_key();
     let mut fs = ARXFS::format(MemBlock::new(512, 256), 32, keying, entropy).expect("format");
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"f", 0, content), Ok(content.len()));
+    assert_eq!(fs.write_at(f, 0, content), Ok(content.len()));
     let phys = data_block_phys(&mut fs, b"f", 0);
     let mut raw = [0u8; MAX_BLOCK_LEN];
     fs.read_block(phys, &mut raw).expect("raw read");

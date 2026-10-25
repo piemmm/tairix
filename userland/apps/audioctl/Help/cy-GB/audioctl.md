@@ -60,8 +60,8 @@ Ar y wybodaeth safonol (fd 3) mae `audioctl streams` yn ysgrifennu cofnod
 ## EXIT STATUS
 
 - `0` — cwblhawyd y gorchymyn.
-- `1` — fe'i gwrthodwyd, neu nid oedd modd ei gyflawni.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — fe'i gwrthodwyd, neu nid oedd modd ei gyflawni. Mae llinell orchymyn
+  na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

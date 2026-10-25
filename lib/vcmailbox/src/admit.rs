@@ -7,15 +7,20 @@
 //! service forwards a request only when it carries one tag, word for word in
 //! the shape a driver sends it, from the driver the kernel attests is loaded
 //! for the device that tag concerns. Anything else is refused.
+//!
+//! A GPIO switch is one device's only when its line is one its node's rails
+//! name, which only discovery states; the kernel's own channel to the
+//! firmware, which its storage floor borrows, is admitted by the same rules.
 
 use tairix_abi::{Errno, HwMatchKey, HwNode};
 
 use crate::{
     FirmwareClock, Malformed, RtcRegister, Tags, CODE_REQUEST, DISPLAY_ENGINE_KEY,
-    FIRMWARE_CLOCKS_KEY, HEADER_WORDS, LINKED_CLOCKS, PROPERTY_WORDS, RPI_RTC_KEY,
-    SKIP_SETTING_TURBO, TAG_GET_CLOCK_RATE, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE,
-    TAG_GET_PHYSICAL_WH, TAG_GET_RTC_REG, TAG_NOTIFY_DISPLAY_DONE, TAG_NOTIFY_XHCI_RESET,
-    TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG, VL805_FIRMWARE_DEV_ADDR, VL805_KEY,
+    FIRMWARE_CLOCKS_KEY, FIRMWARE_GPIO_BASE, HEADER_WORDS, LINKED_CLOCKS, PROPERTY_WORDS,
+    RPI_RTC_KEY, SD_HOST_KEY, SKIP_SETTING_TURBO, TAG_GET_CLOCK_RATE, TAG_GET_MAX_CLOCK_RATE,
+    TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH, TAG_GET_RTC_REG, TAG_NOTIFY_DISPLAY_DONE,
+    TAG_NOTIFY_XHCI_RESET, TAG_SET_CLOCK_RATE, TAG_SET_GPIO_STATE, TAG_SET_RTC_REG,
+    VL805_FIRMWARE_DEV_ADDR, VL805_KEY,
 };
 
 /// Why the service refused a request.
@@ -34,13 +39,23 @@ enum Word {
     Any,
     /// One of these values.
     OneOf(&'static [u32]),
+    /// The firmware's number for a line the caller's node states switches one
+    /// of its rails.
+    RailLine,
 }
 
 impl Word {
-    fn admits(&self, value: u32) -> bool {
+    fn admits(&self, value: u32, caller: &HwNode) -> bool {
         match self {
             Self::Any => true,
             Self::OneOf(values) => values.contains(&value),
+            Self::RailLine => [
+                caller.io_rail().map(|rail| rail.line),
+                caller.power_rail().map(|rail| rail.line),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|line| value == FIRMWARE_GPIO_BASE + u32::from(line)),
         }
     }
 }
@@ -61,7 +76,7 @@ impl Admitted {
                 .values
                 .iter()
                 .zip(values)
-                .all(|(word, &value)| word.admits(value))
+                .all(|(word, &value)| word.admits(value, caller))
             && caller
                 .match_keys()
                 .iter()
@@ -89,7 +104,7 @@ const DRIVEN_CLOCKS: [u32; 1 + LINKED_CLOCKS.len()] = {
 const DRIVEN_CLOCK: Word = Word::OneOf(&DRIVEN_CLOCKS);
 
 /// Every request the service forwards: each driver's working set and no more.
-const ADMITTED: [Admitted; 9] = [
+const ADMITTED: [Admitted; 11] = [
     Admitted {
         tag: TAG_NOTIFY_DISPLAY_DONE,
         device: DISPLAY_ENGINE_KEY,
@@ -147,6 +162,17 @@ const ADMITTED: [Admitted; 9] = [
         device: FIRMWARE_CLOCKS_KEY,
         values: &[DRIVEN_CLOCK, Word::Any, Word::OneOf(&[SKIP_SETTING_TURBO])],
     },
+    // The base clock the SD host divides its SD clock from.
+    Admitted {
+        tag: TAG_GET_CLOCK_RATE,
+        device: SD_HOST_KEY,
+        values: &[Word::OneOf(&[FirmwareClock::Emmc2.as_u32()]), SLOT],
+    },
+    Admitted {
+        tag: TAG_SET_GPIO_STATE,
+        device: SD_HOST_KEY,
+        values: &[Word::RailLine, Word::OneOf(&[0, 1])],
+    },
 ];
 
 /// Admit `message` from the driver the kernel attests is loaded for `caller`,
@@ -192,11 +218,12 @@ pub fn admit_request(
     if tag.code != CODE_REQUEST {
         return Err(refused(named, Errno::OutOfRange));
     }
-    let admitted = ADMITTED
-        .iter()
-        .find(|rule| rule.tag == tag.id)
-        .zip(caller)
-        .is_some_and(|(rule, caller)| rule.admits(tag.values, caller));
+    let admitted = caller.is_some_and(|caller| {
+        ADMITTED
+            .iter()
+            .filter(|rule| rule.tag == tag.id)
+            .any(|rule| rule.admits(tag.values, caller))
+    });
     if admitted {
         Ok(())
     } else {

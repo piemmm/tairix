@@ -5,7 +5,7 @@
 //! On a busy segment nearly all broadcast and multicast traffic is addressed
 //! to other hosts, or to groups this host never joined — ARP asking after a
 //! neighbour, mDNS, LLMNR, SSDP, `NetBIOS` and the rest of a LAN's
-//! background noise. Measured on an idle Raspberry Pi 4: of 7994 frames the
+//! background noise. Measured on an idle board: of 7994 frames the
 //! stack was woken for, it discarded 7917. Each of those cost a frame copy
 //! into the shared ring, a wake of the stack process, and a full protocol
 //! parse, to be dropped. The driver evaluates this classifier on its harvest

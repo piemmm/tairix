@@ -320,6 +320,16 @@ impl Lexer {
         }
     }
 
+    /// With the cursor on unquoted text: whether a command substitution or
+    /// arithmetic expansion opens there.
+    fn opens_substitution(&self) -> bool {
+        match self.peek() {
+            Some('`') => true,
+            Some('$') => self.peek2() == Some('('),
+            _ => false,
+        }
+    }
+
     /// With the cursor on `{` or `}`: `true` when the brace is a *bare* token
     /// (immediately followed by a token boundary), i.e. the reserved-word
     /// spelling of a brace group rather than part of a word or a `{name}<`
@@ -628,6 +638,12 @@ impl Lexer {
                 Some(c) if is_pattern_group_op(c) && self.peek2() == Some('(') => {
                     self.lex_pattern_group(&mut word)?;
                 }
+                Some(_) if self.opens_substitution() => {
+                    return Err(ParseError::UnsupportedSubstitution);
+                }
+                // An unquoted parenthesis is an operator, which bash refuses
+                // inside a word.
+                Some('(' | ')') => return Err(ParseError::UnexpectedToken),
                 Some(c) => {
                     self.bump();
                     word.push_expandable(c);
@@ -662,6 +678,9 @@ impl Lexer {
                         Some(c) => word.push_literal(c),
                     }
                 }
+                Some(_) if self.opens_substitution() => {
+                    return Err(ParseError::UnsupportedSubstitution);
+                }
                 Some(c) => {
                     self.bump();
                     word.push_expandable(c);
@@ -694,15 +713,18 @@ impl Lexer {
     fn lex_double_quoted(&mut self, word: &mut WordBuilder) -> Result<(), ParseError> {
         word.open_quoted_expandable();
         loop {
+            if self.opens_substitution() {
+                return Err(ParseError::UnsupportedSubstitution);
+            }
             match self.bump() {
                 None => return Err(ParseError::UnterminatedQuote),
                 Some('"') => return Ok(()),
                 Some('\\') => match self.bump() {
                     None => return Err(ParseError::DanglingEscape),
-                    // Inside double quotes only these three escapes are
-                    // active; the escaped character is literal, so an escaped
-                    // `$` cannot trigger expansion.
-                    Some(escaped @ ('"' | '\\' | '$')) => word.push_literal(escaped),
+                    // Inside double quotes only these escapes are active; the
+                    // escaped character is literal, so an escaped `$` cannot
+                    // trigger expansion.
+                    Some(escaped @ ('"' | '\\' | '$' | '`')) => word.push_literal(escaped),
                     Some(other) => {
                         word.push_literal('\\');
                         word.push_literal(other);
@@ -717,6 +739,22 @@ impl Lexer {
 /// Whether `c` opens an extended pattern group when a `(` follows it.
 pub(crate) fn is_pattern_group_op(c: char) -> bool {
     matches!(c, '?' | '*' | '+' | '@' | '!')
+}
+
+/// A here-document body read under an unquoted delimiter, as POSIX reads it:
+/// double-quoted text in which only `\$`, `` \` `` and `\\` escape, and a
+/// quote is an ordinary character.
+pub(crate) fn here_doc_word(body: &str) -> Word {
+    let mut word = WordBuilder::new();
+    word.open_quoted_expandable();
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        match chars.next_if(|next| c == '\\' && matches!(next, '$' | '`' | '\\')) {
+            Some(escaped) => word.push_literal(escaped),
+            None => word.push_quoted_expandable(c),
+        }
+    }
+    word.finish()
 }
 
 /// Whether `word` holds an extended pattern group as written: an unquoted
@@ -1045,12 +1083,15 @@ mod tests {
                 Segment::Expandable("|c)".to_string()),
             ])]
         );
-        // Escaped, the operator opens nothing: its `(` is plain word text.
+        // Escaped, the operator opens nothing, so its `(` is the operator
+        // bash refuses there; escaped too, the whole is text.
+        assert_eq!(tokenize(r"\@(x)"), Err(ParseError::UnexpectedToken));
         assert_eq!(
-            tokenize(r"\@(x)").unwrap(),
+            tokenize(r"\@\(x\)").unwrap(),
             vec![Token::Word(vec![
-                Segment::Literal("@".to_string()),
-                Segment::Expandable("(x)".to_string()),
+                Segment::Literal("@(".to_string()),
+                Segment::Expandable("x".to_string()),
+                Segment::Literal(")".to_string()),
             ])]
         );
         assert_eq!(
@@ -1069,7 +1110,8 @@ mod tests {
         assert!(has_pattern_group(&word("*.@(a|b)")));
         assert!(has_pattern_group(&word("!(x)")));
         assert!(!has_pattern_group(&word("'@(a|b)'")));
-        assert!(!has_pattern_group(&word("a(b)")));
+        assert!(!has_pattern_group(&word(r#""@(a|b)""#)));
+        assert!(!has_pattern_group(&word(r"@\(b\)")));
         assert!(!has_pattern_group(&word("*.txt")));
     }
 
@@ -1218,5 +1260,84 @@ mod tests {
     #[test]
     fn dangling_escape_is_rejected() {
         assert_eq!(tokenize(r"oops\"), Err(ParseError::DanglingEscape));
+    }
+
+    /// An unquoted parenthesis inside a word is an operator bash refuses
+    /// there; quoted or escaped it is text.
+    #[test]
+    fn an_unquoted_parenthesis_inside_a_word_is_refused() {
+        for line in [
+            "echo a(b)",
+            "echo a)b",
+            "echo \\$(x)",
+            "cat <<\\@(x)",
+            "f()",
+        ] {
+            assert_eq!(tokenize(line), Err(ParseError::UnexpectedToken), "{line}");
+        }
+        assert_eq!(
+            tokenize(r#"echo "a(b)" a\(b"#).unwrap()[1..],
+            [
+                Token::Word(vec![Segment::QuotedExpandable("a(b)".to_string())]),
+                Token::Word(vec![
+                    Segment::Expandable("a".to_string()),
+                    Segment::Literal("(".to_string()),
+                    Segment::Expandable("b".to_string()),
+                ]),
+            ]
+        );
+    }
+
+    /// Command substitution and arithmetic expansion are refused wherever
+    /// they would run, never read as text; escaped they are text.
+    #[test]
+    fn a_substitution_is_refused_wherever_it_would_run() {
+        for line in [
+            "echo $(x)",
+            "echo `x`",
+            "echo $((1+2))",
+            r#"echo "a$(x)""#,
+            r#"echo "`x`""#,
+            "echo @($(x)|b)",
+        ] {
+            assert_eq!(
+                tokenize(line),
+                Err(ParseError::UnsupportedSubstitution),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            tokenize(r#""\$(x)" "a\`b""#).unwrap(),
+            [
+                Token::Word(vec![
+                    Segment::QuotedExpandable(String::new()),
+                    Segment::Literal("$".to_string()),
+                    Segment::QuotedExpandable("(x)".to_string()),
+                ]),
+                Token::Word(vec![
+                    Segment::QuotedExpandable("a".to_string()),
+                    Segment::Literal("`".to_string()),
+                    Segment::QuotedExpandable("b".to_string()),
+                ]),
+            ]
+        );
+    }
+
+    /// A here-document body under an unquoted delimiter escapes only `$`,
+    /// `` ` `` and `\\`, and its quotes are ordinary characters.
+    #[test]
+    fn a_here_document_body_escapes_as_double_quotes_do() {
+        assert_eq!(
+            super::here_doc_word("\\$X $X \\\\ \\` \\x \"q\" 's'\n"),
+            [
+                Segment::QuotedExpandable(String::new()),
+                Segment::Literal("$".to_string()),
+                Segment::QuotedExpandable("X $X ".to_string()),
+                Segment::Literal("\\".to_string()),
+                Segment::QuotedExpandable(" ".to_string()),
+                Segment::Literal("`".to_string()),
+                Segment::QuotedExpandable(" \\x \"q\" 's'\n".to_string()),
+            ]
+        );
     }
 }

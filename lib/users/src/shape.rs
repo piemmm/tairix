@@ -32,14 +32,19 @@ pub trait ShapeTree {
     /// The volume's refusal.
     fn child(&mut self, dir: NodeId, name: &str) -> Result<Option<(NodeId, bool)>, DriverError>;
 
-    /// Create the directory `name` in `dir`.
+    /// Create the directory `name` in `dir`, born with `security`.
     ///
     /// # Errors
     ///
     /// The volume's refusal.
-    fn create_dir(&mut self, dir: NodeId, name: &str) -> Result<NodeId, DriverError>;
+    fn create_dir(
+        &mut self,
+        dir: NodeId,
+        name: &str,
+        security: NodeSecurity,
+    ) -> Result<NodeId, DriverError>;
 
-    /// Replace `node`'s security record.
+    /// Replace the security record of `node`, which was already there.
     ///
     /// # Errors
     ///
@@ -62,8 +67,13 @@ where
         }
     }
 
-    fn create_dir(&mut self, dir: NodeId, name: &str) -> Result<NodeId, DriverError> {
-        self.create(dir, name.as_bytes(), NodeKind::Directory)
+    fn create_dir(
+        &mut self,
+        dir: NodeId,
+        name: &str,
+        security: NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
+        self.create(dir, name.as_bytes(), NodeKind::Directory, &security)
     }
 
     fn stamp(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
@@ -71,8 +81,9 @@ where
     }
 }
 
-/// The directory `name` in `dir`, created with `security` when absent, or
-/// `None` when something other than a directory holds the name.
+/// The directory `name` in `dir`, created with `security` when absent and
+/// kept as it is when there, or `None` when something other than a directory
+/// holds the name.
 pub(crate) fn ensure_dir<T>(
     tree: &mut T,
     dir: NodeId,
@@ -85,11 +96,36 @@ where
     match tree.child(dir, name)? {
         Some((node, true)) => Ok(Some(node)),
         Some((_, false)) => Ok(None),
-        None => {
-            let node = tree.create_dir(dir, name)?;
+        None => tree.create_dir(dir, name, security).map(Some),
+    }
+}
+
+/// The directory `name` in `dir` holding `security`: created with it when
+/// absent, and re-stamped rather than trusted when there, since its record is
+/// the OS's and not whoever made it.
+///
+/// # Errors
+///
+/// [`ShapeError::Occupied`] when something other than a directory holds the
+/// name, and [`ShapeError::Driver`] for a refusal by the volume.
+pub(crate) fn claim_dir<T>(
+    tree: &mut T,
+    dir: NodeId,
+    name: &str,
+    security: NodeSecurity,
+) -> Result<NodeId, ShapeError>
+where
+    T: ShapeTree + ?Sized,
+{
+    match tree.child(dir, name)? {
+        Some((node, true)) => {
             tree.stamp(node, security)?;
-            Ok(Some(node))
+            Ok(node)
         }
+        Some((_, false)) => Err(ShapeError::Occupied),
+        None => tree
+            .create_dir(dir, name, security)
+            .map_err(ShapeError::Driver),
     }
 }
 

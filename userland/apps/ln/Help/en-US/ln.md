@@ -30,13 +30,19 @@ authority over what it names — every later use is authorised component
 by component under your own identity.
 
 A link name that is already taken is refused unless `-f` or `-i` says
-to replace it, and replacing it **removes** that name first, so nothing
-travels through a link that was already there to whatever it points at.
-A directory is never replaced.
+to replace it. The new link then takes the name's place in one step,
+and only once it exists, so a link that cannot be made — a missing
+target, say — leaves the name as it was, and nothing travels through a
+link already there to whatever it points at. A directory is never
+replaced. A link that would take the place of the very file it names is
+refused as the same file: a file forced onto its own name, or a
+symbolic link whose target, read from the link's own directory, is the
+file it would replace. GNU reads that target from the working directory
+instead, and after an `-i` consent replaces a file with a link to
+itself.
 
-The first failure stops the run before any later target; links already
-made stay made. `--` ends option parsing: every later argument is an
-operand.
+A link that cannot be made is reported and the next is still made.
+`--` ends option parsing: every later argument is an operand.
 
 `-r` stores a symbolic link's target relative to the link's own
 directory. Both halves are canonicalised by the filesystem first, so
@@ -58,14 +64,15 @@ because a hard link stores no target to make relative.
   following no final symbolic link. The default.
 - `-d, -F, --directory` — accept a directory operand. The link is
   still refused: no user may give a directory a second name.
-- `-f, --force` — remove an existing link name, then create the link.
-- `-i, --interactive` — ask before removing an existing link name;
-  only a reply beginning `y`/`Y` consents. The later of `-f` and `-i`
-  wins.
+- `-f, --force` — replace an existing link name with the new link.
+- `-i, --interactive` — ask before replacing an existing link name;
+  only a reply beginning `y`/`Y` consents, and a declined question
+  skips that link and fails the run. The later of `-f` and `-i` wins.
 - `-n, --no-dereference` — treat a destination that is a symbolic
   link to a directory as the plain name it also is, rather than a
   directory to create links in.
-- `-v, --verbose` — report each link made as `'link' -> 'target'`.
+- `-v, --verbose` — report each link made as `'link' -> 'target'` for
+  a symbolic link and `'link' => 'target'` for a hard link.
 - `-t dir, --target-directory=dir` — create every link in `dir`,
   which must already be a directory. The value follows attached
   (`-tdir`, `--target-directory=dir`) or as the next argument.
@@ -89,10 +96,10 @@ because a hard link stores no target to make relative.
 
 ## EXIT STATUS
 
-- `0` — every link was created (or the short help was written); a
-  declined `-i` question is not a failure.
-- `1` — anything else, with the reason printed on standard error. A
-  command line that was not understood exits `1` too.
+- `0` — every link was created (or the short help was written).
+- `1` — anything else, a declined `-i` question included, with any
+  reason printed on standard error. A command line that was not
+  understood exits `1` too.
 
 ## ENVIRONMENT
 

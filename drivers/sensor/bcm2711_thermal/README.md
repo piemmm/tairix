@@ -7,8 +7,8 @@ Raspberry Pi 4's SoC temperature. Stability tier: `experimental`.
 
 - `brcm,bcm2711-thermal`: the sensor inside the AVS monitor
   (`brcm,bcm2711-avs-monitor`). The node has no window of its own; the
-  aarch64 port grants it the monitor's, and the monitor's node then holds
-  none.
+  aarch64 port grants the monitor's window to the one sensor node directly
+  inside it, and that monitor's node then holds none.
 
 It binds only through the discovery match (`BIND_KEYS`).
 
@@ -44,4 +44,4 @@ window. QEMU does not model the BCM2711.
 
 ## References
 
-- The Linux `bcm2711_thermal` driver, for the status register's layout.
+- OpenBSD `sys/dev/fdt/bcm2711_tmon.c` (ISC), for the status register's layout.

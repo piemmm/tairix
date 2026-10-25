@@ -99,7 +99,7 @@ The mount table has one concept where there are two.
   volume placed by a second mechanism.
 
 The mount table holds both (`kernel/core/src/fs/mount.rs`): `Attachment`s,
-and `MountPoint`s as the projections. The driver registry beside it
+and `Projection`s as the projections. The driver registry beside it
 (`LateFilesystem`) keeps each attached volume's source, type, identity and
 availability. `MOUNT_LIST` reports each online attachment once, its
 accounting read once, at the view path showing its root; `VIEW_LIST` reports
@@ -218,6 +218,10 @@ Binding rules, all fail-closed:
   `ROOT_VIEW`: a policy naming a top-level view entry outside those three is
   refused, so §16.1's "exactly three" is enforced structurally rather than by
   convention.
+- Every projection sits directly beneath the floor of another the policy
+  makes, as the kernel's mount table requires of every projection, and none
+  beneath the catalog, which shows only the runtime volumes attached directly
+  beneath it. A document breaking this is refused whole, never half-applied.
 - The document carries the machine ID (`/System/Security/MachineId`); a policy
   signed for another machine is refused. Rollback to an older *validly signed*
   policy for the same machine is defeated by measurement where a TPM exists,
@@ -234,7 +238,7 @@ the whole point.
 ### NS-1 — Split attachment from projection
 
 - `kernel/core/src/fs/mount.rs`: `MountTable` holds `Attachment`s (driver,
-  medium, attach flags) and `MountPoint` projections (path, attachment,
+  medium, attach flags) and `Projection`s (path, attachment,
   `backing_subtree`, flags, permission template). Longest-prefix resolution
   walks projections; capacity, health and medium come from the attachment.
   Detaching a volume withdraws every projection of it; the root projection's
@@ -277,7 +281,8 @@ the whole point.
   off the read-only `/System` volume". The set stays closed.
 - Signature verification through `lib/crypto` against the installation key.
 - `lib/sysconfig` gains the `attach.*` / `project.*` schema and its
-  fail-closed validation (§5).
+  fail-closed validation (§5), the placement rule among it, so a policy the
+  mount table would refuse part-way is refused before anything is attached.
 - `tools/mkimage` writes and signs the policy at image build; the installer
   writes and signs it at install (§11). `AGENTS.md` §16.2's `Policy/`
   description is updated in this stage, when the file starts existing.

@@ -62,8 +62,8 @@ so a multi-interface device lists once.
 
 - `0` — the listing (or the short help) was written.
 - `1` — the hardware-tree query was refused or failed, or the output
-  could not be written.
-- `2` — the command line was not understood.
+  could not be written. A command line that was not understood exits `1`
+  too.
 
 ## ENVIRONMENT
 

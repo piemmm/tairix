@@ -1,5 +1,5 @@
 //! `plans/PI.md` RV-P3 QEMU integration test: boot the riscv64 (QEMU
-//! `virt` / SiFive) `tairix-kernel` pipeline, spawn PID 1 (`init`) into
+//! `virt`) `tairix-kernel` pipeline, spawn PID 1 (`init`) into
 //! U-mode, and report success to QEMU once `init` traps back with an
 //! audited syscall.
 //!

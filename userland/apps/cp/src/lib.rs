@@ -35,50 +35,50 @@
 //!
 //! # What this crate is
 //!
-//! A **copy engine**, not a data source. For one parsed [`Command`] it asks
-//! the injected filesystem seam for the kind of each operand, streams regular
-//! files from source to destination, and walks each directory it must
-//! reproduce. The operations that touch the outside world are the injected
-//! seams:
+//! A **copy engine**, not a data source. For one parsed [`Command`] it looks
+//! at each operand, streams regular files from source to destination, and
+//! walks each directory it must reproduce through the shared tree seam —
+//! every entry reached by name from a source directory held open and copied
+//! by name into a destination directory the copy made or opened, a directory
+//! it made filled before it is given its mode. The operations that touch the
+//! outside world are the injected seams:
 //!
-//! * [`FileSystem`] — probe a path (under either follow posture), read a
-//!   file's bytes and a directory's entries, create directories, files and
-//!   bytes, make a symbolic link or a second name, and remove a destination
-//!   for `-f`.
+//! * [`FileSystem`] — the shared seam's [`Roots`] (operands opened from the
+//!   working directory, and the directories and files held from them), and
+//!   what `cp` needs beyond it: an operand read or written through its final
+//!   link, a resolved spelling, and a link put in a name's place in one step.
+//! * [`Prompt`] — the `-i` question.
 //! * [`Output`] — write the usage banner to the terminal.
 //!
-//! The binary that ships as `cp` wires the real syscall-backed filesystem and
-//! console output; tests wire in-memory fixtures. This is the seam discipline
-//! of the other userland crates (`init`'s `Spawner`/`Reaper`, `login`'s
-//! `Prompt`, `sysinfo`'s `Transport`, `cat`'s `FileSource`, `ls`'s `Listing`,
-//! `rm`'s `Removal`), and it keeps every parsing, recursion, and force
-//! decision testable without a kernel.
+//! The binary that ships as `cp` wires the running system's seams; tests wire
+//! the shared in-memory tree, so every parsing, recursion, mode and force
+//! decision is testable without a kernel.
 //!
 //! # Fail closed
 //!
-//! An unknown option, a missing operand, or more than one source aimed at a
-//! non-directory destination is a [`CpError::Usage`] that copies nothing; a
+//! An option `getopt` refuses ([`CpError::Option`]), and a missing operand
+//! or more than one source under `-T` ([`CpError::Usage`]), copy nothing; a
 //! directory source named without `-r` is a [`CpError::IsDirectory`]; a
 //! directory source whose destination already exists as a non-directory is a
-//! [`CpError::NotADirectory`]; a path that cannot be inspected is
+//! [`CpError::Overwrite`]; a path that cannot be inspected is
 //! [`CpError::Stat`], one that cannot be read [`CpError::Read`], a destination
 //! that cannot be made [`CpError::Create`] and a failed write
-//! [`CpError::Write`], each naming the path and the kernel's reason. The first
-//! failure stops the run before any later operand, and there is no panic.
+//! [`CpError::Write`], each naming the path and the kernel's reason. Each is
+//! reported and the rest are still copied, the rest of its directory too, and
+//! the run exits 1. There is no panic.
 //!
 //! # Module map
 //!
 //! * [`error`] — [`CpError`], the outcomes of [`run`].
 //! * [`command`] — the [`Command`] shape and its [`parse`]r.
-//! * [`io`] — the [`FileSystem`] and [`Output`] seams and the
-//!   [`Entry`]/[`EntryKind`] data they carry.
+//! * [`io`] — the [`FileSystem`], [`Prompt`] and [`Output`] seams and the
+//!   [`Probe`] a look at a node carries.
 //! * [`client`] — the [`run`] entry point and the recursive copy engine.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependency is the
-//! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate. No `unsafe`, and no
+//! `no_std` (with `alloc`); it depends only on `lib/*` crates, so this
+//! userland tool never links a kernel or driver crate. No `unsafe`, and no
 //! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
@@ -95,7 +95,4 @@ pub mod io;
 pub use client::{run, Seams, USAGE};
 pub use command::{parse, Clobber, Command, Contents, Dereference, Options, TargetMode};
 pub use error::CpError;
-pub use io::{
-    Ancestry, AttributeStore, Entry, EntryKind, FileSystem, Follow, Output, PathFiles, Probe,
-    Prompt,
-};
+pub use io::{Dir, FileSystem, FinalLink, Kind, Node, Output, Probe, Prompt, Roots};

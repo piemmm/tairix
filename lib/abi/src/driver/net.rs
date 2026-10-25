@@ -148,8 +148,8 @@ pub enum McastFilter {
 /// Largest group-address set the stack asks a driver to admit.
 ///
 /// A fixed validation bound on the control message, not a capacity: it sits
-/// above every device table in the tree (the largest is the GENET's 17
-/// slots), so the *device's* slot count is what actually binds and the wire
+/// above every device table in the tree (the largest has 17 slots), so the
+/// *device's* slot count is what actually binds and the wire
 /// never silently truncates a set that would have fitted the hardware.
 pub const MAX_MCAST_GROUPS: usize = 32;
 

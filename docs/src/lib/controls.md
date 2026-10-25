@@ -76,7 +76,9 @@ while the pointer is still down and `SliderAction::Settled` when the drag ends
 (a key step, being one whole interaction, settles at once). Durable work — a
 setting written, a document published, another process told — belongs on the
 settle alone. Acting on every value change means acting once per pointer-motion
-sample, which is how a slider ends up wired to a disk write.
+sample, which is how a slider ends up wired to a disk write. An owner holding
+back what would rebuild a slider asks `Slider::is_dragging`, which holds from
+the press that takes the knob to the release or cancel that settles it.
 
 A progress trace reads each state as itself. A known amount fills from the
 track's start and eases to each new value; a busy trace sweeps a comet across

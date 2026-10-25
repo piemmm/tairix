@@ -1,6 +1,5 @@
 //! A pixel valve: the timing generator between an HVS output and the encoder
-//! it feeds, programmed as Linux's `vc4_crtc_config_pv` does for the
-//! BCM2711's HDMI-feeding valves.
+//! it feeds, as the BCM2711's HDMI-feeding valves are set up.
 
 use tairix_abi::driver::display::{Scan, Timing};
 use tairix_abi::driver::mmio::RegisterBlock;
@@ -49,9 +48,8 @@ const PIXELS_PER_CLOCK: u16 = 2;
 /// stop, in microseconds.
 const STOP_BUDGET_US: u64 = 1_000;
 
-/// How long a stopped valve's last pixels take to leave the FIFO between it
-/// and the encoder; any sooner and one sticks, shifting every later line by
-/// a pixel. Linux's `vc4_crtc_disable` waits the same.
+/// How long a stopped valve's last pixels are given to leave the FIFO between
+/// it and the encoder before the valve is reset.
 const DRAIN_US: u32 = 20_000;
 
 /// A valve behind its window.
@@ -192,7 +190,7 @@ fn pair(high: u32, low: u32) -> Result<u32, DriverError> {
 }
 
 /// The lines of one field: the frame's for a progressive timing, half its
-/// edges' for an interlaced one, as DRM halves an interlaced mode's.
+/// edges' for an interlaced one, whose fields carry half the frame's lines.
 struct Field {
     active: u32,
     front: u32,

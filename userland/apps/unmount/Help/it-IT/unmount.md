@@ -17,12 +17,17 @@ informazioni di sistema.
 
 Un volume il cui dispositivo è stato rimosso con scritture non ancora
 confermate resta visibile come `unavailable-dirty` (o
-`unavailable-lost`), e un `unmount` semplice rifiuta: i dati
-trattenuti sono conservati per un reinserimento verificato. `--force`
-è l'uscita deliberata — i dati trattenuti vengono scartati, il volume
-viene rimosso e la perdita è registrata nel registro di controllo. Su
-un volume sano `--force` svuota e scollega comunque in modo pulito;
-nulla viene scartato quando una conferma pulita è possibile.
+`unavailable-lost`) nell'elenco dei montaggi, e un `unmount` semplice
+rifiuta: i dati trattenuti sono conservati per un reinserimento
+verificato. Anche un volume su cui restano file aperti, o che un
+programma ha come directory di lavoro, rifiuta un `unmount` semplice.
+`--force` è l'uscita deliberata — i file ancora aperti sul volume
+vengono tagliati fuori, un programma che vi lavora resta in una
+directory che non esiste più, i dati trattenuti vengono scartati, il
+volume viene rimosso e ciò a cui si è rinunciato è registrato nel
+registro di controllo. Su un volume sano `--force` svuota e scollega
+comunque in modo pulito; nulla viene scartato quando una conferma pulita
+è possibile.
 
 Lo scollegamento richiede l'autorità di montaggio (`CAP_FS_MOUNT`);
 il kernel la verifica e registra ogni decisione. I volumi di avvio
@@ -31,9 +36,10 @@ scollegabili.
 
 ## OPTIONS
 
-- `-f, --force` — smontaggio forzato: rimuovere il volume anche
-  quando i suoi dati non possono essere confermati, scartando i dati
-  trattenuti.
+- `-f, --force` — smontaggio forzato: rimuovere il volume anche mentre
+  vi sono file aperti, un programma vi lavora o i suoi dati non ancora
+  confermati non possono esserlo, tagliando fuori i file aperti e
+  scartando i dati trattenuti.
 - `-?, --help` — mostrare la guida breve di questo comando.
 
 ## EXAMPLES
@@ -50,8 +56,8 @@ scollegabili.
 - `0` — il volume è stato scollegato (o la guida breve è stata
   scritta).
 - `1` — il volume non è stato trovato, non è scollegabile o il kernel
-  ha rifiutato lo scollegamento.
-- `2` — la riga di comando non è stata compresa.
+  ha rifiutato lo scollegamento. Anche una riga di comando non
+  compresa termina con `1`.
 
 ## ENVIRONMENT
 

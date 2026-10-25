@@ -22,7 +22,7 @@ use tairix_abi::Errno;
 use tairix_fontface::{AxisSetting, Face};
 use tairix_log::DiscardSink;
 use tairix_reclaim::{PressureBand, ReportedPressure};
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 
 use crate::discovery::discover;
 use crate::discovery::fixtures::{MemoryFamily, MemoryStore, TalliedStore, Tally};

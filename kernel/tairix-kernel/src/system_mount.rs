@@ -1,5 +1,4 @@
-//! Boot-time install of the userland `fs_*` filesystem mount table
-//! (`PREREQUISITES.md` P-A).
+//! Boot-time install of the userland `fs_*` filesystem mount table.
 //!
 //! The `fs_*` syscalls route through a single
 //! [`MountedFilesystemService`] the dispatch hook holds from boot (installed
@@ -48,7 +47,7 @@
 //! # Why the driver type is erased
 //!
 //! The bootstrap-floor disk type `B` (virtio-blk on the QEMU `virt` / x86_64
-//! root, EMMC2 on the Raspberry Pi 4) is dynamic in one binary, so the
+//! root, an SD host on aarch64 metal) is dynamic in one binary, so the
 //! concrete `ARXFS<PartitionBlock<BorrowedBlockWindow<'static, B>>>` differs
 //! per board. The boot-time [`LateFilesystem`] / [`MountedFilesystemService`]
 //! statics must be a *single* concrete type, so the mounted driver is erased
@@ -76,8 +75,8 @@ use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::{
-    Attachment, CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
-    VolumeForest,
+    Attachment, CachedFs, DriverLock, LateFilesystem, MountedFilesystemService, Path, Vfs,
+    VfsError, VolumeForest,
 };
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -186,8 +185,7 @@ const SYSTEM_MOUNT_HANDLE: u64 = 0x5959_5359; // "YYSY"
 ///
 /// All of these are the *one* root volume (the persistent writable
 /// partition), so they share a single handle — one driver, one per-mount
-/// [`SleepLock`](tairix_kernel_core) serialising every operation on the
-/// volume. The driver is registered by [`register_writable_state`] after the
+/// [`DriverLock`] serialising every operation on the volume. The driver is registered by [`register_writable_state`] after the
 /// root is mounted; until then `/` and its writable subtrees
 /// resolve to no driver and every write/read fails closed (`NotImplemented`),
 /// never a silent fallback to the read-only `/System`. Crate-visible so the
@@ -445,21 +443,17 @@ pub fn install_system_mount<B: Block + 'static>(
         audit,
         watches,
     );
-    if LATE_FILESYSTEM
-        .register(
-            system_handle,
-            driver,
-            "ARXFSSystem",
-            "arxfs",
-            volume_uuid,
-            watch,
-        )
-        .is_err()
-    {
-        // Registered once per boot; a refusal is a logic error. The
-        // returned lock is not needed here: nothing else in the kernel
-        // writes the read-only `/System` volume.
-        unavailable(audit, "already_installed");
+    // The returned lock is not needed here: nothing else in the kernel
+    // writes the read-only `/System` volume.
+    if let Err(refused) = LATE_FILESYSTEM.register(
+        system_handle,
+        driver,
+        "ARXFSSystem",
+        "arxfs",
+        volume_uuid,
+        watch,
+    ) {
+        unavailable(audit, registration_refused(refused));
         return None;
     }
     // Attach the boot disk's fold, so the three per-volume queries report
@@ -524,7 +518,7 @@ pub fn register_writable_state(
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
     watches: Option<&'static WatchRegistry>,
-) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
+) -> Option<Arc<DriverLock<Box<dyn KernelFs>>>> {
     let Ok(handle) = DriverHandle::from_raw(ROOT_VOLUME_HANDLE) else {
         unavailable(audit, "writable_handle_invalid");
         return None;
@@ -537,12 +531,14 @@ pub fn register_writable_state(
         audit,
         watches,
     );
-    let Ok(shared) =
-        LATE_FILESYSTEM.register(handle, driver, "ARXFSRoot", "arxfs", volume_uuid, watch)
-    else {
-        unavailable(audit, "writable_already_installed");
-        return None;
-    };
+    let shared =
+        match LATE_FILESYSTEM.register(handle, driver, "ARXFSRoot", "arxfs", volume_uuid, watch) {
+            Ok(shared) => shared,
+            Err(refused) => {
+                unavailable(audit, registration_refused(refused));
+                return None;
+            }
+        };
     // The same disk the `/System` volume is on, so the same fold: service is
     // a property of the device, and both boot-floor volumes read one set of
     // counters rather than a divergent copy each. Cannot miss: the handle was
@@ -569,6 +565,15 @@ pub fn register_writable_state(
 /// proceeds. Also resolves the application-store readiness latch
 /// *unavailable*, so a `spawn` parked on a pending store wakes and fails
 /// closed rather than waiting forever.
+/// The cause a boot-floor volume's refused registration is recorded with:
+/// each is registered once per boot, so one already there is a logic error.
+fn registration_refused(refused: tairix_kernel_core::fs::RegisterError) -> &'static str {
+    match refused {
+        tairix_kernel_core::fs::RegisterError::AlreadyRegistered => "already_installed",
+        tairix_kernel_core::fs::RegisterError::OutOfMemory => "out_of_memory",
+    }
+}
+
 fn unavailable(audit: &dyn Sink, cause: &'static str) {
     crate::app_store::APP_STORE.note_unavailable();
     log(

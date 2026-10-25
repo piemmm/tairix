@@ -46,8 +46,8 @@ opérande est un nom.
 ## EXIT STATUS
 
 - `0` — les résultats (ou l'aide courte) ont été écrits.
-- `1` — la sortie n'a pas pu être délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — la sortie n'a pas pu être délivrée. Une ligne de commande non
+  comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

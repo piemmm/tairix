@@ -29,10 +29,13 @@ ceiling. `-d` is exactly that pair, as in the GNU tool, spelled as the pair
 so the two halves cannot drift.
 
 Because a link or a second name is *created*, and a create never replaces a
-name, an occupied destination must be removed first — `-f` does that, and
-without it the kernel's `AlreadyExists` reaches the caller rather than a
-silent overwrite. (The byte copy needs no removal: its own create
-truncates.)
+name, an occupied destination needs `-f`, which puts the link in the name's
+place in one step (`tairix_rt::replace_with_link`: made under a staging name,
+then renamed over it), so a link that cannot be made leaves the name; without
+`-f` the kernel's `AlreadyExists` reaches the caller rather than a silent
+overwrite. (The byte copy needs neither: its own create truncates.) A second
+name the destination already is counts as made, and a symbolic link put on
+the node it would name is the same file, as GNU 9.4 judges each.
 
 `-a`/`--archive` and the `--preserve` set other than `--preserve=links` are
 **refused**, not narrowed: `-a` is `-dR --preserve=all`, and
@@ -42,11 +45,25 @@ can set, so honouring it would report a preservation that did not happen.
 for `-r` and `readlink` for `-f`: refused for a stated reason, never
 stubbed.
 
+## Modes
+
+A new file is born with its source's permission bits, the set-ID and
+sticky bits dropped, less the umask, as GNU's `cp` makes one, so a private
+file's copy is never more readable than the file; a destination that
+already exists keeps its own mode. A new directory is made with its
+source's permission and sticky bits and its owner's read, write and search,
+opened to its owner outright when the umask withheld any, filled through its
+descriptor, and then given — through that descriptor — its source's
+permission and sticky bits less the umask, GNU's result, so a `0500` source
+copies to `0500` and a umask of `0277` still fills it. `--no-preserve=mode`
+makes each new node in the default mode (`tairix_abi::fs::FS_NEW_FILE_MODE`,
+`FS_NEW_DIR_MODE`) less the umask instead.
+
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
-depends only on the audited `tairix-abi` crate and the shared `lib/help`
-engine (plus `tairix-rt` for the freestanding `Run` binary), so it never
-links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
+links only `lib/*` crates — the copy itself is the shared engine
+(`tairix-fscopy`) — plus `tairix-rt` for the freestanding `Run` binary, so it
+never links a kernel or driver crate (`AGENTS.md` §17.4). The package is both
 the copy library and the `cp` command app's `Run` binary
 (`src/run.rs`), registered as the self-contained store bundle
 `/System/Commands/cp.app` with its thirteen-locale `Help/` tree (plans/APPS.md
@@ -65,6 +82,7 @@ cp [-dfilnPrRsvT] [-t dir] [--] source... dest
   -s, --symbolic-link        a symbolic link naming the source
   -P, --no-dereference       reproduce a link source as a link
   --preserve=links           keep two sources' shared node shared
+  --no-preserve=mode         make each new file in the default mode
   -d                         -P and --preserve=links together
   -v, --verbose              report each copy ('src' -> 'dst')
   -t dir, --target-directory=dir
@@ -74,58 +92,63 @@ cp [-dfilnPrRsvT] [-t dir] [--] source... dest
 ```
 
 At least one source and a destination are required. Short options may be
-combined (e.g. `-rf`). `--` ends option parsing: every later argument is
-a path. With more than one source the destination must be a directory.
+combined (e.g. `-rf`), and a long option shortened to any unambiguous
+prefix (`--rec`). `--` ends option parsing: every later argument is a
+path. With more than one source the destination must be a directory.
 
 ## A copy machine, not a data source
 
-`run` asks the injected filesystem seam what each source is, streams a
-regular file's bytes from source to destination, and walks each directory
-`-r` must reproduce. The operations that reach the outside world are
-injected seams, mirroring the other userland crates (`init`'s
-`Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s `Transport`, `cat`'s
-`FileSource`, `ls`'s `Listing`, `rm`'s `Removal`):
+`run` looks at each source, streams a regular file's bytes from source to
+destination, and walks each directory `-r` must reproduce through the
+shared tree seam (`tairix_fscopy::tree`). The operations that reach the
+outside world are injected seams:
 
-- `FileSystem` — learn a path's kind, read a file's bytes and a
-  directory's entries, and create directories, files, and bytes (plus
-  remove a destination file for `-f`).
+- `FileSystem` — the shared seam's `Roots` (operands opened from the
+  working directory, and the directories and files held from them), plus
+  an operand read or written through its final link, a resolved spelling,
+  and a link put in a name's place in one step.
 - `Prompt` — ask the `-i` overwrite question, fail-closed on an
   unanswerable prompt (never treated as consent).
 - `Output` — write the usage banner and the `-v` reports (`cp` is otherwise silent on
   success).
 
 On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, recursion, and force decision
-is testable without a kernel.
+are the shared in-memory tree, so every parsing, recursion, mode and force
+decision is testable without a kernel.
 
 ## Streaming and recursion
 
-A regular file is streamed in fixed-size chunks (matching `cat`'s
-granularity), so an arbitrarily large file copies with a bounded buffer.
-A directory is reproduced by creating its destination (or merging into an
-existing one), then copying each entry — files and nested directories
-alike — under the destination. Entries are read into a list before the
-copy descends, so the walk does not depend on directory indices staying
-stable.
+A regular file is streamed in fixed-size chunks, so an arbitrarily large
+file copies with a bounded buffer. A directory is reproduced by making its
+destination (or merging into an existing one), then copying each entry —
+files and nested directories alike — by name from the source directory
+held open into the destination directory held open. Each directory's
+entries are read whole before the copy descends, a directory is entered
+only through `Dir::open_dir`, never through a link, and a link met inside
+the destination tree is never written through.
 
 ## Force
 
 `-f` covers a destination that cannot be created (for example, an
 existing read-only file): the destination is removed and the create is
 retried exactly once. Without `-f`, a create failure surfaces as a
-`CpError::Create` and stops the run.
+`CpError::Create`, reported while the rest are still copied.
 
 ## Fail closed
 
-An unknown option, fewer than two operands, or more than one source aimed
-at a non-directory destination is a `CpError::Usage` that copies nothing.
+An option `getopt` refuses is a `CpError::Option`, and fewer than two
+operands or more than one source under `-T` a `CpError::Usage`; either
+copies nothing and is reported as `cp: reason` and `Try 'cp --help' for
+more information.`, with exit 1.
 A directory source named without `-r` is a `CpError::IsDirectory`; a
 directory source whose destination already exists as a non-directory is a
-`CpError::NotADirectory`. An operand that cannot be inspected surfaces the
+`CpError::Overwrite`. An operand that cannot be inspected surfaces the
 underlying `Errno` as `CpError::Stat`; an unreadable source is
 `CpError::Read`; an uncreatable destination is `CpError::Create`; a failed
-write is `CpError::Write`. The first failure stops the run before any
-later operand, and there is no panic (`AGENTS.md` §2.9).
+write is `CpError::Write`. Each is reported and the rest are still
+copied, the rest of its directory too, and the run exits 1; an unusable
+destination, a refused prompt or a dead terminal ends the run. There is no
+panic.
 
 ## Tests
 

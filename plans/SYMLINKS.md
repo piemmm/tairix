@@ -58,12 +58,20 @@ S4/S6 recorded.
    (`/a/link/../b` with `link -> /elsewhere` must reach `/elsewhere/../b`,
    never `/a/b`) and is forbidden here.
 
-5. **A link cannot resolve outside what its mount projects.** The walk's
-   stack starts at the root the covering mount projects and `..` never pops
-   past index 0 (`/..` is `/`, as POSIX specifies), so an absolute target on
-   a foreign volume resolves against *that mount's* root. A USB stick's link
-   therefore cannot name `/System/Security`. This is deliberately stricter
-   than POSIX, where an absolute target names the global root.
+5. **A link cannot resolve outside the projection that shows it.** Every
+   step a resolution takes is tagged with who supplied it. A caller's `..` at
+   a projection's floor climbs into the projection it is shown in (`/..` is
+   `/`, as POSIX specifies), and a caller's name another projection is shown
+   under goes on at that projection's floor. A link's `..` stops at the floor
+   of the projection showing the link, its absolute target restarts there,
+   and a name it supplies that a projection beneath that floor is shown
+   under is not found: it neither crosses into that projection nor reaches
+   the directory it covers. A caller's name is matched against the
+   projections shown at a floor as the floor's volume matches its own
+   entries, so no other spelling reaches a covered directory either. An absolute target on a foreign volume therefore resolves against
+   *that volume's* projection: a USB stick's link cannot name
+   `/System/Security`. This is deliberately stricter than POSIX, where an
+   absolute target names the global root.
 
    For a **sub-mount** — a subtree of a larger volume bound at a mount point,
    as `/System/Logs` is — the floor is the *subtree's* root and not the
@@ -145,19 +153,18 @@ through; the target grammar's bounds; and that caller paths still refuse
 
 ## Stage S2 — the syscalls reach the VFS — **landed**
 
-Both calls are real end to end: `Vfs::{symlink_via, readlink_via}` (+
-`_secured`), `FilesystemService::{symlink, readlink}` across every
-implementor, the `kernel/core/src/syscalls.rs` handlers with the
-`FsAuditDetail::Symlink` record for the mutating half, and the `lib/rt`
+Both calls are real end to end: `FilesystemService::{symlink, readlink}`,
+resolved by `MountedFilesystemService` through the one descriptor-relative
+walk every operation takes, the `kernel/core/src/syscalls.rs` handlers with
+the `FsAuditDetail::Symlink` record for the mutating half, and the `lib/rt`
 `fs_symlink`/`fs_readlink` wrappers.
 
-**The follow posture is a property of the descriptor, derived once.**
-`FinalLink::for_open` is the single mapping from `OpenFlags::NO_FOLLOW`, and
-every operation served for a descriptor re-derives it from the handle rather
-than taking it as an operand — `fs_stat` (the `lstat` reading) and
-`fs_readdir` (a link is not a directory to a `NO_FOLLOW` handle), plus the
-wait-set's file member, which watches the node its open named. `open` honours
-it too, which is what makes `lstat` reachable at all: a resolve-only
+**The follow posture is a property of the open, applied once.**
+`FinalLink::for_open` is the single mapping from `OpenFlags::NO_FOLLOW`; the
+open pins the node it chose, and every operation through the descriptor acts
+on that node — `fs_stat` (the `lstat` reading of a `NO_FOLLOW` handle),
+`fs_readdir` (a link is not a directory to one), and the wait-set's file
+member. That is what makes `lstat` reachable at all: a resolve-only
 `NO_FOLLOW` handle on a *dangling* link is exactly what `ls -l` needs, and
 following would report it absent. Asking that open for byte access to
 something that really is a link is `LinkLoop`, as `OpenFlags::NO_FOLLOW`'s
@@ -171,11 +178,6 @@ than `MAX_PATH_COMPONENTS` steps, not UTF-8 — is refused rather than stored as
 a link that can only ever fail. Parsing is not resolving: `..` and relative
 spellings stay legal (decision 3), nothing is looked up, and a link may still
 dangle (decision 1).
-
-Note what this does *not* change: a path-recording descriptor re-resolves its
-path, so a rename between open and stat can still name a different node. That
-is a pre-existing property of every path-backed handle, not something links
-introduce, and it is called out here rather than left implied.
 
 Tests: `Keep` stats the link and `Follow` its target (different nodes, not
 just different sizes); a dangling link is statable only under `Keep`; `Keep`
@@ -198,23 +200,21 @@ the whole target out or failing closed.
 
 **The follow posture is a property of each operation, and a walk reports a
 *place*.** `DelegatedFs` resolves to the directory that holds the final name
-*and* that name (`Walk`/`Place`), because the driver mutation surface is keyed
-`(dir, name)` rather than by node. Under `FinalLink::Follow` that place is the
-*target's* place, which is what makes `write`, `truncate`, truncate-on-open,
-and append reach the target as POSIX requires; `unlink`, `rmdir`, `rename`,
-`mkdir`, and `symlink` keep the name as typed. `create` takes the posture
+*and* that name (`Walk`/`Place`), because a driver's name mutations are keyed
+`(dir, name)`. Under `FinalLink::Follow` that place is the *target's* place;
+a byte write — `write`, `truncate`, truncate-on-open, append — is keyed by
+node and goes to the node the walk resolved, so it reaches the target as POSIX
+requires; `unlink`, `rmdir`, `rename`, `mkdir`, and `symlink` keep the name as
+typed. `create` takes the posture
 explicitly, so `open`-with-`O_CREAT` follows (creating through a dangling link
 creates the target) while `mkdir` does not (`AlreadyExists` over a link, live
 or dangling). One walk serves both the read and the write side, so a vacant
 final name is a *place* to the write side and `NotFound` to the read side
 rather than two resolutions.
 
-Two consequences recorded rather than left implied: the write permission this
-VFS asks for on a write's parent — a pre-existing, non-POSIX choice, deliberately
-unchanged — now applies to the parent of the *resolved* node, i.e. the
-directory the bytes really land in; and the parent is authorised **before** the
-occupant is inspected, so a caller who may not write the directory still learns
-nothing about what the name holds.
+A name mutation's parent is authorised **before** the occupant is inspected, so
+a caller who may not write the directory learns nothing about what the name
+holds; a byte write is authorised against the resolved file's own record.
 
 **ARXFS** stores a link as an inode of on-disk kind `3` whose target is its
 **node data**, so it reuses the whole existing pipeline — extents, checksum,
@@ -244,7 +244,7 @@ transaction (and rolled back with it), so a link-free volume stays mountable by
 a link-unaware reader; `check` widens a word that understates the volume.
 
 **ext4** reads both spellings — fast (inline `i_block`) and slow
-(block-backed) — discriminated as Linux's `ext4_inode_is_fast_symlink` does,
+(block-backed) — a fast link owns no data block, at most an attribute block,
 with the cluster size read from the superblock so `bigalloc` is exact rather
 than approximated. It deliberately does **not** author links: `create_link`
 stays `Unsupported`, which the VFS surfaces as `NotSupported`. An inline-data
@@ -298,11 +298,13 @@ own directory needs a canonicalising resolution the ABI does not offer, and a
 decision 4's own trap. (S6 made `-L`/`-P`/`-d`/`-F` real; this stage shipped
 `-s` alone.)
 
-**A replacement removes the name first.** `-f`, and an approved `-i`, unlink
-the existing name *before* creating the link — a create or truncate follows a
-final link, so leaving one in place would act on whatever it pointed at. A
-directory is never replaced. This is the same rule `fstree` and the file
-manager now apply.
+**A replacement takes the name's place in one step.** `-f`, and an approved
+`-i`, make the new link under a staging name beside the old one and rename it
+over the name (`tairix_rt::replace_with_link`): the name is never missing, a
+link that cannot be made leaves it as it was, and nothing travels through a
+link already there, since a rename replaces the entry itself. A directory is
+never replaced, and a link that would take the place of the very file it
+names is refused as the same file.
 
 **`ls`** implements the full GNU four-state dereference posture
 (`Dereference`), because three is not enough to describe the tool: `-l`/`-d`/
@@ -354,10 +356,9 @@ what it would replace (`… exists as a symbolic link`).
 
 **Closed in passing** (`AGENTS.md` §2.18): the graphical file manager's paste
 byte-copied a link — leaving a regular file holding the target's text — and
-followed it to decide directoryness. `CopyWalk` items now carry a `CopyKind`
-(file / directory / link) and yield a `CopyLink` step the app satisfies with
-`readlink` + `symlink`; the paste's source kind comes from a `NO_FOLLOW`
-stat. One directory read serves both walks, each taking the reading it needs.
+followed it to decide directoryness. The paste now carries each item through
+the shared engine (`lib/fscopy::op`), which recreates a link with the target it
+stores and reaches every entry by name through no link.
 
 `lib/path` grew the two spellings this stage needed in more than one place —
 `leaf_name` and `join` — rather than a fifth private `basename` and a twelfth
@@ -447,8 +448,9 @@ opened.
 ## Stage S6 — hard links — **landed**
 
 A second name for one inode: `fs_link` (**115**), `FilesystemWrite::link`
-defaulting to `Unsupported`, the `link_via`/`link_via_secured` VFS pair with
-an audited `FsAuditDetail::Link` handler, and a count carried up from the
+defaulting to `Unsupported`, the service's `link` (`Vfs::link_between`, both
+names kept within one projection under one hold of its driver) with an
+audited `FsAuditDetail::Link` handler, and a count carried up from the
 driver (`NodeInfo::nlink` → `FileStat::nlink` → `ls -l`'s second column)
 rather than invented in the VFS, which could not count names without walking
 every directory on the volume.
@@ -556,11 +558,10 @@ there: the listing driver has already read the child's record, so a walk that
 needs the identity reads it from the one listing instead of re-`stat`ing every
 child.
 
-**One assembly of the identity, resolved once per listing.** The driver's
-`DirEntry` always carried its `NodeId`; `DelegatedFs::list` was dropping it, so
-it now returns a named `DelegatedEntry { node, info, name }` rather than an
-`(info, name)` pair. `MountedFilesystemService` pairs it with the covering
-mount's volume id through the same `node_identity` a `stat` uses — every child
+**One assembly of the identity, resolved once per listing.** A listed child's
+number is its `NodeInfo::ino`, carried in the named `DelegatedEntry { info,
+name }` a listing hands over. `MountedFilesystemService` pairs it with the
+covering mount's volume id through the same `node_identity` a `stat` uses — every child
 of a directory is on the directory's own volume, so `volume_at` resolves the
 mount once for the whole listing rather than per entry. A covered mount point
 merged into its parent's listing reports `FileId::NONE` and
@@ -592,8 +593,8 @@ unidentified node counted with the diagnostic written exactly once.
 `fs_realpath` (**116**) answers the one path that names what a path resolves
 to: every symbolic link followed, every `..` applied to the nodes the walk
 really traversed, and the answer spelled in the caller's own namespace. It is
-`DelegatedFs::canonicalize` over the **same** walk every other operation
-uses, `Vfs::realpath_via{,_secured}`, `FilesystemService::realpath`, and the
+the **same** walk every other operation takes, keeping the view path it
+walked (`Spelling::Exact`), through `FilesystemService::realpath` and the
 `kernel/core` handler, with the `lib/rt` wrapper and the `lib/abi-sys` C stub.
 
 **The mode is one value, not three flags.** `RealpathMode::{Existing, Final,
@@ -669,18 +670,18 @@ over seven canonical pairs, `-r` storing and *reporting* the relative target,
 and the `readlink` parse/print matrix for the three switches.
 
 **The bare-metal half of S7's residual is closed.** The
-`arxfs_virtio_blk_pci_x86_64` tail now continues, over the *same* device open,
-into the secured VFS over the production `CachedFs` — creating and reading
-both link kinds, canonicalising a link and a vacant name, proving two names
-reach one node with the format's count carried up, and confirming a directory
-is refused. So the wrapper chain is exercised in a freestanding build on real
-(emulated) hardware, not only on the host. It stops one layer below
-`MountedFilesystemService`, which the host
+`arxfs_virtio_blk_pci_x86_64` tail continues, over the *same* device open,
+into the production `CachedFs` — creating and reading both link kinds at the
+driver level and resolving each through the kept boot reader
+(`Vfs::read_bounded_via_secured`), and proving two names reach one node with
+the format's count carried up. So the wrapper chain is exercised in a
+freestanding build on real (emulated) hardware, not only on the host.
+Canonicalisation and a directory's refusal of a second name are covered on
+the host through `MountedFilesystemService`, which
 `volume_service_tests::link_round_trip_through_the_real_service_scenario`
-covers: that service's `Send` bound cannot be met by a driver stack holding a
+drives: that service's `Send` bound cannot be met by a driver stack holding a
 borrowed `VirtioHost`, and asserting `Send` for one — or widening a kernel
-trait to host a test — would be the wrong trade. The layer it omits resolves
-the caller's groups and takes the per-mount lock; it holds no link logic.
+trait to host a test — would be the wrong trade.
 
 ---
 

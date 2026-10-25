@@ -431,7 +431,8 @@ recorded in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 - **An attribute CLI.** No command app reads or writes attributes today. The
   graphical callers are `fstree`'s `a` editor and the file manager's Properties
   window (`plans/NEW-FILEMANAGER.md` FM8b), both over the capability-checked
-  syscalls through the shared `lib/rt` drain (`fs_attr_keys`/`fs_attr_value`)
+  syscalls through the shared `lib/rt` drain on a descriptor
+  (`File::attr_keys`/`File::attr_value`)
   and the shared `lib/fsmeta::attr` display and `key = value` grammar. What is
   missing is a `getattr`/`setattr`-shaped pair (or an option surface on an
   existing tool), never a privileged bypass.

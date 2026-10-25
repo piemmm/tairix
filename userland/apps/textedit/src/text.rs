@@ -8,7 +8,7 @@
 
 use core::ops::ControlFlow;
 
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 use tairix_vt::char_width;
 
 use crate::document::{rows_of, Document, LineBounds, MAX_ROW_BYTES};

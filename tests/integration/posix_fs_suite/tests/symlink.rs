@@ -2,338 +2,239 @@
 //! other operation takes around a link (`docs/src/filesystem/overview.md`
 //! §"Which operations follow a final link").
 //!
-//! Driven against a **real** ARXFS volume through the real VFS policy layer,
-//! so the on-disk spelling, the per-component resolution, and the follow
-//! posture of each operation are all the production code paths.
+//! Driven against a **real** ARXFS volume through the real filesystem
+//! service, so the on-disk spelling, the per-component resolution, and the
+//! follow posture of each operation are all the production code paths.
 
 use tairix_test_posix_fs_suite::*;
 
 /// Create the link `link` naming `target` under the volume root, owned by the
 /// volume's owner.
-fn make_link(vfs: &Vfs, fs: &mut LiveFs, link: &str, target: &str) {
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-    vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path(link)), fs, target)
+fn make_link(vol: &Volume, link: &str, target: &str) {
+    vol.symlink(ROOT.caller(), &vol_path(link), target)
         .unwrap_or_else(|e| panic!("create the link {link} -> {target}: {e:?}"));
+}
+
+/// The kind of what `name` reaches, its final link treated as `final_link`.
+fn kind_of(vol: &Volume, name: &str, final_link: FinalLink) -> Result<FileKind, Errno> {
+    vol.stat(ROOT.caller(), &vol_path(name), final_link)
+        .map(|info| info.kind)
 }
 
 #[test]
 fn a_created_link_reads_its_target_back_verbatim() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
+    vol.create(owner, &vol_path("target"), new_file())
         .expect("create the target");
-    make_link(&vfs, &mut fs, "link", "target");
+    make_link(&vol, "link", "target");
 
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs),
+        vol.readlink(owner, &vol_path("link")),
         Ok(String::from("target"))
     );
 }
 
 #[test]
 fn a_relative_target_carrying_dotdot_is_stored_as_typed() {
-    // A target is *data*: the resolver's own grammar accepts `..` and
-    // relative spellings, and nothing normalises them on the way in — the
+    // A target is *data*: nothing normalises it on the way in, so the
     // spelling that comes back is the spelling that went in.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
 
-    make_link(&vfs, &mut fs, "up", "../elsewhere/x");
+    make_link(&vol, "up", "../elsewhere/x");
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("up")), &mut fs),
+        vol.readlink(ROOT.caller(), &vol_path("up")),
         Ok(String::from("../elsewhere/x"))
     );
 }
 
 #[test]
 fn readlink_refuses_anything_that_is_not_a_link() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs)
+    vol.create(owner, &vol_path("plain"), new_file())
         .expect("create");
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dir")), &mut fs)
+    vol.mkdir(owner, &vol_path("dir"), new_dir())
         .expect("mkdir");
 
     // A name that is not a link has no target to read: the same domain
     // refusal for a file and for a directory.
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs),
-        Err(VfsError::InvalidPath)
+        vol.readlink(owner, &vol_path("plain")),
+        Err(Errno::OutOfRange)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("dir")), &mut fs),
-        Err(VfsError::InvalidPath)
+        vol.readlink(owner, &vol_path("dir")),
+        Err(Errno::OutOfRange)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("absent")), &mut fs),
-        Err(VfsError::NotFound)
+        vol.readlink(owner, &vol_path("absent")),
+        Err(Errno::NotFound)
     );
 }
 
 #[test]
 fn lstat_describes_the_link_and_stat_describes_its_target() {
-    // The two readings of one name: `Keep` is POSIX `lstat`, `Follow` is
-    // POSIX `stat`. They must report *different nodes*, not merely different
-    // sizes.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    // `Keep` is POSIX `lstat`, `Follow` is POSIX `stat`. They must report
+    // *different nodes*, not merely different sizes.
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
+    vol.create(owner, &vol_path("target"), new_file())
         .expect("create the target");
-    vfs.write_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("target")),
-        &mut fs,
-        0,
-        b"0123456789",
-    )
-    .expect("write the target");
-    make_link(&vfs, &mut fs, "link", "target");
+    vol.write(owner, &vol_path("target"), 0, b"0123456789")
+        .expect("write the target");
+    make_link(&vol, "link", "target");
 
-    let kept = vfs
-        .stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("link")),
-            &mut fs,
-            FinalLink::Keep,
-        )
+    let kept = vol
+        .stat(owner, &vol_path("link"), FinalLink::Keep)
         .expect("lstat the link");
-    assert_eq!(kept.kind, NodeKind::Symlink);
+    assert_eq!(kept.kind, FileKind::Symlink);
     // A link's own length is the length of the path it stores.
     assert_eq!(kept.size, "target".len() as u64);
 
-    let followed = vfs
-        .stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("link")),
-            &mut fs,
-            FinalLink::Follow,
-        )
+    let followed = vol
+        .stat(owner, &vol_path("link"), FinalLink::Follow)
         .expect("stat the target");
-    assert_eq!(followed.kind, NodeKind::RegularFile);
+    assert_eq!(followed.kind, FileKind::Regular);
     assert_eq!(followed.size, 10);
-    // Two different nodes, not one node described twice.
-    assert_ne!(kept.node, followed.node);
-    let target = vfs
-        .stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("target")),
-            &mut fs,
-            FinalLink::Keep,
-        )
+    assert_ne!(kept.id, followed.id);
+    let target = vol
+        .stat(owner, &vol_path("target"), FinalLink::Keep)
         .expect("lstat the target");
-    assert_eq!(followed.node, target.node);
+    assert_eq!(followed.id, target.id);
 }
 
 #[test]
 fn a_dangling_link_is_describable_only_without_following() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
 
     // Nothing is resolved at creation, so a link may legitimately dangle.
-    make_link(&vfs, &mut fs, "dangling", "nowhere");
+    make_link(&vol, "dangling", "nowhere");
 
-    let kept = vfs
-        .stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("dangling")),
-            &mut fs,
-            FinalLink::Keep,
-        )
-        .expect("lstat the dangling link");
-    assert_eq!(kept.kind, NodeKind::Symlink);
-    // Following it reports exactly what `stat(2)` reports: absent.
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("dangling")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.kind),
-        Err(VfsError::NotFound)
+        kind_of(&vol, "dangling", FinalLink::Keep),
+        Ok(FileKind::Symlink)
     );
-    // Its target still reads back: the link itself is perfectly readable.
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs),
+        kind_of(&vol, "dangling", FinalLink::Follow),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        vol.readlink(ROOT.caller(), &vol_path("dangling")),
         Ok(String::from("nowhere"))
     );
 }
 
 #[test]
 fn a_write_through_a_link_reaches_the_target_and_leaves_the_link_a_link() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
+    vol.create(owner, &vol_path("target"), new_file())
         .expect("create the target");
-    make_link(&vfs, &mut fs, "link", "target");
+    make_link(&vol, "link", "target");
 
-    vfs.write_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("link")),
-        &mut fs,
-        0,
-        b"through",
-    )
-    .expect("write through the link");
+    vol.write(owner, &vol_path("link"), 0, b"through")
+        .expect("write through the link");
 
-    // The bytes landed in the target.
     let mut buf = [0u8; 16];
-    let read = vfs
-        .read_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("target")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
+    let read = vol
+        .read(owner, &vol_path("target"), 0, &mut buf)
         .expect("read the target");
     assert_eq!(&buf[..read], b"through");
-    // The link is still a link — a write never replaces it.
+    // A write never replaces the link.
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("link")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::Symlink)
+        kind_of(&vol, "link", FinalLink::Keep),
+        Ok(FileKind::Symlink)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs),
+        vol.readlink(owner, &vol_path("link")),
         Ok(String::from("target"))
     );
 }
 
 #[test]
 fn a_truncate_through_a_link_reaches_the_target() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
+    vol.create(owner, &vol_path("target"), new_file())
         .expect("create the target");
-    vfs.write_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("target")),
-        &mut fs,
-        0,
-        b"0123456789",
-    )
-    .expect("write the target");
-    make_link(&vfs, &mut fs, "link", "target");
+    vol.write(owner, &vol_path("target"), 0, b"0123456789")
+        .expect("write the target");
+    make_link(&vol, "link", "target");
 
-    vfs.truncate_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs, 4)
+    vol.truncate(owner, &vol_path("link"), 4)
         .expect("truncate through the link");
 
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("target")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.size),
+        vol.stat(owner, &vol_path("target"), FinalLink::Keep)
+            .map(|info| info.size),
         Ok(4)
     );
-    // And the link is untouched.
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("link")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::Symlink)
+        kind_of(&vol, "link", FinalLink::Keep),
+        Ok(FileKind::Symlink)
     );
 }
 
 #[test]
 fn a_write_or_truncate_through_a_dangling_link_is_not_found_and_creates_nothing() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    make_link(&vfs, &mut fs, "dangling", "nowhere");
+    make_link(&vol, "dangling", "nowhere");
 
     assert_eq!(
-        vfs.write_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs, 0, b"x"),
-        Err(VfsError::NotFound)
+        vol.write(owner, &vol_path("dangling"), 0, b"x"),
+        Err(Errno::NotFound)
     );
     assert_eq!(
-        vfs.truncate_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs, 0),
-        Err(VfsError::NotFound)
+        vol.truncate(owner, &vol_path("dangling"), 0),
+        Err(Errno::NotFound)
     );
-    // Neither call left the target behind.
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("nowhere")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Err(VfsError::NotFound)
+        kind_of(&vol, "nowhere", FinalLink::Keep),
+        Err(Errno::NotFound)
     );
 }
 
 #[test]
 fn a_create_through_a_dangling_link_creates_the_target() {
     // `open` with `O_CREAT` follows a final link, so creating "through" a
-    // dangling one creates the file the link names rather than reporting the
-    // link's own name as taken.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    // dangling one creates the file the link names. `O_EXCL` keeps the link,
+    // an existing name.
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    make_link(&vfs, &mut fs, "dangling", "made");
+    make_link(&vol, "dangling", "made");
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs)
-        .expect("create through the dangling link");
-
-    // The *target* now exists as a regular file...
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("made")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::RegularFile)
+        vol.create(owner, &vol_path("dangling"), new_file()),
+        Err(Errno::AlreadyExists)
     );
-    // ...and the link is still a link, now resolving to it.
+    vol.open(
+        owner,
+        &vol_path("dangling"),
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+        new_file(),
+    )
+    .expect("create through the dangling link");
+
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("dangling")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::Symlink)
+        kind_of(&vol, "made", FinalLink::Keep),
+        Ok(FileKind::Regular)
     );
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("dangling")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::RegularFile)
+        kind_of(&vol, "dangling", FinalLink::Keep),
+        Ok(FileKind::Symlink)
+    );
+    assert_eq!(
+        kind_of(&vol, "dangling", FinalLink::Follow),
+        Ok(FileKind::Regular)
     );
 }
 
@@ -341,291 +242,177 @@ fn a_create_through_a_dangling_link_creates_the_target() {
 fn mkdir_over_a_link_is_already_exists_live_or_dangling() {
     // POSIX `mkdir` keeps the name as typed, so a link occupying it is an
     // occupied name — whatever it resolves to.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("real")), &mut fs)
+    vol.mkdir(owner, &vol_path("real"), new_dir())
         .expect("mkdir the target");
-    make_link(&vfs, &mut fs, "live", "real");
-    make_link(&vfs, &mut fs, "dead", "nowhere");
+    make_link(&vol, "live", "real");
+    make_link(&vol, "dead", "nowhere");
 
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("live")), &mut fs),
-        Err(VfsError::AlreadyExists)
+        vol.mkdir(owner, &vol_path("live"), new_dir()),
+        Err(Errno::AlreadyExists)
     );
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dead")), &mut fs),
-        Err(VfsError::AlreadyExists)
+        vol.mkdir(owner, &vol_path("dead"), new_dir()),
+        Err(Errno::AlreadyExists)
     );
-    // Both links survive the refusal.
     for name in ["live", "dead"] {
-        assert_eq!(
-            vfs.stat_via_secured(
-                &owner,
-                &vfs.cover(&vol_path(name)),
-                &mut fs,
-                FinalLink::Keep
-            )
-            .map(|info| info.kind),
-            Ok(NodeKind::Symlink)
-        );
+        assert_eq!(kind_of(&vol, name, FinalLink::Keep), Ok(FileKind::Symlink));
     }
 }
 
 #[test]
 fn symlink_never_replaces_an_existing_name() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("taken")), &mut fs)
+    vol.create(owner, &vol_path("taken"), new_file())
         .expect("create");
     assert_eq!(
-        vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path("taken")), &mut fs, "elsewhere"),
-        Err(VfsError::AlreadyExists)
+        vol.symlink(owner, &vol_path("taken"), "elsewhere"),
+        Err(Errno::AlreadyExists)
     );
-    // The file it would have replaced is still a file.
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("taken")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::RegularFile)
+        kind_of(&vol, "taken", FinalLink::Keep),
+        Ok(FileKind::Regular)
     );
 }
 
 #[test]
 fn unlink_removes_the_link_and_never_its_target() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
+    vol.create(owner, &vol_path("target"), new_file())
         .expect("create the target");
-    vfs.write_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs, 0, b"kept")
+    vol.write(owner, &vol_path("target"), 0, b"kept")
         .expect("write the target");
-    make_link(&vfs, &mut fs, "link", "target");
+    make_link(&vol, "link", "target");
 
-    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs, false)
+    vol.unlink(owner, &vol_path("link"), UnlinkFlags::empty())
         .expect("unlink the link");
 
-    assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("link")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Err(VfsError::NotFound)
-    );
+    assert_eq!(kind_of(&vol, "link", FinalLink::Keep), Err(Errno::NotFound));
     let mut buf = [0u8; 8];
-    let read = vfs
-        .read_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("target")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
+    let read = vol
+        .read(owner, &vol_path("target"), 0, &mut buf)
         .expect("the target survived");
     assert_eq!(&buf[..read], b"kept");
 }
 
 #[test]
 fn rename_moves_the_link_not_what_it_names() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
+    vol.create(owner, &vol_path("target"), new_file())
         .expect("create the target");
-    make_link(&vfs, &mut fs, "link", "target");
+    make_link(&vol, "link", "target");
 
-    vfs.rename_via_secured(
-        &owner,
-        &vfs.cover_pair(&vol_path("link"), &vol_path("moved")),
-        &mut fs,
-        tairix_abi::RenameFlags::empty(),
-    )
-    .expect("rename the link");
+    vol.rename(owner, &vol_path("link"), &vol_path("moved"))
+        .expect("rename the link");
 
-    // The new name is the link, holding the same target.
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("moved")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::Symlink)
+        kind_of(&vol, "moved", FinalLink::Keep),
+        Ok(FileKind::Symlink)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("moved")), &mut fs),
+        vol.readlink(owner, &vol_path("moved")),
         Ok(String::from("target"))
     );
-    // The old name is gone and the target never moved.
+    assert_eq!(kind_of(&vol, "link", FinalLink::Keep), Err(Errno::NotFound));
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("link")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Err(VfsError::NotFound)
-    );
-    assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("target")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::RegularFile)
+        kind_of(&vol, "target", FinalLink::Keep),
+        Ok(FileKind::Regular)
     );
 }
 
 #[test]
 fn a_cycle_is_refused_rather_than_walked() {
-    // Two links naming each other: resolution is bounded, so the walk is
-    // refused with the loop errno instead of running until something else
-    // gives out.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    // Resolution is bounded, so two links naming each other are refused with
+    // the loop errno instead of running until something else gives out.
+    let vol = arxfs_volume(false);
 
-    make_link(&vfs, &mut fs, "a", "b");
-    make_link(&vfs, &mut fs, "b", "a");
+    make_link(&vol, "a", "b");
+    make_link(&vol, "b", "a");
 
+    assert_eq!(kind_of(&vol, "a", FinalLink::Follow), Err(Errno::LinkLoop));
+    make_link(&vol, "self", "self");
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("a")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.kind),
-        Err(VfsError::LinkLoop)
+        kind_of(&vol, "self", FinalLink::Follow),
+        Err(Errno::LinkLoop)
     );
-    // A self-cycle is the same answer.
-    make_link(&vfs, &mut fs, "self", "self");
-    assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("self")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.kind),
-        Err(VfsError::LinkLoop)
-    );
-    // Each link is still perfectly describable as itself.
     for name in ["a", "b", "self"] {
-        assert_eq!(
-            vfs.stat_via_secured(
-                &owner,
-                &vfs.cover(&vol_path(name)),
-                &mut fs,
-                FinalLink::Keep
-            )
-            .map(|info| info.kind),
-            Ok(NodeKind::Symlink)
-        );
+        assert_eq!(kind_of(&vol, name, FinalLink::Keep), Ok(FileKind::Symlink));
     }
 }
 
 #[test]
 fn a_link_is_listed_as_a_link_by_its_parent() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
+    vol.create(owner, &vol_path("target"), new_file())
         .expect("create the target");
-    make_link(&vfs, &mut fs, "link", "target");
+    make_link(&vol, "link", "target");
 
-    let listing = vfs
-        .list_all_via_secured(
-            &owner,
-            &vfs.cover(&path(MOUNT)),
-            &mut fs,
-            FinalLink::Follow,
-            usize::MAX,
-        )
-        .expect("list the volume root");
+    let listing = vol.list(owner, MOUNT).expect("list the volume root");
     let link = listing
         .iter()
         .find(|entry| entry.name == "link")
         .expect("the link is listed");
-    // The stream reports each child's *own* kind, so a link arrives as a
-    // link however the listing was opened.
-    assert_eq!(link.info.kind, NodeKind::Symlink);
+    // The stream reports each child's *own* kind.
+    assert_eq!(link.kind, FileKind::Symlink);
 }
 
 #[test]
 fn a_link_is_not_byte_readable() {
     // Its content is a path, reached only with `readlink`; a byte read fails
     // closed rather than handing the spelling out as file content.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    make_link(&vfs, &mut fs, "link", "nowhere");
+    make_link(&vol, "link", "nowhere");
 
     let mut buf = [0u8; 16];
     assert_eq!(
-        vfs.read_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs, 0, &mut buf),
-        Err(VfsError::NotFound)
+        vol.read(owner, &vol_path("link"), 0, &mut buf),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        vol.open(
+            owner,
+            &vol_path("link"),
+            OpenFlags::READ.union(OpenFlags::NO_FOLLOW),
+            CreateMode::NONE,
+        ),
+        Err(Errno::LinkLoop)
     );
 }
 
 #[test]
 fn an_interior_link_is_always_followed() {
     // A component used *as a directory* is resolved whatever the final
-    // component's posture is: what matters there is what it names.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    // component's posture is.
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("real")), &mut fs)
+    vol.mkdir(owner, &vol_path("real"), new_dir())
         .expect("mkdir");
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("real/inner")), &mut fs)
+    vol.create(owner, &vol_path("real/inner"), new_file())
         .expect("create inside it");
-    vfs.write_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("real/inner")),
-        &mut fs,
-        0,
-        b"deep",
-    )
-    .expect("write");
-    make_link(&vfs, &mut fs, "door", "real");
+    vol.write(owner, &vol_path("real/inner"), 0, b"deep")
+        .expect("write");
+    make_link(&vol, "door", "real");
 
-    // Both postures resolve the interior `door`; only the final component's
-    // treatment differs, and `inner` is not a link either way.
     for links in [FinalLink::Keep, FinalLink::Follow] {
-        assert_eq!(
-            vfs.stat_via_secured(&owner, &vfs.cover(&vol_path("door/inner")), &mut fs, links)
-                .map(|info| info.kind),
-            Ok(NodeKind::RegularFile)
-        );
+        assert_eq!(kind_of(&vol, "door/inner", links), Ok(FileKind::Regular));
     }
     let mut buf = [0u8; 8];
-    let read = vfs
-        .read_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("door/inner")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
+    let read = vol
+        .read(owner, &vol_path("door/inner"), 0, &mut buf)
         .expect("read through the interior link");
     assert_eq!(&buf[..read], b"deep");
 }
@@ -634,59 +421,31 @@ fn an_interior_link_is_always_followed() {
 fn dotdot_in_a_target_is_resolved_physically() {
     // `..` in a link's target pops the directory the walk *really came
     // through*, never the one the spelling suggests. Collapsing it textually
-    // is the classic symlink-escape bug, so the test is built so a lexical
-    // resolution would succeed and reach a *different* file — proving which
-    // rule is in force rather than merely that something resolved.
-    //
-    // A caller's own path can never spell `..` (`Path::parse` refuses it), so
-    // the `..` lives where it legitimately can: inside a stored target.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    // is the classic symlink-escape bug, so a lexical resolution would
+    // succeed here and reach a *different* file.
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("here")), &mut fs)
+    vol.mkdir(owner, &vol_path("here"), new_dir())
         .expect("mkdir here");
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("there")), &mut fs)
+    vol.mkdir(owner, &vol_path("there"), new_dir())
         .expect("mkdir there");
-    // Two files of the same leaf name, one at the volume root and one beside
-    // the link: physical resolution must reach the first, lexical the second.
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("prize")), &mut fs)
+    vol.create(owner, &vol_path("prize"), new_file())
         .expect("create the root prize");
-    vfs.write_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("prize")),
-        &mut fs,
-        0,
-        b"physical",
-    )
-    .expect("write the root prize");
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("here/prize")), &mut fs)
+    vol.write(owner, &vol_path("prize"), 0, b"physical")
+        .expect("write the root prize");
+    vol.create(owner, &vol_path("here/prize"), new_file())
         .expect("create the decoy");
-    vfs.write_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("here/prize")),
-        &mut fs,
-        0,
-        b"lexical!",
-    )
-    .expect("write the decoy");
+    vol.write(owner, &vol_path("here/prize"), 0, b"lexical!")
+        .expect("write the decoy");
 
     // `here/door` names `there`; `there/out` names its parent's `prize`.
-    make_link(&vfs, &mut fs, "here/door", "/there");
-    make_link(&vfs, &mut fs, "there/out", "../prize");
+    make_link(&vol, "here/door", "/there");
+    make_link(&vol, "there/out", "../prize");
 
-    // Resolving `here/door/out` follows the interior `door` into `/there`,
-    // then `out`'s `..` pops `/there` — the node it actually passed through —
-    // landing at the volume root.
     let mut buf = [0u8; 16];
-    let read = vfs
-        .read_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("here/door/out")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
+    let read = vol
+        .read(owner, &vol_path("here/door/out"), 0, &mut buf)
         .expect("read through the link chain");
     assert_eq!(
         &buf[..read],
@@ -700,38 +459,21 @@ fn a_link_cannot_escape_the_volume_that_stores_it() {
     // An absolute target resolves against the *mounted volume's* own root, so
     // a link on this volume cannot name the system tree above it — stricter
     // than POSIX, deliberately.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("inside")), &mut fs)
+    vol.create(ROOT.caller(), &vol_path("inside"), new_file())
         .expect("create inside the volume");
-    // Spelled as if it named the system security store.
-    make_link(&vfs, &mut fs, "escape", "/System/Security/Users");
-    // Nothing of that name exists *on this volume*, so it dangles rather than
-    // reaching the real tree.
+    make_link(&vol, "escape", "/System/Security/Users");
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("escape")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.kind),
-        Err(VfsError::NotFound)
+        kind_of(&vol, "escape", FinalLink::Follow),
+        Err(Errno::NotFound)
     );
     // Climbing out of the volume root with `..` lands back at the root, as
     // POSIX specifies for `/..`.
-    make_link(&vfs, &mut fs, "climb", "/../../inside");
+    make_link(&vol, "climb", "/../../inside");
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("climb")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.kind),
-        Ok(NodeKind::RegularFile)
+        kind_of(&vol, "climb", FinalLink::Follow),
+        Ok(FileKind::Regular)
     );
 }
 
@@ -739,36 +481,18 @@ fn a_link_cannot_escape_the_volume_that_stores_it() {
 fn creating_a_link_needs_a_writable_mount_and_an_authorised_parent() {
     // The call authorises exactly one thing: the right to create a name in
     // the link's own parent. It grants nothing over what the target names.
-    let (read_only, mut fs) = arxfs_backed_vfs(true);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let read_only = arxfs_volume(true);
     assert_eq!(
-        read_only.symlink_via_secured(
-            &owner,
-            &read_only.cover(&vol_path("nope")),
-            &mut fs,
-            "target"
-        ),
-        Err(VfsError::ReadOnly)
+        read_only.symlink(ROOT.caller(), &vol_path("nope"), "target"),
+        Err(Errno::ReadOnly)
     );
 
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    // A principal who may not write the parent cannot create a name in it.
-    let stranger = cred(ROOT_UID + 7, ROOT_GID + 7, &caps);
+    let vol = arxfs_volume(false);
     assert_eq!(
-        vfs.symlink_via_secured(&stranger, &vfs.cover(&vol_path("nope")), &mut fs, "target"),
-        Err(VfsError::PermissionDenied)
+        vol.symlink(STRANGER.caller(), &vol_path("nope"), "target"),
+        Err(Errno::PermissionDenied)
     );
-    assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("nope")),
-            &mut fs,
-            FinalLink::Keep
-        )
-        .map(|info| info.kind),
-        Err(VfsError::NotFound)
-    );
+    assert_eq!(kind_of(&vol, "nope", FinalLink::Keep), Err(Errno::NotFound));
 }
 
 #[test]
@@ -776,26 +500,18 @@ fn an_unwalkable_target_is_refused_rather_than_stored() {
     // A target's *grammar* is checked before it is written, so a link that
     // could only ever fail is never created. Parsing is not resolving: `..`
     // and relative spellings stay legal.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
 
     let over_long = "x".repeat(tairix_abi::FS_SYMLINK_MAX + 1);
     for (target, why) in [("", "empty"), (over_long.as_str(), "over the bound")] {
         assert!(
-            vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path("bad")), &mut fs, target)
+            vol.symlink(ROOT.caller(), &vol_path("bad"), target)
                 .is_err(),
             "a {why} target must be refused"
         );
         assert_eq!(
-            vfs.stat_via_secured(
-                &owner,
-                &vfs.cover(&vol_path("bad")),
-                &mut fs,
-                FinalLink::Keep
-            )
-            .map(|info| info.kind),
-            Err(VfsError::NotFound),
+            kind_of(&vol, "bad", FinalLink::Keep),
+            Err(Errno::NotFound),
             "a refused {why} target must leave no name behind"
         );
     }

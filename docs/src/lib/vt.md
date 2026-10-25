@@ -34,10 +34,12 @@ Stability tier: **experimental** (the surface grows stage by stage under
 Each `Op` and `Sgr` has exactly one canonical byte encoding, so parsing the
 emitter's output reproduces the original operation. This is the §2.2 "one
 vocabulary" guarantee made testable. The one exception is `Op::Print` of a
-control character: a control is no glyph, every one a terminal acts on has an
-`Op` of its own, and a UTF-8 terminal obeys a C1 control as it obeys its
-escape, so the emitter prints U+FFFD and text from elsewhere — a TUI's cells, a
-help document, the shell's line — never reaches a terminal as a command:
+hidden character (`tairix_visible::shown_char`): a control is no glyph and
+every one a terminal acts on has an `Op` of its own, a UTF-8 terminal obeys a
+C1 control as it obeys its escape, and a bidirectional or zero-width character
+reorders or hides the text around it, so the emitter prints U+FFFD and text
+from elsewhere — a TUI's cells, a help document, the shell's line — never
+reaches a terminal as a command or rearranges what it shows:
 
 ```rust
 use tairix_vt::{encode, BasicColor, Color, Op, Parser, Sgr};
@@ -77,7 +79,9 @@ writes to fd 3 (`stdinfo` is reserved, §20).
 
 `lib/vt` depends on `lib/*` only — never on `kernel/*`, `drivers/*`, or
 `userland/*` (`AGENTS.md` §17.4) — and is text-only infrastructure outside
-`userland/gui/*`, so a headless image links it freely (§17.3).
+`userland/gui/*`, so a headless image links it freely (§17.3). Its one
+dependency, `lib/visible`, links no allocator under any feature, so the
+allocator-free boot console that links it still links none.
 
 Tests (`AGENTS.md` §7) live next to the code (`src/tests.rs`: round-trip
 identity and fail-closed robustness) plus two integration harnesses: a

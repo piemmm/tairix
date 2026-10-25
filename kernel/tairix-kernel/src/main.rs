@@ -76,8 +76,7 @@ mod kernel {
     }
 }
 
-// --- Freestanding production bin (`aarch64-unknown-none`, Raspberry
-//     Pi 4) -------------------------------------------------------
+// --- Freestanding production bin (`aarch64-unknown-none`) -------------
 //
 // `plans/PI.md` Stage P1. A thin wrapper around
 // [`tairix_kernel::aarch64::boot::boot`]: it supplies the
@@ -141,8 +140,7 @@ mod kernel {
     }
 }
 
-// --- Freestanding production bin (`riscv64gc-unknown-none-elf`, QEMU
-//     `virt` / SiFive) -------------------------------------------------
+// --- Freestanding production bin (`riscv64gc-unknown-none-elf`) -------
 //
 // `plans/PI.md` RV-P1. A thin wrapper around
 // [`tairix_kernel::riscv64::boot::boot`]: it supplies the

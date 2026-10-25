@@ -17,7 +17,7 @@
 //!
 //! The source of truth for each family is its own on-disk directory. This
 //! crate's build script walks every program crate under `userland/`
-//! (`bundles::program_crates`; each bundle named by its crate's
+//! (`bundles::manifest_crates`; each bundle named by its crate's
 //! `AppInfo.toml`, never the crate directory) for `Help/` and `Resources/`,
 //! and walks each single-tree graphics asset family — `lib/icon/assets/` for
 //! the desktop icon masters, `lib/wallpaper/assets/` for the shipped

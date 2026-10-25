@@ -13,15 +13,15 @@ use alloc::vec::Vec;
 
 use core::time::Duration;
 
-use tairix_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileId, FileKind, FS_NEW_DIR_MODE};
 use tairix_appdata::Settings as SettingsStore;
 use tairix_curses::{Event, InputMode, Pos, Screen, Tty, Window};
 use tairix_fscopy::Omissions;
-use tairix_glob::Pattern;
-use tairix_path::join;
+use tairix_glob::{OutOfMemory, Pattern, Scratch};
+use tairix_path::{dir_name, join};
 use tairix_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
 
-use crate::fs::Fs;
+use crate::fs::{Fs, FsEntry};
 use crate::info::{note_hidden_entries, Info};
 use crate::model::{
     child_dirs_of, merge_child_dirs, AttrEditPrompt, AttrEntries, AttrsView, BatchPrompt,
@@ -29,7 +29,7 @@ use crate::model::{
     NameFilter, OpenAsPrompt, Overlay, OverwritePrompt, Pane, Prompt, RepeatOp, SettingsState,
     SortKey, View, Viewer, ViewerKind,
 };
-use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
+use crate::ops::{plan_target, resolve_destination, Decision, FileOp, OpError, OpProgress};
 use crate::render::{panes_layout, render};
 use crate::search::{ContentScan, Needle};
 use crate::settings::SettingKey;
@@ -81,6 +81,14 @@ const HEAD_SAMPLE: usize = 4096;
 pub enum FstreeError {
     /// The terminal path failed (a write error or a closed input).
     Terminal,
+}
+
+impl core::fmt::Display for FstreeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Terminal => f.write_str("the terminal could not be read or written"),
+        }
+    }
 }
 
 /// Rows available to a pane body: the grid minus the status and message
@@ -342,7 +350,7 @@ fn move_tree_to_parent(model: &mut Model, fs: &mut dyn Fs) {
     if row.depth == 0 {
         return;
     }
-    let parent = String::from(parent_of(&row.path));
+    let parent = String::from(dir_name(&row.path));
     if let Some(index) = rows.iter().position(|r| r.path == parent) {
         model.tree_cursor = index;
         select_dir(model, fs, &parent);
@@ -397,22 +405,36 @@ fn move_to_edge(model: &mut Model, fs: &mut dyn Fs, end: bool) {
 
 /// The focused pane's selection: the file pane's entry, or the tree
 /// pane's directory. `None` when the focused pane is empty.
-fn focused_selection(model: &Model) -> Option<(String, String, FileKind)> {
+fn focused_selection(model: &Model) -> Option<Focused> {
     match model.pane {
         Pane::Files => {
             let entry = model.visible_files().get(model.file_cursor).copied()?;
-            Some((
-                join(&model.files_dir, &entry.name),
-                entry.name.clone(),
-                entry.kind,
-            ))
+            Some(Focused {
+                path: join(&model.files_dir, &entry.name),
+                name: entry.name.clone(),
+                kind: entry.kind,
+                id: entry.id,
+            })
         }
         Pane::Tree => {
             let rows = model.tree_rows();
             let row = rows.get(model.tree_cursor)?;
-            Some((row.path.clone(), row.name.clone(), FileKind::Directory))
+            Some(Focused {
+                path: row.path.clone(),
+                name: row.name.clone(),
+                kind: FileKind::Directory,
+                id: row.id,
+            })
         }
     }
+}
+
+/// The focused pane's selection, and the node its listing showed.
+struct Focused {
+    path: String,
+    name: String,
+    kind: FileKind,
+    id: FileId,
 }
 
 /// Open the attributes editor (`a`) on the focused pane's selection: the
@@ -421,7 +443,7 @@ fn focused_selection(model: &Model) -> Option<(String, String, FileKind)> {
 /// opens nothing; a backing without attribute storage opens the view with
 /// that fact stated (the mode editor still works there).
 fn open_attrs_view(model: &mut Model, fs: &mut dyn Fs) {
-    let Some((path, name, _)) = focused_selection(model) else {
+    let Some(Focused { path, name, .. }) = focused_selection(model) else {
         return;
     };
     let mode = match fs.stat_mode(&path) {
@@ -652,7 +674,13 @@ fn open_delete(model: &mut Model, fs: &mut dyn Fs) {
 /// selection. Moving the session root is refused — the tree must keep its
 /// anchor; copying it elsewhere is legitimate.
 fn open_transfer_prompt(model: &mut Model, moving: bool) {
-    let Some((src, name, kind)) = focused_selection(model) else {
+    let Some(Focused {
+        path: src,
+        name,
+        kind,
+        id: seen,
+    }) = focused_selection(model)
+    else {
         return;
     };
     if moving && src == model.root.path {
@@ -660,9 +688,19 @@ fn open_transfer_prompt(model: &mut Model, moving: bool) {
         return;
     }
     let op = if moving {
-        InputOp::MoveDest { src, name, kind }
+        InputOp::MoveDest {
+            src,
+            seen,
+            name,
+            kind,
+        }
     } else {
-        InputOp::CopyDest { src, name, kind }
+        InputOp::CopyDest {
+            src,
+            seen,
+            name,
+            kind,
+        }
     };
     model.prompt = Some(Prompt::Input(InputPrompt {
         op,
@@ -673,7 +711,13 @@ fn open_transfer_prompt(model: &mut Model, moving: bool) {
 /// Open the rename (`r`) prompt on the focused selection, prefilled with
 /// the current name. Renaming the session root is refused.
 fn open_rename_prompt(model: &mut Model) {
-    let Some((src, name, kind)) = focused_selection(model) else {
+    let Some(Focused {
+        path: src,
+        name,
+        id: seen,
+        ..
+    }) = focused_selection(model)
+    else {
         return;
     };
     if src == model.root.path {
@@ -682,7 +726,7 @@ fn open_rename_prompt(model: &mut Model) {
     }
     let input = name.clone();
     model.prompt = Some(Prompt::Input(InputPrompt {
-        op: InputOp::RenameTo { src, name, kind },
+        op: InputOp::RenameTo { src, seen, name },
         input,
     }));
 }
@@ -691,7 +735,13 @@ fn open_rename_prompt(model: &mut Model) {
 /// when the persisted toggle turned the question off, delete straight
 /// away. Deleting the session root is refused either way.
 fn open_delete_prompt(model: &mut Model, fs: &mut dyn Fs) {
-    let Some((path, name, kind)) = focused_selection(model) else {
+    let Some(Focused {
+        path,
+        name,
+        kind,
+        id: seen,
+    }) = focused_selection(model)
+    else {
         return;
     };
     if path == model.root.path {
@@ -699,18 +749,24 @@ fn open_delete_prompt(model: &mut Model, fs: &mut dyn Fs) {
         return;
     }
     if !model.settings.confirm_delete {
-        delete_now(model, fs, &path, kind);
+        delete_now(model, fs, (&path, seen));
         return;
     }
-    model.prompt = Some(Prompt::ConfirmDelete(ConfirmPrompt { path, name, kind }));
+    model.prompt = Some(Prompt::ConfirmDelete(ConfirmPrompt {
+        path,
+        seen,
+        name,
+        kind,
+    }));
 }
 
 /// Delete `path` now: the confirmed (or unconfirmed-by-setting) single
 /// delete, remembered for the repeat key.
-fn delete_now(model: &mut Model, fs: &mut dyn Fs, path: &str, kind: FileKind) {
+fn delete_now(model: &mut Model, fs: &mut dyn Fs, (path, seen): (&str, FileId)) {
     model.last_op = Some(RepeatOp::Delete);
-    let refresh = alloc::vec![String::from(parent_of(path))];
-    run_op(model, fs, FileOp::delete(path, kind), refresh);
+    let refresh = alloc::vec![String::from(dir_name(path))];
+    let op = FileOp::delete(fs, (path, seen));
+    start_op(model, fs, op, refresh);
     prune_tag_if_gone(model, fs, path);
 }
 
@@ -721,7 +777,7 @@ fn batch_delete_now(model: &mut Model, fs: &mut dyn Fs) {
     let items = model.tags.entries().to_vec();
     let refresh: Vec<String> = items
         .iter()
-        .map(|item| String::from(parent_of(&item.path)))
+        .map(|item| String::from(dir_name(&item.path)))
         .collect();
     run_batch(model, fs, Batch::delete(&items), refresh);
 }
@@ -745,14 +801,20 @@ fn repeat_last_op(model: &mut Model, fs: &mut dyn Fs) {
 /// Repeat a copy/move of the focused selection into `dest` — the same
 /// planning, refusals, and overwrite questions as a typed destination.
 fn repeat_transfer(model: &mut Model, fs: &mut dyn Fs, dest: &str, moving: bool) {
-    let Some((src, _, kind)) = focused_selection(model) else {
+    let Some(Focused {
+        path: src,
+        kind,
+        id: seen,
+        ..
+    }) = focused_selection(model)
+    else {
         return;
     };
     if moving && src == model.root.path {
         model.message = Some(String::from("cannot move the session root"));
         return;
     }
-    submit_transfer(model, fs, &src, kind, dest, moving);
+    submit_transfer(model, fs, (&src, seen), kind, dest, moving);
 }
 
 /// The `V` key: fetch the published storage roots and open the volume
@@ -800,6 +862,7 @@ fn open_volume_root(model: &mut Model, fs: &mut dyn Fs, target: &str) {
             model.root = DirNode {
                 name: String::from(target),
                 path: String::from(target),
+                id: FileId::NONE,
                 expanded: true,
                 children: Some(child_dirs_of(target, &entries)),
             };
@@ -864,7 +927,7 @@ pub fn publish_settings(model: &mut Model, store: &mut SettingsStore<'_>) {
         Ok(()) => model.message = Some(String::from("settings saved")),
         Err(errno) => {
             model.message = Some(format!(
-                "settings not saved ({errno:?}) — in effect this session"
+                "settings not saved ({errno}) — in effect this session"
             ));
         }
     }
@@ -1052,13 +1115,17 @@ fn live_apply_filter(model: &mut Model, prompt: &InputPrompt) {
 /// it names. Every refusal lands on the message line with nothing changed.
 fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
     match prompt.op {
-        InputOp::CopyDest { src, kind, .. } => {
-            submit_transfer(model, fs, &src, kind, &prompt.input, false);
+        InputOp::CopyDest {
+            src, seen, kind, ..
+        } => {
+            submit_transfer(model, fs, (&src, seen), kind, &prompt.input, false);
         }
-        InputOp::MoveDest { src, kind, .. } => {
-            submit_transfer(model, fs, &src, kind, &prompt.input, true);
+        InputOp::MoveDest {
+            src, seen, kind, ..
+        } => {
+            submit_transfer(model, fs, (&src, seen), kind, &prompt.input, true);
         }
-        InputOp::RenameTo { src, name, kind } => {
+        InputOp::RenameTo { src, seen, name } => {
             let typed = prompt.input;
             if typed.is_empty() || typed == "." || typed == ".." || typed.contains('/') {
                 model.message = Some(String::from("rename: invalid name"));
@@ -1068,13 +1135,9 @@ fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
                 model.message = Some(String::from("rename: name unchanged"));
                 return;
             }
-            let target = join(parent_of(&src), &typed);
-            run_op(
-                model,
-                fs,
-                FileOp::move_to(&src, kind, &target),
-                alloc::vec![String::from(parent_of(&src))],
-            );
+            let target = join(dir_name(&src), &typed);
+            let op = FileOp::move_to(fs, (&src, seen), &target);
+            start_op(model, fs, op, alloc::vec![String::from(dir_name(&src))]);
         }
         InputOp::MkdirName => {
             let typed = prompt.input;
@@ -1083,7 +1146,7 @@ fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
                 return;
             }
             let path = join(&model.files_dir, &typed);
-            match fs.mkdir(&path) {
+            match fs.mkdir(&path, FS_NEW_DIR_MODE) {
                 Ok(()) => {
                     model.message = Some(format!("created directory {typed}"));
                     let listed = [model.files_dir.clone()];
@@ -1110,7 +1173,7 @@ fn submit_input(model: &mut Model, fs: &mut dyn Fs, prompt: InputPrompt) {
 fn submit_transfer(
     model: &mut Model,
     fs: &mut dyn Fs,
-    src: &str,
+    (src, seen): (&str, FileId),
     kind: FileKind,
     typed: &str,
     moving: bool,
@@ -1134,19 +1197,19 @@ fn submit_transfer(
         }
     };
     // The repeat key re-applies the operation into the same directory.
-    let dest_dir = String::from(parent_of(&target));
+    let dest_dir = String::from(dir_name(&target));
     model.last_op = Some(if moving {
         RepeatOp::MoveInto(dest_dir.clone())
     } else {
         RepeatOp::CopyInto(dest_dir.clone())
     });
-    let refresh = alloc::vec![String::from(parent_of(src)), dest_dir];
+    let refresh = alloc::vec![String::from(dir_name(src)), dest_dir];
     let op = if moving {
-        FileOp::move_to(src, kind, &target)
+        FileOp::move_to(fs, (src, seen), &target)
     } else {
-        FileOp::copy(src, kind, &target)
+        FileOp::copy(fs, (src, seen), &target)
     };
-    run_op(model, fs, op, refresh);
+    start_op(model, fs, op, refresh);
     if moving {
         prune_tag_if_gone(model, fs, src);
     }
@@ -1161,7 +1224,7 @@ fn handle_confirm_prompt(
     event: &Event,
 ) {
     match event {
-        Event::Char('y' | 'Y') => delete_now(model, fs, &prompt.path, prompt.kind),
+        Event::Char('y' | 'Y') => delete_now(model, fs, (&prompt.path, prompt.seen)),
         _ => model.message = Some(format!("{} not deleted", prompt.name)),
     }
 }
@@ -1270,14 +1333,14 @@ fn toggle_tag(model: &mut Model) {
         model.message = Some(String::from("tags mark file-pane entries"));
         return;
     }
-    let Some((path, kind, size)) = model
+    let Some(item) = model
         .visible_files()
         .get(model.file_cursor)
-        .map(|entry| (join(&model.files_dir, &entry.name), entry.kind, entry.size))
+        .map(|entry| tag_entry(&model.files_dir, entry))
     else {
         return;
     };
-    model.tags.toggle(TagEntry { path, kind, size });
+    model.tags.toggle(item);
     let count = model.visible_files().len();
     model.file_cursor = step(model.file_cursor, 1, count);
 }
@@ -1290,17 +1353,33 @@ fn open_tag_glob(model: &mut Model) {
     }));
 }
 
+/// `entry` of the file pane's directory `dir`, as a tag.
+fn tag_entry(dir: &str, entry: &FsEntry) -> TagEntry {
+    TagEntry {
+        path: join(dir, &entry.name),
+        id: entry.id,
+        kind: entry.kind,
+        size: entry.size,
+    }
+}
+
+/// A row of the flattened view, as a tag.
+fn flat_tag_entry(entry: &FlatEntry) -> TagEntry {
+    TagEntry {
+        path: entry.path.clone(),
+        id: entry.id,
+        kind: entry.kind,
+        size: entry.size,
+    }
+}
+
 /// The `i` key in the panes: toggle the tag of every visible file-pane
 /// entry, so the tagged and untagged sets swap.
 fn invert_tags(model: &mut Model) {
     let items: Vec<TagEntry> = model
         .visible_files()
         .iter()
-        .map(|entry| TagEntry {
-            path: join(&model.files_dir, &entry.name),
-            kind: entry.kind,
-            size: entry.size,
-        })
+        .map(|entry| tag_entry(&model.files_dir, entry))
         .collect();
     for item in items {
         model.tags.toggle(item);
@@ -1312,7 +1391,7 @@ fn invert_tags(model: &mut Model) {
 /// (panes) or branch-relative path (flattened view) matches the glob —
 /// or, for a `size:`/`date:` range spelling, whose listed figures fall
 /// inside the range. A malformed pattern or range is reported and tags
-/// nothing.
+/// nothing, as is a match the heap could not hold.
 fn submit_tag_glob(model: &mut Model, typed: &str) {
     match TagRange::parse(typed) {
         Ok(Some(range)) => {
@@ -1332,30 +1411,40 @@ fn submit_tag_glob(model: &mut Model, typed: &str) {
             return;
         }
     };
-    let items: Vec<TagEntry> = if model.view == View::Flat {
+    let mut scratch = Scratch::new();
+    let mut tag = |text: &str, entry: &dyn Fn() -> TagEntry| {
+        pattern
+            .matches_with(text, &mut scratch)
+            .map(|hit| hit.then(entry))
+            .transpose()
+    };
+    let tagged: Result<Vec<TagEntry>, OutOfMemory> = if model.view == View::Flat {
         let Some(walk) = &model.walk else {
             return;
         };
         walk.entries
             .iter()
-            .filter(|entry| pattern.matches(relative_to(&walk.root, &entry.path)))
-            .map(|entry| TagEntry {
-                path: entry.path.clone(),
-                kind: entry.kind,
-                size: entry.size,
+            .filter_map(|entry| {
+                tag(relative_to(&walk.root, &entry.path), &|| {
+                    flat_tag_entry(entry)
+                })
             })
             .collect()
     } else {
         model
             .visible_files()
             .iter()
-            .filter(|entry| pattern.matches(&entry.name))
-            .map(|entry| TagEntry {
-                path: join(&model.files_dir, &entry.name),
-                kind: entry.kind,
-                size: entry.size,
-            })
+            .filter_map(|entry| tag(&entry.name, &|| tag_entry(&model.files_dir, entry)))
             .collect()
+    };
+    // Tags drive batch operations, so a match the heap could not hold tags
+    // nothing rather than a guess.
+    let items = match tagged {
+        Ok(items) => items,
+        Err(err) => {
+            model.message = Some(format!("{err} — nothing tagged"));
+            return;
+        }
     };
     let matched = items.len();
     for item in items {
@@ -1378,22 +1467,14 @@ fn tag_by_range(model: &mut Model, range: &TagRange) {
         walk.entries
             .iter()
             .filter(|entry| range.matches(entry.size, entry.modified))
-            .map(|entry| TagEntry {
-                path: entry.path.clone(),
-                kind: entry.kind,
-                size: entry.size,
-            })
+            .map(flat_tag_entry)
             .collect()
     } else {
         model
             .visible_files()
             .iter()
             .filter(|entry| range.matches(entry.size, entry.modified))
-            .map(|entry| TagEntry {
-                path: join(&model.files_dir, &entry.name),
-                kind: entry.kind,
-                size: entry.size,
-            })
+            .map(|entry| tag_entry(&model.files_dir, entry))
             .collect()
     };
     let matched = items.len();
@@ -1444,7 +1525,7 @@ fn submit_batch_dest(model: &mut Model, fs: &mut dyn Fs, moving: bool, typed: &s
     let items = model.tags.entries().to_vec();
     let mut refresh: Vec<String> = items
         .iter()
-        .map(|item| String::from(parent_of(&item.path)))
+        .map(|item| String::from(dir_name(&item.path)))
         .collect();
     refresh.push(dst.clone());
     let batch = if moving {
@@ -1538,6 +1619,7 @@ fn submit_content_search(model: &mut Model, tagged: bool, typed: &str) {
             } else {
                 seeds.push(FlatEntry {
                     path: item.path.clone(),
+                    id: item.id,
                     kind: item.kind,
                     size: item.size,
                     modified: tairix_abi::time::Time64::UNIX_EPOCH,
@@ -1672,7 +1754,7 @@ fn jump_to_flat_hit(model: &mut Model, fs: &mut dyn Fs) {
     }) else {
         return;
     };
-    let parent = String::from(parent_of(&path));
+    let parent = String::from(dir_name(&path));
     let name = path.rsplit('/').next().unwrap_or_default();
     if !select_dir(model, fs, &parent) {
         return;
@@ -1733,33 +1815,21 @@ fn move_flat_cursor(model: &mut Model, delta: isize) {
 /// The `t` key in the flattened view: toggle the tag on the selected row
 /// and step the cursor down.
 fn flat_toggle_tag(model: &mut Model) {
-    let Some((path, kind, size, count)) = model.walk.as_ref().and_then(|walk| {
-        walk.entries.get(model.flat_cursor).map(|entry| {
-            (
-                entry.path.clone(),
-                entry.kind,
-                entry.size,
-                walk.entries.len(),
-            )
-        })
+    let Some((item, count)) = model.walk.as_ref().and_then(|walk| {
+        walk.entries
+            .get(model.flat_cursor)
+            .map(|entry| (flat_tag_entry(entry), walk.entries.len()))
     }) else {
         return;
     };
-    model.tags.toggle(TagEntry { path, kind, size });
+    model.tags.toggle(item);
     model.flat_cursor = step(model.flat_cursor, 1, count);
 }
 
 /// The `i` key in the flattened view: toggle the tag of every listed row.
 fn flat_invert_tags(model: &mut Model) {
     let items: Vec<TagEntry> = model.walk.as_ref().map_or_else(Vec::new, |walk| {
-        walk.entries
-            .iter()
-            .map(|entry| TagEntry {
-                path: entry.path.clone(),
-                kind: entry.kind,
-                size: entry.size,
-            })
-            .collect()
+        walk.entries.iter().map(flat_tag_entry).collect()
     });
     for item in items {
         model.tags.toggle(item);
@@ -2447,11 +2517,25 @@ fn handle_overwrite_prompt(
     run_op(model, fs, paused.op, paused.refresh);
 }
 
+/// Run an operation just started, or say why it could not start, nothing
+/// having changed.
+fn start_op(
+    model: &mut Model,
+    fs: &mut dyn Fs,
+    started: Result<FileOp, OpError>,
+    refresh: Vec<String>,
+) {
+    match started {
+        Ok(op) => run_op(model, fs, op, refresh),
+        Err(error) => model.message = Some(error.describe()),
+    }
+}
+
 /// Drive `op` until it finishes, fails, or pauses on an overwrite
 /// question; the panes are refreshed when it ends either way, because a
 /// failed or cancelled operation may already have applied earlier steps.
 fn run_op(model: &mut Model, fs: &mut dyn Fs, mut op: FileOp, refresh: Vec<String>) {
-    match op.advance(fs) {
+    match op.advance() {
         OpProgress::Done => {
             conclude(model, op.summary(), op.omissions());
             refresh_after(model, fs, &refresh);
@@ -2530,7 +2614,7 @@ fn revalidate_file_pane(model: &mut Model, fs: &mut dyn Fs) {
                 return;
             }
             Err(_) if path != model.root.path => {
-                path = String::from(parent_of(&path));
+                path = String::from(dir_name(&path));
             }
             // The session root itself no longer lists; the previous
             // listing is kept rather than blanked — the next navigation

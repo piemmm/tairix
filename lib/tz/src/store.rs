@@ -10,7 +10,7 @@ use crate::layout::{
     MAX_OFFSET, MAX_REGION_NAME, MAX_RELEASE, MAX_RULE_TIME, MAX_STORE_LEN, NAME_LEN, NO_TRAILING,
     PLACE_LEN, REGION_LEN, TRAILING_LEN, TRANSITION_LEN, TYPE_LEN, ZONE_LEN,
 };
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 
 use crate::pattern::Pattern;
 use crate::zone::Zone;

@@ -86,8 +86,8 @@ pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 /// An xHCI-protocol fact, not a board or device identity: it lives here,
 /// beside the controller engine, so every host that maps an xHCI
 /// controller's register BAR — the PCI bus driver's wiring
-/// (`drivers/bus/usb`) and the root-complex bus driver that resolves the
-/// controller's BAR before publishing it (`drivers/bus/pcie_brcm`) — depends
+/// (`drivers/bus/usb`) and a root-complex bus driver that resolves the
+/// controller's BAR before publishing it — depends
 /// on one definition.
 pub const XHCI_BAR_INDEX: u8 = 0;
 
@@ -100,7 +100,7 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// [`HwMatchKey::compatible`](tairix_abi::HwMatchKey::compatible) bind key.
 /// It is an xHCI-protocol identity (the controller class), not a board or
 /// vendor name, so it lives here beside the controller engine as the single
-/// definition both the emitting bus driver (`drivers/bus/usb/vl805`) and the
+/// definition both the emitting bus driver and the
 /// binding controller driver (`drivers/bus/usb/xhci`) depend on, never a
 /// copy in each.
 pub const XHCI_COMPATIBLE: &[u8] = b"usb,xhci";
@@ -383,9 +383,8 @@ impl<H: RegisterBlock> Xhci<H> {
         }
         // Max Scratchpad Buffers: page-sized buffers the controller
         // requires software to reserve and point `DCBAA[0]` at before it
-        // can run any command (xHCI §4.20). The VL805 reports 31; missing
-        // them leaves the very first command without a completion event
-        // (the Pi 4 `stage=2 completion=0` metal symptom).
+        // can run any command (xHCI §4.20); missing them leaves the very
+        // first command without a completion event.
         let structural2 = host
             .read32(regs::HCSPARAMS2)
             .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?;
@@ -746,7 +745,7 @@ impl<H: RegisterBlock> Xhci<H> {
     }
 
     /// Enable interrupt generation on interrupter 0 so a posted event
-    /// asserts the device's interrupt (the MSI write, on the PCIe VL805)
+    /// asserts the device's interrupt (the MSI write, on a PCIe controller)
     /// rather than only landing on the event ring for a poller to find.
     ///
     /// Programs interrupt moderation to the 1 ms reset default
@@ -924,7 +923,7 @@ impl<H: RegisterBlock> Xhci<H> {
     ///
     /// The Host Controller Reset issued in [`Self::open`] clears every
     /// `PORTSC`, and a port-power-controlled controller (`HCCPARAMS1`
-    /// PPC = 1 — the Pi 4's VL805) reports `PP` = 0 and never asserts
+    /// PPC = 1) reports `PP` = 0 and never asserts
     /// Current Connect Status until software powers the port on
     /// (xHCI 1.2 §4.19.1.1 / §5.4.8). Without this an attached device
     /// is invisible to [`Self::port_status`]. The read-modify-write

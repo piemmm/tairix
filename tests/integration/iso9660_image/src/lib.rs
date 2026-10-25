@@ -549,6 +549,7 @@ pub const fn typed_load(filetype: u16) -> u32 {
 }
 
 /// Where a directory's records landed.
+#[derive(Clone, Copy)]
 struct Placed {
     extent: u32,
     len: u32,
@@ -582,11 +583,12 @@ impl Layout {
         }
     }
 
-    /// The records of `node`, a directory's child, its data placed.
-    fn child_records(&mut self, node: &Node) -> Vec<Vec<u8>> {
+    /// The records of `node`, a child of the directory placed at `parent`,
+    /// its data placed.
+    fn child_records(&mut self, node: &Node, parent: Placed) -> Vec<Vec<u8>> {
         match &node.kind {
             Kind::Dir { .. } => {
-                let placed = self.directory(node);
+                let placed = self.directory(node, Some(parent));
                 vec![self
                     .record(placed.extent, placed.len, DIRECTORY | node.flags, node)
                     .bytes()]
@@ -662,9 +664,10 @@ impl Layout {
         self.image[at..at + bytes.len()].copy_from_slice(bytes);
     }
 
-    /// Lay `dir` out: its records packed so none crosses a sector, then its
-    /// children's.
-    fn directory(&mut self, dir: &Node) -> Placed {
+    /// Lay `dir` out, a child of the directory placed at `parent` or the
+    /// root when `None`: its records packed so none crosses a sector, then
+    /// its children's.
+    fn directory(&mut self, dir: &Node, parent: Option<Placed>) -> Placed {
         let Kind::Dir { children, dot_use } = &dir.kind else {
             unreachable!("a directory");
         };
@@ -695,6 +698,9 @@ impl Layout {
         let extent = self.allocate(sectors);
         self.directories.push(extent);
         let len = (sectors * BLOCK) as u32;
+        let placed = Placed { extent, len };
+        // A root's `..` names the root itself.
+        let up = parent.unwrap_or(placed);
         let dot = Rec {
             date: dir.date,
             system_use: dot_use,
@@ -704,11 +710,11 @@ impl Layout {
         let dotdot = Rec {
             date: dir.date,
             standard: self.standard,
-            ..Rec::new(extent, len, DIRECTORY, &[1])
+            ..Rec::new(up.extent, up.len, DIRECTORY, &[1])
         };
         let mut records = vec![dot.bytes(), dotdot.bytes()];
         for child in children {
-            records.extend(self.child_records(child));
+            records.extend(self.child_records(child, placed));
         }
         let mut at = extent as usize * BLOCK;
         let start = at;
@@ -719,7 +725,7 @@ impl Layout {
             self.write(at, &r);
             at += r.len();
         }
-        Placed { extent, len }
+        placed
     }
 }
 
@@ -733,9 +739,12 @@ pub fn master(disc: &Disc) -> Mastered {
         directories: Vec::new(),
         standard: disc.standard,
     };
-    let root = layout.directory(&disc.root);
+    let root = layout.directory(&disc.root, None);
     let joliet = match disc.standard {
-        Standard::Iso9660 => disc.joliet.as_ref().map(|tree| layout.directory(tree)),
+        Standard::Iso9660 => disc
+            .joliet
+            .as_ref()
+            .map(|tree| layout.directory(tree, None)),
         Standard::HighSierra => None,
     };
     let volume_blocks = layout.next;

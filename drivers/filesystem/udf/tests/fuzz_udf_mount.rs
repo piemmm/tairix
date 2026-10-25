@@ -4,9 +4,10 @@
 //! A stick or disc is outside TAIRiX's trust boundary: any byte of its
 //! anchors, descriptor sequences, partition maps, sparing and allocation
 //! tables, file entries, allocation descriptors and identifiers may be
-//! hostile. Whatever the volume holds, mounting it, walking it, reading it
-//! and writing to it must answer values or errors — never panic, read or
-//! write out of bounds, or fail to end. The run aborting *is* the failure.
+//! hostile. Whatever the volume holds, mounting it, walking it, reading it,
+//! holding its nodes and writing to it must answer values or errors — never
+//! panic, read or write out of bounds, or fail to end. The run aborting *is*
+//! the failure.
 //!
 //! A per-run-seeded `Prng` mutates volumes the driver's own formatter laid
 //! out and populated, and the `genisoimage` bridge disc, biased towards the
@@ -20,7 +21,7 @@ mod sparse;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeId, NodeKind,
+    FilesystemWrite, NodeId, NodeKind, NodeSecurity,
 };
 use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
@@ -33,6 +34,11 @@ const SMOKE_ITERATIONS: u64 = 600;
 
 const MAX_DEPTH: usize = 8;
 const MAX_NODES: usize = 200;
+
+// The records the seed volumes' nodes are created with.
+const FILE: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
+const DIR: NodeSecurity = NodeSecurity::new(0o755, 0, 0);
+const LINK: NodeSecurity = NodeSecurity::new(0o777, 0, 0);
 
 struct Disk {
     block_size: u32,
@@ -86,31 +92,30 @@ fn populated(block_size: u32, revision: u16) -> Vec<u8> {
     };
     let mut fs = Udf::format(disk, &options).expect("formats");
     let root = fs.root();
-    let dir = fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
-    fs.create(dir, b"inner.txt", NodeKind::RegularFile)
+    let dir = fs
+        .create(root, b"dir", NodeKind::Directory, &DIR)
+        .expect("mkdir");
+    let inner = fs
+        .create(dir, b"inner.txt", NodeKind::RegularFile, &FILE)
         .expect("create");
-    fs.write_all(dir, b"inner.txt", 0, b"inner").expect("write");
-    fs.create(root, b"a", NodeKind::RegularFile)
+    fs.write_all(inner, 0, b"inner").expect("write");
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE)
         .expect("create");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE)
         .expect("create");
     for i in 0..60u8 {
         let block = vec![i; block_size as usize];
-        fs.write_all(root, b"a", u64::from(i) * u64::from(block_size), &block)
+        fs.write_all(a, u64::from(i) * u64::from(block_size), &block)
             .expect("a");
-        fs.write_all(root, b"b", u64::from(i) * u64::from(block_size), &block)
+        fs.write_all(b, u64::from(i) * u64::from(block_size), &block)
             .expect("b");
     }
-    fs.punch(
-        root,
-        b"a",
-        u64::from(block_size) * 3,
-        u64::from(block_size) * 4,
-    )
-    .expect("punch");
-    let a = fs.lookup(root, b"a").expect("a");
+    fs.punch(a, u64::from(block_size) * 3, u64::from(block_size) * 4)
+        .expect("punch");
     fs.link(dir, b"a-again", a).expect("link");
-    fs.create_link(root, b"link", b"/dir/../a")
+    fs.create_link(root, b"link", b"/dir/../a", &LINK)
         .expect("symlink");
     fs.set_attr(a, b"mac.type", b"TEXT").expect("type");
     fs.set_attr(dir, b"mac.finderflags", &[0x40, 0])
@@ -128,16 +133,43 @@ fn exercise(bytes: Vec<u8>, block_size: u32, write: bool) {
     let mut visited = 0;
     visit(&mut fs, root, 0, &mut visited);
     if write && fs.write_refusal().is_none() {
-        let _ = fs.create(root, b"new", NodeKind::RegularFile);
-        let _ = fs.write_all(root, b"new", 0, &[5u8; 3000]);
-        let _ = fs.write_all(root, b"a", 100, &[6u8; 5000]);
-        if let Ok(a) = fs.lookup(root, b"a") {
+        let record = NodeSecurity::new(0o2640, 1000, 100);
+        if let Ok(new) = fs.create(root, b"new", NodeKind::RegularFile, &record) {
+            if let Ok(held) = fs.pin(new) {
+                let _ = fs.write_all(held, 0, &[5u8; 3000]);
+                let mut back = [0u8; 3000];
+                let _ = fs.read_at(held, 0, &mut back);
+                // Removed while held, it is freed by its last unpin.
+                let _ = fs.remove(root, b"new");
+                let _ = fs.write_all(held, 1000, &[6u8; 600]);
+                let _ = fs.read_at(held, 0, &mut back);
+                let _ = fs.unpin(held);
+            }
+        }
+        let a = fs.lookup(root, b"a");
+        if let Ok(a) = a {
+            let _ = fs.write_all(a, 100, &[6u8; 5000]);
             let _ = fs.set_attr(a, b"mac.creator", b"ttxt");
             let _ = fs.remove_attr(a, b"mac.type");
         }
-        let _ = fs.truncate(root, b"b", 10);
+        // Held, removed, and freed only when every hold is released.
+        if let Ok(b) = fs.lookup(root, b"b").and_then(|b| fs.pin(b)) {
+            let _ = fs.truncate(b, 10);
+            let _ = fs.remove(root, b"b");
+            let _ = fs.write_all(b, 0, &[8u8; 700]);
+        }
         let _ = fs.rename(root, b"dir", root, b"moved");
         let _ = fs.remove(root, b"a");
+        // Ids a removal left stale, or no node ever had, reach nothing.
+        let forged = NodeId::from_raw(root.raw().wrapping_add(1));
+        for id in a.into_iter().chain([forged]) {
+            let _ = fs.write_all(id, 0, &[7u8; 600]);
+            let _ = fs.truncate(id, 1);
+            let _ = fs.punch(id, 0, 512);
+            let _ = fs.parent(id);
+            let _ = fs.pin(id);
+        }
+        let _ = fs.release_pins();
         let _ = fs.flush();
         visited = 0;
         visit(&mut fs, root, 0, &mut visited);
@@ -164,7 +196,12 @@ fn visit(fs: &mut Udf<Disk>, dir: NodeId, depth: usize, visited: &mut usize) {
         }
         let _ = fs.lookup(dir, &name);
         let _ = fs.node_info(node);
+        let _ = fs.parent(node);
         let _ = fs.security(node);
+        if let Ok(held) = fs.pin(node) {
+            let _ = fs.node_info(held);
+            let _ = fs.unpin(held);
+        }
         let mut key = [0u8; 32];
         for index in 0..4 {
             if let Ok(Some(len)) = fs.list_attr(node, index, &mut key) {

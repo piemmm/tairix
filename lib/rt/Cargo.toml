@@ -72,6 +72,10 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 # and which `replace_file` carries a file's extended attributes through.
 tairix-fscopy = { path = "../fscopy", version = "=0.0.0" }
 
+# The directory a path spelling names its file in, alias roots included, which
+# `replace_file` creates when asked to.
+tairix-path = { path = "../path", version = "=0.0.0" }
+
 # The host trap seam used to assert the wrappers' marshalling without a kernel.
 # Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.

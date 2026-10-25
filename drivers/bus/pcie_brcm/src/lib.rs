@@ -32,7 +32,8 @@
 //!   (a generic-timer delay on metal, a no-op in tests).
 //!
 //! Once the link is up the register window is handed to
-//! `tairix_pci::mechanism_brcm`; this crate never enumerates.
+//! `tairix_pci::mechanism_supplied` through the windowed access in
+//! `config_window`; this crate never enumerates.
 //!
 //! # Public surface & capabilities
 //!
@@ -49,10 +50,11 @@
 #![deny(missing_docs)]
 
 use tairix_abi::{
-    CapabilityId, DmaCoherence, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey,
-    RegisterBlock,
+    compatible_key, CapabilityId, DmaCoherence, DriverBindKey, DriverError, DriverHandle,
+    DriverHost, RegisterBlock,
 };
 
+mod config_window;
 pub mod regs;
 pub mod wiring;
 
@@ -92,13 +94,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// bind table is authored from and `devmgr` resolves a node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(b"brcm,bcm2711-pcie") {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(b"brcm,bcm2711-pcie"),
 )];
 
 /// Low 32 bits of a 64-bit address, as a `u32`.
@@ -630,8 +626,8 @@ impl<R: RegisterBlock> BrcmPcieRc<R> {
     /// VL805 on bus 1 never answers until the secondary
     /// ([`regs::RC_SECONDARY_BUS`]) and subordinate
     /// ([`regs::RC_SUBORDINATE_BUS`], kept equal) buses are named — the
-    /// assignment a full enumerator would do, which the windowed `mech_brcm`
-    /// accessor does not.
+    /// assignment a full enumerator would do, which the windowed
+    /// `config_window` accessor does not.
     fn program_bridge_bus_numbers(&mut self) -> Result<(), DriverError> {
         let cur = self.regs.read32(regs::RC_CFG_PRIMARY_BUS)?;
         let mut value = regs::replace_bits(cur, 0, regs::PRIMARY_BUS_PRIMARY_MASK);

@@ -48,8 +48,8 @@ formé avant d'être stocké.
 - `0` — le mot de passe a été remplacé.
 - `1` — la base a refusé ou échoué le remplacement, les deux saisies
   diffèrent, aucun aléa n'était disponible, ou l'enregistrement était mal
-  formé ; la raison est écrite sur la sortie d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+  formé ; la raison est écrite sur la sortie d'erreur. Une ligne de commande
+  non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

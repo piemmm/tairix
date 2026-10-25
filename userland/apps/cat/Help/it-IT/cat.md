@@ -35,9 +35,8 @@ stampa gli altri byte di controllo come `^X` e i byte non ASCII in
 notazione `M-`. `-e`, `-t` e `-A` sono le consuete combinazioni
 `-vE`, `-vT` e `-vET`.
 
-Una sorgente che non può essere letta arresta il comando prima che
-qualsiasi sorgente successiva venga toccata; i byte già scritti
-restano scritti.
+Una sorgente che non può essere letta viene segnalata e la successiva
+viene letta comunque.
 
 ## OPTIONS
 
@@ -73,8 +72,7 @@ restano scritti.
 
 - `0` — ogni sorgente è stata scritta.
 - `1` — una sorgente non è stata letta, o l'output non è stato
-  consegnato.
-- `2` — la riga di comando non è stata compresa.
+  consegnato. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

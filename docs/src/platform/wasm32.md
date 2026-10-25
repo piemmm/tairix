@@ -196,6 +196,12 @@ nothing to shoot down, so synthesising the call would be a fake primitive
 MMU/context-switch/user-entry primitives. This is why only the three
 bare-metal ports carry a `cross_cpu_tlb_shootdown_qemu_*` vertical.
 
+### Message-interrupt multiplexer (`MsiMultiplexer`) — n/a
+
+The optional Arch HAL `MsiMultiplexer` slice (`plans/WIRING.md` W18) is not
+applicable to wasm32: the browser sandbox has no PCI and no device interrupts,
+so there is no message to demultiplex.
+
 ### Hand-rolled host bindings
 
 The host imports in `bindings` are a plain `extern "C"` block resolved

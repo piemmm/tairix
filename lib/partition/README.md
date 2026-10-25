@@ -6,8 +6,8 @@ partition-window `Block` adapter — the one definition the image author
 share, so the bytes one writes are always the bytes the other reads back
 (`AGENTS.md` §2.2).
 
-A flashed TAIRiX disk is **not** one scheme on one board: a Raspberry Pi
-image is MBR, a UEFI x86_64 disk is GPT, and TAIRiX reads either on any
+A flashed TAIRiX disk is **not** one scheme on one board: an image for
+firmware that reads only MBR is MBR, a UEFI x86_64 disk is GPT, and TAIRiX reads either on any
 architecture (`AGENTS.md` §17 — nothing here is board-specific). The
 parser detects the scheme on the device and dispatches; every scheme is
 validated fail-closed against an untrusted, possibly-hostile disk

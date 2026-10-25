@@ -19,12 +19,11 @@
 //! firmware patches the real RAM ranges in at boot — so the memory walk
 //! is asserted for *shape* (`Some`), not for a size.
 
-use tairix_abi::driver::timing::Delay;
 use tairix_abi::{DmaCoherence, HwNode, HwResourceKind};
-use tairix_arch_aarch64::{console, firmware, platform, sd_supply, uart_init};
+use tairix_arch_aarch64::{console, firmware, platform, uart_init};
 use tairix_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use tairix_fdt::Fdt;
-use tairix_vcmailbox::mock::MockFirmware;
+use tairix_vcmailbox::SD_HOST_COMPATIBLE;
 
 #[test]
 fn real_pi4_dtb_discovery() {
@@ -59,17 +58,6 @@ fn real_pi4_dtb_discovery() {
         "a /memory node walks (the firmware patches its reg at boot)"
     );
 
-    // The SD card's rails: power on expander line 6, 1.8 V signalling on
-    // line 4, both the firmware's to drive.
-    let supplies = sd_supply::find_sd_supplies(&fdt).expect("both SD rails");
-    let mut firmware = MockFirmware::healthy();
-    let delay = NoDelay;
-    let mut rails = sd_supply::FirmwareSdSupply::new(&mut firmware, supplies, &delay);
-    rails.set_signalling(1_800_000).expect("1.8 V state");
-    rails.set_power(true).expect("power on");
-    assert!(firmware.gpio_high(4), "VDD_SD_IO_SEL high selects 1.8 V");
-    assert!(firmware.gpio_high(6), "SD_PWR_ON high powers the card");
-
     // The on-disk tree is the B0 stepping's; the firmware rewrites
     // `/emmc2bus` for later parts before the kernel reads it.
     let mut sink = Collect::default();
@@ -82,9 +70,29 @@ fn real_pi4_dtb_discovery() {
         .find(|n| {
             n.match_keys()
                 .iter()
-                .any(|k| k.compatible_bytes() == platform::EMMC2_COMPATIBLE)
+                .any(|k| k.compatible_bytes() == SD_HOST_COMPATIBLE)
         })
         .expect("EMMC2 emitted");
+
+    // The card's rails, the firmware's to drive: VDD_SD_IO_SEL on expander
+    // line 4, high selecting 1.8 V, and SD_PWR_ON on line 6, high powering
+    // the card.
+    let io = emmc2.io_rail().expect("the I/O rail");
+    let power = emmc2.power_rail().expect("the power rail");
+    assert_eq!(
+        (io.line, io.level_1v8, io.level_3v3),
+        (4, Some(true), Some(false))
+    );
+    assert_eq!((power.line, power.active_low), (6, false));
+    // The one line the bring-up binds, signalled by level until its status is
+    // cleared.
+    let wired: Vec<_> = emmc2
+        .resources()
+        .iter()
+        .filter(|r| r.kind() == Some(HwResourceKind::Irq) && !r.is_message())
+        .collect();
+    assert_eq!(wired.len(), 1, "one wired interrupt line");
+    assert!(!wired[0].is_edge_triggered(), "signalled by level");
     let dma: Vec<(u64, u64, u64)> = emmc2
         .resources()
         .iter()
@@ -96,7 +104,7 @@ fn real_pi4_dtb_discovery() {
     // No BCM2711 master states `dma-coherent`, so by Arm's convention none
     // snoops: every DMA grant the board's masters carry says so.
     for compatible in [
-        platform::EMMC2_COMPATIBLE,
+        SD_HOST_COMPATIBLE,
         platform::GENET_COMPATIBLE,
         platform::PCIE_COMPATIBLE,
         tairix_vcmailbox::MAILBOX_COMPATIBLE,
@@ -120,17 +128,6 @@ fn real_pi4_dtb_discovery() {
             coherence.iter().all(|&c| c == DmaCoherence::Unsnooped),
             "{compatible:?} does not snoop"
         );
-    }
-}
-
-/// A delay that returns at once: the probe checks which lines move, not when.
-struct NoDelay;
-
-impl Delay for NoDelay {
-    fn delay_us(&self, _us: u32) {}
-
-    fn now_us(&self) -> u64 {
-        0
     }
 }
 

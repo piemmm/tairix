@@ -113,6 +113,6 @@ and the client-side inverse `driver_error_from_errno` here.
 seams (the protocol halves in `src/tests.rs`; the surface engine in
 `tests/framebuffer.rs`, a separate test crate because its mock
 `RegisterWindow` needs the `unsafe` constructor the library itself
-forbids). Consumed by the framebuffer and Raspberry Pi display services'
+forbids). Consumed by the framebuffer and display-engine services'
 `Run` binaries (service loop + surface engine), the framebuffer QEMU
 verticals (surface engine), and the desktop session (client).

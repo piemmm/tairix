@@ -41,21 +41,34 @@ separately resolvable.
 
 ## Writing
 
-`FilesystemWrite` addresses a target as a `(dir, name)` pair, because a
-FAT file's length and starting cluster live in its parent directory
-entry, not in a self-describing `NodeId`. `create`/`mkdir` write a VFAT
+A file's `NodeId` is the place of its short directory entry, which holds
+its length, starting cluster and stamps, so `write_at` and `truncate` take
+the file's id and keep it; a directory's id is its first cluster. The name
+operations take a `(dir, name)` pair. `create`/`mkdir` write a VFAT
 long-name set bound to an 8.3 short alias taking the lowest `~N` tail no
 live alias holds (so arbitrary, case-preserving names round-trip), chosen
 with the free run of slots it takes in one walk of the directory; `write_at` allocates
 and chains clusters, zero-fills sparse gaps and updates the entry;
 `truncate` frees the tail chain (shrink) or zero-extends (grow); and
-`remove` frees the chain and marks the entry plus its long-name run
-deleted. Free clusters are found by scanning the FAT, directories grow a
-zeroed cluster at a time up to the format's 65,536 entries, and every FAT
+`remove` marks the entry plus its long-name run deleted and frees the chain,
+unless a pin holds the file. Free clusters are found by scanning the FAT,
+directories grow a zeroed cluster at a time up to the format's 65,536
+entries, and every FAT
 mutation is mirrored across all FAT copies. A create stamps the entry from
 the host's wall clock, and a write or truncate moves its last-write stamp,
 as UTC civil time; with no time to give, the entry gets the zero date FAT
-reads as none (`docs/src/filesystem/fat32.md`, Timestamps).
+reads as none (`docs/src/filesystem/fat32.md`, Timestamps). A create
+ignores the record it is given: FAT keeps no owner or mode.
+
+## Pins
+
+A file the kernel pins is reported under a token until its last unpin, so it
+keeps one id through renames, and a removal deletes a pinned file's entry but
+keeps its chain until then; a pinned directory keeps its own id, its cluster
+held. The driver therefore declares `NodeIdentity::ContentDerived`. No pin
+outlives the mount, and FAT keeps no orphan record, so a crash with a deleted
+file still pinned leaves its chain to the format's checker
+(`docs/src/filesystem/fat32.md`, Pins).
 
 ## Limitations
 
@@ -104,6 +117,20 @@ allocation-free in-memory FAT32 image and exercises:
   `truncate` shrink and grow, `remove` + name reuse, `mkdir` with a
   nested file, and the `AlreadyExists`/`DirectoryNotEmpty`/`DirectoryCycle`/
   `Unsupported`/`NotFound` guards.
+- Node ids: a file's id is its short entry's place, the number `stat`
+  reports, lasts through writes and truncations, differs between two empty
+  files, and names nothing once a removal or a rename frees the entry; an
+  id naming anything but a file's short entry is refused. `parent` reads
+  `..`, the root answers itself, and a removed directory answers
+  `NotFound`.
+- Pins: every hold of a node answering one token, counted to its last
+  unpin; lookups and listings answering the token while `stat` reports the
+  entry's place; a pinned file kept through renames, its directory's rename
+  and a move; a removed or replaced pinned file reading, writing and
+  truncating through its token with its chain kept until the last unpin
+  frees it; a removed pinned directory taking no entries; `release_pins`;
+  the chain a removal leaves allocated when the mount ends; and a removed
+  directory's id refusing new entries.
 - Placement: the lowest free alias tail, past a thousand held ones, found
   in one pass; a full directory refusing a name and reusing freed slots;
   an entry deleted across a cluster boundary; a create refused before it

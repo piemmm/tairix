@@ -1,5 +1,5 @@
 //! `plans/PI.md` P6e-3b-ii / P11 QEMU integration test: boot the aarch64
-//! (Raspberry Pi 4) `tairix-kernel` pipeline on the `virt` board, spawn
+//! `tairix-kernel` pipeline on the `virt` board, spawn
 //! PID 1 (`init`) into EL0, and prove `init` **supervises** the embedded
 //! login session (`/System/Services/login.app/Run`) — launching it, waiting on and
 //! reaping it when it exits, and relaunching it — rather than spawning it

@@ -310,15 +310,16 @@ pub fn system_account_uid(name: &str) -> Option<Uid> {
         .map(|spec| spec.uid)
 }
 
-/// The compiled-in accounts' `(uid, username)` directory pairing, in
-/// stable table order — the rows the kernel's user-directory
-/// introspection serves ahead of the on-disk human records, so `ls -l`,
-/// `ps`, and `top` render a system uid's name without any volume being
-/// mounted. Carries no credential material.
-pub fn system_account_directory() -> impl Iterator<Item = (u32, &'static str)> {
+/// The compiled-in accounts as the public user directory lists them — uid,
+/// login group and username, in stable table order — the rows the kernel's
+/// user-directory introspection serves ahead of the on-disk human records,
+/// so `ls -l`, `ps`, and `top` render a system uid's name, and `chown
+/// OWNER:` its login group, without any volume being mounted. Carries no
+/// credential material.
+pub fn system_account_directory() -> impl Iterator<Item = (Uid, Gid, &'static str)> {
     SYSTEM_ACCOUNTS
         .iter()
-        .map(|spec| (spec.uid.0, spec.username))
+        .map(|spec| (spec.uid, spec.primary_gid, spec.username))
 }
 
 /// Whether `name` is a compiled-in system account's username.

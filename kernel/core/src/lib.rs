@@ -119,6 +119,7 @@ pub mod loadavg;
 pub mod memmap;
 pub mod memstats;
 pub mod memtest;
+pub mod msimux;
 pub mod notice;
 pub mod panic;
 pub mod peerwatch;
@@ -164,10 +165,9 @@ pub mod test_arch;
 // `cfg(test)` only — never a production or integration-test allocator.
 #[cfg(test)]
 pub(crate) mod test_alloc;
-// Shared host-test fixtures for the on-disk bundle spawn path (an
-// in-memory filesystem + the signed-bundle composer), used by both the
-// `appspawn` unit tests and the `spawn` syscall-handler tests so the fake
-// volume is defined once.
+// Shared host-test fixtures for the filesystem seam and the on-disk bundle
+// spawn path (the nodes a test service opens, an in-memory filesystem, the
+// signed-bundle composer), so the fake volume is defined once.
 #[cfg(test)]
 pub(crate) mod test_bundle;
 // Shared host-test entropy stand-in for the reserve and `random_get` tests.
@@ -236,10 +236,10 @@ pub use filemap::{FileMap, NullFileMap, NULL_FILE_MAP};
 pub use forever::forever;
 pub use fs::{
     read_bootstrap_file, Access, AclEntry, AclWho, Attachment, BootstrapFile, BoundedReadError,
-    CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService, IdentityAlreadyInstalled,
-    LateFilesystem, LateIdentity, Metadata, Mode, MountPoint, MountTable, MountedFilesystemService,
-    NullFilesystemService, Path, Vfs, VfsError, VolumeForest, VolumePublishError, VolumeService,
-    NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
+    CachedFs, Credentials, DriverLock, FilesystemAlreadyInstalled, FilesystemService,
+    IdentityAlreadyInstalled, LateFilesystem, LateIdentity, Metadata, Mode, MountTable,
+    MountedFilesystemService, NullFilesystemService, Path, Projection, Vfs, VfsError, VolumeForest,
+    VolumePublishError, VolumeService, NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
 pub use groups::{
     build_identity_table, load_groups_db, system_identity_table, GroupsDbSource, GroupsLoadError,
@@ -262,6 +262,7 @@ pub use kthread_irq::{CooperativeYield, KthreadIrqWaiter};
 pub use launch_cache::LaunchCache;
 pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap, LiveSharedMem};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
+pub use msimux::{MsiMuxLines, MsiMuxLinesError};
 pub use panic::{fault_dump, handle_panic, panic_dump, PanicContext};
 pub use peerwatch::PeerWatch;
 pub use pipe::{Pipe, PipeEnd, PipeRole, PIPE_CAPACITY};

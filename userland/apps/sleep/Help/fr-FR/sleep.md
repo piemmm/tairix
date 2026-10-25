@@ -46,9 +46,9 @@ telle chaîne, donc — contrairement à GNU `sleep` — elle n'a pas d'option
 ## EXIT STATUS
 
 - `0` — l'intervalle s'est écoulé, ou l'aide courte demandée a été écrite.
-- `1` — l'écriture de l'aide courte a échoué.
-- `2` — la ligne de commande n'a pas été comprise (option inconnue,
-  opérande manquant ou intervalle de temps invalide).
+- `1` — l'écriture de l'aide courte a échoué. Une ligne de commande non
+  comprise (option inconnue, opérande manquant ou intervalle de temps
+  invalide) sort aussi avec `1`.
 
 ## ENVIRONMENT
 

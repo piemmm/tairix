@@ -2472,21 +2472,42 @@ impl Form {
         self.rebuild();
     }
 
-    /// Adopt what the cooling service answered. A reading that moves only
-    /// the temperature restates that one row; anything else rebuilds.
-    pub(crate) fn adopt_cooling(&mut self, reading: &Cooling) {
-        let only_temperature = self.cooling.only_temperature_moves(reading);
+    /// Adopt what the cooling service answered, reporting into `damage` the
+    /// rows it moved: none for the reading already held, the STATUS rows in
+    /// place while the header's lines stand, and a rebuild otherwise.
+    pub(crate) fn adopt_cooling(
+        &mut self,
+        reading: &Cooling,
+        place: FormPlace<'_>,
+        damage: &mut Region,
+    ) {
+        if self.cooling == *reading {
+            return;
+        }
+        let in_place = self.cooling.moves_only_status(reading);
         self.cooling = reading.clone();
-        if !only_temperature {
+        if !in_place {
             self.rebuild();
             return;
         }
-        let rows = crate::pi::status_rows(&self.cooling);
+        let before = self.layouts(place);
+        let mut moved = Vec::new();
+        let mut reshaped = false;
         if let Some(group) = self.groups.get_mut(COOLING_STATUS_GROUP) {
-            for (held, fresh) in group.rows_mut().iter_mut().zip(rows) {
-                *held.control_mut() = fresh.control().clone();
+            let fresh = crate::pi::status_rows(&self.cooling);
+            for (index, (held, fresh)) in group.rows_mut().iter_mut().zip(&fresh).enumerate() {
+                match adopt_row(held, fresh) {
+                    Adopted::Same => {}
+                    Adopted::Moved => moved.push((COOLING_STATUS_GROUP, index)),
+                    Adopted::Reshaped => reshaped = true,
+                }
             }
         }
+        if reshaped {
+            self.rebuild();
+            return;
+        }
+        self.report_moved(&before, &moved, place, damage);
     }
 
     /// Adopt what the desktop session answered of the user's sound choices.
@@ -3347,6 +3368,19 @@ impl Form {
             self.rebuild();
             return;
         };
+        self.report_moved(&before, &moved, place, damage);
+    }
+
+    /// Report each of the `moved` rows into `damage` where the form still lays
+    /// out as it did `before`, or have it laid out again where it does not, so
+    /// nothing is drawn against a stale layout.
+    fn report_moved(
+        &mut self,
+        before: &[(usize, FieldLayout)],
+        moved: &[(usize, usize)],
+        place: FormPlace<'_>,
+        damage: &mut Region,
+    ) {
         if moved.is_empty() {
             return;
         }
@@ -3359,7 +3393,7 @@ impl Form {
             self.reshaped = true;
             return;
         }
-        for (group, row) in moved {
+        for &(group, row) in moved {
             let rect = after
                 .iter()
                 .find_map(|(at, layout)| (*at == group).then_some(*layout))
@@ -3388,6 +3422,8 @@ impl Form {
             machine_zone,
             savers,
             catalog,
+            config,
+            cooling,
             ..
         } = self;
         let mut moved = Vec::new();
@@ -3414,6 +3450,9 @@ impl Form {
                     (Owner::Saver(changed), Owner::Saver(row)) if changed == row => {
                         crate::saver::chosen(savers, &settings.screensaver)
                             .and_then(|saver| row.row(saver, settings, catalog))
+                    }
+                    (Owner::Machine(changed), Owner::Machine(setting)) if changed == setting => {
+                        Some(setting.row(config.as_ref(), cooling))
                     }
                     _ => continue,
                 };
@@ -3639,6 +3678,9 @@ impl Form {
                         | MachineSetting::FanHysteresis
                 ) {
                     self.rebuild();
+                } else if setting == MachineSetting::FanLine {
+                    // Its choices are drawn around the line it stages.
+                    self.restating = Some(owner);
                 }
                 FormOutcome::Staged
             }
@@ -4183,6 +4225,16 @@ impl Form {
         self.listing().is_some()
     }
 
+    /// Whether a row is in the middle of a gesture — a choice list open, or a
+    /// slider being dragged — which rebuilding the rows would drop.
+    #[must_use]
+    pub(crate) fn mid_gesture(&self) -> bool {
+        self.groups.iter().flat_map(FieldGroup::rows).any(|row| {
+            row.popup_open()
+                || matches!(row.control(), FieldControl::Slider(slider) if slider.is_dragging())
+        })
+    }
+
     /// The group holding the open choice list, if one is open.
     fn listing(&self) -> Option<usize> {
         self.groups.iter().position(|group| {
@@ -4239,6 +4291,17 @@ fn adopt_row(held: &mut FieldRow, built: &FieldRow) -> Adopted {
         (FieldControl::Slider(held), FieldControl::Slider(built)) => {
             let differs = held.value() != built.value();
             held.set_value(built.value());
+            differs
+        }
+        // A reading holds no interaction state, so it is restated whole.
+        (
+            held @ (FieldControl::Reading(_) | FieldControl::Unmeasured(_)),
+            built @ (FieldControl::Reading(_) | FieldControl::Unmeasured(_)),
+        ) => {
+            let differs = *held != *built;
+            if differs {
+                held.clone_from(built);
+            }
             differs
         }
         _ => return Adopted::Reshaped,

@@ -60,6 +60,20 @@ fn a_later_link_of_a_chain_is_named_by_its_place() {
     assert_eq!(naming("radio.ogg", 0), "radio.ogg");
 }
 
+/// A line names its file as every `name: reason` line does, quoted where a
+/// shell needs it or where it holds a `:`, its hidden characters escaped.
+#[test]
+fn a_line_names_its_file_quoted_where_a_name_needs_it() {
+    assert_eq!(naming("radio.ogg", 0), "radio.ogg");
+    assert_eq!(naming("a:b.ogg", 1), "'a:b.ogg' (link 2)");
+    assert_eq!(naming("e\u{1b}[2J.wav", 0), "'e'$'\\033''[2J.wav'");
+    let line = text(&left_out("e\u{1b}[2J.wav", Skip::StartsPastEnd, true));
+    assert!(
+        line.contains("'e'$'\\\\033''[2J.wav' was not played"),
+        "{line}"
+    );
+}
+
 /// A file name is the user's text and may hold anything a name may.
 #[test]
 fn a_hostile_file_name_cannot_break_a_record() {

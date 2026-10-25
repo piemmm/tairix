@@ -1,9 +1,11 @@
 //! The parsed shape of a `sysmon` command line.
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::SysmonError;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `sysmon`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `sysmon`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: sysmon [-d secs.tenths] [-h | -?]";
 
 /// The default refresh delay in tenths of a second: `top`'s 3.0 s, the
@@ -43,47 +45,50 @@ pub enum Command {
     Help,
 }
 
+/// What each of `sysmon`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Delay,
+    Help,
+}
+
+/// `sysmon`'s option, as GNU `top` spells it, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('d', &["delay"], Flag::Delay),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `sysmon [-d secs.tenths] [-h | -?]`:
+/// The grammar is `sysmon [-d secs.tenths] [-h | -?]`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options clustered, a value attached
+/// (`-d5`, `--delay=5`) or the next argument, a long option by any
+/// unambiguous prefix, `--` ending them.
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md §4; they win immediately).
-/// * `-d secs.tenths` / `-dsecs.tenths` / `--delay secs.tenths` /
-///   `--delay=secs.tenths` — the refresh interval between automatic
-///   redisplays, exactly GNU `top`'s `-d, --delay` spellings, parsed by the
-///   shared full-screen-viewer grammar. A zero delay is clamped to the
-///   0.1 s minimum rather than busy-looping.
-/// * anything else — a [`SysmonError::Usage`] error. The monitor takes no
-///   operands; its panels and interval are keys pressed inside the session.
+/// * `-d secs.tenths` / `--delay secs.tenths` — the refresh interval between
+///   automatic redisplays, exactly GNU `top`'s `-d, --delay` spellings,
+///   parsed by the shared full-screen-viewer grammar. A zero delay is clamped
+///   to the 0.1 s minimum rather than busy-looping. The last one given wins.
+/// * an operand — a [`SysmonError::Usage`] error. The monitor takes none; its
+///   panels and interval are keys pressed inside the session.
 ///
 /// # Errors
 ///
-/// [`SysmonError::Usage`] for any input outside the grammar above,
-/// including a missing or malformed delay value.
+/// * [`SysmonError::Option`] — an option `getopt` refuses, in its words.
+/// * [`SysmonError::Usage`] — an operand, or a malformed delay value.
 pub fn parse(args: &[&str]) -> Result<Command, SysmonError> {
     let mut delay_tenths = DEFAULT_DELAY_TENTHS;
-    let mut rest = args;
-    while let Some((&arg, tail)) = rest.split_first() {
-        match arg {
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "-d" | "--delay" => {
-                let (&value, tail) = tail.split_first().ok_or(SysmonError::Usage)?;
-                delay_tenths = parse_delay_tenths(value)?;
-                rest = tail;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(SysmonError::Option)? {
+            Arg::Operand(_) => return Err(SysmonError::Usage),
+            Arg::Opt(Flag::Delay, value) => {
+                delay_tenths = parse_delay_tenths(value.unwrap_or_default())?;
             }
-            _ => {
-                let value = if let Some(attached) = arg.strip_prefix("--delay=") {
-                    attached
-                } else if let Some(attached) = arg.strip_prefix("-d") {
-                    attached
-                } else {
-                    return Err(SysmonError::Usage);
-                };
-                delay_tenths = parse_delay_tenths(value)?;
-                rest = tail;
-            }
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
     }
     Ok(Command::Run { delay_tenths })

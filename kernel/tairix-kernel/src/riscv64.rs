@@ -1,4 +1,4 @@
-//! The riscv64 (QEMU `virt` / SiFive) boot pipeline and `KernelArch` port
+//! The riscv64 boot pipeline and `KernelArch` port
 //! wrapper.
 //!
 //! Every module here names the riscv64 architecture port, so the whole

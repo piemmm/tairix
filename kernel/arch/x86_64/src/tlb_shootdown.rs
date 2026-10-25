@@ -374,10 +374,10 @@ pub fn serve_pending() {
     SHOOTDOWN.pending.fetch_sub(1, Ordering::Release);
 }
 
-/// Past this many pages one `CR3` reload is cheaper than an `invlpg` each:
-/// Linux's measured `tlb_single_page_flush_ceiling`
-/// (`Documentation/arch/x86/tlb.rst`). It also bounds a sparse unmap's span,
-/// which would otherwise cost an `invlpg` per page of its gaps.
+/// Past this many pages one `CR3` reload is taken to be cheaper than an
+/// `invlpg` each; any ceiling is correct, only the cost moves. It also
+/// bounds a sparse unmap's span, which would otherwise cost an `invlpg` per
+/// page of its gaps.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
 const SINGLE_PAGE_FLUSH_CEILING: usize = 33;
 

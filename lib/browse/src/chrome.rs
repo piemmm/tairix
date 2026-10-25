@@ -254,8 +254,8 @@ pub enum ManagerTool {
     /// as a refusal, not hidden.
     Trash,
     /// Empty the user's Trash — permanently remove its contents
-    /// ([`empty_trash_plan`](crate::trash::empty_trash_plan) driven by the
-    /// shared [`DeleteWalk`](crate::delete::DeleteWalk)). Offered only when the
+    /// ([`empty_trash_plan`](crate::trash::empty_trash_plan) carried out by
+    /// the recursive removal a delete uses). Offered only when the
     /// current directory *is* the user's Trash and it is non-empty (the
     /// [`ManagerToolModel`] the file manager builds); it renders disabled
     /// elsewhere, never hidden, so the toolbar's shape is stable.
@@ -414,8 +414,8 @@ pub enum ContextCommand {
     /// Drop the whole selection ([`clear_selection`](Browser::clear_selection)).
     ClearSelection,
     /// Delete the selected entry — the modal-confirmed recursive removal the
-    /// app drives through [`plan_delete`](Browser::plan_delete) and the shared
-    /// [`DeleteWalk`](crate::delete::DeleteWalk). Acts on the selection, so it
+    /// app plans through [`plan_delete`](Browser::plan_delete) and carries out
+    /// through the shared engine (`lib/fscopy`). Acts on the selection, so it
     /// is offered only when one exists.
     Delete,
 }

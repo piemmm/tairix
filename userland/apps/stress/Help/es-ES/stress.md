@@ -81,8 +81,8 @@ flujo de información estándar consultivo (fd 3).
 - `0` — la ejecución terminó (los rechazos tipados de los
   trabajadores son resultados esperados y no la hacen fallar).
 - `1` — un trabajador falló de verdad, o la ejecución no pudo
-  prepararse.
-- `2` — la línea de comandos no se entendió.
+  prepararse. Una línea de comandos no entendida también termina con
+  `1`.
 - `130` / `143` — `Ctrl-C` / `Terminate` terminó la ejecución, tras
   desmontar a los trabajadores y eliminar los archivos de trabajo.
 

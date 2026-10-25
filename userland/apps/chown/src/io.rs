@@ -1,94 +1,52 @@
-//! The seams through which `chown` touches the outside world, and the data
-//! they carry.
-//!
-//! Keeping the filesystem and the terminal behind object-safe traits is what
-//! lets the owner-changing logic in [`crate::client`] run against in-memory
-//! fixtures with no kernel, mirroring the seam design of the other userland
-//! crates (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s
-//! `Transport`, `cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`,
-//! `cp`'s and `mv`'s `FileSystem`, `chmod`'s `FileSystem`).
+//! The seam `chown` reads owner and group names through, and the stream it
+//! reports on.
 
 use alloc::string::String;
+
 use tairix_abi::Errno;
 
-/// What kind of object a path or directory entry is, as far as `chown` cares.
-///
-/// The only distinction `chown` needs is whether an object is a directory,
-/// because `-R` descends into one. Everything else — a regular file, a
-/// symbolic link, a device node — is treated as a non-directory.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EntryKind {
-    /// A directory, whose entries `chown -R` descends into.
-    Directory,
-    /// Any non-directory object.
-    File,
-}
-
-/// The metadata `chown` reads for a path: its kind and current ownership
-/// (the [`tairix_abi::fs::FileStat`] fields the tool actually uses — the
-/// old owner backs the `-c`/`-v` reports).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Metadata {
-    /// What kind of object the path is.
-    pub kind: EntryKind,
-    /// The current owning user id.
-    pub uid: u32,
-    /// The current owning group id.
-    pub gid: u32,
-}
-
-/// One directory entry: a name and its [`EntryKind`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Entry {
-    /// The entry's name within its directory (not a full path, and never
-    /// `.` or `..` — the seam does not surface those).
-    pub name: String,
-    /// What kind of object the entry is. The recursive descent reuses this so
-    /// it never re-inspects a child it already learned the kind of.
-    pub kind: EntryKind,
-}
-
-/// Inspects paths, changes their owner, and enumerates directories for `-R`.
-///
-/// The client [`stat`](FileSystem::stat)s each operand to learn whether it is
-/// a directory, applies the new owner with
-/// [`set_owner`](FileSystem::set_owner), and — for a recursive (`-R`) change
-/// of a directory — enumerates it with [`read_dir`](FileSystem::read_dir),
-/// calling it with an increasing `index` until it returns [`None`] and
-/// recursing into each child.
-pub trait FileSystem {
-    /// Return the [`Metadata`] of `path`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::NotFound`] for a
-    /// missing path or [`Errno::PermissionDenied`] when the caller may not
-    /// reach it.
-    fn stat(&self, path: &str) -> Result<Metadata, Errno>;
-
-    /// Set the owning user and/or group of `path`.
-    ///
-    /// `uid` and `gid` are [`Some`] when that field is to change and [`None`]
-    /// when it is to be left as it is, so an `OWNER`-only or `:GROUP`-only
-    /// spec touches only the field it names.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`]
-    /// when the caller lacks the authority to change ownership.
-    fn set_owner(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> Result<(), Errno>;
-
-    /// Return the entry at position `index` in the directory `path`, or
-    /// [`None`] once `index` is past the last entry.
-    ///
-    /// The client reads a directory by calling this with `index` `0, 1, 2, …`
-    /// until it returns [`None`]. The entries `.` and `..` are never
-    /// returned.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises while reading the directory.
-    fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno>;
-}
-
 pub use tairix_util::output::Output;
+
+/// An account the directory lists, as an owner operand names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Account {
+    /// Its uid.
+    pub uid: u32,
+    /// Its login group, which `OWNER:` gives.
+    pub login_group: u32,
+}
+
+/// The account and group directories an owner operand's names are read
+/// against.
+pub trait Accounts {
+    /// The account named `name`, or [`None`] when the directory lists none.
+    ///
+    /// # Errors
+    ///
+    /// The directory could not be read, which is never taken for an absent
+    /// name.
+    fn user(&self, name: &str) -> Result<Option<Account>, Errno>;
+
+    /// The gid of the group named `name`, or [`None`] when the directory
+    /// lists none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Accounts::user`].
+    fn group(&self, name: &str) -> Result<Option<u32>, Errno>;
+
+    /// The name of the account `uid`, or [`None`] when the directory lists
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Accounts::user`].
+    fn user_name(&self, uid: u32) -> Result<Option<String>, Errno>;
+
+    /// The name of the group `gid`, or [`None`] when the directory lists none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Accounts::user`].
+    fn group_name(&self, gid: u32) -> Result<Option<String>, Errno>;
+}

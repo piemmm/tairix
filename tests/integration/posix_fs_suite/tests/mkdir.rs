@@ -1,120 +1,92 @@
 //! `mkdir(2)` conformance: directory creation, `EEXIST`, `ENOENT`,
 //! `ENOTDIR`, and the refusal to mutate the mount root itself.
 //!
-//! Every case drives the real `arxfs` driver through
-//! [`Vfs::mkdir_via_secured`], the per-inode-security delegation path the
-//! kernel uses for a native filesystem.
+//! Every case drives the real `arxfs` driver through the kernel's filesystem
+//! service, the path every `fs_mkdir` takes.
 
 use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn mkdir_creates_a_directory() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("d")), &mut fs)
+    vol.mkdir(owner, &vol_path("d"), new_dir())
         .expect("mkdir succeeds");
 
-    let info = vfs
-        .stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("d")),
-            &mut fs,
-            FinalLink::Follow,
-        )
+    let info = vol
+        .stat(owner, &vol_path("d"), FinalLink::Follow)
         .expect("stat the new directory");
-    assert_eq!(info.kind, NodeKind::Directory);
+    assert_eq!(info.kind, FileKind::Directory);
 }
 
 #[test]
 fn mkdir_creates_nested_directories() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("a")), &mut fs)
+    vol.mkdir(owner, &vol_path("a"), new_dir())
         .expect("mkdir a");
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("a/b")), &mut fs)
+    vol.mkdir(owner, &vol_path("a/b"), new_dir())
         .expect("mkdir a/b");
 
-    let names: Vec<(NodeKind, String)> = vfs
-        .list_all_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("a")),
-            &mut fs,
-            FinalLink::Follow,
-            usize::MAX,
-        )
-        .expect("list a")
-        .into_iter()
-        .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
-        .collect();
-    assert_eq!(names, [(NodeKind::Directory, String::from("b"))]);
+    let entries = vol.list(owner, &vol_path("a")).expect("list a");
+    assert_eq!(kinds(&entries), [(FileKind::Directory, "b")]);
 }
 
 #[test]
 fn mkdir_existing_name_is_already_exists() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dup")), &mut fs)
+    vol.mkdir(owner, &vol_path("dup"), new_dir())
         .expect("first mkdir");
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dup")), &mut fs),
-        Err(VfsError::AlreadyExists)
+        vol.mkdir(owner, &vol_path("dup"), new_dir()),
+        Err(Errno::AlreadyExists)
     );
 }
 
 #[test]
 fn mkdir_over_existing_file_is_already_exists() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("f")), &mut fs)
+    vol.create(owner, &vol_path("f"), new_file())
         .expect("create file");
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("f")), &mut fs),
-        Err(VfsError::AlreadyExists)
+        vol.mkdir(owner, &vol_path("f"), new_dir()),
+        Err(Errno::AlreadyExists)
     );
 }
 
 #[test]
 fn mkdir_in_missing_parent_is_not_found() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-
+    let vol = arxfs_volume(false);
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("missing/child")), &mut fs),
-        Err(VfsError::NotFound)
+        vol.mkdir(ROOT.caller(), &vol_path("missing/child"), new_dir()),
+        Err(Errno::NotFound)
     );
 }
 
 #[test]
 fn mkdir_with_file_as_parent_is_not_a_directory() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("file")), &mut fs)
+    vol.create(owner, &vol_path("file"), new_file())
         .expect("create file");
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("file/child")), &mut fs),
-        Err(VfsError::NotADirectory)
+        vol.mkdir(owner, &vol_path("file/child"), new_dir()),
+        Err(Errno::NotADirectory)
     );
 }
 
 #[test]
-fn mkdir_of_the_mount_root_itself_is_invalid() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-
+fn mkdir_of_the_mount_root_itself_finds_it_there() {
+    let vol = arxfs_volume(false);
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vfs.cover(&path(MOUNT)), &mut fs),
-        Err(VfsError::InvalidPath)
+        vol.mkdir(ROOT.caller(), MOUNT, new_dir()),
+        Err(Errno::AlreadyExists)
     );
 }

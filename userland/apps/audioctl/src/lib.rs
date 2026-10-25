@@ -32,6 +32,7 @@ use tairix_procinfo::{
     CallError, ListError, Output, StreamScope, Transport, WalkStep, AUDIO_DEVICE_HEADER,
     AUDIO_STREAM_HEADER,
 };
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
 /// The command word the tool's help and `stdinfo` records go by.
@@ -74,8 +75,9 @@ pub enum Command {
 pub enum UsageError {
     /// A command word the tool does not have.
     UnknownCommand(String),
-    /// An option the command does not take.
-    UnknownOption(String),
+    /// An option `getopt` refuses, or `-a` with a command other than
+    /// `streams`, worded as `getopt` words it.
+    Option(Refusal),
     /// The command needs this operand.
     Missing(&'static str),
     /// An operand past those the command takes.
@@ -90,9 +92,7 @@ impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownCommand(word) => write!(f, "unknown command {word}", word = quote(word)),
-            Self::UnknownOption(option) => {
-                write!(f, "unrecognized option {option}", option = quote(option))
-            }
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Missing(what) => write!(f, "missing {what}"),
             Self::Extra(operand) => write!(f, "extra operand {operand}", operand = quote(operand)),
             Self::Device(text, err) => write!(f, "{text}: {err}", text = quote(text)),
@@ -112,44 +112,70 @@ impl fmt::Display for UsageError {
     }
 }
 
+/// What each of `audioctl`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    All,
+    Help,
+    Version,
+}
+
+/// `audioctl`'s options and the reserved help switches, `streams`'s `-a`
+/// last.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+    Opt::long(&["version"], Takes::Nothing, Flag::Version),
+    Opt::flag('a', &["all"], Flag::All),
+];
+
+/// The options every command but `streams` takes.
+const COMMON_OPTIONS: &[Opt<Flag>] = match OPTIONS.split_last() {
+    Some((_, common)) => common,
+    None => &[],
+};
+
 /// Read the argument vector, the program's own name excluded.
 ///
-/// A level is often negative, so an operand of a digit after its `-` is a
-/// number rather than an option: no option of this tool is spelled so.
+/// It is read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere
+/// among the operands, clustered, a long one by any unambiguous prefix, `--`
+/// ending them. A level is often negative, so a dash and a digit or a dot is
+/// a number rather than an option: no option of this tool is spelled so. The
+/// help switches (`-h`, `-?`, `--help`) and `--version` answer at once. The
+/// first operand is the command word, and `-a` is the `streams` command's
+/// alone.
 ///
 /// # Errors
 ///
-/// The [`UsageError`] the first malformed argument makes.
+/// The [`UsageError`] the first malformed argument makes:
+/// [`UsageError::Option`] for an option `getopt` refuses, and for `-a` given
+/// to another command.
 pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
     let mut words: Vec<&str> = Vec::new();
-    let mut all: Option<&str> = None;
-    let mut options_ended = false;
-    for &arg in args {
-        let numeric = arg
-            .strip_prefix('-')
-            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
-        if options_ended || numeric || !arg.starts_with('-') || arg == "-" {
-            words.push(arg);
-            continue;
-        }
-        match arg {
-            "--" => options_ended = true,
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "--version" => return Ok(Command::Version),
-            "-a" | "--all" => all = Some(arg),
-            _ => return Err(UsageError::UnknownOption(String::from(arg))),
+    let mut all = false;
+    for arg in Scan::new(OPTIONS, args, Order::Permute).numbers_are_operands() {
+        match arg.map_err(UsageError::Option)? {
+            Arg::Operand(word) => words.push(word),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Version, _) => return Ok(Command::Version),
+            Arg::Opt(Flag::All, _) => all = true,
         }
     }
     let (word, operands) = match words.split_first() {
         Some((word, operands)) => (*word, operands),
         None => ("devices", &[][..]),
     };
-    if let Some(option) = all.filter(|_| word != "streams") {
-        return Err(UsageError::UnknownOption(String::from(option)));
+    // Read again without `-a`, so the refusal names it as it was typed.
+    if all && word != "streams" {
+        let refusal = Scan::new(COMMON_OPTIONS, args, Order::Permute)
+            .numbers_are_operands()
+            .find_map(Result::err)
+            .unwrap_or(Refusal::UnknownShort('a'));
+        return Err(UsageError::Option(refusal));
     }
     let command = match word {
         "devices" => Command::Devices,
-        "streams" => Command::Streams { all: all.is_some() },
+        "streams" => Command::Streams { all },
         "default" => Command::Set(device(operands)?, DeviceControl::Default),
         "level" => {
             let target = device(operands)?;

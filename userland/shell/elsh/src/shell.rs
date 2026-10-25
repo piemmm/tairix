@@ -28,13 +28,13 @@ use crate::host::{
     NULL_LIMIT_STORE,
 };
 use crate::job::{ExitStatus, JobState, JobTable, WaitOutcome};
-use crate::lexer::{has_pattern_group, FdSpec, Segment, Word};
+use crate::lexer::{has_pattern_group, here_doc_word, FdSpec, Word};
 use crate::options::{ShellOption, ShellOptions};
 use crate::parser::{
     parse, Command, CommandList, ListEntry, OpenMode, Pipeline, Redirection, RunCondition,
 };
-use crate::pathexp::{GlobFs, NULL_FS};
-use tairix_util::quote::quote_if_needed;
+use crate::pathexp::{GlobFs, Ignore, NULL_FS};
+use tairix_util::quote::quote_subject;
 
 /// Standard output's descriptor — the target of a combined `&>` open.
 const STDOUT_FD: u32 = 1;
@@ -65,6 +65,7 @@ pub struct Shell<'a> {
     elevator: &'a dyn Elevator,
     fs: &'a dyn GlobFs,
     options: ShellOptions,
+    ignore: Ignore,
     exit: Option<i32>,
     next_dyn_fd: u32,
 }
@@ -93,6 +94,7 @@ impl<'a> Shell<'a> {
             elevator: &NULL_ELEVATOR,
             fs: &NULL_FS,
             options: ShellOptions::default(),
+            ignore: Ignore::default(),
             exit: None,
             next_dyn_fd: FIRST_DYN_FD,
         }
@@ -147,6 +149,14 @@ impl<'a> Shell<'a> {
         &self.env
     }
 
+    /// Bring `PWD` into step with the working directory before the first
+    /// prompt: a `PWD` naming the working directory stays, and otherwise
+    /// `PWD` takes the directory's own path; the shell never changes
+    /// directory to follow it. `OLDPWD` starts equal to it.
+    pub fn settle_working_directory(&mut self) {
+        crate::cwd::settle(&mut self.env, self.host);
+    }
+
     /// The shell's job table.
     #[must_use]
     pub fn jobs(&self) -> &JobTable {
@@ -171,8 +181,9 @@ impl<'a> Shell<'a> {
     /// # Errors
     ///
     /// Returns [`ParseError`] if the line cannot be lexed, parsed, or
-    /// expanded; in that case the error is reported, `$?` becomes 2, and
-    /// nothing from the line runs.
+    /// expanded; in that case the error is reported, `$?` becomes the
+    /// error's [status](ParseError::status), and nothing further from the
+    /// line runs.
     pub fn run_line(&mut self, line: &str) -> Result<(), ParseError> {
         let list = self.parse_line(line)?;
         self.run_list(&list)
@@ -235,7 +246,7 @@ impl<'a> Shell<'a> {
 
     fn report(&self, err: &ExpandError) {
         let line = match &err.subject {
-            Some(subject) => format!("shell: {}: {}\n", quote_if_needed(subject), err.error),
+            Some(subject) => format!("shell: {}: {}\n", quote_subject(subject), err.error),
             None => format!("shell: {}\n", err.error),
         };
         self.console.write_stderr(&line);
@@ -250,7 +261,7 @@ impl<'a> Shell<'a> {
     }
 
     fn expander(&self) -> Expander<'_> {
-        Expander::new(&self.env, &self.options, self.fs)
+        Expander::new(&self.env, &self.options, self.fs, &self.ignore)
     }
 
     fn run_entry(&mut self, entry: &ListEntry, budget: &mut Budget) -> Result<(), ExpandError> {
@@ -268,24 +279,48 @@ impl<'a> Shell<'a> {
                 return Ok(());
             }
         }
-        let commands = match self.resolve_pipeline(pipeline, expanded, budget)? {
-            Ok(commands) => commands,
-            Err(status) => {
+        let mut bound = Vec::new();
+        let commands = match self.resolve_pipeline(pipeline, expanded, budget, &mut bound) {
+            Ok(Ok(commands)) => commands,
+            Ok(Err(status)) => {
+                self.restore(bound);
                 self.env
                     .set_last_status(negate_if(pipeline.negated, status));
                 return Ok(());
             }
+            Err(err) => {
+                self.restore(bound);
+                return Err(err);
+            }
         };
-        if entry.background {
+        let launched = if entry.background {
             // `!` negates a pipeline's *exit status*; a background launch
             // reports 0 either way, so negation only applies foreground.
-            self.launch_background(&commands);
+            self.launch_background(&commands)
         } else {
-            self.launch_foreground(&commands);
+            let launched = self.launch_foreground(&commands);
             let status = negate_if(pipeline.negated, self.env.last_status());
             self.env.set_last_status(status);
+            launched
+        };
+        // A `{var}` names a descriptor only once the host has opened it.
+        if !launched {
+            self.restore(bound);
         }
         Ok(())
+    }
+
+    /// Put back the variables `saved` holds as they were, the earliest
+    /// change undone last.
+    fn restore(&mut self, saved: Vec<(String, Option<String>)>) {
+        for (name, old) in saved.into_iter().rev() {
+            match old {
+                Some(value) => self.env.set(name, value),
+                None => {
+                    self.env.unset(&name);
+                }
+            }
+        }
     }
 
     /// Expand one command's prefix assignments and words, once: both against
@@ -376,14 +411,7 @@ impl<'a> Shell<'a> {
             self.env.set(name, value);
         }
         let status = self.run_builtin(&expanded.argv);
-        for (name, old) in saved.into_iter().rev() {
-            match old {
-                Some(value) => self.env.set(name, value),
-                None => {
-                    self.env.unset(&name);
-                }
-            }
-        }
+        self.restore(saved);
         Ok(Some(status))
     }
 
@@ -417,12 +445,14 @@ impl<'a> Shell<'a> {
 
     /// Lower each expanded command's redirections, ready to launch — or the
     /// status of a command that failed on its redirection target, reported
-    /// already.
+    /// already. Each `{var}` bound is recorded in `bound` with the value it
+    /// replaced.
     fn resolve_pipeline(
         &mut self,
         pipeline: &Pipeline,
         expanded: Vec<ExpandedCommand>,
         budget: &mut Budget,
+        bound: &mut Vec<(String, Option<String>)>,
     ) -> Result<Result<Vec<ResolvedCommand>, i32>, ExpandError> {
         let mut commands = Vec::with_capacity(pipeline.commands.len());
         for (command, expanded) in pipeline.commands.iter().zip(expanded) {
@@ -433,7 +463,7 @@ impl<'a> Shell<'a> {
             }
             let mut redirections = Vec::with_capacity(command.redirections.len());
             for redirection in &command.redirections {
-                match self.lower_redirection(redirection, &mut redirections, budget) {
+                match self.lower_redirection(redirection, &mut redirections, budget, bound) {
                     Ok(()) => {}
                     // Bash fails just the command on these, and so does the
                     // shell: the reason is stated and the line goes on.
@@ -484,15 +514,18 @@ impl<'a> Shell<'a> {
         redirection: &Redirection,
         out: &mut Vec<ResolvedRedirection>,
         budget: &mut Budget,
+        bound: &mut Vec<(String, Option<String>)>,
     ) -> Result<(), ExpandError> {
         match redirection {
             Redirection::File { fd, mode, target } => {
-                let fd = self.resolve_bound_fd(fd)?;
+                // As bash binds it, `{var}` is bound only once the target has
+                // expanded.
+                let target = self.redirect_target(target, budget)?;
                 out.push(ResolvedRedirection {
-                    fd,
+                    fd: self.resolve_bound_fd(fd, bound)?,
                     action: RedirAction::Open {
                         mode: *mode,
-                        target: self.redirect_target(target, budget)?,
+                        target,
                     },
                 });
             }
@@ -519,7 +552,7 @@ impl<'a> Shell<'a> {
                 });
             }
             Redirection::Dup { fd, source } => {
-                let fd = self.resolve_bound_fd(fd)?;
+                let fd = self.resolve_bound_fd(fd, bound)?;
                 out.push(ResolvedRedirection {
                     fd,
                     action: RedirAction::Dup { source: *source },
@@ -536,11 +569,11 @@ impl<'a> Shell<'a> {
                 // A here-string feeds the expanded word followed by a single
                 // newline — the one definition of its shape, so the host reads
                 // the bytes verbatim without re-appending the terminator.
-                let fd = self.resolve_bound_fd(fd)?;
                 let mut bytes = self.env.expand_word(content, budget)?;
+                budget.room(&mut bytes, 1)?;
                 bytes.push('\n');
                 out.push(ResolvedRedirection {
-                    fd,
+                    fd: self.resolve_bound_fd(fd, bound)?,
                     action: RedirAction::HereString { content: bytes },
                 });
             }
@@ -551,15 +584,13 @@ impl<'a> Shell<'a> {
                 // otherwise it undergoes the same `$` expansion as a word.
                 let body = doc.body()?;
                 let content = if doc.is_quoted() {
-                    budget.charge(body.len())?;
-                    String::from(body)
+                    let mut content = budget.string(body.len())?;
+                    content.push_str(body);
+                    content
                 } else {
-                    self.env.expand_word(
-                        &alloc::vec![Segment::Expandable(String::from(body))],
-                        budget,
-                    )?
+                    self.env.expand_word(&here_doc_word(body), budget)?
                 };
-                let fd = self.resolve_bound_fd(doc.fd())?;
+                let fd = self.resolve_bound_fd(doc.fd(), bound)?;
                 out.push(ResolvedRedirection {
                     fd,
                     action: RedirAction::HereString { content },
@@ -572,19 +603,24 @@ impl<'a> Shell<'a> {
     /// Resolve the descriptor an opening/duplicating redirection binds. A
     /// `{var}` spec allocates the next dynamic descriptor — always ≥
     /// [`FIRST_DYN_FD`], never a standard stream — and binds its number to
-    /// the shell parameter `var`.
+    /// the shell parameter `var`, the value it replaced recorded in `bound`.
     ///
     /// # Errors
     ///
     /// [`ParseError::BadDynamicFd`] if the allocator is exhausted (the
     /// counter would overflow), failing closed rather than re-issuing a
     /// descriptor.
-    fn resolve_bound_fd(&mut self, spec: &FdSpec) -> Result<u32, ParseError> {
+    fn resolve_bound_fd(
+        &mut self,
+        spec: &FdSpec,
+        bound: &mut Vec<(String, Option<String>)>,
+    ) -> Result<u32, ParseError> {
         match spec {
             FdSpec::Fd(n) => Ok(*n),
             FdSpec::Var(name) => {
                 let fd = self.next_dyn_fd;
                 self.next_dyn_fd = fd.checked_add(1).ok_or(ParseError::BadDynamicFd)?;
+                bound.push((name.clone(), self.env.get(name).map(String::from)));
                 self.env.set(name.clone(), fd.to_string());
                 Ok(fd)
             }
@@ -612,7 +648,8 @@ impl<'a> Shell<'a> {
         }
     }
 
-    fn launch_foreground(&mut self, commands: &[ResolvedCommand]) {
+    /// Launch `commands` and wait for them; whether the host launched them.
+    fn launch_foreground(&mut self, commands: &[ResolvedCommand]) -> bool {
         let env = self.env.exported_vars();
         let spec = LaunchSpec {
             commands,
@@ -625,10 +662,10 @@ impl<'a> Shell<'a> {
                 let (status, reason) = launch_failure(err);
                 self.console.write_stderr(&format!(
                     "shell: {}: {reason}\n",
-                    quote_if_needed(&program_name(commands))
+                    quote_subject(&program_name(commands))
                 ));
                 self.env.set_last_status(status);
-                return;
+                return false;
             }
         };
         match self.host.wait(pid) {
@@ -652,7 +689,7 @@ impl<'a> Shell<'a> {
                 if let Some((reason, shell_status)) = async_load_failure(status) {
                     self.console.write_stderr(&format!(
                         "shell: {}: {reason}\n",
-                        quote_if_needed(&program_name(commands))
+                        quote_subject(&program_name(commands))
                     ));
                     self.env.set_last_status(shell_status);
                 } else {
@@ -663,7 +700,7 @@ impl<'a> Shell<'a> {
                     if let Some(reason) = fault_kill_reason(status) {
                         self.console.write_stderr(&format!(
                             "shell: {}: {reason}\n",
-                            program_name(commands)
+                            quote_subject(&program_name(commands))
                         ));
                     }
                     self.env.set_last_status(status);
@@ -674,9 +711,11 @@ impl<'a> Shell<'a> {
                 self.env.set_last_status(NOT_FOUND_STATUS);
             }
         }
+        true
     }
 
-    fn launch_background(&mut self, commands: &[ResolvedCommand]) {
+    /// Launch `commands` as a background job; whether the host launched them.
+    fn launch_background(&mut self, commands: &[ResolvedCommand]) -> bool {
         let env = self.env.exported_vars();
         let spec = LaunchSpec {
             commands,
@@ -691,14 +730,16 @@ impl<'a> Shell<'a> {
                 self.console
                     .write_stdout(&format!("[{}] {}\n", id.as_u32(), pid.as_u64()));
                 self.env.set_last_status(0);
+                true
             }
             Err(err) => {
                 let (status, reason) = launch_failure(err);
                 self.console.write_stderr(&format!(
                     "shell: {}: {reason}\n",
-                    quote_if_needed(&program_name(commands))
+                    quote_subject(&program_name(commands))
                 ));
                 self.env.set_last_status(status);
+                false
             }
         }
     }
@@ -724,14 +765,14 @@ impl<'a> Shell<'a> {
                 if let Some((reason, _)) = async_load_failure(code) {
                     self.console.write_stderr(&format!(
                         "shell: {}: {reason}\n",
-                        quote_if_needed(&job.command)
+                        quote_subject(&job.command)
                     ));
                 } else if let Some(reason) = fault_kill_reason(code) {
                     // A background child killed by a memory fault: state it
                     // on stderr so the failure is never silent (fail loud).
                     self.console.write_stderr(&format!(
                         "shell: {}: {reason}\n",
-                        quote_if_needed(&job.command)
+                        quote_subject(&job.command)
                     ));
                 }
             }
@@ -750,7 +791,8 @@ struct ExpandedCommand {
     assignment_only: bool,
 }
 
-/// Whether any word of `list` holds an extended pattern group.
+/// Whether any word of `list`, a here-document's delimiter included, holds
+/// an extended pattern group.
 fn list_holds_pattern_group(list: &CommandList) -> bool {
     list.entries
         .iter()
@@ -765,9 +807,8 @@ fn list_holds_pattern_group(list: &CommandList) -> bool {
                             has_pattern_group(target)
                         }
                         Redirection::HereString { content, .. } => has_pattern_group(content),
-                        Redirection::Dup { .. }
-                        | Redirection::Close { .. }
-                        | Redirection::HereDoc(_) => false,
+                        Redirection::HereDoc(doc) => doc.holds_pattern_group(),
+                        Redirection::Dup { .. } | Redirection::Close { .. } => false,
                     })
         })
 }
@@ -1729,5 +1770,174 @@ mod tests {
         assert_eq!(shell.run_line("run {fd}>&-"), Err(ParseError::BadDynamicFd));
         assert_eq!(shell.environment().last_status(), 2);
         assert!(host.launches().is_empty());
+    }
+
+    /// A program name that needs quoting is quoted in every launch diagnostic.
+    #[test]
+    fn launch_diagnostics_quote_a_program_name_that_needs_it() {
+        let fail_launch = |line: &str| {
+            let host = ScriptedHost::new();
+            host.fail_launch_of("my tool");
+            let console = RecordingConsole::new();
+            let mut shell = Shell::new(&host, &console);
+            shell.run_line(line).unwrap();
+            console.stderr()
+        };
+        for line in ["'my tool'", "'my tool' &"] {
+            assert_eq!(
+                fail_launch(line),
+                "shell: 'my tool': command not found\n",
+                "{line}"
+            );
+        }
+        for (code, reason) in [
+            (
+                tairix_abi::LOAD_UNVERIFIED,
+                "signature or hash verification failed",
+            ),
+            (
+                tairix_abi::FAULT_EXIT_STATUS,
+                "killed by fault (segmentation fault)",
+            ),
+        ] {
+            let expected = alloc::format!("shell: 'my tool': {reason}\n");
+            let host = ScriptedHost::new();
+            host.set_wait(Pid::new(100), WaitOutcome::Exited(code));
+            let console = RecordingConsole::new();
+            let mut shell = Shell::new(&host, &console);
+            shell.run_line("'my tool'").unwrap();
+            assert_eq!(console.stderr(), expected, "foreground {code}");
+
+            let host = ScriptedHost::new();
+            let console = RecordingConsole::new();
+            let mut shell = Shell::new(&host, &console);
+            shell.run_line("'my tool' &").unwrap();
+            host.queue_poll(Pid::new(100), WaitOutcome::Exited(code));
+            shell.run_line("echo hi").unwrap();
+            assert_eq!(console.stderr(), expected, "background {code}");
+        }
+    }
+
+    /// bash reads a pattern group in a here-document's delimiter only while
+    /// `extglob` is on, so without it the line is refused whole.
+    #[test]
+    fn a_pattern_group_in_a_here_document_delimiter_needs_extglob() {
+        use crate::error::ParseError;
+
+        fn here_doc(shell: &mut Shell<'_>, line: &str) -> Result<(), ParseError> {
+            let mut list = shell.parse_line(line)?;
+            list.feed_here_doc_line("body");
+            list.feed_here_doc_line("@(x)");
+            shell.run_list(&list)
+        }
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        assert_eq!(
+            here_doc(&mut shell, "run <<@(x)"),
+            Err(ParseError::ExtendedGlobDisabled)
+        );
+        assert_eq!(shell.environment().last_status(), 2);
+        assert!(host.launches().is_empty());
+        // Quoted, it holds no group, as bash reads it.
+        assert_eq!(here_doc(&mut shell, "run <<'@(x)'"), Ok(()));
+        shell.run_line("shopt -s extglob").unwrap();
+        assert_eq!(here_doc(&mut shell, "run <<@(x)"), Ok(()));
+        assert_eq!(host.launches().len(), 2);
+    }
+
+    /// As bash does, a `{var}` redirection expands its target first and binds
+    /// the variable only once that has succeeded.
+    #[test]
+    fn dynamic_fd_is_bound_only_after_its_target_expands() {
+        use crate::error::ParseError;
+        use crate::host::{RedirAction, RedirTarget};
+        use crate::parser::OpenMode;
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        shell.run_line("run {v}>$EMPTY").unwrap();
+        assert_eq!(shell.environment().last_status(), 1);
+        assert_eq!(
+            shell.run_line("run {w}<<<${OOPS"),
+            Err(ParseError::UnterminatedExpansion)
+        );
+        assert_eq!(shell.environment().get("v"), None);
+        assert_eq!(shell.environment().get("w"), None);
+
+        shell.run_line("v=out").unwrap();
+        shell.run_line("run {v}>$v").unwrap();
+        assert_eq!(
+            host.launches()[0].commands[0].redirections,
+            [super::ResolvedRedirection {
+                fd: 10,
+                action: RedirAction::Open {
+                    mode: OpenMode::Write { clobber: false },
+                    target: RedirTarget::Path("out".into()),
+                },
+            }]
+        );
+        assert_eq!(shell.environment().get("v"), Some("10"));
+    }
+
+    /// A `{var}` names a descriptor only once the host has opened it, so a
+    /// command the host refuses leaves the variable as it was.
+    #[test]
+    fn a_refused_launch_leaves_its_dynamic_fd_unbound() {
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        host.fail_launch_of("run");
+        shell.run_line("run {v}>out").unwrap();
+        assert_eq!(shell.environment().get("v"), None);
+        shell.run_line("v=keep").unwrap();
+        host.fail_launch_of("run");
+        shell.run_line("run {v}>out {w}>$v &").unwrap();
+        assert_eq!(shell.environment().get("v"), Some("keep"));
+        assert_eq!(shell.environment().get("w"), None);
+        // Launched, the binding stands.
+        shell.run_line("other {v}>out").unwrap();
+        assert!(shell
+            .environment()
+            .get("v")
+            .is_some_and(|fd| fd.parse::<u32>().is_ok_and(|fd| fd >= 10)));
+    }
+
+    /// A here-document body under an unquoted delimiter is read as POSIX
+    /// reads it: `\$`, `` \` `` and `\\` escape, and a substitution, which the
+    /// shell does not perform, is refused rather than handed on as text.
+    #[test]
+    fn a_here_document_body_escapes_and_refuses_substitution() {
+        use crate::error::ParseError;
+        use crate::host::RedirAction;
+
+        fn here_doc(shell: &mut Shell<'_>, body: &str) -> Result<(), ParseError> {
+            let mut list = shell.parse_line("run <<EOF")?;
+            list.feed_here_doc_line(body);
+            list.feed_here_doc_line("EOF");
+            shell.run_list(&list)
+        }
+
+        let host = ScriptedHost::new();
+        let console = RecordingConsole::new();
+        let mut shell = Shell::new(&host, &console);
+        shell.run_line("X=val").unwrap();
+        here_doc(&mut shell, "\\$X $X \\\\ \\` \\x").unwrap();
+        assert_eq!(
+            host.launches()[0].commands[0].redirections[0].action,
+            RedirAction::HereString {
+                content: "$X val \\ ` \\x\n".into()
+            }
+        );
+        for body in ["$(x)", "`x`", "$((1+2))"] {
+            assert_eq!(
+                here_doc(&mut shell, body),
+                Err(ParseError::UnsupportedSubstitution),
+                "{body}"
+            );
+        }
+        assert_eq!(host.launches().len(), 1);
     }
 }

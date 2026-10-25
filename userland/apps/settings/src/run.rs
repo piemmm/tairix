@@ -901,43 +901,42 @@ mod program {
 
     impl CoolingRead<'_> {
         /// Ask for a reading if the pane wants one and none is outstanding,
-        /// answering whether anything on screen changed.
-        fn request(&mut self, shell: &mut Shell) -> bool {
+        /// reporting into `damage` what one landing at once moved.
+        fn request(&mut self, shell: &mut Shell, seat: (Rect, Scale, &Theme), damage: &mut Region) {
             if self.pending || !shell.cooling_wanted() {
-                return false;
+                return;
             }
             if self.worker.submit(()) {
-                return self.settle(shell);
+                self.settle(shell, seat, damage);
+                return;
             }
             self.pending = true;
-            false
         }
 
-        /// Ask again once the period has passed, answering whether anything on
-        /// screen changed.
-        fn refresh(&mut self, shell: &mut Shell) -> bool {
+        /// Ask again once the period has passed, reporting into `damage` what
+        /// a reading landing at once moved.
+        fn refresh(&mut self, shell: &mut Shell, seat: (Rect, Scale, &Theme), damage: &mut Region) {
             if self
                 .refresh_ns
                 .is_none_or(|due| due > tairix_rt::clock_get())
             {
-                return false;
+                return;
             }
             self.refresh_ns = None;
             shell.cooling_due();
-            self.request(shell)
+            self.request(shell, seat, damage);
         }
 
-        /// Adopt a landed reading, answering whether anything changed.
-        fn settle(&mut self, shell: &mut Shell) -> bool {
+        /// Adopt a landed reading, reporting into `damage` what it moved.
+        fn settle(&mut self, shell: &mut Shell, seat: (Rect, Scale, &Theme), damage: &mut Region) {
             let Some(reading) = self.worker.collect() else {
-                return false;
+                return;
             };
             self.pending = false;
-            shell.adopt_cooling(reading);
+            shell.adopt_cooling(reading, seat, damage);
             self.refresh_ns = shell
                 .states_cooling()
                 .then(|| tairix_rt::clock_get().saturating_add(COOLING_REFRESH_NS));
-            true
         }
 
         /// When the next reading is due.
@@ -2147,7 +2146,8 @@ mod program {
     /// presentable.
     ///
     /// An answer lands a new set of rows, so the pane is redrawn rather than
-    /// the one row a choice reported.
+    /// the one row a choice reported — but for the cooling service's, which
+    /// lands every two seconds and reports the rows it moved.
     fn adopt_answers(
         surface: &mut SettingsWindow,
         shell: &mut Shell,
@@ -2167,11 +2167,13 @@ mod program {
         landed |= desks.desktop.settle(shell);
         landed |= desks.sound.settle(shell);
         landed |= desks.effects.settle(shell);
-        landed |= desks.cooling.settle(shell);
-        if !landed {
-            return true;
+        let mut cooled = tairix_controls::damage::sink();
+        let seat = (surface.viewport(), desktop.scale(), themes.active());
+        desks.cooling.settle(shell, seat, &mut cooled);
+        if landed {
+            return repaint_pane(surface, shell, themes, desktop);
         }
-        repaint_pane(surface, shell, themes, desktop)
+        present_reported(surface, shell, themes, desktop, &cooled)
     }
 
     /// Redraw the pane, whose rows a landed answer rebuilt, answering whether
@@ -2187,6 +2189,24 @@ mod program {
         let mut damage = tairix_controls::damage::sink();
         damage.add(shell.pane_region(viewport, desktop.scale(), themes.active()));
         let Some(area) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
+            return true;
+        };
+        surface
+            .present(shell, themes, desktop.scale(), area)
+            .is_ok()
+    }
+
+    /// Present what `damage` reports, if anything, answering whether the
+    /// window is still presentable.
+    fn present_reported(
+        surface: &mut SettingsWindow,
+        shell: &Shell,
+        themes: &ThemeRegistry,
+        desktop: &Desktop,
+        damage: &Region,
+    ) -> bool {
+        let repaint = Repaint::reported_if(!damage.is_empty());
+        let Some(area) = present_damage(&surface.mode, repaint, damage) else {
             return true;
         };
         surface
@@ -2212,15 +2232,7 @@ mod program {
         let mut damage = tairix_controls::damage::sink();
         let place = (desktop.scale(), themes.active());
         shell.advance_secrets(now_ns, surface.viewport(), place, &mut damage);
-        if damage.is_empty() {
-            return true;
-        }
-        let Some(area) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
-            return true;
-        };
-        surface
-            .present(shell, themes, desktop.scale(), area)
-            .is_ok()
+        present_reported(surface, shell, themes, desktop, &damage)
     }
 
     /// Step a held scrollbar press whose repeat is due and present what moved,
@@ -2232,22 +2244,15 @@ mod program {
         desktop: &Desktop,
     ) -> bool {
         let mut damage = tairix_controls::damage::sink();
-        let outcome = shell.repeat(
+        // What it reports is exactly what it drew.
+        let _ = shell.repeat(
             tairix_rt::clock_get(),
             surface.viewport(),
             desktop.scale(),
             themes.active(),
             &mut damage,
         );
-        if !outcome.changed() {
-            return true;
-        }
-        let Some(area) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
-            return true;
-        };
-        surface
-            .present(shell, themes, desktop.scale(), area)
-            .is_ok()
+        present_reported(surface, shell, themes, desktop, &damage)
     }
 
     /// What carrying out an event's conclusion changed beyond what the event
@@ -2396,8 +2401,15 @@ mod program {
     /// the read made here and the pane already holding its answer.
     ///
     /// Every desk is asked whatever the others answered, and a reading that
-    /// landed rebuilt its pane's rows, so any one of them redraws the pane.
-    fn request_readings(shell: &mut Shell, desks: &mut Desks<'_>) -> bool {
+    /// landed rebuilt its pane's rows, so any one of them redraws the pane;
+    /// the cooling service's reports into `damage` what it moved instead.
+    fn request_readings(
+        shell: &mut Shell,
+        desks: &mut Desks<'_>,
+        seat: (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) -> bool {
+        desks.cooling.request(shell, seat, damage);
         let landed = [
             desks.mounts.request(shell),
             desks.machine.request(shell),
@@ -2407,7 +2419,6 @@ mod program {
             desks.desktop.request_savers(shell),
             desks.sound.request(shell),
             desks.effects.request(shell),
-            desks.cooling.request(shell),
         ];
         landed.contains(&true)
     }
@@ -2436,7 +2447,10 @@ mod program {
             return false;
         }
         // The temperature's period is the clock's, not an event's.
-        if desks.cooling.refresh(shell) && !repaint_pane(surface, shell, themes, desktop) {
+        let mut cooled = tairix_controls::damage::sink();
+        let seat = (surface.viewport(), desktop.scale(), themes.active());
+        desks.cooling.refresh(shell, seat, &mut cooled);
+        if !present_reported(surface, shell, themes, desktop, &cooled) {
             return false;
         }
         // Every turn, not only an event's: a navigation, a resize and an
@@ -2902,7 +2916,12 @@ mod program {
             if acted == Acted::ChooseZone && zones.is_none() {
                 zones = ZoneChooser::open(shell, surface, endpoint, (themes, desktop));
             }
-            let landed = request_readings(shell, &mut desks);
+            let landed = request_readings(
+                shell,
+                &mut desks,
+                (surface.viewport(), desktop.scale(), themes.active()),
+                &mut damage,
+            );
             if matches!(event, WindowEvent::ContentReleased { .. }) {
                 surface.window.release_frames();
                 continue;
@@ -3265,13 +3284,13 @@ mod program {
         };
         let event_endpoint = binding.endpoint();
 
-        // An empty registry would leave the window nothing to show at all, so
-        // it ends fail-loud rather than opening a blank frame.
         // The board decides the categories only some boards show, so it is
         // read before the strip is drawn; an unanswered read shows none of
         // them.
         let board = tairix_procinfo::platform_compatible(&IpcTransport)
             .map_or_else(|_| Board::default(), |platform| Board::of(&platform));
+        // An empty registry would leave the window nothing to show at all, so
+        // it ends fail-loud rather than opening a blank frame.
         let Some(mut shell) = Shell::new(settings_in_effect(), board) else {
             return app::fail(
                 APP_NAME,

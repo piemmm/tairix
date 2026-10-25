@@ -2,11 +2,11 @@
 //! line space they take above the GIC's own INTIDs, and the LPIs a GICv3
 //! interrupt translation service raises for each PCI function's MSI-X.
 //!
-//! Lines `0..=MAX_INTID` are the GIC's INTIDs, the root-complex MSI
-//! controller's vectors follow, then one line per LPI the boot routed, in the
-//! order it routed them. An LPI is raised only by the `DeviceID` and `EventID`
-//! it was mapped for, so a device forging another event, or another device's,
-//! raises nothing.
+//! Lines `0..=MAX_INTID` are the GIC's INTIDs; a chained multiplexer's
+//! vectors follow where the board has one, then one line per LPI the boot
+//! routed, in the order it routed them. An LPI is raised only by the
+//! `DeviceID` and `EventID` it was mapped for, so a device forging another
+//! event, or another device's, raises nothing.
 //!
 //! The boot probe offers each function a route ([`LpiPlanner`]): the `DeviceID`
 //! its host's `msi-map` gives its requester id, the next `EventID` of that
@@ -14,6 +14,7 @@
 //! every route the functions took at once, before any of them can master.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::driver::msix::MsiMessage;
 use tairix_abi::HwResource;
@@ -24,15 +25,26 @@ use tairix_fdt::Fdt;
 
 use crate::pci_fdt::{MessageRoute, MessageRouter};
 
-/// The first line of the root-complex MSI controller's vectors, just past
-/// the highest SPI.
+/// The first line past the GIC's INTIDs, where a chained multiplexer's
+/// vectors start.
 pub const MSI_LINE_BASE: u32 = tairix_arch_aarch64::gic::MAX_INTID + 1;
 
-/// The last line of the root-complex MSI controller's vectors.
-pub const MSI_LINE_TOP: u32 = MSI_LINE_BASE + tairix_arch_aarch64::brcm_msi::NUM_MSI_VECTORS - 1;
+/// The line the first LPI raises: just past the multiplexer's `mux_lines`,
+/// else just past the GIC's INTIDs.
+#[must_use]
+pub fn first_lpi_line(mux_lines: Option<Range<u32>>) -> u32 {
+    mux_lines.map_or(MSI_LINE_BASE, |lines| lines.end)
+}
 
-/// The line the first LPI the boot routes raises.
-pub const LPI_LINE_BASE: u32 = MSI_LINE_TOP + 1;
+/// The highest line the IRQ table admits: the last LPI line `routes` raise,
+/// else the multiplexer's last, else the GIC's last INTID.
+#[must_use]
+pub fn max_line(routes: Option<&LpiRoutes>, mux_lines: Option<Range<u32>>) -> u32 {
+    routes
+        .and_then(LpiRoutes::last_line)
+        .or_else(|| mux_lines.and_then(|lines| lines.end.checked_sub(1)))
+        .unwrap_or(tairix_arch_aarch64::gic::MAX_INTID)
+}
 
 /// The fewest INTID bits LPI tables cover: the first LPI's, and the
 /// architecture's minimum.
@@ -60,13 +72,15 @@ pub struct Lpi {
 
 /// The routes the boot probe recorded, for the port to map once the GIC is
 /// up.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LpiRoutes {
     /// Every service a route goes through.
     pub services: Vec<Service>,
     /// Every route, in the order it was taken: route `i` raises LPI
-    /// `FIRST_LPI + i` on line `LPI_LINE_BASE + i`.
+    /// `FIRST_LPI + i` on line `first_line + i`.
     pub lpis: Vec<Lpi>,
+    /// The line route `0` raises.
+    pub first_line: u32,
 }
 
 impl LpiRoutes {
@@ -81,14 +95,18 @@ impl LpiRoutes {
     #[must_use]
     pub fn line_of(&self, intid: u32) -> Option<u32> {
         let index = intid.checked_sub(FIRST_LPI)?;
-        (usize::try_from(index).ok()? < self.lpis.len()).then(|| LPI_LINE_BASE + index)
+        if usize::try_from(index).ok()? < self.lpis.len() {
+            self.first_line.checked_add(index)
+        } else {
+            None
+        }
     }
 
     /// The last line a route raises; [`None`] where none was taken.
     #[must_use]
     pub fn last_line(&self) -> Option<u32> {
         let count = u32::try_from(self.lpis.len()).ok()?;
-        count.checked_sub(1).map(|last| LPI_LINE_BASE + last)
+        self.first_line.checked_add(count.checked_sub(1)?)
     }
 }
 
@@ -104,13 +122,15 @@ pub struct LpiPlanner {
 }
 
 impl LpiPlanner {
-    /// A planner routing through `services`, at most `capacity` LPIs.
+    /// A planner routing through `services`, at most `capacity` LPIs, the
+    /// first raising `first_line`.
     #[must_use]
-    pub fn new(services: Vec<Service>, capacity: u32) -> Self {
+    pub fn new(services: Vec<Service>, capacity: u32, first_line: u32) -> Self {
         Self {
             routes: LpiRoutes {
                 services,
                 lpis: Vec::new(),
+                first_line,
             },
             events: Vec::new(),
             capacity,
@@ -119,13 +139,17 @@ impl LpiPlanner {
     }
 
     /// A planner for a distributor of `id_bits` INTID bits, the LPIs above
-    /// the first that they name.
+    /// the first that they name, the first raising `first_line`.
     #[must_use]
-    pub fn for_distributor(services: Vec<Service>, id_bits: u32) -> Self {
+    pub fn for_distributor(services: Vec<Service>, id_bits: u32, first_line: u32) -> Self {
         let lpis = 1u64
             .checked_shl(id_bits)
             .map_or(0, |end| end.saturating_sub(u64::from(FIRST_LPI)));
-        Self::new(services, u32::try_from(lpis).unwrap_or(u32::MAX))
+        Self::new(
+            services,
+            u32::try_from(lpis).unwrap_or(u32::MAX),
+            first_line,
+        )
     }
 
     /// The routes taken.
@@ -185,7 +209,7 @@ impl MessageRouter for LpiPlanner {
                 address: base + TRANSLATER,
                 data: event,
             },
-            line: LPI_LINE_BASE.checked_add(index)?,
+            line: self.routes.first_line.checked_add(index)?,
             doorbell,
         })
     }
@@ -223,13 +247,15 @@ pub fn published() -> Option<&'static LpiRoutes> {
 /// A planner over every interrupt translation service beneath the GICv3 in
 /// `fdt` that answers as one, for a boot CPU whose redistributor among
 /// `regions` can take LPIs: none on a GICv2, on a distributor or
-/// redistributor without LPIs, or where firmware left them on.
+/// redistributor without LPIs, or where firmware left them on. Its first LPI
+/// raises `first_line`.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 #[must_use]
 pub fn discover(
     fdt: &Fdt<'_>,
     regions: &[tairix_arch_aarch64::gicv3::RedistributorRegion],
     stride: Option<tairix_arch_aarch64::gicv3::RedistributorStride>,
+    first_line: u32,
 ) -> LpiPlanner {
     use tairix_arch_aarch64::gic;
     use tairix_arch_aarch64::its::{Its, VolatileItsMmio, FRAMES_BYTES};
@@ -257,7 +283,7 @@ pub fn discover(
             }
         });
     }
-    LpiPlanner::for_distributor(services, id_bits.unwrap_or(0))
+    LpiPlanner::for_distributor(services, id_bits.unwrap_or(0), first_line)
 }
 
 /// Map every published route: the device CPU's redistributor given LPI

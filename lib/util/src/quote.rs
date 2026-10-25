@@ -1,24 +1,26 @@
-//! GNU coreutils' quoting styles: how a name is written inside a message or a
-//! listing, so the text a file name carries can neither hide nor rewrite what
-//! is shown around it.
+//! GNU coreutils' quoting styles: how a name is written inside a message, a
+//! listing or a command's output, so the text a file name carries can neither
+//! hide nor rewrite what is shown around it.
 //!
-//! [`quote`] names a file in a diagnostic, a `-v` report or a prompt;
-//! [`quote_if_needed`] is `printf`'s `%q` and the bare names some messages
-//! carry; a [`Quoted`] in any [`Style`] is `ls`'s `--quoting-style`. Each
-//! formats straight into its destination, allocating nothing.
+//! [`quote`] names a file inside a message's sentence, a `-v` report or a
+//! prompt; [`quote_subject`] names the file a `name: reason` line leads with;
+//! [`quote_if_needed`] is `printf`'s `%q`; [`output_style`] is how a command
+//! writes a name to its standard output; and a [`Quoted`] in any [`Style`] is
+//! `ls`'s `--quoting-style`. Each formats straight into its destination,
+//! allocating nothing.
 //!
-//! Two deliberate departures from GNU 9.4. Every [`is_hidden`] character is
+//! Three deliberate departures from GNU 9.4. Every [`is_hidden`] character is
 //! escaped, the tree's one rule for text from elsewhere, where GNU escapes only
 //! what its locale calls unprintable and so leaves a bidirectional override
-//! raw. And the shell styles always write the minimal quoting, where GNU
-//! prefixes `''` to a name holding a `'` that ends in an escape, and drops a
-//! `$'` when such a name also begins with one, so its answer no longer reads
-//! back as the name. Nor does a marked character take a backslash inside
-//! `"…"`, where the shell would read the backslash back too.
+//! raw. The shell styles write GNU's own form save its two faults with a name
+//! holding a `'` that ends in an escape: GNU prefixes a needless `''` to it,
+//! and when such a name also begins with an escape drops that escape's `$`, so
+//! its word no longer reads back as the name. And a marked character takes no
+//! backslash inside `"…"`, where a shell would read the backslash back too.
 
 use core::fmt::{self, Write};
 
-use crate::utf8::is_hidden;
+use tairix_visible::is_hidden;
 
 /// A GNU `--quoting-style`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,18 +51,39 @@ pub struct Quoted<'a> {
     marks: &'a str,
 }
 
-/// `text` as a message names a file or an operand: always quoted, hidden
-/// characters escaped (GNU's `quoteaf`).
+/// `text` as a message's sentence names a file or an operand: always quoted,
+/// hidden characters escaped.
 #[must_use]
 pub const fn quote(text: &str) -> Quoted<'_> {
     Quoted::new(text, Style::ShellEscapeAlways)
 }
 
+/// `text` as a `name: reason` line leads with it: quoted where a shell needs
+/// it or where it holds a `:` of its own, which would pass for the one ending
+/// the name, hidden characters escaped.
+#[must_use]
+pub const fn quote_subject(text: &str) -> Quoted<'_> {
+    Quoted::new(text, Style::ShellEscape).marking(":")
+}
+
 /// `text` quoted only where a shell needs it, hidden characters escaped
-/// (GNU's `quotef`, and `printf`'s `%q`).
+/// (`printf`'s `%q`).
 #[must_use]
 pub const fn quote_if_needed(text: &str) -> Quoted<'_> {
     Quoted::new(text, Style::ShellEscape)
+}
+
+/// The style a command writes a name from elsewhere to its standard output
+/// in, as `ls` defaults: escaped where a shell needs it at an attested
+/// terminal, where a hidden character could command or rearrange the screen,
+/// and the name's own bytes anywhere else, so a pipe carries what is there.
+#[must_use]
+pub const fn output_style(at_terminal: bool) -> Style {
+    if at_terminal {
+        Style::ShellEscape
+    } else {
+        Style::Literal
+    }
 }
 
 impl<'a> Quoted<'a> {

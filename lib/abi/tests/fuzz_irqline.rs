@@ -68,10 +68,10 @@ fn reply_seeds() -> Vec<Vec<u8>> {
 fn node_seeds() -> Vec<Vec<u8>> {
     let key = |text: &[u8]| HwMatchKey::compatible(text).expect("fits");
     [
-        HwSelfNode::new(42, &[key(b"brcm,bcm2711-hdmi0")], BlkStatus::Ok),
+        HwSelfNode::new(42, &[key(b"vendor,hdmi0")], BlkStatus::Ok),
         HwSelfNode::new(
             7,
-            &[key(b"brcm,bcm2711-l2-intc"), key(b"brcm,l2-intc")],
+            &[key(b"vendor,soc-l2-intc"), key(b"vendor,l2-intc")],
             BlkStatus::Reset,
         ),
         HwSelfNode::new(1, &[], BlkStatus::Offline),

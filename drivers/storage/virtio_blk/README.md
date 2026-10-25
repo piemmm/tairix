@@ -52,11 +52,18 @@ with one entry matching the virtio block device id
 (`HwMatchKey::virtio(2)`). A discovered virtio node whose probed device
 id is `virtio-blk` binds this driver by match — never a kernel guess
 (§18.5) — and the key carries no transport detail, so the same driver
-binds the device over either the PCI or the MMIO transport. As part of
-the storage **bootstrap floor** (`AGENTS.md` §18.6), the driver is
-registered in the kernel binary's `driver_catalog::IN_KERNEL_DRIVERS`
-floor registry against a build-signed manifest carrying this same
-`BIND_KEYS`.
+binds the device over either the PCI or the MMIO transport.
+
+## Bootstrap floor
+
+The driver is part of the storage **bootstrap floor** (`AGENTS.md` §18.6)
+on every target: its `Floor.toml` declares it — the `virtio` bring-up (the
+port provisions the transport and the kernel opens the device), the
+instruction sets it serves, its bind table and why it sits below the driver
+store — and the kernel's build script discovers the declaration and enters
+the driver in that target's floor table under `FLOOR_PATH`, against a
+build-signed manifest carrying that bind table. The manifest's `bind`
+restates `BIND_KEYS`, and the kernel's build refuses any other.
 
 ## Required capabilities
 

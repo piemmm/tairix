@@ -69,14 +69,14 @@ pub(crate) fn read_i64(bytes: &[u8], offset: usize) -> i64 {
 }
 
 #[inline]
-pub(crate) fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+pub(crate) const fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     let v = value.to_le_bytes();
     bytes[offset] = v[0];
     bytes[offset + 1] = v[1];
 }
 
 #[inline]
-pub(crate) fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+pub(crate) const fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     let v = value.to_le_bytes();
     bytes[offset] = v[0];
     bytes[offset + 1] = v[1];

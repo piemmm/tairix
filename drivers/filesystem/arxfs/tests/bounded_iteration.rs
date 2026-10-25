@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::alloc::{GlobalAlloc, Layout};
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, SeekRegion};
 use tairix_drv_fs_arxfs::{
     EntropySource, Keying, PassVerdict, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
@@ -265,11 +265,17 @@ fn fragmented_volume(files: u32, runs: u64) -> ARXFS<SparseBlock> {
     let root = fs.root();
     for file in 0..files {
         let name = format!("f{file}");
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+        let node = fs
+            .create(
+                root,
+                name.as_bytes(),
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create");
         for run in 0..runs {
             let at = run * 2 * u64::from(BLOCK_SIZE);
-            assert_eq!(fs.write_at(root, name.as_bytes(), at, &[0x5A]), Ok(1));
+            assert_eq!(fs.write_at(node, at, &[0x5A]), Ok(1));
         }
     }
     fs
@@ -302,7 +308,13 @@ fn contiguous_volume(blocks: u64) -> (ARXFS<SparseBlock>, u64) {
     let mut fs = ARXFS::format(device, 64, Keying::Key(&TEST_KEY), &mut TestEntropy(0xB2))
         .expect("format the fixture volume");
     let root = fs.root();
-    fs.create(root, b"big", NodeKind::RegularFile)
+    let big = fs
+        .create(
+            root,
+            b"big",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     // Incompressible and never repeating, so the write neither clusters nor
     // dedupes and every logical block gets its own physical one.
@@ -311,7 +323,7 @@ fn contiguous_volume(blocks: u64) -> (ARXFS<SparseBlock>, u64) {
     let mut done = 0usize;
     while done < body.len() {
         let wrote = fs
-            .write_at(root, b"big", done as u64, &body[done..])
+            .write_at(big, done as u64, &body[done..])
             .expect("write the fixture file");
         assert!(wrote > 0, "the write must make progress");
         done += wrote;
@@ -354,9 +366,10 @@ fn a_delete_holds_its_runs_not_its_blocks() {
         );
         mapped.push(allocated);
 
+        let big = fs.lookup(root, b"big").expect("lookup");
         // Truncate to zero first: the tail-freeing path, then the whole-file
         // path over the same fixture rebuilt.
-        let (cut, cut_peak, cut_allocs) = measure(|| fs.truncate(root, b"big", 0));
+        let (cut, cut_peak, cut_allocs) = measure(|| fs.truncate(big, 0));
         assert_eq!(cut, Ok(()));
 
         let (mut fs, _) = contiguous_volume(blocks);
@@ -576,8 +589,9 @@ fn a_single_record_edit_allocates_the_same_at_any_depth() {
         let mut fs = fragmented_volume(1, runs);
         let root = fs.root();
 
+        let f0 = fs.lookup(root, b"f0").expect("lookup");
         // An insert that descends the whole tree and may split on the way up.
-        let (wrote, peak, allocs) = measure(|| fs.write_at(root, b"f0", runs * stride, &[0x5A]));
+        let (wrote, peak, allocs) = measure(|| fs.write_at(f0, runs * stride, &[0x5A]));
         assert_eq!(wrote, Ok(1));
         assert!(
             allocs <= ALLOC_BUDGET && peak <= PEAK_BUDGET,
@@ -587,7 +601,7 @@ fn a_single_record_edit_allocates_the_same_at_any_depth() {
         );
 
         // A remove of exactly one record, which is where borrow-or-merge lives.
-        let (cut, peak, allocs) = measure(|| fs.truncate(root, b"f0", (runs - 1) * stride));
+        let (cut, peak, allocs) = measure(|| fs.truncate(f0, (runs - 1) * stride));
         assert_eq!(cut, Ok(()));
         assert!(
             allocs <= ALLOC_BUDGET && peak <= PEAK_BUDGET,
@@ -626,11 +640,17 @@ fn bounded_fragmented_volume(extents: u64) -> ARXFS<SparseBlock> {
         )
         .expect("the floor machine bounds the volume");
     let root = fs.root();
-    fs.create(root, b"frag", NodeKind::RegularFile)
+    let frag = fs
+        .create(
+            root,
+            b"frag",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     for run in 0..extents {
         let at = run * 2 * u64::from(BLOCK_SIZE);
-        assert_eq!(fs.write_at(root, b"frag", at, &[0x5A]), Ok(1));
+        assert_eq!(fs.write_at(frag, at, &[0x5A]), Ok(1));
     }
     fs.flush().expect("publish the fixture");
     fs
@@ -649,15 +669,15 @@ fn a_fragmented_punch_holds_its_ceiling_not_its_extents() {
         let mut fs = bounded_fragmented_volume(extents);
         let root = fs.root();
         let span = extents * 2 * u64::from(BLOCK_SIZE);
-        let (punched, peak, allocs) = measure(|| fs.punch(root, b"frag", 0, span));
+        let frag = fs.lookup(root, b"frag").expect("lookup");
+        let (punched, peak, allocs) = measure(|| fs.punch(frag, 0, span));
         assert_eq!(punched, Ok(()));
         assert!(
             peak <= PEAK_BUDGET,
             "punching a {extents}-extent file held {peak} bytes over {allocs} \
              allocations, past the {PEAK_BUDGET} budget"
         );
-        let file = fs.lookup(root, b"frag").expect("lookup");
-        assert_eq!(fs.seek_region(file, 0, SeekRegion::Data), Ok(None));
+        assert_eq!(fs.seek_region(frag, 0, SeekRegion::Data), Ok(None));
         peaks.push(peak);
     }
     let (small, large) = (peaks[0], peaks[1]);

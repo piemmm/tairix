@@ -1,0 +1,485 @@
+//! Open file descriptions bound to a pinned node (`plans/OPENFILE.md`).
+//!
+//! A descriptor of a volume's node holds a [`NodeHandle`]: one driver pin on
+//! that node, the projection it was opened through, and whose identity its
+//! byte operations run under. Nothing after open looks at a path.
+//!
+//! A pin's last [`NodeRef`] may drop in any context, the address-space lock
+//! held included, so the drop only queues the release on the registration's
+//! [`VolumeNodes`], in the [`ReleaseSlot`] reserved before the pin was taken.
+//! A close tells the driver when its lock is free, and the write-back flusher
+//! otherwise ([`VolumeNodes::reap`]). The queue's spin lock is a leaf: only
+//! the kernel heap's own lock is taken beneath it, by an admission growing
+//! the reservation.
+
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::sync::Arc;
+use core::fmt;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
+use tairix_abi::CapabilityQuery;
+use tairix_caps::CapabilitySet;
+use tairix_sync::SpinLock;
+
+use super::mount::Projection;
+use super::VfsError;
+use crate::sleeplock::{SleepGuard, SleepLock};
+
+/// The kernel's record of one registration of a volume's driver.
+///
+/// The instance number is never reused, though the driver handle the volume
+/// was registered under may be. Detach, retraction, recovery and a clean
+/// surprise removal retire a registration, and a descriptor of a retired one
+/// answers [`VfsError::Stale`]; the stand-in for a volume that vanished with
+/// work unpublished takes the registration over instead.
+pub struct VolumeNodes {
+    instance: u64,
+    retired: AtomicBool,
+    /// A release was queued that the write-back flusher has not reaped.
+    reap_due: AtomicBool,
+    queue: SpinLock<ReleaseQueue>,
+}
+
+/// The pins a registration's descriptors hold, and the releases waiting for
+/// the driver.
+///
+/// `outstanding + pending.len() <= pending.capacity()`: taking a pin reserved
+/// its release's slot, so a release never allocates.
+struct ReleaseQueue {
+    outstanding: usize,
+    pending: VecDeque<NodeId>,
+}
+
+impl VolumeNodes {
+    /// A registration numbered `instance`, holding no pin.
+    #[must_use]
+    pub fn new(instance: u64) -> Self {
+        Self {
+            instance,
+            retired: AtomicBool::new(false),
+            reap_due: AtomicBool::new(false),
+            queue: SpinLock::new(ReleaseQueue {
+                outstanding: 0,
+                pending: VecDeque::new(),
+            }),
+        }
+    }
+
+    /// The registration's number.
+    #[must_use]
+    pub fn instance(&self) -> u64 {
+        self.instance
+    }
+
+    /// Whether the registration is retired.
+    ///
+    /// Asked under the driver's lock: a retirement made under it is seen by
+    /// every operation that takes the lock after, and one made without it,
+    /// as a surprise removal's is, leaves an operation already past the check
+    /// to fail against the departed device.
+    #[must_use]
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
+    /// Retire the registration: no descriptor of it reaches the volume again.
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+    }
+
+    /// Reserve the release slot of a pin about to be taken.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the slot cannot be reserved; nothing is
+    /// reserved, and no pin may be taken.
+    pub fn admit(self: &Arc<Self>) -> Result<ReleaseSlot, VfsError> {
+        let mut queue = self.queue.lock();
+        let more = queue
+            .outstanding
+            .checked_add(1)
+            .ok_or(VfsError::OutOfMemory)?;
+        queue
+            .pending
+            .try_reserve(more)
+            .map_err(|_| VfsError::OutOfMemory)?;
+        queue.outstanding = more;
+        Ok(ReleaseSlot {
+            volume: Arc::clone(self),
+            taken: false,
+        })
+    }
+
+    fn give_back(&self) {
+        self.queue.lock().outstanding -= 1;
+    }
+
+    /// How many release slots are reserved: the pins the registration's
+    /// descriptors hold, and any being taken. Under the driver's lock, where
+    /// pins are taken, that is the pins held.
+    #[must_use]
+    pub fn outstanding(&self) -> usize {
+        self.queue.lock().outstanding
+    }
+
+    /// Whether a release waits for a reap, without taking the mark: the
+    /// write-back flusher asks before it tries the driver's lock, so a
+    /// volume it finds busy stays due for the lock's holder to report.
+    #[must_use]
+    pub fn is_reap_due(&self) -> bool {
+        self.reap_due.load(Ordering::Acquire)
+    }
+
+    /// Whether a release was queued since this was last asked. Taken under
+    /// the driver's lock, by whoever then reaps.
+    pub fn take_reap_due(&self) -> bool {
+        self.reap_due.swap(false, Ordering::AcqRel)
+    }
+
+    /// Tell `fs`, whose lock the caller holds, of every queued release. Each
+    /// is taken from the queue on its own, so a reap allocates nothing and
+    /// the driver is never called under the queue's lock.
+    ///
+    /// A retired registration's releases are dropped: its driver let every
+    /// pin go before it was retired, or is gone.
+    pub fn reap<F: FilesystemRead + ?Sized>(&self, fs: &mut F) {
+        if self.is_retired() {
+            self.queue.lock().pending.clear();
+            return;
+        }
+        loop {
+            let next = self.queue.lock().pending.pop_front();
+            let Some(pinned) = next else {
+                return;
+            };
+            // The hold goes whatever this answers; a node the driver failed
+            // to free is left to the format's own checker.
+            let _ = fs.unpin(pinned);
+        }
+    }
+
+    /// Queue `pinned`'s release, answering whether it made the registration
+    /// due: only then need the write-back flusher be woken, so a burst of
+    /// releases between two of its passes wakes it once.
+    fn queue_release(&self, pinned: NodeId) -> bool {
+        {
+            let mut queue = self.queue.lock();
+            queue.outstanding -= 1;
+            queue.pending.push_back(pinned);
+        }
+        !self.reap_due.swap(true, Ordering::AcqRel)
+    }
+}
+
+/// A registered volume's driver behind the lock that serialises it, beside the
+/// registration whose releases it reaps.
+///
+/// The write-back flusher only tries a volume's lock, leaving a busy volume
+/// due, so every hold that ends while releases wait wakes it again: a long
+/// operation on one volume never stalls the flusher's work on another.
+pub struct DriverLock<F: ?Sized> {
+    nodes: Arc<VolumeNodes>,
+    lock: SleepLock<F>,
+}
+
+impl<F> DriverLock<F> {
+    /// `driver`, serving the registration `nodes`.
+    #[must_use]
+    pub fn new(driver: F, nodes: Arc<VolumeNodes>) -> Self {
+        Self {
+            nodes,
+            lock: SleepLock::new(driver),
+        }
+    }
+}
+
+impl<F: ?Sized> DriverLock<F> {
+    /// Hold the driver, parking until it is free.
+    pub fn lock(&self) -> DriverGuard<'_, F> {
+        DriverGuard {
+            guard: self.lock.lock(),
+            _reported: ReapReport(&self.nodes),
+        }
+    }
+
+    /// Hold the driver if it is free this instant.
+    pub fn try_lock(&self) -> Option<DriverGuard<'_, F>> {
+        self.lock.try_lock().map(|guard| DriverGuard {
+            guard,
+            _reported: ReapReport(&self.nodes),
+        })
+    }
+
+    /// The registration the driver serves.
+    #[must_use]
+    pub fn nodes(&self) -> &Arc<VolumeNodes> {
+        &self.nodes
+    }
+}
+
+impl<F: ?Sized> fmt::Debug for DriverLock<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DriverLock")
+            .field("nodes", &self.nodes)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A hold of a [`DriverLock`].
+pub struct DriverGuard<'a, F: ?Sized> {
+    // Dropped before `_reported`, so the wake follows the release.
+    guard: SleepGuard<'a, F>,
+    _reported: ReapReport<'a>,
+}
+
+impl<F: ?Sized> Deref for DriverGuard<'_, F> {
+    type Target = F;
+
+    fn deref(&self) -> &F {
+        &self.guard
+    }
+}
+
+impl<F: ?Sized> DerefMut for DriverGuard<'_, F> {
+    fn deref_mut(&mut self) -> &mut F {
+        &mut self.guard
+    }
+}
+
+/// Wakes the write-back flusher when a hold ends with releases still waiting.
+struct ReapReport<'a>(&'a VolumeNodes);
+
+impl Drop for ReapReport<'_> {
+    fn drop(&mut self) {
+        if self.0.is_reap_due() {
+            crate::waitq::request_writeback_reap();
+        }
+    }
+}
+
+/// The release slot of one pin about to be taken, reserved before the driver
+/// is asked so the pin's release allocates nothing. [`NodeRef::new`] consumes
+/// it; dropped unconsumed, when the driver refuses the pin, it gives the slot
+/// back.
+#[must_use = "a slot not consumed by `NodeRef::new` is given back"]
+pub struct ReleaseSlot {
+    volume: Arc<VolumeNodes>,
+    taken: bool,
+}
+
+impl Drop for ReleaseSlot {
+    fn drop(&mut self) {
+        if !self.taken {
+            self.volume.give_back();
+        }
+    }
+}
+
+impl fmt::Debug for ReleaseSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReleaseSlot")
+            .field("instance", &self.volume.instance)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for VolumeNodes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VolumeNodes")
+            .field("instance", &self.instance)
+            .field("retired", &self.is_retired())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One pin the kernel holds on a node, shared by every [`NodeRef`] cloned
+/// from the first. Until the last goes, the pinned id names the node through
+/// renames, writes and the loss of its last name.
+pub struct PinnedNode {
+    volume: Arc<VolumeNodes>,
+    pinned: NodeId,
+    kind: NodeKind,
+}
+
+impl Drop for PinnedNode {
+    fn drop(&mut self) {
+        if self.volume.queue_release(self.pinned) {
+            crate::waitq::request_writeback_reap();
+        }
+    }
+}
+
+impl fmt::Debug for PinnedNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PinnedNode")
+            .field("instance", &self.volume.instance)
+            .field("pinned", &self.pinned.raw())
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+/// A shared reference to one [`PinnedNode`]; clones share the pin. Two
+/// references are equal when they name one node of one registration.
+#[derive(Clone, Debug)]
+pub struct NodeRef(Arc<PinnedNode>);
+
+impl NodeRef {
+    /// The pin the driver answered as `pinned` for a node of `kind`, in the
+    /// release `slot` [admitted](VolumeNodes::admit) for it before the driver
+    /// was asked.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the reference cannot be allocated; the
+    /// pin's release is queued all the same, in the slot.
+    pub fn new(mut slot: ReleaseSlot, pinned: NodeId, kind: NodeKind) -> Result<Self, VfsError> {
+        slot.taken = true;
+        Arc::try_new(PinnedNode {
+            volume: Arc::clone(&slot.volume),
+            pinned,
+            kind,
+        })
+        .map(Self)
+        .map_err(|_| VfsError::OutOfMemory)
+    }
+
+    /// The id the driver names the node by while it is pinned.
+    #[must_use]
+    pub fn pinned(&self) -> NodeId {
+        self.0.pinned
+    }
+
+    /// The node's kind.
+    #[must_use]
+    pub fn kind(&self) -> NodeKind {
+        self.0.kind
+    }
+
+    /// The number of the registration the pin was taken on.
+    #[must_use]
+    pub fn instance(&self) -> u64 {
+        self.0.volume.instance
+    }
+
+    /// The registration the pin was taken on.
+    #[must_use]
+    pub fn volume(&self) -> &Arc<VolumeNodes> {
+        &self.0.volume
+    }
+}
+
+impl PartialEq for NodeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.instance() == other.instance() && self.pinned() == other.pinned()
+    }
+}
+
+impl Eq for NodeRef {}
+
+/// Whose identity a descriptor's byte operations run under.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Authority {
+    /// The opener's own descriptor: each operation runs as the process making
+    /// it, so a capability narrowed while it is open stops working at once.
+    Holder,
+    /// An identity captured when the descriptor was conferred at spawn or
+    /// granted.
+    Frozen(FrozenAuthority),
+}
+
+/// The identity a conferred or granted descriptor carries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrozenAuthority {
+    /// The conferring parent's, or the first grantor's, uid.
+    pub uid: u32,
+    /// Their effective capability set when they handed the descriptor on.
+    pub caps: CapabilitySet,
+    /// What an `fd_grant` hand-off attenuates; `None` for a spawn's.
+    pub grant: Option<Grant>,
+}
+
+/// What an `fd_grant` hand-off attenuates.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Grant {
+    /// The highest length the holder may write or truncate the file to.
+    pub write_ceiling: Option<u64>,
+}
+
+/// The identity one byte operation runs under, built by the syscall layer
+/// from the descriptor's [`Authority`] and its caller.
+#[derive(Copy, Clone)]
+pub struct Acting<'a> {
+    /// The uid the operation runs as.
+    pub uid: u32,
+    /// The capability set it runs with.
+    pub caps: &'a dyn CapabilityQuery,
+    /// Whether the descriptor was granted, which bars the owner's exemption.
+    pub granted: bool,
+}
+
+/// What a descriptor of a volume's node holds.
+#[derive(Clone, Debug)]
+pub struct NodeHandle {
+    /// The pin.
+    pub node: NodeRef,
+    /// The projection the node was opened through.
+    pub projection: Arc<Projection>,
+    /// Whose identity its byte operations run under.
+    pub authority: Authority,
+    /// The path it was opened as: a label, never resolved.
+    pub opened_as: Arc<String>,
+    /// Whether the node is the projection's floor, whose listing shows the
+    /// projections attached beneath it.
+    pub at_floor: bool,
+}
+
+/// Where a relative path is resolved from. An absolute path ignores it.
+#[derive(Clone, Copy, Debug)]
+pub enum Start<'a> {
+    /// The view root, before a root volume is mounted.
+    Root,
+    /// A directory the caller holds: its working directory or a descriptor.
+    Dir(&'a NodeHandle),
+    /// The catalog the caller holds or works in.
+    Catalog(&'a Projection),
+}
+
+/// A path, and where it starts when relative.
+#[derive(Clone, Copy, Debug)]
+pub struct At<'a> {
+    /// Where a relative `path` starts.
+    pub start: Start<'a>,
+    /// A `/`-view or relative path.
+    pub path: &'a str,
+}
+
+/// A process's working directory.
+#[derive(Clone, Debug)]
+pub enum Cwd {
+    /// The view root.
+    Root,
+    /// A directory, pinned for as long as it is the working directory.
+    Dir(NodeHandle),
+    /// A catalog of attached volumes.
+    Catalog(Arc<Projection>),
+}
+
+impl Cwd {
+    /// Where a path relative to this working directory starts.
+    #[must_use]
+    pub fn start(&self) -> Start<'_> {
+        match self {
+            Self::Root => Start::Root,
+            Self::Dir(handle) => Start::Dir(handle),
+            Self::Catalog(catalog) => Start::Catalog(catalog),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "node_tests.rs"]
+mod tests;

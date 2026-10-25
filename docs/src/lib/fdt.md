@@ -21,15 +21,14 @@ Above the walk, the crate decodes what discovery needs from the generic
 bindings: a phandle-and-specifier list (`dmas`, `iommus`) framed by each
 provider's cell count, an id map (`iommu-map`, `msi-map`), a translation
 unit's specifier and the windows it keeps, a consumer's regulator supply, a
-thermal zone's linear calibration for the one sensor it reads
-(`thermal::sensor_coefficients`), and address translation through `ranges`
+linear calibration the thermal zones reading a single-channel sensor alone
+agree on (`thermal::sensor_coefficients`), and address translation through `ranges`
 and `dma-ranges`.
 
 ## Writing
 
 `write::FdtWriter`, behind the `writer` feature since it allocates, is what
-`tools/mkimage` writes the Raspberry Pi image's
-[device-tree overlay](../platform/aarch64.md) with. A tree is written node by
+`tools/mkimage` writes an image's device-tree overlay with. A tree is written node by
 node and laid out by `finish`: the header, an empty memory-reservation map,
 the structure block and the strings block, each property name stored once —
 the layout libfdt, and so a board's firmware, checks. `finish` refuses a tree
@@ -37,8 +36,9 @@ that does not nest into exactly one root, a property outside every node, and
 a name or string holding a NUL, so a malformed tree is never written.
 
 The test trees the ports' discovery tests read are built with the same writer
-(`fixture`, behind `test-fixtures`), so the reader is proven against the one
-encoder the tree has.
+(`fixture`, behind `test-fixtures`, for the trees QEMU's boards describe; a
+port's own board tree is built in the port), so the reader is proven against
+the one encoder the tree has.
 
 ## Stability
 

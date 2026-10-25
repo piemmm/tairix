@@ -24,6 +24,9 @@ the bounds applied to an untrusted volume.
 - Metadata-partition, sparable and virtual-partition volumes are read-only.
 - Named streams, and so resource forks, are freed with their file but not
   read or written (`plans/FOREIGN-MEDIA.md`).
+- No orphan record: a node removed while the kernel holds it keeps its
+  blocks until its last unpin, and a crash before then leaves them allocated
+  until the volume is checked.
 
 ## Capabilities
 

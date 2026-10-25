@@ -283,6 +283,24 @@ fn a_control_character_is_never_printed_as_itself() {
     }
 }
 
+/// Nor is a character that draws nothing yet can hide, reorder or break the
+/// text around it.
+#[test]
+fn a_hidden_character_is_never_printed_as_itself() {
+    for ch in [
+        '\u{ad}',
+        '\u{200b}',
+        '\u{200f}',
+        '\u{2028}',
+        '\u{202e}',
+        '\u{2066}',
+        '\u{feff}',
+        '\u{e0041}',
+    ] {
+        assert_eq!(encode(&Op::Print(ch)), "\u{fffd}".as_bytes(), "{ch:?}");
+    }
+}
+
 #[test]
 fn window_title_round_trips() {
     for title in [

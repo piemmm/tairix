@@ -1,5 +1,4 @@
-//! The production [`IntrospectSource`] over the live kernel state
-//! (`PREREQUISITES.md` P-C).
+//! The production [`IntrospectSource`] over the live kernel state.
 //!
 //! [`KernelIntrospectSource`] is the real implementation of the
 //! [`crate::introspect::IntrospectSource`] seam: it reads the authoritative
@@ -41,9 +40,9 @@ use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
 use tairix_kernel_sec::{JobGeneration, ProcessId};
 use tairix_reclaim::PressureBand;
 
-use crate::aspace::AddressSpaceRegistry;
+use crate::aspace::{AddressSpaceRegistry, OpenBacking};
 use crate::bootinfo::KernelArch;
-use crate::fs::FilesystemService;
+use crate::fs::{Acting, At, CreateMode, FilesystemService, Start};
 use crate::init::KernelState;
 use crate::introspect::IntrospectSource;
 use crate::loadavg::LoadTracker;
@@ -226,8 +225,9 @@ pub struct KernelIntrospectSource<A: KernelArch + 'static> {
     /// whole regions, so its size is a reading and not a boot-time constant.
     heap: &'static FreeListAllocator,
     /// The kernel-held user database the account directory is derived
-    /// from. Only the uid + username pairing is ever exposed; credential
-    /// material stays behind the capability-gated `users_db_read` syscall.
+    /// from. Only the uid, login group and username are ever exposed;
+    /// credential material stays behind the capability-gated `users_db_read`
+    /// syscall.
     users_db: &'static (dyn UsersDbSource + 'static),
     /// The kernel-held group registry the group directory is derived
     /// from: the gid + group-name pairing and nothing else.
@@ -340,16 +340,31 @@ fn system_config_layer(
     // The kernel's own uid-0 bootstrap identity holds no capability, so the
     // read passes the per-inode owner/mode/ACL check on its merits: the
     // document is the machine's public configuration and world-readable, and
-    // nothing here could reach a node that is not.
+    // nothing here could reach a node that is not. The node is let go when
+    // the read is done.
     let cred = NoCapabilities;
+    let at = At {
+        start: Start::Root,
+        path,
+    };
+    let opened = match filesystem.open(0, &cred, at, tairix_abi::OpenFlags::READ, CreateMode::NONE)
+    {
+        Ok(opened) => opened,
+        Err(Errno::NotFound) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let OpenBacking::Node(node) = OpenBacking::opened(opened) else {
+        return Err(Errno::IsADirectory);
+    };
+    let reader = Acting {
+        uid: 0,
+        caps: &cred,
+        granted: false,
+    };
     let mut document = Vec::new();
     let mut buf = [0u8; CONFIG_READ_CHUNK];
     loop {
-        let read = match filesystem.read(0, &cred, path, document.len() as u64, &mut buf) {
-            Ok(read) => read,
-            Err(Errno::NotFound) => return Ok(None),
-            Err(err) => return Err(err),
-        };
+        let read = filesystem.read_node(&node, &reader, document.len() as u64, &mut buf)?;
         if read == 0 {
             return Ok(Some(document));
         }
@@ -817,7 +832,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // The live advisory-lock record count, read from the lock registry
         // that charges it rather than recounted here.
         let lock_usage = crate::filelock::usage(ProcessId(task_id.0));
-        let (limits, aspace_usage, stack_usage, pinned_usage) = {
+        let (limits, aspace_usage, stack_usage, pinned_usage, file_usage) = {
             let aspaces = self.state.aspaces.read();
             let process = ProcessId(task_id.0);
             // Pinned usage is the whole footprint while the process is
@@ -833,12 +848,14 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 aspaces.mapped_aspace_bytes(process),
                 aspaces.stack_committed_bytes(process),
                 pinned_usage,
+                aspaces.open_file_count(process),
             )
         };
         let mut out = Vec::with_capacity(RESOURCE_LIMITS_REPORT_LEN);
         for kind in LimitKind::ALL {
             let usage = match kind {
                 LimitKind::AddressSpaceBytes => aspace_usage,
+                LimitKind::OpenFiles => file_usage,
                 LimitKind::StackBytes => stack_usage,
                 LimitKind::PinnedMemoryBytes => pinned_usage,
                 LimitKind::Threads => thread_usage,
@@ -847,7 +864,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 | LimitKind::IpcQueueBytes
                 | LimitKind::WaitSets
                 | LimitKind::WaitSetMembers => charges.held(kind),
-                LimitKind::OpenStreams | LimitKind::Processes => 0,
+                LimitKind::Processes => 0,
             };
             let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);
             out.extend_from_slice(&record.to_le_bytes());
@@ -868,12 +885,12 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
 /// the same fail-closed parser at load, so a re-parse failure equally
 /// yields no human rows.
 ///
-/// Only the uid + username pairing crosses this boundary: password
+/// Only the uid, login group and username cross this boundary: password
 /// records stay behind the capability-gated `users_db_read` syscall, and
 /// an account's grants behind the `CAP_USER_ADMIN` listing. A principal
 /// reads its own home and shell through the self-scoped account read,
 /// never here — the directory answers about *every* account, so it
-/// carries only what rendering a uid needs. Row order is stable across
+/// carries only the `/etc/passwd`-class public fields. Row order is stable across
 /// paged calls (the held text only changes through the audited admin
 /// path).
 fn user_directory_page(
@@ -887,16 +904,21 @@ fn user_directory_page(
             .and_then(|text| tairix_users::UsersDb::parse(text).ok())
     });
     let mut page = Page::new(offset, max_records);
-    for (uid, username) in tairix_users::system_account_directory() {
+    for (uid, primary_gid, username) in tairix_users::system_account_directory() {
         page.push(|| {
-            UserDirectoryRecord::new(uid, username.as_bytes()).map(|entry| entry.to_le_bytes())
+            UserDirectoryRecord::new(uid.0, primary_gid.0, username.as_bytes())
+                .map(|entry| entry.to_le_bytes())
         })?;
     }
     if let Some(db) = &humans {
         for record in db.records() {
             page.push(|| {
-                UserDirectoryRecord::new(record.uid().0, record.username().as_bytes())
-                    .map(|entry| entry.to_le_bytes())
+                UserDirectoryRecord::new(
+                    record.uid().0,
+                    record.primary_gid().0,
+                    record.username().as_bytes(),
+                )
+                .map(|entry| entry.to_le_bytes())
             })?;
         }
     }
@@ -1373,8 +1395,9 @@ mod tests {
     use tairix_abi::sysinfo::{GroupDirectoryRecord, SelfAccountRecord, UserDirectoryRecord};
     use tairix_users::NO_PATH_MARKER;
 
-    /// Decode a page's packed records into owned `(uid, name)` rows.
-    fn rows(bytes: &[u8]) -> Vec<(u32, String)> {
+    /// Decode a page's packed records into owned `(uid, login group, name)`
+    /// rows.
+    fn rows(bytes: &[u8]) -> Vec<(u32, u32, String)> {
         assert_eq!(bytes.len() % UserDirectoryRecord::WIRE_LEN, 0);
         bytes
             .as_chunks::<{ UserDirectoryRecord::WIRE_LEN }>()
@@ -1384,6 +1407,7 @@ mod tests {
                 let record = UserDirectoryRecord::from_bytes(chunk).expect("record decodes");
                 (
                     record.uid,
+                    record.primary_gid,
                     String::from(core::str::from_utf8(record.name_bytes()).expect("utf8")),
                 )
             })
@@ -1426,8 +1450,8 @@ mod tests {
         // first boot, and nothing is fabricated beyond it.
         let page = user_directory_page(&NullUsersDbSource, 0, 64).expect("page encodes");
         let rows = rows(&page);
-        let expected: Vec<(u32, String)> = tairix_users::system_account_directory()
-            .map(|(uid, name)| (uid, String::from(name)))
+        let expected: Vec<(u32, u32, String)> = tairix_users::system_account_directory()
+            .map(|(uid, gid, name)| (uid.0, gid.0, String::from(name)))
             .collect();
         assert_eq!(rows, expected);
     }
@@ -1462,16 +1486,20 @@ mod tests {
         // The whole directory: compiled rows first, then the human half.
         let all = rows(&user_directory_page(&cell, 0, 64).expect("page encodes"));
         assert_eq!(all.len(), 16);
-        assert_eq!(all[0], (0, String::from("system")));
-        assert_eq!(all[15], (1000, String::from("root")));
+        assert_eq!(all[0], (0, 0, String::from("system")));
+        assert_eq!(all[15], (1000, 1000, String::from("root")));
         // A page straddling the seam carries the tail of the compiled half
         // and the head of the human half.
         let seam = rows(&user_directory_page(&cell, 14, 2).expect("page encodes"));
         assert_eq!(
             seam,
             alloc::vec![
-                (tairix_users::THERMALD_UID.0, String::from("thermald")),
-                (1000, String::from("root")),
+                (
+                    tairix_users::THERMALD_UID.0,
+                    tairix_users::SERVICES_GID.0,
+                    String::from("thermald")
+                ),
+                (1000, 1000, String::from("root")),
             ]
         );
         // An offset past the end is the empty paging terminator.

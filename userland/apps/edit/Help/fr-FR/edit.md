@@ -77,8 +77,8 @@ détient aucune autorité particulière.
   aide a été affichée.
 - `1` — le fichier nommé n'a pas pu être chargé (pas du texte, trop
   grand, ou refusé), ou le terminal a échoué ; la raison est écrite
-  sur la sortie d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+  sur la sortie d'erreur. Une ligne de commande non comprise sort aussi
+  avec `1`.
 
 ## ENVIRONMENT
 

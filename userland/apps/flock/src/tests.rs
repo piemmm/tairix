@@ -1,6 +1,6 @@
 //! Host tests for the `flock` parse-and-run engine.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -9,7 +9,7 @@ use tairix_help::{HelpSource, SourceError};
 
 use super::{
     parse, run, Command, FlockError, Mode, Output, Ran, Session, Wait, DEFAULT_CONFLICT_CODE,
-    EXIT_NOT_EXECUTABLE, EXIT_NOT_FOUND, EXIT_USAGE, USAGE,
+    EXIT_NOT_EXECUTABLE, EXIT_NOT_FOUND, USAGE,
 };
 
 /// A session that records what it was asked and answers as scripted.
@@ -88,13 +88,13 @@ impl HelpSource for NoHelp {
     }
 }
 
-fn parsed<'a>(argv: &[&'a str]) -> Command<'a> {
+fn parsed<'a>(argv: &'a [&'a str]) -> Command<'a> {
     parse(argv).expect("a well-formed command line")
 }
 
 #[test]
 fn the_default_is_an_exclusive_indefinite_wait() {
-    let command = parsed(&["flock", "/tmp.lock", "backup"]);
+    let command = parsed(&["/tmp.lock", "backup"]);
     assert_eq!(command.mode, Mode::Exclusive);
     assert_eq!(command.wait, Wait::Forever);
     assert_eq!(command.conflict_code, DEFAULT_CONFLICT_CODE);
@@ -106,42 +106,41 @@ fn the_default_is_an_exclusive_indefinite_wait() {
 #[test]
 fn the_long_and_short_spellings_agree() {
     for argv in [
-        alloc::vec!["flock", "-s", "-n", "f", "c"],
-        alloc::vec!["flock", "--shared", "--nonblock", "f", "c"],
-        alloc::vec!["flock", "-sn", "f", "c"],
+        alloc::vec!["-s", "-n", "f", "c"],
+        alloc::vec!["--shared", "--nonblock", "f", "c"],
+        alloc::vec!["-sn", "f", "c"],
     ] {
         let command = parsed(&argv);
         assert_eq!(command.mode, Mode::Shared, "{argv:?}");
         assert_eq!(command.wait, Wait::Never, "{argv:?}");
     }
     // The later mode flag wins, as it does for the GNU tools.
-    assert_eq!(
-        parsed(&["flock", "-s", "-x", "f", "c"]).mode,
-        Mode::Exclusive
-    );
-    assert_eq!(parsed(&["flock", "-x", "-s", "f", "c"]).mode, Mode::Shared);
+    assert_eq!(parsed(&["-s", "-x", "f", "c"]).mode, Mode::Exclusive);
+    assert_eq!(parsed(&["-x", "-s", "f", "c"]).mode, Mode::Shared);
 }
 
 #[test]
 fn a_timeout_is_read_in_seconds_in_every_accepted_spelling() {
     for argv in [
-        alloc::vec!["flock", "-w", "5", "f", "c"],
-        alloc::vec!["flock", "-w5", "f", "c"],
-        alloc::vec!["flock", "--timeout", "5", "f", "c"],
-        alloc::vec!["flock", "--timeout=5", "f", "c"],
+        alloc::vec!["-w", "5", "f", "c"],
+        alloc::vec!["-w5", "f", "c"],
+        alloc::vec!["--timeout", "5", "f", "c"],
+        alloc::vec!["--timeout=5", "f", "c"],
+        alloc::vec!["--wait=5", "f", "c"],
+        alloc::vec!["-nw5", "f", "c"],
     ] {
         assert_eq!(parsed(&argv).wait, Wait::Until(5_000_000_000), "{argv:?}");
     }
-    assert_eq!(parsed(&["flock", "-w", "0", "f", "c"]).wait, Wait::Until(0));
+    assert_eq!(parsed(&["-w", "0", "f", "c"]).wait, Wait::Until(0));
 }
 
 #[test]
 fn a_conflict_code_is_read_in_every_accepted_spelling() {
     for argv in [
-        alloc::vec!["flock", "-E", "7", "f", "c"],
-        alloc::vec!["flock", "-E7", "f", "c"],
-        alloc::vec!["flock", "--conflict-code", "7", "f", "c"],
-        alloc::vec!["flock", "--conflict-code=7", "f", "c"],
+        alloc::vec!["-E", "7", "f", "c"],
+        alloc::vec!["-E7", "f", "c"],
+        alloc::vec!["--conflict-code", "7", "f", "c"],
+        alloc::vec!["--conflict-code=7", "f", "c"],
     ] {
         assert_eq!(parsed(&argv).conflict_code, 7, "{argv:?}");
     }
@@ -150,13 +149,13 @@ fn a_conflict_code_is_read_in_every_accepted_spelling() {
 #[test]
 fn a_malformed_value_is_a_usage_error_rather_than_a_guess() {
     for argv in [
-        alloc::vec!["flock", "-w", "f", "c"],
-        alloc::vec!["flock", "-w", "-1", "f", "c"],
-        alloc::vec!["flock", "-w", "5s", "f", "c"],
-        alloc::vec!["flock", "-w", "", "f", "c"],
-        alloc::vec!["flock", "-w", "99999999999999999999", "f", "c"],
-        alloc::vec!["flock", "-E", "x", "f", "c"],
-        alloc::vec!["flock", "-E", "5000000000", "f", "c"],
+        alloc::vec!["-w", "f", "c"],
+        alloc::vec!["-w", "-1", "f", "c"],
+        alloc::vec!["-w", "5s", "f", "c"],
+        alloc::vec!["-w", "", "f", "c"],
+        alloc::vec!["-w", "99999999999999999999", "f", "c"],
+        alloc::vec!["-E", "x", "f", "c"],
+        alloc::vec!["-E", "5000000000", "f", "c"],
     ] {
         assert_eq!(parse(&argv), Err(FlockError::Usage), "{argv:?}");
     }
@@ -167,39 +166,72 @@ fn a_timeout_too_large_to_express_in_nanoseconds_is_refused_not_saturated() {
     // Saturating would turn a typo into an unbounded wait, which is the one
     // thing a `-w` caller asked not to happen.
     let huge = alloc::format!("{}", u64::MAX / 1_000_000_000 + 1);
-    assert_eq!(
-        parse(&["flock", "-w", &huge, "f", "c"]),
-        Err(FlockError::Usage)
-    );
+    assert_eq!(parse(&["-w", &huge, "f", "c"]), Err(FlockError::Usage));
 }
 
 #[test]
 fn an_unknown_option_is_refused_and_nothing_is_locked() {
     for argv in [
-        alloc::vec!["flock", "-Z", "f", "c"],
-        alloc::vec!["flock", "--nope", "f", "c"],
+        alloc::vec!["-Z", "f", "c"],
+        alloc::vec!["--nope", "f", "c"],
         // A near-miss long option must never be taken as the file name, or
         // the run would lock the wrong thing and run the wrong command.
-        alloc::vec!["flock", "--nonblok", "lock", "cmd"],
-        alloc::vec!["flock", "--shared=yes", "f", "c"],
-        alloc::vec!["flock", "-sZ", "f", "c"],
+        alloc::vec!["--nonblok", "lock", "cmd"],
+        alloc::vec!["--shared=yes", "f", "c"],
+        alloc::vec!["-sZ", "f", "c"],
         // `-u` and `-o` exist in util-linux for its descriptor form; they
         // are refused rather than silently ignored, so a script that needs
         // them is told so instead of running unlocked.
-        alloc::vec!["flock", "-u", "f", "c"],
-        alloc::vec!["flock", "-o", "f", "c"],
-        alloc::vec!["flock", "-c", "echo hi"],
+        alloc::vec!["-u", "f", "c"],
+        alloc::vec!["-o", "f", "c"],
+        alloc::vec!["-c", "echo hi"],
     ] {
-        assert_eq!(parse(&argv), Err(FlockError::Usage), "{argv:?}");
+        assert!(
+            matches!(parse(&argv), Err(FlockError::Option(_))),
+            "{argv:?}"
+        );
     }
+}
+
+/// `getopt_long`'s words for each refusal.
+fn refused(argv: &[&str]) -> String {
+    parse(argv).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-Z", "f", "c"]), "invalid option -- 'Z'");
+    assert_eq!(
+        refused(&["--nonblok", "lock", "cmd"]),
+        "unrecognized option '--nonblok'"
+    );
+    assert_eq!(refused(&["-w"]), "option requires an argument -- 'w'");
+    assert_eq!(
+        refused(&["--conflict-code"]),
+        "option '--conflict-code' requires an argument"
+    );
+    assert_eq!(
+        refused(&["--shared=yes", "f", "c"]),
+        "option '--shared' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let command = parsed(&["--sh", "--non", "--time=3", "f", "c"]);
+    assert_eq!(command.mode, Mode::Shared);
+    assert_eq!(command.wait, Wait::Until(3_000_000_000));
+    // `--nonblock` and its synonym `--nb` share the prefix: one option.
+    assert_eq!(parsed(&["--n", "f", "c"]).wait, Wait::Never);
+    assert!(parsed(&["--he"]).help);
 }
 
 #[test]
 fn a_missing_file_or_command_is_a_usage_error() {
-    assert_eq!(parse(&["flock"]), Err(FlockError::Usage));
-    assert_eq!(parse(&["flock", "-x"]), Err(FlockError::Usage));
+    assert_eq!(parse(&[]), Err(FlockError::Usage));
+    assert_eq!(parse(&["-x"]), Err(FlockError::Usage));
     assert_eq!(
-        parse(&["flock", "onlyfile"]),
+        parse(&["onlyfile"]),
         Err(FlockError::Usage),
         "a lock with nothing to run would take a lock and drop it again"
     );
@@ -207,7 +239,7 @@ fn a_missing_file_or_command_is_a_usage_error() {
 
 #[test]
 fn the_commands_own_options_reach_the_command_not_flock() {
-    let command = parsed(&["flock", "lock", "ls", "-l", "-w", "--help"]);
+    let command = parsed(&["lock", "ls", "-l", "-w", "--help"]);
     assert_eq!(command.file, "lock");
     assert_eq!(command.argv, alloc::vec!["ls", "-l", "-w", "--help"]);
     assert_eq!(
@@ -220,18 +252,14 @@ fn the_commands_own_options_reach_the_command_not_flock() {
 
 #[test]
 fn a_double_dash_ends_option_parsing_so_a_dashed_name_stays_reachable() {
-    let command = parsed(&["flock", "--", "-weird-file", "-weird-command"]);
+    let command = parsed(&["--", "-weird-file", "-weird-command"]);
     assert_eq!(command.file, "-weird-file");
     assert_eq!(command.argv, alloc::vec!["-weird-command"]);
 }
 
 #[test]
 fn help_is_rendered_and_nothing_is_locked_or_run() {
-    for argv in [
-        alloc::vec!["flock", "--help"],
-        alloc::vec!["flock", "-?"],
-        alloc::vec!["flock", "-h"],
-    ] {
+    for argv in [alloc::vec!["--help"], alloc::vec!["-?"], alloc::vec!["-h"]] {
         let command = parsed(&argv);
         assert!(command.help, "{argv:?}");
         let session = FakeSession::new();
@@ -255,7 +283,7 @@ fn the_lock_is_taken_before_the_command_runs() {
     *session.run_result.borrow_mut() = Ok(Ran::Exited(0));
     let out = Sink::new();
     let notices = Sink::new();
-    let command = parsed(&["flock", "-s", "-w", "3", "/db.lock", "report", "--full"]);
+    let command = parsed(&["-s", "-w", "3", "/db.lock", "report", "--full"]);
     assert_eq!(
         run(&command, None, &session, &NoHelp, &out, &notices),
         Ok(0)
@@ -279,7 +307,7 @@ fn the_commands_exit_status_is_the_tools_own() {
         let notices = Sink::new();
         assert_eq!(
             run(
-                &parsed(&["flock", "f", "c"]),
+                &parsed(&["f", "c"]),
                 None,
                 &session,
                 &NoHelp,
@@ -299,7 +327,7 @@ fn a_contended_lock_exits_with_the_conflict_code_and_runs_nothing() {
         let notices = Sink::new();
         assert_eq!(
             run(
-                &parsed(&["flock", "-n", "-E", "9", "f", "c"]),
+                &parsed(&["-n", "-E", "9", "f", "c"]),
                 None,
                 &session,
                 &NoHelp,
@@ -324,7 +352,7 @@ fn the_conflict_code_defaults_to_one() {
     let notices = Sink::new();
     assert_eq!(
         run(
-            &parsed(&["flock", "-n", "f", "c"]),
+            &parsed(&["-n", "f", "c"]),
             None,
             &session,
             &NoHelp,
@@ -348,7 +376,7 @@ fn a_refusal_waiting_would_not_fix_is_an_error_not_a_conflict() {
         let notices = Sink::new();
         assert_eq!(
             run(
-                &parsed(&["flock", "f", "c"]),
+                &parsed(&["f", "c"]),
                 None,
                 &session,
                 &NoHelp,
@@ -368,7 +396,7 @@ fn an_unresolvable_command_reports_the_shells_own_status() {
     let out = Sink::new();
     let notices = Sink::new();
     let failure = run(
-        &parsed(&["flock", "f", "nosuch"]),
+        &parsed(&["f", "nosuch"]),
         None,
         &session,
         &NoHelp,
@@ -381,7 +409,7 @@ fn an_unresolvable_command_reports_the_shells_own_status() {
 
     *session.run_result.borrow_mut() = Ok(Ran::NotExecutable);
     let failure = run(
-        &parsed(&["flock", "f", "adir"]),
+        &parsed(&["f", "adir"]),
         None,
         &session,
         &NoHelp,
@@ -400,7 +428,7 @@ fn verbose_notes_go_to_the_notice_stream_and_never_to_standard_output() {
     let notices = Sink::new();
     assert_eq!(
         run(
-            &parsed(&["flock", "-v", "f", "c"]),
+            &parsed(&["-v", "f", "c"]),
             None,
             &session,
             &NoHelp,
@@ -418,7 +446,7 @@ fn verbose_notes_go_to_the_notice_stream_and_never_to_standard_output() {
     let session = FakeSession::refusing(Errno::WouldBlock);
     let notices = Sink::new();
     let _ = run(
-        &parsed(&["flock", "-v", "-n", "f", "c"]),
+        &parsed(&["-v", "-n", "f", "c"]),
         None,
         &session,
         &NoHelp,
@@ -430,7 +458,9 @@ fn verbose_notes_go_to_the_notice_stream_and_never_to_standard_output() {
 
 #[test]
 fn a_usage_error_reports_the_status_the_tree_uses_for_one() {
-    assert_eq!(FlockError::Usage.exit_code(), EXIT_USAGE);
+    assert_eq!(FlockError::Usage.exit_code(), tairix_help::MISUSE);
+    let refusal = parse(&["-Z", "f", "c"]).expect_err("refused");
+    assert_eq!(refusal.exit_code(), tairix_help::MISUSE);
 }
 
 #[test]

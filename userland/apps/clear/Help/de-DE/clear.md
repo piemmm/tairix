@@ -33,8 +33,8 @@ aus Skript-Kompatibilität akzeptiert und ändert nichts.
 
 - `0` — die Löschsequenz wurde geschrieben.
 - `1` — das Terminal kann nicht löschen, oder die Ausgabe konnte nicht
-  zugestellt werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  zugestellt werden. Eine nicht verstandene Befehlszeile endet ebenfalls
+  mit `1`.
 
 ## ENVIRONMENT
 

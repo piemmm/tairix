@@ -13,6 +13,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use tairix_abi::sysinfo::PlatformCompatible;
 use tairix_abi::window_ipc::SystemTask;
 use tairix_controls::{FieldControl, FieldRow};
 use tairix_font::install_test_transport;
@@ -27,6 +29,21 @@ use crate::shell::{Shell, ShellOutcome};
 
 /// A window wide enough to seat the strip and a full content column.
 pub(crate) const WIDE: Rect = Rect::new(0, 0, 900, 640);
+
+/// The platform the hardware tree's root names with `names`.
+pub(crate) fn platform(names: &[&[u8]]) -> PlatformCompatible {
+    let mut root = HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root);
+    for name in names {
+        root.push_match_key(HwMatchKey::compatible(name).expect("a compatible key"))
+            .expect("room for the key");
+    }
+    PlatformCompatible::of(&root)
+}
+
+/// A Raspberry Pi, known as the window knows one: from its platform.
+pub(crate) fn raspberry_pi() -> Board {
+    Board::of(&platform(&[b"raspberrypi,4-model-b"]))
+}
 
 /// The dark theme, with the solid test glyph transport installed so a
 /// paint measures text without a running font service.

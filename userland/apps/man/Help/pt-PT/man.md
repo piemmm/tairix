@@ -49,8 +49,8 @@ inteira é emitida de seguida.
 
 - `0` — a página foi mostrada.
 - `1` — o comando ou o seu documento de ajuda não foi encontrado, ou a
-  página não pôde ser entregue.
-- `2` — a linha de comandos não foi compreendida.
+  página não pôde ser entregue. Uma linha de comandos não compreendida
+  também termina com `1`.
 
 ## ENVIRONMENT
 

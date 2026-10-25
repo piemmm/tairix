@@ -4,6 +4,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::StatError;
 
 /// Whether the operands are described as files or as the filesystems that
@@ -137,10 +139,35 @@ pub enum Command {
     Help,
 }
 
+/// What each of `stat`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Dereference,
+    FileSystem,
+    Format,
+    Printf,
+    Terse,
+    Help,
+}
+
+/// `stat`'s options, as GNU's `stat` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('L', &["dereference"], Flag::Dereference),
+    Opt::flag('f', &["file-system"], Flag::FileSystem),
+    Opt::valued('c', &["format"], Flag::Format),
+    Opt::long(&["printf"], Takes::Value, Flag::Printf),
+    Opt::flag('t', &["terse"], Flag::Terse),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name).
 ///
 /// The grammar is the GNU `stat` surface,
-/// `stat [-Lft] [-c FORMAT | --printf=FORMAT] [--] file...`:
+/// `stat [-Lft] [-c FORMAT | --printf=FORMAT] [--] file...`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// clustered, a long one by any unambiguous prefix, a value attached or
+/// following, `--` ending them.
 ///
 /// * `-L` / `--dereference` — describe what a symbolic link names.
 /// * `-f` / `--file-system` — describe the filesystem, not the file.
@@ -151,15 +178,13 @@ pub enum Command {
 /// * `-t` / `--terse` — the one-line summary form.
 /// * `-?` / `--help` — the reserved short-help switches (they win
 ///   immediately).
-/// * `--` — end option parsing; every later argument is an operand.
 ///
 /// The later of `-c` and `--printf` wins, as GNU's own last-one-wins
 /// argument handling gives.
 ///
 /// # Errors
 ///
-/// * [`StatError::Usage`] — an unrecognised option, or `-c` without a
-///   value.
+/// * [`StatError::Option`] — an option `getopt` refuses, in its words.
 /// * [`StatError::MissingOperand`] — no operand at all.
 /// * [`StatError::UnknownSpecifier`] — a format naming a letter that is not
 ///   a specifier.
@@ -169,22 +194,20 @@ pub fn parse(args: &[&str]) -> Result<Command, StatError> {
     let mut options = Options::DEFAULT;
     let mut format: Option<(String, Trailer)> = None;
     let mut paths: Vec<String> = Vec::new();
-    let mut options_done = false;
-    let mut args = args.iter();
 
-    while let Some(&arg) = args.next() {
-        if options_done {
-            paths.push(String::from(arg));
-            continue;
-        }
-        match arg {
-            "--" => options_done = true,
-            "-?" | "--help" => return Ok(Command::Help),
-            _ if arg.starts_with("--") => apply_long(arg, &mut options, &mut format, &mut args)?,
-            _ if arg.len() > 1 && arg.starts_with('-') => {
-                apply_short(&arg[1..], &mut options, &mut format, &mut args)?;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(StatError::Option)? {
+            Arg::Operand(path) => paths.push(String::from(path)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Dereference, _) => options.dereference = true,
+            Arg::Opt(Flag::FileSystem, _) => options.subject = Subject::Filesystem,
+            Arg::Opt(Flag::Terse, _) => options.terse = true,
+            Arg::Opt(Flag::Format, value) => {
+                format = value.map(|text| (String::from(text), Trailer::Newline));
             }
-            _ => paths.push(String::from(arg)),
+            Arg::Opt(Flag::Printf, value) => {
+                format = value.map(|text| (String::from(text), Trailer::None));
+            }
         }
     }
 
@@ -199,77 +222,6 @@ pub fn parse(args: &[&str]) -> Result<Command, StatError> {
         None => None,
     };
     Ok(Command::Describe { options, paths })
-}
-
-/// Apply one long option (`--name` or `--name=value`).
-fn apply_long<'a, I: Iterator<Item = &'a &'a str>>(
-    arg: &str,
-    options: &mut Options,
-    format: &mut Option<(String, Trailer)>,
-    args: &mut I,
-) -> Result<(), StatError> {
-    let (key, inline) = match arg[2..].split_once('=') {
-        Some((key, value)) => (key, Some(value)),
-        None => (&arg[2..], None),
-    };
-    // A value on a switch that takes none is a mistake, not a token to drop.
-    let flag = |options: &mut Options, set: fn(&mut Options)| -> Result<(), StatError> {
-        if inline.is_some() {
-            return Err(StatError::Usage);
-        }
-        set(options);
-        Ok(())
-    };
-    match key {
-        "dereference" => flag(options, |o| o.dereference = true),
-        "file-system" => flag(options, |o| o.subject = Subject::Filesystem),
-        "terse" => flag(options, |o| o.terse = true),
-        "format" | "printf" => {
-            let trailer = if key == "format" {
-                Trailer::Newline
-            } else {
-                Trailer::None
-            };
-            let value = match inline {
-                Some(value) => String::from(value),
-                None => String::from(*args.next().ok_or(StatError::Usage)?),
-            };
-            *format = Some((value, trailer));
-            Ok(())
-        }
-        _ => Err(StatError::Usage),
-    }
-}
-
-/// Apply one cluster of short options (the text after the leading `-`).
-///
-/// `-c` consumes the rest of the cluster as its value, or the next argument
-/// when it ends the cluster.
-fn apply_short<'a, I: Iterator<Item = &'a &'a str>>(
-    cluster: &str,
-    options: &mut Options,
-    format: &mut Option<(String, Trailer)>,
-    args: &mut I,
-) -> Result<(), StatError> {
-    for (index, flag) in cluster.char_indices() {
-        match flag {
-            'L' => options.dereference = true,
-            'f' => options.subject = Subject::Filesystem,
-            't' => options.terse = true,
-            'c' => {
-                let rest = &cluster[index + flag.len_utf8()..];
-                let value = if rest.is_empty() {
-                    String::from(*args.next().ok_or(StatError::Usage)?)
-                } else {
-                    String::from(rest)
-                };
-                *format = Some((value, Trailer::Newline));
-                return Ok(());
-            }
-            _ => return Err(StatError::Usage),
-        }
-    }
-    Ok(())
 }
 
 /// Split a format string into [`Piece`]s, validating every specifier against

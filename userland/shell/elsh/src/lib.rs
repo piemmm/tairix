@@ -60,6 +60,7 @@ extern crate alloc;
 mod brace;
 pub mod builtin;
 pub mod complete;
+mod cwd;
 mod editor;
 mod elevate;
 pub mod env;
@@ -75,6 +76,7 @@ mod pathexp;
 pub mod repl;
 pub mod shell;
 mod ulimit;
+mod umask;
 pub mod wireplan;
 
 #[cfg(test)]

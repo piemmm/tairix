@@ -35,7 +35,7 @@ sortie d'erreur — elle ne déloge jamais une session en cours.
 ## EXIT STATUS
 
 - `0` — l'aide courte a été servie.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — la ligne de commande n'a pas été comprise.
 - tout autre code non nul — la session n'a pas pu démarrer (pas de
   poste, pas de service d'affichage) ou s'est terminée (le bail du
   poste a été perdu) ; la raison est écrite sur la sortie d'erreur.

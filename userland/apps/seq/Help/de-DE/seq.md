@@ -20,9 +20,17 @@ umgekehrten Fall, und darf nicht null sein. `ende` darf `inf` sein, um
 endlos zu zählen. Die Standard-Ausgabegenauigkeit folgt der Schreibweise
 der Operanden (`seq 1 0.25 2` gibt zwei Nachkommastellen aus), und reine
 Ganzzahlfolgen werden exakt erzeugt, gleich wie groß die Zahlen sind.
+Eine Hexadezimalzahl mit großgeschriebenem Exponenten (`0X1P-1`) wird
+genauso gelesen wie eine mit kleingeschriebenem; GNU `seq` liest ihren
+Aufbau als den einer Ganzzahl und gibt falsche Zahlen aus.
 
 Die Optionsauswertung endet am ersten Operanden, und eine führende
 negative Zahl ist ein Operand, keine Option: `seq -5 5` zählt ab -5.
+
+Eine Diagnose zeigt das Format und eine unbekannte Direktive darin mit
+maskierten Steuer- und sonst unsichtbaren Zeichen, sodass keines von
+beiden das Terminal steuern kann; GNU gibt die Direktive unverändert
+aus.
 
 ## OPTIONS
 
@@ -52,9 +60,9 @@ negative Zahl ist ein Operand, keine Option: `seq -5 5` zählt ab -5.
 ## EXIT STATUS
 
 - `0` — die Folge (oder die angeforderte Kurzhilfe) wurde geschrieben.
-- `1` — die Ausgabe nahm keine Bytes mehr an.
-- `2` — die Befehlszeile wurde nicht verstanden (unbekannte Option,
-  ungültige Zahl, Schrittweite null oder fehlerhaftes Format).
+- `1` — die Ausgabe nahm keine Bytes mehr an. Eine nicht verstandene
+  Befehlszeile (unbekannte Option, ungültige Zahl, Schrittweite null
+  oder fehlerhaftes Format) endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

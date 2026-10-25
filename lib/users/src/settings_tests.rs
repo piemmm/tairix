@@ -8,7 +8,7 @@ use super::{
 };
 use crate::shape::testkit::{Tree, ROOT};
 use crate::shape::{ShapeError, ShapeTree};
-use crate::{SERVICES_GID, SETTINGSD_UID, SYSTEM_UID, TIMED_UID};
+use crate::{SERVICES_GID, SETTINGSD_UID, SYSTEM_GID, SYSTEM_UID, TIMED_UID};
 
 fn security_of(tree: &Tree, name: &str) -> Option<NodeSecurity> {
     tree.at(&[name]).and_then(|node| node.security)
@@ -59,6 +59,7 @@ fn the_settings_service_owns_both_documents_and_only_its_group_reaches_the_netwo
     for dir in SETTINGS_DIRS {
         assert!(tree.at(&[dir.name()]).is_some_and(|node| node.directory));
     }
+    assert_eq!(tree.stamps, 0, "each directory is born with its record");
 }
 
 #[test]
@@ -153,7 +154,14 @@ fn each_image_default_s_directory_is_laid_out_with_its_document_s_reach() {
             Some(default_dir_security(which)),
             "{which:?}"
         );
+        let parent = tree.at(&names[..names.len() - 1]).expect("laid out");
+        assert_eq!(
+            parent.security,
+            Some(NodeSecurity::new(0o755, SYSTEM_UID.0, SYSTEM_GID.0)),
+            "a directory made on the way is born the system user's"
+        );
     }
+    assert_eq!(tree.stamps, 0, "each directory is born with its record");
     let before = tree.nodes.len();
     provision_default_dirs(&mut tree, ROOT).expect("idempotent");
     assert_eq!(tree.nodes.len(), before);

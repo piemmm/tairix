@@ -396,7 +396,7 @@ fn caps(set: &[CapabilityId]) -> CapabilitySet {
 }
 
 // A register block grant (CPU/identity space) and an outbound bus window
-// modelled on the BCM2711 PCIe bridge geometry.
+// modelled on a PCIe bridge's geometry.
 const REGS_HANDLE: u64 = 1;
 const REGS_BASE: u64 = 0xFD50_0000;
 const REGS_LEN: u64 = 0x9310;

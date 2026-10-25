@@ -16,7 +16,6 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::vec::Vec;
 
     use tairix_abi::audio::AudioDeviceDescriptor;
@@ -24,10 +23,10 @@ mod program {
     use tairix_abi::Errno;
     use tairix_audio::live::RtAudio;
     use tairix_audio::stream::{devices, set_control, DeviceControl};
-    use tairix_audioctl::{parse, run, Sound, OWN_WORD, USAGE};
+    use tairix_audioctl::{parse, run, Sound, OWN_WORD};
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
 
     /// The audio service over its live transport.
     struct RtSound(RtAudio);
@@ -47,20 +46,17 @@ mod program {
 
     /// Program entry point.
     ///
-    /// Exit codes: `0` when the command completed, `1` when it was refused
-    /// or failed, with the reason on standard error, and `2` on a usage
-    /// error.
+    /// Exit codes: `0` when the command completed, `1` when it was refused,
+    /// failed, or was not understood, with the reason on standard error.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            let _ = Stderr.write_all(USAGE.as_bytes());
-            return 2;
+        let Some(arguments) = tairix_help::arguments(OWN_WORD) else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("{OWN_WORD}: {err}"));
-                let _ = Stderr.write_all(USAGE.as_bytes());
-                return 2;
+                tairix_help::report_misuse(OWN_WORD, &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -74,7 +70,7 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("{OWN_WORD}: {err}"));
+                write_stderr_line(format_args!("{OWN_WORD}: {err}"));
                 1
             }
         }

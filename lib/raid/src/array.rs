@@ -8,8 +8,8 @@
 //! once it has *discovered* an array from its members' superblocks and resolved
 //! its [`RaidLevel`], must present exactly one logical [`Block`] device to the
 //! filesystem layer and drive its self-recovery, regardless of level.
-//! [`RaidArray`] is that single composed-device abstraction (modelled on Linux
-//! md's per-personality dispatch): it wraps the level-specific engine and
+//! [`RaidArray`] is that single composed-device abstraction: it wraps the
+//! level-specific engine and
 //! forwards both the [`Block`] I/O path and the level-agnostic health,
 //! maintenance, and member-reconfiguration surface, so neither the autoloaded
 //! serve process nor the ARXFS-native composition re-derives the level → engine

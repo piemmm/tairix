@@ -46,8 +46,8 @@ nombre.
 ## EXIT STATUS
 
 - `0` — se escribieron los resultados (o la ayuda breve).
-- `1` — la salida no pudo entregarse.
-- `2` — la línea de órdenes no se entendió.
+- `1` — la salida no pudo entregarse. Una línea de órdenes no
+  entendida también termina con `1`.
 
 ## ENVIRONMENT
 

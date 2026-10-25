@@ -11,14 +11,15 @@
 //! `main` collects the inherited argument vector, reads the `LANG` locale
 //! preference from the inherited environment (plans/APPS.md §5 — the shell
 //! exports it; the tool invents no second source), and runs the parsed
-//! command against the production seams: `RtFileSystem`, which inspects,
-//! walks, and re-modes paths through the kernel-authorised `fs_*` syscalls
-//! (the owner-only rule and every per-inode and mount check stay
-//! kernel-side), the shared `tairix_help::BundleHelp`, which reads the
-//! tool's own bundle's `Help/` tree for the short-help switches, and
-//! `Stdout`, which writes the `-v`/`-c` reports to the inherited standard
-//! output. The tool binds only to its inherited descriptors, never a console
-//! device, and holds no ambient authority.
+//! command against the production seams: `tairix_rt::copy::WorkingDirectory`,
+//! the shared tree seam over the kernel-authorised `fs_*` calls, through
+//! whose descriptors every mode is read and set (the owner-only rule and
+//! every per-inode and mount check stay kernel-side), the process's umask
+//! read once, the shared `tairix_help::BundleHelp`, which reads the tool's
+//! own bundle's `Help/` tree for the short-help switches, and `Stdout`, which
+//! writes the `-v`/`-c` reports to the inherited standard output. The tool
+//! binds only to its inherited descriptors, never a console device, and
+//! holds no ambient authority.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -30,136 +31,29 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
-    use alloc::string::String;
-    use alloc::vec::Vec;
-    use core::cell::RefCell;
-
-    use tairix_abi::fs::{DirEntries, OpenFlags, FS_MODE_MASK};
-    use tairix_abi::Errno;
-    use tairix_chmod::{parse, run, ChmodError, Entry, EntryKind, FileSystem, Metadata, USAGE};
+    use tairix_chmod::{parse, run};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-    use tairix_rt::File;
-
-    /// Read every entry of the directory at `path` into one snapshot, the
-    /// one batched listing read `ls` and `rm` use.
-    fn read_entries(path: &str) -> Result<Vec<Entry>, Errno> {
-        let buf = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
-        let mut entries = Vec::new();
-        for entry in DirEntries::new(&buf) {
-            let entry = entry?;
-            // The ABI contract makes every entry name UTF-8; a name that is
-            // not is a corrupt or hostile stream, refused whole rather than
-            // silently dropped — `OutOfRange`, the same errno the entry
-            // decoder itself uses for a field outside its permitted domain.
-            let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
-            entries.push(Entry {
-                name: String::from(name),
-                kind: if entry.kind.is_dir() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::File
-                },
-            });
-        }
-        Ok(entries)
-    }
-
-    /// The production [`FileSystem`]: the kernel-authorised `fs_*` view. It
-    /// adds no authority — every path resolution, the owner-only mode-change
-    /// rule, and every per-inode and mount-flag check happen kernel-side
-    /// under the caller's attested identity, and a refusal surfaces as the
-    /// exact [`Errno`] the kernel chose.
-    ///
-    /// The engine walks a directory entry-by-entry through the index-based
-    /// seam, so the host keeps a one-slot snapshot of the last directory
-    /// read, hoisting the per-entry re-read off the walk. A mode change
-    /// never renames or removes anything, so a snapshot can never go stale
-    /// against this tool's own actions.
-    struct RtFileSystem {
-        listing: RefCell<Option<(String, Vec<Entry>)>>,
-    }
-
-    impl RtFileSystem {
-        fn new() -> Self {
-            Self {
-                listing: RefCell::new(None),
-            }
-        }
-    }
-
-    impl FileSystem for RtFileSystem {
-        fn stat(&self, path: &str) -> Result<Metadata, Errno> {
-            // A resolve-only open: no read authority is requested, the
-            // handle is closed on drop, and only the metadata is learned.
-            let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
-            let stat = file.stat().map_err(Errno::from_syscall)?;
-            Ok(Metadata {
-                kind: if stat.kind.is_dir() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::File
-                },
-                // Only the permission bits are the mode this tool reasons
-                // about; any file-type bits the backing reports are not.
-                mode: stat.mode & FS_MODE_MASK,
-            })
-        }
-
-        fn set_mode(&self, path: &str, mode: u32) -> Result<(), Errno> {
-            // The seam contract: the file-type bits are not the caller's to
-            // change, so only the permission bits travel.
-            let ret = tairix_rt::fs_set_mode(path.as_bytes(), mode & FS_MODE_MASK);
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
-        }
-
-        fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno> {
-            let mut listing = self.listing.borrow_mut();
-            let cached = matches!(&*listing, Some((dir, _)) if dir == path);
-            if !cached {
-                *listing = Some((String::from(path), read_entries(path)?));
-            }
-            let Some((_, entries)) = &*listing else {
-                // Unreachable by construction (the snapshot was just
-                // installed), but fail closed rather than panic.
-                return Err(Errno::NotFound);
-            };
-            let index = usize::try_from(index).map_err(|_| Errno::LengthOutOfRange)?;
-            Ok(entries.get(index).cloned())
-        }
-    }
-
-    /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
-    /// own trailing newline), best-effort on the already-failing path.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
+    use tairix_rt::copy::WorkingDirectory;
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a filesystem or output failure
     /// (silent for `-f`'s suppressed diagnostics — the silence is the very
-    /// thing the user asked for; the status still reports the failure), `2`
-    /// on a usage error (a malformed argument vector, an unrecognised
-    /// option, or an unparsable mode).
+    /// thing the user asked for; the status still reports the failure) or a
+    /// command line not understood, an unparsable mode included, as GNU's
+    /// `chmod` ends.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("chmod") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("chmod", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -167,16 +61,16 @@ mod program {
         match run(
             command,
             locale,
-            &RtFileSystem::new(),
+            &WorkingDirectory,
+            tairix_rt::umask_get(),
             &BundleHelp::new("chmod"),
             &Stdout,
+            &Stderr,
         ) {
-            Ok(()) => 0,
-            // `-f` suppressed the diagnostics; the exit status alone
-            // reports the failure, exactly as the user requested.
-            Err(ChmodError::Silenced) => 1,
+            Ok(true) => 0,
+            Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("chmod: {err}"));
+                write_stderr_line(format_args!("chmod: {err}"));
                 1
             }
         }

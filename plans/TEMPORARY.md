@@ -259,8 +259,8 @@ What the answer means for the design (TMP-2.1 and TMP-2.3):
   when it says so, through VPD B1h or SAT. A reported rotation rate, or no
   report at all, gets the slowest media's budgets: the `Rotational` class's
   30 s deadline and 60 s grace are the most patient the tree defines.
-- **Reference values.** Linux's `sd` driver uses 30 s per command, twice that
-  for a cache flush, and up to 100 s for a disk to spin up. A spin-up budget
+- **Reference values.** A Linux host reports a 30 s command timeout for a
+  SCSI disk (`cat /sys/block/sdX/device/timeout`). A spin-up budget
   of 60 s matches the Rotational grace.
 
 ### D-4 — Does an operation's progress window hold its folder window? (gates TMP-7.3)
@@ -314,7 +314,6 @@ a disk still spinning up from being reset again too soon.
 The witness is the 2026-10-17 boot: one disk's exchange went unanswered for
 its 30 s budget, the transport reset at 50.163 s worked, and the reissue that
 succeeded came at 80.176 s — 30 s spent waiting on a device that was ready.
-Linux retries a command at once after a successful reset.
 
 Options:
 

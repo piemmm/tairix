@@ -1943,7 +1943,7 @@ mod tests {
     fn service_manifest_round_trips_per_service_limits() {
         let limits = [
             ServiceLimit {
-                kind: LimitKind::OpenStreams,
+                kind: LimitKind::OpenFiles,
                 limit: ResourceLimit::new(64, 128).expect("well-formed"),
             },
             ServiceLimit {
@@ -2001,7 +2001,7 @@ mod tests {
                 limit: ResourceLimit::UNLIMITED,
             },
             ServiceLimit {
-                kind: LimitKind::OpenStreams,
+                kind: LimitKind::OpenFiles,
                 limit: ResourceLimit::UNLIMITED,
             },
         ];

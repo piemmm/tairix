@@ -40,28 +40,31 @@
 mod program {
     extern crate alloc;
 
+    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion, FS_MODE_MASK};
-    use tairix_abi::{Errno, FileId, FileKind, InputMode, RenameFlags, UnlinkFlags, STDOUT};
+    use tairix_abi::fs::{DirEntries, OpenFlags, FS_MODE_MASK};
+    use tairix_abi::{Errno, FileId, FileKind, InputMode, STDOUT};
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
-    use tairix_fscopy::Ancestry;
-    use tairix_fscopy::PathFiles;
+    use tairix_fscopy::op::{OpError, Verb};
+    use tairix_fscopy::tree::Roots;
+    use tairix_fscopy::{landing, Landing, Source, Unresolved};
+    use tairix_fstree::ops::{self, Run};
     use tairix_fstree::{
-        run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, OWN_WORD,
+        parse, run, Command, Fs, FsEntry, Info, Model, Settings, VolumeInfo, OWN_WORD,
     };
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_procinfo::{for_each_mount, IpcTransport, Namespace, VolumeBytes, WalkStep};
-    use tairix_rt::copy::{OpenFiles, RtAncestry};
+    use tairix_rt::copy::WorkingDirectory;
     use tairix_rt::io::{write_stderr_line, StdInfo, Write};
-    use tairix_rt::File;
+    use tairix_rt::{Dir, File};
     use tairix_sandbox::decode::DecodeService;
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_termcap::from_term;
-    use tairix_util::quote::quote_if_needed;
+    use tairix_util::quote::quote_subject;
     use tairix_vt::{Op, Parser};
 
     /// The conventional fallback terminal grid — 80 columns by 24 rows —
@@ -70,29 +73,49 @@ mod program {
     const FALLBACK_ROWS: u16 = 24;
     const FALLBACK_COLS: u16 = 80;
 
-    /// The usage banner printed when the arguments cannot be understood.
+    /// The usage banner the short help and the `?` overlay fall back to when
+    /// the bundle's Help cannot be read.
     const USAGE: &str = "usage: fstree [-h | -?] [directory]";
 
-    /// The production [`Fs`]: directory listings and every file mutation
-    /// through the kernel-authorised `fs_*` syscalls (each entry's kind,
-    /// sizes, and modification stamp ride the one `fs_readdir` stream),
-    /// and volume free space through the System Information API's shared
-    /// mount walk.
+    /// The production [`Fs`]: directory listings through the
+    /// kernel-authorised `fs_*` syscalls (each entry's kind, sizes, and
+    /// modification stamp ride the one `fs_readdir` stream), volume free
+    /// space through the System Information API's shared mount walk, and
+    /// every copy, move and removal from the working directory, each entry
+    /// reached by name from a directory held.
     ///
-    /// A copy streams a file a chunk at a time through path-based seam
-    /// calls, so the copying tools' shared open-file cache keeps the source
-    /// and the destination open between chunks; a mutation of a cached path
-    /// drops its handle so a stale one is never written through.
+    /// The viewers read a file a window at a time, so it stays open, or
+    /// mapped, between windows; starting an operation lets both go, since
+    /// what it changes may be what they hold.
     struct RtFs {
-        files: OpenFiles,
+        reader: Option<Held>,
         mapped: Option<MappedFile>,
+    }
+
+    /// A file held open for reading, and the path it was opened at.
+    struct Held {
+        path: String,
+        file: File,
+    }
+
+    /// A resolve-only handle on what `path` names, a final link followed as
+    /// the mode and attributes editors follow one: no read or write access
+    /// is asked of the descriptor, only of the caller.
+    fn node(path: &str) -> Result<File, Errno> {
+        File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)
+    }
+
+    /// A resolve-only handle on the node `path` names itself, never what a
+    /// link there names.
+    fn own_node(path: &str) -> Result<File, Errno> {
+        File::open(path.as_bytes(), OpenFlags::NO_FOLLOW).map_err(Errno::from_syscall)
     }
 
     /// One live demand-paged mapping of the file the viewers are reading
     /// (`file_map`): the kernel backs each page on first access, so one
     /// mapping serves a file of any size — a 20 TB file costs only the
     /// pages the viewer actually shows. Dropped (released) when another
-    /// file is read or the file is mutated.
+    /// file is read or an operation starts.
     struct MappedFile {
         path: String,
         base: u64,
@@ -160,24 +183,34 @@ mod program {
     impl RtFs {
         fn new() -> Self {
             Self {
-                files: OpenFiles::default(),
+                reader: None,
                 mapped: None,
             }
         }
 
-        /// Drop any cached handle or mapping on `path` after a mutation of
-        /// it, so stale bytes are never served or written through.
-        fn forget(&mut self, path: &str) {
-            self.files.forget(path);
-            self.forget_mapping(path);
+        /// The file `path` names, open for reading, a final link followed
+        /// as the viewers follow one.
+        fn reader(&mut self, path: &str) -> Result<&mut File, Errno> {
+            let held = match self.reader.take() {
+                Some(held) if held.path == path => held,
+                stale => {
+                    // Closed first, so the viewers hold one descriptor.
+                    drop(stale);
+                    let file = File::open(path.as_bytes(), OpenFlags::READ)
+                        .map_err(Errno::from_syscall)?;
+                    Held {
+                        path: String::from(path),
+                        file,
+                    }
+                }
+            };
+            Ok(&mut self.reader.insert(held).file)
         }
 
-        /// Drop the cached mapping on `path` alone (resident pages are a
-        /// map-time snapshot; a write to the file must invalidate them).
-        fn forget_mapping(&mut self, path: &str) {
-            if matches!(&self.mapped, Some(mapped) if mapped.path == path) {
-                self.mapped = None;
-            }
+        /// Let the file held and the mapping go.
+        fn forget(&mut self) {
+            self.reader = None;
+            self.mapped = None;
         }
     }
 
@@ -194,6 +227,7 @@ mod program {
                 entries.push(FsEntry {
                     name: String::from(name),
                     kind: entry.kind,
+                    id: entry.id,
                     size: entry.size,
                     modified: entry.modified,
                 });
@@ -202,11 +236,7 @@ mod program {
         }
 
         fn stat_mode(&mut self, path: &str) -> Result<u32, Errno> {
-            // A resolve-only open: no read authority is requested, the
-            // handle is closed on drop, and only the metadata is learned.
-            let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
-            let stat = file.stat().map_err(Errno::from_syscall)?;
+            let stat = node(path)?.stat().map_err(Errno::from_syscall)?;
             // Only the permission bits are the editor's subject; the
             // file-type bits the backing reports above the mask are not.
             Ok(stat.mode & FS_MODE_MASK)
@@ -224,66 +254,48 @@ mod program {
         }
 
         fn attr_list(&mut self, path: &str) -> Result<Vec<String>, Errno> {
-            // The shared drain of the index iteration: the kernel filters
-            // unreadable namespaces out, so this sees only what it may show.
-            tairix_rt::fs_attr_keys(path.as_bytes()).map_err(Errno::from_syscall)
+            // The kernel filters unreadable namespaces out, so this sees
+            // only what it may show.
+            node(path)?.attr_keys().map_err(Errno::from_syscall)
         }
 
         fn attr_get(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
-            tairix_rt::fs_attr_value(path.as_bytes(), key.as_bytes()).map_err(Errno::from_syscall)
+            node(path)?
+                .attr_value(key.as_bytes())
+                .map_err(Errno::from_syscall)
         }
 
         fn attr_set(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
             // The kernel authorises the write (permission, mount flags,
             // key grammar, size bounds) and applies it as one
             // copy-on-write transaction.
-            let ret = tairix_rt::fs_attr_set(path.as_bytes(), key.as_bytes(), value);
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
+            node(path)?
+                .attr_set(key.as_bytes(), value)
+                .map_err(Errno::from_syscall)
         }
 
         fn attr_remove(&mut self, path: &str, key: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_attr_remove(path.as_bytes(), key.as_bytes());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
+            node(path)?
+                .attr_remove(key.as_bytes())
+                .map_err(Errno::from_syscall)
         }
 
         fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno> {
-            // A resolve-only, `NO_FOLLOW` open: no read authority is
-            // requested, the handle is closed on drop, and the *name as
-            // typed* is described. Following a final link here would let one
-            // already sitting at a destination decide what a later create or
-            // truncate acts on — anywhere on the volume.
-            let file =
-                File::open(path.as_bytes(), OpenFlags::NO_FOLLOW).map_err(Errno::from_syscall)?;
-            let stat = file.stat().map_err(Errno::from_syscall)?;
+            // The *name as typed* is described. Following a final link here
+            // would let one already sitting at a destination decide what a
+            // later create acts on — anywhere on the volume.
+            let stat = own_node(path)?.stat().map_err(Errno::from_syscall)?;
             Ok(stat.kind)
         }
 
-        fn canonical(&mut self, path: &str) -> Result<String, Errno> {
-            RtAncestry.canonical(path)
-        }
-
-        fn identity(&mut self, path: &str) -> Result<FileId, Errno> {
-            RtAncestry.identity(path)
-        }
-
-        fn read_link(&mut self, path: &str) -> Result<String, Errno> {
-            tairix_rt::readlink(path)
-        }
-
-        fn create_link(&mut self, target: &str, path: &str) -> Result<(), Errno> {
-            // Target first, then the link — the `symlink(2)` argument order.
-            let ret = tairix_rt::fs_symlink(target.as_bytes(), path.as_bytes());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            self.forget(path);
-            Ok(())
+        fn landing(&mut self, src: &str, dir: &str) -> Result<Landing, Unresolved> {
+            let source = WorkingDirectory
+                .open_dir(src, true)
+                .map_err(Unresolved::Source)?;
+            let dir = WorkingDirectory
+                .open_dir(dir, true)
+                .map_err(Unresolved::Target)?;
+            landing(&source, &dir)
         }
 
         fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -302,86 +314,33 @@ mod program {
             // Streamed fallback — the same bytes through `fs_read` — for a
             // file the kernel declined to map (an empty file, or a port
             // with no file-mapping window yet).
-            self.files.read(path, offset, buf)
+            Source::read_at(self.reader(path)?, offset, buf)
         }
 
-        fn size(&mut self, path: &str) -> Result<u64, Errno> {
-            self.files.size(path)
+        fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
+            Dir::create(path.as_bytes(), mode)
+                .map(drop)
+                .map_err(Errno::from_syscall)
         }
 
-        fn next_region(
+        fn transfer(
             &mut self,
-            path: &str,
-            offset: u64,
-            region: SeekRegion,
-        ) -> Result<Option<u64>, Errno> {
-            self.files.next_region(path, offset, region)
+            verb: Verb,
+            src: (&str, FileId),
+            target: &str,
+        ) -> Result<Box<dyn Run>, OpError> {
+            self.forget();
+            Ok(Box::new(ops::transfer(
+                &WorkingDirectory,
+                verb,
+                (src, target),
+                tairix_rt::staging_name,
+            )?))
         }
 
-        fn create(&mut self, path: &str) -> Result<(), Errno> {
-            // Create-or-truncate, then close: the engine writes through
-            // `write`, which re-opens the destination for the stream.
-            let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
-            drop(file);
-            self.forget(path);
-            Ok(())
-        }
-
-        fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-            // A write invalidates any mapping of the same file: resident
-            // pages are a map-time snapshot and must not be served stale.
-            self.forget_mapping(path);
-            self.files.write(path, offset, bytes)
-        }
-
-        fn set_len(&mut self, path: &str, len: u64) -> Result<(), Errno> {
-            self.forget_mapping(path);
-            self.files.set_len(path, len)
-        }
-
-        fn mkdir(&mut self, path: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_mkdir(path.as_bytes());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
-        }
-
-        fn remove_file(&mut self, path: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_unlink(path.as_bytes(), UnlinkFlags::empty());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            self.forget(path);
-            Ok(())
-        }
-
-        fn remove_dir(&mut self, path: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_unlink(path.as_bytes(), UnlinkFlags::DIRECTORY);
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
-        }
-
-        fn rename(
-            &mut self,
-            src: &str,
-            dst: &str,
-            flags: RenameFlags,
-        ) -> Result<RenameOutcome, Errno> {
-            let ret = tairix_rt::fs_rename(src.as_bytes(), dst.as_bytes(), flags);
-            if ret == 0 {
-                self.forget(src);
-                self.forget(dst);
-                return Ok(RenameOutcome::Renamed);
-            }
-            match Errno::from_syscall(ret) {
-                // The honest boundary report that drives the engine's
-                // copy-then-remove fallback; nothing was changed.
-                Errno::CrossVolume => Ok(RenameOutcome::CrossDevice),
-                errno => Err(errno),
-            }
+        fn remove(&mut self, path: (&str, FileId)) -> Result<Box<dyn Run>, OpError> {
+            self.forget();
+            Ok(Box::new(ops::remove(&WorkingDirectory, path)?))
         }
 
         fn volume_space(&mut self, path: &str) -> Option<VolumeBytes> {
@@ -457,30 +416,17 @@ mod program {
             return serve_stdio(&mut DecodeService).exit_code();
         }
 
-        // A malformed (non-UTF-8) argument vector is a usage error,
-        // reported rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments(OWN_WORD) else {
+            return tairix_help::MISUSE;
         };
-        let mut root: Option<String> = None;
-        for &argument in arguments.iter().skip(1) {
-            match argument {
-                "-h" | "-?" => return tairix_help::print_own_short_help(OWN_WORD, Some(USAGE)),
-                other if root.is_none() && !other.starts_with('-') => {
-                    root = Some(String::from(other));
-                }
-                other => {
-                    write_stderr_line(&alloc::format!(
-                        "fstree: unknown argument: {other}",
-                        other = quote_if_needed(other)
-                    ));
-                    write_stderr_line(USAGE);
-                    return 2;
-                }
+        let root = match parse(&arguments) {
+            Ok(Command::Open(root)) => root,
+            Ok(Command::Help) => return tairix_help::print_own_short_help(OWN_WORD, Some(USAGE)),
+            Err(err) => {
+                tairix_help::report_misuse(OWN_WORD, &err);
+                return tairix_help::MISUSE;
             }
-        }
-        let root = root.unwrap_or_else(|| String::from("/"));
+        };
 
         // The `?` overlay's text: the bundle's own Help document rendered
         // by the shared engine, decoded to plain text. A bundle whose help
@@ -513,9 +459,9 @@ mod program {
         let mut model = match Model::new(&mut fs, &root, help_text) {
             Ok(model) => model,
             Err(errno) => {
-                write_stderr_line(&alloc::format!(
-                    "fstree: {root}: {errno:?}",
-                    root = quote_if_needed(&root)
+                write_stderr_line(format_args!(
+                    "fstree: {root}: {errno}",
+                    root = quote_subject(&root)
                 ));
                 return 1;
             }
@@ -537,7 +483,7 @@ mod program {
         // menu instead.
         for refusal in refusals {
             if !matches!(refusal, tairix_appdata::Refusal::StoreUnreadable(_)) {
-                write_stderr_line(&alloc::format!("fstree: {refusal}"));
+                write_stderr_line(format_args!("fstree: {refusal}"));
             }
         }
 
@@ -575,7 +521,7 @@ mod program {
         // states that reason on stderr — after the terminal is restored,
         // so the message is not torn down with the alternate screen.
         if let Err(err) = &result {
-            write_stderr_line(&alloc::format!("fstree: terminal error: {err:?}"));
+            write_stderr_line(format_args!("fstree: terminal error: {err}"));
         } else if entered.is_err() || left.is_err() {
             write_stderr_line("fstree: terminal error: the screen could not be switched");
         }

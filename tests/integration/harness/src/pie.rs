@@ -46,10 +46,10 @@ pub const RUN_LD_WORKSPACE_RELPATH: &str = "lib/rt/Run.ld";
 /// this cross-compile vocabulary.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum PieArch {
-    /// `aarch64-unknown-none` — the Raspberry Pi image and the aarch64 QEMU
+    /// `aarch64-unknown-none` — the aarch64 image and the aarch64 QEMU
     /// verticals boot this.
     Aarch64,
-    /// `riscv64gc-unknown-none-elf` — the QEMU `virt` / SiFive verticals.
+    /// `riscv64gc-unknown-none-elf` — the QEMU `virt` verticals.
     Riscv64,
     /// `x86_64-tairix-none` — the BIOS/UEFI PC image and the x86_64 QEMU
     /// verticals.

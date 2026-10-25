@@ -30,11 +30,12 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
-//! ABI crate, the shared `lib/procinfo` client helpers, and the shared
-//! `lib/help` engine, so this userland tool never links a kernel or driver
-//! crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in production
-//! paths; nothing writes to fd 3 (`stdinfo` — a single name is never an
-//! omission or summary).
+//! ABI crate, the shared `lib/procinfo` client helpers, the shared
+//! `lib/util` command-line scanner and quoting, and the shared `lib/help`
+//! engine, so this userland tool never links a kernel or driver crate. No
+//! `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths; nothing
+//! writes to fd 3 (`stdinfo` — a single name is never an omission or
+//! summary).
 //!
 //! The bundle's `Help/` documents are **not** embedded in this crate: they
 //! are authored once in the bundle's on-disk `Help/` tree, planted onto
@@ -54,10 +55,11 @@ use core::fmt;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{user_name, CallError, ListError, Output, Transport};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `whoami`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `whoami`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: whoami
 
@@ -82,11 +84,8 @@ pub enum Command {
 /// The failures the `whoami` tool reports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WhoamiError {
-    /// An unrecognised `--long` option (GNU `unrecognized option`).
-    UnknownLong(String),
-    /// An unrecognised short option (GNU `invalid option`); carries the
-    /// offending flag character.
-    UnknownShort(char),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// An operand was given; `whoami` takes none (GNU `extra operand`).
     ExtraOperand(String),
     /// Reading the caller's identity failed, the directory transport
@@ -117,14 +116,7 @@ impl From<ListError> for WhoamiError {
 impl fmt::Display for WhoamiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => {
-                write!(f, "unrecognized option {token}", token = quote(token))
-            }
-            Self::UnknownShort(flag) => write!(
-                f,
-                "invalid option -- {}",
-                quote(flag.encode_utf8(&mut [0; 4]))
-            ),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::ExtraOperand(operand) => {
                 write!(f, "extra operand {operand}", operand = quote(operand))
             }
@@ -150,51 +142,45 @@ pub trait Identity {
     fn uid(&self) -> Result<u32, Errno>;
 }
 
+/// What each of `whoami`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `whoami`'s options: the reserved help switches alone.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
 /// The grammar is the GNU `whoami` surface — no operands, no options beyond
-/// the reserved short-help switches (plans/APPS.md §4):
+/// the reserved short-help switches (plans/APPS.md §4) — read as GNU's
+/// `getopt_long` reads it ([`Scan`]):
 ///
-/// * `-h` / `-?` / `--help` — short help; like GNU getopt's permutation,
-///   an option is honoured wherever it sits, so `whoami foo --help` serves
-///   the help.
+/// * `-h` / `-?` / `--help` — short help, honoured wherever it sits, so
+///   `whoami foo --help` serves the help.
 /// * `--` — end option parsing; every later argument is an operand.
-/// * any other option-shaped token — [`WhoamiError::UnknownLong`] /
-///   [`WhoamiError::UnknownShort`], diagnosed left to right exactly as GNU
-///   getopt reports the first bad option before complaining about operands.
-/// * any operand (`whoami` takes none) — [`WhoamiError::ExtraOperand`]
-///   naming the first one. A lone `-` is an operand.
+/// * any operand, a lone `-` included, is one too many.
 ///
 /// # Errors
 ///
-/// The GNU diagnostics above, in getopt's order: the first unrecognised
-/// option anywhere wins over an operand complaint.
+/// In getopt's order, the first refused option anywhere winning over an
+/// operand complaint:
+///
+/// * [`WhoamiError::Option`] — an option `getopt` refuses, in its words.
+/// * [`WhoamiError::ExtraOperand`] — an operand, naming the first.
 pub fn parse(args: &[&str]) -> Result<Command, WhoamiError> {
     let mut operand: Option<&str> = None;
-    let mut options_ended = false;
-    for &arg in args {
-        if options_ended {
-            operand.get_or_insert(arg);
-            continue;
-        }
-        match arg {
-            "--" => options_ended = true,
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            _ if arg.starts_with("--") => {
-                return Err(WhoamiError::UnknownLong(String::from(arg)));
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(WhoamiError::Option)? {
+            Arg::Operand(extra) => {
+                operand.get_or_insert(extra);
             }
-            _ if arg.len() > 1 && arg.starts_with('-') => {
-                // The first flag character of the cluster, exactly as
-                // getopt reports it (`-hx` diagnoses `h`: GNU `whoami` has
-                // no short options, so only the exact reserved spellings
-                // above are ever honoured).
-                let flag = arg.chars().nth(1).unwrap_or('-');
-                return Err(WhoamiError::UnknownShort(flag));
-            }
-            _ => {
-                operand.get_or_insert(arg);
-            }
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
     }
     match operand {
@@ -362,7 +348,7 @@ mod tests {
     }
 
     fn record(uid: u32, name: &[u8]) -> UserDirectoryRecord {
-        UserDirectoryRecord::new(uid, name).expect("record")
+        UserDirectoryRecord::new(uid, uid, name).expect("record")
     }
 
     fn directory() -> Directory {
@@ -381,22 +367,25 @@ mod tests {
         assert_eq!(parse(&["extra", "--help"]), Ok(Command::Help));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
     fn parse_diagnoses_options_and_operands_in_getopt_order() {
-        assert_eq!(
-            parse(&["--bogus"]),
-            Err(WhoamiError::UnknownLong(String::from("--bogus")))
-        );
-        assert_eq!(parse(&["-x"]), Err(WhoamiError::UnknownShort('x')));
-        // A cluster diagnoses its first flag; only the exact reserved
-        // spellings serve the help.
-        assert_eq!(parse(&["-hx"]), Err(WhoamiError::UnknownShort('h')));
+        assert_eq!(refused(&["--bogus"]), "unrecognized option '--bogus'");
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        // A cluster is read letter by letter: the first refused letter is
+        // named, and the help switch answers at once.
+        assert_eq!(refused(&["-xh"]), "invalid option -- 'x'");
+        assert_eq!(parse(&["-hx"]), Ok(Command::Help));
         assert_eq!(
             parse(&["extra"]),
             Err(WhoamiError::ExtraOperand(String::from("extra")))
         );
         // The first bad option wins over the operand complaint.
-        assert_eq!(parse(&["extra", "-x"]), Err(WhoamiError::UnknownShort('x')));
+        assert_eq!(refused(&["extra", "-x"]), "invalid option -- 'x'");
         // After `--` everything is an operand — still one too many.
         assert_eq!(
             parse(&["--", "-h"]),
@@ -407,6 +396,22 @@ mod tests {
             parse(&["-"]),
             Err(WhoamiError::ExtraOperand(String::from("-")))
         );
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--help=x"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `whoami extra --he` as `whoami extra --help`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["extra", "--he"]), Ok(Command::Help));
     }
 
     #[test]

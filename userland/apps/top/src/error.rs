@@ -5,16 +5,20 @@ use core::fmt;
 use tairix_abi::Errno;
 use tairix_curses::CursesError;
 use tairix_procinfo::{CallError, ListError};
+use tairix_util::getopt::Refusal;
 
 /// Why a `top` session ended other than by the user quitting.
 ///
 /// The variants are deliberately coarse: enough to print a useful diagnostic
 /// and set an exit status, while leaning on the frozen [`Errno`] for the
 /// wire-level cause so the tool invents no parallel error set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TopError {
-    /// The command line carried an unrecognised option or an operand. The
-    /// caller should print [`crate::USAGE`]. The viewer never starts.
+    /// An option `getopt` refuses, worded as it words it. The viewer never
+    /// starts.
+    Option(Refusal),
+    /// The command line carried an operand or a malformed delay. The viewer
+    /// never starts.
     Usage,
     /// The service refused the system-wide process listing because the
     /// caller lacks `CAP_SYSINFO_GLOBAL`. Distinguished
@@ -58,6 +62,7 @@ impl From<CursesError> for TopError {
 impl fmt::Display for TopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::PermissionDenied => f.write_str(
                 "permission denied: the system-wide process view requires a capability you do not hold",

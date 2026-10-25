@@ -10,7 +10,9 @@
 //! [`controller`] is the line server over the controller's registers; the
 //! `Run` binary maps the window, binds the controller's own line and serves.
 //!
-//! Reference: the Linux `irq-brcmstb-l2` driver's register layouts.
+//! Reference: the `brcm,l2-intc` binding (taken under BSD-2-Clause) for the
+//! compatibles; OpenBSD `sys/dev/fdt/bcmstbintc.c` (ISC) for the level
+//! layout. The edge layout is held to the on-metal hotplug run.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -22,7 +24,9 @@ pub mod controller;
 mod controller_tests;
 
 use controller::Layout;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the register window, its own line on the root controller, the node's
@@ -41,11 +45,11 @@ const BIND_PRIORITY: u16 = 10;
 /// bundle's signed manifest and the autoload match are built from — each key
 /// with the register layout its controller keeps, in [`LAYOUTS`] order.
 pub const BIND_KEYS: &[DriverBindKey] = &[
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(b"brcm,bcm2711-l2-intc")),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(b"brcm,l2-intc")),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(b"brcm,hif-spi-l2-intc")),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(b"brcm,upg-aux-aon-l2-intc")),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(b"brcm,bcm7271-l2-intc")),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(b"brcm,bcm2711-l2-intc")),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(b"brcm,l2-intc")),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(b"brcm,hif-spi-l2-intc")),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(b"brcm,upg-aux-aon-l2-intc")),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(b"brcm,bcm7271-l2-intc")),
 ];
 
 /// The layout each entry of [`BIND_KEYS`] names.
@@ -58,15 +62,6 @@ pub const LAYOUTS: [Layout; 5] = [
 ];
 
 const _: () = assert!(LAYOUTS.len() == BIND_KEYS.len());
-
-const fn compatible_key(compatible: &[u8]) -> HwMatchKey {
-    match HwMatchKey::compatible(compatible) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    }
-}
 
 /// Handle marker [`register`] returns; the host re-issues its own. `"L2IC"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x4C32_4943_0000_0001;

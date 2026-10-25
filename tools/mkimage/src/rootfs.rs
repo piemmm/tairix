@@ -30,7 +30,9 @@ use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, No
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::{stored_root_entries, DriverError};
 use tairix_drv_fs_arxfs::{plant_nested_file, EntropySource, Keying, Security, ARXFS};
-use tairix_users::{provision_default_dirs, provision_home_shape, provision_settings_dirs};
+use tairix_users::{
+    provision_default_dirs, provision_home_shape, provision_settings_dirs, HOME_MODE,
+};
 
 use crate::device::MemBlock;
 use crate::MkimageError;
@@ -81,6 +83,13 @@ pub const WRITABLE_SYSTEM_SUBDIRS: [&str; 3] = [
     "Security",
 ];
 
+/// The record the image's own directories are laid with: the system user's.
+const SYSTEM_DIR: Security = Security::created(NodeKind::Directory, 0, 0);
+
+/// The record of a file the image plants for the system: readable by every
+/// principal, written by the system user alone.
+const SYSTEM_FILE: Security = Security::created(NodeKind::RegularFile, 0, 0);
+
 /// Number of inodes the root volume is formatted with: ample for the
 /// skeleton plus the installer's first-boot output, while trivial against
 /// the volume size (`ARXFS` allocates inodes from this hint's table).
@@ -106,7 +115,7 @@ pub const MACHINE_ID_NAME: &str = "MachineId";
 const MACHINE_ID_MODE: u32 = 0o644;
 
 /// Name of the per-installation log-attestation key file under
-/// `/System/Security/Keys` (`PREREQUISITES.md` P-E). Its bytes are the
+/// `/System/Security/Keys`. Its bytes are the
 /// [`tairix_log::LogAttestationKey`] on-disk image.
 pub const LOG_ATTESTATION_KEY_NAME: &str = "LogAttestation";
 
@@ -166,7 +175,7 @@ pub fn build_root_partition(
 
     for name in stored_root_entries() {
         let node = fs
-            .create(root, name.as_bytes(), NodeKind::Directory)
+            .create(root, name.as_bytes(), NodeKind::Directory, &SYSTEM_DIR)
             .map_err(MkimageError::RootPartition)?;
         if name == "System" {
             populate_system_subtree(&mut fs, node, seed)?;
@@ -185,9 +194,9 @@ pub fn build_root_partition(
         .into_bytes())
 }
 
-/// Create `/Users/<username>` for `(uid, gid)` with the fixed home shape,
-/// through the one walk `users_admin` provisions a new account's home with,
-/// so a seeded account and a created one can never get different homes.
+/// Create `/Users/<username>` owner-only for `(uid, gid)` with the fixed home
+/// shape, through the one walk `users_admin` provisions a new account's home
+/// with, so a seeded account and a created one can never get different homes.
 fn create_home_dir(
     fs: &mut ARXFS<MemBlock>,
     users: NodeId,
@@ -196,7 +205,12 @@ fn create_home_dir(
     gid: u32,
 ) -> Result<(), MkimageError> {
     let home = fs
-        .create(users, username.as_bytes(), NodeKind::Directory)
+        .create(
+            users,
+            username.as_bytes(),
+            NodeKind::Directory,
+            &Security::new(HOME_MODE, uid, gid),
+        )
         .map_err(MkimageError::RootPartition)?;
     provision_home_shape(fs, home, uid, gid).map_err(MkimageError::Shape)
 }
@@ -295,7 +309,7 @@ fn populate_system_subtree(
 ) -> Result<(), MkimageError> {
     for sub in WRITABLE_SYSTEM_SUBDIRS {
         let node = fs
-            .create(system, sub.as_bytes(), NodeKind::Directory)
+            .create(system, sub.as_bytes(), NodeKind::Directory, &SYSTEM_DIR)
             .map_err(MkimageError::RootPartition)?;
         if sub == "Security" {
             create_security_subdirs(fs, node, MkimageError::RootPartition)?;
@@ -335,13 +349,15 @@ fn write_machine_id_file(
     bytes: &[u8],
 ) -> Result<(), MkimageError> {
     let file = fs
-        .create(security, name.as_bytes(), NodeKind::RegularFile)
+        .create(
+            security,
+            name.as_bytes(),
+            NodeKind::RegularFile,
+            &Security::new(MACHINE_ID_MODE, 0, 0),
+        )
         .map_err(MkimageError::RootPartition)?;
-    fs.write_all(security, name.as_bytes(), 0, bytes)
-        .map_err(MkimageError::RootPartition)?;
-    fs.set_security(file, Security::new(MACHINE_ID_MODE, 0, 0))
-        .map_err(MkimageError::RootPartition)?;
-    Ok(())
+    fs.write_all(file, 0, bytes)
+        .map_err(MkimageError::RootPartition)
 }
 
 /// Create the [`SYSTEM_SUBDIRS`] under `system`, with `Keys` and `Policy`
@@ -355,7 +371,7 @@ fn create_system_subdirs(
 ) -> Result<(), MkimageError> {
     for sub in SYSTEM_SUBDIRS {
         let sub_node = fs
-            .create(system, sub.as_bytes(), NodeKind::Directory)
+            .create(system, sub.as_bytes(), NodeKind::Directory, &SYSTEM_DIR)
             .map_err(wrap)?;
         if sub == "Security" {
             create_security_subdirs(fs, sub_node, wrap)?;
@@ -375,7 +391,7 @@ fn create_security_subdirs(
     wrap: fn(tairix_abi::DriverError) -> MkimageError,
 ) -> Result<(), MkimageError> {
     for sec in ["Keys", "Policy"] {
-        fs.create(security, sec.as_bytes(), NodeKind::Directory)
+        fs.create(security, sec.as_bytes(), NodeKind::Directory, &SYSTEM_DIR)
             .map_err(wrap)?;
     }
     Ok(())
@@ -391,9 +407,15 @@ fn write_security_file(
     name: &str,
     text: &str,
 ) -> Result<(), MkimageError> {
-    fs.create(security, name.as_bytes(), NodeKind::RegularFile)
+    let file = fs
+        .create(
+            security,
+            name.as_bytes(),
+            NodeKind::RegularFile,
+            &SYSTEM_FILE,
+        )
         .map_err(MkimageError::RootPartition)?;
-    fs.write_all(security, name.as_bytes(), 0, text.as_bytes())
+    fs.write_all(file, 0, text.as_bytes())
         .map_err(MkimageError::RootPartition)
 }
 
@@ -422,21 +444,19 @@ fn write_library_config(
             settings,
             tairix_proglib::LIBRARY_SETTINGS_SUBDIR.as_bytes(),
             NodeKind::Directory,
+            &SYSTEM_DIR,
         )
         .map_err(MkimageError::RootPartition)?;
-    fs.create(
-        library,
-        tairix_proglib::LIBRARY_FILE.as_bytes(),
-        NodeKind::RegularFile,
-    )
-    .map_err(MkimageError::RootPartition)?;
-    fs.write_all(
-        library,
-        tairix_proglib::LIBRARY_FILE.as_bytes(),
-        0,
-        text.as_bytes(),
-    )
-    .map_err(MkimageError::RootPartition)
+    let file = fs
+        .create(
+            library,
+            tairix_proglib::LIBRARY_FILE.as_bytes(),
+            NodeKind::RegularFile,
+            &SYSTEM_FILE,
+        )
+        .map_err(MkimageError::RootPartition)?;
+    fs.write_all(file, 0, text.as_bytes())
+        .map_err(MkimageError::RootPartition)
 }
 
 /// Create `/System/Security/Keys/<name>`, write the secret `bytes` into it
@@ -451,18 +471,19 @@ fn write_key_file(
     name: &str,
     bytes: &[u8],
 ) -> Result<(), MkimageError> {
+    // System-user-owned, owner-read/write-only from birth: an ordinary
+    // principal cannot read the key, and the read-only-`/System` policy plus
+    // this mode gate the secret until the journal/attestation principal exists.
     let file = fs
-        .create(keys, name.as_bytes(), NodeKind::RegularFile)
+        .create(
+            keys,
+            name.as_bytes(),
+            NodeKind::RegularFile,
+            &Security::new(LOG_ATTESTATION_KEY_MODE, 0, 0),
+        )
         .map_err(MkimageError::RootPartition)?;
-    fs.write_all(keys, name.as_bytes(), 0, bytes)
-        .map_err(MkimageError::RootPartition)?;
-    // System-user-owned, owner-read/write-only: an ordinary principal cannot
-    // read the key, and the read-only-`/System` policy plus this mode gate the
-    // secret until the journal/attestation principal exists. The kernel refuses
-    // the record otherwise (fail closed).
-    fs.set_security(file, Security::new(LOG_ATTESTATION_KEY_MODE, 0, 0))
-        .map_err(MkimageError::RootPartition)?;
-    Ok(())
+    fs.write_all(file, 0, bytes)
+        .map_err(MkimageError::RootPartition)
 }
 
 #[cfg(test)]

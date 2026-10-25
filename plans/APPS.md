@@ -79,9 +79,9 @@ omission, and the shared self-scope omission record `ps` and `sysinfo
 processes` both emit are live; the other registered commands have
 nothing non-obvious to add today), `Help/`
 trees for future command apps as each becomes a registered bundle,
-the §12.1 Stage B remainder (`chmod`/`chown`/`getcap`/`setcap`/`mount`
-blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
-are registered store bundles), the §12.1 Stage C remainder (the first
+the §12.1 Stage B remainder (`getcap`/`setcap`/`mount` blocked on their
+kernel syscalls — `cp`/`mv`/`rm`/`chmod`/`chown`/`useradd`/`groupadd` are
+registered store bundles), the §12.1 Stage C remainder (the first
 batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir`/
 `head`/`wc`/`tee`/`seq`/`whoami` are registered store bundles; the rest
 land in further batches; the networking tools `ping`, `host`, `ss` and
@@ -876,7 +876,7 @@ platform floor).
   owner/group, the GNU numeric fallback, beside the link count the
   filesystem records; the sort
   key is name by default, `-S` size, `-t` time, `-X` extension, `-v` natural
-  version order (a faithful `filevercmp` port), `-U`/`-f` no sort (directory
+  version order (the coreutils manual's version sort, §30), `-U`/`-f` no sort (directory
   order, `-f` also enabling `-a` and disabling `-l`/`-s`), or `--sort=WORD`
   by name, with `--group-directories-first` floating directories to the top
   regardless of `-r`; the
@@ -887,14 +887,14 @@ platform floor).
   and falling back to one-per-line otherwise, cell widths measured
   through the shared `tairix_vt::str_width` table; names are quoted by the
   shared `tairix_util::quote` engine every command app names files with —
-  GNU's `quotearg` styles, `-R` headings and indicator styles marking what
+  GNU's `--quoting-style` styles, `-R` headings and indicator styles marking what
   GNU marks (`-F` its own `*` too) — `-N` literal, `-Q` C, `-b` escape, and
   `--quoting-style` selecting the full `literal`/`shell`/`shell-always`/
   `shell-escape`/`shell-escape-always`/`c`/`escape` set (`locale`/`clocale`
   refused, fail closed, like `--time-style=+FORMAT`), defaulting to
   `shell-escape` at an attested terminal and `literal` otherwise, with
   `-q`/`--show-control-chars` toggling the `?` control-char masking);
-  name filters follow GNU's `file_ignored` order — `-B`/`--ignore-backups`
+  name filters follow the coreutils manual (§10.1.1) — `-B`/`--ignore-backups`
   drops names ending in `~` in every mode (a direct suffix test, not a
   glob), `-I`/`--ignore=PATTERN` (repeatable) drops matches in every
   mode, and `--hide=PATTERN` (repeatable) drops matches only when neither
@@ -914,8 +914,8 @@ platform floor).
   `--file-type` extend `-p`/`-F` (with only dir/regular kinds, `file-type`
   appends `/` and never `*`), `-G`/`--no-group` drops the group column
   without selecting `-l`, `--author` repeats the owner column, `-T`/
-  `--tabsize` (default 8, `0` = spaces) advances columns with tabs by a
-  faithful port of GNU's `indent`, and `--zero` NUL-terminates entry lines
+  `--tabsize` (default 8, `0` = spaces) advances columns with tabs where
+  GNU `ls` places them, and `--zero` NUL-terminates entry lines
   and the `total` (headers/separators keep the newline), defaulting to
   single-column + literal + shown control chars;
   `rm` `-d -f -i -I -r -v
@@ -926,9 +926,9 @@ platform floor).
   committed, renamed into place, committed, and only then the source removed
   — and keeps the rename's rules, owner and mode; `-f` never removes a
   destination); `chmod` and
-  `chown` `-c -f -v` (GNU changed/retained wording; `-f` suppresses
-  per-operand diagnostics, continues, and still fails the run via the
-  message-less `Silenced` error). Each tool's `Prompt`/`Output` seams stay
+  `chown` `-c -f -v` (GNU changed/retained wording; a failed operand is
+  reported and the next still changed, `-f` suppressing the report but not
+  the failed status). Each tool's `Prompt`/`Output` seams stay
   injected and fail closed; registered tools' thirteen-locale `Help/` trees and
   the switch-drift pins are current.
 - **Stage B — register the orphan utilities as store bundles (in
@@ -961,7 +961,7 @@ platform floor).
   `fs_set_mode` (74, the `chmod(2)` shape; `CAP_FS_ACCESS`-gated, audited,
   mode word validated to `FS_MODE_MASK` at dispatch and again at the
   service seam, never masked) flows dispatcher → `MountedFilesystemService`
-  → `Vfs::set_mode_via_secured` → the per-inode `DelegatedFs::set_mode`,
+  → the per-inode `HeldNode::set_mode`,
   where only the inode's **owner** may change its mode (no
   write-implies-chmod, no capability override, `required_cap` honoured,
   read-only mounts refused), rewriting only the driver security record's
@@ -969,9 +969,24 @@ platform floor).
   with the thirteen-locale `Help/` tree, `-h`/`-?` over `lib/help`, and
   the `tairix_sys_fs_set_mode` stub + `TAIRIX_FS_MODE_MASK` in the regenerated C
   header. `fstree`'s `a` mode editor is the second caller.
-  **Remaining, blocked on kernel prerequisites:** `chown` needs the fs
-  owner-set syscall, `getcap`/`setcap` need per-inode
-  capability-requirement get/set syscalls, and `mount` needs a user-facing
+  **Done: `chown`** — a store bundle requesting console-write,
+  `CAP_FS_ACCESS` and `CAP_FS_CHOWN` (what the kernel asks of a change
+  giving a node away; without it an account still gives a file it owns to
+  one of its own groups), with GNU's command line from its manual —
+  `-c`/`-f`/`-v`, `-R`, `-h`/`--no-dereference`, `--dereference`,
+  `-H`/`-P`, `--from`, `--reference`, `--help`, `--version`, and `-L`
+  refused under `-R` because a walk follows no link it meets. An owner or
+  group is a name, read against the ungated `USER_DIRECTORY` and
+  `GROUP_DIRECTORY` queries before a number is tried, or a number (`+`
+  forcing one), in GNU's `OWNER`, `OWNER:`, `OWNER:GROUP`, `:GROUP` and
+  warned `OWNER.GROUP` forms; `OWNER:` gives the login group the directory
+  lists for the named account, whichever it is. Each change goes through
+  the descriptor its old owner was
+  read from, a tree walked through `tairix_fscopy::tree`: a link met in it
+  is changed itself and never followed, and each directory is changed
+  after its contents.
+  **Remaining, blocked on kernel prerequisites:** `getcap`/`setcap` need
+  per-inode capability-requirement get/set syscalls, and `mount` needs a user-facing
   attach: `volume_attach` attaches a block-service partition under
   `/Storage/<name>`, but nothing lets a user name an unattached storage
   object to attach (`plans/DRIVES.md` §5.8's discover/attach/publish verbs),
@@ -1009,9 +1024,9 @@ platform floor).
   `--ignore-fail-on-non-empty` tolerates exactly `NotEmpty`. Both
   tools' `-p` walks share the one ancestor-spelling rule
   (`tairix_path::Path::prefix`, the §2.2 seam added for exactly these
-  walks); `mkdir`'s GNU `-m` remains staged — its kernel prerequisite
-  (`fs_set_mode`, Stage B `chmod`) now exists, and the flag lands with
-  its own tests in its own change, never stubbed. `head`
+  walks); `mkdir -m` gives each directory exactly the mode named, the
+  umask applied at the create and the rest set after it, as GNU's does.
+  `head`
   implements the full GNU surface — `-n`/`-c` with the leading `-`
   elide form and the multiplier suffix alphabet, `-q`/`-v`/`-z`,
   bundles/permutation, and the obsolete first-argument
@@ -1019,7 +1034,7 @@ platform floor).
   letter keeps scaling after a later `l`) — streaming in constant
   memory (a circular byte ring for `-c -N`; a last-N-lines queue whose
   unterminated final fragment counts as a line). `wc` implements
-  `-c`/`-m`/`-l`/`-w`/`-L`, `--total` (GNU argmatch prefixes), and
+  `-c`/`-m`/`-l`/`-w`/`-L`, `--total` (unambiguous prefixes, as GNU's), and
   `--files0-from` with the exact GNU column-width rule (summed
   regular-file sizes via the three-way `SizeProbe` seam; 7-column
   minimum for non-regular inputs; unpadded single-input/single-count,
@@ -1027,9 +1042,9 @@ platform floor).
   across chunks (an encoding-error byte is a byte, not a character)
   and `-L` measures columns through the one `tairix_vt::char_width`
   definition — never a second width table. `tee` implements
-  `-a`/`--append`, `-p`, and `--output-error[=MODE]` (argmatch
+  `-a`/`--append`, `-p`, and `--output-error[=MODE]` (unambiguous
   prefixes; the value only attached with `=`, a bare `--output-error`
-  selecting `warn-nopipe`) with the GNU `tee.c` failure discipline (a
+  selecting `warn-nopipe`) with the failure discipline of the coreutils manual's `tee` modes (a
   failed output is diagnosed, dropped, and the run continues or stops
   per mode; reading stops when no output remains). Two documented
   divergences: TAIRiX has no `SIGPIPE`, so the modes' "pipe" class maps
@@ -1037,7 +1052,7 @@ platform floor).
   default mode's stdout failure stops the run fail-loud), and
   `-i`/`--ignore-interrupts` is staged behind per-process
   signal-disposition kernel work (nothing exists to set today), never
-  stubbed — the `mkdir -m` precedent. `seq` implements the full GNU
+  stubbed. `seq` implements the full GNU
   surface — `-f`/`--format` (a validated one-directive printf float
   format rendered by a C-locale `%e`/`%f`/`%g`/`%a` engine),
   `-s`/`--separator`, `-w`/`--equal-width`, GNU operand scanning (no
@@ -1076,7 +1091,7 @@ platform floor).
   stack, measuring each node's `fs_stat` `allocated` bytes by default
   (`--apparent-size`/`-b` for lengths) and implementing `-a`/`-s`/`-c`/
   `-d`/`-S`/`-0` plus the GNU unit options; the `-B` grammar, ceiling
-  block scaling, and `human_ceiling` renderings live once in
+  block scaling, and GNU's rounded-up human-readable sizes live once in
   `tairix_util::size` (a §2.2 `lib/util` promotion, shared with `df`).
   `df` renders the GNU table (auto-sized columns, `-a`/`-T`/`-t`/`-x`/
   `-i`/`-P`/`-l`/`--total`, operand→covering-mount by longest prefix)
@@ -1434,10 +1449,8 @@ both landed; `plans/SHELL.md` command execution):
    `en-US/<command>.md` (never a per-bundle list). Any violation fails
    closed with a message naming the offending `bundle/locale/file`.
 6. **`Help/` trees for the existing command apps** — **done for every
-   store-registered command app**: `basename`, `cat`, `clear`, `cp`,
-   `dirname`, `edit`, `false`, `groupadd`, `head`, `ls`, `mkdir`,
-   `mv`, `ps`, `reset`, `rm`, `rmdir`, `seq`, `sleep`, `tail`, `tee`, `top`, `true`, `sysinfo`, `useradd`,
-   `users`, `wc`, `whoami`, `yes`, and `elsh` each author their thirteen-locale tree on disk in the bundle,
+   store-registered command app**: each authors its thirteen-locale tree
+   on disk in its bundle,
    discovered by `tools/syshelp` (roots `userland/apps` and
    `userland/shell`), planted at `/System/Commands/<cmd>.app/Help/`, and served
    at runtime through the `HelpSource` seam — never embedded in the binary
@@ -1446,9 +1459,8 @@ both landed; `plans/SHELL.md` command execution):
    The tools that gained filesystem reach for that read request
    `CAP_FS_ACCESS` in their manifests (the man/ls precedent — the secured
    VFS still authorises per-inode). The not-yet-registered utilities
-   (`chmod`, `chown`, `mount`, `getcap`,
-   `setcap`, `terminal`, …) gain their trees in the
-   same change that registers each as a store bundle (§12.1 Stage B). Each new tree ships
+   (`getcap`, `setcap`, `mount`) gain their trees in the same change that
+   registers each as a store bundle (§12.1 Stage B). Each new tree ships
    by dropping its `Help/` files under the bundle — `tools/syshelp`
    rediscovers them, and no image-builder list is edited (§6.1).
 

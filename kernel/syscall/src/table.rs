@@ -11,12 +11,12 @@
 use tairix_abi::driver::DmaReach;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType,
+    i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType, AtFlags,
     CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
     MapFlags, OpenFlags, PeerWatchOp, PortWidth, PowerAction, RandomFlags, RealpathMode,
     RenameFlags, SchedPriority, SeekRegion, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec,
     UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK,
-    PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    FS_UMASK_BITS, FS_UMASK_QUERY, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -552,36 +552,41 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Change the calling process's working directory to the path at
-    /// `(path, path_len)` (`plans/SHELL.md` P2).
+    /// Change the calling process's working directory to the directory at
+    /// `(path, path_len)` relative to `dirfd`, or under
+    /// [`AtFlags::EMPTY_PATH`] to the one `dirfd` holds (`plans/SHELL.md` P2).
     ///
-    /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`] and that
-    /// `path` is a non-null `UserPtr`. The implementation copies the path in
-    /// through the validated `copy_from_user` boundary, resolves it (relative
-    /// to the caller's current working directory when it is not absolute) with
-    /// the shared path parser, and re-authorises it as a searchable directory
-    /// through the secured VFS under the caller's real credentials before it
-    /// becomes the new working directory. A path that is not a searchable
-    /// directory fails closed and leaves the working directory unchanged.
-    /// Returns `Ok(0)` on success.
+    /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`], that
+    /// `path` is null and `path_len` `0` exactly under `EMPTY_PATH`, and
+    /// refused [`AtFlags::NO_FOLLOW`]. The target must be a
+    /// directory the caller may search; it becomes the working directory by
+    /// node, so later relative paths resolve from it wherever it moves. A
+    /// refusal leaves the working directory unchanged. Returns `Ok(0)`.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`]:
     /// a kernel build with no filesystem service wired never pretends the
     /// working directory changed. The service is installed in `kernel/core`.
-    fn fs_chdir(&self, _caller: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_chdir(
+        &self,
+        _caller: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _flags: AtFlags,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Write the calling process's working directory — a normalised absolute
-    /// path — to the user buffer at `buf` (`plans/SHELL.md` P2).
+    /// Write the path that names the calling process's working directory now
+    /// to the user buffer at `buf` (`plans/SHELL.md` P2).
     ///
     /// The dispatcher has already validated that `buf` is a non-null
-    /// `UserPtr`. The implementation copies the working directory out through
-    /// the validated `copy_to_user` boundary and returns its byte length. A
-    /// buffer smaller than the path must fail closed with
-    /// [`Errno::BufferTooSmall`] — the path is never truncated. Reading one's
-    /// own working directory grants no authority, so no capability is
-    /// required.
+    /// `UserPtr`. The implementation copies the path out through the
+    /// validated `copy_to_user` boundary and returns its byte length; a
+    /// removed working directory is [`Errno::NotFound`]. A buffer smaller than
+    /// the path must fail closed with [`Errno::BufferTooSmall`] — the path is
+    /// never truncated. Reading one's own working directory grants no
+    /// authority, so no capability is required.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`];
     /// the service is installed in `kernel/core`.
@@ -2552,18 +2557,18 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Open the file or directory at the absolute path `path` (`path_len`
-    /// bytes) with `flags`, returning a new per-process file descriptor
-    /// (`PREREQUISITES.md` P-A).
+    /// Open the file or directory at `path` (`path_len` bytes) with `flags`,
+    /// returning a new per-process file descriptor. A relative `path`
+    /// resolves from `dirfd`, a directory or catalog descriptor of the
+    /// caller's, or its working directory under [`tairix_abi::FD_CWD`]; an
+    /// absolute one ignores `dirfd`. `mode` is the permission bits a create
+    /// asks for.
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`.
-    /// The implementation copies the path in through the validated
-    /// `copy_from_user` boundary, resolves it against the mounted secured
-    /// VFS under the caller's kernel-attested `Credentials`, allocates a
-    /// descriptor in the caller's per-process table, and returns it. Every
-    /// per-inode and mount-flag check stays kernel-side; any failure fails
-    /// closed.
+    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`,
+    /// and refused a `mode` past [`FS_MODE_MASK`] or a non-zero one on an
+    /// open without [`OpenFlags::CREATE`]. Every per-inode and mount-flag
+    /// check stays kernel-side; any failure fails closed.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]: a kernel build with no filesystem service
@@ -2572,15 +2577,17 @@ pub trait SyscallHandlers {
     fn fs_open(
         &self,
         _caller: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _flags: OpenFlags,
+        _mode: u32,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
     /// Release the open file descriptor `fd` from the caller's per-process
-    /// table (`PREREQUISITES.md` P-A).
+    /// table.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_close(&self, _caller: &CallerContext<'_>, _fd: u32) -> SyscallResult {
@@ -2588,7 +2595,7 @@ pub trait SyscallHandlers {
     }
 
     /// Read up to `len` bytes from open file `fd` at `offset` into the user
-    /// buffer `buf`, returning the number read (`PREREQUISITES.md` P-A).
+    /// buffer `buf`, returning the number read.
     ///
     /// The dispatcher has already validated `buf` is a non-null `UserPtr`.
     /// The implementation resolves `fd` against the caller's table,
@@ -2609,7 +2616,7 @@ pub trait SyscallHandlers {
 
     /// Write up to `len` bytes from the user buffer `buf` to open file `fd`
     /// at `offset` (ignored for an append handle), returning the number
-    /// written (`PREREQUISITES.md` P-A).
+    /// written.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_write(
@@ -2626,8 +2633,7 @@ pub trait SyscallHandlers {
     /// Read the next batch of open directory `fd` into the user buffer
     /// `buf`, from where the open description's listing stands (or its
     /// start, for `from` = [`tairix_abi::ReaddirFrom::Start`]), returning the
-    /// bytes written as a packed [`tairix_abi::DirEntry`] stream
-    /// (`PREREQUISITES.md` P-A).
+    /// bytes written as a packed [`tairix_abi::DirEntry`] stream.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_readdir(
@@ -2664,8 +2670,7 @@ pub trait SyscallHandlers {
     }
 
     /// Write the [`tairix_abi::FileStat`] of open handle `fd` to the user
-    /// buffer `out`, returning the number of bytes written
-    /// (`PREREQUISITES.md` P-A).
+    /// buffer `out`, returning the number of bytes written.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_stat(
@@ -2678,7 +2683,7 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Set the length of open file `fd` to `size` (`PREREQUISITES.md` P-A).
+    /// Set the length of open file `fd` to `size`.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_truncate(&self, _caller: &CallerContext<'_>, _fd: u32, _size: u64) -> SyscallResult {
@@ -2712,68 +2717,94 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Flush the filesystem backing open handle `fd` to its store
-    /// (`PREREQUISITES.md` P-A).
+    /// Flush the filesystem backing open handle `fd` to its store.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_sync(&self, _caller: &CallerContext<'_>, _fd: u32) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Create the directory at the absolute path `path` (`path_len` bytes)
-    /// (`PREREQUISITES.md` P-A).
+    /// Create the directory at `path` (`path_len` bytes, relative to
+    /// `dirfd` as [`Self::fs_open`] resolves it), asking the permission bits
+    /// `mode`.
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`.
+    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`,
+    /// and refused a `mode` past [`FS_MODE_MASK`].
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
-    fn fs_mkdir(&self, _caller: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_mkdir(
+        &self,
+        _caller: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _mode: u32,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Remove the file or empty directory at the absolute path `path`
-    /// (`path_len` bytes) (`PREREQUISITES.md` P-A).
+    /// Set the calling process's file mode creation mask to `mask`, or read
+    /// it unchanged when `mask` is [`None`], answering the mask it held.
+    ///
+    /// The dispatcher has already decoded [`FS_UMASK_QUERY`] as [`None`] and
+    /// refused a mask past [`FS_UMASK_BITS`]. No capability gates it: a
+    /// process sets only its own mask.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_umask(&self, _caller: &CallerContext<'_>, _mask: Option<u32>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Remove the file or empty directory at `path` (`path_len` bytes,
+    /// relative to `dirfd` as [`Self::fs_open`] resolves it).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], that `path` is a non-null `UserPtr`, and
-    /// rejected any reserved [`UnlinkFlags`] bit. With
+    /// [`CapabilityId::FS_ACCESS`], that `path` is a non-null `UserPtr`,
+    /// rejected any reserved [`UnlinkFlags`] bit, and refused an `expect`
+    /// that is zero under an expectation bit or non-zero without one. With
     /// [`UnlinkFlags::DIRECTORY`] the removal succeeds only when the name is
     /// an (empty) directory — the atomic `rmdir` posture, decided by the
-    /// filesystem under its own lock.
+    /// filesystem under its own lock. Under an expectation bit `expect` is
+    /// the address of the [`tairix_abi::NodeExpect`] the name must meet.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_unlink(
         &self,
         _caller: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _flags: UnlinkFlags,
+        _expect: u64,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Move the file or directory at absolute `src` (`src_len` bytes) to
-    /// absolute `dst` (`dst_len` bytes) (`PREREQUISITES.md` P-A rename).
+    /// Move the file or directory the [`tairix_abi::PathAt`] at `from` names
+    /// to the name the one at `to` names.
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], that both `src` and `dst` are non-null
-    /// `UserPtr`s, and rejected any reserved [`RenameFlags`] bit.
+    /// [`CapabilityId::FS_ACCESS`], that both `from` and `to` are non-null
+    /// `UserPtr`s, rejected any reserved [`RenameFlags`] bit, and refused an
+    /// `expect` that is zero under [`RenameFlags::EXPECT_NODE`] or non-zero
+    /// without it.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_rename(
         &self,
         _caller: &CallerContext<'_>,
-        _src: u64,
-        _src_len: usize,
-        _dst: u64,
-        _dst_len: usize,
+        _from: u64,
+        _to: u64,
         _flags: RenameFlags,
+        _expect: u64,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Create a symbolic link at absolute `link` (`link_len` bytes) whose
-    /// stored target is the `target_len` bytes at `target`.
+    /// Create a symbolic link at `link` (`link_len` bytes, relative to `dirfd`
+    /// as [`Self::fs_open`] resolves it) whose stored target is the
+    /// `target_len` bytes at `target`.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`] and that both pointers are non-null
@@ -2787,15 +2818,17 @@ pub trait SyscallHandlers {
         _caller: &CallerContext<'_>,
         _target: u64,
         _target_len: usize,
+        _dirfd: u32,
         _link: u64,
         _link_len: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Read the target of the symbolic link at absolute `path` (`path_len`
-    /// bytes) into the caller's buffer at `out` (`out_len` bytes),
-    /// returning the target's length.
+    /// Read the target of the symbolic link at `path` (`path_len` bytes,
+    /// relative to `dirfd` as [`Self::fs_open`] resolves it) into the
+    /// caller's buffer at `out` (`out_len` bytes), returning the target's
+    /// length.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`] and that both pointers are non-null
@@ -2806,6 +2839,7 @@ pub trait SyscallHandlers {
     fn fs_readlink(
         &self,
         _caller: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _out: u64,
@@ -2814,9 +2848,8 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Add the absolute path `link` (`link_len` bytes) as a second name for
-    /// the node the absolute path `existing` (`existing_len` bytes) already
-    /// names — a hard link.
+    /// Add the name the [`tairix_abi::PathAt`] at `new` names as a second
+    /// name for the node the one at `existing` already names — a hard link.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`], that both pointers are non-null
@@ -2832,17 +2865,15 @@ pub trait SyscallHandlers {
         &self,
         _caller: &CallerContext<'_>,
         _existing: u64,
-        _existing_len: usize,
-        _link: u64,
-        _link_len: usize,
+        _new: u64,
         _flags: LinkFlags,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Canonicalise the absolute path `path` (`path_len` bytes) into the
-    /// caller's buffer at `out` (`out_len` bytes), returning the canonical
-    /// path's length.
+    /// Canonicalise `path` (`path_len` bytes, relative to `dirfd` as
+    /// [`Self::fs_open`] resolves it) into the caller's buffer at `out`
+    /// (`out_len` bytes), returning the canonical path's length.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`], that both pointers are non-null
@@ -2853,9 +2884,13 @@ pub trait SyscallHandlers {
     /// the path must exist.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
+    // The seam mirrors the six syscall argument registers one-to-one, as the
+    // dispatcher hands them over.
+    #[allow(clippy::too_many_arguments)]
     fn fs_realpath(
         &self,
         _caller: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _out: u64,
@@ -2868,12 +2903,12 @@ pub trait SyscallHandlers {
     /// Take or release an advisory byte-range lock on the file behind the
     /// open descriptor `fd` (`plans/FILELOCK.md`).
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and decoded `mode`, `flags` and the
-    /// `start`/`len` range spelling, so the range is representable before
-    /// the handler sees it. The lock belongs to the descriptor's open file
+    /// The dispatcher has decoded `mode`, `flags` and the `start`/`len` range
+    /// spelling, so the range is representable before the handler sees it,
+    /// and applies no capability gate: the descriptor's authority decides, as
+    /// for `fs_read`. The lock belongs to the descriptor's open file
     /// description, not to the process, and the handler re-authorises the
-    /// file under the caller's identity: a shared lock needs read access, an
+    /// file under that authority: a shared lock needs read access, an
     /// exclusive one write access.
     ///
     /// `timeout_ns` bounds a blocking request
@@ -2917,55 +2952,89 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Set the permission bits of the file or directory at the absolute
-    /// path `path` (`path_len` bytes) to `mode` (the `chmod(2)` shape).
+    /// Set the permission bits of the file or directory at `path`
+    /// (`path_len` bytes, relative to `dirfd` as [`Self::fs_open`] resolves
+    /// it), or under [`AtFlags::EMPTY_PATH`] of the node `dirfd` holds, to
+    /// `mode` (the `fchmodat(2)` shape).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], that `path` is a non-null `UserPtr`,
-    /// and rejected any `mode` bit above [`FS_MODE_MASK`]. The per-inode
-    /// rule — only the inode's owner may change its mode — is the secured
-    /// VFS's, applied in the handler's filesystem service.
+    /// [`CapabilityId::FS_ACCESS`], that `path` is null and `path_len` `0`
+    /// exactly under `EMPTY_PATH`, and rejected any `mode` bit above
+    /// [`FS_MODE_MASK`]. The per-inode rule — only the
+    /// inode's owner may change its mode — is the secured VFS's, applied in
+    /// the handler's filesystem service.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_set_mode(
         &self,
         _caller: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _mode: u32,
+        _flags: AtFlags,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Set the owning user and/or group of the file or directory at the
-    /// absolute path `path` (`path_len` bytes) to `uid` / `gid` (the
-    /// `chown(2)` / `chgrp(2)` shape). Either field may be
+    /// Set the owning user and/or group of the file or directory at `path`
+    /// (`path_len` bytes, relative to `dirfd` as [`Self::fs_open`] resolves
+    /// it), or under [`AtFlags::EMPTY_PATH`] of the node `dirfd` holds, to
+    /// `uid` / `gid` (the `fchownat(2)` shape). Either field may be
     /// [`tairix_abi::fs::FS_OWNER_UNCHANGED`] to leave it unchanged.
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`.
-    /// The per-inode rule — reassigning the uid, or setting a gid the caller
-    /// is not a member of, requires [`CapabilityId::FS_CHOWN`]; otherwise
-    /// only the owner may change the group, and only to a group they belong
-    /// to; any change strips the set-*id* bits — is the secured VFS's,
-    /// applied in the handler's filesystem service.
+    /// [`CapabilityId::FS_ACCESS`], and that `path` is null and `path_len` `0`
+    /// exactly under `EMPTY_PATH`. The per-inode rule —
+    /// reassigning the uid, or setting a gid the caller is not a member of,
+    /// requires [`CapabilityId::FS_CHOWN`]; otherwise only the owner may
+    /// change the group, and only to a group they belong to; any change
+    /// strips the set-*id* bits — is the secured VFS's, applied in the
+    /// handler's filesystem service.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
+    // The seam mirrors the six syscall argument registers one-to-one, as the
+    // dispatcher hands them over.
+    #[allow(clippy::too_many_arguments)]
     fn fs_set_owner(
         &self,
         _caller: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _uid: u32,
         _gid: u32,
+        _flags: AtFlags,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Read one extended attribute of the file or directory at the
-    /// absolute path `path` (`path_len` bytes) into the caller's
-    /// `value_out` buffer, returning the value's byte count (the
-    /// `getxattr(2)` shape).
+    /// Answer whether the caller may have every access `want` asks of the
+    /// node at `path` (`path_len` bytes, relative to `dirfd` as
+    /// [`Self::fs_open`] resolves it), or under [`AtFlags::EMPTY_PATH`] of
+    /// the node `dirfd` holds (the `faccessat(2)` shape).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`], and that `path` is null and `path_len` `0`
+    /// exactly under `EMPTY_PATH`. The node's mode, ACL and gate answer first,
+    /// then the projection's flags.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_access(
+        &self,
+        _caller: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _want: tairix_abi::Access,
+        _flags: AtFlags,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read one extended attribute of the node the open descriptor `fd`
+    /// holds into the caller's `value_out` buffer, returning the value's byte
+    /// count (the `fgetxattr(2)` shape).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`], that the pointers are non-null
@@ -2974,16 +3043,10 @@ pub trait SyscallHandlers {
     /// VFS's, applied in the handler's filesystem service.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
-    // The seam mirrors the six syscall argument registers one-to-one (three
-    // pointer/length pairs), exactly as the dispatcher hands them over;
-    // folding them into a struct would give this one syscall a different
-    // shape from every sibling without removing any register.
-    #[allow(clippy::too_many_arguments)]
     fn fs_attr_get(
         &self,
         _caller: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
         _value_out: u64,
@@ -2992,9 +3055,8 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Set one extended attribute of the file or directory at the absolute
-    /// path `path` to the `value_len` bytes at `value` (the `setxattr(2)`
-    /// shape).
+    /// Set one extended attribute of the node the open descriptor `fd` holds
+    /// to the `value_len` bytes at `value` (the `fsetxattr(2)` shape).
     ///
     /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`],
     /// the pointers, `key_len` (`1..=FS_ATTR_KEY_MAX`), and `value_len`
@@ -3002,16 +3064,10 @@ pub trait SyscallHandlers {
     /// grammar are the secured VFS's.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
-    // The seam mirrors the six syscall argument registers one-to-one (three
-    // pointer/length pairs), exactly as the dispatcher hands them over;
-    // folding them into a struct would give this one syscall a different
-    // shape from every sibling without removing any register.
-    #[allow(clippy::too_many_arguments)]
     fn fs_attr_set(
         &self,
         _caller: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
         _value: u64,
@@ -3020,20 +3076,19 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Yield the `index`-th visible extended-attribute key of the file or
-    /// directory at the absolute path `path` into the caller's `key_out`
-    /// buffer, returning the key's byte count or `0` past the end.
+    /// Yield the `index`-th visible extended-attribute key of the node the
+    /// open descriptor `fd` holds into the caller's `key_out` buffer,
+    /// returning the key's byte count or `0` past the end.
     ///
     /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`] and
-    /// the pointers. Read permission and the visibility filtering are the
+    /// the pointer. Read permission and the visibility filtering are the
     /// secured VFS's.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_attr_list(
         &self,
         _caller: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _index: u64,
         _key_out: u64,
         _key_out_len: usize,
@@ -3041,19 +3096,18 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Remove one extended attribute of the file or directory at the
-    /// absolute path `path` (the `removexattr(2)` shape).
+    /// Remove one extended attribute of the node the open descriptor `fd`
+    /// holds (the `fremovexattr(2)` shape).
     ///
     /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`],
-    /// the pointers, and `key_len` (`1..=FS_ATTR_KEY_MAX`). Write
+    /// the pointer, and `key_len` (`1..=FS_ATTR_KEY_MAX`). Write
     /// permission and the key grammar are the secured VFS's.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_attr_remove(
         &self,
         _caller: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
     ) -> SyscallResult {
@@ -3175,11 +3229,11 @@ pub trait SyscallHandlers {
     /// demand-paged, read-only private mapping, returning its base
     /// address (the `mmap(2)` shape).
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`]. The implementation resolves `fd`
-    /// against the caller's table (open for reading, path-backed),
-    /// validates the alignment and extent, reserves the region, and
-    /// records the mapping-time identity the fault path pages under.
+    /// The dispatcher applies no capability gate: the descriptor's authority
+    /// decides, as for `fs_read`. The implementation resolves `fd` against
+    /// the caller's table (open for reading, backed by a node), validates the
+    /// alignment and extent, reserves the region, and keeps the descriptor's
+    /// authority for the fault path to page under.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn file_map(
@@ -4134,12 +4188,25 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     .waitset_wait(caller, args.0[0], args.0[1], args.0[2])
             }
             SyscallNumber::FS_OPEN => {
-                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
-                // args[1] is the path length; args[2] is the `OpenFlags`
-                // bits, rejected for any reserved/illegal combination here.
-                let path_len = decode_len(args.0[1])?;
-                let flags = OpenFlags::from_bits(decode_u32(args.0[2]))?;
-                self.handlers.fs_open(caller, args.0[0], path_len, flags)
+                // args[0] is the start directory; args[1] the non-null path
+                // `UserPtr` (dispatcher-checked); args[2] the path length;
+                // args[3] the `OpenFlags` bits, rejected for any
+                // reserved/illegal combination here; args[4] the mode a
+                // create asks for, which only a create may name.
+                let path_len = decode_len(args.0[2])?;
+                let flags = OpenFlags::from_bits(decode_u32(args.0[3]))?;
+                let mode = decode_mode(args.0[4])?;
+                if mode != 0 && !flags.contains(OpenFlags::CREATE) {
+                    return Err(Errno::OutOfRange);
+                }
+                self.handlers.fs_open(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    path_len,
+                    flags,
+                    mode,
+                )
             }
             SyscallNumber::FS_LOCK => {
                 // args[0] fd; args[1] `LockMode`; args[2] `LockFlags`;
@@ -4226,97 +4293,163 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     .fs_punch(caller, decode_u32(args.0[0]), args.0[1], args.0[2])
             }
             SyscallNumber::FS_MKDIR => {
-                let path_len = decode_len(args.0[1])?;
-                self.handlers.fs_mkdir(caller, args.0[0], path_len)
+                let path_len = decode_len(args.0[2])?;
+                let mode = decode_mode(args.0[3])?;
+                self.handlers
+                    .fs_mkdir(caller, decode_u32(args.0[0]), args.0[1], path_len, mode)
+            }
+            SyscallNumber::FS_UMASK => {
+                // args[0] is the new mask or the query word, refused here
+                // past the permission triads.
+                let mask = decode_umask(decode_u32(args.0[0]))?;
+                self.handlers.fs_umask(caller, mask)
             }
             SyscallNumber::FS_UNLINK => {
-                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
-                // args[1] is the path length; args[2] is the `UnlinkFlags`
-                // bits, rejected here for any reserved bit.
-                let path_len = decode_len(args.0[1])?;
-                let flags = UnlinkFlags::from_bits(decode_u32(args.0[2]))?;
-                self.handlers.fs_unlink(caller, args.0[0], path_len, flags)
+                // args[0] is the start directory; args[1] the non-null path
+                // `UserPtr` (dispatcher-checked); args[2] the path length;
+                // args[3] the `UnlinkFlags` bits, rejected here for any
+                // reserved bit; args[4] the expectation's address, present
+                // exactly when the flags ask for one.
+                let path_len = decode_len(args.0[2])?;
+                let flags = UnlinkFlags::from_bits(decode_u32(args.0[3]))?;
+                check_expect(flags.expects(), args.0[4])?;
+                self.handlers.fs_unlink(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    path_len,
+                    flags,
+                    args.0[4],
+                )
             }
             SyscallNumber::FS_RENAME => {
-                // args[4] is the `RenameFlags` bits, rejected here for any
-                // reserved bit.
-                let src_len = decode_len(args.0[1])?;
-                let dst_len = decode_len(args.0[3])?;
-                let flags = RenameFlags::from_bits(decode_u32(args.0[4]))?;
+                // args[0]/args[1] address the two `PathAt`s (non-null,
+                // dispatcher-checked); args[2] is the `RenameFlags` bits,
+                // rejected here for any reserved bit; args[3] the
+                // expectation's address, present exactly when asked for.
+                let flags = RenameFlags::from_bits(decode_u32(args.0[2]))?;
+                check_expect(flags.expects(), args.0[3])?;
                 self.handlers
-                    .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len, flags)
+                    .fs_rename(caller, args.0[0], args.0[1], flags, args.0[3])
             }
             SyscallNumber::FS_SYMLINK => {
                 let target_len = decode_len(args.0[1])?;
-                let link_len = decode_len(args.0[3])?;
-                self.handlers
-                    .fs_symlink(caller, args.0[0], target_len, args.0[2], link_len)
-            }
-            SyscallNumber::FS_READLINK => {
-                let path_len = decode_len(args.0[1])?;
-                let out_len = decode_len(args.0[3])?;
-                self.handlers
-                    .fs_readlink(caller, args.0[0], path_len, args.0[2], out_len)
-            }
-            SyscallNumber::FS_LINK => {
-                // args[0]/args[2] are the non-null path `UserPtr`s
-                // (dispatcher-checked); args[4] is the `LinkFlags` bits,
-                // rejected here for any reserved bit.
-                let existing_len = decode_len(args.0[1])?;
-                let link_len = decode_len(args.0[3])?;
-                let flags = LinkFlags::from_bits(decode_u32(args.0[4]))?;
-                self.handlers
-                    .fs_link(caller, args.0[0], existing_len, args.0[2], link_len, flags)
-            }
-            SyscallNumber::FS_REALPATH => {
-                // args[0]/args[2] are the non-null `UserPtr`s
-                // (dispatcher-checked); args[4] selects how much of the path
-                // must exist, refused here for any undefined value.
-                let path_len = decode_len(args.0[1])?;
-                let out_len = decode_len(args.0[3])?;
-                let mode = RealpathMode::from_raw(decode_u32(args.0[4]))?;
-                self.handlers
-                    .fs_realpath(caller, args.0[0], path_len, args.0[2], out_len, mode)
-            }
-            SyscallNumber::FS_SET_MODE => {
-                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
-                // args[1] is the path length; args[2] is the mode word,
-                // refused here for any bit above the permission mask (never
-                // masked to a mode the caller did not ask for).
-                let path_len = decode_len(args.0[1])?;
-                let mode = decode_u32(args.0[2]);
-                if mode & !FS_MODE_MASK != 0 {
-                    return Err(Errno::OutOfRange);
-                }
-                self.handlers.fs_set_mode(caller, args.0[0], path_len, mode)
-            }
-            SyscallNumber::FS_SET_OWNER => {
-                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
-                // args[1] is the path length; args[2]/args[3] are the new
-                // uid/gid (either may be `FS_OWNER_UNCHANGED`). The whole
-                // authority rule is the secured VFS's; no value needs
-                // rejecting here (an id is any `u32`, the sentinel included).
-                let path_len = decode_len(args.0[1])?;
-                let uid = decode_u32(args.0[2]);
-                let gid = decode_u32(args.0[3]);
-                self.handlers
-                    .fs_set_owner(caller, args.0[0], path_len, uid, gid)
-            }
-            SyscallNumber::FS_ATTR_GET => {
-                // args[0]/args[2]/args[4] are non-null `UserPtr`s
-                // (dispatcher-checked). The key length is bounded here so no
-                // user memory beyond the fixed key bound is ever staged; the
-                // key grammar itself is the secured VFS's to judge.
-                let path_len = decode_len(args.0[1])?;
-                let key_len = decode_attr_key_len(args.0[3])?;
-                let value_out_len = decode_len(args.0[5])?;
-                self.handlers.fs_attr_get(
+                let link_len = decode_len(args.0[4])?;
+                self.handlers.fs_symlink(
                     caller,
                     args.0[0],
+                    target_len,
+                    decode_u32(args.0[2]),
+                    args.0[3],
+                    link_len,
+                )
+            }
+            SyscallNumber::FS_READLINK => {
+                let path_len = decode_len(args.0[2])?;
+                let out_len = decode_len(args.0[4])?;
+                self.handlers.fs_readlink(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
                     path_len,
-                    args.0[2],
+                    args.0[3],
+                    out_len,
+                )
+            }
+            SyscallNumber::FS_LINK => {
+                // args[0]/args[1] address the two `PathAt`s (non-null,
+                // dispatcher-checked); args[2] is the `LinkFlags` bits,
+                // rejected here for any reserved bit.
+                let flags = LinkFlags::from_bits(decode_u32(args.0[2]))?;
+                self.handlers.fs_link(caller, args.0[0], args.0[1], flags)
+            }
+            SyscallNumber::FS_REALPATH => {
+                // args[1]/args[3] are the non-null `UserPtr`s
+                // (dispatcher-checked); args[5] selects how much of the path
+                // must exist, refused here for any undefined value.
+                let path_len = decode_len(args.0[2])?;
+                let out_len = decode_len(args.0[4])?;
+                let mode = RealpathMode::from_raw(decode_u32(args.0[5]))?;
+                self.handlers.fs_realpath(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    path_len,
+                    args.0[3],
+                    out_len,
+                    mode,
+                )
+            }
+            SyscallNumber::FS_SET_MODE => {
+                // args[0] is the start directory; args[1]/args[2] the path,
+                // null and 0 exactly under `EMPTY_PATH`; args[3] the mode
+                // word, refused here for any bit above the permission mask
+                // (never masked to a mode the caller did not ask for);
+                // args[4] the `AtFlags` bits.
+                let path_len = decode_len(args.0[2])?;
+                let mode = decode_mode(args.0[3])?;
+                let flags = AtFlags::from_bits(decode_u32(args.0[4]))?;
+                check_at_path(flags, args.0[1], path_len)?;
+                self.handlers.fs_set_mode(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    path_len,
+                    mode,
+                    flags,
+                )
+            }
+            SyscallNumber::FS_SET_OWNER => {
+                // args[0] is the start directory; args[1]/args[2] the path,
+                // null and 0 exactly under `EMPTY_PATH`; args[3]/args[4] the
+                // new uid/gid (either may be `FS_OWNER_UNCHANGED`, and an id
+                // is any `u32`, so no value needs rejecting here); args[5]
+                // the `AtFlags` bits.
+                let path_len = decode_len(args.0[2])?;
+                let flags = AtFlags::from_bits(decode_u32(args.0[5]))?;
+                check_at_path(flags, args.0[1], path_len)?;
+                self.handlers.fs_set_owner(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    path_len,
+                    decode_u32(args.0[3]),
+                    decode_u32(args.0[4]),
+                    flags,
+                )
+            }
+            SyscallNumber::FS_ACCESS => {
+                // args[0] is the start directory; args[1]/args[2] the path,
+                // null and 0 exactly under `EMPTY_PATH`; args[3] the `Access`
+                // bits asked, refused here for any other bit; args[4] the
+                // `AtFlags` bits.
+                let path_len = decode_len(args.0[2])?;
+                let want = tairix_abi::Access::from_bits(decode_u32(args.0[3]))?;
+                let flags = AtFlags::from_bits(decode_u32(args.0[4]))?;
+                check_at_path(flags, args.0[1], path_len)?;
+                self.handlers.fs_access(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    path_len,
+                    want,
+                    flags,
+                )
+            }
+            SyscallNumber::FS_ATTR_GET => {
+                // args[0] is the descriptor; args[1]/args[3] are non-null
+                // `UserPtr`s (dispatcher-checked). The key length is bounded
+                // here so no user memory beyond the fixed key bound is ever
+                // staged; the key grammar itself is the secured VFS's to
+                // judge.
+                let key_len = decode_attr_key_len(args.0[2])?;
+                let value_out_len = decode_len(args.0[4])?;
+                self.handlers.fs_attr_get(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
                     key_len,
-                    args.0[4],
+                    args.0[3],
                     value_out_len,
                 )
             }
@@ -4325,35 +4458,36 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // the fixed attribute-value maximum is refused before any
                 // copy (a larger payload is a named stream, never silently
                 // truncated into an attribute).
-                let path_len = decode_len(args.0[1])?;
-                let key_len = decode_attr_key_len(args.0[3])?;
-                let value_len = decode_len(args.0[5])?;
+                let key_len = decode_attr_key_len(args.0[2])?;
+                let value_len = decode_len(args.0[4])?;
                 if value_len > FS_ATTR_VALUE_MAX {
                     return Err(Errno::LengthOutOfRange);
                 }
                 self.handlers.fs_attr_set(
-                    caller, args.0[0], path_len, args.0[2], key_len, args.0[4], value_len,
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    key_len,
+                    args.0[3],
+                    value_len,
                 )
             }
             SyscallNumber::FS_ATTR_LIST => {
-                // args[0]/args[3] are non-null `UserPtr`s
-                // (dispatcher-checked); args[2] is the enumeration index.
-                let path_len = decode_len(args.0[1])?;
-                let key_out_len = decode_len(args.0[4])?;
+                // args[0] is the descriptor; args[1] the enumeration index;
+                // args[2] a non-null `UserPtr` (dispatcher-checked).
+                let key_out_len = decode_len(args.0[3])?;
                 self.handlers.fs_attr_list(
                     caller,
-                    args.0[0],
-                    path_len,
+                    decode_u32(args.0[0]),
+                    args.0[1],
                     args.0[2],
-                    args.0[3],
                     key_out_len,
                 )
             }
             SyscallNumber::FS_ATTR_REMOVE => {
-                let path_len = decode_len(args.0[1])?;
-                let key_len = decode_attr_key_len(args.0[3])?;
+                let key_len = decode_attr_key_len(args.0[2])?;
                 self.handlers
-                    .fs_attr_remove(caller, args.0[0], path_len, args.0[2], key_len)
+                    .fs_attr_remove(caller, decode_u32(args.0[0]), args.0[1], key_len)
             }
             SyscallNumber::PORT_BIND => {
                 let max_payload = decode_len(args.0[1])?;
@@ -4412,10 +4546,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.volume_detach(caller, args.0[0], request_len)
             }
             SyscallNumber::FS_CHDIR => {
-                // args[0] is the non-null path `UserPtr` (dispatcher-checked);
-                // args[1] is the path length.
-                let path_len = decode_len(args.0[1])?;
-                self.handlers.fs_chdir(caller, args.0[0], path_len)
+                // args[0] is the start directory; args[1]/args[2] the path,
+                // null and 0 exactly under `EMPTY_PATH`; args[3] the `AtFlags`
+                // bits. A working directory is reached through its links, so
+                // keeping a final one is refused.
+                let path_len = decode_len(args.0[2])?;
+                let flags = AtFlags::from_bits(decode_u32(args.0[3]))?;
+                if flags.contains(AtFlags::NO_FOLLOW) {
+                    return Err(Errno::OutOfRange);
+                }
+                check_at_path(flags, args.0[1], path_len)?;
+                self.handlers
+                    .fs_chdir(caller, decode_u32(args.0[0]), args.0[1], path_len, flags)
             }
             SyscallNumber::FS_GETCWD => {
                 // args[0] is the non-null out `UserPtr` (dispatcher-checked);
@@ -4710,8 +4852,13 @@ fn validate_arg(ty: AbiType, raw: u64) -> Result<(), Errno> {
             }
         }
         // `I64` joins the full-width arms: every bit pattern is a value,
-        // so there is no reserved half to police.
-        AbiType::U64 | AbiType::I64 | AbiType::Handle | AbiType::IpcEndpoint => Ok(()),
+        // so there is no reserved half to police. What null means for a
+        // pointer a call may omit is the handler's to decide.
+        AbiType::U64
+        | AbiType::I64
+        | AbiType::Handle
+        | AbiType::IpcEndpoint
+        | AbiType::UserPtrOrNull => Ok(()),
         AbiType::Cap => decode_capability(raw).map(|_| ()),
         AbiType::UserPtr => {
             if raw == 0 {
@@ -4773,6 +4920,63 @@ fn decode_attr_key_len(raw: u64) -> Result<usize, Errno> {
         return Err(Errno::LengthOutOfRange);
     }
     Ok(len)
+}
+
+/// Narrow a mode word, refusing any bit above the permission mask rather
+/// than masking it to a mode the caller did not ask for.
+fn decode_mode(raw: u64) -> Result<u32, Errno> {
+    let mode = decode_u32(raw);
+    if mode & !FS_MODE_MASK != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(mode)
+}
+
+/// Decode an `fs_umask` word: [`FS_UMASK_QUERY`] reads the mask, answering
+/// [`None`], and any other word is the new mask, refused past
+/// [`FS_UMASK_BITS`].
+fn decode_umask(raw: u32) -> Result<Option<u32>, Errno> {
+    if raw == FS_UMASK_QUERY {
+        return Ok(None);
+    }
+    if raw & !FS_UMASK_BITS != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(Some(raw))
+}
+
+/// Refuse a path operand that does not fit its form: an
+/// [`AtFlags::EMPTY_PATH`] call names no path, so its address is null and its
+/// length 0, and every other names a non-empty one at a non-null address, as
+/// a `UserPtr` would.
+fn check_at_path(flags: AtFlags, path: u64, path_len: usize) -> Result<(), Errno> {
+    if flags.contains(AtFlags::EMPTY_PATH) {
+        if path != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        return if path_len == 0 {
+            Ok(())
+        } else {
+            Err(Errno::LengthOutOfRange)
+        };
+    }
+    if path == 0 {
+        return Err(Errno::BadAlignment);
+    }
+    if path_len == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(())
+}
+
+/// Refuse an expectation address that does not match the request: a call
+/// asking for an expectation names one, and any other names none.
+fn check_expect(expects: bool, expect: u64) -> Result<(), Errno> {
+    if expects == (expect != 0) {
+        Ok(())
+    } else {
+        Err(Errno::OutOfRange)
+    }
 }
 
 /// Narrow a `U32`-typed argument register to `u32`.
@@ -5853,12 +6057,16 @@ mod tests {
         fn fs_open(
             &self,
             _c: &CallerContext<'_>,
+            dirfd: u32,
             _path: u64,
             _path_len: usize,
             _flags: OpenFlags,
+            mode: u32,
         ) -> SyscallResult {
             self.record("fs_open");
-            Ok(4)
+            // Echo the start directory and the mode, so a test sees what the
+            // dispatcher forwarded.
+            Ok((u64::from(dirfd) << 32) | u64::from(mode))
         }
 
         fn fs_close(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
@@ -5961,22 +6169,34 @@ mod tests {
             Ok(0)
         }
 
-        fn fs_mkdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        fn fs_mkdir(
+            &self,
+            _c: &CallerContext<'_>,
+            _dirfd: u32,
+            _path: u64,
+            _path_len: usize,
+            mode: u32,
+        ) -> SyscallResult {
             self.record("fs_mkdir");
-            Ok(0)
+            Ok(u64::from(mode))
+        }
+
+        fn fs_umask(&self, _c: &CallerContext<'_>, mask: Option<u32>) -> SyscallResult {
+            self.record("fs_umask");
+            // Echo the word the mask came from: the query reads as itself.
+            Ok(mask.map_or(u64::from(FS_UMASK_QUERY), u64::from))
         }
 
         fn fs_rename(
             &self,
             _c: &CallerContext<'_>,
-            _src: u64,
-            _src_len: usize,
-            _dst: u64,
-            _dst_len: usize,
+            _from: u64,
+            _to: u64,
             _flags: RenameFlags,
+            expect: u64,
         ) -> SyscallResult {
             self.record("fs_rename");
-            Ok(0)
+            Ok(expect)
         }
 
         fn fs_symlink(
@@ -5984,6 +6204,7 @@ mod tests {
             _c: &CallerContext<'_>,
             _target: u64,
             _target_len: usize,
+            _dirfd: u32,
             _link: u64,
             _link_len: usize,
         ) -> SyscallResult {
@@ -5994,6 +6215,7 @@ mod tests {
         fn fs_readlink(
             &self,
             _c: &CallerContext<'_>,
+            _dirfd: u32,
             _path: u64,
             _path_len: usize,
             _out: u64,
@@ -6007,9 +6229,7 @@ mod tests {
             &self,
             _c: &CallerContext<'_>,
             _existing: u64,
-            _existing_len: usize,
-            _link: u64,
-            _link_len: usize,
+            _new: u64,
             _flags: LinkFlags,
         ) -> SyscallResult {
             self.record("fs_link");
@@ -6043,6 +6263,7 @@ mod tests {
         fn fs_realpath(
             &self,
             _c: &CallerContext<'_>,
+            _dirfd: u32,
             _path: u64,
             _path_len: usize,
             _out: u64,
@@ -6056,42 +6277,60 @@ mod tests {
         fn fs_unlink(
             &self,
             _c: &CallerContext<'_>,
+            _dirfd: u32,
             _path: u64,
             _path_len: usize,
             _flags: UnlinkFlags,
+            expect: u64,
         ) -> SyscallResult {
             self.record("fs_unlink");
-            Ok(0)
+            Ok(expect)
         }
 
         fn fs_set_mode(
             &self,
             _c: &CallerContext<'_>,
+            _dirfd: u32,
             _path: u64,
             _path_len: usize,
             _mode: u32,
+            flags: AtFlags,
         ) -> SyscallResult {
             self.record("fs_set_mode");
-            Ok(0)
+            Ok(u64::from(flags.bits()))
         }
 
         fn fs_set_owner(
             &self,
             _c: &CallerContext<'_>,
+            _dirfd: u32,
             _path: u64,
             _path_len: usize,
             _uid: u32,
             _gid: u32,
+            _flags: AtFlags,
         ) -> SyscallResult {
             self.record("fs_set_owner");
             Ok(0)
         }
 
+        fn fs_access(
+            &self,
+            _c: &CallerContext<'_>,
+            _dirfd: u32,
+            _path: u64,
+            _path_len: usize,
+            want: tairix_abi::Access,
+            _flags: AtFlags,
+        ) -> SyscallResult {
+            self.record("fs_access");
+            Ok(u64::from(want.bits()))
+        }
+
         fn fs_attr_get(
             &self,
             _c: &CallerContext<'_>,
-            _path: u64,
-            _path_len: usize,
+            _fd: u32,
             _key: u64,
             _key_len: usize,
             _value_out: u64,
@@ -6104,8 +6343,7 @@ mod tests {
         fn fs_attr_set(
             &self,
             _c: &CallerContext<'_>,
-            _path: u64,
-            _path_len: usize,
+            _fd: u32,
             _key: u64,
             _key_len: usize,
             _value: u64,
@@ -6118,8 +6356,7 @@ mod tests {
         fn fs_attr_list(
             &self,
             _c: &CallerContext<'_>,
-            _path: u64,
-            _path_len: usize,
+            _fd: u32,
             _index: u64,
             _key_out: u64,
             _key_out_len: usize,
@@ -6131,8 +6368,7 @@ mod tests {
         fn fs_attr_remove(
             &self,
             _c: &CallerContext<'_>,
-            _path: u64,
-            _path_len: usize,
+            _fd: u32,
             _key: u64,
             _key_len: usize,
         ) -> SyscallResult {
@@ -6233,7 +6469,14 @@ mod tests {
             Ok(0)
         }
 
-        fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+        fn fs_chdir(
+            &self,
+            _c: &CallerContext<'_>,
+            _dirfd: u32,
+            _path: u64,
+            _path_len: usize,
+            _flags: AtFlags,
+        ) -> SyscallResult {
             self.record("fs_chdir");
             Ok(0)
         }
@@ -6537,10 +6780,18 @@ mod tests {
             args.0[i] = match spec.args[i] {
                 AbiType::U32 | AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint => 1,
                 AbiType::Cap => u64::from(CapabilityId::FS_MOUNT.as_u16()),
-                AbiType::UserPtr => 0x1000,
+                AbiType::UserPtr | AbiType::UserPtrOrNull => 0x1000,
                 AbiType::Len => 64,
                 AbiType::I32 | AbiType::I64 | AbiType::Unit | AbiType::Errno => 0,
             };
+        }
+        // `1` in the flags slot is a read, and an open that does not create
+        // names no mode; flags asking no expectation name no expectation; and
+        // a working directory is never reached as a link kept.
+        match spec.number {
+            SyscallNumber::FS_OPEN | SyscallNumber::FS_UNLINK => args.0[4] = 0,
+            SyscallNumber::FS_RENAME | SyscallNumber::FS_CHDIR => args.0[3] = 0,
+            _ => {}
         }
     }
 
@@ -7560,9 +7811,10 @@ mod tests {
         let d = Dispatcher::new(&h, &sink);
 
         let mut args = RawArgs::ZERO;
-        args.0[0] = 0x1000; // path — a non-null user pointer
-        args.0[1] = 16; // path length
-        args.0[2] = 0o10_0644; // a file-type bit above the mask
+        args.0[0] = u64::from(tairix_abi::FD_CWD);
+        args.0[1] = 0x1000; // path — a non-null user pointer
+        args.0[2] = 16; // path length
+        args.0[3] = 0o10_0644; // a file-type bit above the mask
         assert_eq!(
             d.dispatch(&ctx, u64::from(SyscallNumber::FS_SET_MODE.as_u16()), args),
             Err(Errno::OutOfRange)
@@ -7571,14 +7823,106 @@ mod tests {
 
         // The full permission word (all twelve bits) is the inclusive
         // upper bound and reaches the handler.
-        let mut args = RawArgs::ZERO;
-        args.0[0] = 0x1000;
-        args.0[1] = 16;
-        args.0[2] = u64::from(FS_MODE_MASK);
+        args.0[3] = u64::from(FS_MODE_MASK);
         assert!(d
             .dispatch(&ctx, u64::from(SyscallNumber::FS_SET_MODE.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_set_mode"));
+    }
+
+    #[test]
+    fn fs_open_refuses_a_mode_only_a_create_may_name() {
+        // The mode is a create's: one past the permission mask is refused,
+        // as is any mode on an open that does not create, both before the
+        // handler; in range on a create it reaches the handler unchanged.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        // The mock echoes the start directory in the high word, the mode in
+        // the low one.
+        let open = |flags: OpenFlags, mode: u64| {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = 3; // a directory descriptor
+            args.0[1] = 0x1000; // path — a non-null user pointer
+            args.0[2] = 16; // path length
+            args.0[3] = u64::from(flags.bits());
+            args.0[4] = mode;
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_OPEN.as_u16()), args)
+        };
+        let create = OpenFlags::WRITE.union(OpenFlags::CREATE);
+        assert_eq!(open(OpenFlags::READ, 0o644), Err(Errno::OutOfRange));
+        assert_eq!(
+            open(create, u64::from(FS_MODE_MASK) + 1),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None, "no handler ran");
+        assert_eq!(open(OpenFlags::READ, 0), Ok(3 << 32));
+        assert_eq!(
+            open(create, u64::from(FS_MODE_MASK)),
+            Ok((3 << 32) | u64::from(FS_MODE_MASK))
+        );
+        assert_eq!(h.last(), Some("fs_open"));
+    }
+
+    #[test]
+    fn fs_mkdir_refuses_a_mode_above_the_permission_mask() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let mkdir = |mode: u64| {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = u64::from(tairix_abi::FD_CWD);
+            args.0[1] = 0x1000; // path — a non-null user pointer
+            args.0[2] = 16; // path length
+            args.0[3] = mode;
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_MKDIR.as_u16()), args)
+        };
+        assert_eq!(mkdir(0o10_0755), Err(Errno::OutOfRange));
+        assert_eq!(h.last(), None, "no handler ran");
+        assert_eq!(mkdir(0o2775), Ok(0o2775), "the mode reaches the handler");
+    }
+
+    #[test]
+    fn fs_umask_decodes_the_query_word_and_a_mask_within_the_permission_bits() {
+        // No capability gates it and nothing is audited: the mask is the
+        // caller's own. A mask past the permission bits is refused before
+        // the handler.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let umask = |word: u64| {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = word;
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_UMASK.as_u16()), args)
+        };
+        let query = u64::from(FS_UMASK_QUERY);
+        assert_eq!(umask(query), Ok(query), "the query word reads the mask");
+        assert_eq!(umask(0o027), Ok(0o027));
+        assert_eq!(umask(0), Ok(0));
+        assert_eq!(
+            umask(u64::from(FS_UMASK_BITS)),
+            Ok(u64::from(FS_UMASK_BITS))
+        );
+        assert!(sink.ids().is_empty(), "fs_umask audits nothing");
+        let reached = h.calls.borrow().len();
+        assert_eq!(umask(0o1000), Err(Errno::OutOfRange));
+        assert_eq!(umask(query - 1), Err(Errno::OutOfRange));
+        assert_eq!(h.calls.borrow().len(), reached, "no handler ran");
     }
 
     #[test]
@@ -7593,10 +7937,11 @@ mod tests {
         let d = Dispatcher::new(&h, &sink);
 
         let mut args = RawArgs::ZERO;
-        args.0[0] = 0x1000; // path — a non-null user pointer
-        args.0[1] = 16; // path length
-        args.0[2] = 1000; // new uid
-        args.0[3] = u64::from(tairix_abi::FS_OWNER_UNCHANGED); // gid unchanged
+        args.0[0] = u64::from(tairix_abi::FD_CWD);
+        args.0[1] = 0x1000; // path — a non-null user pointer
+        args.0[2] = 16; // path length
+        args.0[3] = 1000; // new uid
+        args.0[4] = u64::from(tairix_abi::FS_OWNER_UNCHANGED); // gid unchanged
         assert!(d
             .dispatch(&ctx, u64::from(SyscallNumber::FS_SET_OWNER.as_u16()), args)
             .is_ok());
@@ -7638,12 +7983,11 @@ mod tests {
 
         // An empty key never satisfies the `namespace.rest` grammar.
         let mut args = RawArgs::ZERO;
-        args.0[0] = 0x1000; // path
-        args.0[1] = 16; // path length
-        args.0[2] = 0x2000; // key
-        args.0[3] = 0; // key length — empty, refused
-        args.0[4] = 0x3000; // value_out
-        args.0[5] = 64;
+        args.0[0] = 4; // the descriptor
+        args.0[1] = 0x2000; // key
+        args.0[2] = 0; // key length — empty, refused
+        args.0[3] = 0x3000; // value_out
+        args.0[4] = 64;
         assert_eq!(
             d.dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_GET.as_u16()), args),
             Err(Errno::LengthOutOfRange)
@@ -7651,12 +7995,11 @@ mod tests {
         assert_eq!(h.last(), None);
 
         // A key above the fixed bound is refused on every attr call
-        // (remove is the 4-argument shape: its trailing slots stay zero).
+        // (remove is the 3-argument shape: its trailing slots stay zero).
         let mut remove_args = RawArgs::ZERO;
-        remove_args.0[0] = 0x1000;
-        remove_args.0[1] = 16;
-        remove_args.0[2] = 0x2000;
-        remove_args.0[3] = (FS_ATTR_KEY_MAX + 1) as u64;
+        remove_args.0[0] = 4;
+        remove_args.0[1] = 0x2000;
+        remove_args.0[2] = (FS_ATTR_KEY_MAX + 1) as u64;
         assert_eq!(
             d.dispatch(
                 &ctx,
@@ -7668,8 +8011,8 @@ mod tests {
         assert_eq!(h.last(), None);
 
         // A value above the fixed bound is refused before any copy.
-        args.0[3] = 9; // "user.demo"
-        args.0[5] = (FS_ATTR_VALUE_MAX + 1) as u64;
+        args.0[2] = 9; // "user.demo"
+        args.0[4] = (FS_ATTR_VALUE_MAX + 1) as u64;
         assert_eq!(
             d.dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_SET.as_u16()), args),
             Err(Errno::LengthOutOfRange)
@@ -7677,7 +8020,7 @@ mod tests {
         assert_eq!(h.last(), None);
 
         // In-bounds calls reach their handlers.
-        args.0[5] = 64;
+        args.0[4] = 64;
         assert!(d
             .dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_GET.as_u16()), args)
             .is_ok());
@@ -7686,7 +8029,7 @@ mod tests {
             .dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_SET.as_u16()), args)
             .is_ok());
         assert_eq!(h.last(), Some("fs_attr_set"));
-        remove_args.0[3] = 9;
+        remove_args.0[2] = 9;
         assert!(d
             .dispatch(
                 &ctx,
@@ -7696,11 +8039,10 @@ mod tests {
             .is_ok());
         assert_eq!(h.last(), Some("fs_attr_remove"));
         let mut args = RawArgs::ZERO;
-        args.0[0] = 0x1000;
-        args.0[1] = 16;
-        args.0[2] = 0; // index — a plain U64, zero is valid
-        args.0[3] = 0x2000; // key_out
-        args.0[4] = 64;
+        args.0[0] = 4;
+        args.0[1] = 0; // index — a plain U64, zero is valid
+        args.0[2] = 0x2000; // key_out
+        args.0[3] = 64;
         assert!(d
             .dispatch(&ctx, u64::from(SyscallNumber::FS_ATTR_LIST.as_u16()), args)
             .is_ok());
@@ -7710,7 +8052,7 @@ mod tests {
     #[test]
     fn fs_attr_calls_require_the_filesystem_capability() {
         // The coarse CAP_FS_ACCESS gate refuses every attr call before the
-        // handler is reached, exactly as the other path-taking fs calls.
+        // handler is reached, exactly as the path-taking fs calls.
         let sink = RecordingSink::new();
         let caps = build_caps(&[], &sink);
         let ctx = CallerContext {
@@ -7720,12 +8062,11 @@ mod tests {
         let h = MockHandlers::default();
         let d = Dispatcher::new(&h, &sink);
         let mut args = RawArgs::ZERO;
-        args.0[0] = 0x1000;
-        args.0[1] = 16;
-        args.0[2] = 0x2000;
-        args.0[3] = 9;
-        args.0[4] = 0x3000;
-        args.0[5] = 64;
+        args.0[0] = 4;
+        args.0[1] = 0x2000;
+        args.0[2] = 9;
+        args.0[3] = 0x3000;
+        args.0[4] = 64;
         for n in [SyscallNumber::FS_ATTR_GET, SyscallNumber::FS_ATTR_SET] {
             assert_eq!(
                 d.dispatch(&ctx, u64::from(n.as_u16()), args),
@@ -7734,10 +8075,9 @@ mod tests {
         }
         // The shorter shapes, with their trailing slots zero.
         let mut remove_args = RawArgs::ZERO;
-        remove_args.0[0] = 0x1000;
-        remove_args.0[1] = 16;
-        remove_args.0[2] = 0x2000;
-        remove_args.0[3] = 9;
+        remove_args.0[0] = 4;
+        remove_args.0[1] = 0x2000;
+        remove_args.0[2] = 9;
         assert_eq!(
             d.dispatch(
                 &ctx,
@@ -7747,11 +8087,10 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
         let mut list_args = RawArgs::ZERO;
-        list_args.0[0] = 0x1000;
-        list_args.0[1] = 16;
-        list_args.0[2] = 0;
-        list_args.0[3] = 0x2000;
-        list_args.0[4] = 64;
+        list_args.0[0] = 4;
+        list_args.0[1] = 0;
+        list_args.0[2] = 0x2000;
+        list_args.0[3] = 64;
         assert_eq!(
             d.dispatch(
                 &ctx,
@@ -7761,6 +8100,153 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
         assert_eq!(h.last(), None);
+    }
+
+    #[test]
+    fn a_path_call_names_no_path_exactly_under_empty_path() {
+        // `EMPTY_PATH` acts on the start descriptor's own node, so it names no
+        // path, null and empty, and every other form names one; a reserved
+        // `AtFlags` bit is refused. All before any handler.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let empty = u64::from(AtFlags::EMPTY_PATH.bits());
+        // Each call with the register its `AtFlags` ride in.
+        for (number, flags_slot) in [
+            (SyscallNumber::FS_CHDIR, 3),
+            (SyscallNumber::FS_SET_MODE, 4),
+            (SyscallNumber::FS_SET_OWNER, 5),
+            (SyscallNumber::FS_ACCESS, 4),
+        ] {
+            let call = |path: u64, path_len: u64, flags: u64| {
+                let mut args = RawArgs::ZERO;
+                args.0[0] = 4; // a directory descriptor
+                args.0[1] = path;
+                args.0[2] = path_len;
+                args.0[flags_slot] = flags;
+                d.dispatch(&ctx, u64::from(number.as_u16()), args)
+            };
+            assert_eq!(
+                call(0x1000, 0, 0),
+                Err(Errno::LengthOutOfRange),
+                "{number:?}"
+            );
+            assert_eq!(call(0, 16, 0), Err(Errno::BadAlignment), "{number:?}");
+            assert_eq!(
+                call(0, 16, empty),
+                Err(Errno::LengthOutOfRange),
+                "{number:?}"
+            );
+            assert_eq!(call(0x1000, 0, empty), Err(Errno::OutOfRange), "{number:?}");
+            assert_eq!(
+                call(0x1000, 16, 1 << 2),
+                Err(Errno::OutOfRange),
+                "{number:?}"
+            );
+            assert_eq!(h.last(), None, "{number:?}: no handler ran");
+            assert!(call(0, 0, empty).is_ok(), "{number:?}");
+            assert!(call(0x1000, 16, 0).is_ok(), "{number:?}");
+            h.calls.borrow_mut().clear();
+        }
+    }
+
+    #[test]
+    fn a_working_directory_is_never_reached_as_a_kept_link() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = u64::from(tairix_abi::FD_CWD);
+        args.0[1] = 0x1000;
+        args.0[2] = 16;
+        args.0[3] = u64::from(AtFlags::NO_FOLLOW.bits());
+        assert_eq!(
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_CHDIR.as_u16()), args),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None);
+    }
+
+    #[test]
+    fn an_expectation_is_named_exactly_when_the_flags_ask_for_one() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        // The mocks echo the expectation address they were handed.
+        let unlink = |flags: UnlinkFlags, expect: u64| {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = u64::from(tairix_abi::FD_CWD);
+            args.0[1] = 0x1000;
+            args.0[2] = 16;
+            args.0[3] = u64::from(flags.bits());
+            args.0[4] = expect;
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_UNLINK.as_u16()), args)
+        };
+        let rename = |flags: RenameFlags, expect: u64| {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = 0x1000;
+            args.0[1] = 0x2000;
+            args.0[2] = u64::from(flags.bits());
+            args.0[3] = expect;
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_RENAME.as_u16()), args)
+        };
+        assert_eq!(unlink(UnlinkFlags::EXPECT_NODE, 0), Err(Errno::OutOfRange));
+        assert_eq!(
+            unlink(UnlinkFlags::DIRECTORY, 0x4000),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(rename(RenameFlags::EXPECT_NODE, 0), Err(Errno::OutOfRange));
+        assert_eq!(
+            rename(RenameFlags::NO_REPLACE, 0x4000),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.last(), None, "no handler ran");
+        assert_eq!(unlink(UnlinkFlags::EXPECT_UNCHANGED, 0x4000), Ok(0x4000));
+        assert_eq!(unlink(UnlinkFlags::DIRECTORY, 0), Ok(0));
+        assert_eq!(rename(RenameFlags::EXPECT_NODE, 0x4000), Ok(0x4000));
+        assert_eq!(rename(RenameFlags::NO_REPLACE, 0), Ok(0));
+    }
+
+    #[test]
+    fn fs_access_asks_read_write_and_exec_and_nothing_else_unaudited() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::FS_ACCESS], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        // The mock echoes the access it was asked.
+        let access = |want: u64| {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = u64::from(tairix_abi::FD_CWD);
+            args.0[1] = 0x1000;
+            args.0[2] = 16;
+            args.0[3] = want;
+            d.dispatch(&ctx, u64::from(SyscallNumber::FS_ACCESS.as_u16()), args)
+        };
+        assert_eq!(access(8), Err(Errno::OutOfRange));
+        assert_eq!(h.last(), None);
+        for want in 0..=7 {
+            assert_eq!(access(want), Ok(want));
+        }
+        assert!(sink.ids().is_empty(), "a pure query audits nothing");
     }
 
     #[test]

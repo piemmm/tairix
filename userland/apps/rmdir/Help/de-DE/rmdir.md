@@ -21,9 +21,10 @@ Alias-Wurzel wie `Home:/`) wird nie angefragt.
 
 Mit `--ignore-fail-on-non-empty` ist die Zurückweisung „Verzeichnis
 nicht leer" kein Fehler — der Operand (oder der `-p`-Aufstieg) endet
-einfach dort. Keine andere Zurückweisung wird toleriert. Der erste
-echte Fehlschlag beendet den Lauf vor jedem weiteren Operanden. `--`
-beendet die Optionsanalyse: jedes spätere Argument ist ein Pfad.
+einfach dort. Keine andere Zurückweisung wird toleriert. Ein Operand,
+der sich nicht entfernen lässt, wird gemeldet, und der nächste wird
+trotzdem entfernt. `--` beendet die Optionsanalyse: jedes spätere
+Argument ist ein Pfad.
 
 ## OPTIONS
 
@@ -48,8 +49,8 @@ beendet die Optionsanalyse: jedes spätere Argument ist ein Pfad.
 - `0` — jede Entfernung gelang (eine von `--ignore-fail-on-non-empty`
   tolerierte Zurückweisung ist kein Fehlschlag).
 - `1` — ein Dateisystem- oder Ausgabefehler; der Grund wird auf der
-  Standardfehlerausgabe gemeldet.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Standardfehlerausgabe gemeldet. Eine nicht verstandene Befehlszeile
+  endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

@@ -121,8 +121,38 @@ fn the_ln_option_surface_is_refused_rather_than_ignored() {
     // `link` is deliberately optionless: silently accepting `-s` would make
     // it create a *symbolic* link when the caller asked for a hard one.
     for arg in ["-s", "-f", "-i", "-v", "-L", "-P", "--symbolic", "--force"] {
-        assert_eq!(parse(&[arg, "a", "b"]), Err(LinkError::Usage), "{arg}");
+        assert!(
+            matches!(parse(&[arg, "a", "b"]), Err(LinkError::Option(_))),
+            "{arg}"
+        );
     }
+}
+
+/// GNU 9.4's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-s", "a", "b"]), "invalid option -- 's'");
+    assert_eq!(
+        refused(&["--symbolic", "a", "b"]),
+        "unrecognized option '--symbolic'"
+    );
+    // `-h` is no help switch here, as in GNU's `link`.
+    assert_eq!(refused(&["-h"]), "invalid option -- 'h'");
+    assert_eq!(
+        refused(&["--help=1"]),
+        "option '--help' doesn't allow an argument"
+    );
+}
+
+/// GNU 9.4 reads `link --he` as `link --help`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
+    assert_eq!(parse(&["a", "b", "--h"]), Ok(Command::Help));
 }
 
 #[test]

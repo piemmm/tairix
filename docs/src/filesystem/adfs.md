@@ -64,6 +64,10 @@ ADFS has no per-inode owner, mode, ACL, or capability gate: the §5.3
 security metadata lives in the VFS layer, and the driver makes no
 permission decisions. The `FileCore` attribute bits (including `L`,
 locked) are surfaced as data through `acorn.attr` for the policy layer.
+They are RISC OS's own access controls, not a store for TAIRiX's record:
+a create ignores the record it is given, and a new object takes the bits
+RISC OS gives one, owner read and write for a file and owner read for a
+directory, locked on the 1280-byte format.
 
 ## Allocation
 
@@ -75,12 +79,52 @@ growth absorbs free map bits after an object's last fragment, appends
 same-id fragments later in scan order (lookup concatenates fragments in
 scan order, so appending earlier would reorder data), and relocates as
 the last resort; shrinking returns fragments to the per-zone free
-lists. A shared fragment is freed only when a bounded directory-tree
-walk proves no other live entry references it.
+lists. A shared fragment is freed only when neither the directory
+holding the object nor another of its entries uses it: `FileCore` shares a
+fragment only between a directory and its files, or files of one
+directory.
 
 Fixed directories never resize (their 47/77-entry capacity is a format
 bound); big directories grow in place and never relocate, keeping
 directory node ids stable.
+
+## Node ids
+
+An object's id names it by its address and the address of the directory
+whose entry holds it, so a stat, read or write by id reads that one
+directory; the id is also the number `stat` reports. An object with no
+allocation has no address, and is named by a digest of its name instead.
+A write that gives an empty file its first allocation or moves a file, and
+a truncation to nothing, therefore change its id: the driver declares
+`NodeIdentity::ContentDerived`, and a caller looks the name up again after
+writing. Two empty siblings whose names share a digest share an id, and a
+write by it is refused as `Unsupported` rather than guessed. A directory's
+id carries its parent's address, and the parent pointer each directory
+records gives the parent's own. `parent` finds the directory's entry in its
+parent first, so a removed directory answers `NotFound`.
+
+## Pins
+
+An object the kernel pins is reported under a token until its last unpin,
+since its own id moves when a write relocates it and a directory's carries
+its parent's address. A file's pin finds it again by its directory's address
+and its name as `FileCore` folds it, which a rename updates; a directory's
+by its address, which a directory keeps for life; the root keeps its own id.
+Lookups, listings and `parent` answer the token, while `stat` goes on
+reporting the object's own number. Every table a pin is recorded in grows
+fallibly, so a hold that cannot be recorded is refused with `OutOfMemory`.
+
+A removal of a pinned object, or a rename replacing it, deletes its entry but
+keeps its fragments until the last unpin frees them (`Unpinned::Freed`): the
+file reads, writes, truncates and changes its `acorn.*` metadata through its
+token, and `stat` reports no name. A file sharing a fragment first takes one
+of its own, since a shared fragment is freed with the last entry naming it.
+A removed directory a pin holds takes no entries: a lookup in it, its parent
+and a creation or move into it answer `NotFound`, and it lists nothing.
+
+No pin outlives the mount, and `FileCore` keeps no orphan record, so a crash
+with a deleted object still pinned leaves its fragments allocated and named
+by no entry, for the format's own checker to reclaim.
 
 ## Listing
 
@@ -106,11 +150,15 @@ Per-variant unit tests cover round-trips (with remount), listings,
 lookups, sparse writes, truncation, removal with space-reclaim
 verification, renames including replacement and cycle refusal, forced
 relocation, disc-full behaviour, name validation, big-directory growth,
-and the metadata round-trips. A corruption suite damages every
-checksummed structure in turn (old-map sums, directory check bytes and
-sequence pairs, zone checks, the cross-check, the boot block, big-dir
-headers and heaps, entry pointers) and asserts the driver fails closed.
+the metadata round-trips, and pins: one token for every hold, kept through
+writes and renames, a removed or replaced pinned object kept until its last
+unpin, a removed pinned directory taking no entries, `release_pins`, and the
+fragments a removal leaves allocated when the mount ends. A corruption
+suite damages every checksummed structure in turn (old-map sums, directory
+check bytes and sequence pairs, zone checks, the cross-check, the boot
+block, big-dir headers and heaps, entry pointers) and asserts the driver
+fails closed.
 `tests/fuzz_adfs_mount.rs` is the fuzz harness registered with
 `cargo xtask fuzz`: seed-logged byte sweeps over valid images of each
-map flavour plus PRNG mutations, with the invariant that `open` and the
-read surface never panic.
+map flavour plus PRNG mutations, with the invariant that `open`, the read
+surface and a file driven through a pin never panic.

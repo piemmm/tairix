@@ -1021,7 +1021,7 @@ pub const RTC_RETRY_BASE_NANOS: u64 = 1_000_000_000;
 /// Six doublings from one second span about a minute. Driver autoload runs as
 /// soon as the hardware tree is published, far earlier than the encrypted
 /// root is mounted, so this is generous; the point of the bound is that a
-/// board with no clock chip at all — a Raspberry Pi 3/4 — stops asking
+/// board with no clock chip at all stops asking
 /// instead of waking for the rest of the boot.
 pub const RTC_RETRY_ATTEMPTS: u32 = 6;
 

@@ -70,5 +70,8 @@ to 24308.
 
 - BCM2835 ARM Peripherals, section 6.3 — the generators the PCM and PWM
   clocks share with the general-purpose ones.
-- Linux `drivers/clk/bcm/clk-bcm2835.c` — the PLL registers.
+- QEMU's BCM2835 CPRMAN model (`include/hw/misc/bcm2835_cprman_internals.h`,
+  `hw/misc/bcm2835_cprman.c`; GPL-2.0-or-later) — the PLL and PLL-channel
+  registers, the VPU generator and its source mux, and the PCM and PWM
+  generators' offsets.
 - `plans/SOUND.md` SND8 — the staged design this driver lands.

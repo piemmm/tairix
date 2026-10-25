@@ -33,14 +33,15 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::{Block, BlockClass};
 use tairix_abi::driver::filesystem::{
-    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
+    AclModel, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, NameMatching, NodeId, NodeIdentity,
-    NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
 };
 use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
+use tairix_collections::RadixTree;
 use tairix_fsmeta::preset::mac::{self, FinderInfo};
 use tairix_fsprobe::udf::{self, LongAd, Tag, TAG_FSD, TAG_IE};
 
@@ -111,6 +112,16 @@ pub struct Udf<B: Block> {
     file: Option<(NodeId, Mapped)>,
     write: write::State,
     host: Option<&'static dyn VolumeHost>,
+    /// The nodes the kernel holds, by id.
+    held: RadixTree<Hold>,
+}
+
+/// The kernel's hold on one node.
+struct Hold {
+    /// Holds outstanding: never none while the hold is recorded.
+    count: u32,
+    /// The node lost its last name while held, so its last unpin frees it.
+    unnamed: bool,
 }
 
 /// A file's extents and the offset each starts at.
@@ -226,6 +237,7 @@ impl<B: Block> Udf<B> {
             file: None,
             write: write::State::new(cost),
             host: None,
+            held: RadixTree::new(),
             volume,
         };
         fs.partitions = fs.build_partitions(layout)?;
@@ -704,10 +716,29 @@ impl<B: Block> Udf<B> {
         Ok(())
     }
 
-    /// The node `node` names, resolved.
+    /// The node `node` names, resolved: none once its entry is freed, which
+    /// leaves the entry's bytes in place.
     pub(crate) fn node(&mut self, node: NodeId) -> Result<Resolved, DriverError> {
         let addr = addr_of(node).ok_or(DriverError::NotFound)?;
+        if self.freed(addr)? {
+            return Err(DriverError::NotFound);
+        }
         self.resolve(addr)
+    }
+
+    /// Whether the node `node` lost its last name while the kernel held it.
+    pub(crate) fn unnamed(&self, node: NodeId) -> bool {
+        self.held.get(node.raw()).is_some_and(|hold| hold.unnamed)
+    }
+
+    /// The directory `dir`, resolved to have its entries read: `None` for one
+    /// removed while held, which takes no entries.
+    fn listable(&mut self, dir: NodeId) -> Result<Option<Resolved>, DriverError> {
+        let resolved = self.node(dir)?;
+        if kind_of(resolved.entry.file_type) != Some(NodeKind::Directory) {
+            return Err(DriverError::Unsupported);
+        }
+        Ok((!self.unnamed(dir)).then_some(resolved))
     }
 
     /// The extended attribute file of a resolved node: its entry, its bytes,
@@ -752,8 +783,8 @@ impl<B: Block> Udf<B> {
         ea::finder_at(&content, at, is_dir).ok()
     }
 
-    /// The structural metadata of a resolved node.
-    fn info(&mut self, resolved: &Resolved) -> Result<NodeInfo, DriverError> {
+    /// The structural metadata of the node `node`, resolved as `resolved`.
+    fn info(&mut self, node: NodeId, resolved: &Resolved) -> Result<NodeInfo, DriverError> {
         let entry = &resolved.entry;
         let kind = kind_of(entry.file_type).ok_or(DriverError::Unsupported)?;
         let size = match kind {
@@ -767,11 +798,17 @@ impl<B: Block> Udf<B> {
         } else {
             entry.recorded_blocks.saturating_mul(self.block_bytes())
         };
+        // UDF counts the names that identify a node; a directory's own `.` is
+        // not one.
+        let nlink = if self.unnamed(node) {
+            0
+        } else {
+            u32::from(entry.links).max(1) + u32::from(kind == NodeKind::Directory)
+        };
         Ok(NodeInfo {
             kind,
-            // UDF counts the names that identify a node; a directory's own
-            // `.` is not one.
-            nlink: u32::from(entry.links).max(1) + u32::from(kind == NodeKind::Directory),
+            nlink,
+            ino: node.raw(),
             size,
             allocated,
             times: NodeTimes {
@@ -1126,14 +1163,14 @@ impl<B: Block> FilesystemRead for Udf<B> {
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let resolved = self.node(node)?;
-        self.info(&resolved).map_err(|err| match err {
+        self.info(node, &resolved).map_err(|err| match err {
             DriverError::Unsupported => DriverError::NotFound,
             other => other,
         })
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
-        let dir = self.node(dir)?;
+        let dir = self.listable(dir)?.ok_or(DriverError::NotFound)?;
         let mut found = None;
         self.walk_dir(&dir, 0, &mut |fs, fid, listed, _| {
             if listed.as_bytes() != name {
@@ -1209,20 +1246,88 @@ impl<B: Block> FilesystemRead for Udf<B> {
         _after: &[u8],
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError> {
-        let dir = self.node(dir)?;
+        let Some(dir) = self.listable(dir)? else {
+            return Ok(());
+        };
         self.walk_dir(&dir, cursor, &mut |fs, fid, name, next| {
             let addr = fid.node();
             let child = fs.resolve(addr)?;
             if kind_of(child.entry.file_type).is_none() {
                 return Ok(DirVisit::Take);
             }
+            let node = node_of(addr);
             let entry = DirEntry {
-                node: node_of(addr),
-                info: fs.info(&child)?,
+                node,
+                info: fs.info(node, &child)?,
                 next_cursor: next,
             };
             Ok(visit(&entry, name.as_bytes()))
         })
+    }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        if addr_of(dir) == Some(self.root) {
+            return Ok(dir);
+        }
+        let resolved = self.node(dir)?;
+        match kind_of(resolved.entry.file_type) {
+            Some(NodeKind::Directory) if !self.unnamed(dir) => {
+                self.parent_addr(&resolved).map(node_of)
+            }
+            // A removed directory's parent descriptor names where it was.
+            Some(NodeKind::Directory) | None => Err(DriverError::NotFound),
+            Some(_) => Err(DriverError::Unsupported),
+        }
+    }
+
+    /// A held node's entry stays where it lies and is never freed, so the
+    /// node's own id names it while it is held.
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        if let Some(hold) = self.held.get_mut(node.raw()) {
+            hold.count = hold.count.checked_add(1).ok_or(DriverError::OutOfMemory)?;
+            return Ok(node);
+        }
+        if kind_of(self.node(node)?.entry.file_type).is_none() {
+            return Err(DriverError::NotFound);
+        }
+        self.held
+            .try_insert(
+                node.raw(),
+                Hold {
+                    count: 1,
+                    unnamed: false,
+                },
+            )
+            .map_err(|_| DriverError::OutOfMemory)?;
+        Ok(node)
+    }
+
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        let hold = self
+            .held
+            .get_mut(pinned.raw())
+            .ok_or(DriverError::NotFound)?;
+        if hold.count > 1 {
+            hold.count -= 1;
+            return Ok(Unpinned::Held);
+        }
+        let unnamed = hold.unnamed;
+        self.held.remove(pinned.raw());
+        if !unnamed {
+            return Ok(Unpinned::Released);
+        }
+        self.free_unnamed(pinned).map(|()| Unpinned::Freed)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        let held = core::mem::take(&mut self.held);
+        let mut freed = Ok(());
+        for (id, hold) in &held {
+            if hold.unnamed && self.free_unnamed(NodeId::from_raw(id)).is_err() {
+                freed = Err(DriverError::DeviceFault);
+            }
+        }
+        freed
     }
 }
 
@@ -1263,13 +1368,16 @@ impl<B: Block> FilesystemSecurity for Udf<B> {
         ))
     }
 
+    /// A file entry has no place for ACL entries or a capability gate, so a
+    /// record asking for either is refused whole rather than stored in part.
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        if security.required_cap.is_some()
+            || !security.acl().is_empty()
+            || security.acl_model != AclModel::Additive
+        {
+            return Err(DriverError::Unsupported);
+        }
         self.change(|fs| fs.set_owner_mode(node, security))
-    }
-
-    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
-        let current = self.security(node)?;
-        self.change(|fs| fs.set_owner_mode(node, NodeSecurity::new(current.mode, uid, gid)))
     }
 
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {

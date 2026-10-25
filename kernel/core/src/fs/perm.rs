@@ -24,11 +24,24 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{AclModel, NodeSecurity, SecuritySubject, MAX_ACL_ENTRIES};
+use tairix_abi::fs::Access as Wanted;
 use tairix_abi::CapabilityId;
 use tairix_abi::CapabilityQuery;
+use tairix_abi::{Errno, FS_LINK_MODE, FS_MODE_MASK, FS_UMASK_BITS};
 use tairix_kernel_sec::{GroupId, UserId};
 
 use super::VfsError;
+
+/// How an access through a descriptor is judged.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Judged {
+    /// As a byte operation of that access through the descriptor is: the
+    /// owner of a descriptor of its own passes the mode and the ACL.
+    AsOperation,
+    /// On the gate, mode and ACL alone, as a path is asked about, so a
+    /// descriptor and a path answer alike for one identity.
+    AsQuery,
+}
 
 /// A single access right requested against an inode.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -49,6 +62,18 @@ impl Access {
             Self::Write => 0b010,
             Self::Execute => 0b001,
         }
+    }
+
+    /// Each access `want` asks for, in the order `fs_access` judges them:
+    /// read, write, then execute.
+    pub fn asked_by(want: Wanted) -> impl Iterator<Item = Self> {
+        [
+            (Wanted::READ, Self::Read),
+            (Wanted::WRITE, Self::Write),
+            (Wanted::EXEC, Self::Execute),
+        ]
+        .into_iter()
+        .filter_map(move |(bit, access)| want.contains(bit).then_some(access))
     }
 }
 
@@ -146,6 +171,50 @@ impl Credentials<'_> {
     #[must_use]
     pub fn is_in_group(&self, gid: GroupId) -> bool {
         self.gid == gid || self.supplementary_gids.contains(&gid)
+    }
+}
+
+/// What a create asks the new node's permission bits to be: the mode its
+/// caller named, and the file mode creation mask of the process creating it.
+///
+/// Built only from a mode within [`FS_MODE_MASK`] and a mask within
+/// [`FS_UMASK_BITS`], so a node is never born with a bit the permission
+/// model does not know.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CreateMode {
+    mode: u32,
+    umask: u32,
+}
+
+impl CreateMode {
+    /// What an open that creates nothing carries: no mode and no mask.
+    pub const NONE: Self = Self { mode: 0, umask: 0 };
+
+    /// What a symbolic link is born with: every permission bit, unmasked,
+    /// since a link's own mode never gates access.
+    pub const LINK: Self = Self {
+        mode: FS_LINK_MODE,
+        umask: 0,
+    };
+
+    /// `mode` asked for by a process whose mask is `umask`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a mode past [`FS_MODE_MASK`] or a mask past
+    /// [`FS_UMASK_BITS`].
+    pub fn new(mode: u32, umask: u32) -> Result<Self, Errno> {
+        if mode & !FS_MODE_MASK != 0 || umask & !FS_UMASK_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self { mode, umask })
+    }
+
+    /// The permission bits the mask lets through: the setuid, setgid and
+    /// sticky bits asked for always, the `rwx` triads less the mask.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.mode & !self.umask
     }
 }
 
@@ -292,6 +361,53 @@ impl Metadata {
         }
     }
 
+    /// Decide `access` for a byte operation through a descriptor: as
+    /// [`Self::authorize`], except that when `owner_exempt` — the descriptor is
+    /// its holder's own or was conferred, never granted — the node's owner
+    /// passes the mode and the ACL, which they could restore at will. The
+    /// capability gate binds everyone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::PermissionDenied`] as [`Self::authorize`] does.
+    pub fn authorize_held(
+        &self,
+        cred: &Credentials<'_>,
+        access: Access,
+        owner_exempt: bool,
+    ) -> Result<(), VfsError> {
+        if !(owner_exempt && cred.uid == self.owner) {
+            return self.authorize(cred, access);
+        }
+        match self.required_cap {
+            Some(cap) if !cred.caps.holds(cap) => Err(VfsError::PermissionDenied),
+            _ => Ok(()),
+        }
+    }
+
+    /// Decide whether `cred` may remove, rename away or replace the entry this
+    /// inode occupies in a directory whose metadata is `dir`, beyond the
+    /// write permission on `dir` the caller already holds.
+    ///
+    /// The capability gate guards the name as well as the inode: otherwise a
+    /// writer of `dir` could unlink a gated node and plant an ungated one the
+    /// gate's own service would walk into. In a sticky directory only the
+    /// entry's owner or the directory's owner may touch the name, which is
+    /// what a shared drop folder relies on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::PermissionDenied`] when either rule refuses.
+    pub fn admits_name_removal(&self, dir: &Self, cred: &Credentials<'_>) -> Result<(), VfsError> {
+        if self.required_cap.is_some_and(|cap| !cred.caps.holds(cap)) {
+            return Err(VfsError::PermissionDenied);
+        }
+        if dir.mode.has(Mode::STICKY) && cred.uid != self.owner && cred.uid != dir.owner {
+            return Err(VfsError::PermissionDenied);
+        }
+        Ok(())
+    }
+
     /// Resolve the ACL for `access`: `Some(false)` if any matching entry
     /// denies, `Some(true)` if one allows (and none deny), `None` if no
     /// entry matches.
@@ -377,6 +493,30 @@ mod tests {
     }
 
     #[test]
+    fn a_create_mode_lets_through_what_the_umask_does_not_withhold() {
+        let file = CreateMode::new(tairix_abi::FS_NEW_FILE_MODE, tairix_abi::FS_INITIAL_UMASK)
+            .expect("in range");
+        assert_eq!(file.bits(), 0o644);
+        assert_eq!(
+            CreateMode::new(0o4777, 0o077).map(CreateMode::bits),
+            Ok(0o4700),
+            "a mask never withholds a special bit"
+        );
+        assert_eq!(CreateMode::LINK.bits(), 0o777);
+        assert_eq!(CreateMode::NONE.bits(), 0);
+    }
+
+    #[test]
+    fn a_create_mode_past_its_bounds_is_refused() {
+        assert_eq!(CreateMode::new(FS_MODE_MASK + 1, 0), Err(Errno::OutOfRange));
+        assert_eq!(CreateMode::new(0o644, 0o1000), Err(Errno::OutOfRange));
+        assert_eq!(
+            CreateMode::new(FS_MODE_MASK, 0o777).map(CreateMode::bits),
+            Ok(0o7000)
+        );
+    }
+
+    #[test]
     fn mode_triads_decode_correctly() {
         let m = Mode::from_bits(0o751);
         assert_eq!(m.owner_rwx(), 0b111);
@@ -431,6 +571,33 @@ mod tests {
         with.insert(CapabilityId::AUDIT_READ);
         let cred = creds(7, 3, &[], &with);
         assert!(meta.authorize(&cred, Access::Read).is_ok());
+    }
+
+    /// A held node's owner passes its own mode through a descriptor that is not
+    /// a grant, as POSIX's `open(O_CREAT, 0444)` then `write` needs; a grant,
+    /// another principal, and the capability gate are judged as ever.
+    #[test]
+    fn a_held_nodes_owner_passes_its_mode_but_not_its_gate() {
+        let none = CapabilitySet::empty();
+        let mut meta = Metadata::new(UserId(7), GroupId(3), Mode::from_bits(0o444));
+        let owner = creds(7, 3, &[], &none);
+        assert!(meta.authorize_held(&owner, Access::Write, true).is_ok());
+        assert_eq!(
+            meta.authorize_held(&owner, Access::Write, false),
+            Err(VfsError::PermissionDenied),
+            "a grant has no exemption"
+        );
+        let other = creds(8, 3, &[], &none);
+        assert_eq!(
+            meta.authorize_held(&other, Access::Write, true),
+            Err(VfsError::PermissionDenied)
+        );
+        meta.required_cap = Some(CapabilityId::AUDIT_READ);
+        assert_eq!(
+            meta.authorize_held(&owner, Access::Read, true),
+            Err(VfsError::PermissionDenied),
+            "the gate binds the owner too"
+        );
     }
 
     #[test]

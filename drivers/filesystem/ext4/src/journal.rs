@@ -12,7 +12,7 @@
 //! committed, so a replay is only ever of the newest, whose blocks no later
 //! change can have reused — a block freed is reused only after the
 //! transaction freeing it commits — and no revoke record is needed. A quiet
-//! volume's log is emptied. Recovery reads whatever a Linux kernel left,
+//! volume's log is emptied. Recovery reads whatever any writer left,
 //! revokes and all. Every structure is big-endian.
 
 use alloc::vec::Vec;
@@ -212,8 +212,8 @@ impl Journal {
     }
 
     /// Turn on what this writer needs from the format: 64-bit tags on a
-    /// 64-bit filesystem, and v3 checksums on a checksummed one, as Linux
-    /// does when it mounts such a volume. A log checksummed in v2 moves to
+    /// 64-bit filesystem, whose block numbers need them, and v3 checksums on a
+    /// checksummed one. A log checksummed in v2 moves to
     /// v3, which this writer writes instead. A version-1 superblock has no
     /// feature words to set.
     pub(crate) fn adopt_features(&mut self, wide: bool, checksummed: bool) {

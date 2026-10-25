@@ -176,7 +176,7 @@ These are settled. A change that contradicts one stops and asks (§15.7).
 16. **Interrupt remapping is the whole machine's or no one's.** Every source
     the boot set up gets an entry before remapping turns on; an IO-APIC no
     unit names, or a unit that cannot remap, leaves every source in
-    compatibility format, as Linux does. x2APIC mode is entered only with
+    compatibility format. x2APIC mode is entered only with
     extended-mode remapping, or where firmware left it.
 
 ## 0a. The security position, stated honestly
@@ -550,10 +550,10 @@ holds a group at a time.
   function joins the furthest device its DMA cannot be told apart from — the
   topmost bridge that tags it, then every bridge above whose path to the root
   lacks ACS — and that device, sharing a slot without ACS, joins its siblings
-  that lack it too: Linux's `pci_device_group`, without device-specific
+  that lack it too (PCI Express Base Specification, Access Control Services), without device-specific
   exceptions. A port isolates when Source Validation, Request and Completion
-  Redirect and Upstream Forwarding, each it implements, are on. Beyond
-  Linux, a bus below the root complex holding a bridge that does not
+  Redirect and Upstream Forwarding, each it implements, are on. Further, a
+  bus below the root complex holding a bridge that does not
   isolate, or an endpoint beside a bridge, is open — a request reaches every
   function on it without passing a port that redirects it — and everything
   below an open bus is one group; grouping by the path alone would let one

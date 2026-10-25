@@ -19,7 +19,7 @@ verticals that boot it.
 | `src/<arch>/`          | One port's own wiring (`x86_64`, `aarch64`, `riscv64`): `boot.rs` (the boot pipeline), `dispatch.rs` (the syscall-dispatch callback), `panic_ctx.rs` (the panic bridge), `root_unlock.rs`, `init_spawn.rs` and `spawn_producer.rs`, plus the port's interrupt controller and console. |
 | `src/dispatch_core.rs` | What every port's dispatch callback shares: the argument frame, the result encoding, and the forward through the dispatch slot. |
 | `src/kalloc.rs`        | Re-exports `lib/kalloc`'s freeing allocator and arena type. |
-| `build.rs`             | Hands each port's boot linker script to `rustc` and emits the `freestanding` and `kernel_isa` names the crate gates on. |
+| `build.rs`             | Hands each port's boot linker script to `rustc`, emits the `freestanding` and `kernel_isa` names the crate gates on, and generates the target's bootstrap-floor table (`driver_catalog`) from the floor drivers' own `Floor.toml` declarations. |
 
 The other modules in `src/` are arch-neutral and serve every port.
 

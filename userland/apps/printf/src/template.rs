@@ -1,8 +1,8 @@
 //! The FORMAT template engine: backslash escapes and `%` directives.
 //!
 //! [`render_pass`] walks the FORMAT once, appending output bytes and
-//! consuming arguments, exactly as one pass of GNU `printf`'s
-//! `print_formatted` does; the client repeats it while it consumes
+//! consuming arguments — one use of the format, which POSIX `printf` reuses
+//! as often as the arguments need; the client repeats it while it consumes
 //! arguments and any remain. Escapes are shared between the FORMAT and a
 //! `%b` argument (the latter reads octal as `\0NNN`, per POSIX). `\c`
 //! halts all output.
@@ -16,6 +16,45 @@ use tairix_util::quote::{quote, quote_if_needed};
 
 use crate::error::PrintfError;
 use crate::number::{to_float, to_signed, to_unsigned, Note};
+
+/// Where a pass writes its output: a buffer the client flushes as it fills,
+/// so a field of any width or precision is written without being held.
+pub trait Sink {
+    /// Append `bytes`.
+    fn extend_from_slice(&mut self, bytes: &[u8]);
+
+    /// Append `count` copies of `byte`.
+    fn repeat(&mut self, byte: u8, count: usize);
+
+    /// Append one byte.
+    fn push(&mut self, byte: u8) {
+        self.extend_from_slice(&[byte]);
+    }
+}
+
+impl Sink for Vec<u8> {
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        Vec::extend_from_slice(self, bytes);
+    }
+
+    fn repeat(&mut self, byte: u8, count: usize) {
+        self.resize(self.len() + count, byte);
+    }
+
+    fn push(&mut self, byte: u8) {
+        Vec::push(self, byte);
+    }
+}
+
+/// A [`Sink`] the float renderer writes into.
+struct Text<'s>(&'s mut dyn Sink);
+
+impl core::fmt::Write for Text<'_> {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        self.0.extend_from_slice(text.as_bytes());
+        Ok(())
+    }
+}
 
 /// How serious a conversion diagnostic is: an error sets the run's exit
 /// status to `1`; a warning leaves it untouched (both GNU behaviours).
@@ -60,7 +99,7 @@ pub struct PassResult {
 pub fn render_pass(
     format: &str,
     arguments: &[&str],
-    out: &mut Vec<u8>,
+    out: &mut dyn Sink,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<PassResult, PrintfError> {
     let bytes = format.as_bytes();
@@ -181,7 +220,7 @@ fn render_directive(
     format: &str,
     start: usize,
     cursor: &mut Cursor<'_, '_>,
-    out: &mut Vec<u8>,
+    out: &mut dyn Sink,
 ) -> Result<(usize, bool), PrintfError> {
     let bytes = format.as_bytes();
     let (d, i) = parse_spec(bytes, start + 1, cursor);
@@ -309,7 +348,7 @@ fn parse_spec(bytes: &[u8], mut i: usize, cursor: &mut Cursor<'_, '_>) -> (Direc
 }
 
 /// Convert and render one integer conversion (`diouxX`).
-fn render_integer(conversion: u8, cursor: &mut Cursor<'_, '_>, d: &Directive, out: &mut Vec<u8>) {
+fn render_integer(conversion: u8, cursor: &mut Cursor<'_, '_>, d: &Directive, out: &mut dyn Sink) {
     let arg = cursor.take();
     let value = if matches!(conversion, b'd' | b'i') {
         let converted = to_signed(arg);
@@ -344,7 +383,7 @@ fn render_integer(conversion: u8, cursor: &mut Cursor<'_, '_>, d: &Directive, ou
 }
 
 /// Convert and render one floating-point conversion (`eEfFgGaA`).
-fn render_float(conversion: u8, cursor: &mut Cursor<'_, '_>, d: &Directive, out: &mut Vec<u8>) {
+fn render_float(conversion: u8, cursor: &mut Cursor<'_, '_>, d: &Directive, out: &mut dyn Sink) {
     let arg = cursor.take();
     let converted = to_float(arg);
     if let Some(note) = converted.note {
@@ -366,7 +405,8 @@ fn render_float(conversion: u8, cursor: &mut Cursor<'_, '_>, d: &Directive, out:
         },
         uppercase: conversion.is_ascii_uppercase(),
     };
-    out.extend_from_slice(directive.render(converted.value).as_bytes());
+    // The sink takes every write.
+    let _ = directive.render_into(converted.value, &mut Text(out));
 }
 
 /// The probe-pinned GNU flag/precision validity table: `%b`/`%q` take no
@@ -408,7 +448,7 @@ struct Int {
 /// Append one rendered integer: sign, alternate-form prefix, zero or
 /// space padding, and the digits, per C's rules (a precision defeats the
 /// `0` flag; `-` defeats it too).
-fn push_integer(out: &mut Vec<u8>, d: &Directive, value: Int) {
+fn push_integer(out: &mut dyn Sink, d: &Directive, value: Int) {
     let mut digits = [0_u8; 64];
     let mut len = 0_usize;
     let mut rest = value.magnitude;
@@ -424,7 +464,6 @@ fn push_integer(out: &mut Vec<u8>, d: &Directive, value: Int) {
         len += 1;
         rest /= value.base;
     }
-    let mut body = Vec::with_capacity(24);
     // The precision is the minimum digit count; zero with precision
     // zero prints no digits at all.
     let min_digits = d.precision.unwrap_or(1);
@@ -447,37 +486,39 @@ fn push_integer(out: &mut Vec<u8>, d: &Directive, value: Int) {
     } else {
         b""
     };
-    body.extend_from_slice(prefix);
-    body.resize(body.len() + zeros, b'0');
-    body.extend_from_slice(&digits[64 - len..]);
-
-    let printed = sign.len() + body.len();
+    let shown = &digits[64 - len..];
+    let printed = sign.len() + prefix.len() + zeros.saturating_add(shown.len());
     let width = if d.saw_width { d.width } else { 0 };
     let padding = width.saturating_sub(printed);
+    let body = |out: &mut dyn Sink| {
+        out.extend_from_slice(prefix);
+        out.repeat(b'0', zeros);
+        out.extend_from_slice(shown);
+    };
     if d.left {
         out.extend_from_slice(sign);
-        out.extend_from_slice(&body);
-        out.extend(core::iter::repeat_n(b' ', padding));
+        body(out);
+        out.repeat(b' ', padding);
     } else if d.zero && d.precision.is_none() {
         out.extend_from_slice(sign);
-        out.extend(core::iter::repeat_n(b'0', padding));
-        out.extend_from_slice(&body);
+        out.repeat(b'0', padding);
+        body(out);
     } else {
-        out.extend(core::iter::repeat_n(b' ', padding));
+        out.repeat(b' ', padding);
         out.extend_from_slice(sign);
-        out.extend_from_slice(&body);
+        body(out);
     }
 }
 
 /// Append `content` space-padded to the directive's width (`%c`/`%s`).
-fn push_padded(out: &mut Vec<u8>, content: &[u8], d: &Directive) {
+fn push_padded(out: &mut dyn Sink, content: &[u8], d: &Directive) {
     let width = if d.saw_width { d.width } else { 0 };
     let padding = width.saturating_sub(content.len());
     if d.left {
         out.extend_from_slice(content);
-        out.extend(core::iter::repeat_n(b' ', padding));
+        out.repeat(b' ', padding);
     } else {
-        out.extend(core::iter::repeat_n(b' ', padding));
+        out.repeat(b' ', padding);
         out.extend_from_slice(content);
     }
 }
@@ -502,7 +543,7 @@ fn push_escape(
     bytes: &[u8],
     i: usize,
     style: OctalStyle,
-    out: &mut Vec<u8>,
+    out: &mut dyn Sink,
 ) -> Result<(usize, bool), PrintfError> {
     let Some(&b) = bytes.get(i) else {
         // A trailing lone backslash passes through, as in GNU.
@@ -604,7 +645,11 @@ fn hex_value(b: u8) -> u32 {
 
 /// `\uHHHH` / `\UHHHHHHHH`: exactly 4 or 8 hex digits naming a Unicode
 /// scalar, emitted as UTF-8. `bytes[i]` is the `u`/`U`.
-fn push_universal(bytes: &[u8], i: usize, out: &mut Vec<u8>) -> Result<(usize, bool), PrintfError> {
+fn push_universal(
+    bytes: &[u8],
+    i: usize,
+    out: &mut dyn Sink,
+) -> Result<(usize, bool), PrintfError> {
     let want = if bytes[i] == b'u' { 4 } else { 8 };
     let (value, len) = hex_digits(bytes, i + 1, want);
     if len < want {
@@ -625,7 +670,7 @@ fn push_universal(bytes: &[u8], i: usize, out: &mut Vec<u8>) -> Result<(usize, b
 
 /// Append `text` with its escapes interpreted as a `%b` argument's,
 /// returning `true` when `\c` halted output.
-fn push_b_argument(text: &str, out: &mut Vec<u8>) -> Result<bool, PrintfError> {
+fn push_b_argument(text: &str, out: &mut dyn Sink) -> Result<bool, PrintfError> {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {

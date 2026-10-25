@@ -25,8 +25,7 @@ La base decide qué puede retirarse. Rechaza eliminar la última cuenta activa q
 ## EXIT STATUS
 
 - `0` — la cuenta fue eliminada.
-- `1` — la base rechazó o no pudo completar la eliminación (por ejemplo una capacidad ausente, una cuenta desconocida o el último administrador); la razón se imprime en la salida de error.
-- `2` — no se entendió la línea de órdenes.
+- `1` — la base rechazó o no pudo completar la eliminación (por ejemplo una capacidad ausente, una cuenta desconocida o el último administrador); la razón se imprime en la salida de error. Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

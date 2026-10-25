@@ -56,8 +56,8 @@ capability the calling account does not itself hold.
 
 - `0` — every requested change was made.
 - `1` — the database refused or failed a change; the step and the reason are
-  printed on standard error.
-- `2` — the command line was not understood.
+  printed on standard error. A command line that was not understood
+  exits `1` too.
 
 ## ENVIRONMENT
 

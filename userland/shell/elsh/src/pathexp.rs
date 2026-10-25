@@ -7,7 +7,8 @@
 //! is walked a component at a time:
 //!
 //! * a literal component is appended, its existence checked at the end of
-//!   the word (as bash's `lstat` does) or by the listing of a later one;
+//!   the word, without following a final link, so a dangling one still
+//!   matches as in bash, or by the listing of a later one;
 //! * a wildcard component reads its directory a batch at a time and keeps
 //!   the names it matches, a leading `.` matched only by a `.` unless
 //!   `dotglob`, so no listing is ever held whole;
@@ -28,12 +29,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::ops::ControlFlow;
 
 use tairix_abi::{Errno, FileKind};
-use tairix_glob::{Component, Mark, Options, Pattern, Scratch};
+use tairix_glob::{Component, Mark, Options, OutOfMemory, Pattern, Scratch, MAX_PATTERN_LEN};
 
 use crate::complete::{DirEntryInfo, DirLister};
+use crate::env::Expansion;
 use crate::error::ParseError;
 use crate::expand::{Budget, ExpandError};
 
@@ -118,47 +121,128 @@ impl Settings {
 }
 
 /// `GLOBIGNORE`'s `:`-separated patterns, which remove the paths they match
-/// whole.
-pub(crate) struct Ignore(Vec<Pattern>);
+/// whole: compiled once for each value and the options it is read under,
+/// and kept for the session.
+#[derive(Default)]
+pub(crate) struct Ignore {
+    compiled: Cell<Option<Compiled>>,
+}
 
 impl Ignore {
-    /// Compile `text`'s entries as bash matches them: against the whole path,
-    /// a wildcard reaching a leading `.`.
+    /// Remove from `paths` those an entry of `text` matches — read as bash
+    /// reads them, against the whole path and a wildcard reaching a leading
+    /// `.`, with `word`'s extended and case options — and, as bash does
+    /// whenever it filters, any whose last component is `.` or `..`. A value
+    /// not yet compiled under those options is compiled first, charged to
+    /// `budget` at what it holds.
     ///
     /// # Errors
     ///
-    /// An entry that is not a valid pattern, named as the variable.
-    pub(crate) fn new(text: &str, extglob: bool, nocaseglob: bool) -> Result<Self, ExpandError> {
-        let options = Settings::word_options(extglob, nocaseglob, true);
-        text.split(':')
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| {
-                Pattern::with_options(entry, options).map_err(|err| ExpandError {
-                    error: ParseError::Pattern(err),
-                    subject: Some(String::from("GLOBIGNORE")),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Self)
+    /// An entry that is not a valid pattern or whose group holds a `/`, named
+    /// as the variable; the bound spent compiling one; or a match the heap
+    /// could not hold, which leaves what to remove unknown.
+    pub(crate) fn retain(
+        &self,
+        text: &str,
+        word: Options,
+        paths: &mut Vec<String>,
+        budget: &mut Budget,
+    ) -> Result<(), ExpandError> {
+        let options = word.with(Options::PERIOD, false);
+        let compiled = match self.compiled.take() {
+            Some(compiled) if compiled.options == options && compiled.text == text => compiled,
+            stale => {
+                drop(stale);
+                Compiled::new(text, options, budget)?
+            }
+        };
+        let kept = compiled.retain(paths);
+        self.compiled.set(Some(compiled));
+        kept
+    }
+}
+
+/// One `GLOBIGNORE` value, compiled, or the refusal of its first entry that
+/// is no pattern it can hold.
+struct Compiled {
+    text: String,
+    options: Options,
+    patterns: Result<Vec<Pattern>, ParseError>,
+}
+
+impl Compiled {
+    fn new(text: &str, options: Options, budget: &mut Budget) -> Result<Self, ParseError> {
+        let mut kept = budget.string(text.len())?;
+        kept.push_str(text);
+        let mut patterns = Vec::new();
+        for entry in text.split(':').filter(|entry| !entry.is_empty()) {
+            let pattern = match Pattern::with_options(entry, options) {
+                // Compared a component at a time, an entry whose group holds a
+                // `/` could hide less than it names.
+                Ok(pattern) if pattern.components().len() <= entry.matches('/').count() => {
+                    Err(ParseError::PatternGroupHoldsSlash)
+                }
+                Ok(pattern) => Ok(pattern),
+                Err(err) => Err(ParseError::Pattern(err)),
+            };
+            match pattern {
+                Ok(pattern) => {
+                    budget.spend(pattern.heap_bytes())?;
+                    budget.push(&mut patterns, pattern)?;
+                }
+                Err(refusal) => {
+                    return Ok(Self {
+                        text: kept,
+                        options,
+                        patterns: Err(refusal),
+                    });
+                }
+            }
+        }
+        Ok(Self {
+            text: kept,
+            options,
+            patterns: Ok(patterns),
+        })
     }
 
-    /// Remove the paths an entry matches, and — as bash does whenever it
-    /// filters — any whose last component is `.` or `..`.
-    pub(crate) fn retain(&self, paths: &mut Vec<String>) {
+    fn retain(&self, paths: &mut Vec<String>) -> Result<(), ExpandError> {
+        let patterns = self.patterns.as_ref().map_err(|refusal| ExpandError {
+            error: *refusal,
+            subject: Some(String::from("GLOBIGNORE")),
+        })?;
         let mut scratch = Scratch::new();
+        let mut refused = None;
         paths.retain(|path| {
+            if refused.is_some() {
+                return true;
+            }
             let last = match path.rsplit_once('/') {
                 Some((_, last)) if !last.is_empty() => last,
                 _ => path,
             };
-            last != "."
-                && last != ".."
-                && !self
-                    .0
-                    .iter()
-                    .any(|pattern| pattern.matches_with(path, &mut scratch))
+            if last == "." || last == ".." {
+                return false;
+            }
+            match ignores(patterns, path, &mut scratch) {
+                Ok(ignored) => !ignored,
+                Err(err) => {
+                    refused = Some(err);
+                    true
+                }
+            }
         });
+        refused.map_or(Ok(()), |err| Err(err.into()))
     }
+}
+
+fn ignores(patterns: &[Pattern], path: &str, scratch: &mut Scratch) -> Result<bool, OutOfMemory> {
+    for pattern in patterns {
+        if pattern.matches_with(path, scratch)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A listing or probe failing this way means *nothing here*, as bash reads
@@ -182,9 +266,9 @@ fn absent(errno: Errno) -> bool {
     )
 }
 
-fn unreadable(path: &str, errno: Errno) -> ExpandError {
+fn naming(path: &str, error: ParseError) -> ExpandError {
     ExpandError {
-        error: ParseError::UnreadableDirectory(errno),
+        error,
         subject: Some(String::from(path)),
     }
 }
@@ -193,21 +277,22 @@ fn unreadable(path: &str, errno: Errno) -> ExpandError {
 #[derive(Clone)]
 struct Found {
     path: String,
-    /// Nothing follows the root yet, so the next name needs no separator.
-    at_root: bool,
+    /// The components after its root; with none yet, the next name needs no
+    /// separator.
+    components: usize,
 }
 
 impl Found {
     fn join(&self, name: &str) -> Self {
         let mut path = String::with_capacity(self.path.len() + 1 + name.len());
         path.push_str(&self.path);
-        if !self.at_root {
+        if self.components > 0 {
             path.push('/');
         }
         path.push_str(name);
         Self {
             path,
-            at_root: false,
+            components: self.components + 1,
         }
     }
 
@@ -232,23 +317,32 @@ fn spelled(path: &str, relative: bool) -> Cow<'_, str> {
     }
 }
 
+/// What removes, from the paths a pattern matched, those that must not be
+/// kept.
+pub(crate) type MatchFilter<'a> =
+    dyn Fn(&mut Vec<String>, &mut Budget) -> Result<(), ExpandError> + 'a;
+
 /// The sorted paths `word` matches when it holds a wildcard, or `Ok(None)`
 /// when it holds none and stands for itself. `filter` removes what it must
 /// from the paths as bash spells them, before any is written from `./`.
 pub(crate) fn expand(
-    word: &[Mark],
+    word: &Expansion,
     settings: &Settings,
     fs: &dyn GlobFs,
     budget: &mut Budget,
-    filter: &dyn Fn(&mut Vec<String>) -> Result<(), ExpandError>,
+    filter: &MatchFilter<'_>,
 ) -> Result<Option<Vec<String>>, ExpandError> {
-    if !tairix_glob::may_hold_wildcards(word, settings.word.contains(Options::EXTENDED)) {
+    let extended = settings.word.contains(Options::EXTENDED);
+    let wildcard = |ch| tairix_glob::may_hold_wildcards(&[Mark { ch, literal: false }], extended);
+    if !word.unquoted_chars().any(wildcard) {
         return Ok(None);
     }
-    let text = || -> String { word.iter().map(|mark| mark.ch).collect() };
-    let pattern = Pattern::from_marked(word, settings.word).map_err(|err| ExpandError {
+    // A text longer than this is too long a pattern however it goes on, so
+    // no more of it need be marked.
+    let marks: Vec<Mark> = word.marks().take(MAX_PATTERN_LEN + 1).collect();
+    let pattern = Pattern::from_marked(&marks, settings.word).map_err(|err| ExpandError {
         error: ParseError::Pattern(err),
-        subject: Some(text()),
+        subject: Some(word.text.clone()),
     })?;
     if !pattern.has_wildcards() {
         return Ok(None);
@@ -259,18 +353,15 @@ pub(crate) fn expand(
     // pattern syntax (`[[:digit:]]`).
     let (root, mut components) = match all.first().and_then(Component::literal) {
         Some("") => (String::from("/"), &all[1..]),
-        Some(first) if first.contains(':') => {
-            let mut text = text();
-            match tairix_path::root_len(&text) {
-                Ok(len) => {
-                    text.truncate(len);
-                    (text, &all[1..])
-                }
-                // No path spelling at all (a resource reference such as
-                // `sys:*`): nothing on disk can match it.
-                Err(_) => return Ok(Some(Vec::new())),
-            }
-        }
+        Some(first) if first.contains(':') => match tairix_path::root_len(&word.text) {
+            Ok(len) => (
+                String::from(word.text.get(..len).unwrap_or_default()),
+                &all[1..],
+            ),
+            // No path spelling at all (a resource reference such as
+            // `sys:*`): nothing on disk can match it.
+            Err(_) => return Ok(Some(Vec::new())),
+        },
         _ => (String::new(), all),
     };
     let dirs_only =
@@ -288,7 +379,7 @@ pub(crate) fn expand(
     };
     let mut found = vec![Found {
         path: root,
-        at_root: true,
+        components: 0,
     }];
     let mut rest = components;
     while let Some((component, after)) = rest.split_first() {
@@ -315,24 +406,26 @@ pub(crate) fn expand(
             break;
         }
     }
-    let mut paths: Vec<String> = found
+    let mut paths = walker.budget.list(found.len())?;
+    // `**` standing for no level of the working directory is no path.
+    for mut path in found
         .into_iter()
-        // `**` standing for no level of the working directory is no path.
-        .filter(|entry| !entry.path.is_empty())
-        .map(|mut entry| {
-            if dirs_only {
-                entry.path.push('/');
-            }
-            entry.path
-        })
-        .collect();
+        .map(|entry| entry.path)
+        .filter(|path| !path.is_empty())
+    {
+        if dirs_only {
+            walker.budget.room(&mut path, 1)?;
+            path.push('/');
+        }
+        paths.push(path);
+    }
     paths.sort_unstable();
     paths.dedup();
-    filter(&mut paths)?;
+    filter(&mut paths, walker.budget)?;
     if relative {
         for path in &mut paths {
             if !tairix_path::is_relative_spelling(path) {
-                walker.budget.spend("./".len())?;
+                walker.budget.room(path, "./".len())?;
                 path.insert_str(0, "./");
             }
         }
@@ -355,11 +448,10 @@ enum Yields<'c> {
     Matches(&'c Component, bool),
 }
 
-/// A `**` walk in progress: what it yielded, and the levels still to read
-/// with their depth.
+/// A `**` walk in progress: what it yielded, and the levels still to read.
 struct Descent {
     next: Vec<Found>,
-    pending: Vec<(Found, usize)>,
+    pending: Vec<Found>,
 }
 
 struct Walker<'a, 'b> {
@@ -382,7 +474,7 @@ impl Walker<'_, '_> {
         dirs_only: bool,
     ) -> Result<Vec<Found>, ExpandError> {
         let need_dir = !last || dirs_only;
-        let mut next = Vec::with_capacity(found.len());
+        let mut next = Vec::new();
         if let Some(name) = component.literal() {
             for base in found {
                 let path = base.join(name);
@@ -411,7 +503,7 @@ impl Walker<'_, '_> {
         need_dir: bool,
         into: &mut Vec<Found>,
     ) -> Result<(), ExpandError> {
-        if !component.matches_with(name, &mut self.scratch) {
+        if !component.matches_with(name, &mut self.scratch)? {
             return Ok(());
         }
         let path = dir.join(name);
@@ -434,7 +526,7 @@ impl Walker<'_, '_> {
         };
         for base in found {
             let listed = self.read(&base, |walker, name, kind| {
-                walker.level_entry(&base, name, kind, 0, yields, &mut walk)
+                walker.level_entry(&base, name, kind, yields, &mut walk)
             })?;
             if !listed {
                 continue;
@@ -442,8 +534,9 @@ impl Walker<'_, '_> {
             // The level `**` adds nothing to, spelled with the separator it
             // followed (`dir/**` names `dir/`).
             match yields {
-                Yields::Everything if !base.at_root => {
+                Yields::Everything if base.components > 0 => {
                     let mut itself = base;
+                    self.budget.room(&mut itself.path, 1)?;
                     itself.path.push('/');
                     self.keep(itself, &mut walk.next)?;
                 }
@@ -452,23 +545,22 @@ impl Walker<'_, '_> {
                 Yields::Matches(..) => self.charge(&base)?,
                 _ => self.keep(base, &mut walk.next)?,
             }
-            while let Some((dir, depth)) = walk.pending.pop() {
+            while let Some(dir) = walk.pending.pop() {
                 self.read(&dir, |walker, name, kind| {
-                    walker.level_entry(&dir, name, kind, depth, yields, &mut walk)
+                    walker.level_entry(&dir, name, kind, yields, &mut walk)
                 })?;
             }
         }
         Ok(walk.next)
     }
 
-    /// Take one entry of a level `depth` below a `**` walk's base: what it
-    /// yields, and — a subdirectory, never a link — a level to read next.
+    /// Take one entry of a level of a `**` walk: what it yields, and — a
+    /// subdirectory, never a link — a level to read next.
     fn level_entry(
         &mut self,
         dir: &Found,
         name: &str,
         kind: FileKind,
-        depth: usize,
         yields: Yields<'_>,
         walk: &mut Descent,
     ) -> Result<(), ExpandError> {
@@ -478,9 +570,10 @@ impl Walker<'_, '_> {
         if !self.settings.dotglob() && tairix_path::is_hidden_name(name) {
             return Ok(());
         }
-        let below = depth + 1;
-        // A deeper level could not be spelled, so the walk ends there.
-        let is_level = kind == FileKind::Directory && below < tairix_path::MAX_COMPONENTS;
+        // A path through a deeper level could not be spelled, so the walk
+        // ends there, wherever it began.
+        let is_level =
+            kind == FileKind::Directory && dir.components + 1 < tairix_path::MAX_COMPONENTS;
         let may_yield = matches!(yields, Yields::Directories | Yields::Everything);
         if !is_level && !may_yield {
             return Ok(());
@@ -495,12 +588,9 @@ impl Walker<'_, '_> {
         match (is_level, yielded) {
             (true, true) => {
                 self.keep(child.clone(), &mut walk.next)?;
-                walk.pending.push((child, below));
+                self.keep(child, &mut walk.pending)?;
             }
-            (true, false) => {
-                self.charge(&child)?;
-                walk.pending.push((child, below));
-            }
+            (true, false) => self.keep(child, &mut walk.pending)?,
             (false, true) => self.keep(child, &mut walk.next)?,
             (false, false) => {}
         }
@@ -508,13 +598,12 @@ impl Walker<'_, '_> {
     }
 
     fn charge(&mut self, found: &Found) -> Result<(), ExpandError> {
-        Ok(self.budget.charge(found.path.len())?)
+        Ok(self.budget.spend(found.path.len())?)
     }
 
     fn keep(&mut self, found: Found, into: &mut Vec<Found>) -> Result<(), ExpandError> {
         self.charge(&found)?;
-        into.push(found);
-        Ok(())
+        Ok(self.budget.push(into, found)?)
     }
 
     /// Read `dir`'s listing through `visit` an entry at a time, never `.` or
@@ -550,7 +639,7 @@ impl Walker<'_, '_> {
         match read {
             Ok(()) => Ok(true),
             Err(errno) if absent(errno) && !began => Ok(false),
-            Err(errno) => Err(unreadable(&listing, errno)),
+            Err(errno) => Err(naming(&listing, ParseError::UnreadableDirectory(errno))),
         }
     }
 
@@ -561,7 +650,7 @@ impl Walker<'_, '_> {
         match self.fs.kind(&path, need_dir) {
             Ok(kind) => Ok(!need_dir || kind.is_dir()),
             Err(errno) if absent(errno) => Ok(false),
-            Err(errno) => Err(unreadable(&path, errno)),
+            Err(errno) => Err(naming(&path, ParseError::UnresolvablePath(errno))),
         }
     }
 

@@ -17,12 +17,16 @@ informação do sistema.
 
 Um volume cujo dispositivo foi removido ainda com escritas por
 confirmar permanece visível como `unavailable-dirty` (ou
-`unavailable-lost`), e um `unmount` simples recusa: os dados retidos
-são guardados para uma reinserção verificada. `--force` é a saída
-deliberada — os dados retidos são descartados, o volume é retirado e
-a perda fica registada no registo de auditoria. Num volume saudável,
-`--force` continua a despejar e desanexar de forma limpa; nada é
-descartado quando uma confirmação limpa é possível.
+`unavailable-lost`) na lista de montagens, e um `unmount` simples
+recusa: os dados retidos são guardados para uma reinserção verificada.
+Um volume no qual ainda há ficheiros abertos, ou que um programa tem
+como diretório de trabalho, também recusa um `unmount` simples.
+`--force` é a saída deliberada — os ficheiros ainda abertos no volume
+são desligados, um programa que nele trabalhe fica num diretório que já
+não existe, os dados retidos são descartados, o volume é retirado e
+aquilo de que se prescindiu fica registado no registo de auditoria. Num
+volume saudável, `--force` continua a despejar e desanexar de forma
+limpa; nada é descartado quando uma confirmação limpa é possível.
 
 Desanexar exige a autoridade de montagem (`CAP_FS_MOUNT`); o núcleo
 verifica-a e audita cada decisão. Os volumes de arranque permanentes
@@ -30,9 +34,10 @@ e as ligações de vista do sistema não são desanexáveis.
 
 ## OPTIONS
 
-- `-f, --force` — desmontagem forçada: retirar o volume mesmo quando
-  os seus dados não podem ser confirmados, descartando os dados
-  retidos.
+- `-f, --force` — desmontagem forçada: retirar o volume mesmo enquanto
+  há ficheiros abertos nele, um programa trabalha nele ou os seus dados
+  por confirmar não podem sê-lo, desligando os ficheiros abertos e
+  descartando os dados retidos.
 - `-?, --help` — mostrar a ajuda curta deste comando.
 
 ## EXAMPLES
@@ -47,8 +52,8 @@ e as ligações de vista do sistema não são desanexáveis.
 
 - `0` — o volume foi desanexado (ou a ajuda curta foi escrita).
 - `1` — o volume não foi encontrado, não é desanexável ou o núcleo
-  recusou a desanexação.
-- `2` — a linha de comandos não foi compreendida.
+  recusou a desanexação. Uma linha de comandos não compreendida também
+  termina com `1`.
 
 ## ENVIRONMENT
 

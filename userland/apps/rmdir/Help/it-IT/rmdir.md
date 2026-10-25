@@ -21,9 +21,10 @@ poi `a`. La radice nuda di un percorso (`/` o una radice alias come
 
 Con `--ignore-fail-on-non-empty` un rifiuto «directory non vuota» non
 è un errore: l'operando (o la risalita di `-p`) si ferma semplicemente
-lì. Nessun altro rifiuto è tollerato. Il primo fallimento reale
-arresta l'esecuzione prima di ogni operando successivo. `--` termina
-l'analisi delle opzioni: ogni argomento successivo è un percorso.
+lì. Nessun altro rifiuto è tollerato. Un operando che non può essere
+rimosso viene segnalato e il successivo viene rimosso comunque. `--`
+termina l'analisi delle opzioni: ogni argomento successivo è un
+percorso.
 
 ## OPTIONS
 
@@ -49,8 +50,8 @@ l'analisi delle opzioni: ogni argomento successivo è un percorso.
 - `0` — ogni rimozione è riuscita (un rifiuto tollerato da
   `--ignore-fail-on-non-empty` non è un fallimento).
 - `1` — un errore del filesystem o dell'output; la ragione è stampata
-  sullo standard error.
-- `2` — la riga di comando non è stata compresa.
+  sullo standard error. Anche una riga di comando non compresa
+  termina con `1`.
 
 ## ENVIRONMENT
 

@@ -72,8 +72,7 @@ authority.
   was shown.
 - `1` — the named file could not be loaded (not text, too large, or
   refused), or the terminal failed; the reason is printed on standard
-  error.
-- `2` — the command line was not understood.
+  error. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

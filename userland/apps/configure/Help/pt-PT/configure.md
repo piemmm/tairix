@@ -235,10 +235,10 @@ pelo que é guardada e a recusa é indicada.
   concluída.
 - `1` — as definições não puderam ser lidas ou alteradas (por exemplo,
   quem chama não pode alterar as definições da máquina, ou não pode ler
-  as suas definições de rede), ou a saída não pôde ser entregue.
-- `2` — a linha de comandos não foi compreendida, a chave é
-  desconhecida, o valor está fora do conjunto da chave, ou a alteração
-  deixaria incoerente a configuração de rede.
+  as suas definições de rede), a chave é desconhecida, o valor está fora do
+  conjunto da chave, a alteração deixaria incoerente a configuração de
+  rede, ou a saída não pôde ser entregue. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

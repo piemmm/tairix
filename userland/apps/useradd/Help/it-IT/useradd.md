@@ -58,8 +58,8 @@ operando.
 - `0` — l'account è stato creato.
 - `1` — il database ha rifiutato la creazione o questa è fallita (per
   esempio una capacità mancante, un identificatore duplicato o un gruppo
-  sconosciuto); il motivo è stampato sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+  sconosciuto); il motivo è stampato sull'errore standard. Anche una
+  riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

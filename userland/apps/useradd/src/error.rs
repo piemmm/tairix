@@ -2,6 +2,7 @@
 
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::getopt::Refusal;
 
 /// Why a `useradd` invocation did not complete.
 ///
@@ -9,11 +10,13 @@ use tairix_abi::Errno;
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UseraddError {
-    /// The command line carried an unrecognised option, omitted the required
-    /// primary group (`-g`), or did not name exactly one account. The caller
-    /// should print [`crate::USAGE`]. Nothing is created.
+    /// An option `getopt` refuses, worded as it words it. Nothing is
+    /// created.
+    Option(Refusal),
+    /// The command line omitted the required primary group (`-g`), or did
+    /// not name exactly one account. Nothing is created.
     Usage,
     /// The login name is not a valid `[a-z_][a-z0-9_-]*` within the length
     /// bound ([`MAX_NAME_LEN`](crate::MAX_NAME_LEN)). Nothing is created.
@@ -41,6 +44,7 @@ pub enum UseraddError {
 impl fmt::Display for UseraddError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::BadName => f.write_str("invalid user name"),
             Self::BadId => f.write_str("invalid numeric id"),

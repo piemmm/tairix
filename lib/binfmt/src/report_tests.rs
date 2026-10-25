@@ -32,7 +32,7 @@ fn driver() -> Vec<u8> {
     let keys = [
         DriverBindKey::new(
             10,
-            HwMatchKey::compatible(b"brcm,bcm2711-hdmi0").expect("a short name"),
+            HwMatchKey::compatible(b"vendor,hdmi0").expect("a short name"),
         ),
         DriverBindKey::new(5, HwMatchKey::pci(0x8086, 0x1234, 0x03_0000)),
     ];
@@ -144,7 +144,7 @@ fn a_driver_lists_its_manifest_its_bindings_and_the_program_it_runs() {
     assert!(says(&report, "CAP_IRQ_BIND"), "{lines:?}");
     assert!(says(&report, "2 keys"), "{lines:?}");
     assert!(
-        says(&report, "priority 10: compatible \"brcm,bcm2711-hdmi0\""),
+        says(&report, "priority 10: compatible \"vendor,hdmi0\""),
         "{lines:?}"
     );
     assert!(

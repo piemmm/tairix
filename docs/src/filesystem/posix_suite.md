@@ -10,12 +10,14 @@ deliverable.
 ## What it exercises
 
 The suite drives the **real** `arxfs` driver
-(`tairix_drv_fs_arxfs::ARXFS`) through the **real**
-`kernel/core::fs::Vfs` policy layer — the identical code paths the
-kernel runs — and never re-implements any filesystem semantics
-(`AGENTS.md` §2.2). A `arxfs` volume is formatted in memory, mounted at
-`/Storage/vol` in a default-layout VFS, and every case asserts behaviour
-through the per-inode-security delegation methods (`*_via_secured`).
+(`tairix_drv_fs_arxfs::ARXFS`) through the kernel's **real** filesystem
+service (`MountedFilesystemService`) — the code path every `fs_*` syscall
+takes — and never re-implements any filesystem semantics. An `arxfs`
+volume is formatted in memory, mounted at `/Storage/vol` in a
+default-layout VFS, and served beside an identity table holding the
+accounts the cases act as; every case asserts behaviour through the
+service's operations, each read, write and truncate through a descriptor
+of its own.
 
 The test files mirror `pjdfstest`'s operation groups:
 
@@ -31,13 +33,15 @@ The test files mirror `pjdfstest`'s operation groups:
 | `layout.rs`       | §16 layout       | the four top-level directories, a user may create a legacy POSIX name (no refusal), read-only `/System` with writable `Logs`/`Settings`, read-only-mount refusal |
 | `errno.rs`        | errno mapping    | the stable `Errno` each `VfsError` surfaces; each structural conflict (`EEXIST`, `ENOTEMPTY`, self-descending rename) distinct on a real volume |
 | `pathname.rs`     | namespace        | absolute-only paths; `.`/`..`, NUL, and over-long components refused |
+| `symlink.rs`      | `symlink`/`readlink` | targets stored verbatim, `lstat` vs. `stat`, dangling links, the follow matrix, physical `..`, the volume floor, `ELOOP` |
+| `link.rs`         | `link`           | one inode under two names, `nlink` accounting, the last name frees the storage, directories refused, the default and follow postures, the count across a remount |
 
 ## The permission and capability-gate cases
 
 `permission.rs` is the heart of the suite. Because `arxfs` stores a full
 per-inode §5.3 record, the suite can stamp a node's owner, mode bits,
 ACL, and optional capability gate (through `ARXFS::set_security`) and
-then assert the VFS decision. In particular it pins the case the charter
+then assert the service's decision. In particular it pins the case the charter
 (`AGENTS.md` §5.3) and `PLAN.md` Stage 5 call out by name: a file marked
 with a required capability is unreadable without that capability, even at
 mode `0644`, and becomes readable once the caller holds it. The decision
@@ -50,10 +54,10 @@ end-to-end verticals
 (`tests/integration/{arxfs,fat32}_virtio_blk_pci_x86_64`) already prove
 the same drivers mount and round-trip over a real (emulated) virtio-blk
 device under QEMU; the conformance assertions here run on the host
-against the very same driver and VFS code, so the two together cover the
+against the very same driver and kernel code, so the two together cover the
 filesystem stack from on-disk bytes to POSIX-visible behaviour.
 
-It is filesystem-agnostic by construction: the harness talks to the VFS
+It is filesystem-agnostic by construction: the harness talks to the service
 and a `drivers/filesystem/*` driver behind the frozen ABI traits, so a
 second driver can be exercised by swapping the backing constructor.
 `arxfs` is the first subject because it is the native filesystem that

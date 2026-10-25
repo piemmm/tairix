@@ -56,7 +56,8 @@ use tairix_abi::font_ipc::{
     FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN,
 };
 use tairix_abi::fs::{
-    DirChange, DirChangeBatch, DirEntries, DirEntry, FileKind, FileStat, OpenFlags,
+    DirChange, DirChangeBatch, DirEntries, DirEntry, FileKind, FileStat, NodeExpect, OpenFlags,
+    PathAt, FS_PATH_MAX,
 };
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::net::{
@@ -1400,6 +1401,7 @@ fn exercise_fs(bytes: &[u8]) {
         );
     }
     exercise_dir_changes(bytes);
+    exercise_path_operands(bytes);
     // `FileKind`/`OpenFlags` decode from a scalar rather than a slice; derive
     // the scalar from the fuzz bytes so the boundary between accepted and
     // rejected values is still walked.
@@ -1412,6 +1414,32 @@ fn exercise_fs(bytes: &[u8]) {
         let raw = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         if let Ok(flags) = OpenFlags::from_bits(raw) {
             assert_eq!(OpenFlags::from_bits(flags.bits()), Ok(flags));
+        }
+    }
+}
+
+/// Drive the two records the descriptor-relative calls copy in from a
+/// caller: an accepted `PathAt` names a path a call may take and re-encodes
+/// byte for byte, and an accepted `NodeExpect` does the same.
+fn exercise_path_operands(bytes: &[u8]) {
+    if let Some(raw) = bytes.first_chunk::<{ PathAt::WIRE_LEN }>() {
+        if let Ok(at) = PathAt::from_le_bytes(raw) {
+            assert!(at.path != 0, "an accepted PathAt names an address");
+            let len = usize::try_from(at.len).expect("a path length fits usize");
+            assert!(
+                (1..=FS_PATH_MAX).contains(&len),
+                "an accepted PathAt is in bounds"
+            );
+            assert_eq!(&at.to_le_bytes(), raw, "a PathAt round-trips byte for byte");
+        }
+    }
+    if let Some(raw) = bytes.first_chunk::<{ NodeExpect::WIRE_LEN }>() {
+        if let Ok(expect) = NodeExpect::from_le_bytes(raw) {
+            assert_eq!(
+                &expect.to_le_bytes(),
+                raw,
+                "a NodeExpect round-trips byte for byte"
+            );
         }
     }
 }
@@ -1672,7 +1700,7 @@ fn spawn_attach_blocks_with_flipped_bits_round_trip_or_are_refused() {
         SpawnAttach::drawing(explicit, 64 << 20, 4, 0x5A),
         SpawnAttach {
             limits: SpawnLimits::INHERIT.lowering(
-                tairix_abi::LimitKind::OpenStreams,
+                tairix_abi::LimitKind::OpenFiles,
                 tairix_abi::ResourceLimit { soft: 8, hard: 64 },
             ),
             ..SpawnAttach::INHERIT
@@ -3473,4 +3501,47 @@ fn dir_change_batches_with_flipped_bits_round_trip_or_are_refused() {
         flipped[bit / 8] ^= 1 << (bit % 8);
         exercise_dir_changes(&flipped);
     }
+}
+
+/// Every key a board answer holds, the longest string among them, seeded and
+/// bit-flipped: a random input never lands a canonical key, so without a seed
+/// only the empty answer is ever accepted.
+#[test]
+fn platform_answers_with_flipped_bits_round_trip_or_are_refused() {
+    use tairix_abi::hwtree::{
+        HwDeviceClass, HwMatchKey, HwNode, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_ROOT,
+        HW_NODE_ROOT_ID,
+    };
+    use tairix_abi::Errno;
+    let longest = [b'v'; HW_COMPATIBLE_MAX];
+    let mut root = HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root);
+    for name in [
+        &longest[..],
+        b"vendor,board",
+        b"vendor,soc",
+        b"vendor,family",
+    ] {
+        root.push_match_key(HwMatchKey::compatible(name).expect("fits"))
+            .expect("room for every key");
+    }
+    let mut seed = [0u8; PlatformCompatible::WIRE_MAX];
+    let len = PlatformCompatible::of(&root)
+        .encode(&mut seed)
+        .expect("fits");
+    assert_eq!(len, HW_NODE_MAX_MATCH_KEYS * HwMatchKey::WIRE_LEN);
+    exercise(&seed[..len]);
+    let mut accepted = 0usize;
+    for bit in 0..len * 8 {
+        let mut flipped = seed;
+        flipped[bit / 8] ^= 1 << (bit % 8);
+        accepted += usize::from(PlatformCompatible::decode(&flipped[..len]).is_ok());
+        exercise(&flipped[..len]);
+    }
+    assert!(accepted > 0, "the round trip sees a real key");
+    let mut over = seed.to_vec();
+    over.extend_from_slice(&seed[..HwMatchKey::WIRE_LEN]);
+    assert_eq!(
+        PlatformCompatible::decode(&over),
+        Err(Errno::LengthOutOfRange)
+    );
 }

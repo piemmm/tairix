@@ -74,8 +74,8 @@ operando nudo è un errore d'uso e non un argomento ignorato in silenzio.
 
 - `0` — l'elenco è stato prodotto (o l'aiuto breve è stato scritto).
 - `1` — l'interrogazione dei socket è stata rifiutata o è fallita, o
-  l'output non è stato scritto.
-- `2` — la riga di comando non è stata compresa.
+  l'output non è stato scritto. Anche una riga di comando non compresa
+  termina con `1`.
 
 ## ENVIRONMENT
 

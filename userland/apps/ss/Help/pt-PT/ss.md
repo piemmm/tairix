@@ -74,8 +74,8 @@ silêncio.
 
 - `0` — a lista foi produzida (ou a ajuda breve foi escrita).
 - `1` — a consulta de sockets foi recusada ou falhou, ou não foi
-  possível escrever a saída.
-- `2` — a linha de comando não foi compreendida.
+  possível escrever a saída. Uma linha de comando não compreendida
+  também termina com `1`.
 
 ## ENVIRONMENT
 

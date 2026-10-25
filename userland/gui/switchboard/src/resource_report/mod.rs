@@ -372,7 +372,7 @@ fn health_text(record: &VolumeIoHealthRecord) -> String {
 pub(super) const fn limit_name(kind: LimitKind) -> &'static str {
     match kind {
         LimitKind::AddressSpaceBytes => "Address space",
-        LimitKind::OpenStreams => "Open streams",
+        LimitKind::OpenFiles => "Open files",
         LimitKind::Processes => "Processes",
         LimitKind::StackBytes => "Stack",
         LimitKind::PinnedMemoryBytes => "Pinned memory",

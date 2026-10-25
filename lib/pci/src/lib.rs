@@ -3,26 +3,26 @@
 //! A `no_std` `lib/*` crate: it implements the
 //! `abi-v1` PCI/PCIe bus and transport seams
 //! ([`tairix_abi::driver::bus::Bus`], [`VirtioPciBus`], [`MsixBus`],
-//! [`PciBus`]) over three configuration-access mechanisms, and exposes them
-//! through the [`mechanism_one`] / [`mechanism_ecam`] / [`mechanism_brcm`]
-//! constructors. The concrete `Pci<C>` type stays crate-private — every
+//! [`PciBus`]) over the two standard configuration-access mechanisms and any
+//! one a root complex's own bus driver supplies, and exposes them through the
+//! [`mechanism_one`] / [`mechanism_ecam`] / [`mechanism_supplied`] constructors. The concrete `Pci<C>` type stays crate-private — every
 //! caller borrows the result as `&dyn Bus` / `&dyn VirtioPciBus` /
 //! `&dyn MsixBus` / `&dyn PciBus` and never names it.
 //!
 //! It lives in `lib/` (not `drivers/`) because PCI configuration access is
 //! shared *bus-protocol* logic, not a single device's driver: the kernel's
-//! ring-0 boot pipeline, a user-space bus driver (`drivers/bus/pcie_brcm`),
+//! ring-0 boot pipeline, a user-space root-complex bus driver,
 //! and the host-side integration tests all compose it through the public
 //! seams above — a `drivers/*` crate may not depend on another `drivers/*`
 //! crate, so a user-space driver reaches the mechanism
 //! here, never through a sibling driver. This mirrors the `lib/usb` ↔
 //! `drivers/bus/usb` and `lib/virtio` ↔ `drivers/bus/virtio` split.
 //!
-//! The three mechanisms are: x86_64 **mechanism #1** (PCI Local Bus 3.0
-//! §3.2.2.3.2 — the `0xCF8`/`0xCFC` address/data port pair), **ECAM**
-//! (PCI Express Base 3.0 §7.2.2 — flat MMIO configuration space), and the
-//! **BCM2711 windowed** mechanism (the Raspberry Pi 4 root complex's
-//! index/data window pair). MSI / MSI-X capabilities are *discovered* and
+//! The two standard mechanisms are x86_64 **mechanism #1** (PCI Local Bus 3.0
+//! §3.2.2.3.2 — the `0xCF8`/`0xCFC` address/data port pair) and **ECAM**
+//! (PCI Express Base 3.0 §7.2.2 — flat MMIO configuration space); a root
+//! complex that reaches configuration space another way supplies its own
+//! [`ConfigSpace`]. MSI / MSI-X capabilities are *discovered* and
 //! routed through [`MsixBus::route_msix`]; the BAR walker maps a BAR only
 //! through the supplied [`MmioMapper`], which enforces
 //! [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP) kernel-side
@@ -55,7 +55,6 @@ pub mod assign;
 pub(crate) mod config;
 pub(crate) mod enumerate;
 mod locate;
-pub(crate) mod mech_brcm;
 pub(crate) mod mech_ecam;
 pub(crate) mod mech_one;
 pub mod topology;
@@ -163,50 +162,26 @@ pub fn mechanism_ecam(
     Pci::new(mech_ecam::EcamConfigSpace::new(regions), Some(apertures))
 }
 
-/// Construct a real-hardware `PCIe` root bus over the BCM2711
-/// **windowed** configuration access mechanism: the Raspberry Pi 4 root
-/// complex does not map configuration space flat like ECAM but reaches a
-/// downstream function through an index/data window pair inside the
-/// controller's own register block (the BCM2711 windowed `ConfigSpace`).
+/// Construct a real-hardware `PCIe` root bus over a configuration access
+/// mechanism the root complex's own bus driver supplies: one reached neither
+/// through the legacy ports nor flat like ECAM.
 ///
-/// `window` is the kernel-mapped [`RegisterWindow`] over the PCIe
-/// controller's register block — the very window the BCM2711 PCIe
-/// host-bridge bring-up driver (`drivers/bus/pcie_brcm`) trained the
-/// link through — obtained from the MMIO-map facility after a
-/// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP) check. The link must be
-/// up before any downstream configuration access, or the controller
-/// raises a CPU abort; the bring-up driver guarantees this before
-/// handing the window here.
-///
-/// `secondary_bus` is the bus number the bring-up driver programmed into
-/// the root port's bridge bus-number register. The BCM2711 root port is
-/// a single-device link, so the windowed mechanism forwards a
-/// configuration transaction only to `device 0` on this one bus and
-/// resolves every other downstream target to the PCI "no device"
-/// sentinel without touching the controller — otherwise a flat
-/// enumeration would forward unanswered config TLPs and the root complex
-/// would raise a CPU abort.
+/// `config` must resolve every target it cannot reach to the PCI "no device"
+/// sentinel without touching the link, so a flat enumeration never forwards a
+/// transaction nothing answers.
 ///
 /// The returned value is driven through the [`Bus`], [`VirtioPciBus`],
 /// [`MsixBus`], and [`PciBus`] seams identically to [`mechanism_ecam`];
-/// the concrete `Pci` type stays crate-private.
-/// Construction performs **no** I/O.
-///
-/// # Platform
-///
-/// The index/data windowing is BCM2711-specific, but it is expressed
-/// entirely as offsets within the supplied memory window, so this
-/// constructor carries no target-conditional `cfg` gate: an architecture without a BCM2711 root complex
-/// simply never calls it.
+/// the concrete `Pci` type stays crate-private. Construction performs **no**
+/// I/O.
 ///
 /// Its BARs resolve as the bus addresses they hold: the bus driver maps them
 /// only through windows the kernel checks against its own grants.
 #[must_use]
-pub fn mechanism_brcm(
-    window: RegisterWindow,
-    secondary_bus: u8,
+pub fn mechanism_supplied<C: ConfigSpace>(
+    config: C,
 ) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
-    Pci::new(mech_brcm::BrcmConfigSpace::new(window, secondary_bus), None)
+    Pci::new(config, None)
 }
 
 // --- Trait-object seams over the concrete `Pci<C>` ------------------------
@@ -215,7 +190,7 @@ pub fn mechanism_brcm(
 // reached through `&dyn Bus` / `&dyn VirtioPciBus` / `&dyn MsixBus` /
 // `&dyn PciBus`, never through the crate-private concrete `Pci<C>` type.
 
-use config::ConfigSpace;
+pub use config::{ConfigAddress, ConfigSpace};
 use enumerate::Pci;
 
 impl<C: ConfigSpace> Bus for Pci<C> {

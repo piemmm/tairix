@@ -24,6 +24,10 @@
 //!      `cargo xtask cfg-check` forbids the target-conditional predicate
 //!      in the crate body).
 //!
+//! It also generates the bootstrap floor's table (`floor_drivers.rs`) from
+//! the floor drivers' own manifests, each driver's manifest image signed
+//! with the build's driver-signing key.
+//!
 //! The pure selection logic lives in `src/build_support.rs` (also unit
 //! tested by the crate's host test build); this script only reads the
 //! Cargo-provided target strings and emits the directives.
@@ -39,6 +43,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use build_support::{is_freestanding, kernel_isa, linker_script_for};
+use tairix_itest_harness::driver_image::build_signed_driver_image;
 use tairix_itest_harness::pie::{self, PieArch};
 use tairix_itest_harness::program_fixture::{format_grouped_hex, GROUPED_HEX_LEN};
 use tairix_itest_harness::USER_IMAGE_BIAS;
@@ -273,7 +278,7 @@ fn main() {
     emit_build_id();
     emit_program_rxes(&target, embed_spawn_rows);
     emit_user_bias();
-    emit_signed_driver_manifests(kernel_isa(&target_arch), &keys);
+    emit_floor_drivers(kernel_isa(&target_arch), &keys);
     emit_app_trust_anchor(&keys);
 }
 
@@ -351,69 +356,39 @@ fn emit_app_trust_anchor(keys: &SigningKeys) {
     fs::write(&path, out).expect("write app_trust fixture");
 }
 
-/// One chain driver to bake a signed manifest for: the emitted `const`
-/// name and the driver crate's own canonical `BIND_KEYS` (so the signed
-/// bind table never drifts from the matcher).
-struct DriverImage {
-    /// `const` name the fixture emits the signed image bytes under.
-    const_name: &'static str,
-    /// The driver crate's published bind table.
-    bind_keys: &'static [tairix_abi::DriverBindKey],
-}
-
-/// Bake the signed `.rxe` manifest image of every Pi 4 USB-chain driver
-/// the in-kernel `driver_loader` admits through `drvhost::Host::load`
-/// (`plans/PI.md` P10 5c-ii), plus the build's driver-signing public key,
-/// into a `driver_images.rs` source the loader `include!`s.
+/// Generate this target's bootstrap-floor table (`floor_drivers.rs`) for the
+/// `driver_catalog` registry to `include!`, with the build's driver-signing
+/// public key.
 ///
-/// Each image is a `DriverManifest` (kind [`InKernel`], stamped with the
-/// kernel's compiled-in `SYSCALL_TABLE_HASH`, requesting `CAP_DRV_LOAD`)
-/// followed by its capability body and the driver's own `BIND_KEYS`, all
-/// covered by an Ed25519 signature over
-/// `header[..signed_end] || cap_body || bind_table || payload` — exactly
-/// the message `drvhost::Host::verify_signature` reconstructs. The payload
-/// is empty: the drivers are statically linked, so the in-process spawner
-/// invokes their `register()` directly rather than loading a program image,
-/// and covering an empty payload is a no-op (a user-space driver's non-empty
-/// payload, by contrast, is authenticated).
-fn emit_signed_driver_manifests(isa: Option<&str>, keys: &SigningKeys) {
+/// Each floor driver the walk of `drivers/` finds whose manifest names the
+/// target's instruction set becomes one `floor_driver!` entry: its bring-up,
+/// its crate, its signed `.rxe` manifest image — a `DriverManifest` of kind
+/// `InKernel`, stamped with the kernel's compiled-in `SYSCALL_TABLE_HASH`,
+/// requesting `CAP_DRV_LOAD`, carrying the bind table its manifest declares,
+/// and signed as `drvhost::Host::verify_signature` checks it — and that bind
+/// table, which the entry holds to its crate's. The payload is empty: the
+/// drivers are linked in, so the in-process spawner calls their `register()`
+/// rather than loading a program image.
+fn emit_floor_drivers(isa: Option<&str>, keys: &SigningKeys) {
+    use tairix_abi::{CapabilityId, DriverBindKey, DriverKind};
     use tairix_crypto::Ed25519SecretKey;
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let signing_key = Ed25519SecretKey::from_seed(keys.seed(Domain::DriverSigning));
-    let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
-
-    // The compiled-in floor is storage-only: the block
-    // drivers that read the volume holding the signed driver store. The
-    // BCM2711 PCIe / VL805 USB / USB-keyboard drivers are installed as signed
-    // `/System/Drivers/` bundles and autoloaded into user space, so their
-    // manifests are baked by the image pipeline (`tools/xtask`), not here.
-    // The floor is per architecture: virtio-blk is the root block driver on
-    // every target, while the BCM2711 EMMC2 SD host is floor **only on
-    // aarch64** (the Raspberry Pi 4 SD card). An x86_64 / riscv64 image has
-    // no such controller, so its manifest is never baked in — the build
-    // emits `EMMC2_IMAGE` for the aarch64 target alone, matching the
-    // `#[cfg(kernel_isa = "aarch64")]` `driver_catalog` entry that consumes
-    // it. `build.rs` is one host artifact that branches on the resolved
-    // target instruction set at run time, so the crate stays a build
-    // dependency on every target while contributing image bytes only where
-    // the driver belongs.
-    let mut images = vec![DriverImage {
-        const_name: "VIRTIO_BLK_IMAGE",
-        bind_keys: tairix_drv_storage_virtio_blk::BIND_KEYS,
-    }];
-    if isa == Some("aarch64") {
-        images.push(DriverImage {
-            const_name: "EMMC2_IMAGE",
-            bind_keys: tairix_drv_storage_emmc2::BIND_KEYS,
-        });
-    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let drivers = Path::new(&manifest_dir).join("../../drivers");
+    let floor = build_support::discover_floor_drivers(&drivers).unwrap_or_else(|err| {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    });
+    let held = isa.map_or_else(Vec::new, |isa| build_support::floor_for_isa(&floor, isa));
+    let seed = keys.seed(Domain::DriverSigning);
+    let signer_pubkey: [u8; 32] = *Ed25519SecretKey::from_seed(seed).public_key().as_bytes();
 
     let mut out = String::new();
     out.push_str("// Auto-generated by build.rs. DO NOT EDIT.\n");
     out.push_str(
-        "/// Ed25519 public key the build signed every embedded driver\n\
-         /// manifest with — the kernel's driver-load trust anchor\n\
+        "/// Ed25519 public key the build signed every floor driver's manifest\n\
+         /// with — the kernel's driver-load trust anchor\n\
          /// (`plans/PI.md` P10 5c-ii).\n",
     );
     emit_byte_array(
@@ -422,95 +397,64 @@ fn emit_signed_driver_manifests(isa: Option<&str>, keys: &SigningKeys) {
         "[u8; 32]",
         &signer_pubkey,
     );
-
-    for image in &images {
-        let bytes = build_signed_driver_image(&signing_key, signer_pubkey, image.bind_keys);
-        let _ = writeln!(
-            out,
-            "/// Signed `.rxe` driver-manifest image admitted through `Host::load`."
+    let _ = writeln!(
+        out,
+        "/// The number of drivers in this target's bootstrap floor.\n\
+         pub const IN_KERNEL_DRIVER_COUNT: usize = {};",
+        held.len()
+    );
+    out.push_str(
+        "/// This target's bootstrap floor, as its drivers' manifests declare it.\n\
+         pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [\n",
+    );
+    for driver in held {
+        let declaration = &driver.declaration;
+        let signed = build_signed_driver_image(
+            seed,
+            DriverKind::InKernel,
+            &[CapabilityId::DRV_LOAD],
+            &declaration.bind_keys,
+            tairix_kernel_syscall::SYSCALL_TABLE_HASH,
+            &[],
         );
-        emit_byte_slice(&mut out, image.const_name, &bytes);
+        let _ = writeln!(out, "    // {}", declaration.reason);
+        let _ = write!(
+            out,
+            "    floor_driver!({} {}, &[",
+            declaration.kind.arm(),
+            driver.crate_name()
+        );
+        push_bytes(&mut out, &signed.image);
+        out.push_str("    ], &[");
+        let bind: Vec<u8> = declaration
+            .bind_keys
+            .iter()
+            .flat_map(DriverBindKey::to_le_bytes)
+            .collect();
+        push_bytes(&mut out, &bind);
+        out.push_str("    ]),\n");
     }
-
-    let path = PathBuf::from(&out_dir).join("driver_images.rs");
-    fs::write(&path, out).expect("write driver_images fixture");
-}
-
-/// Encode and sign one chain driver's `DriverManifest` image, mirroring
-/// the message `drvhost::Host::verify_signature` reconstructs.
-fn build_signed_driver_image(
-    signing_key: &tairix_crypto::Ed25519SecretKey,
-    signer_pubkey: [u8; 32],
-    bind_keys: &[tairix_abi::DriverBindKey],
-) -> Vec<u8> {
-    use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
-
-    // The drivers are statically linked; their `register()` only needs
-    // `CAP_DRV_LOAD` (the admission check). `kind = InKernel` makes the
-    // gate additionally require `CAP_DRV_KERNEL` of the caller. No further
-    // capabilities are requested: the real MMIO/DMA work runs over the
-    // bring-up's own capability-gated host, not this admission view.
-    let caps = [CapabilityId::DRV_LOAD];
-    let bind_key_count = u8::try_from(bind_keys.len()).expect("floor bind tables fit in u8");
-    let capability_count = u16::try_from(caps.len()).expect("caps fit in u16");
-
-    let mut manifest = DriverManifest {
-        magic: DRIVER_MANIFEST_MAGIC,
-        abi_version: tairix_abi::ABI_VERSION_CURRENT,
-        kind: DriverKind::InKernel,
-        bind_key_count,
-        capability_count,
-        syscall_table_hash: tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        signer_pubkey,
-        signature: [0u8; 64],
-    };
-
-    let mut cap_body = Vec::with_capacity(caps.len() * 2);
-    for c in &caps {
-        cap_body.extend_from_slice(&c.as_u16().to_le_bytes());
-    }
-    let mut bind_body = Vec::new();
-    for k in bind_keys {
-        bind_body.extend_from_slice(&k.to_le_bytes());
-    }
-
-    let header = manifest.to_le_bytes();
-    let signed_end = DriverManifest::WIRE_LEN - 64;
-    let mut signed_message = Vec::new();
-    signed_message.extend_from_slice(&header[..signed_end]);
-    signed_message.extend_from_slice(&cap_body);
-    signed_message.extend_from_slice(&bind_body);
-    manifest.signature = *signing_key.sign(&signed_message).as_bytes();
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&manifest.to_le_bytes());
-    out.extend_from_slice(&cap_body);
-    out.extend_from_slice(&bind_body);
-    out
+    out.push_str("];\n");
+    let path = PathBuf::from(&out_dir).join("floor_drivers.rs");
+    fs::write(&path, out).expect("write floor_drivers fixture");
 }
 
 /// Emit `pub const <name>: <ty> = [ … ];` for a fixed-size byte array.
 fn emit_byte_array(out: &mut String, name: &str, ty: &str, bytes: &[u8]) {
     let _ = write!(out, "pub const {name}: {ty} = [");
-    for (i, b) in bytes.iter().enumerate() {
-        if i % 16 == 0 {
-            out.push_str("\n    ");
-        }
-        let _ = write!(out, "0x{b:02x}, ");
-    }
-    out.push_str("\n];\n");
+    push_bytes(out, bytes);
+    out.push_str("];\n");
 }
 
-/// Emit `pub const <name>: &[u8] = &[ … ];` for a variable-length blob.
-fn emit_byte_slice(out: &mut String, name: &str, bytes: &[u8]) {
-    let _ = write!(out, "pub const {name}: &[u8] = &[");
+/// Append `bytes` as byte literals, sixteen to a line.
+fn push_bytes(out: &mut String, bytes: &[u8]) {
     for (i, b) in bytes.iter().enumerate() {
         if i % 16 == 0 {
             out.push_str("\n    ");
         }
         let _ = write!(out, "0x{b:02x}, ");
     }
-    out.push_str("\n];\n");
+    out.push('\n');
 }
 
 /// Emit a `build_id.rs` fixture (`pub const KERNEL_BUILD_ID: &str`) the
@@ -846,13 +790,8 @@ fn write_fixture(path: &Path, program: &Program, rxe: &[u8]) {
         "/// The converted `rxe` image of the `{}` `Run` program.",
         program.pkg
     );
-    let _ = writeln!(out, "pub const {prefix}_RXE: &[u8] = &[");
-    for (i, b) in rxe.iter().enumerate() {
-        if i % 16 == 0 {
-            out.push_str("\n    ");
-        }
-        let _ = write!(out, "0x{b:02x}, ");
-    }
-    out.push_str("\n];\n");
+    let _ = write!(out, "pub const {prefix}_RXE: &[u8] = &[");
+    push_bytes(&mut out, rxe);
+    out.push_str("];\n");
     fs::write(path, out).expect("write program rxe fixture");
 }

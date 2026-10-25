@@ -17,4 +17,4 @@ tier: `experimental`.
   driver's own tests drive its hardware through.
 
 Every clock controller driver links it, so the protocol's rules are written
-once: `drivers/clock/bcm2711_cprman`, `drivers/clock/bcm2711_dvp`.
+once.

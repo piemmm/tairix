@@ -61,8 +61,8 @@ Sur l'information standard (fd 3), `audioctl streams` écrit un enregistrement
 ## EXIT STATUS
 
 - `0` — la commande a abouti.
-- `1` — elle a été refusée, ou n'a pas pu être exécutée.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — elle a été refusée, ou n'a pas pu être exécutée. Une ligne de commande
+  non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

@@ -45,7 +45,7 @@ use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
 use tairix_abi::driver::i2c::{I2cAddress, I2C_CONTROLLER_ENDPOINTS};
 use tairix_abi::driver::irqline::INTERRUPT_LINE_ENDPOINTS;
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
-use tairix_abi::driver::thermal::ThermalCalibration;
+use tairix_abi::driver::thermal::{ThermalCalibration, ThermalZone};
 use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_NAME_MAX, LINK_SELECTOR_MAX_CELLS};
 use tairix_abi::{
     DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource, IommuStreams,
@@ -65,12 +65,20 @@ const CELL_BYTES: usize = 4;
 /// The id the walk gives the first node it emits after the root.
 const FIRST_EMITTED_ID: u32 = HW_NODE_ROOT_ID + 1;
 
-/// The calibration the thermal zone reading only `node` states for it, when
-/// `node` is a sensor (`#thermal-sensor-cells`) one zone reads alone.
+/// The calibration the thermal zones reading only `node` agree on, when
+/// `node` is a single-channel sensor (`#thermal-sensor-cells` of zero).
 fn sensor_calibration(fdt: &Fdt<'_>, node: &Node<'_>) -> Option<ThermalCalibration> {
     node.property("#thermal-sensor-cells")?;
     let (slope, offset) = tairix_fdt::thermal::sensor_coefficients(fdt, node.phandle()?)?;
     Some(ThermalCalibration { slope, offset })
+}
+
+/// The zone `node` measures, when it is a sensor a zone named for the
+/// processor reads alone.
+fn sensor_zone(fdt: &Fdt<'_>, node: &Node<'_>) -> Option<ThermalZone> {
+    node.property("#thermal-sensor-cells")?;
+    tairix_fdt::thermal::reads_processor_zone(fdt, node.phandle()?)
+        .then_some(ThermalZone::Processor)
 }
 
 /// Push `node`'s `compatible` strings onto `hw` as match keys, most specific
@@ -154,9 +162,11 @@ pub trait FdtPlatform {
 
     /// Push any resource only this platform's tree can describe onto a node
     /// the walk has already built, whose DMA is `coherence` wherever it
-    /// masters any. Ports with no board augmentation leave the default.
+    /// masters any; `fdt` is the whole tree, for a fact a phandle leads to.
+    /// Ports with no board augmentation leave the default.
     fn augment(
         &self,
+        _fdt: &Fdt<'_>,
         _node: &Node<'_>,
         _depth: usize,
         _levels: &[BusLevel<'_>],
@@ -175,6 +185,13 @@ pub trait FdtPlatform {
     /// marks a generic ECAM PCI host so on every port.
     fn kernel_driven(&self, _node: &Node<'_>) -> bool {
         false
+    }
+
+    /// The class of a node this platform's binding names outside the generic
+    /// node-name stems, where the node's own data leaves it
+    /// [`HwDeviceClass::Other`]. The default states none.
+    fn class(&self, _node: &Node<'_>) -> Option<HwDeviceClass> {
+        None
     }
 }
 
@@ -323,7 +340,10 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
         if !is_emitted(node) {
             return None;
         }
-        let class = classify(node);
+        let class = match classify(node) {
+            HwDeviceClass::Other => self.platform.class(node).unwrap_or(HwDeviceClass::Other),
+            class => class,
+        };
         let mut hw = HwNode::new(id, parent, class);
         // Stated first, so the node always has room for it: one the kernel
         // drives that could not say so would be a load target. A generic ECAM
@@ -364,10 +384,14 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
             let _ = hw.push_resource(HwResource::link_address(octets));
         }
 
-        // A temperature sensor's conversion, which only its thermal zone
-        // states: the generic thermal-zones binding, read for every sensor.
+        // A temperature sensor's conversion and what it measures, which only
+        // its thermal zone states: the generic thermal-zones binding, read for
+        // every sensor.
         if let Some(calibration) = sensor_calibration(&self.fdt, node) {
             let _ = hw.push_resource(HwResource::thermal_calibration(calibration));
+        }
+        if let Some(zone) = sensor_zone(&self.fdt, node) {
+            let _ = hw.push_resource(HwResource::property(HwProperty::ThermalZone, zone.as_u64()));
         }
 
         let mut streams = StreamRanges::new();
@@ -411,7 +435,7 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
         }
 
         self.platform
-            .augment(node, depth, levels, coherence, &mut hw);
+            .augment(&self.fdt, node, depth, levels, coherence, &mut hw);
 
         Some(hw)
     }
@@ -707,7 +731,7 @@ impl CardLink {
             None => claimed,
         };
         // Without a link-level master the binding is the legacy one, whose
-        // codec sub-node may state the inversions too, as Linux reads it.
+        // codec sub-node may state the inversions too.
         let legacy = self.bit_clock_master.is_none() && self.frame_clock_master.is_none();
         let codec = if legacy {
             self.codec.inversion
@@ -1588,7 +1612,7 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
         b"serial" | b"uart" => HwDeviceClass::Serial,
         b"rtc" => HwDeviceClass::Rtc,
         b"ethernet" => HwDeviceClass::Network,
-        b"mmc" | b"sdhci" | b"emmc2" => HwDeviceClass::Storage,
+        b"mmc" | b"sdhci" => HwDeviceClass::Storage,
         b"keyboard" | b"mouse" | b"touchscreen" => HwDeviceClass::Input,
         b"display" | b"gpu" | b"hdmi" | b"framebuffer" => HwDeviceClass::Display,
         // The three generic names the devicetree spec offers for a device
@@ -1613,7 +1637,7 @@ mod tests {
     use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
     use tairix_abi::driver::i2c::I2C_CONTROLLER_ENDPOINTS;
     use tairix_abi::driver::irqline::INTERRUPT_LINE_ENDPOINTS;
-    use tairix_abi::driver::thermal::ThermalCalibration;
+    use tairix_abi::driver::thermal::{ThermalCalibration, ThermalZone};
     use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole};
     use tairix_abi::{
         DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwResource, HwResourceKind, IommuStreams,
@@ -1703,6 +1727,65 @@ mod tests {
         }
     }
 
+    /// [`BarePlatform`] stating every node with a binding is a network
+    /// device.
+    struct ClassedPlatform;
+
+    impl FdtPlatform for ClassedPlatform {
+        const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
+        fn interrupt_cells(&self) -> usize {
+            1
+        }
+
+        fn from_tree(_fdt: &Fdt<'_>) -> Self {
+            Self
+        }
+
+        fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
+            BarePlatform.interrupt_line(specifier)
+        }
+
+        fn root_interrupt_controller(&self) -> Option<u32> {
+            Some(ROOT_INTC)
+        }
+
+        fn class(&self, node: &Node<'_>) -> Option<HwDeviceClass> {
+            node.property("compatible")
+                .is_some()
+                .then_some(HwDeviceClass::Network)
+        }
+    }
+
+    #[test]
+    fn a_port_states_the_class_of_a_node_named_outside_the_stems() {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.begin_node("slot@1000");
+        b.prop_str("compatible", "test,slot");
+        b.end_node();
+        b.begin_node("mmc@2000");
+        b.prop_str("compatible", "test,sd");
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let bare = discover(&blob);
+        assert_eq!(
+            by_key(&bare, b"test,slot").class(),
+            Some(HwDeviceClass::Other)
+        );
+        let classed = discover_on::<ClassedPlatform>(&blob);
+        assert_eq!(
+            by_key(&classed, b"test,slot").class(),
+            Some(HwDeviceClass::Network)
+        );
+        // The node's own data wins where it states a class.
+        assert_eq!(
+            by_key(&classed, b"test,sd").class(),
+            Some(HwDeviceClass::Storage)
+        );
+    }
+
     #[test]
     fn a_sensor_carries_its_zone_s_calibration_and_only_a_sensor_does() {
         let cells =
@@ -1734,13 +1817,23 @@ mod tests {
             })
         );
         assert_eq!(by_key(&nodes, b"test,plain").thermal_calibration(), None);
+        // The processor's zone reads the sensor alone, so discovery states
+        // what it measures.
+        assert_eq!(
+            by_key(&nodes, b"test,sensor").property(tairix_abi::HwProperty::ThermalZone),
+            Some(ThermalZone::Processor.as_u64())
+        );
+        assert_eq!(
+            by_key(&nodes, b"test,plain").property(tairix_abi::HwProperty::ThermalZone),
+            None
+        );
     }
 
     #[test]
     fn the_root_names_the_board_and_a_tree_without_compatible_names_none() {
         let mut b = FdtWriter::new();
         b.begin_node("");
-        b.prop("compatible", b"raspberrypi,4-model-b\0brcm,bcm2711\0");
+        b.prop("compatible", b"vendor,board\0vendor,soc\0");
         b.end_node();
         let nodes = discover(&b.build());
         let root = nodes.first().expect("the root is emitted first");
@@ -1748,8 +1841,8 @@ mod tests {
         assert_eq!(
             root.match_keys(),
             [
-                HwMatchKey::compatible(b"raspberrypi,4-model-b").expect("fits"),
-                HwMatchKey::compatible(b"brcm,bcm2711").expect("fits"),
+                HwMatchKey::compatible(b"vendor,board").expect("fits"),
+                HwMatchKey::compatible(b"vendor,soc").expect("fits"),
             ]
         );
         let mut bare = FdtWriter::new();
@@ -1852,7 +1945,7 @@ mod tests {
         );
         b.end_node();
         b.begin_node("i2c@fe804000");
-        b.prop_str("compatible", "brcm,bcm2835-i2c");
+        b.prop_str("compatible", "vendor,i2c");
         b.prop(
             "reg",
             &[
@@ -1937,7 +2030,7 @@ mod tests {
     #[test]
     fn an_i2c_controller_serves_its_bus_and_each_target_links_to_it_by_its_address() {
         let nodes = discover(&i2c_tree(0));
-        let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
+        let bus = by_key(&nodes, b"vendor,i2c");
         let ds3231 = by_key(&nodes, b"maxim,ds3231");
         let pcf = by_key(&nodes, b"nxp,pcf85063a");
         assert_eq!(
@@ -1953,7 +2046,7 @@ mod tests {
     #[test]
     fn an_i2c_controller_states_the_speed_its_node_declares() {
         let nodes = discover(&i2c_tree(0));
-        let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
+        let bus = by_key(&nodes, b"vendor,i2c");
         assert!(bus.resources().contains(&HwResource::property(
             tairix_abi::HwProperty::BusSpeed,
             400_000
@@ -1967,19 +2060,19 @@ mod tests {
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
         b.begin_node("hdmi@7ef00700");
-        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop_str("compatible", "vendor,hdmi0");
         b.prop("wifi-2.4ghz-coexistence", &[]);
         b.end_node();
         b.begin_node("hdmi@7ef05700");
-        b.prop_str("compatible", "brcm,bcm2711-hdmi1");
+        b.prop_str("compatible", "vendor,hdmi1");
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
         let coexists = HwResource::property(tairix_abi::HwProperty::RadioCoexistence, 1);
-        assert!(by_key(&nodes, b"brcm,bcm2711-hdmi0")
+        assert!(by_key(&nodes, b"vendor,hdmi0")
             .resources()
             .contains(&coexists));
-        assert!(!by_key(&nodes, b"brcm,bcm2711-hdmi1")
+        assert!(!by_key(&nodes, b"vendor,hdmi1")
             .resources()
             .contains(&coexists));
     }
@@ -1997,7 +2090,7 @@ mod tests {
             assert_eq!(i2c_links(child).len(), 1);
         }
         // The bus itself still gets its own window and line.
-        let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
+        let bus = by_key(&nodes, b"vendor,i2c");
         assert!(bus
             .resources()
             .iter()
@@ -2024,7 +2117,7 @@ mod tests {
         b.prop_u32("#interrupt-cells", 1);
         b.end_node();
         b.begin_node("interrupt-controller@fef00100");
-        b.prop_str("compatible", "brcm,bcm2711-l2-intc");
+        b.prop_str("compatible", "vendor,l2-intc");
         b.prop_u32("phandle", 2);
         b.prop_cells("reg", &[0xFEF0_0100, 0x30]);
         b.prop("interrupts", &96u32.to_be_bytes());
@@ -2033,7 +2126,7 @@ mod tests {
         b.prop_str("status", aon);
         b.end_node();
         b.begin_node("hdmi@fef00700");
-        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop_str("compatible", "vendor,hdmi0");
         b.prop_cells("reg", &[0xFEF0_0700, 0x300]);
         consumer(&mut b);
         b.end_node();
@@ -2056,8 +2149,8 @@ mod tests {
             b.prop_cells("interrupts", &[0, 4, 5]);
             b.prop("interrupt-names", b"cec-tx\0hpd-connected\0hpd-gone\0");
         }));
-        let l2 = by_key(&nodes, b"brcm,bcm2711-l2-intc");
-        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        let l2 = by_key(&nodes, b"vendor,l2-intc");
+        let hdmi = by_key(&nodes, b"vendor,hdmi0");
         let endpoint = INTERRUPT_LINE_ENDPOINTS.endpoint(l2.id());
         let links = lines(hdmi);
         assert_eq!(links.len(), 3);
@@ -2092,7 +2185,7 @@ mod tests {
             // `interrupts-extended` wins over this.
             b.prop("interrupts", &7u32.to_be_bytes());
         }));
-        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        let hdmi = by_key(&nodes, b"vendor,hdmi0");
         let irqs: Vec<&HwResource> = hdmi
             .resources()
             .iter()
@@ -2114,11 +2207,11 @@ mod tests {
             b.prop_u32("interrupt-parent", 2);
             b.prop_cells("interrupts", &[4]);
         }));
-        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        let hdmi = by_key(&nodes, b"vendor,hdmi0");
         assert!(lines(hdmi).is_empty());
         assert!(!nodes.iter().any(|node| node
             .match_keys()
-            .contains(&HwMatchKey::compatible(b"brcm,bcm2711-l2-intc").expect("fits"))));
+            .contains(&HwMatchKey::compatible(b"vendor,l2-intc").expect("fits"))));
     }
 
     #[test]
@@ -2136,7 +2229,7 @@ mod tests {
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
         b.begin_node("hdmi@fef00700");
-        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop_str("compatible", "vendor,hdmi0");
         b.prop(
             "reg",
             &[
@@ -2154,7 +2247,7 @@ mod tests {
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
-        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        let hdmi = by_key(&nodes, b"vendor,hdmi0");
         let windows: Vec<&HwResource> = hdmi
             .resources()
             .iter()
@@ -2176,7 +2269,7 @@ mod tests {
         // link, so none depends on room in the controller's node.
         let extra = u32::try_from(HW_NODE_MAX_RESOURCES).expect("small");
         let nodes = discover(&i2c_tree(extra));
-        let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
+        let bus = by_key(&nodes, b"vendor,i2c");
         let targets: Vec<&HwNode> = nodes.iter().filter(|n| n.id() > bus.id()).collect();
         assert_eq!(targets.len(), HW_NODE_MAX_RESOURCES + 2);
         for target in targets {
@@ -2219,7 +2312,7 @@ mod tests {
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
         b.begin_node("spi@fe204000");
-        b.prop_str("compatible", "brcm,bcm2835-spi");
+        b.prop_str("compatible", "vendor,spi");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 0);
         b.begin_node("flash@0");
@@ -2229,7 +2322,7 @@ mod tests {
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
-        assert_eq!(i2c_duty(by_key(&nodes, b"brcm,bcm2835-spi")), None);
+        assert_eq!(i2c_duty(by_key(&nodes, b"vendor,spi")), None);
         assert!(i2c_links(by_key(&nodes, b"jedec,spi-nor")).is_empty());
     }
 
@@ -2240,7 +2333,7 @@ mod tests {
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
         b.begin_node("i2c@fe804000");
-        b.prop_str("compatible", "brcm,bcm2835-i2c");
+        b.prop_str("compatible", "vendor,i2c");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 0);
         b.begin_node("general-call@0");
@@ -2260,7 +2353,7 @@ mod tests {
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
         b.begin_node("i2c@7ef04500");
-        b.prop_str("compatible", "brcm,bcm2711-hdmi-i2c");
+        b.prop_str("compatible", "vendor,hdmi-i2c");
         b.prop_u32("phandle", 0x30);
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 0);
@@ -2270,25 +2363,25 @@ mod tests {
         b.prop_u32("phandle", 0x31);
         b.end_node();
         b.begin_node("hdmi@7ef00700");
-        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop_str("compatible", "vendor,hdmi0");
         b.prop_u32("ddc", 0x30);
         b.end_node();
         b.begin_node("hdmi@7ef05700");
-        b.prop_str("compatible", "brcm,bcm2711-hdmi1");
+        b.prop_str("compatible", "vendor,hdmi1");
         b.prop_u32("ddc", 0x31);
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
-        let ddc = by_key(&nodes, b"brcm,bcm2711-hdmi-i2c");
+        let ddc = by_key(&nodes, b"vendor,hdmi-i2c");
         let expected =
             LinkRequest::new(I2C_CONTROLLER_ENDPOINTS.endpoint(ddc.id()), 0, &[], b"ddc")
                 .expect("valid");
         assert_eq!(
-            i2c_links(by_key(&nodes, b"brcm,bcm2711-hdmi0")),
+            i2c_links(by_key(&nodes, b"vendor,hdmi0")),
             std::vec![expected]
         );
         assert!(
-            i2c_links(by_key(&nodes, b"brcm,bcm2711-hdmi1")).is_empty(),
+            i2c_links(by_key(&nodes, b"vendor,hdmi1")).is_empty(),
             "a phandle naming no I2C controller links nothing"
         );
         assert_eq!(i2c_duty(ddc), Some(expected.endpoint()));
@@ -2302,7 +2395,7 @@ mod tests {
             b.prop_u32("#address-cells", 1);
             b.prop_u32("#size-cells", 1);
             b.begin_node("i2c@7e804000");
-            b.prop_str("compatible", "brcm,bcm2835-i2c");
+            b.prop_str("compatible", "vendor,i2c");
             b.prop_u32("phandle", 0x30);
             b.prop_u32("#address-cells", 1);
             b.prop_u32("#size-cells", 0);
@@ -2313,7 +2406,7 @@ mod tests {
             b.end_node();
             b.end_node();
             b.begin_node("hdmi@7ef00700");
-            b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+            b.prop_str("compatible", "vendor,hdmi0");
             b.prop_u32("ddc", 0x30);
             b.end_node();
             b.end_node();
@@ -2321,13 +2414,13 @@ mod tests {
         };
         let shared = tree("okay");
         assert!(
-            i2c_links(by_key(&shared, b"brcm,bcm2711-hdmi0")).is_empty(),
+            i2c_links(by_key(&shared, b"vendor,hdmi0")).is_empty(),
             "the port would reach the clock on the same bus"
         );
         assert_eq!(i2c_links(by_key(&shared, b"maxim,ds3231")).len(), 1);
         let dedicated = tree("disabled");
         assert_eq!(
-            i2c_links(by_key(&dedicated, b"brcm,bcm2711-hdmi0")).len(),
+            i2c_links(by_key(&dedicated, b"vendor,hdmi0")).len(),
             1,
             "a target nobody may use shares nothing"
         );
@@ -2362,7 +2455,7 @@ mod tests {
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
         b.begin_node("i2c@fe804000");
-        b.prop_str("compatible", "brcm,bcm2835-i2c");
+        b.prop_str("compatible", "vendor,i2c");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 0);
         b.begin_node("unbindable@10");
@@ -2382,7 +2475,7 @@ mod tests {
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
-        let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
+        let bus = by_key(&nodes, b"vendor,i2c");
         assert_eq!(
             i2c_links(by_key(&nodes, b"vendor,mux")),
             std::vec![target_link(bus, 0x70)]
@@ -2527,7 +2620,7 @@ mod tests {
         assert!(irqs(by_key(&nodes, b"test,orphan")).is_empty());
     }
 
-    /// The legacy controller's `/soc` in the shape of the pinned Pi 4 tree:
+    /// A legacy controller's `/soc`:
     /// a one-cell bus under a two-cell root, translating the peripherals and
     /// reaching RAM and the peripherals through two `dma-ranges` windows.
     /// A consumer sits ahead of its controller in document order, so its
@@ -2562,13 +2655,13 @@ mod tests {
             ]),
         );
         b.begin_node("i2s@7e203000");
-        b.prop_str("compatible", "brcm,bcm2835-i2s");
+        b.prop_str("compatible", "vendor,i2s");
         b.prop("reg", &cells(&[0x7e20_3000, 0x24]));
         b.prop("dmas", &cells(&[0x0c, 2, 0x0c, 3]));
         b.prop("dma-names", b"tx\0rx\0");
         b.end_node();
         b.begin_node("dma-controller@7e007000");
-        b.prop_str("compatible", "brcm,bcm2835-dma");
+        b.prop_str("compatible", "vendor,dma");
         b.prop("reg", &cells(&[0x7e00_7000, 0xb00]));
         b.prop(
             "interrupts",
@@ -2579,7 +2672,7 @@ mod tests {
         b.prop_u32("phandle", 0x0c);
         b.end_node();
         b.begin_node("mmc@7e202000");
-        b.prop_str("compatible", "brcm,bcm2835-sdhost");
+        b.prop_str("compatible", "vendor,sdhost");
         b.prop("reg", &cells(&[0x7e20_2000, 0x100]));
         b.prop("dmas", &cells(&[0x0c, 0x2000_000d]));
         b.prop("dma-names", b"rx-tx-and-more\0");
@@ -2634,19 +2727,19 @@ mod tests {
         b.prop_u32("#clock-cells", 1);
         b.prop_u32("phandle", 4);
         b.end_node();
-        b.begin_node("cprman@2000");
-        b.prop_str("compatible", "brcm,bcm2711-cprman");
+        b.begin_node("clocks@2000");
+        b.prop_str("compatible", "vendor,clocks");
         b.prop_u32("#clock-cells", 1);
         b.prop("clocks", &cells(&[3, 4, 0]));
         b.prop_u32("phandle", 8);
         b.end_node();
         b.begin_node("pwm@3000");
-        b.prop_str("compatible", "brcm,bcm2835-pwm");
+        b.prop_str("compatible", "vendor,pwm");
         b.prop("clocks", &cells(&[8, 0x1e]));
         b.prop("clock-names", b"pwm\0");
         b.end_node();
         b.begin_node("i2s@4000");
-        b.prop_str("compatible", "brcm,bcm2835-i2s");
+        b.prop_str("compatible", "vendor,i2s");
         b.prop("clocks", &cells(&[4, 0, 8, 0x1f]));
         b.prop("clock-names", b"dsi\0pcm\0");
         b.end_node();
@@ -2657,9 +2750,9 @@ mod tests {
     #[test]
     fn a_clock_supplier_carries_its_duty_and_each_consumer_its_clocks_or_their_fixed_rates() {
         let nodes = discover(&clock_tree());
-        let cprman = by_key(&nodes, b"brcm,bcm2711-cprman");
-        let endpoint = CLOCK_CONTROLLER_ENDPOINTS.endpoint(cprman.id());
-        let duties: Vec<LinkDuty> = cprman
+        let supplier = by_key(&nodes, b"vendor,clocks");
+        let endpoint = CLOCK_CONTROLLER_ENDPOINTS.endpoint(supplier.id());
+        let duties: Vec<LinkDuty> = supplier
             .resources()
             .iter()
             .filter_map(|r| r.link_duty().ok())
@@ -2668,7 +2761,7 @@ mod tests {
             duties,
             std::vec![LinkDuty::new(endpoint, None).expect("valid")]
         );
-        let fixed: Vec<(u8, u64)> = cprman
+        let fixed: Vec<(u8, u64)> = supplier
             .resources()
             .iter()
             .filter_map(HwResource::fixed_clock)
@@ -2679,7 +2772,7 @@ mod tests {
             "the oscillator is a fact, not a link"
         );
         assert!(
-            requests(cprman).is_empty(),
+            requests(supplier).is_empty(),
             "the disabled source is no supplier"
         );
         assert!(
@@ -2690,11 +2783,11 @@ mod tests {
             "no driver serves a fixed clock"
         );
         assert_eq!(
-            requests(by_key(&nodes, b"brcm,bcm2835-pwm")),
+            requests(by_key(&nodes, b"vendor,pwm")),
             std::vec![LinkRequest::new(endpoint, 0, &[0x1e], b"pwm").expect("valid")]
         );
         assert_eq!(
-            requests(by_key(&nodes, b"brcm,bcm2835-i2s")),
+            requests(by_key(&nodes, b"vendor,i2s")),
             std::vec![LinkRequest::new(endpoint, 1, &[0x1f], b"pcm").expect("valid")],
             "an entry naming an unusable supplier is framed and skipped"
         );
@@ -2718,7 +2811,7 @@ mod tests {
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
         for (name, compatible, cells_count, phandle) in [
-            ("i2s@1000", "brcm,bcm2835-i2s", 0, 0x20),
+            ("i2s@1000", "vendor,i2s", 0, 0x20),
             ("dac", "ti,pcm5102a", 0, 0x21),
             ("tdm@2000", "test,tdm", 1, 0x22),
             ("adc", "ti,pcm5122", 0, 0x23),
@@ -2783,7 +2876,7 @@ mod tests {
             std::vec![LinkDuty::new(CODEC_ENDPOINTS.endpoint(adc), None).expect("valid")]
         );
         assert!(
-            codec_duties(b"brcm,bcm2835-i2s").is_empty(),
+            codec_duties(b"vendor,i2s").is_empty(),
             "a CPU side is no codec"
         );
         let link = |key: &[u8]| -> (u64, DaiLink) {
@@ -2797,7 +2890,7 @@ mod tests {
             )
         };
         assert_eq!(
-            link(b"brcm,bcm2835-i2s"),
+            link(b"vendor,i2s"),
             (
                 CODEC_ENDPOINTS.endpoint(dac),
                 DaiLink {
@@ -2829,7 +2922,7 @@ mod tests {
     #[test]
     fn a_dma_controller_carries_its_duty_and_each_window_it_reaches_memory_through() {
         let nodes = discover(&dma_tree());
-        let dma = by_key(&nodes, b"brcm,bcm2835-dma");
+        let dma = by_key(&nodes, b"vendor,dma");
         assert_eq!(dma.class(), Some(HwDeviceClass::Dma));
         let duties: Vec<LinkDuty> = dma
             .resources()
@@ -2919,7 +3012,7 @@ mod tests {
         b.prop("ranges", &[]);
         b.prop("dma-ranges", &[]);
         b.begin_node("dma-controller@7e007000");
-        b.prop_str("compatible", "brcm,bcm2835-dma");
+        b.prop_str("compatible", "vendor,dma");
         b.prop("reg", &cells(&[0x7e00_7000, 0xb00]));
         b.prop_u32("#dma-cells", 1);
         b.end_node();
@@ -2927,7 +3020,7 @@ mod tests {
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
-        let windows: Vec<HwResource> = by_key(&nodes, b"brcm,bcm2835-dma")
+        let windows: Vec<HwResource> = by_key(&nodes, b"vendor,dma")
             .resources()
             .iter()
             .copied()
@@ -2947,8 +3040,8 @@ mod tests {
     #[test]
     fn a_consumer_names_its_controller_even_before_the_walk_reaches_it() {
         let nodes = discover(&dma_tree());
-        let dma = by_key(&nodes, b"brcm,bcm2835-dma");
-        let i2s = by_key(&nodes, b"brcm,bcm2835-i2s");
+        let dma = by_key(&nodes, b"vendor,dma");
+        let i2s = by_key(&nodes, b"vendor,i2s");
         assert!(i2s.id() < dma.id());
         let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(dma.id());
         assert_eq!(
@@ -2960,7 +3053,7 @@ mod tests {
         );
         // A name longer than a record holds leaves the line unnamed rather
         // than truncated; the specifier's serving bits ride along whole.
-        let mmc = by_key(&nodes, b"brcm,bcm2835-sdhost");
+        let mmc = by_key(&nodes, b"vendor,sdhost");
         assert_eq!(
             requests(mmc),
             std::vec![LinkRequest::new(endpoint, 0, &[0x2000_000d], b"").expect("valid")]
@@ -2970,7 +3063,7 @@ mod tests {
     #[test]
     fn an_entry_wider_than_a_record_is_dropped_and_a_dangling_one_ends_the_list() {
         let nodes = discover(&dma_tree());
-        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(by_key(&nodes, b"brcm,bcm2835-dma").id());
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(by_key(&nodes, b"vendor,dma").id());
         // The three-cell entry is dropped whole; the next keeps its position
         // and its own name.
         assert_eq!(

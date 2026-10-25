@@ -9,10 +9,9 @@
 //!
 //! # Design summary
 //!
-//! * **Completely Fair Queuing (Linux-CFS-like).** Each task carries a
+//! * **Completely Fair Queuing.** Each task carries a
 //!   virtual runtime `vruntime`; the ready task with the *smallest*
-//!   `vruntime` is dispatched next (the leftmost node of Linux CFS's
-//!   red-black tree, here the top of a min-heap keyed by
+//!   `vruntime` is dispatched next (the top of a min-heap keyed by
 //!   `(vruntime, arrival)` — `O(log n)` pick and insert). A dispatch
 //!   charges the running task `elapsed_ticks * SCALE / weight` of virtual
 //!   runtime (the shared proportional-share charge), so equal-weight tasks
@@ -27,16 +26,16 @@
 //!   permitted to violate that.** It keeps a fixed-frequency periodic
 //!   quantum tick armed for *any* running task — including a lone
 //!   CPU-bound one — so the timer interrupt fires at a steady `HZ` cadence
-//!   like Linux's scheduler tick. Concretely the dispatch path calls
+//!   like a classic periodic-tick scheduler. Concretely the dispatch path calls
 //!   [`SchedulerArch::set_preemption`]`(true)` unconditionally while a task
 //!   runs; only a genuinely idle CPU (nothing runnable at all) disarms in
 //!   [`Scheduler::step`]. A fired tick forces a context switch only when
-//!   there is another runnable task (the kernel's `preempt_current` gate,
-//!   mirroring Linux `check_preempt_tick`), so a lone task's tick does its
+//!   there is another runnable task (the kernel's `preempt_current` gate),
+//!   so a lone task's tick does its
 //!   accounting without a needless switch-to-self. This is the
 //!   charter-blessed non-tickless exception and no other policy may take it.
 //! * **Weight by priority.** The three [`Priority`] bands map to a 4:2:1
-//!   weight ratio (the CFS "nice level" analog): for equal demand a `High`
+//!   weight ratio (the analogue of POSIX `nice` levels): for equal demand a `High`
 //!   task receives roughly four times the CPU time of a `Low` one.
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns one
 //!   `vruntime`-ordered [`Scheduler`]-internal run queue with its own

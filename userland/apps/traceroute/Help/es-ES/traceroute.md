@@ -71,8 +71,9 @@ incluidas (por defecto 60 para IPv4 y 80 para IPv6).
 
 - `0` — el trazado se ejecutó, alcanzara o no el host (o se mostró la
   ayuda breve).
-- `2` — no se entendió la línea de órdenes, el destino no se resolvió, no
-  se pudo abrir el socket o no se pudo enviar una sonda.
+- `1` — no se entendió la línea de órdenes.
+- `2` — el destino no se resolvió, no se pudo abrir el socket o no se
+  pudo enviar una sonda.
 
 ## ENVIRONMENT
 

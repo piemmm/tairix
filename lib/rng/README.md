@@ -25,7 +25,7 @@ randomness ends up drawn from an invertible generator.
   secrecy). Its working state is zeroed on drop and its draws are fallible and
   fail closed — they never block, spin, or panic.
 - **`FastRng`** is buffered **ChaCha12 with fast key erasure** — Bernstein's
-  construction, as used by OpenBSD `arc4random` and Linux `get_random_u64`.
+  construction, the shape OpenBSD's `arc4random` takes over ChaCha20.
   One refill runs the cipher once: the first 32 keystream bytes *become the
   key* and the rest fill the issue buffer, so the key behind already-issued
   output exists nowhere (backtracking resistance) and each byte is wiped as it

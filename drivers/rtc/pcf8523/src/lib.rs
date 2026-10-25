@@ -1,7 +1,7 @@
 //! NXP PCF8523 real-time-clock driver (`nxp,pcf8523`).
 //!
-//! The PCF8523 is the I²C calendar chip at bus address `0x68` that Raspberry
-//! Pi's own `i2c-rtc` overlay documentation names. Its calendar block runs
+//! The PCF8523 is the I²C calendar chip at bus address `0x68`. Its calendar
+//! block runs
 //! `0x03..=0x09`: seconds with a clock-integrity flag in the top bit, then
 //! minutes, hours, days, weekdays, months, and a two-digit year.
 //!
@@ -49,7 +49,9 @@ use tairix_abi::driver::rtc::{
     bcd_to_bin, bin_to_bcd, hour_from_twelve, resolve_two_digit_year, Rtc, RtcStatus,
 };
 use tairix_abi::time::{CivilTime, Duration64, Time64};
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 use tairix_i2c::Device;
 
 #[cfg(test)]
@@ -83,13 +85,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(PCF8523_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(PCF8523_COMPATIBLE),
 )];
 
 /// Control register 1, holding the hour-format and stop bits.

@@ -33,8 +33,8 @@ riceve solo il ripristino della disciplina di ingresso.
 ## EXIT STATUS
 
 - `0` — il terminale è stato ripristinato.
-- `1` — l'output non è stato consegnato.
-- `2` — la riga di comando non è stata compresa.
+- `1` — l'output non è stato consegnato. Anche una riga di comando non
+  compresa termina con `1`.
 
 ## ENVIRONMENT
 

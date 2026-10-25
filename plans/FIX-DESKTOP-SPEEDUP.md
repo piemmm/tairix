@@ -1290,8 +1290,7 @@ output's, and the invariants later work must keep:
   governor sheds detail against stays the 60 Hz baseline `plans/WINTERSUN.md`
   states, so a faster output is given more frames, never less detail.
 - **Rate, not phase.** A device with no vertical-blank event (virtio-gpu, the
-  framebuffers) is paced at the right rate with no knowledge of the phase — the
-  same position Linux takes for a virtual display with no vblank interrupt.
+  framebuffers) is paced at the right rate with no knowledge of the phase.
 
 ### E.6 The cursor moves with the frame while a gesture carries a window
 

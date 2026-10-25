@@ -3,10 +3,16 @@
 //!
 //! An operation too large for one transaction — truncating or deleting a
 //! big file — puts its inode on the superblock's orphan chain first, each
-//! orphan's `i_dtime` naming the next. A crash between its transactions
-//! leaves the inode listed, and mounting finishes the job: an orphan with no
-//! links is deleted, one with links is cut back to its size. The orphan
-//! file a newer kernel may also keep is drained the same way.
+//! orphan's `i_dtime` naming the next. So does an inode the kernel holds as
+//! it loses its last link, kept until its last unpin. A crash between its
+//! transactions, or before that unpin, leaves the inode listed, and mounting
+//! finishes the job: an orphan with no links is deleted, one with links is
+//! cut back to its size. The orphan file a newer kernel may also keep is
+//! drained the same way.
+//!
+//! An orphan leaves the chain wherever it sits, so the mount keeps an index of
+//! each listed orphan's predecessor, rewound with the chain when an operation
+//! is undone or a transaction lost, rather than walking the chain to find it.
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
@@ -43,38 +49,75 @@ impl<B: Block> Ext4<B> {
         put_le32(raw, INODE_DTIME, head);
         self.write_inode_raw(ino, raw)?;
         put_le32(&mut self.sb, SB_LAST_ORPHAN, ino);
+        if head != 0 {
+            self.index_orphan(head, Some(ino))?;
+        }
+        self.index_orphan(ino, Some(0))
+    }
+
+    /// Take inode `ino`, whose record is `raw`, off the orphan chain: from the
+    /// superblock's head, or from the orphan the index says names it, which
+    /// must still name it.
+    pub(crate) fn orphan_remove(&mut self, ino: u32, raw: &mut [u8]) -> Result<(), DriverError> {
+        let next = le32(raw, INODE_DTIME);
+        let prev = if le32(&self.sb, SB_LAST_ORPHAN) == ino {
+            put_le32(&mut self.sb, SB_LAST_ORPHAN, next);
+            0
+        } else {
+            let prev = self
+                .orphan_prev
+                .get(u64::from(ino))
+                .copied()
+                .filter(|&prev| prev != 0)
+                .ok_or(DriverError::DeviceFault)?;
+            let mut prev_raw = self.inode_scratch()?;
+            self.read_inode_raw(prev, &mut prev_raw)?;
+            if le32(&prev_raw, INODE_DTIME) != ino {
+                return Err(DriverError::DeviceFault);
+            }
+            put_le32(&mut prev_raw, INODE_DTIME, next);
+            self.write_inode_raw(prev, &mut prev_raw)?;
+            prev
+        };
+        if next != 0 {
+            self.index_orphan(next, Some(prev))?;
+        }
+        self.index_orphan(ino, None)?;
+        put_le32(raw, INODE_DTIME, 0);
         Ok(())
     }
 
-    /// Take inode `ino`, whose record is `raw`, off the orphan chain.
-    pub(crate) fn orphan_remove(&mut self, ino: u32, raw: &mut [u8]) -> Result<(), DriverError> {
-        let next = le32(raw, INODE_DTIME);
-        let head = le32(&self.sb, SB_LAST_ORPHAN);
-        if head == ino {
-            put_le32(&mut self.sb, SB_LAST_ORPHAN, next);
+    /// Record `prev` as orphan `ino`'s predecessor, or forget `ino` for
+    /// `None`, logging what it replaces for the undo.
+    fn index_orphan(&mut self, ino: u32, prev: Option<u32>) -> Result<(), DriverError> {
+        let key = u64::from(ino);
+        self.orphan_undo
+            .try_reserve(1)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        let replaced = if let Some(prev) = prev {
+            self.orphan_prev
+                .try_insert(key, prev)
+                .map_err(|_| DriverError::OutOfMemory)?
         } else {
-            let mut at = head;
-            let mut prev = self.inode_scratch()?;
-            let mut found = false;
-            for _ in 0..self.layout.inodes_count {
-                if at == 0 {
-                    break;
-                }
-                self.read_inode_raw(at, &mut prev)?;
-                if le32(&prev, INODE_DTIME) == ino {
-                    put_le32(&mut prev, INODE_DTIME, next);
-                    self.write_inode_raw(at, &mut prev)?;
-                    found = true;
-                    break;
-                }
-                at = le32(&prev, INODE_DTIME);
-            }
-            if !found {
-                return Err(DriverError::DeviceFault);
+            self.orphan_prev.remove(key)
+        };
+        self.orphan_undo.push((key, replaced));
+        Ok(())
+    }
+
+    /// Undo the index's changes past the first `kept` the log holds.
+    pub(crate) fn rewind_orphans(&mut self, kept: usize) {
+        let kept = kept.min(self.orphan_undo.len());
+        for (key, replaced) in self.orphan_undo.drain(kept..).rev() {
+            if let Some(prev) = replaced {
+                // The entry either keeps its slot or takes back the nodes its
+                // removal freed, so this cannot fail; were it to, the entry is
+                // missing and the removal that needs it fails closed.
+                let _ = self.orphan_prev.try_insert(key, prev);
+            } else {
+                self.orphan_prev.remove(key);
             }
         }
-        put_le32(raw, INODE_DTIME, 0);
-        Ok(())
     }
 
     /// Finish every orphan the volume lists, each in operations of its own.

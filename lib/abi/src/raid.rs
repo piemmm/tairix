@@ -25,9 +25,10 @@ use crate::sysinfo::MountAvailability;
 ///
 /// A GF(2^8) parity syndrome weights data member `k` by `gᵏ` (and the higher
 /// syndrome by `g²ᵏ`), whose exponents `g⁰ … g²⁵⁴` are the 255 distinct
-/// non-zero field elements (`g = {02}`, polynomial `0x11d` — the Linux-md
-/// field). Beyond 255 data members those coefficients would repeat and the
-/// erasures could no longer be solved, so a GF-parity array admits at most this
+/// non-zero field elements (`g = {02}`, polynomial `0x11d`; H. P. Anvin, "The
+/// mathematics of RAID-6"). Beyond 255 data members those coefficients would
+/// repeat and the erasures could no longer be solved, so a GF-parity array
+/// admits at most this
 /// many data members. This is the single definition of that structural ceiling:
 /// [`RaidLevel::max_members`] and the parity composition engines' fields all
 /// derive from it.
@@ -454,7 +455,7 @@ pub enum MemberState {
     Resyncing,
     /// No device occupies this slot: a member the array is *defined* to have
     /// but which is currently missing — never inserted, or removed after a
-    /// fault. Like a Linux md "removed" slot, an absent member reduces the
+    /// fault. An absent member reduces the
     /// array's redundancy, so the array reports [`ArrayHealth::Degraded`]
     /// while one is present. A spare can be installed into an absent slot,
     /// which then rebuilds it from a surviving copy.

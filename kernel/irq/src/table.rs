@@ -306,9 +306,7 @@ pub(crate) const STORM_WINDOW_NS: u64 = 1_000_000_000;
 /// re-asserting with no work being done (a wedged controller, a
 /// never-quiesced source, or a hostile device), i.e. exactly the storm that
 /// would otherwise peg a CPU. The budget is deliberately generous so a busy
-/// but healthy line never trips, mirroring Linux's `note_interrupt`
-/// spurious-IRQ disable in spirit while fitting this kernel's userspace-IRQ
-/// model.
+/// but healthy line never trips.
 pub(crate) const STORM_FIRE_BUDGET: u32 = 100_000;
 
 /// Kernel IRQ table.

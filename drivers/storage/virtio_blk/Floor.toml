@@ -1,0 +1,7 @@
+# The kernel's bootstrap floor: the kernel opens this driver's device itself,
+# before the driver store it reads is reachable. `bind` restates the crate's
+# `BIND_KEYS` for the build to sign, and the build refuses any other.
+bring-up = "virtio"
+isas = "aarch64 riscv64 x86_64"
+bind = "virtio:2@10"
+reason = "It reads the virtio disk the root volume, and the driver store on it, live on."

@@ -1960,7 +1960,7 @@ mod tests {
     /// reaches the same frames through a non-cacheable mapping, so a live
     /// space built over a physmap whose `clean_invalidate` does nothing
     /// leaves dirty zero lines that are later written back over the task's
-    /// device-shared rings (the Pi 4 xHCI regression). This pins the
+    /// device-shared rings (the xHCI regression). This pins the
     /// delegation the spawn producers rely on when they wire the
     /// cache-maintaining physmap into each task's live space.
     #[test]

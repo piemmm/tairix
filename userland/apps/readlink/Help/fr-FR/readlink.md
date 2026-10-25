@@ -44,6 +44,13 @@ son montage projette — et cet outil l'*appelle* au lieu de suivre les
 liens lui-même. Une seconde copie de l'algorithme qui divergerait d'une
 règle afficherait un chemin que le système de fichiers résout autrement.
 
+Sur un terminal, chaque chemin affiché est mis entre guillemets là où un
+shell en aurait besoin, et tout caractère de contrôle ou autre caractère
+invisible qu'il contient est écrit sous forme de séquence d'échappement,
+de sorte qu'un chemin ne peut ni commander ni réorganiser l'écran ; GNU
+l'affiche tel quel. Un tube, un fichier ou une sortie avec `-z` reçoit
+le chemin octet pour octet.
+
 ## OPTIONS
 
 - `-f, --canonicalize` — afficher le chemin canonique ; tous les
@@ -75,8 +82,8 @@ règle afficherait un chemin que le système de fichiers résout autrement.
 
 - `0` — la cible de chaque opérande a été affichée (ou l'aide courte a
   été écrite).
-- `1` — au moins une lecture a été refusée, ou la sortie a échoué.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — au moins une lecture a été refusée, ou la sortie a échoué. Une
+  ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

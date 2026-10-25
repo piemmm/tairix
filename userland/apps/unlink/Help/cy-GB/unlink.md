@@ -41,8 +41,8 @@ dynadwy.
 
 - `0` — tynnwyd yr enw (neu ysgrifennwyd y cymorth byr).
 - `1` — gwrthododd y system ffeiliau'r tynnu, neu methodd yr allbwn;
-  argreffir y rheswm ar y gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  argreffir y rheswm ar y gwall safonol. Mae llinell orchymyn na
+  ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -54,7 +54,7 @@ its share of the journal, or on a sync:
   written home. `needs_recovery` is set before anything is logged; a quiet
   volume's log is emptied durably, and only then is the mark cleared, so
   an idle volume is clean. Opening a volume writable replays a log a crash
-  left, Linux's included (revokes, 64-bit tags, v2/v3 checksums, escaped
+  left, any writer's (revokes, 64-bit tags, v2/v3 checksums, escaped
   blocks), then reads the volume again from what the replay left; a volume
   under multi-mount protection is never replayed.
 - **Unjournaled (ext2):** the volume is marked not clean behind a barrier,
@@ -66,12 +66,21 @@ writes old metadata over new file data. A truncate or delete too large for
 one transaction is listed on the orphan chain first and finished at the
 next mount if a crash interrupts it.
 
+An inode the kernel holds (`pin`) that loses its last link is listed on the
+orphan chain in that same operation and kept, readable and writable, until its
+last `unpin` releases it; after a crash the chain alone remains and the mount
+releases it. A held orphan leaves the chain from wherever it sits through an
+in-memory index of each listed orphan's predecessor, never a walk of the
+chain.
+
 ## Security
 
 `security` reports an inode's mode, owner and group, and folds its
 `system.posix_acl_access` attribute into a POSIX.1e record: named entries
 under the mask, the owning group's own entry, the mode's group triad
-mirroring the mask. A malformed ACL fails closed. `set_security` stores a
+mirroring the mask. A malformed ACL fails closed. `create` gives a new node
+the owner, group and permission bits of the record it is handed; the format
+keeps no capability gate and a new node takes no ACL. `set_security` stores a
 mode and an owner (a `chmod` moves the ACL's mask with it, copying a shared
 attribute block first) and refuses a capability gate or an ACL change it
 cannot store. New files do not inherit a directory's default ACL. The
@@ -104,7 +113,10 @@ handle the host minted at load.
 and e2fsprogs-made images (`tests/fixtures`, the large ones stored sparse):
 extent and block-map edits, the journal against `debugfs`-written logs,
 allocation over lazily initialised groups, ACL decoding, commit failures
-before and after the medium changes, and replay after a crash.
+before and after the medium changes, replay after a crash, and holds: a held
+file kept past its last link until its last unpin, a removed held directory
+taking no entries, the orphan chain's predecessor index across a lost commit,
+and a held file a crash leaves unlinked released at mount.
 `tests/generations.rs` writes real ext2, ext3 and revision-0 images and checks
 each is left the generation it was made.
 

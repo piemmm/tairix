@@ -81,8 +81,10 @@ avec lequel la réponse est arrivée dans un champ `ttl=`, comme `iputils`.
 ## EXIT STATUS
 
 - `0` — au moins une réponse reçue (ou l'aide courte affichée).
-- `1` — aucune requête n'a reçu de réponse.
-- `2` — ligne de commande incomprise, ou socket impossible à ouvrir.
+- `1` — aucune requête n'a reçu de réponse. Une ligne de commande
+  incomprise sort aussi avec `1`.
+- `2` — cible non résolue, socket impossible à ouvrir, ou réponse
+  impossible à recevoir ou à écrire.
 
 ## ENVIRONMENT
 

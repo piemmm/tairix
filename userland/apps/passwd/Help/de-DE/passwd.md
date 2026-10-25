@@ -48,8 +48,8 @@ Der Datensatz wird vor dem Speichern auf Wohlgeformtheit geprüft.
 - `1` — die Datenbank hat das Ersetzen verweigert oder es ist
   fehlgeschlagen, die Eingaben stimmten nicht überein, es war kein Zufall
   verfügbar, oder der Datensatz war fehlerhaft; der Grund erscheint auf der
-  Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Standardfehlerausgabe. Eine nicht verstandene Befehlszeile endet ebenfalls
+  mit `1`.
 
 ## ENVIRONMENT
 

@@ -76,7 +76,7 @@ ou interrompido, e um registo `summary` no fim.
 
 - `0` — cada ficheiro foi reproduzido, ou a reprodução foi parada sem nenhum deixado de fora.
 - `1` — um ficheiro não pôde ser reproduzido, ou a reprodução não pôde continuar.
-- `2` — a linha de comandos não foi compreendida.
+  Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

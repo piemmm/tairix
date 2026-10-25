@@ -35,8 +35,8 @@ mae `/` yn ei chwarae ar systemau POSIX.
 ## EXIT STATUS
 
 - `0` — ysgrifennwyd y canlyniadau (neu'r cymorth byr).
-- `1` — ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni ellid cyflwyno'r allbwn. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -32,7 +32,8 @@ use crate::pcm::{Framing, Pcm};
 /// Fewest frames a period may hold: 2.7 ms at 48 kHz, two FIFOs' worth.
 pub const MIN_PERIOD_FRAMES: u32 = 128;
 
-/// The rates the block carries, as Linux's driver states them.
+/// The rates the block is offered at: its codecs' span, 8 kHz to 384 kHz
+/// (the PCM5122's, TI SLAS763C).
 const BLOCK_MIN_HZ: u32 = 8_000;
 const BLOCK_MAX_HZ: u32 = 384_000;
 

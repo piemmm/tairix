@@ -16,32 +16,42 @@ directorio bajo su propio nombre base.
 
 Un movimiento dentro de un volumen es un cambio de nombre atómico que
 conserva la identidad del nodo. Un movimiento entre volúmenes cumple la
-misma promesa: la copia se construye junto al destino, se escribe en el
-disco y se renombra a su lugar en un solo paso, y solo entonces se
-elimina el origen — así el destino conserva lo que contenía hasta que el
-movimiento está completo, y ni un fallo ni una caída pierden nada. En
-ambos casos, un directorio solo reemplaza a un directorio vacío, nada
-más reemplaza a un directorio y ningún directorio se mueve dentro de su
+misma promesa: la copia se construye junto al destino, legible solo por
+su propietario hasta que está completa, se escribe en el disco y se
+renombra a su lugar en un solo paso, y solo entonces se elimina lo
+copiado — así el destino conserva lo que contenía hasta que el
+movimiento está completo, y ni un fallo ni una caída pierden nada. Un
+archivo añadido al origen, o modificado, mientras se copiaba se conserva
+donde estaba y se notifica, junto con el directorio que lo contiene; en
+un volumen que no lleva un contador de cambios, o que guarda tiempos
+poco precisos (los dos segundos de FAT), una reescritura de la misma
+longitud hecha dentro de ese margen puede pasar inadvertida. En ambos
+casos, un directorio solo reemplaza a un directorio vacío, nada más
+reemplaza a un directorio y ningún directorio se mueve dentro de su
 propio subárbol.
 
-Un destino existente se sobrescribe por defecto, se omite con `-n` y
-se pregunta por la salida de error estándar con `-i` (una pregunta
-rechazada omite ese movimiento sin error; una respuesta ilegible
-nunca se considera consentimiento). El primer fallo detiene la
-ejecución antes de cualquier operando posterior. `--` termina el
-análisis de opciones: cada argumento posterior es una ruta.
+Un destino existente se sobrescribe por defecto, se conserva con `-n`
+(que avisa con `not replacing` y hace fallar la ejecución, como en GNU)
+y se pregunta por la salida de error estándar con `-i` (una pregunta
+rechazada omite ese movimiento y hace fallar la ejecución; una respuesta
+ilegible nunca se considera consentimiento). Un operando que no puede
+moverse se notifica, y el siguiente se mueve de todos modos. `--`
+termina el análisis de opciones: cada argumento posterior es una ruta.
 
 La copia conserva los huecos de cada archivo, sus atributos extendidos —
 un tipo de archivo de RISC OS, un tipo y un creador de Mac —, sus
 permisos y su propietario allí donde el destino los guarde, y mueve un
 enlace simbólico como un enlace con el mismo destino, nunca aquello a lo
-que apunta. Un archivo que quien lo mueve no puede devolver a su
-propietario pasa a ser suyo, sin sus bits set-ID. Las marcas de tiempo
-no se conservan: ninguna llamada de este sistema las establece. Los
-atributos que el destino no puede guardar se notifican en una única
-advertencia al terminar la ejecución, y en un registro `omission` en el
-flujo de información estándar, antes de que los orígenes desaparezcan
-para siempre.
+que apunta. Un archivo devuelto a otro propietario llega sin sus bits
+set-ID, que el sistema borra al cambiar el propietario; uno que quien lo
+mueve no puede devolver pasa a ser suyo, en su propio grupo allí donde
+quien lo mueve puede conservarlo, y sin los bits set-ID de un
+propietario o un grupo que no conservó. Las marcas de tiempo no se
+conservan: ninguna llamada de este sistema las establece. Los atributos
+que el destino no puede guardar se notifican en una única advertencia al
+terminar la ejecución, y en un registro `omission` en el flujo de
+información estándar, antes de que los orígenes desaparezcan para
+siempre.
 
 ## OPTIONS
 
@@ -49,10 +59,15 @@ para siempre.
   último de `-f`, `-i` y `-n`.
 - `-i, --interactive` — preguntar antes de sobrescribir un destino
   existente; solo consiente una respuesta que empiece por `y`/`Y`.
-- `-n, --no-clobber` — no sobrescribir nunca un destino existente.
+- `-n, --no-clobber` — no sobrescribir nunca un destino existente; cada
+  uno que se conserva se notifica como `not replacing 'dest'`.
 - `-v, --verbose` — informar de cada movimiento como
-  `renamed 'source' -> 'dest'`, y de un movimiento entre volúmenes como
-  `copied 'source' -> 'dest'` y después `removed 'source'`.
+  `renamed 'source' -> 'dest'`, y de un movimiento entre volúmenes
+  entrada a entrada, como hace GNU: `created directory 'dest'` por cada
+  directorio y `copied 'source' -> 'dest'` por todo lo demás a medida
+  que se copia, y después `removed 'source'` o
+  `removed directory 'source'` por cada uno a medida que desaparece el
+  origen.
 - `-t dir, --target-directory=dir` — mover cada origen dentro de
   `dir`, que debe ser un directorio existente. El valor sigue adjunto
   (`-tdir`, `--target-directory=dir`) o como argumento siguiente.
@@ -66,16 +81,17 @@ para siempre.
 - `mv draft.txt final.txt` — renombrar un archivo.
 - `mv -v a.txt b.txt Archive` — mover ambos archivos a `Archive`,
   informando de cada movimiento.
-- `mv -n new.cfg current.cfg` — instalar un archivo solo si el
-  destino no existe ya.
+- `mv -n new.cfg current.cfg` — instalar un archivo solo si el destino
+  no existe ya (avisando con `not replacing` si existe).
 
 ## EXIT STATUS
 
-- `0` — todos los movimientos tuvieron éxito (una omisión por `-n` y
-  una pregunta `-i` rechazada no son fallos).
-- `1` — un fallo del sistema de archivos, de la pregunta o de la
-  salida; el motivo se imprime en la salida de error estándar.
-- `2` — la línea de órdenes no se entendió.
+- `0` — todos los movimientos tuvieron éxito.
+- `1` — un operando no pudo moverse, `-n` conservó un destino, se
+  rechazó una pregunta `-i`, algo de un origen cambió mientras se movía
+  y se conservó, o falló una pregunta o la salida; el motivo de cada
+  fallo se imprime en la salida de error estándar. Una línea de órdenes
+  no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

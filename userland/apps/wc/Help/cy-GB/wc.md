@@ -32,6 +32,14 @@ gyfuno ag operandau `file`.
 Adroddir am fewnbwn na ellir ei ddarllen ar y gwall safonol ac mae'r
 rhediad yn parhau gyda'r mewnbwn nesaf.
 
+Wrth derfynell, dyfynnir pob enw a ddangosir yn yr allbwn lle byddai
+angen hynny ar gragen, ac ysgrifennir unrhyw nod rheoli neu nod
+anweledig arall sydd ynddo wedi'i ddianc, fel na all enw reoli nac
+aildrefnu'r sgrin; mae GNU yn ei ddangos heb ei newid. Mae pibell neu
+ffeil yn derbyn yr enw beit am feit. Mewn pibell hefyd, dyfynnir enw
+sy'n cynnwys toriad llinell, fel y gwna `wc` GNU, er mwyn i bob cyfrif
+aros ar un llinell.
+
 ## OPTIONS
 
 - `-c, --bytes` — argraffu cyfrif y beitiau.
@@ -59,8 +67,8 @@ rhediad yn parhau gyda'r mewnbwn nesaf.
 ## EXIT STATUS
 
 - `0` — cyfrifwyd pob mewnbwn (neu ysgrifennwyd y cymorth byr).
-- `1` — ni ellid darllen mewnbwn, neu ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni ellid darllen mewnbwn, neu ni ellid cyflwyno'r allbwn. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

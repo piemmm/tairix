@@ -8,8 +8,8 @@
 //! turns remapping on; the port then rewrites each source with its entry, and a
 //! pin activated later takes its entry as it is activated
 //! ([`PinRemapping`](crate::x86_64::ioapic_controller::PinRemapping)). A
-//! machine that cannot remap every source keeps compatibility delivery, as
-//! Linux does.
+//! machine that cannot remap every source keeps compatibility delivery for
+//! all of them (`plans/IOMMU.md` item 16).
 
 use alloc::vec::Vec;
 

@@ -2,6 +2,8 @@
 
 use alloc::string::String;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::ManError;
 
 /// One thing the `man` tool can do.
@@ -22,43 +24,47 @@ pub enum Command {
     },
 }
 
+/// What each of `man`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `man`'s options: the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `man [-h | -?] <command> [topic]`:
-///
-/// * `-h` / `-?` / `--help` — render `man`'s own short help (wins
-///   immediately).
-/// * `--` — end option parsing; later words are operands.
-/// * `<command>` — the command whose Help document to render.
-/// * `[topic]` — a named topic within that command's bundle.
-///
-/// It **fails closed**: an unknown option or a third operand is a
-/// [`ManError::Usage`] rather than a silently ignored token, and no operand
-/// at all is a usage error too (there is nothing to render).
+/// The grammar is `man [-h | -?] <command> [topic]`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// `--` ending them. The help switches (`-h`, `-?`, `--help`) render `man`'s
+/// own short help at once. `<command>` is the command whose Help document to
+/// render, `[topic]` a named topic within that command's bundle.
 ///
 /// # Errors
 ///
-/// [`ManError::Usage`] for any input outside the grammar above.
+/// * [`ManError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ManError::Usage`] — no operand (there is nothing to render), or a
+///   third one.
 pub fn parse(args: &[&str]) -> Result<Command, ManError> {
     let mut word: Option<&str> = None;
     let mut topic: Option<&str> = None;
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done && arg.starts_with('-') && arg.len() > 1 {
-            match arg {
-                "--" => options_done = true,
-                "-h" | "-?" | "--help" => return Ok(Command::ShortHelp),
-                _ => return Err(ManError::Usage),
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ManError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::ShortHelp),
+            Arg::Operand(operand) => {
+                if word.is_none() {
+                    word = Some(operand);
+                } else if topic.is_none() {
+                    topic = Some(operand);
+                } else {
+                    return Err(ManError::Usage);
+                }
             }
-            continue;
-        }
-        if word.is_none() {
-            word = Some(arg);
-        } else if topic.is_none() {
-            topic = Some(arg);
-        } else {
-            return Err(ManError::Usage);
         }
     }
     match word {
@@ -72,6 +78,8 @@ pub fn parse(args: &[&str]) -> Result<Command, ManError> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
+
     use super::{parse, Command};
     use crate::error::ManError;
 
@@ -121,10 +129,31 @@ mod tests {
     #[test]
     fn out_of_grammar_input_fails_closed_as_usage() {
         assert_eq!(parse(&[]), Err(ManError::Usage));
-        assert_eq!(parse(&["--verbose", "ps"]), Err(ManError::Usage));
-        assert_eq!(parse(&["-x"]), Err(ManError::Usage));
         assert_eq!(parse(&["ps", "topic", "extra"]), Err(ManError::Usage));
         assert_eq!(parse(&["--"]), Err(ManError::Usage));
+    }
+
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--verbose", "ps"]),
+            "unrecognized option '--verbose'"
+        );
+        assert_eq!(
+            refused(&["--help=ps"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--he", "ps"]), Ok(Command::ShortHelp));
     }
 
     #[test]

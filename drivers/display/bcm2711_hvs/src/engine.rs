@@ -37,8 +37,8 @@ use crate::valve::{Load, Valve, ValveKind};
 /// The outputs one engine drives.
 pub const OUTPUTS_MAX: usize = 2;
 
-/// The core clock a mode set runs at, at least: Linux's `vc4_kms` raises it
-/// for the span of one.
+/// The core clock a mode set runs at, at least: the Pi 4's default core clock
+/// (Raspberry Pi documentation, config.txt: `core_freq` 500).
 const MODESET_CORE_HZ: u64 = 500_000_000;
 
 /// The margin the HVS needs over an active-loaded output's pixel rate.
@@ -276,7 +276,7 @@ pub struct Engine<H, V, C: LinkCall, A: BufferMemory, D, L> {
 }
 
 /// What the pipe a valve of `load` feeds carries when the core clock runs at
-/// `core_hz` at most: Linux's `vc4_crtc_atomic_check` load, inverted.
+/// `core_hz` at most: `output_load_hz`, inverted.
 #[must_use]
 pub fn pipe_limits(load: Load, core_hz: u64) -> PipeLimits {
     let ceiling = u32::try_from(core_hz / 1_000).unwrap_or(u32::MAX);
@@ -1096,7 +1096,7 @@ where
 
     /// The core clock the pipes running, or about to run, `timings` need:
     /// the most any one output loads it, or the share of every plane's
-    /// pixels it composites, as Linux's `vc4_core_clock_atomic_check` has it.
+    /// pixels it composites.
     fn needed_hz(&self, timings: &[Option<Timing>]) -> u64 {
         let surface = self.surface;
         let (width, height) = surface.map_or((0, 0), |mode| (mode.width_px, mode.height_px));

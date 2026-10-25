@@ -60,8 +60,8 @@
 //!   fault); the write still succeeds as long as one copy accepted it.
 //! - A member going faulted **degrades the array, never the system**: the
 //!   survivors keep serving and the array reports [`ArrayHealth::Degraded`].
-//! - A **missing member slot** ([`MemberState::Absent`]) is first-class, like
-//!   a Linux md "removed" slot: the array is assembled to its full defined
+//! - A **missing member slot** ([`MemberState::Absent`]) is first-class: the
+//!   array is assembled to its full defined
 //!   width (one [`MirrorMember::absent`] per missing copy), counts the empty
 //!   slot toward its member count, and reports [`ArrayHealth::Degraded`] for
 //!   the reduced redundancy rather than masquerading as a smaller, optimal
@@ -264,8 +264,8 @@
 //! Once a serve process has *discovered* an array and resolved its
 //! [`RaidLevel`], it presents exactly one logical
 //! [`Block`](tairix_abi::driver::block::Block) device regardless of level.
-//! [`RaidArray`] is that single composed-device abstraction (modelled on Linux
-//! md's per-personality dispatch): it wraps the level-specific engine and
+//! [`RaidArray`] is that single composed-device abstraction: it wraps the
+//! level-specific engine and
 //! forwards the `Block` I/O path together with the level-agnostic health,
 //! self-maintenance (scrub/resync), and member-reconfiguration surface, so
 //! neither the autoloaded serve process nor the ARXFS-native composition

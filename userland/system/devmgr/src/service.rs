@@ -26,6 +26,7 @@
 use alloc::vec::Vec;
 use core::iter;
 
+use tairix_abi::hwtree::snapshot_nodes;
 use tairix_abi::hwtree::HW_TREE_READ_START;
 use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::waitset::WaitSourceKind;
@@ -42,7 +43,6 @@ use crate::netcfg::{
     deliver_interface_configs, deliver_network_settings, NetConfigState, NetIfConfigState,
     NetworkConfigSource, NetworkInterfaceConfigSource,
 };
-use crate::observe::for_each_node;
 use crate::presence::{BootSettle, Devices, Pending, Presence};
 use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
 
@@ -133,8 +133,9 @@ const DEFERRED_RETRY_NS: u64 = 250_000_000;
 ///
 /// # Errors
 ///
-/// Propagates the [`Errno`] from [`HwTreeService::read_tree`] or from the
-/// fail-closed [`for_each_node`] decode, and [`Errno::OutOfMemory`] when the
+/// Propagates the [`Errno`] from [`HwTreeService::read_tree`],
+/// [`Errno::BadMagic`] for a snapshot the tree's one walk
+/// ([`snapshot_nodes`]) refuses, and [`Errno::OutOfMemory`] when the
 /// snapshot's working lists cannot be allocated; on any error no driver is
 /// loaded or unloaded. A catalogue-fetch failure is
 /// **not** propagated — it is fail-soft (logged, retried).
@@ -186,17 +187,19 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
     let len = read_snapshot(tree_buf, HW_TREE_READ_START, |buf| tree.read_tree(buf))?;
     // Decode the snapshot once: report each node and collect it (`HwNode`
     // is `Copy`), so the immutable borrow of `tree_buf` ends before the
-    // match-and-load pass writes into the disjoint `reply_buf`. The decode
-    // admits no more records than the bytes hold, so the pushes stay inside
-    // this reservation.
+    // match-and-load pass writes into the disjoint `reply_buf`. The walk
+    // yields no more nodes than the snapshot promised, so the pushes stay
+    // inside this reservation.
+    let snapshot = snapshot_nodes(&tree_buf[..len]).ok_or(Errno::BadMagic)?;
+    let header = snapshot.header();
     let mut nodes: Vec<HwNode> = Vec::new();
     nodes
-        .try_reserve_exact(len.saturating_sub(HwTreeHeader::WIRE_LEN) / HwNode::WIRE_LEN)
+        .try_reserve_exact(snapshot.len())
         .map_err(|_| Errno::OutOfMemory)?;
-    let header = for_each_node(&tree_buf[..len], |node| {
-        tree.on_node(node);
-        nodes.push(*node);
-    })?;
+    for node in snapshot {
+        tree.on_node(&node);
+        nodes.push(node);
+    }
     tree.on_header(&header);
     state.generation = header.generation();
     let now_ns = tree.now_ns();

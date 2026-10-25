@@ -140,8 +140,7 @@ overhead, in which case every image gets it.** Applying it:
   the image), not a CPU cost. Gate it on `cfg!(debug_assertions)`. The
   zero-image-cost default everywhere is to print **raw addresses** and
   resolve them offline against the unstripped kernel ELF with
-  `addr2line` / `llvm-symbolizer` — exactly how Linux's
-  `decode_stacktrace.sh` works.
+  `addr2line` / `llvm-symbolizer`.
 
 The debug gate already exists honestly: `ImageProfile::Debug` builds the
 kernel **without** `--release` and `ImageProfile::Installer` builds **with**
@@ -281,8 +280,7 @@ A stack unwinder in a panic handler that faults itself is a triple-fault.
   `kernel_core::handle_panic` via the publish-arch-ptr pattern (§2.14).
 - **Symbolication (debug only):** first cut is offline — raw addresses
   everywhere, resolved with `addr2line` against the debug ELF (add a
-  `tools/` helper or document the exact invocation, mirroring Linux's
-  `decode_stacktrace.sh`). On-target names, if wanted later, embed a
+  `tools/` helper or document the exact invocation). On-target names, if wanted later, embed a
   compact sorted `(addr, name)` table in a dedicated section, looked up by
   binary search on the panic path, `cfg!(debug_assertions)`-gated. **Stage
   the on-target part in `PLAN.md`** rather than half-building it (§2.19 —

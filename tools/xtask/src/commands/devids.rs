@@ -53,7 +53,7 @@ use std::process::Command as Process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tairix_devids::{textdb, DbKind, MAX_TABLE_BYTES, TABLE_SUFFIX};
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 
 use crate::Context;
 

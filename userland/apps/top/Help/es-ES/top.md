@@ -78,8 +78,8 @@ Las filas se ordenan por `%CPU`, el mayor consumidor primero, y llevan:
 
 - `0` — la sesión terminó con `q`, o se mostró la ayuda corta.
 - `1` — el servicio o el terminal falló; el motivo se imprime en la
-  salida de error estándar.
-- `2` — la línea de comandos no fue comprendida.
+  salida de error estándar. Una línea de comandos no comprendida
+  también termina con `1`.
 
 ## ENVIRONMENT
 

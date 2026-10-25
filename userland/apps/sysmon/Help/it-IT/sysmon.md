@@ -270,7 +270,7 @@ montati non è soggetta a restrizioni.
 - `0` — la sessione è terminata con `q`, oppure è stata mostrata la guida
   breve.
 - `1` — il terminale ha fallito; il motivo è scritto sull'uscita d'errore.
-- `2` — la riga di comando non è stata compresa.
+  Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

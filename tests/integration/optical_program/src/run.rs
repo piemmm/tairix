@@ -35,7 +35,9 @@ mod program {
         }
 
         fn attr(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
-            tairix_rt::fs_attr_value(path.as_bytes(), key.as_bytes()).map_err(Errno::from_syscall)
+            File::open(path.as_bytes(), OpenFlags::empty())
+                .and_then(|node| node.attr_value(key.as_bytes()))
+                .map_err(Errno::from_syscall)
         }
     }
 

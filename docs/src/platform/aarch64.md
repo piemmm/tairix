@@ -115,8 +115,8 @@ resolve under `__fixups__`, as `dtc` writes an overlay:
   reach. It names the engine's window `hvs`, and gives the DDC buses the
   `#address-cells`/`#size-cells` the I²C controller binding states and the
   base tree omits, by which the walk reads a node as a bus. It disables the
-  firmware's own display devices, `fb` (its framebuffer) and `firmwarekms`,
-  as Linux's `vc4-kms-v3d` does: only then does the firmware hand the display
+  firmware's own display devices, `fb` (its framebuffer) and `firmwarekms`:
+  only then does the firmware hand the display
   to the ARM and stop driving it when the engine says so. A test checks every
   label against the pinned base tree's `__symbols__`.
 
@@ -441,7 +441,7 @@ hand-off: they enter an ELF `-kernel` with `x0 = 0` (GDB-verified on
 hand the kernel a generated tree (with a real `arm,pl011` node), so the
 runtime discover→configure→print path is CI-proven on `virt` against a
 genuine firmware tree; the Pi's specific console base and the mini-UART
-register layout are covered by host unit tests against the `tairix_fdt`
+register layout are covered by host unit tests against the port's own
 `raspi_like_arm` fixture and are on-metal acceptance items for the Arc C
 peripheral stages.
 
@@ -805,7 +805,7 @@ it, so it is never a driver's load target and its windows are never granted.
 The `tairix-test-ipi-smp-qemu-aarch64` vertical poisons the base and
 rediscovers it from its embedded tree, on a GICv2 board and on a GICv3 one, so
 the IPI it delivers proves the discovered controller. The Pi 4's GIC-400 bases
-are covered by host tests against the `raspi_like_arm` fixture and are an
+are covered by host tests against the port's `raspi_like_arm` fixture and are an
 on-metal acceptance item (QEMU has no `raspi4b`).
 
 ## Board-discovered timer frequency
@@ -1412,7 +1412,9 @@ the Pi 4 both HDMI blocks name `aon_intr`, and their one-cell specifiers
 read as GIC triples would have granted INTID 33, another device's line.
 The device class is derived from the node's own data (`device_type`,
 `#dma-cells`, the `interrupt-controller` marker, or the spec-recommended
-generic node-name stem), defaulting to `Other`; class is advisory —
+generic node-name stem, then the port's own statement for a node its board
+names otherwise — `FdtPlatform::class`, the Pi's `emmc2@…` SD host),
+defaulting to `Other`; class is advisory —
 binding is by match key. Interior buses (e.g. a `simple-bus` `/soc`) are emitted
 as `Bus` nodes before their children, so the flat stream reconstructs
 the tree shape, and a node describing nothing bindable (no
@@ -1434,7 +1436,14 @@ can size:
   translated `Dma` window of its `/emmc2bus` `dma-ranges`
   (`fdtwalk::push_dma_windows`), which the firmware rewrites per `SoC`
   stepping, so the ADMA2 staging is carved where the controller reaches and
-  addressed as its bus sees it; and
+  addressed as its bus sees it, and the card's two rails when its
+  `vqmmc-supply` and `vmmc-supply` are regulators on lines of the firmware's
+  GPIO expander (`raspberrypi,firmware-gpio`): the I/O rail
+  (`HwResource::io_rail`, the line, the level each signalling voltage selects
+  and the settling time) and the power rail (`HwResource::power_rail`, the
+  line, its active level and the start-up and off-on delays). A card power
+  supply the board keeps always on, or a delay the record cannot hold, states
+  neither, and the card stays at 3.3 V; and
 - the BCM2711 PCIe host bridge (`brcm,bcm2711-pcie`, PI Stage P10) —
   the host bridge the VL805 xHCI (the USB-A ports) sits behind. It
   carries two windows the VL805 wiring needs, read from the device
@@ -1486,13 +1495,14 @@ never the encoder's.
 
 Two more facts are the board's own (`plans/COOLING.md`). On a tree whose
 root names a Raspberry Pi (`raspberrypi,…`), the SoC's GPIO block
-(`brcm,bcm2711-gpio`, or the Pi 3's `brcm,bcm2835-gpio`) carries the
+(`brcm,bcm2711-gpio`) carries the
 `GpioHeaderLines` the 40-pin header lends to system services: GPIO 2–27,
 leaving GPIO 0 and 1 to the HAT identification EEPROM the firmware reads. And
 the BCM2711's temperature sensor (`brcm,bcm2711-thermal`), which has no window
-of its own, is granted the window of the AVS monitor directly above it; the
-port then refuses the monitor its own copy, so exactly one node holds those
-registers. The sensor's calibration is the shared walk's, read from its
+of its own, is granted the window of the AVS monitor directly above it —
+that node alone, so a second or misplaced node naming the sensor is granted
+nothing — and the port refuses that monitor its own copy, so exactly one node
+holds those registers. The sensor's calibration is the shared walk's, read from its
 thermal zone's `coefficients` on every port.
 
 The walker is host-tested against the shared DTB fixtures (the `virt`-
@@ -1562,13 +1572,17 @@ carve request) is what the service binds.
   the VL805's own address from the VL805's, the RTC time and backup reading
   and the time write from the PMIC clock's, and the rates of the ARM, core
   and HDMI clocks and their rate writes with the turbo transition skipped
-  from the firmware clocks'.
+  from the firmware clocks', and the EMMC2 clock's rate and a switch of the
+  lines its node's rails name from the SD host's.
   The device keys are defined once in `lib/vcmailbox` and each driver's bind
   table is built from its key. Code execution, GPU memory, voltages,
-  one-time-programmable bits, GPIO, framebuffer allocation and the revision
-  probe are refused to everyone, because the GPU masters the bus. Each
-  refusal is answered in-band and logged as event `24_500` with the caller's
-  pid, the tag and the answer.
+  one-time-programmable bits, every other GPIO line, framebuffer allocation
+  and the revision probe are refused to everyone, because the GPU masters the
+  bus. Each refusal is answered in-band and logged as event `24_500` with the
+  caller's pid, the tag and the answer. The kernel's own channel to the
+  firmware, which its storage floor lends the SD host's driver for the
+  bring-up alone (`firmware::with_floor_channel`), forwards only what this
+  table admits that node's driver, and refuses the rest unsent.
 - **Bind identity.** The mailbox `compatible` string and the service's
   `BIND_KEYS` are one definition in `lib/vcmailbox` (`MAILBOX_COMPATIBLE`), so
   the discovery key here and the autoload match key can never diverge
@@ -1834,7 +1848,7 @@ attach. Host-proven by
 VL805, withholds every command completion until `DCBAA[0]` is programmed —
 enumeration then runs end to end), `start_stalls_without_scratchpad_on_a_controller_that_needs_it`
 (fail-closed when the region is too small), and the
-`hcsparams2_decodes_the_vl805_scratchpad_count` / `pagesize_decodes_the_lowest_supported_page`
+`hcsparams2_decodes_a_31_buffer_scratchpad_count` / `pagesize_decodes_the_lowest_supported_page`
 register-decode tests. **Metal-confirmed:** the capture read `4106
 max_scratchpad_hex=0x1f` (the count is read) and `4126` advanced from
 `stage_hex=2` all the way to `stage_hex=8 completion_hex=6` — the command
@@ -1964,7 +1978,7 @@ master-aborts a request the RC itself can refuse; a *forwarded* TLP
 instead waits for a completion that never arrives, and the timeout
 manifests as a CPU external abort that hangs the boot CPU. The fix is in
 the windowed configuration accessor
-(`tairix_pci::mechanism_brcm`): the BCM2711 root port is a
+(`pcie_brcm`'s `config_window`): the BCM2711 root port is a
 single-device link, so the accessor now forwards a configuration
 transaction **only** to `device 0` on the secondary bus and resolves
 every other downstream target to the PCI "no device" sentinel *without*
@@ -2125,7 +2139,7 @@ scan saw `1106:3483`) and the controller's CPU→PCIe outbound *translation*
 (`MEM_WIN0`), but never the bridge memory window, so the root port
 master-aborted every CPU access to the VL805's BAR even though config
 reads succeeded. A full PCI enumerator sets
-this; the windowed `mech_brcm` accessor does not.
+this; the windowed `config_window` accessor does not.
 
 The fix is `BrcmPcieRc::program_bridge_mem_window`, run during bring-up
 right after the bus-number programming: it sets the bridge Memory
@@ -2422,9 +2436,10 @@ The EMMC2 path keeps the identity mapping cacheable and uses the existing
 ADMA2 command, the driver synchronizes the active data range and its
 descriptor table, then issues `dma_wmb()` before the MMIO command. After a read
 completion, it issues `dma_rmb()`, synchronizes the device-written data
-range, and only then copies bytes to the caller. The aarch64 bootstrap host
-attaches `clean_invalidate_dcache_range` to both slabs when the controller's
-node states it does not snoop, as the Pi 4's does, which performs `dc civac`
+range, and only then copies bytes to the caller. The kernel's floor DMA host
+(`floor_dma::WindowDmaHost`) attaches the port's `clean_invalidate_dcache_range`
+to both slabs when the controller's node states it does not snoop, as the
+Pi 4's does, which performs `dc civac`
 over the cache lines followed by `dsb sy`; a snooping controller's slabs, and
 Normal-Non-Cacheable hosts, retain the no-op callback. Bring-up keeps ADMA2
 only after a DMA read into staging filled with the inverse of the expected
@@ -2435,9 +2450,9 @@ This avoids mixed-attribute aliases and avoids changing live block mappings
 after secondary CPUs are online. The register-level EMMC2 mock records every
 synchronization: tests pin the table and data published before the command
 and the data consumed after it, and a transfer split across staging windows.
-QEMU has no Pi EMMC2 model, so a real Pi 4 boot whose `root-unlock: emmc2
-link` record reads `dma=true` and that mounts the system volume without
-filesystem corruption is the metal acceptance signal.
+QEMU has no Pi EMMC2 model, so a real Pi 4 boot whose `emmc2: link` record
+reads `dma=true` and that mounts the system volume without filesystem
+corruption is the metal acceptance signal.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 
@@ -2543,6 +2558,24 @@ one `edu` function's message carrying an event only another was given raises
 nothing. How the kernel chooses each route is in
 [the IOMMU page](../security/iommu.md#msi-isolation-through-a-gicv3-its).
 
+### Message-interrupt multiplexer (`MsiMultiplexer`)
+
+The Raspberry Pi 4's PCIe root complex captures an endpoint's MSI write at a
+doorbell of its own and raises one GIC SPI, the `brcm,bcm2711-pcie` node's
+second `interrupts` entry, for the 32 vectors of its `INTR2` block. The port
+implements the Arch HAL `MsiMultiplexer` slice over it in a private module
+(`brcm_msi::BrcmMsiController`); the binary reaches it only through
+`msimux::configure_from_fdt`, which records the parent INTID, the register base
+and the doorbell the discovered inbound aperture selects, and refuses a
+register window outside the Device-typed identity gigapages. `enable` opens
+every vector, clears stale status, and programs the doorbell and the data
+pattern; it relies on `drivers/bus/pcie_brcm` having released the block from
+reset first, which nothing yet enforces (D1451). `mask` is fenced, and mask, unmask and drain touch nothing before
+the block is enabled. The `msimux` conformance verticals run over an atomic
+model of the block; the vectors' lines and `msi_alloc` are
+`kernel/core::msimux` (`plans/WIRING.md` W18). QEMU models no Pi PCIe, so the
+path is proven only on metal.
+
 ### Device-IRQ delivery (Stage W3-B)
 
 An SPI is delivered to no CPU until it is routed: `gic::route_spi(intid, cpu)`
@@ -2572,7 +2605,7 @@ capability (`EDDEVID`), validity (`EDPRSR`), and capture-first (`EDPCSR` low
 then high/`EDVIDSR`) sequence is a pure function host-tested over a `DebugMmio`
 seam; the real MMIO is the freestanding `VolatileDebugMmio`. Per-CPU debug
 bases are **discovered**, never board constants: `fdt::debug_component_bases`
-reads the Linux `arm,coresight-cpu-debug` binding (translated `reg` +
+reads the `arm,coresight-cpu-debug` binding (translated `reg` +
 `cpu`-phandle → dense id) and the boot path installs a base only when its
 gigapage is already Device-mapped, so a read on the lockup path can never
 fault. A tree that describes no debug components (QEMU `virt`, and the stock Pi

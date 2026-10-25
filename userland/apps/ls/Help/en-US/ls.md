@@ -54,9 +54,11 @@ paste back into a shell: at a terminal the default is `shell-escape` (a
 name with spaces or metacharacters is quoted, control characters shown
 as `$'…'` escapes), and elsewhere it is `literal` (names verbatim).
 `-N`, `-Q`, `-b`, and `--quoting-style` choose the style, and `-q` shows
-control characters as `?`. Under `-F` and `--file-type`, `-Q` and `-b`
-also escape each `*`, `=`, `>`, `@`, and `|` in a name, so a name cannot
-pass for an indicator suffix.
+control characters as `?`. Under `-F` and `--file-type`, a name holding
+`*`, `=`, `>`, `@`, or `|` is quoted by the shell styles and has that
+character escaped by `-Q` and `-b`, so it cannot pass for an indicator
+suffix. GNU's `-F` leaves a `*` unmarked, so there a name ending in one
+reads as an executable.
 
 At a colour terminal names are coloured by kind — directories,
 executables, and plain files each in the standard scheme's role —
@@ -216,9 +218,12 @@ listing's style, and so is any `:` it holds.
 ## EXIT STATUS
 
 - `0` — every operand was listed.
-- `1` — an operand could not be inspected or a directory could not
-  be read, or the output could not be delivered.
-- `2` — the command line was not understood.
+- `1` — a minor problem: an entry or a subdirectory inside a listing
+  could not be inspected or read.
+- `2` — serious trouble: the command line was not understood, an
+  operand could not be inspected or read, `-R` reached a directory
+  again through a link, memory ran out, or the output could not be
+  delivered.
 
 ## ENVIRONMENT
 

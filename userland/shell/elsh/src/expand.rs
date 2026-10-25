@@ -9,7 +9,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::OnceCell;
+
+use tairix_glob::OutOfMemory;
 
 use crate::brace;
 use crate::env::{assignment_split, Environment, Expansion};
@@ -18,7 +19,7 @@ use crate::lexer::{Segment, Word};
 use crate::options::{ShellOption, ShellOptions};
 use crate::pathexp::{self, GlobFs, Ignore, Settings};
 
-/// Most bytes one command line's expansions may produce together — its
+/// Most bytes one command line's expansions may hold together — its
 /// fields, redirection targets, here-strings, here-documents and assignment
 /// values: the largest argument block a program can be handed, so a short
 /// line can never demand unbounded memory.
@@ -27,10 +28,6 @@ use crate::pathexp::{self, GlobFs, Ignore, Settings};
 pub(crate) const MAX_EXPANSION_BYTES: usize = tairix_abi::PROCESS_START_MAX_TOTAL_LEN as usize;
 
 const _: () = assert!(tairix_abi::PROCESS_START_MAX_TOTAL_LEN <= usize::MAX as u64);
-
-/// What each word held costs beyond its text: its own bookkeeping, so a
-/// flood of tiny words is bounded as surely as one long one.
-const WORD_OVERHEAD: usize = core::mem::size_of::<String>();
 
 /// A word that could not be expanded: the error, and the word it concerns
 /// when there is one to name.
@@ -49,8 +46,16 @@ impl From<ParseError> for ExpandError {
     }
 }
 
-/// The bound on what one line's expansions may hold, charged as text is
-/// made.
+impl From<OutOfMemory> for ExpandError {
+    fn from(_: OutOfMemory) -> Self {
+        ParseError::OutOfMemory.into()
+    }
+}
+
+/// The bound on what one line's expansions may hold, charged before it is
+/// allocated: every byte of text, and every slot a list of words grows by.
+/// Memory the allocator refuses is the bound spent, never the end of the
+/// session.
 pub(crate) struct Budget {
     remaining: usize,
 }
@@ -60,21 +65,12 @@ impl Budget {
         Self { remaining: limit }
     }
 
-    /// Charge one word of `len` bytes.
-    ///
-    /// # Errors
-    ///
-    /// [`ParseError::ExpansionTooLarge`] once the bound is spent.
-    pub(crate) fn charge(&mut self, len: usize) -> Result<(), ParseError> {
-        self.spend(len.saturating_add(WORD_OVERHEAD))
-    }
-
     /// What is left to charge.
     pub(crate) fn remaining(&self) -> usize {
         self.remaining
     }
 
-    /// Charge `len` bytes of text added to a word already charged for.
+    /// Charge `len` bytes.
     ///
     /// # Errors
     ///
@@ -86,6 +82,64 @@ impl Budget {
             .ok_or(ParseError::ExpansionTooLarge)?;
         Ok(())
     }
+
+    /// An empty string with room for exactly `len` bytes, charged.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::ExpansionTooLarge`] once the bound is spent, or
+    /// [`ParseError::OutOfMemory`] when memory refuses the room.
+    pub(crate) fn string(&mut self, len: usize) -> Result<String, ParseError> {
+        let mut text = String::new();
+        self.room(&mut text, len)?;
+        Ok(text)
+    }
+
+    /// Room in `text` for exactly `more` bytes beyond its own, charged.
+    ///
+    /// # Errors
+    ///
+    /// As [`Budget::string`].
+    pub(crate) fn room(&mut self, text: &mut String, more: usize) -> Result<(), ParseError> {
+        self.spend(more)?;
+        text.try_reserve_exact(more)
+            .map_err(|_| ParseError::OutOfMemory)
+    }
+
+    /// An empty list with room for exactly `count` elements, charged at
+    /// their size.
+    ///
+    /// # Errors
+    ///
+    /// As [`Budget::string`].
+    pub(crate) fn list<T>(&mut self, count: usize) -> Result<Vec<T>, ParseError> {
+        let mut list = Vec::new();
+        self.reserve(&mut list, count)?;
+        Ok(list)
+    }
+
+    /// Push `item` onto `list`, which, when full, grows to twice its room,
+    /// the slots it gains charged at their size.
+    ///
+    /// # Errors
+    ///
+    /// As [`Budget::string`].
+    pub(crate) fn push<T>(&mut self, list: &mut Vec<T>, item: T) -> Result<(), ParseError> {
+        if list.len() == list.capacity() {
+            self.reserve(list, list.capacity().max(1))?;
+        }
+        list.push(item);
+        Ok(())
+    }
+
+    fn reserve<T>(&mut self, list: &mut Vec<T>, more: usize) -> Result<(), ParseError> {
+        let bytes = more
+            .checked_mul(core::mem::size_of::<T>())
+            .ok_or(ParseError::ExpansionTooLarge)?;
+        self.spend(bytes)?;
+        list.try_reserve_exact(more)
+            .map_err(|_| ParseError::OutOfMemory)
+    }
 }
 
 /// Expands words against the session's variables, options and filesystem.
@@ -96,14 +150,21 @@ pub(crate) struct Expander<'a> {
     settings: Settings,
     /// `GLOBIGNORE`'s text, when set and not empty.
     globignore: Option<&'a str>,
-    /// Compiled the first time a pattern's matches need filtering, so an
-    /// entry that is no pattern fails only the lines that generate names.
-    ignore: OnceCell<Result<Ignore, ExpandError>>,
+    /// The session's compiled `GLOBIGNORE`, compiled only when a pattern's
+    /// matches need filtering, so an entry that is no pattern fails only the
+    /// lines that generate names.
+    ignore: &'a Ignore,
 }
 
 impl<'a> Expander<'a> {
-    /// An expander for the session as it stands.
-    pub(crate) fn new(env: &'a Environment, options: &'a ShellOptions, fs: &'a dyn GlobFs) -> Self {
+    /// An expander for the session as it stands, filtering through its
+    /// compiled `GLOBIGNORE`.
+    pub(crate) fn new(
+        env: &'a Environment,
+        options: &'a ShellOptions,
+        fs: &'a dyn GlobFs,
+        ignore: &'a Ignore,
+    ) -> Self {
         let on = |option| options.is_on(option);
         let globignore = env.get("GLOBIGNORE").filter(|text| !text.is_empty());
         let settings = Settings {
@@ -120,7 +181,7 @@ impl<'a> Expander<'a> {
             fs,
             settings,
             globignore,
-            ignore: OnceCell::new(),
+            ignore,
         }
     }
 
@@ -128,24 +189,15 @@ impl<'a> Expander<'a> {
     ///
     /// # Errors
     ///
-    /// A `GLOBIGNORE` entry that is not a valid pattern.
-    fn filter(&self, paths: &mut Vec<String>) -> Result<(), ExpandError> {
-        let Some(text) = self.globignore.filter(|_| !paths.is_empty()) else {
-            return Ok(());
-        };
-        let ignore = self.ignore.get_or_init(|| {
-            Ignore::new(
-                text,
-                self.options.is_on(ShellOption::Extglob),
-                self.options.is_on(ShellOption::Nocaseglob),
-            )
-        });
-        match ignore {
-            Ok(ignore) => {
-                ignore.retain(paths);
-                Ok(())
+    /// A `GLOBIGNORE` entry that is not a valid pattern or whose group holds
+    /// a `/`, the bound spent compiling one, or a match the heap could not
+    /// hold.
+    fn filter(&self, paths: &mut Vec<String>, budget: &mut Budget) -> Result<(), ExpandError> {
+        match self.globignore {
+            Some(text) if !paths.is_empty() => {
+                self.ignore.retain(text, self.settings.word, paths, budget)
             }
-            Err(err) => Err(err.clone()),
+            _ => Ok(()),
         }
     }
 
@@ -170,10 +222,9 @@ impl<'a> Expander<'a> {
             for braced in brace::expand(word, budget)? {
                 let expansion = self.env.expand_marked(&braced, budget)?;
                 if assignment {
-                    budget.charge(expansion.marks.len())?;
-                    fields.push(expansion.text());
+                    budget.push(&mut fields, expansion.text)?;
                 } else {
-                    self.generate(&expansion, budget, &mut fields)?;
+                    self.generate(expansion, budget, &mut fields)?;
                 }
             }
         }
@@ -200,26 +251,28 @@ impl<'a> Expander<'a> {
     /// Filename generation for one expanded word, then the empty-word rule.
     fn generate(
         &self,
-        expansion: &Expansion,
+        expansion: Expansion,
         budget: &mut Budget,
         fields: &mut Vec<String>,
     ) -> Result<(), ExpandError> {
         if !self.options.is_on(ShellOption::Noglob) {
             if let Some(paths) = pathexp::expand(
-                &expansion.marks,
+                &expansion,
                 &self.settings,
                 self.fs,
                 budget,
-                &|paths| self.filter(paths),
+                &|paths, budget| self.filter(paths, budget),
             )? {
                 if !paths.is_empty() {
-                    fields.extend(paths);
+                    for path in paths {
+                        budget.push(fields, path)?;
+                    }
                     return Ok(());
                 }
                 if self.options.is_on(ShellOption::Failglob) {
                     return Err(ExpandError {
                         error: ParseError::NoMatch,
-                        subject: Some(expansion.text()),
+                        subject: Some(expansion.text),
                     });
                 }
                 if self.options.is_on(ShellOption::Nullglob) {
@@ -228,11 +281,10 @@ impl<'a> Expander<'a> {
             }
         }
         // An unquoted word that expanded to nothing is no argument at all.
-        if expansion.marks.is_empty() && !expansion.quoted {
+        if expansion.text.is_empty() && !expansion.quoted {
             return Ok(());
         }
-        budget.charge(expansion.marks.len())?;
-        fields.push(expansion.text());
+        budget.push(fields, expansion.text)?;
         Ok(())
     }
 }

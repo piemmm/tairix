@@ -71,26 +71,26 @@ use tairix_abi::{
     DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
     DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
     DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
-    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
-    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
-    KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX,
-    LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
-    LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
-    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
-    MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
-    MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS,
-    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_FLAG_SANDBOXED,
-    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    READDIR_BATCH_MAX, RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY,
-    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD,
-    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
-    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
-    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_PAYLOAD_MAX, SYSINFO_REPLY_STATUS_LEN,
-    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
-    THREAD_STACK_DEFAULT, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE,
+    FS_MODE_MASK, FS_UMASK_BITS, FS_UMASK_QUERY, GRANT_EXTENT_INHERIT, HOSTNAME_MAX,
+    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS,
+    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
+    KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED,
+    KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
+    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX,
+    LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
+    MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX,
+    PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
+    PROCESS_FLAG_SANDBOXED, PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
+    PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES,
+    RANDOM_RESERVE_DEFAULT_BYTES, READDIR_BATCH_MAX, RELEASE_EPOCH_SECS,
+    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
+    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_PAYLOAD_MAX,
+    SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -217,7 +217,7 @@ pub struct GeneratedHeader {
 /// The widths are fixed by `<stdint.h>` so the header means the same thing on
 /// every Tier-1 target. `Len` maps to `uintptr_t` because a byte count is a
 /// register-width quantity (it must address the caller's whole address
-/// space), and `UserPtr` to `void *`; this is the only place the
+/// space), and both pointer types to `void *`; this is the only place the
 /// Rust→C type mapping is defined.
 fn c_type(ty: AbiType) -> &'static str {
     match ty {
@@ -229,7 +229,7 @@ fn c_type(ty: AbiType) -> &'static str {
         AbiType::Cap => "uint16_t",
         // Opaque kernel handles and IPC endpoints are 64-bit values.
         AbiType::U64 | AbiType::IpcEndpoint | AbiType::Handle => "uint64_t",
-        AbiType::UserPtr => "void *",
+        AbiType::UserPtr | AbiType::UserPtrOrNull => "void *",
         AbiType::Len => "uintptr_t",
     }
 }
@@ -819,6 +819,8 @@ fn property_name(key: HwProperty) -> &'static str {
         HwProperty::GpioHeaderLines => "GPIO_HEADER_LINES",
         HwProperty::ThermalCalibration => "THERMAL_CALIBRATION",
         HwProperty::ThermalZone => "THERMAL_ZONE",
+        HwProperty::IoRail => "IO_RAIL",
+        HwProperty::PowerRail => "POWER_RAIL",
     }
 }
 
@@ -2280,11 +2282,13 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   tairix_resource_limit_t limit;\n\
          \x20   uint64_t usage;\n\
          } tairix_resource_limit_record_t;\n\n",
-    "/* One account entry: the uid + username pairing, and nothing else (no\n\
-         * credential material). The inline name is valid for name_len bytes. */\n\
+    "/* One account entry: the uid, login group and username, and nothing else\n\
+         * (no credential material). The inline name is valid for name_len bytes. */\n\
          typedef struct tairix_user_directory_record {\n\
          \x20   uint32_t uid;\n\
+         \x20   uint32_t primary_gid;\n\
          \x20   uint8_t name_len;\n\
+         \x20   uint8_t reserved[3];\n\
          \x20   uint8_t name[TAIRIX_MAX_USERNAME_LEN];\n\
          } tairix_user_directory_record_t;\n\n",
     "/* One group entry: the gid + group-name pairing, and nothing else (no\n\
@@ -2292,6 +2296,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          typedef struct tairix_group_directory_record {\n\
          \x20   uint32_t gid;\n\
          \x20   uint8_t name_len;\n\
+         \x20   uint8_t reserved[3];\n\
          \x20   uint8_t name[TAIRIX_MAX_GROUPNAME_LEN];\n\
          } tairix_group_directory_record_t;\n\n",
     "/* The calling principal's own account record: the identity fields a\n\
@@ -2834,13 +2839,14 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   tairix_time64_t changed;\n\
          } tairix_node_times_t;\n\n",
     "/* Structural metadata about a filesystem node; `kind` is a TAIRIX_NODE_KIND_*.\n\
-         * `nlink` counts the directory entries naming the node; `times` carries its\n\
-         * four timestamps, read in the same structural read as kind/size; and\n\
-         * `content_gen` names the version of its data, 0 where the volume keeps\n\
-         * none. */\n\
+         * `nlink` counts the directory entries naming the node; `ino` is its number\n\
+         * as stat reports it; `times` carries its four timestamps, read in the same\n\
+         * structural read as kind/size; and `content_gen` names the version of its\n\
+         * data, 0 where the volume keeps none. */\n\
          typedef struct tairix_node_info {\n\
          \x20   uint8_t kind;\n\
          \x20   uint32_t nlink;\n\
+         \x20   uint64_t ino;\n\
          \x20   uint64_t size;\n\
          \x20   uint64_t allocated;\n\
          \x20   tairix_node_times_t times;\n\
@@ -2904,8 +2910,8 @@ fn generate_syscall() -> String {
     out.push('\n');
 
     emit_wait_contract(&mut out);
-    emit_spawn_attach_contract(&mut out);
     emit_fs_contract(&mut out);
+    emit_spawn_attach_contract(&mut out);
     emit_readdir_contract(&mut out);
     emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
@@ -3354,11 +3360,74 @@ const fn notice_topic_macro_suffix(topic: NoticeTopic) -> &'static str {
 /// from `lib/abi` and never re-typed.
 fn emit_fs_contract(out: &mut String) {
     use std::fmt::Write as _;
+    use tairix_abi::{FD_CWD, FS_PATH_MAX, FS_SYMLINK_MAX, STD_STREAM_COUNT};
+    out.push_str(
+        "/* A path call takes 1..=TAIRIX_FS_PATH_MAX bytes of path, and fs_symlink() a\n\
+         * target of 1..=TAIRIX_FS_SYMLINK_MAX. A relative path resolves from the\n\
+         * directory or catalog its dirfd holds, or from the caller's working directory\n\
+         * when dirfd is TAIRIX_FD_CWD; an absolute path ignores dirfd. A new descriptor\n\
+         * is numbered from TAIRIX_STD_STREAM_COUNT up, and never TAIRIX_FD_CWD. */\n",
+    );
+    let _ = writeln!(out, "#define TAIRIX_FS_PATH_MAX {FS_PATH_MAX}u");
+    let _ = writeln!(out, "#define TAIRIX_FS_SYMLINK_MAX {FS_SYMLINK_MAX}u");
+    let _ = writeln!(out, "#define TAIRIX_STD_STREAM_COUNT {STD_STREAM_COUNT}u");
+    let _ = writeln!(out, "#define TAIRIX_FD_CWD {FD_CWD:#x}u");
+    out.push('\n');
+
+    emit_fs_call_flags(out);
+    emit_fs_name_flags(out);
+    emit_fs_records(out);
+    emit_fs_values(out);
+}
+
+/// Emit the flag words of the calls that act on one node: `fs_chdir()`,
+/// `fs_set_mode()`, `fs_set_owner()` and `fs_access()`, and `fs_open()`.
+fn emit_fs_call_flags(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::{Access, AtFlags};
+    out.push_str(
+        "/* fs_chdir() / fs_set_mode() / fs_set_owner() / fs_access() flag bits\n\
+         * (uint32_t). Every undefined bit is reserved and rejected with\n\
+         * TAIRIX_E_OUT_OF_RANGE. NO_FOLLOW acts on a final symbolic link itself, and\n\
+         * fs_chdir() rejects it with TAIRIX_E_OUT_OF_RANGE. EMPTY_PATH acts on the node\n\
+         * dirfd holds (the fchdir(), fchmod() and fchown() spelling) and names no\n\
+         * path: a non-NULL path is rejected with TAIRIX_E_OUT_OF_RANGE and a non-zero\n\
+         * path_len with TAIRIX_E_LENGTH_OUT_OF_RANGE. Without it a NULL path is\n\
+         * rejected with TAIRIX_E_BAD_ALIGNMENT and an empty one with\n\
+         * TAIRIX_E_LENGTH_OUT_OF_RANGE. */\n",
+    );
+    for (name, flag) in [
+        ("NO_FOLLOW", AtFlags::NO_FOLLOW),
+        ("EMPTY_PATH", AtFlags::EMPTY_PATH),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_AT_FLAG_{name} {:#x}u", flag.bits());
+    }
+    out.push('\n');
+
+    out.push_str(
+        "/* fs_access() request bits (uint32_t), POSIX access()'s values; 0 asks only\n\
+         * whether the node can be reached. Any other bit is rejected with\n\
+         * TAIRIX_E_OUT_OF_RANGE. What the node grants is still refused for WRITE through\n\
+         * a read-only mount (TAIRIX_E_READ_ONLY) and for EXEC of a regular file through\n\
+         * a noexec one (TAIRIX_E_PERMISSION_DENIED). */\n",
+    );
+    for (name, bit) in [
+        ("READ", Access::READ),
+        ("WRITE", Access::WRITE),
+        ("EXEC", Access::EXEC),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_ACCESS_{name} {:#x}u", bit.bits());
+    }
+    out.push('\n');
+
     out.push_str(
         "/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
          * with TAIRIX_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/\n\
-         * APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with WRITE). An open\n\
-         * with neither READ nor WRITE is a resolve-only handle. */\n",
+         * APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with WRITE, and\n\
+         * CREATE|DIRECTORY without EXCLUSIVE or with READ). CREATE|DIRECTORY|EXCLUSIVE\n\
+         * makes a directory and returns it open with neither READ nor WRITE, and an\n\
+         * EXCLUSIVE create never follows a final symbolic link. An open with neither\n\
+         * READ nor WRITE is a resolve-only handle. */\n",
     );
     for (name, flag) in [
         ("READ", OpenFlags::READ),
@@ -3373,19 +3442,30 @@ fn emit_fs_contract(out: &mut String) {
         let _ = writeln!(out, "#define TAIRIX_OPEN_FLAG_{name} {:#x}u", flag.bits());
     }
     out.push('\n');
+}
 
+/// Emit the flag words of the calls that change a name: `fs_unlink()`,
+/// `fs_link()` and `fs_rename()`.
+fn emit_fs_name_flags(out: &mut String) {
+    use std::fmt::Write as _;
     out.push_str(
         "/* fs_unlink() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
          * with TAIRIX_E_OUT_OF_RANGE. 0 removes the named file or (empty) directory; with\n\
          * the DIRECTORY bit the removal succeeds only when the name is an (empty)\n\
          * directory (the atomic rmdir posture) and a non-directory is refused with\n\
-         * TAIRIX_E_NOT_A_DIRECTORY. */\n",
+         * TAIRIX_E_NOT_A_DIRECTORY. EXPECT_NODE removes the name only while it names the\n\
+         * node the tairix_node_expect_t at `expect` names, and EXPECT_UNCHANGED only\n\
+         * while that node is also unchanged; otherwise the call fails with\n\
+         * TAIRIX_E_STALE and removes nothing. At most one of the two is set, and\n\
+         * `expect` is NULL exactly when neither is. */\n",
     );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_UNLINK_FLAG_DIRECTORY {:#x}u",
-        UnlinkFlags::DIRECTORY.bits()
-    );
+    for (name, flag) in [
+        ("DIRECTORY", UnlinkFlags::DIRECTORY),
+        ("EXPECT_NODE", UnlinkFlags::EXPECT_NODE),
+        ("EXPECT_UNCHANGED", UnlinkFlags::EXPECT_UNCHANGED),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_UNLINK_FLAG_{name} {:#x}u", flag.bits());
+    }
     out.push('\n');
 
     out.push_str(
@@ -3408,15 +3488,71 @@ fn emit_fs_contract(out: &mut String) {
          * with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX rename(): an existing destination is\n\
          * replaced. With the NO_REPLACE bit the move is refused with\n\
          * TAIRIX_E_ALREADY_EXISTS when the destination names any entry but the source's\n\
-         * own, decided under the volume's lock (the renameat2(RENAME_NOREPLACE) posture). */\n",
+         * own, decided under the volume's lock (the renameat2(RENAME_NOREPLACE) posture).\n\
+         * With EXPECT_NODE the source moves only while it names the node the\n\
+         * tairix_node_expect_t at `expect` names, else the call fails with\n\
+         * TAIRIX_E_STALE; `expect` is NULL exactly when EXPECT_NODE is clear. */\n",
+    );
+    for (name, flag) in [
+        ("NO_REPLACE", RenameFlags::NO_REPLACE),
+        ("EXPECT_NODE", RenameFlags::EXPECT_NODE),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_RENAME_FLAG_{name} {:#x}u", flag.bits());
+    }
+    out.push('\n');
+}
+
+/// Emit the records a name call reads: one name, and what it expects of the
+/// node it acts on.
+fn emit_fs_records(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::{NodeExpect, PathAt};
+    out.push_str(
+        "/* One name of fs_rename() or fs_link(): `len` bytes of path at the address\n\
+         * `path`, resolved from `dirfd` as fs_open() resolves a path. A length outside\n\
+         * 1..=TAIRIX_FS_PATH_MAX is rejected with TAIRIX_E_LENGTH_OUT_OF_RANGE and a\n\
+         * zero address with TAIRIX_E_BAD_ALIGNMENT. Encoded little-endian. */\n",
+    );
+    let _ = writeln!(out, "#define TAIRIX_PATH_AT_LEN {}u", PathAt::WIRE_LEN);
+    out.push_str(
+        "typedef struct tairix_path_at {\n\
+         \x20   uint32_t dirfd;\n\
+         \x20   uint32_t len;\n\
+         \x20   uint64_t path;\n\
+         } tairix_path_at_t;\n\n",
+    );
+
+    out.push_str(
+        "/* What fs_unlink() and fs_rename() expect of the node they act on, every field\n\
+         * as fs_stat() reports it, the node's volume and its number there first. An\n\
+         * expectation of the node alone sets `volume` and `node` and leaves every\n\
+         * other field 0, else the call is rejected with TAIRIX_E_OUT_OF_RANGE; a\n\
+         * stamp's nanoseconds at or above one second are rejected with\n\
+         * TAIRIX_E_TIMESTAMP_OUT_OF_RANGE. Encoded little-endian. */\n",
     );
     let _ = writeln!(
         out,
-        "#define TAIRIX_RENAME_FLAG_NO_REPLACE {:#x}u",
-        RenameFlags::NO_REPLACE.bits()
+        "#define TAIRIX_NODE_EXPECT_LEN {}u",
+        NodeExpect::WIRE_LEN
     );
-    out.push('\n');
+    out.push_str(
+        "typedef struct tairix_node_expect {\n\
+         \x20   uint8_t volume[16];\n\
+         \x20   uint64_t node;\n\
+         \x20   uint64_t content_gen;\n\
+         \x20   uint64_t size;\n\
+         \x20   int64_t modified_secs;\n\
+         \x20   int64_t changed_secs;\n\
+         \x20   uint32_t modified_nanos;\n\
+         \x20   uint32_t changed_nanos;\n\
+         } tairix_node_expect_t;\n\n",
+    );
+}
 
+/// Emit the value words, masks and bounds of the remaining calls.
+fn emit_fs_values(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::FS_OWNER_UNCHANGED;
     out.push_str(
         "/* fs_realpath() mode (uint32_t). The three readings are alternatives, so this is\n\
          * one value rather than bits, and any other value is rejected with\n\
@@ -3452,12 +3588,33 @@ fn emit_fs_contract(out: &mut String) {
     out.push('\n');
 
     out.push_str(
-        "/* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the\n\
-         * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode\n\
-         * carrying any higher bit (a file-type bit, say) is rejected with\n\
-         * TAIRIX_E_OUT_OF_RANGE, never silently masked. */\n",
+        "/* Permission-bit mask of the `mode` argument (uint32_t) fs_set_mode(),\n\
+         * fs_open() and fs_mkdir() take: the owner/group/other rwx triads plus the\n\
+         * setuid/setgid/sticky bits. A mode carrying any higher bit (a file-type bit,\n\
+         * say) is rejected with TAIRIX_E_OUT_OF_RANGE, never silently masked. A create\n\
+         * is born with its mode less the caller's file mode creation mask, and\n\
+         * fs_open() rejects a non-zero mode without TAIRIX_OPEN_FLAG_CREATE. */\n",
     );
     let _ = writeln!(out, "#define TAIRIX_FS_MODE_MASK {FS_MODE_MASK:#x}u");
+    out.push('\n');
+
+    out.push_str(
+        "/* fs_set_owner() owner or group (uint32_t) that leaves that field as it is. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_FS_OWNER_UNCHANGED {FS_OWNER_UNCHANGED:#x}u"
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* fs_umask() mask (uint32_t): the permission bits the caller's creates\n\
+         * withhold, at most TAIRIX_FS_UMASK_BITS, or TAIRIX_FS_UMASK_QUERY to read the\n\
+         * mask without changing it; any other value is rejected with\n\
+         * TAIRIX_E_OUT_OF_RANGE. The call returns the mask held before. */\n",
+    );
+    let _ = writeln!(out, "#define TAIRIX_FS_UMASK_BITS {FS_UMASK_BITS:#x}u");
+    let _ = writeln!(out, "#define TAIRIX_FS_UMASK_QUERY {FS_UMASK_QUERY:#x}u");
     out.push('\n');
 
     out.push_str(
@@ -3795,6 +3952,12 @@ fn emit_spawn_attach_contract(out: &mut String) {
          * on any other spawn is refused. */\n",
     );
     out.push_str(
+        "/* Working directory: a tairix_path_at_t naming the directory the child\n\
+         * starts in, resolved as the child from where the path starts for the\n\
+         * caller and refused with the resolution's error when the child may not\n\
+         * search it; all zero shares the caller's. A SANDBOX spawn names none. */\n",
+    );
+    out.push_str(
         "typedef struct tairix_fd_wire {\n\
          \x20   uint32_t kind;\n\
          \x20   uint32_t value;\n\
@@ -3816,7 +3979,9 @@ fn emit_spawn_attach_contract(out: &mut String) {
         "    tairix_resource_limit_t limits[{}];",
         tairix_abi::LimitKind::COUNT
     );
-    out.push_str("    uint64_t share;\n} tairix_spawn_attach_t;\n\n");
+    out.push_str(
+        "    uint64_t share;\n    tairix_path_at_t working_directory;\n} tairix_spawn_attach_t;\n\n",
+    );
 }
 
 /// `tairix_abi.h` — the umbrella header that includes every module header.
@@ -4158,9 +4323,23 @@ mod tests {
             )),
             "fs_unlink directory flag bit: {h}"
         );
+        for (name, flag) in [
+            ("EXPECT_NODE", UnlinkFlags::EXPECT_NODE),
+            ("EXPECT_UNCHANGED", UnlinkFlags::EXPECT_UNCHANGED),
+        ] {
+            assert!(
+                h.contains(&format!(
+                    "#define TAIRIX_UNLINK_FLAG_{name} {:#x}u",
+                    flag.bits()
+                )),
+                "fs_unlink {name} flag bit: {h}"
+            );
+        }
         assert!(
-            h.contains("int32_t tairix_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);"),
-            "fs_unlink prototype carries the flags argument: {h}"
+            h.contains(
+                "int32_t tairix_sys_fs_unlink(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, void * a4);"
+            ),
+            "fs_unlink prototype carries the flags and expectation arguments: {h}"
         );
         assert!(
             h.contains(&format!(
@@ -4170,10 +4349,8 @@ mod tests {
             "fs_link follow flag bit: {h}"
         );
         assert!(
-            h.contains(
-                "int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
-            ),
-            "fs_link prototype carries the flags argument: {h}"
+            h.contains("int32_t tairix_sys_fs_link(void * a0, void * a1, uint32_t a2);"),
+            "fs_link prototype carries both names and the flags argument: {h}"
         );
         assert!(
             h.contains(&format!(
@@ -4183,11 +4360,25 @@ mod tests {
             "fs_rename no-replace flag bit: {h}"
         );
         assert!(
-            h.contains(
-                "int32_t tairix_sys_fs_rename(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
-            ),
-            "fs_rename prototype carries the flags argument: {h}"
+            h.contains(&format!(
+                "#define TAIRIX_RENAME_FLAG_EXPECT_NODE {:#x}u",
+                RenameFlags::EXPECT_NODE.bits()
+            )),
+            "fs_rename expect-node flag bit: {h}"
         );
+        assert!(
+            h.contains(
+                "int32_t tairix_sys_fs_rename(void * a0, void * a1, uint32_t a2, void * a3);"
+            ),
+            "fs_rename prototype carries the flags and expectation arguments: {h}"
+        );
+    }
+
+    /// `fs_realpath()`'s mode and `fs_seek_region()`'s region kind are read from
+    /// `lib/abi`, and their prototypes carry the word.
+    #[test]
+    fn syscall_header_pins_the_filesystem_value_words() {
+        let h = body("tairix_syscall.h");
         for (name, mode) in [
             ("EXISTING", RealpathMode::Existing),
             ("FINAL", RealpathMode::Final),
@@ -4203,7 +4394,7 @@ mod tests {
         }
         assert!(
             h.contains(
-                "uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
+                "uint64_t tairix_sys_fs_realpath(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4, uint32_t a5);"
             ),
             "fs_realpath prototype carries the mode argument: {h}"
         );
@@ -4225,6 +4416,169 @@ mod tests {
         assert!(
             h.contains("int32_t tairix_sys_fs_punch(uint32_t a0, uint64_t a1, uint64_t a2);"),
             "fs_punch prototype: {h}"
+        );
+    }
+
+    /// A create's mode and the umask word are read from `lib/abi`, and each
+    /// call's prototype carries its `uint32_t` mode or mask.
+    #[test]
+    fn syscall_header_carries_the_create_mode_contract() {
+        let h = body("tairix_syscall.h");
+        for line in [
+            format!("#define TAIRIX_FS_UMASK_BITS {FS_UMASK_BITS:#x}u"),
+            format!("#define TAIRIX_FS_UMASK_QUERY {FS_UMASK_QUERY:#x}u"),
+            String::from(
+                "uint64_t tairix_sys_fs_open(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4);",
+            ),
+            String::from(
+                "int32_t tairix_sys_fs_mkdir(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3);",
+            ),
+            String::from("uint64_t tairix_sys_fs_umask(uint32_t a0);"),
+        ] {
+            assert!(h.contains(&line), "{line} missing: {h}");
+        }
+    }
+
+    /// The descriptor-relative contract is read from `lib/abi`, and each
+    /// call's prototype carries its `dirfd` and flags slots, so a C caller
+    /// can neither name a stale bit nor drop an argument.
+    #[test]
+    fn syscall_header_carries_the_descriptor_relative_contract() {
+        use tairix_abi::{
+            Access, AtFlags, NodeExpect, PathAt, FD_CWD, FS_OWNER_UNCHANGED, FS_PATH_MAX,
+            FS_SYMLINK_MAX, STD_STREAM_COUNT,
+        };
+        let h = body("tairix_syscall.h");
+        for line in [
+            format!("#define TAIRIX_FS_PATH_MAX {FS_PATH_MAX}u"),
+            format!("#define TAIRIX_FS_SYMLINK_MAX {FS_SYMLINK_MAX}u"),
+            format!("#define TAIRIX_STD_STREAM_COUNT {STD_STREAM_COUNT}u"),
+            format!("#define TAIRIX_FD_CWD {FD_CWD:#x}u"),
+            format!(
+                "#define TAIRIX_AT_FLAG_NO_FOLLOW {:#x}u",
+                AtFlags::NO_FOLLOW.bits()
+            ),
+            format!(
+                "#define TAIRIX_AT_FLAG_EMPTY_PATH {:#x}u",
+                AtFlags::EMPTY_PATH.bits()
+            ),
+            format!("#define TAIRIX_ACCESS_READ {:#x}u", Access::READ.bits()),
+            format!("#define TAIRIX_ACCESS_WRITE {:#x}u", Access::WRITE.bits()),
+            format!("#define TAIRIX_ACCESS_EXEC {:#x}u", Access::EXEC.bits()),
+            format!("#define TAIRIX_PATH_AT_LEN {}u", PathAt::WIRE_LEN),
+            format!("#define TAIRIX_NODE_EXPECT_LEN {}u", NodeExpect::WIRE_LEN),
+            format!("#define TAIRIX_FS_OWNER_UNCHANGED {FS_OWNER_UNCHANGED:#x}u"),
+            String::from(
+                "int32_t tairix_sys_fs_chdir(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3);",
+            ),
+            String::from(
+                "int32_t tairix_sys_fs_access(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4);",
+            ),
+            String::from(
+                "int32_t tairix_sys_fs_set_owner(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4, uint32_t a5);",
+            ),
+            String::from(
+                "int32_t tairix_sys_fs_symlink(void * a0, uintptr_t a1, uint32_t a2, void * a3, uintptr_t a4);",
+            ),
+            String::from(
+                "uint64_t tairix_sys_fs_readlink(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);",
+            ),
+            String::from(
+                "uint64_t tairix_sys_fs_attr_get(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);",
+            ),
+            String::from(
+                "int32_t tairix_sys_fs_attr_set(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);",
+            ),
+            String::from(
+                "uint64_t tairix_sys_fs_attr_list(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);",
+            ),
+            String::from(
+                "int32_t tairix_sys_fs_attr_remove(uint32_t a0, void * a1, uintptr_t a2);",
+            ),
+        ] {
+            assert!(h.contains(&line), "{line} missing: {h}");
+        }
+    }
+
+    /// A pointer a call may omit is still a pointer to C, so the prototype is
+    /// the one the stub implementing it has on every target, 32-bit included.
+    #[test]
+    fn a_pointer_a_call_may_omit_is_a_pointer_in_c() {
+        let h = body("tairix_syscall.h");
+        assert!(
+            h.contains(
+                "uint64_t tairix_sys_spawn(void * a0, uintptr_t a1, void * a2, uintptr_t a3, void * a4, uintptr_t a5);"
+            ),
+            "spawn's optional blocks are pointers: {h}"
+        );
+    }
+
+    /// Each C record a path call reads is its wire encoding exactly: every
+    /// field where `lib/abi`'s encoder writes it, so a C caller fills the
+    /// struct and passes its address.
+    #[test]
+    fn path_call_records_lay_out_as_their_wire_encoding() {
+        use tairix_abi::{NodeExpect, PathAt};
+        fn at(wire: &[u8], field: &[u8]) -> usize {
+            wire.windows(field.len())
+                .position(|window| window == field)
+                .expect("each field's bytes are distinct")
+        }
+        let h = body("tairix_syscall.h");
+
+        let path_at = PathAt {
+            dirfd: 0x0403_0201,
+            len: 0x0807_0605,
+            path: 0x100f_0e0d_0c0b_0a09,
+        };
+        let wire = path_at.to_le_bytes();
+        assert_eq!(
+            c_field_offsets(&h, "tairix_path_at"),
+            named(&[
+                ("dirfd", at(&wire, &path_at.dirfd.to_le_bytes())),
+                ("len", at(&wire, &path_at.len.to_le_bytes())),
+                ("path", at(&wire, &path_at.path.to_le_bytes())),
+            ])
+        );
+
+        let expect = NodeExpect {
+            id: tairix_abi::FileId {
+                volume: [
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                    0x0e, 0x0f, 0x10,
+                ],
+                node: 0x1817_1615_1413_1211,
+            },
+            content_gen: 0x2827_2625_2423_2221,
+            size: 0x3837_3635_3433_3231,
+            modified: Time64::new(0x4847_4645_4443_4241, 0x0353_5251).expect("canonical"),
+            changed: Time64::new(0x6867_6665_6463_6261, 0x0373_7271).expect("canonical"),
+        };
+        let wire = expect.to_le_bytes();
+        assert_eq!(
+            c_field_offsets(&h, "tairix_node_expect"),
+            named(&[
+                ("volume", at(&wire, &expect.id.volume)),
+                ("node", at(&wire, &expect.id.node.to_le_bytes())),
+                ("content_gen", at(&wire, &expect.content_gen.to_le_bytes())),
+                ("size", at(&wire, &expect.size.to_le_bytes())),
+                (
+                    "modified_secs",
+                    at(&wire, &expect.modified.secs().to_le_bytes()),
+                ),
+                (
+                    "changed_secs",
+                    at(&wire, &expect.changed.secs().to_le_bytes()),
+                ),
+                (
+                    "modified_nanos",
+                    at(&wire, &expect.modified.subsec_nanos().to_le_bytes()),
+                ),
+                (
+                    "changed_nanos",
+                    at(&wire, &expect.changed.subsec_nanos().to_le_bytes()),
+                ),
+            ])
         );
     }
 
@@ -4263,8 +4617,10 @@ mod tests {
             "fs_set_mode permission mask: {h}"
         );
         assert!(
-            h.contains("int32_t tairix_sys_fs_set_mode(void * a0, uintptr_t a1, uint32_t a2);"),
-            "fs_set_mode prototype carries the mode argument: {h}"
+            h.contains(
+                "int32_t tairix_sys_fs_set_mode(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4);"
+            ),
+            "fs_set_mode prototype carries the mode and flags arguments: {h}"
         );
         // The signal() control-signal discriminants are read from lib/abi,
         // never re-typed, and the prototype carries its (pid, signal) args.
@@ -5303,6 +5659,7 @@ mod tests {
             named(&[
                 ("kind", offset_of!(NodeInfo, kind)),
                 ("nlink", offset_of!(NodeInfo, nlink)),
+                ("ino", offset_of!(NodeInfo, ino)),
                 ("size", offset_of!(NodeInfo, size)),
                 ("allocated", offset_of!(NodeInfo, allocated)),
                 ("times", offset_of!(NodeInfo, times)),
@@ -5355,8 +5712,8 @@ mod tests {
             let (width, align) = match ty {
                 "uint8_t" => (1, 1),
                 "uint16_t" => (2, 2),
-                "uint32_t" => (4, 4),
-                "uint64_t" => (8, 8),
+                "uint32_t" | "int32_t" => (4, 4),
+                "uint64_t" | "int64_t" => (8, 8),
                 other => nested.iter().find(|(name, ..)| *name == other).map_or_else(
                     || panic!("`{other}` in {tag} has no stated layout"),
                     |&(_, size, align)| (size, align),
@@ -5616,7 +5973,7 @@ mod tests {
             (
                 "UserDirectoryRecord",
                 core::mem::size_of::<UserDirectoryRecord>(),
-                40,
+                44,
                 core::mem::align_of::<UserDirectoryRecord>(),
                 4,
             ),
@@ -5914,14 +6271,14 @@ mod tests {
             ("tairix_driver.h", "} tairix_buffer_id_t;", size_of::<BufferId>(), 4, align_of::<BufferId>(), 4),
             ("tairix_driver.h", "} tairix_damage_rect_t;", size_of::<DamageRect>(), 16, align_of::<DamageRect>(), 4),
             ("tairix_driver.h", "} tairix_hosted_console_t;", size_of::<HostedConsole>(), 16, align_of::<HostedConsole>(), 8),
-            ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 96, align_of::<NodeInfo>(), 8),
-            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 112, align_of::<DirEntry>(), 8),
+            ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 104, align_of::<NodeInfo>(), 8),
+            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 120, align_of::<DirEntry>(), 8),
             ("tairix_driver.h", "} tairix_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
             ("tairix_driver.h", "} tairix_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
             ("tairix_driver.h", "} tairix_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),
             ("tairix_rlimit.h", "} tairix_resource_limit_t;", size_of::<ResourceLimit>(), 16, align_of::<ResourceLimit>(), 8),
             ("tairix_sysinfo.h", "} tairix_resource_limit_record_t;", size_of::<ResourceLimitRecord>(), 32, align_of::<ResourceLimitRecord>(), 8),
-            ("tairix_sysinfo.h", "} tairix_user_directory_record_t;", size_of::<UserDirectoryRecord>(), 40, align_of::<UserDirectoryRecord>(), 4),
+            ("tairix_sysinfo.h", "} tairix_user_directory_record_t;", size_of::<UserDirectoryRecord>(), 44, align_of::<UserDirectoryRecord>(), 4),
             ("tairix_sysinfo.h", "} tairix_dma_unit_record_t;", size_of::<DmaUnitRecord>(), 40, align_of::<DmaUnitRecord>(), 8),
             ("tairix_sysinfo.h", "} tairix_dma_group_record_t;", size_of::<DmaGroupRecord>(), 24, align_of::<DmaGroupRecord>(), 8),
             ("tairix_sysinfo.h", "} tairix_dma_node_record_t;", size_of::<DmaNodeRecord>(), 40, align_of::<DmaNodeRecord>(), 8),
@@ -6087,6 +6444,7 @@ mod tests {
                     "    uint32_t limits_reserved;\n",
                     "    tairix_resource_limit_t limits[{}];\n",
                     "    uint64_t share;\n",
+                    "    tairix_path_at_t working_directory;\n",
                     "}} tairix_spawn_attach_t;",
                 ),
                 tairix_abi::LimitKind::COUNT
@@ -6096,7 +6454,7 @@ mod tests {
         assert!(h.contains("#include \"tairix_rlimit.h\""), "{h}");
         // The struct is the block: its members sum to the encoded length.
         assert_eq!(
-            4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16 + 4 + 4 + tairix_abi::LimitKind::COUNT * 16 + 8,
+            4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16 + 4 + 4 + tairix_abi::LimitKind::COUNT * 16 + 8 + 16,
             tairix_abi::SPAWN_ATTACH_LEN
         );
     }

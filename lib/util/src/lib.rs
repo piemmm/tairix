@@ -1,109 +1,59 @@
 //! Strictly justified shared utilities.
 //!
-//! Per every item in this crate must be used by at least
-//! two independent callers outside `lib/util` itself. The crate exists in
-//! Stage 1 as the *destination* for such items as they are extracted out
-//! of subsequent stages — adding speculative helpers ahead of demand is
-//! explicitly forbidden.
+//! Every item is used by at least two independent callers outside this crate,
+//! and `PLAN.md`'s `lib/util` table names them: an item moves here when its
+//! second caller appears, never ahead of demand. Members hold text and buffers
+//! on the heap, so a crate that must link no allocator takes nothing from here.
 //!
-//! Members:
-//!
-//! * [`conf`] — the `#`-comment line grammar every line-oriented
-//!   configuration store shares, consumed by `lib/sysconfig`,
-//!   `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`,
-//!   `lib/proglib`, `lib/syntax`, and `userland/system/init`'s startup list,
-//!   so a comment is recognised the same way in all of them.
-//! * [`cfloat`] — C-locale `printf(3)` floating-point rendering, consumed
-//!   by the `seq` and `printf` command apps (`plans/APPS.md`), so C's
-//!   rounding, flag, and padding rules exist in exactly one place.
-//! * [`cnum`] — C-locale `strtod(3)` scanning (decimal and hexadecimal
-//!   floats, `inf`/`nan`, longest-prefix `endptr` semantics), consumed by
-//!   the `seq` and `printf` command apps, so C's number grammar and its
-//!   exact one-step rounding exist in exactly one place.
-//! * [`mathf`] — bounded `f64` maths (`floor`/`round`, `sqrt`, `sin`/`cos`,
-//!   `atan2`) for `no_std` geometry, consumed by the glyph rasteriser
-//!   (`lib/fontface`) and the SVG decoder (`lib/svg`), so an external libm
-//!   stays out of the trusted computing base and both round and rotate
-//!   identically; and [`mathf::Phasor`], a sine swept along a row a turn at a
-//!   time, consumed by the ribbon of light (`lib/ribbon`) and the desktop
-//!   session's retro games screensaver.
-//! * [`retry`] — the bounded, doubling one-shot schedule a reader climbs when
-//!   the thing it needs appears after it starts and no readiness event says
-//!   so, consumed by the clock service (its configuration store and RTC) and
-//!   by the service manager (the administrator enrolment overrides on the
-//!   encrypted root), so one boot-order problem has one schedule.
-//! * [`fmt`] — no-allocation numeric formatters for audit-log fields.
-//!   Promoted from `kernel/sec` in Stage 2.5 (`kernel/ipc`) once a second
-//!   caller materialised; consumed by `kernel/sec` and `kernel/ipc`.
-//! * [`size`] — GNU coreutils-style block-size parsing and human-readable
-//!   size formatting, consumed by the `du` and `df` command apps
-//!   (`plans/APPS.md`), so the size grammar and ceiling-rounding rules
-//!   exist in exactly one place.
-//! * [`count`] — GNU coreutils count-with-multiplier-suffix parsing
-//!   (`-c`/`-n` values), consumed by the `head` and `tail` command apps
-//!   (`plans/APPS.md` §12.1 Stage C), so the GNU multiplier alphabet
-//!   exists in exactly one place.
-//! * [`seconds`] — the decimal-seconds operand a network tool's timing
-//!   option takes, as nanoseconds, consumed by the `ping` and `traceroute`
-//!   command apps, so the grammar and its bound exist in exactly one place.
-//! * [`secret`] — erasing a password/key buffer so the optimiser cannot
-//!   delete the erasure, consumed by the `lib/rt` elevation client, the
-//!   shell's `elevate` builtin, the login supervisor's elevation broker,
-//!   and `lib/controls`' masked text field, so "the secret is gone" means
-//!   the same thing everywhere a credential is marshalled.
+//! * [`argv`] — a word argument (`--total=auto`) resolved to its one choice
+//!   or refused with the valid ones listed.
+//! * [`banner`] — the `==> name <==` banner before each of several sources.
+//! * [`cfloat`] — C-locale `printf(3)` floating-point rendering.
+//! * [`cnum`] — C-locale `strtod(3)` scanning: decimal and hexadecimal floats,
+//!   `inf`/`nan`, and longest-prefix `endptr` semantics.
+//! * [`conf`] — the `#`-comment line grammar every line-oriented configuration
+//!   store shares, and the shape of the values a key accepts.
+//! * [`count`] — GNU's count grammar for `-c`/`-n` values, multiplier suffixes
+//!   included.
+//! * [`defer`] — handing slow work off an interactive loop: `JobDesk`,
+//!   latest-wins with at most one job in flight, and `JobQueue`, every request
+//!   answered in turn.
 //! * [`fallible`] — reserving a data-sized buffer before filling it, so
-//!   exhaustion is a refusal rather than an allocation abort, consumed by
-//!   the rasteriser (`lib/raster`), the compositor (`userland/gui/wm`), and
-//!   the PNG decoder (`lib/image`), so every buffer a picture's size decides
-//!   is reserved the same way.
-//! * [`defer`] — handing slow work off an interactive loop (`JobDesk`:
-//!   latest-wins, at most one in flight; `JobQueue`: every request answered
-//!   in turn), consumed by the terminal's and the desktop session's settings
-//!   publishers, the session's program-catalogue scan and file calls, the
-//!   file manager's bundle scan and folder-occupancy probes, and the text
-//!   editor's document queue, so no surface invents a second deferral scheme.
-//! * [`hex`] — two hex digits a byte for digests, keys and seeds, consumed by
-//!   the build's signing key set, `tools/cc`'s checksum pins and
-//!   `tools/mkimage`'s root key file.
-//! * [`hexdump`] — the canonical offset/hex/ASCII dump row, consumed by
-//!   `fstree` and the text editor's hex view.
-//! * [`join`] — one bounded line from a list, whole items then how many were
-//!   left out, consumed by `lib/procinfo`'s multi-valued readings and the
-//!   network map's host tooltip.
-//! * [`lanes`] — finding a byte eight lanes of a word at a time, consumed
-//!   by `lib/collections` and the text editor.
-//! * [`output`] — the byte stream a command engine writes through, consumed
-//!   by the command apps' engines and implemented for the standard streams
-//!   by `lib/rt`.
-//! * [`quote`] — GNU coreutils' quoting styles, consumed by `ls`'s listing,
-//!   `printf`'s `%q` and every command app that names a file in a message,
-//!   so a name a foreign volume carries is written by one rule and never
-//!   reaches a terminal raw.
+//!   exhaustion is a refusal rather than an allocation abort.
+//! * [`fmt`] — numeric formatters that allocate nothing, for structured-log
+//!   fields.
+//! * [`getopt`] — a command line read as GNU's `getopt_long` reads it, from a
+//!   table of the tool's options, and refused in its words.
+//! * [`hex`] — two hex digits a byte, for digests, keys and seeds.
+//! * [`hexdump`] — the canonical offset/hex/ASCII dump row.
+//! * [`join`] — one bounded line from a list: whole items, then how many were
+//!   left out.
+//! * [`lanes`] — finding a byte eight lanes of a word at a time.
+//! * [`mathf`] — bounded, total `f64` maths for `no_std` geometry, the same
+//!   bits on every target.
+//! * [`mode`] — a file mode as `chmod`, `mkdir -m` and `umask` spell it, the
+//!   bits it gives a node, and the modes a new file and directory start from.
+//! * [`output`] — the byte stream a command engine writes through, and the run
+//!   that reports each failure it carries past.
+//! * [`quote`] — GNU coreutils' quoting styles, and the three ways a command
+//!   names text from elsewhere: inside a sentence, leading a `name: reason`
+//!   line, and on its standard output.
 //! * [`report`] — a file's structure as a person reads it, bounded against the
-//!   untrusted bytes it is built from, consumed by the picture reports
-//!   (`lib/image`) and the executable reports (`lib/binfmt`), so every report a
-//!   viewer shows is cut, escaped and capped by one rule.
-//! * [`utf8`] — which bytes begin a UTF-8 sequence and its length, consumed
-//!   by `lib/syntax`, `wc`, and the text editor, so a hand-written decoder never
-//!   admits a lead the standard rejects; and which characters hide or reorder
-//!   the text they are shown with, consumed by the text editor, `lib/net`'s
-//!   peer-label display, and `lib/devids`' vetting filter, so text from
-//!   elsewhere is escaped by one rule.
-//! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
-//!   windows, consumed by the `head` and `tail` command apps
-//!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
-//!   mechanics exist in exactly one place.
+//!   untrusted bytes it is built from.
+//! * [`retry`] — a bounded doubling schedule for waiting on something with no
+//!   readiness event, and a capped doubling delay between restarts.
+//! * [`seconds`] — the decimal-seconds operand a network tool's timing option
+//!   takes, as nanoseconds.
+//! * [`secret`] — erasing secret bytes so the optimiser cannot delete the
+//!   erasure.
+//! * [`size`] — GNU coreutils' block-size grammar and size renderings, and the
+//!   desktop's prose rendering of the same quantity.
 //! * [`space`] — three-dimensional vectors, orthonormal frames and rigid
-//!   poses, consumed by the ray tracer (`lib/raytrace`) and the desktop
-//!   session's retro games screensaver, so both turn and place things with
-//!   one arithmetic.
-//!
-//! The flat device-tree (FDT) parser that once lived here has been folded
-//! into the single shared `lib/fdt` reader, which now owns the generic
-//! node-iteration API every device-tree consumer uses.
-//!
-//! Promoting code into this crate requires a `PLAN.md` note documenting
-//! the two-or-more concrete callers.
+//!   poses.
+//! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines" windows.
+//! * [`utf8`] — which bytes begin a UTF-8 sequence, which characters hide or
+//!   reorder the text around them, and the letters and order a reader looks
+//!   names up by.
 
 #![no_std]
 // `mathf` takes the correctly rounded square root and rounding `core` exposes
@@ -117,6 +67,7 @@
 extern crate alloc;
 
 pub mod argv;
+pub mod banner;
 pub mod cfloat;
 pub mod cnum;
 pub mod conf;
@@ -124,11 +75,13 @@ pub mod count;
 pub mod defer;
 pub mod fallible;
 pub mod fmt;
+pub mod getopt;
 pub mod hex;
 pub mod hexdump;
 pub mod join;
 pub mod lanes;
 pub mod mathf;
+pub mod mode;
 pub mod output;
 pub mod quote;
 pub mod report;

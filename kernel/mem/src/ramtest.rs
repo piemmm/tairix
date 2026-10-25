@@ -865,7 +865,7 @@ fn emit_region_minus_excludes(
 /// own console cell grids and audit ring included), DMA buffers a device may
 /// still map non-cacheably, and all driver and userland memory — because the
 /// allocator marks them used. Writing such an in-use frame races its owner and
-/// can wedge the machine; that is exactly what froze a real Raspberry Pi 4
+/// can wedge the machine; that is exactly what froze a real board
 /// (the sweep reached a live, non-cacheable DMA buffer the old boot-map
 /// snapshot still called "usable"). Testing only free RAM is the honest
 /// maximum-safe coverage, exactly as a running memtest86 cannot test its own
@@ -1623,7 +1623,7 @@ mod tests {
 
     #[test]
     fn snapshot_excludes_frames_the_allocator_handed_out() {
-        // The core Raspberry Pi 4 regression: a frame the allocator has handed
+        // The core regression: a frame the allocator has handed
         // out (a live DMA buffer, say) must never appear in the sweep's
         // free-run snapshot, even though the boot map still calls its whole
         // region "usable". Overwriting such an in-use, possibly non-cacheably

@@ -6,7 +6,8 @@
 //! The invariants:
 //!
 //! * no line — however hostile its quoting, braces, brackets or groups, and
-//!   under any combination of the glob options — panics or fails to finish;
+//!   under every combination of the glob options, each line taking the next
+//!   in turn — panics or fails to finish;
 //! * every command reaching the process host has a program name, and the
 //!   words it carries stay within the expansion bound.
 //!
@@ -17,7 +18,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use tairix_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileId, FileKind};
 use tairix_elsh::{
     Console, DirEntryInfo, DirLister, GlobFs, LaunchError, LaunchSpec, Pid, ProcessHost, Shell,
     Signal, WaitOutcome,
@@ -26,10 +27,6 @@ use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 3_000;
-
-/// The most argument text one launched command may carry: the startup-block
-/// bound the expansion is held to.
-const ARGV_LIMIT: usize = 1 << 24;
 
 /// A small tree, every path absolute: directories, files, a hidden entry,
 /// a link to a directory, a dangling link and a link loop.
@@ -177,7 +174,11 @@ impl ProcessHost for Host {
         for command in spec.commands {
             assert!(!command.argv.is_empty(), "a command with no program name");
             let text: usize = command.argv.iter().map(String::len).sum();
-            assert!(text <= ARGV_LIMIT, "an argument vector past the bound");
+            assert!(
+                u64::try_from(text)
+                    .is_ok_and(|text| text <= tairix_abi::PROCESS_START_MAX_TOTAL_LEN),
+                "an argument vector past the startup block's bound"
+            );
         }
         *self.launches.borrow_mut() += 1;
         Ok(Pid::new(1))
@@ -197,9 +198,23 @@ impl ProcessHost for Host {
         None
     }
 
-    fn change_directory(&self, _path: &str) -> Result<String, Errno> {
+    fn change_directory(&self, _path: &str) -> Result<(), Errno> {
         Err(Errno::NotFound)
     }
+
+    fn working_directory(&self) -> Result<String, Errno> {
+        Err(Errno::NotFound)
+    }
+
+    fn directory_identity(&self, _path: &str) -> Result<FileId, Errno> {
+        Err(Errno::NotFound)
+    }
+
+    fn umask(&self) -> u32 {
+        0o022
+    }
+
+    fn set_umask(&self, _mask: u32) {}
 }
 
 /// Pieces a hostile line is spliced from: every expansion's syntax, quoting,
@@ -222,6 +237,8 @@ const PIECES: &[&str] = &[
     "$",
     "$x",
     "${x}",
+    "$(",
+    "`",
     "\"",
     "'",
     "\\",
@@ -263,6 +280,15 @@ const OPTIONS: &[&str] = &[
     "nullglob",
 ];
 
+/// Every set of `OPTIONS` with `noglob` on or off, each line taking the next
+/// in turn.
+const COMBINATIONS: u64 = 1 << (OPTIONS.len() + 1);
+
+const _: () = assert!(
+    SMOKE_ITERATIONS >= COMBINATIONS,
+    "the smoke sweep reaches every combination"
+);
+
 #[test]
 fn expansion_never_panics_and_stays_bounded() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -278,12 +304,13 @@ fn expansion_never_panics_and_stays_bounded() {
     let mut iteration: u64 = 0;
     loop {
         let mut shell = Shell::new(&host, &console).with_filesystem(&tree);
-        for option in OPTIONS {
-            if rng.below(2) == 0 {
+        let combination = iteration % COMBINATIONS;
+        for (bit, option) in OPTIONS.iter().enumerate() {
+            if (combination >> bit) & 1 == 1 {
                 let _ = shell.run_line(&format!("shopt -s {option}"));
             }
         }
-        if rng.below(4) == 0 {
+        if (combination >> OPTIONS.len()) & 1 == 1 {
             let _ = shell.run_line("shopt -o -s noglob");
         }
         let _ = shell.run_line("x='*.txt'");
@@ -293,6 +320,9 @@ fn expansion_never_panics_and_stays_bounded() {
             }
             1 => {
                 let _ = shell.run_line("GLOBIGNORE='[z-a]:.'");
+            }
+            2 => {
+                let _ = shell.run_line("GLOBIGNORE='@(*.o|d/e)'");
             }
             _ => {}
         }

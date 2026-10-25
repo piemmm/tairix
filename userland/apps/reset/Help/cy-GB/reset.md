@@ -31,8 +31,8 @@ reolaethau o gwbl (mae `TERM` anhysbys yn dirywio i'r sylfaen «dumb»).
 ## EXIT STATUS
 
 - `0` — adferwyd y derfynell.
-- `1` — ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni ellid cyflwyno'r allbwn. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -84,10 +84,8 @@ mod program {
         }
 
         fn write(&self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-            let flags = OpenFlags::WRITE
-                .union(OpenFlags::CREATE)
-                .union(OpenFlags::TRUNCATE);
-            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            let file = tairix_rt::create(path.as_bytes(), tairix_abi::fs::FS_NEW_FILE_MODE)
+                .map_err(Errno::from_syscall)?;
             // `write_at` already loops over short writes; a partial count
             // means the backing stopped accepting bytes, which must fail
             // closed rather than report a truncated file as saved.
@@ -103,22 +101,19 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on a clean exit (or served short help), `1` on a
-    /// failed initial load or a terminal failure, `2` on a usage error (a
-    /// malformed argument vector, an unrecognised option, or a second
-    /// operand).
+    /// failed initial load, a terminal failure, or a command line that was
+    /// not understood (a malformed argument vector, an unrecognised option,
+    /// or a second operand).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("edit") else {
+            return tairix_help::MISUSE;
         };
         let path = match parse(&arguments) {
             Ok(Command::Run { path }) => path,
             Ok(Command::Help) => return tairix_help::print_own_short_help("edit", Some(USAGE)),
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
+            Err(err) => {
+                tairix_help::report_misuse("edit", &err);
+                return tairix_help::MISUSE;
             }
         };
 
@@ -129,7 +124,7 @@ mod program {
             // screen is taken over — never an empty buffer silently opened
             // over real data.
             if let Err(reason) = model.open_initial(&fs, path) {
-                write_stderr_line(&alloc::format!("edit: {reason}"));
+                write_stderr_line(format_args!("edit: {reason}"));
                 return 1;
             }
         }
@@ -171,7 +166,7 @@ mod program {
         // the message is not torn down with the alternate screen. A silent
         // abnormal exit tells the user nothing.
         if let Err(err) = &result {
-            write_stderr_line(&alloc::format!("edit: {err}"));
+            write_stderr_line(format_args!("edit: {err}"));
         } else if entered.is_err() || left.is_err() {
             write_stderr_line("edit: terminal error: the screen could not be switched");
         }

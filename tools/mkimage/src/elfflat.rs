@@ -29,9 +29,9 @@ pub const VIRT_KERNEL_LOAD_ADDR: u64 = 0x4020_0000;
 /// generated DTB it passes in `x0`.
 const VIRT_RAM_BASE: u64 = 0x4000_0000;
 
-/// Byte length of the arm64 Linux `Image` header
-/// [`build_virt_boot_image`] prepends (Linux
-/// `Documentation/arch/arm64/booting.rst`).
+/// Byte length of the arm64 `Image` header [`build_virt_boot_image`]
+/// prepends (the layout U-Boot's `booti` reads, `arch/arm/lib/image.c`,
+/// GPL-2.0-or-later).
 const IMAGE_HEADER_LEN: usize = 64;
 
 /// `code0` of the emitted `Image` header: the AArch64 `b #64`

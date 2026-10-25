@@ -46,9 +46,9 @@ stringa, quindi — diversamente da GNU `sleep` — non ha l'opzione
 
 - `0` — l'intervallo è trascorso, oppure è stato scritto un aiuto breve
   richiesto.
-- `1` — la scrittura dell'aiuto breve è fallita.
-- `2` — la riga di comando non è stata compresa (un'opzione sconosciuta, un
-  operando mancante o un intervallo di tempo non valido).
+- `1` — la scrittura dell'aiuto breve è fallita. Anche una riga di comando
+  non compresa (un'opzione sconosciuta, un operando mancante o un
+  intervallo di tempo non valido) termina con `1`.
 
 ## ENVIRONMENT
 

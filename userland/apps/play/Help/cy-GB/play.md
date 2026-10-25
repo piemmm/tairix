@@ -74,8 +74,8 @@ dorrwyd yn fyr, a chofnod `summary` ar y diwedd.
 ## EXIT STATUS
 
 - `0` — chwaraewyd pob ffeil, neu stopiwyd y chwarae heb hepgor yr un.
-- `1` — ni ellid chwarae ffeil, neu ni allai'r chwarae fynd yn ei flaen.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni ellid chwarae ffeil, neu ni allai'r chwarae fynd yn ei flaen. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

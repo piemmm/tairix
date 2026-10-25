@@ -80,8 +80,8 @@ sur le flux d'information standard consultatif (fd 3).
 - `0` — l'exécution s'est achevée (les refus typés des travailleurs
   sont des résultats attendus et ne la font pas échouer).
 - `1` — un travailleur a réellement échoué, ou l'exécution n'a pas pu
-  être mise en place.
-- `2` — la ligne de commande n'a pas été comprise.
+  être mise en place. Une ligne de commande non comprise sort aussi avec
+  `1`.
 - `130` / `143` — `Ctrl-C` / `Terminate` a mis fin à l'exécution,
   après le démontage des travailleurs et la suppression des fichiers
   de travail.

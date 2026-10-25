@@ -140,6 +140,7 @@
   - [`tairix-users`](./lib/users.md)
   - [`tairix-util`](./lib/util.md)
   - [`tairix-virtio-input`](./lib/virtio_input.md)
+  - [`tairix-visible`](./lib/visible.md)
   - [`tairix-vt`](./lib/vt.md)
   - [`tairix-wallpaper`](./lib/wallpaper.md)
   - [`tairix-writeback`](./lib/writeback.md)

@@ -1,5 +1,5 @@
 //! `plans/NETWORK.md` N4e-riscv64 QEMU integration test: boot the production
-//! riscv64 (QEMU `virt` / SiFive) `tairix-kernel` pipeline against the shared
+//! riscv64 (QEMU `virt`) `tairix-kernel` pipeline against the shared
 //! whole-disk autoload-root image — whose always-readable `/System` volume
 //! carries the **kernel-signed virtio-net driver bundle** in its `Drivers/`
 //! store (cross-compiled for riscv64) alongside the input and display bundles

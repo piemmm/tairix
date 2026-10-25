@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, NodeTimes,
+    NodeSecurity, NodeTimes, Unpinned,
 };
 use tairix_abi::driver::DriverError;
 
@@ -179,6 +179,7 @@ impl FilesystemRead for MockStore {
         Ok(NodeInfo {
             kind: n.kind,
             nlink: 1,
+            ino: node.raw(),
             size: n.reported_size.unwrap_or(n.content.len() as u64),
             allocated: n.content.len() as u64,
             times: NodeTimes::default(),
@@ -193,6 +194,21 @@ impl FilesystemRead for MockStore {
             Some(id) => Ok(NodeId::from_raw(id)),
             None => Err(DriverError::NotFound),
         }
+    }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        let node = self.nodes.get(&dir.raw()).ok_or(DriverError::NotFound)?;
+        if node.kind != NodeKind::Directory {
+            return Err(DriverError::Unsupported);
+        }
+        if dir.raw() == ROOT_ID {
+            return Ok(dir);
+        }
+        self.nodes
+            .iter()
+            .find(|(_, n)| n.children.iter().any(|&(_, child)| child == dir.raw()))
+            .map(|(&id, _)| NodeId::from_raw(id))
+            .ok_or(DriverError::NotFound)
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
@@ -236,6 +252,18 @@ impl FilesystemRead for MockStore {
                 break;
             }
         }
+        Ok(())
+    }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.node_info(node).map(|_| node)
+    }
+
+    fn unpin(&mut self, _pinned: NodeId) -> Result<Unpinned, DriverError> {
+        Ok(Unpinned::Released)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
 }
@@ -285,9 +313,9 @@ fn scanned_record(sink: &TestSink) -> (usize, usize) {
 #[test]
 fn a_nested_store_enumerates_every_regular_file_in_order() {
     let mut fs = MockStore::new();
-    // The chain drivers, organised `<class>[/<vendor>]/<driver>`.
+    // The chain drivers, nested `<class>/<leaf>/<file>`.
     fs.add_file("/System/Drivers/bus_usb");
-    fs.add_file("/System/Drivers/pcie/brcm/bcm2711");
+    fs.add_file("/System/Drivers/pcie/host/driver");
     fs.add_file("/System/Drivers/usb_hid");
 
     let sink = TestSink::new();
@@ -297,7 +325,7 @@ fn a_nested_store_enumerates_every_regular_file_in_order() {
         drivers,
         alloc::vec![
             "/System/Drivers/bus_usb".to_string(),
-            "/System/Drivers/pcie/brcm/bcm2711".to_string(),
+            "/System/Drivers/pcie/host/driver".to_string(),
             "/System/Drivers/usb_hid".to_string(),
         ]
     );
@@ -430,7 +458,7 @@ fn read_image_returns_a_bundle_byte_for_byte() {
 #[test]
 fn a_prefix_read_reads_the_head_of_a_bundle_and_no_more() {
     let mut fs = MockStore::new();
-    fs.add_file_with("/System/Drivers/genet", b"MANIFEST|program bytes");
+    fs.add_file_with("/System/Drivers/nic", b"MANIFEST|program bytes");
 
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = alloc::vec![0xAAu8];
@@ -438,7 +466,7 @@ fn a_prefix_read_reads_the_head_of_a_bundle_and_no_more() {
         .read_image_prefix(
             &mut fs,
             DRIVER_STORE_PATH,
-            "/System/Drivers/genet",
+            "/System/Drivers/nic",
             8,
             &mut buf,
         )
@@ -450,7 +478,7 @@ fn a_prefix_read_reads_the_head_of_a_bundle_and_no_more() {
         .read_image_prefix(
             &mut fs,
             DRIVER_STORE_PATH,
-            "/System/Drivers/genet",
+            "/System/Drivers/nic",
             4096,
             &mut buf,
         )
@@ -463,7 +491,7 @@ fn a_prefix_read_reads_the_head_of_a_bundle_and_no_more() {
 #[test]
 fn a_bundle_and_a_boot_file_are_each_read_in_one_walk() {
     let mut fs = MockStore::new();
-    fs.add_file_with("/System/Drivers/network/genet", b"MANIFEST|program bytes");
+    fs.add_file_with("/System/Drivers/network/nic", b"MANIFEST|program bytes");
     fs.add_file_with("/System/Security/Users", b"root:x:0:0");
 
     let reader = DriverImageReader::open().expect("root mount builds");
@@ -472,7 +500,7 @@ fn a_bundle_and_a_boot_file_are_each_read_in_one_walk() {
         .read_image_prefix(
             &mut fs,
             DRIVER_STORE_PATH,
-            "/System/Drivers/network/genet",
+            "/System/Drivers/network/nic",
             8,
             &mut buf,
         )

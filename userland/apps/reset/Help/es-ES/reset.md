@@ -33,8 +33,8 @@ restauración de la disciplina de entrada.
 ## EXIT STATUS
 
 - `0` — el terminal fue restaurado.
-- `1` — la salida no pudo entregarse.
-- `2` — la línea de órdenes no fue comprendida.
+- `1` — la salida no pudo entregarse. Una línea de órdenes no
+  comprendida también termina con `1`.
 
 ## ENVIRONMENT
 

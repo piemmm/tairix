@@ -130,6 +130,14 @@ fn extract_link_targets(markdown: &str) -> Vec<String> {
             continue;
         }
 
+        // A code span holds no link: it runs to the next backtick run of the
+        // same length, and an unmatched run is literal.
+        if bytes[i] == b'`' {
+            let run = backtick_run(bytes, i);
+            i = code_span_end(bytes, i + run, run).unwrap_or(i + run);
+            continue;
+        }
+
         // Inline links: `[label](target)`. We scan for `](` and walk back
         // to ensure the `[` opener exists.
         if bytes[i] == b']' && bytes.get(i + 1) == Some(&b'(') {
@@ -160,6 +168,32 @@ fn extract_link_targets(markdown: &str) -> Vec<String> {
         i += 1;
     }
     targets
+}
+
+/// How many backticks run from `at`.
+fn backtick_run(bytes: &[u8], at: usize) -> usize {
+    bytes[at..].iter().take_while(|&&byte| byte == b'`').count()
+}
+
+/// Where a code span opened by `len` backticks ending at `from` closes: just
+/// past the next run of exactly `len`, before the paragraph ends.
+fn code_span_end(bytes: &[u8], from: usize, len: usize) -> Option<usize> {
+    let mut j = from;
+    while j < bytes.len() {
+        if bytes[j..].starts_with(b"\n\n") {
+            return None;
+        }
+        if bytes[j] == b'`' {
+            let run = backtick_run(bytes, j);
+            if run == len {
+                return Some(j + run);
+            }
+            j += run;
+        } else {
+            j += 1;
+        }
+    }
+    None
 }
 
 fn display_relative(base: &Path, path: &Path) -> String {
@@ -198,6 +232,14 @@ mod tests {
         let md = "Text [a](./a.md).\n\n```\n[b](./b.md)\n```\n[c](./c.md)\n";
         let urls = extract_link_targets(md);
         assert_eq!(urls, vec!["./a.md".to_string(), "./c.md".to_string()]);
+    }
+
+    #[test]
+    fn ignores_link_syntax_inside_code_spans() {
+        let md = "A mode `[ugoa]*([-+=]([rwxXst]*|[ugo]))+`, ``[d](e) ` x``, \
+                  [f](./f.md) and [`g`](./g.md).\nAn unclosed ` then [h](./h.md).\n\n\
+                  A new paragraph ` [i](./i.md) `.\n";
+        assert_eq!(extract_link_targets(md), vec!["./f.md", "./g.md", "./h.md"]);
     }
 
     #[test]

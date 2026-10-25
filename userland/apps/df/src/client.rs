@@ -15,10 +15,10 @@ use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_
 use crate::command::{Command, Options};
 use crate::error::DfError;
 use crate::io::{Output, PathProbe};
-use tairix_util::quote::quote_if_needed;
+use tairix_util::quote::quote_subject;
 
-/// The one-line usage banner, printed on a usage error and as the
-/// fallback when the bundled help document is unavailable.
+/// The one-line usage banner, the short help's fallback when the bundled
+/// help document is unavailable.
 pub const USAGE: &str =
     "usage: df [-aikPTl] [-h | -H | --si | -B <size>] [-t <type>] [-x <type>] [--total] [--] [file...]";
 
@@ -193,10 +193,7 @@ fn select_operands(
     let mut reported: Vec<&ViewBindingRecord> = Vec::new();
     for path in &options.paths {
         if let Err(errno) = probe.probe(path) {
-            diagnose(
-                err,
-                &format!("{path}: {errno}", path = quote_if_needed(path)),
-            )?;
+            diagnose(err, &format!("{path}: {errno}", path = quote_subject(path)))?;
             *clean = false;
             continue;
         }
@@ -207,7 +204,7 @@ fn select_operands(
                 err,
                 &format!(
                     "{path}: cannot resolve a relative path to its mount point",
-                    path = quote_if_needed(path)
+                    path = quote_subject(path)
                 ),
             )?;
             *clean = false;
@@ -223,7 +220,7 @@ fn select_operands(
                 err,
                 &format!(
                     "{path}: no listed volume holds this path",
-                    path = quote_if_needed(path)
+                    path = quote_subject(path)
                 ),
             )?;
             *clean = false;

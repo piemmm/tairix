@@ -36,7 +36,8 @@ block's 8 kHz to 384 kHz, and the gain is the codec's.
 
 Each sample has a slot as wide as itself, two slots a frame, in the link's
 framing — I²S, left- or right-justified, DSP A or B — and either clock's
-inversion, as Linux's `bcm2835-i2s` programs the block for the same link.
+inversion, in the block's `MODE_A` and `TXC_A` fields (BCM2711 ARM
+Peripherals, 7.9).
 Where this side drives the bit clock, the clock manager runs the PCM clock at
 the rate times the frame's bits; a clock it makes more than 100 ppm off is
 refused, and the mixer's clock fit follows what remains. Where the codec
@@ -61,8 +62,9 @@ halted, so a drain's last frames are heard.
 
 ## Testing
 
-Host tests check every framing against the register values Linux computes
-for the same link, the FIFO clear's two-bit-clock handshake and its failure
+Host tests check every framing against register values worked by hand from
+the datasheet's `MODE_A` and `TXC_A` fields, the FIFO clear's two-bit-clock
+handshake and its failure
 with no bit clock, and drive the composed interface over a model of the
 block, the modelled DMA channel, and a clock controller and a codec that
 decode every frame they are sent: the offer, the clock's rate and tolerance,
@@ -75,5 +77,4 @@ There is no QEMU vertical for the Pi board (no firmware tree hand-off,
 ## References
 
 - BCM2711 ARM Peripherals, chapter 7 — the PCM/I²S block.
-- Linux `sound/soc/bcm/bcm2835-i2s.c` — the framing this driver matches.
 - `plans/SOUND.md` SND8g — the staged design this driver lands.

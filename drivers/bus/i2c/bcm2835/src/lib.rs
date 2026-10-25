@@ -10,7 +10,7 @@
 //!
 //! The BSC has no repeated-START command. It issues one by chaining: a message
 //! started while the one before it is active follows it with a repeated START
-//! instead of a STOP (the behaviour Linux's `i2c-bcm2835` relies on). The
+//! instead of a STOP (BCM2835 ARM Peripherals §3.3, the read procedure). The
 //! chain must be in place before the message before it can end, and in a
 //! process that may be preempted at any instruction the only guarantee of that
 //! is to withhold the write's last byte until the next message is started: the
@@ -31,7 +31,7 @@
 //! bus runs at no more than its declared speed whatever the firmware has done
 //! to that clock.
 //!
-//! Reference: BCM2835 ARM Peripherals §3 (BSC); Linux `i2c-bcm2835.c`.
+//! Reference: BCM2835 ARM Peripherals §3 (BSC); NXP UM10204 Rev. 7.0 (timing).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -44,7 +44,8 @@ use tairix_abi::driver::i2c::{
     BusFacts, Direction, I2cFault, I2cMessage, I2cTransaction, RepeatedStart,
 };
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+    RegisterBlock,
 };
 use tairix_i2cbus::{step_budget_ns, I2cBus};
 
@@ -78,12 +79,7 @@ const BIND_PRIORITY: u16 = 10;
 /// and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(BSC_COMPATIBLE) {
-        Ok(key) => key,
-        // A too-long literal is a compile-time const-eval error here, never a
-        // runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(BSC_COMPATIBLE),
 )];
 
 /// Bytes of register block the controller occupies (`C` through `CLKT`).
@@ -118,8 +114,10 @@ const S_DONE: u32 = 1 << 1;
 /// Every latched `S` bit, cleared by writing it back.
 const S_LATCHED: u32 = S_CLKT | S_ERR | S_DONE;
 
-/// The register reads the divider as even, ignoring its low bit.
-const CDIV_MIN: u32 = 0x0002;
+/// The smallest divider whose edge delays stay below half of it, as `DEL`
+/// requires (BCM2835 ARM Peripherals §3.2). The register reads the divider as
+/// even, ignoring its low bit.
+const CDIV_MIN: u32 = 0x0004;
 const CDIV_MAX: u32 = 0xFFFE;
 
 const FEDL_SHIFT: u32 = 16;
@@ -166,7 +164,10 @@ fn divider(parent_hz: u64, speed_hz: NonZeroU32) -> Result<u32, DriverError> {
 }
 
 /// The edge delays for `divider`: data driven a sixteenth of a bit after the
-/// falling edge and sampled a quarter after the rising, as Linux sets them.
+/// falling edge, within UM10204's data-valid time in Standard and Fast mode,
+/// and sampled a quarter after the rising, mid-way through SCL high — both
+/// under the `CDIV / 2` the `DEL` register must stay below (BCM2835 ARM
+/// Peripherals §3.2).
 fn edge_delays(divider: u32) -> u32 {
     let falling = (divider / 16).max(1);
     let rising = (divider / 4).max(1);

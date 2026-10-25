@@ -69,14 +69,19 @@ policy is set on the Settings application's Raspberry Pi pane.
 
 - A sensor driver binds its node's `THERMAL_SENSOR_ENDPOINTS` id, gated on
   `CAP_SYSINFO_HW`, and publishes a `tairix,thermal-sensor` child node
-  carrying it and the zone it measures (`HwProperty::ThermalZone`). `Read`
-  answers millidegrees Celsius, or `NotReady` when the hardware has no valid
-  conversion.
+  carrying it. `Read` answers millidegrees Celsius, or `NoData` when the
+  hardware has no valid conversion.
+- What a sensor measures is discovery's: a zone named for the processor
+  (`cpu-thermal`, or `soc-thermal`) whose `thermal-sensors` names the sensor
+  alone puts `HwProperty::ThermalZone` on the sensor's own node, a
+  discovery-only fact, so no driver can claim to be the processor's sensor.
 - The BCM2711 AVS sensor has no window of its own: it is a register of the
   AVS monitor above it. The arch port grants it the monitor's window and the
   linear calibration (`HwProperty::ThermalCalibration`) from the thermal zone
-  whose `thermal-sensors` names it, so the conversion is the tree's, not a
-  constant. A sensor whose zone states no `coefficients` serves nothing.
+  whose `thermal-sensors` names it alone, so the conversion is the tree's,
+  not a constant. A sensor of several channels, or one no zone reading it
+  alone states `coefficients` for, serves nothing, and zones that disagree
+  state none.
 
 ## The fan settings (CL5)
 
@@ -97,16 +102,23 @@ policy is set on the Settings application's Raspberry Pi pane.
 - Holds `CAP_SYSINFO_HW` (the tree and the sensors), `CAP_GPIO` (the fan's
   line), `CAP_FS_ACCESS` (`system.conf` and its directory watch),
   `CAP_IPC_BIND_PRIVILEGED` (its reserved endpoint) and `CAP_LOG_EMIT`.
-- Parks on one wait set: its endpoint, the settings directory's watch (the
+- Parks on its wait set: its endpoint, the settings directory's watch (the
   mount table's notice until that directory exists), the hardware tree's
-  generation, and a one-shot deadline armed only while the fan is automatic.
-  `on` and `off` sample nothing.
+  generation, and a one-shot deadline armed only while the fan is automatic
+  or the header owes it an answer. `on` and `off` sample nothing. A call to
+  a driver parks on a second set observing only its reply, for at most the
+  call's deadline.
 - **Automatic**: every second, the hottest processor sensor; the fan starts
   at `start` and stops at `start − hysteresis`. A reading that cannot be
-  taken runs the fan and states the fault until readings return.
+  taken, or that no processor could be at (below −55 °C or above 150 °C),
+  runs the fan and states the fault until readings return.
 - Every call to a sensor or the header carries a quarter-second deadline, so
-  a wedged driver is a refused call — a failed reading runs the fan — and
-  never stalls the service.
+  a wedged driver never stalls the service: a reading it leaves unanswered
+  failed, which runs the fan, and a header call it leaves unanswered is not a
+  refusal — the claim is kept and the call asked again a second later until
+  the header answers. A line is claimed only once the header has answered
+  that it holds none of the service's, so a claim that landed unanswered is
+  never refused as busy.
 - A line the controller refuses, a missing header or a missing sensor is a
   fault stated on the status and in the log, retried when the tree changes,
   never on a timer.
@@ -116,10 +128,16 @@ policy is set on the Settings application's Raspberry Pi pane.
   is found out while the fan has nothing to switch. A restarted driver's
   channel node stands beside the one it published before (`plans/OPEN-DEFECTS.md`
   D1271), so sensors are counted once per endpoint.
+- A channel is believed only where the kernel's binding vouches for it: it
+  names its block's entry for the node it hangs from, which only that node's
+  driver may serve; a header must hang from a controller discovery states
+  lends header lines, and a sensor from a node discovery states measures the
+  processor, so no other driver can stand in for either.
 - `thermal-v1` `Status` is ungated and answers the hottest processor
   temperature, the policy in effect, whether the fan is running, the fault if
   any, and which lent header lines the fan may take (`FanLines`: the lent
-  and free masks). How the other lines are routed is hardware inventory,
+  and free masks, or none when no header serves or its lines could not be
+  read). How the other lines are routed is hardware inventory,
   read under `CAP_SYSINFO_HW`, and the ungated status does not repeat it.
 
 ## The Raspberry Pi pane (CL7)
@@ -132,10 +150,12 @@ policy is set on the Settings application's Raspberry Pi pane.
 - The CPU FAN group stages the five settings and applies them through the one
   elevated `configure` run, as the other machine panes do. Lines are offered
   as `GPIO n (pin p)` with the 40-pin header's pin; a line something else
-  holds is named in the row's description, never offered.
+  holds is named in the row's description, never offered, but for the line
+  staged, which the row shows as chosen.
 - The STATUS group reads `thermal-v1` on a worker while the pane is on show,
   re-asked on a two-second one-shot deadline; a reading that could not be
-  taken renders unmeasured.
+  taken renders unmeasured. A reading redraws only the rows it moves, and one
+  landing while a row is in use waits until the reader lets go.
 
 ## Invariants
 
@@ -144,6 +164,7 @@ policy is set on the Settings application's Raspberry Pi pane.
 - No line routed to a peripheral is driven, and no line outside the board's
   stated header is lent.
 - The fan's policy samples only while automatic, and never without a
-  deadline it armed itself.
+  deadline it armed itself; a header call is asked again on a timer only
+  while the header leaves it unanswered.
 - Settings holds no authority over the fan: it reads an ungated status and
   writes through the elevated settings writer.

@@ -94,14 +94,11 @@ core::arch::global_asm!(include_str!("smp.s"));
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(include_str!("takeover.s"));
 
-/// BCM2711 PCIe root-complex MSI controller (Raspberry Pi 4): the
-/// register-level driver for the root complex's internal MSI controller,
-/// which demultiplexes the VL805 xHCI's message-signalled interrupts onto
-/// one shared GIC SPI. Host-testable register/demux logic over an
-/// [`brcm_msi::MsiMmio`] seam; the real MMIO is the freestanding
-/// `brcm_msi::VolatileMsiMmio` over the discovered root-complex base.
 pub mod backtrace;
-pub mod brcm_msi;
+/// The BCM2711 PCIe root complex's internal MSI controller, which the binary
+/// reaches only as `msimux`'s Arch HAL multiplexer, never by name.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+mod brcm_msi;
 /// Board-discovered console model + runtime MMIO base (`plans/PI.md` P2):
 /// the one console abstraction ([`console::ConsoleModel`] — PL011 / BCM2835
 /// AUX mini-UART register layouts) the freestanding `serial` sink
@@ -153,8 +150,9 @@ pub mod fault;
 /// (PSCI method, generic-timer PPI, `/memory`) layered on the shared
 /// [`tairix_fdt`] parser.
 pub mod fdt;
-/// The pre-MMU `VideoCore` firmware channel: the shared mailbox transport
-/// and the boot-time requests made over it.
+/// The `VideoCore` firmware channel: the pre-MMU mailbox transport and the
+/// boot-time requests made over it, and the channel the storage floor lends
+/// its SD host's driver.
 pub mod firmware;
 pub mod gic;
 pub mod gicv3;
@@ -186,7 +184,9 @@ pub mod preempt;
 /// (`plans/WIRING.md` W6).
 pub mod psci;
 pub mod qemu_exit;
-pub mod sd_supply;
+#[cfg(test)]
+mod raspi_fixture;
+mod sd_supply;
 /// aarch64 implementation of the Arch HAL side-channel mitigation
 /// surface ([`tairix_arch_api::SideChannelMitigation`]).
 pub mod sidechannel;
@@ -231,6 +231,11 @@ pub mod watchdog;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod entry;
+/// The chained message-interrupt multiplexer the firmware tree describes, as
+/// the Arch HAL [`tairix_arch_api::MsiMultiplexer`] slice (freestanding
+/// only).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub mod msimux;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod panic;
 pub mod serial;

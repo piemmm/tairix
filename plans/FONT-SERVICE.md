@@ -114,7 +114,7 @@ never baked into the kernel.
   a scalar no face maps costs each fallback face tens of kilobytes rather than
   all of it. A failed read is tried again on the next request; only a face
   that does not parse is set aside. A scalar that draws nothing
-  (`tairix_util::utf8::is_hidden`) is answered empty without consulting a
+  (`tairix_visible::is_hidden`) is answered empty without consulting a
   face.
 
 ### 2.2 `FONT_ENDPOINT` — the IPC protocol (`lib/abi/src/font_ipc.rs`)
@@ -401,8 +401,7 @@ Load-bearing facts a future reader needs:
   the designer drew (§2.7). Only a face without that axis falls to the
   synthetic stroke (`userland/system/fontd/src/embolden.rs`): zero at Regular,
   rising linearly to em/24 at Bold (§3.3) — the strength a stroke-widening
-  rasteriser applies for a synthetic bold, as FreeType's
-  `FT_GlyphSlot_Embolden` does — carried in 1/256 px fixed point and applied
+  rasteriser applies for a synthetic bold — carried in 1/256 px fixed point and applied
   to the 8-bit coverage, never the outline. That stroke is
   **horizontal only**, so the baseline, box height, and pen advance are
   unchanged and a synthetic bold run occupies exactly what its regular twin

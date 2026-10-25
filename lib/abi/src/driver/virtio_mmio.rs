@@ -1,7 +1,7 @@
 //! virtio-1.x MMIO transport-provisioning seam (`abi-v1`).
 //!
 //! On a `virt`-style platform (QEMU `aarch64 -M virt` / `riscv64 -M
-//! virt`, `SiFive` boards) a virtio device is presented as a single
+//! virt`, and boards like them) a virtio device is presented as a single
 //! memory-mapped register block discovered from the flat device tree
 //! (virtio 1.1 §4.2.2). Unlike the PCI transport — which collects four
 //! capability-selected windows ([`VirtioPciBus`](super::virtio_pci::VirtioPciBus))

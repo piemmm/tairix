@@ -84,8 +84,8 @@ la réponse n'est pas jetée comme le fait l'outil historique.
 - `0` — la session a eu lieu (quelle que soit la façon dont l'hôte l'a
   terminée), ou l'aide courte a été écrite.
 - `1` — la session n'a pas pu avoir lieu : l'hôte n'a pas été résolu, le
-  socket a été refusé, ou le terminal n'a pas pu passer en mode brut.
-- `2` — la ligne de commande n'a pas été comprise.
+  socket a été refusé, ou le terminal n'a pas pu passer en mode brut. Une
+  ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

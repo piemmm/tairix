@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_abi::driver::gpio::HeaderLines;
+use tairix_abi::driver::supply::{IoRail, PowerRail};
 use tairix_abi::driver::thermal::{ThermalCalibration, ThermalZone};
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwMatchKind, HwNode, HwProperty, HwResource, HwResourceKind};
@@ -19,8 +20,8 @@ use crate::command::{Command, NameMode, Options};
 use crate::error::LspciError;
 use crate::Output;
 
-/// The one-line usage banner, printed on a usage error and as the
-/// fallback when the bundled help document is unavailable.
+/// The one-line usage banner, printed as the fallback when the bundled help
+/// document is unavailable.
 pub const USAGE: &str = "usage: lspci [-n | -nn] [-v] [-t] [-d [<vendor>]:[<device>]] [-s <node>]";
 
 /// The command word this bundle is named by, for the own-help lookup.
@@ -486,6 +487,27 @@ fn describe_property(resource: &HwResource, line: &mut String) {
         Ok((HwProperty::ThermalZone, zone)) => match ThermalZone::from_u64(zone) {
             Some(ThermalZone::Processor) => line.push_str("Measures the processor's temperature"),
             None => line.push_str("Thermal zone (unknown)"),
+        },
+        Ok((HwProperty::IoRail, word)) => match IoRail::from_word(word) {
+            Some(rail) => {
+                let _ = write!(
+                    line,
+                    "I/O voltage selected by firmware line {}, settling in {} µs",
+                    rail.line, rail.settle_us
+                );
+            }
+            None => line.push_str("I/O rail (malformed)"),
+        },
+        Ok((HwProperty::PowerRail, word)) => match PowerRail::from_word(word) {
+            Some(rail) => {
+                let level = if rail.active_low { "low" } else { "high" };
+                let _ = write!(
+                    line,
+                    "Power switched by firmware line {}, on when {level}",
+                    rail.line
+                );
+            }
+            None => line.push_str("Power rail (malformed)"),
         },
         Ok((HwProperty::BlockMedium, value)) => {
             match tairix_abi::blkio::BlkMedium::decode(&value.to_le_bytes()) {
@@ -1123,6 +1145,42 @@ C 02  Network controller
                 "  Lends header lines 2-4, 9",
                 "  Temperature calibrated at -487 m°C a count from 410040 m°C",
                 "  Measures the processor's temperature",
+            ]
+        );
+    }
+
+    #[test]
+    fn verbose_states_the_rails_the_firmware_switches_for_a_device() {
+        let mut host = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Other);
+        host.push_match_key(HwMatchKey::pci(0x1af4, 0x1001, 0x01_80_00))
+            .expect("key fits");
+        host.push_resource(HwResource::io_rail(IoRail {
+            line: 4,
+            level_1v8: Some(true),
+            level_3v3: Some(false),
+            settle_us: 5000,
+        }))
+        .expect("resource fits");
+        let power = PowerRail {
+            line: 6,
+            active_low: false,
+            startup_us: 0,
+            off_on_us: 0,
+        };
+        host.push_resource(HwResource::power_rail(power).expect("fits"))
+            .expect("resource fits");
+        host.push_resource(HwResource::property(HwProperty::IoRail, u64::MAX))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&host.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines()[1..],
+            [
+                "  I/O voltage selected by firmware line 4, settling in 5000 µs",
+                "  Power switched by firmware line 6, on when high",
+                "  I/O rail (malformed)",
             ]
         );
     }

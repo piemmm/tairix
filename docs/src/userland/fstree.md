@@ -79,22 +79,32 @@ what is built.
   is joined onto the listed directory, and an existing directory receives
   the transfer inside it under the source's name. A transfer onto itself
   or into the source's own subtree is refused before any I/O. A move is
-  an atomic `fs_rename` on one volume and falls back to copy-then-remove
-  across volumes (the kernel's honest `CrossVolume` report drives the
-  fallback). The rename asks the kernel to refuse an occupied target
+  an atomic `fs_rename` on one volume, and across volumes (the kernel's
+  honest `CrossVolume` report decides) a copy after which what was copied
+  goes: once the copy is whole and on the medium, only what it copied while
+  unchanged is removed, and an entry changed or added meanwhile is kept and
+  named in the summary. A move keeps its source's mode and owner as `mv`
+  does. The rename asks the kernel to refuse an occupied target
   rather than replace it, so an existing file — even one created after the
   move was typed — is asked about, never silently replaced, and a
   re-spelling of the source's own name on a volume that ignores case goes
   straight through.
 - **The overwrite question.** When a transfer would overwrite an existing
   file the operation pauses per file: `o` overwrites, `s` skips (the
-  skipped source stays in place, and the emptied-source-directory removal
-  above it is withheld so a skip never fails a move), `c` cancels the
-  remaining steps — applied work stays, and the completion report counts
-  entries and skips. A file is copied by the shared engine
+  skipped source stays in place, and so do the directories above it, so a
+  skip never fails a move), `c` cancels the remaining steps — applied work
+  stays, and the completion report counts entries and skips. A file is copied by the shared engine
   ([`tairix-fscopy`](../lib/fscopy.md)) through a buffer sized to the file
   and at most 1 MiB, keeping its holes, then its extended attributes — a
-  directory the copy creates takes its source's too. Attributes the
+  directory the copy creates takes its source's too. What a copy makes
+  takes its source's mode as `cp` gives it: a file its permission bits
+  less the umask, its set-id bits dropped; a directory its permission and
+  sticky bits less the umask, and a setgid bit the directory it is made in
+  passes down. A directory is filled holding its owner's read, write and
+  search, and given its own mode once its entries are in, or once the
+  operation fails or is cancelled — through the handle the copy holds on the
+  directory it made, whatever its name holds by then — so a read-only source
+  still copies whole. Attributes the
   destination cannot keep are left and said once, after the operation's
   summary on the message line, with an `fs.attributes_not_kept` record on
   fd 3; a batch gathers every entry's into one. A failure part-way —
@@ -104,7 +114,8 @@ what is built.
 - **Tagging.** `t` toggles a tag on the file pane's selected entry (and
   steps down, so a held key marks a run); `T` tags by a filename glob
   compiled by the one shared matcher (`lib/glob`) against the visible
-  names; `i` inverts the tags over the visible entries; `C` clears them.
+  names, tagging nothing and saying so when a match is more than the heap
+  can hold; `i` inverts the tags over the visible entries; `C` clears them.
   Tagged entries carry a `*` marker and the status line shows the tagged
   count and listed-byte total. Tag order is preserved — it is the batch
   order.
@@ -136,14 +147,16 @@ what is built.
   the filter held before the prompt opened. A pattern that does not
   compile — a reversed range, an unknown class — hides nothing: the pane
   stays unfiltered and the status line marks the filter `(bad pattern)`,
-  so entries are never silently hidden behind an uncompilable pattern. A
+  so entries are never silently hidden behind an uncompilable pattern, and a
+  name whose match the heap cannot hold passes it too. A
   bracket still open mid-edit is no fault: POSIX reads an unclosed `[` as
   itself, so the pane shows what that literal matches until it closes.
   Emptying the pattern clears the filter.
 - **Branch filename search (`/`).** The S3 walker with a name sieve: the
   focused branch is descended in the same bounded, cancellable ticks,
   and every file whose branch-relative path matches the glob lands in
-  the flattened view as it is found. Results are ordinary flat rows —
+  the flattened view as it is found; a path whose match the heap cannot
+  hold is counted unreadable. Results are ordinary flat rows —
   taggable, batchable, and jumpable.
 - **Content search (`F`).** A literal, ASCII-case-insensitive text
   search through file contents — over the tagged set when anything is
@@ -232,25 +245,26 @@ grammar (`src/app.rs`) mutates, over two injected seams —
 
 - `Fs` (`src/fs.rs`) — `list_dir`, `volume_space`, the attributes
   editor's `stat_mode`/`set_mode` and
-  `attr_list`/`attr_get`/`attr_set`/`attr_remove`, and the S2 mutating
-  operations (`stat_kind`,
-  streamed `read`/`write`, `size`, the hole-aware `next_region`, `set_len`,
-  `create`, `mkdir`, `remove_file`, `remove_dir`, `rename` with its
-  `RenameOutcome::CrossDevice` report);
+  `attr_list`/`attr_get`/`attr_set`/`attr_remove`, the viewers' streamed
+  `read`, the planner's `stat_kind` and `landing`, `mkdir`, and `transfer`
+  and `remove`, which start the shared engine's operation
+  (`tairix_fscopy::op`) over the directories the implementation holds;
   the `Run` binary implements it over the kernel-authorised `fs_*`
-  syscalls and the sysinfo mount walk (with the shared one-slot
-  source/destination handle cache, `tairix_rt::copy::OpenFiles`, hoisting the
-  per-chunk open off the copy path), the
-  tests over an in-memory tree. The trait carries exactly the operations
+  syscalls, the working directory and the sysinfo mount walk (letting the
+  file the viewers hold open, or mapped, go when an operation starts), the
+  tests over in-memory trees. The trait carries exactly the operations
   the landed stages perform; each later stage extends it in place with
   the operations it introduces, together with their callers.
 - The operations themselves live in `src/ops.rs`: `resolve_destination`
-  and `plan_target` validate before any I/O, and the resumable `FileOp`
-  executor drives a work stack that reads directories incrementally as
-  the walk reaches them (memory follows the frontier, never the subtree)
+  and `plan_target` validate before any I/O, and a `FileOp` carries the
+  engine's operation, whose walk holds the directory chain it is in and
+  reads each directory as it reaches it (memory follows the frontier,
+  never the subtree), reaching every entry by name from a directory held,
   and pauses on each overwrite conflict, handing the decision to the key
-  loop — a paused operation holds no filesystem handle, only the paths
-  still to process.
+  loop. Each listing entry, tree row, flattened row and tag keeps the node
+  its listing named (`FileId`), and an operation started on one carries it:
+  a name that has come to hold another node is refused, the message line
+  saying it changed meanwhile.
 - The tag set and batch driver live in `src/tag.rs` (an ordered `TagSet`
   and a `Batch` that drives one `FileOp` per entry, pausing through the
   same conflict machinery), and the bounded walker in `src/walk.rs`
@@ -300,12 +314,14 @@ verb acts on the **name**, never on what the name points at:
   untouched.
 - A **link already at a destination** is a real loss, so the overwrite
   question says so (`… exists as a symbolic link`). An approved replacement
-  of any occupant *removes* it, once the source has answered, before the new
-  object is created: a create or truncate follows a final link, so a link
-  left in place would act on whatever it pointed at, anywhere on the volume,
-  and a file emptied in place would be the source itself were the two names
-  one node. A directory is never transferred onto a link: a link is a leaf
-  however it resolves.
+  of any occupant is built beside it under a staging name, its bytes written
+  through the handle the exclusive create answered, and renamed over it once
+  whole and on the medium — only while it is the node asked about, the
+  question asked again about whatever took its place. Nothing is written
+  through a final link, a file that is the source's other name is never
+  emptied in place, and a failure on the way leaves the occupant as it was.
+  A directory is never transferred onto a link: a link is a leaf however it
+  resolves.
 
 The destination probe is therefore a `NO_FOLLOW` stat — the name as typed.
 A *following* probe would hand anyone who can plant a name inside a
@@ -331,8 +347,9 @@ help overlay, the sort prompt, the mode prompt), the mode-editor flows
 fifth-digit refusal, apply, Esc cancel, refused stat, kernel-refused
 change, emptied prompt), and a scripted end-to-end session
 (browse → expand → pane switch → sort → hidden toggle → help → quit).
-The S2 operations are covered end to end through the same in-memory
-seam: mkdir (creation, invalid-name refusal, Esc cancel), rename (in
+The S2 operations are covered end to end over the shared fixture tree
+(`tairix_fscopy::fixture`), the engine's own semantics in its crate:
+mkdir (creation, invalid-name refusal, Esc cancel), rename (in
 place, onto an existing file via the overwrite question, session-root
 refusal), delete (file, recursive directory with the file pane climbing
 to the surviving ancestor, declined confirmation), copy (absolute and
@@ -341,7 +358,12 @@ refusals), the overwrite matrix (overwrite, skip, cancel, per-file
 questions in a merging directory copy), move (same-volume rename,
 cross-volume copy-then-remove, skip preserving the skipped source), and
 failure injection (a read or write failure mid-copy removes the partial
-target and surfaces the errno with the panes consistent), and holes and
+target and surfaces the errno with the panes consistent; a destination
+name taken after the look is asked about, never written through; an entry
+changed during a cross-volume move kept and named), modes (a
+file's and a directory's source mode less the umask, a read-only source
+copied whole, a umask withholding the owner's write, an inherited setgid
+and a sticky source), and holes and
 attributes (a sparse file's holes kept, every attribute carried down a tree
 and across a volume, a refusal said once on the message line and fd 3, a
 batch's refusals gathered, a fault failing the copy). The S3 surface

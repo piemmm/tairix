@@ -57,8 +57,8 @@ requiere `CAP_NET_DISCOVER_ALL`, que solo lleva una cuenta de administrador. El
 
 - `0` — la orden se completó (o se escribió la ayuda breve).
 - `1` — el servicio de descubrimiento rechazó la petición o no está en
-  marcha.
-- `2` — no se entendió la línea de órdenes, o no se pudo escribir la salida.
+  marcha. Una línea de órdenes no entendida también termina con `1`.
+- `2` — no se pudo escribir la salida.
 
 ## ENVIRONMENT
 

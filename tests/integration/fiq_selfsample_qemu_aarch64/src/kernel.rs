@@ -206,7 +206,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // 3. Probe non-secure FIQ (Group 0) deliverability — the production,
     //    empirical, fail-closed capability the D13 masked-section sampler
     //    consumes. On the QEMU `virt` single-Security-state GIC this is
-    //    `Supported`; on a two-Security-state GIC (a real Pi 4 GIC-400) it is
+    //    `Supported`; on a two-Security-state GIC (a real GIC-400) it is
     //    `Unsupported` and the masked-section sampler is genuinely
     //    unavailable, so this test cannot run there (the shippable buddy
     //    detector is the design for that hardware).

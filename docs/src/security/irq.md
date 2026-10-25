@@ -186,8 +186,8 @@ context) and, on exceeding `STORM_FIRE_BUDGET` (100 000) fires in a window,
 * a fresh `irq_bind` clears the quarantine, so a driver that recovers its
   device can rebind the line.
 
-This is the kernel's analogue of Linux's `note_interrupt` spurious-IRQ
-disable, adapted to the user-space IRQ model. The budget is deliberately
+This is the kernel's spurious-interrupt disable, built for the user-space
+IRQ model. The budget is deliberately
 generous so a busy-but-healthy line (serviced with real work each round,
 whose fires spread across windows) never trips; only a genuine runaway does.
 Until the monotonic clock is installed at boot the accounting is inert (no
@@ -200,8 +200,7 @@ and delivered normally).
 Several owners may bind one line, at most once each. A level-triggered
 line one sharer's device still holds re-asserts as soon as it is
 unmasked, so the kernel leaves it masked from a fire until every sharer
-has taken that fire and come back to wait, and only then re-arms it — the
-semantics of a Linux oneshot shared interrupt.
+has taken that fire and come back to wait, and only then re-arms it.
 
 A sharer that ends with its device still raising the line would leave
 it storming once re-armed for the others, so the kernel controls the
@@ -579,8 +578,8 @@ alongside the other five freestanding integration crates.
 A PCI device that delivers **message-signalled** interrupts (MSI/MSI-X)
 writes a chosen vector straight to the local-APIC doorbell — an *edge*
 message that never uses an IO-APIC pin. `kernel/tairix-kernel/src/x86_64/msi.rs`
-models this the way Linux (and the aarch64 `MSI_LINE_BASE` range) does,
-rather than reusing an IO-APIC pin:
+models this as the aarch64 `MSI_LINE_BASE` range does, rather than reusing
+an IO-APIC pin:
 
 1. **One vector pool + a virtual line space.** The boot installs every
    external vector's IDT entry (`0x30..=0xFE`) and masks every IO-APIC pin;
@@ -625,11 +624,39 @@ triple-faults before any `/System` mount).
 
 On a GICv3 with an ITS, each PCI function the boot routed raises its MSI-X as
 an LPI, which the line space (`kernel/tairix-kernel/src/aarch64_messages.rs`)
-gives a line of its own above the GIC's INTIDs and the root-complex MSI
-vectors: the dispatcher maps an acknowledged LPI to the line its route took,
-and an LPI no route took is a stray that wakes nothing. Like an x86_64 MSI
-line, an LPI line is an edge with nothing to mask, so the composite
-controller's `mask`, `rearm` and `set_trigger` are no-ops for it.
+gives a line of its own above the GIC's INTIDs and any multiplexer's vectors —
+from the line after the multiplexer's last, or from 1020 on a board without
+one: the dispatcher maps an acknowledged LPI to the line its route took, and an
+LPI no route took is a stray that wakes nothing. Like an x86_64 MSI line, an
+LPI line is an edge with nothing to mask, so the composite controller's
+`mask`, `rearm` and `set_trigger` are no-ops for it.
+
+### aarch64 chained message multiplexer (`plans/WIRING.md` W18)
+
+Where the tree describes a root complex whose MSI controller raises one GIC
+SPI, the *parent*, for a bank of vectors, the port hands the binary that
+multiplexer (`tairix_arch_api::MsiMultiplexer`), and `kernel/core::msimux`
+lays its vectors out on lines from `MSI_LINE_BASE`, just past the GIC's
+INTIDs. `msi_alloc` hands out the lowest free vector; the multiplexer is
+brought up on the first allocation. The line a driver binds is its vector's.
+Nothing yet ties that allocation to the root complex having left reset
+(D1451).
+
+- **Mask before wake.** The dispatcher fans a parent fire out to each pending
+  vector's line through `IrqTable::fire`, whose mask reaches the multiplexer's
+  mask register through the composite controller and is fenced before the fire
+  count a waiter takes advances.
+- **Acknowledge after the fire.** The multiplexer clears a vector's status only
+  once its fire has masked it, so the level-sensitive parent deasserts and the
+  vector stays masked until its driver re-arms it through `irq_wait`.
+- **Strays are contained.** Enabling opens every vector: a message raised
+  before its driver waits, or for a vector nobody bound, fires, is masked by
+  that fire and is acknowledged, so it cannot re-raise the parent; a vector
+  past the bank raises nothing.
+- **The functions behind one multiplexer are not isolated from each other.**
+  The controller decodes a vector from the message data alone, so a function
+  that writes another vector's message raises that vector's line; unlike an
+  ITS-routed LPI, nothing ties a vector to the function it was allocated for.
 
 ### riscv64 AIA lines (`plans/IOMMU.md` IOM18.3, IOM18.4)
 
@@ -825,6 +852,13 @@ alongside the other freestanding integration crates.
 * `kernel/arch/aarch64::exceptions` adds host tests for the set-once
   device-IRQ dispatch slot: fail-closed on a second install and the
   installed-fn address round-trip.
+* `kernel/core::msimux` adds host tests for the chained multiplexer's
+  lines: the lowest free vector on its own line with its message, exhaustion,
+  bring-up once and only on the first allocation, an unroutable parent, the window `mask`/`rearm`
+  answer for, and a parent fire fanning out over a real `IrqTable`, each
+  vector masked before it is acknowledged; the aarch64 port runs the
+  `msimux` conformance verticals and the acknowledge order over a model of
+  its block.
 * `tests/integration/irq_qemu_x86_64` and
   `tests/integration/irq_qemu_aarch64` are the QEMU-validated
   end-to-end regression bounds described above.

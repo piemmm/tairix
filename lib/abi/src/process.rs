@@ -36,6 +36,7 @@
 //! every string is representable as a C string), and fails closed with an
 //! [`Errno`] rather than ever indexing out of range.
 
+use crate::fs::PathAt;
 use crate::le::{read_u32, read_u64};
 use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
@@ -657,7 +658,7 @@ pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 /// block. A block bearing any other value is refused with
 /// [`Errno::BadMagic`], so a stale or foreign encoding can never be
 /// misread as wiring.
-pub const SPAWN_ATTACH_VERSION: u32 = 5;
+pub const SPAWN_ATTACH_VERSION: u32 = 6;
 
 /// Byte offset of the session selector in an encoded [`SpawnAttach`] block:
 /// after the version and target-uid words, the console selector, the flags
@@ -674,11 +675,15 @@ const SPAWN_ATTACH_LIMITS_AT: usize = SPAWN_ATTACH_SESSION_AT + 4 + 4 + PROC_ID_
 const SPAWN_ATTACH_SHARE_AT: usize =
     SPAWN_ATTACH_LIMITS_AT + 4 + 4 + LimitKind::COUNT * ResourceLimit::WIRE_LEN;
 
+/// Byte offset of the working directory in an encoded [`SpawnAttach`] block:
+/// after the spawn share's region id.
+const SPAWN_ATTACH_CWD_AT: usize = SPAWN_ATTACH_SHARE_AT + 8;
+
 /// Exact byte length of an encoded [`SpawnAttach`] block: everything before
-/// the spawn share, then the share's region id. The block is fixed-length by
+/// the working directory, then its [`PathAt`]. The block is fixed-length by
 /// design — the kernel bounds the copy before staging and refuses any other
 /// length.
-pub const SPAWN_ATTACH_LEN: usize = SPAWN_ATTACH_SHARE_AT + 8;
+pub const SPAWN_ATTACH_LEN: usize = SPAWN_ATTACH_CWD_AT + PathAt::WIRE_LEN;
 
 /// The threads a sandbox worker may hold: its leader alone. A parser needs no
 /// other, and every thread costs kernel memory its ceiling does not bound.
@@ -982,6 +987,11 @@ pub struct SpawnAttach {
     /// sandboxed child as its one spawn share ([`crate::SyscallNumber::SHARE_MAP`]);
     /// zero for none. Refused on any spawn but a sandbox one.
     pub share: u64,
+    /// The directory the child starts in, resolved as the child from where
+    /// the path starts for the spawner, or [`None`] to share the spawner's.
+    /// A spawner may so start a child where only the child may go. Encoded as
+    /// sixteen zero bytes when absent; refused on a sandbox spawn.
+    pub working_directory: Option<PathAt>,
 }
 
 /// The resource limits a spawn lowers its child to, each kind at most once.
@@ -1068,6 +1078,7 @@ impl SpawnAttach {
         session: SpawnSession::Inherit,
         limits: SpawnLimits::INHERIT,
         share: 0,
+        working_directory: None,
     };
 
     /// Build a canonical [`SPAWN_FLAG_SANDBOX`] block over `wires`, its worker
@@ -1097,6 +1108,7 @@ impl SpawnAttach {
                 .lowering(LimitKind::AddressSpaceBytes, ceiling)
                 .lowering(LimitKind::Threads, SANDBOX_THREADS),
             share: 0,
+            working_directory: None,
         }
     }
 
@@ -1167,7 +1179,10 @@ impl SpawnAttach {
         out[at + 8..SPAWN_ATTACH_LIMITS_AT].copy_from_slice(&instance.to_le_bytes());
         self.limits
             .write(&mut out[SPAWN_ATTACH_LIMITS_AT..SPAWN_ATTACH_SHARE_AT]);
-        out[SPAWN_ATTACH_SHARE_AT..].copy_from_slice(&self.share.to_le_bytes());
+        out[SPAWN_ATTACH_SHARE_AT..SPAWN_ATTACH_CWD_AT].copy_from_slice(&self.share.to_le_bytes());
+        if let Some(at) = &self.working_directory {
+            out[SPAWN_ATTACH_CWD_AT..].copy_from_slice(&at.to_le_bytes());
+        }
         out
     }
 
@@ -1185,9 +1200,11 @@ impl SpawnAttach {
     /// console index, a session other than the one anchored at the parent, no
     /// finite memory ceiling and thread bound, or a terminal hand-over —
     /// nothing ambient may flow into a sandbox, nothing may let it outlive its
-    /// owner, and nothing it decodes may take the machine's memory), or a
-    /// spawn share on a block that is not a sandbox one. A refused block wires
-    /// nothing.
+    /// owner, and nothing it decodes may take the machine's memory), a
+    /// working directory on a sandbox block, or a spawn share on a block that
+    /// is not a sandbox one; [`PathAt::from_le_bytes`]'s refusals for a
+    /// working directory that is neither absent nor well formed. A refused
+    /// block wires nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != SPAWN_ATTACH_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -1213,6 +1230,13 @@ impl SpawnAttach {
             ProcId::from_bytes(&bytes[at + 8..SPAWN_ATTACH_LIMITS_AT])?,
         )?;
         let limits = SpawnLimits::read(&bytes[SPAWN_ATTACH_LIMITS_AT..SPAWN_ATTACH_SHARE_AT])?;
+        let mut directory = [0u8; PathAt::WIRE_LEN];
+        directory.copy_from_slice(&bytes[SPAWN_ATTACH_CWD_AT..]);
+        let working_directory = if directory.iter().all(|&byte| byte == 0) {
+            None
+        } else {
+            Some(PathAt::from_le_bytes(&directory)?)
+        };
         let block = Self {
             target_uid,
             console,
@@ -1221,6 +1245,7 @@ impl SpawnAttach {
             session,
             limits,
             share: read_u64(bytes, SPAWN_ATTACH_SHARE_AT),
+            working_directory,
         };
         if block.share != 0 && !block.is_sandbox() {
             return Err(Errno::OutOfRange);
@@ -1237,6 +1262,7 @@ impl SpawnAttach {
                 || !block.limits.bounds(LimitKind::AddressSpaceBytes)
                 || !block.limits.bounds(LimitKind::Threads)
                 || block.hands_over_foreground()
+                || block.working_directory.is_some()
             {
                 return Err(Errno::OutOfRange);
             }
@@ -1681,9 +1707,10 @@ impl WaitStatusRecord {
 pub const LOAD_FAILURE_STATUS_BASE: i32 = 0x7F5A_0000;
 
 /// Reserved exit status: the bundle could not be found or its bytes could
-/// not be read under the child's own credential (a missing `<Name>.app/Run`
-/// or a VFS read the child's authority does not permit). Fail closed — the
-/// child never runs a byte it could not read.
+/// not be read under the child's own credential (a missing `<Name>.app/Run`,
+/// a VFS read the child's authority does not permit, or a store that could
+/// not serve it: none serving yet, a failing device, a volume gone). Fail
+/// closed — the child never runs a byte it could not read.
 pub const LOAD_NOT_FOUND: i32 = LOAD_FAILURE_STATUS_BASE + 0x01;
 
 /// Reserved exit status: the bundle was found and read but failed
@@ -1720,9 +1747,15 @@ pub const LOAD_OOM: i32 = LOAD_FAILURE_STATUS_BASE + 0x04;
 #[must_use]
 pub const fn load_failure_status(errno: Errno) -> i32 {
     match errno {
-        // Missing bundle bytes, or a read the child's own credential is not
-        // allowed to perform — both are "could not obtain the program".
-        Errno::NotFound | Errno::PermissionDenied | Errno::BadAddress => LOAD_NOT_FOUND,
+        // Missing bundle bytes, a read the child's own credential is not
+        // allowed to perform, or a store that could not serve it — all are
+        // "could not obtain the program", never a verdict on its bytes.
+        Errno::NotFound
+        | Errno::PermissionDenied
+        | Errno::BadAddress
+        | Errno::NotImplemented
+        | Errno::DeviceFault
+        | Errno::Stale => LOAD_NOT_FOUND,
         // A bad signature / content-hash (SignatureInvalid) or an
         // interface-hash mismatch (AbiVersionUnsupported): the bytes were
         // read but did not verify.
@@ -1945,12 +1978,13 @@ mod tests {
         SpawnSession, StreamMode, StringSlot, WaitStatus, WaitStatusRecord,
         LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
         PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-        PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN, SPAWN_ATTACH_LIMITS_AT,
+        PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_CWD_AT, SPAWN_ATTACH_LEN, SPAWN_ATTACH_LIMITS_AT,
         SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_SHARE_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL,
         SPAWN_FLAG_FOREGROUND, SPAWN_FLAG_SANDBOX, SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT,
         SPAWN_SESSION_JOIN, STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT,
         WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
+    use crate::fs::{PathAt, FD_CWD};
     use crate::{Errno, LimitKind, ProcId, ResourceLimit, ABI_VERSION_CURRENT, RLIMIT_INFINITY};
     use alloc::vec::Vec;
 
@@ -1981,6 +2015,7 @@ mod tests {
             session: SpawnSession::Inherit,
             limits: SpawnLimits::INHERIT,
             share: 0,
+            working_directory: None,
         };
         let bytes = attach.to_le_bytes();
         assert_eq!(bytes.len(), SPAWN_ATTACH_LEN);
@@ -1989,6 +2024,35 @@ mod tests {
         // semantics every pre-existing caller relies on.
         let inherit = SpawnAttach::INHERIT.to_le_bytes();
         assert_eq!(SpawnAttach::parse(&inherit), Ok(SpawnAttach::INHERIT));
+    }
+
+    /// A working directory round-trips, its absence is sixteen zero bytes, a
+    /// malformed one is refused, and a sandbox may name none.
+    #[test]
+    fn spawn_attach_carries_a_working_directory_a_sandbox_may_not_name() {
+        let home = PathAt {
+            dirfd: FD_CWD,
+            len: 11,
+            path: 0x4000,
+        };
+        let attach = SpawnAttach {
+            working_directory: Some(home),
+            ..SpawnAttach::INHERIT
+        };
+        assert_eq!(SpawnAttach::parse(&attach.to_le_bytes()), Ok(attach));
+        let inherit = SpawnAttach::INHERIT.to_le_bytes();
+        assert!(inherit[SPAWN_ATTACH_CWD_AT..].iter().all(|&byte| byte == 0));
+        let mut empty = inherit;
+        empty[SPAWN_ATTACH_CWD_AT + 8] = 1;
+        assert_eq!(SpawnAttach::parse(&empty), Err(Errno::LengthOutOfRange));
+        let sandboxed = SpawnAttach {
+            working_directory: Some(home),
+            ..SpawnAttach::sandbox([FdWire::Closed; STD_STREAM_COUNT], 1 << 20)
+        };
+        assert_eq!(
+            SpawnAttach::parse(&sandboxed.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -2188,7 +2252,8 @@ mod tests {
         assert_eq!(SpawnAttach::parse(&all.to_le_bytes()), Ok(all));
         assert_eq!(SPAWN_ATTACH_LIMITS_AT, 80);
         assert_eq!(SPAWN_ATTACH_SHARE_AT, 80 + 8 + LimitKind::COUNT * 16);
-        assert_eq!(SPAWN_ATTACH_LEN, SPAWN_ATTACH_SHARE_AT + 8);
+        assert_eq!(SPAWN_ATTACH_CWD_AT, SPAWN_ATTACH_SHARE_AT + 8);
+        assert_eq!(SPAWN_ATTACH_LEN, SPAWN_ATTACH_CWD_AT + PathAt::WIRE_LEN);
     }
 
     #[test]
@@ -2301,7 +2366,7 @@ mod tests {
             Err(Errno::OutOfRange)
         );
         let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
-        bytes[SPAWN_ATTACH_LEN - 1] = 1;
+        bytes[SPAWN_ATTACH_CWD_AT - 1] = 1;
         assert_eq!(SpawnAttach::parse(&bytes), Err(Errno::OutOfRange));
     }
 
@@ -2915,6 +2980,10 @@ mod tests {
         assert_eq!(load_failure_status(Errno::NotFound), LOAD_NOT_FOUND);
         assert_eq!(load_failure_status(Errno::PermissionDenied), LOAD_NOT_FOUND);
         assert_eq!(load_failure_status(Errno::BadAddress), LOAD_NOT_FOUND);
+        // A store that could not serve the bundle read nothing to judge.
+        assert_eq!(load_failure_status(Errno::NotImplemented), LOAD_NOT_FOUND);
+        assert_eq!(load_failure_status(Errno::DeviceFault), LOAD_NOT_FOUND);
+        assert_eq!(load_failure_status(Errno::Stale), LOAD_NOT_FOUND);
         // Verification failure (signature/content hash, interface hash).
         assert_eq!(
             load_failure_status(Errno::SignatureInvalid),

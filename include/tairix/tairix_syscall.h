@@ -177,6 +177,8 @@ extern "C" {
 #define TAIRIX_SYS_SHARE_MAP 150u
 #define TAIRIX_SYS_FS_SEEK_REGION 151u
 #define TAIRIX_SYS_FS_PUNCH 152u
+#define TAIRIX_SYS_FS_UMASK 153u
+#define TAIRIX_SYS_FS_ACCESS 154u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -219,13 +221,164 @@ typedef struct tairix_wait_status {
 * under the same bound fails the same way. */
 #define TAIRIX_MEMORY_BOUND_EXIT_STATUS ((int32_t)135)
 
+/* A path call takes 1..=TAIRIX_FS_PATH_MAX bytes of path, and fs_symlink() a
+* target of 1..=TAIRIX_FS_SYMLINK_MAX. A relative path resolves from the
+* directory or catalog its dirfd holds, or from the caller's working directory
+* when dirfd is TAIRIX_FD_CWD; an absolute path ignores dirfd. A new descriptor
+* is numbered from TAIRIX_STD_STREAM_COUNT up, and never TAIRIX_FD_CWD. */
+#define TAIRIX_FS_PATH_MAX 4096u
+#define TAIRIX_FS_SYMLINK_MAX 4096u
+#define TAIRIX_STD_STREAM_COUNT 4u
+#define TAIRIX_FD_CWD 0xffffffffu
+
+/* fs_chdir() / fs_set_mode() / fs_set_owner() / fs_access() flag bits
+* (uint32_t). Every undefined bit is reserved and rejected with
+* TAIRIX_E_OUT_OF_RANGE. NO_FOLLOW acts on a final symbolic link itself, and
+* fs_chdir() rejects it with TAIRIX_E_OUT_OF_RANGE. EMPTY_PATH acts on the node
+* dirfd holds (the fchdir(), fchmod() and fchown() spelling) and names no
+* path: a non-NULL path is rejected with TAIRIX_E_OUT_OF_RANGE and a non-zero
+* path_len with TAIRIX_E_LENGTH_OUT_OF_RANGE. Without it a NULL path is
+* rejected with TAIRIX_E_BAD_ALIGNMENT and an empty one with
+* TAIRIX_E_LENGTH_OUT_OF_RANGE. */
+#define TAIRIX_AT_FLAG_NO_FOLLOW 0x1u
+#define TAIRIX_AT_FLAG_EMPTY_PATH 0x2u
+
+/* fs_access() request bits (uint32_t), POSIX access()'s values; 0 asks only
+* whether the node can be reached. Any other bit is rejected with
+* TAIRIX_E_OUT_OF_RANGE. What the node grants is still refused for WRITE through
+* a read-only mount (TAIRIX_E_READ_ONLY) and for EXEC of a regular file through
+* a noexec one (TAIRIX_E_PERMISSION_DENIED). */
+#define TAIRIX_ACCESS_READ 0x4u
+#define TAIRIX_ACCESS_WRITE 0x2u
+#define TAIRIX_ACCESS_EXEC 0x1u
+
+/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with TAIRIX_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/
+* APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with WRITE, and
+* CREATE|DIRECTORY without EXCLUSIVE or with READ). CREATE|DIRECTORY|EXCLUSIVE
+* makes a directory and returns it open with neither READ nor WRITE, and an
+* EXCLUSIVE create never follows a final symbolic link. An open with neither
+* READ nor WRITE is a resolve-only handle. */
+#define TAIRIX_OPEN_FLAG_READ 0x1u
+#define TAIRIX_OPEN_FLAG_WRITE 0x2u
+#define TAIRIX_OPEN_FLAG_CREATE 0x4u
+#define TAIRIX_OPEN_FLAG_TRUNCATE 0x8u
+#define TAIRIX_OPEN_FLAG_APPEND 0x10u
+#define TAIRIX_OPEN_FLAG_DIRECTORY 0x20u
+#define TAIRIX_OPEN_FLAG_EXCLUSIVE 0x40u
+#define TAIRIX_OPEN_FLAG_NO_FOLLOW 0x80u
+
+/* fs_unlink() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with TAIRIX_E_OUT_OF_RANGE. 0 removes the named file or (empty) directory; with
+* the DIRECTORY bit the removal succeeds only when the name is an (empty)
+* directory (the atomic rmdir posture) and a non-directory is refused with
+* TAIRIX_E_NOT_A_DIRECTORY. EXPECT_NODE removes the name only while it names the
+* node the tairix_node_expect_t at `expect` names, and EXPECT_UNCHANGED only
+* while that node is also unchanged; otherwise the call fails with
+* TAIRIX_E_STALE and removes nothing. At most one of the two is set, and
+* `expect` is NULL exactly when neither is. */
+#define TAIRIX_UNLINK_FLAG_DIRECTORY 0x1u
+#define TAIRIX_UNLINK_FLAG_EXPECT_NODE 0x2u
+#define TAIRIX_UNLINK_FLAG_EXPECT_UNCHANGED 0x4u
+
+/* fs_link() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX link(): neither operand's final
+* component is followed, so the node that gains a name is the one spelled. With
+* the FOLLOW bit the existing name's final symbolic link is resolved and the new
+* name is given to what it names (the linkat(AT_SYMLINK_FOLLOW) posture). The new
+* name is never followed under either. */
+#define TAIRIX_LINK_FLAG_FOLLOW 0x1u
+
+/* fs_rename() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX rename(): an existing destination is
+* replaced. With the NO_REPLACE bit the move is refused with
+* TAIRIX_E_ALREADY_EXISTS when the destination names any entry but the source's
+* own, decided under the volume's lock (the renameat2(RENAME_NOREPLACE) posture).
+* With EXPECT_NODE the source moves only while it names the node the
+* tairix_node_expect_t at `expect` names, else the call fails with
+* TAIRIX_E_STALE; `expect` is NULL exactly when EXPECT_NODE is clear. */
+#define TAIRIX_RENAME_FLAG_NO_REPLACE 0x1u
+#define TAIRIX_RENAME_FLAG_EXPECT_NODE 0x2u
+
+/* One name of fs_rename() or fs_link(): `len` bytes of path at the address
+* `path`, resolved from `dirfd` as fs_open() resolves a path. A length outside
+* 1..=TAIRIX_FS_PATH_MAX is rejected with TAIRIX_E_LENGTH_OUT_OF_RANGE and a
+* zero address with TAIRIX_E_BAD_ALIGNMENT. Encoded little-endian. */
+#define TAIRIX_PATH_AT_LEN 16u
+typedef struct tairix_path_at {
+    uint32_t dirfd;
+    uint32_t len;
+    uint64_t path;
+} tairix_path_at_t;
+
+/* What fs_unlink() and fs_rename() expect of the node they act on, every field
+* as fs_stat() reports it, the node's volume and its number there first. An
+* expectation of the node alone sets `volume` and `node` and leaves every
+* other field 0, else the call is rejected with TAIRIX_E_OUT_OF_RANGE; a
+* stamp's nanoseconds at or above one second are rejected with
+* TAIRIX_E_TIMESTAMP_OUT_OF_RANGE. Encoded little-endian. */
+#define TAIRIX_NODE_EXPECT_LEN 64u
+typedef struct tairix_node_expect {
+    uint8_t volume[16];
+    uint64_t node;
+    uint64_t content_gen;
+    uint64_t size;
+    int64_t modified_secs;
+    int64_t changed_secs;
+    uint32_t modified_nanos;
+    uint32_t changed_nanos;
+} tairix_node_expect_t;
+
+/* fs_realpath() mode (uint32_t). The three readings are alternatives, so this is
+* one value rather than bits, and any other value is rejected with
+* TAIRIX_E_OUT_OF_RANGE. EXISTING requires every component to exist, FINAL lets
+* the last one be absent, and MISSING lets any of them be. All three resolve
+* identically otherwise. */
+#define TAIRIX_REALPATH_MODE_EXISTING 0u
+#define TAIRIX_REALPATH_MODE_FINAL 1u
+#define TAIRIX_REALPATH_MODE_MISSING 2u
+
+/* fs_seek_region() region kind (uint32_t): DATA finds the next byte the volume
+* stores, HOLE the next byte of a hole; a file's end always begins one. Any
+* other value is rejected with TAIRIX_E_OUT_OF_RANGE. */
+#define TAIRIX_SEEK_REGION_DATA 0u
+#define TAIRIX_SEEK_REGION_HOLE 1u
+
+/* Permission-bit mask of the `mode` argument (uint32_t) fs_set_mode(),
+* fs_open() and fs_mkdir() take: the owner/group/other rwx triads plus the
+* setuid/setgid/sticky bits. A mode carrying any higher bit (a file-type bit,
+* say) is rejected with TAIRIX_E_OUT_OF_RANGE, never silently masked. A create
+* is born with its mode less the caller's file mode creation mask, and
+* fs_open() rejects a non-zero mode without TAIRIX_OPEN_FLAG_CREATE. */
+#define TAIRIX_FS_MODE_MASK 0xfffu
+
+/* fs_set_owner() owner or group (uint32_t) that leaves that field as it is. */
+#define TAIRIX_FS_OWNER_UNCHANGED 0xffffffffu
+
+/* fs_umask() mask (uint32_t): the permission bits the caller's creates
+* withhold, at most TAIRIX_FS_UMASK_BITS, or TAIRIX_FS_UMASK_QUERY to read the
+* mask without changing it; any other value is rejected with
+* TAIRIX_E_OUT_OF_RANGE. The call returns the mask held before. */
+#define TAIRIX_FS_UMASK_BITS 0x1ffu
+#define TAIRIX_FS_UMASK_QUERY 0xffffffffu
+
+/* fs_attr_*() bounds: an extended-attribute key (a `namespace.rest`
+* lib/fsmeta-grammar key) carries 1..=TAIRIX_FS_ATTR_KEY_MAX bytes, and a value
+* at most TAIRIX_FS_ATTR_VALUE_MAX opaque bytes; a call outside either bound is
+* rejected with TAIRIX_E_LENGTH_OUT_OF_RANGE before any copy. An absent
+* attribute reads as TAIRIX_E_NO_DATA (a value may be empty, so absence is
+* never an empty read), and a mount whose on-disk format stores no
+* attributes answers every fs_attr_*() call with TAIRIX_E_NOT_SUPPORTED. */
+#define TAIRIX_FS_ATTR_KEY_MAX 255u
+#define TAIRIX_FS_ATTR_VALUE_MAX 3072u
+
 /* spawn() attach block: the child's credential, base console, and one wire per
 * standard descriptor (fd 0..3). Pass NULL/0 for full inherit. Every wire kind
 * other than the values below (including 0) is reserved and refused; a HANDLE
 * wire names a descriptor of the CALLER'S OWN open table (a file, resource, or
 * pipe end), owner-checked kernel-side before any child state exists. */
-#define TAIRIX_SPAWN_ATTACH_VERSION 5u
-#define TAIRIX_SPAWN_ATTACH_LEN 272u
+#define TAIRIX_SPAWN_ATTACH_VERSION 6u
+#define TAIRIX_SPAWN_ATTACH_LEN 288u
 /* Attach-block flags. SANDBOX starts the child as a minimum-capability
 * parser sandbox: empty capability set, closed syscall allow-list, and
 * every wire must be CLOSED or HANDLE (nothing ambient flows in). A
@@ -265,6 +418,10 @@ typedef struct tairix_wait_status {
 * sandbox, handed the shared region of that id the caller holds a live
 * grant for, which the child maps once with tairix_sys_share_map. A share
 * on any other spawn is refused. */
+/* Working directory: a tairix_path_at_t naming the directory the child
+* starts in, resolved as the child from where the path starts for the
+* caller and refused with the resolution's error when the child may not
+* search it; all zero shares the caller's. A SANDBOX spawn names none. */
 typedef struct tairix_fd_wire {
     uint32_t kind;
     uint32_t value;
@@ -282,73 +439,8 @@ typedef struct tairix_spawn_attach {
     uint32_t limits_reserved;
     tairix_resource_limit_t limits[11];
     uint64_t share;
+    tairix_path_at_t working_directory;
 } tairix_spawn_attach_t;
-
-/* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected
-* with TAIRIX_E_OUT_OF_RANGE, as is a combination the contract forbids (TRUNCATE/
-* APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with WRITE). An open
-* with neither READ nor WRITE is a resolve-only handle. */
-#define TAIRIX_OPEN_FLAG_READ 0x1u
-#define TAIRIX_OPEN_FLAG_WRITE 0x2u
-#define TAIRIX_OPEN_FLAG_CREATE 0x4u
-#define TAIRIX_OPEN_FLAG_TRUNCATE 0x8u
-#define TAIRIX_OPEN_FLAG_APPEND 0x10u
-#define TAIRIX_OPEN_FLAG_DIRECTORY 0x20u
-#define TAIRIX_OPEN_FLAG_EXCLUSIVE 0x40u
-#define TAIRIX_OPEN_FLAG_NO_FOLLOW 0x80u
-
-/* fs_unlink() flag bits (uint32_t). Every undefined bit is reserved and rejected
-* with TAIRIX_E_OUT_OF_RANGE. 0 removes the named file or (empty) directory; with
-* the DIRECTORY bit the removal succeeds only when the name is an (empty)
-* directory (the atomic rmdir posture) and a non-directory is refused with
-* TAIRIX_E_NOT_A_DIRECTORY. */
-#define TAIRIX_UNLINK_FLAG_DIRECTORY 0x1u
-
-/* fs_link() flag bits (uint32_t). Every undefined bit is reserved and rejected
-* with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX link(): neither operand's final
-* component is followed, so the node that gains a name is the one spelled. With
-* the FOLLOW bit the existing name's final symbolic link is resolved and the new
-* name is given to what it names (the linkat(AT_SYMLINK_FOLLOW) posture). The new
-* name is never followed under either. */
-#define TAIRIX_LINK_FLAG_FOLLOW 0x1u
-
-/* fs_rename() flag bits (uint32_t). Every undefined bit is reserved and rejected
-* with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX rename(): an existing destination is
-* replaced. With the NO_REPLACE bit the move is refused with
-* TAIRIX_E_ALREADY_EXISTS when the destination names any entry but the source's
-* own, decided under the volume's lock (the renameat2(RENAME_NOREPLACE) posture). */
-#define TAIRIX_RENAME_FLAG_NO_REPLACE 0x1u
-
-/* fs_realpath() mode (uint32_t). The three readings are alternatives, so this is
-* one value rather than bits, and any other value is rejected with
-* TAIRIX_E_OUT_OF_RANGE. EXISTING requires every component to exist, FINAL lets
-* the last one be absent, and MISSING lets any of them be. All three resolve
-* identically otherwise. */
-#define TAIRIX_REALPATH_MODE_EXISTING 0u
-#define TAIRIX_REALPATH_MODE_FINAL 1u
-#define TAIRIX_REALPATH_MODE_MISSING 2u
-
-/* fs_seek_region() region kind (uint32_t): DATA finds the next byte the volume
-* stores, HOLE the next byte of a hole; a file's end always begins one. Any
-* other value is rejected with TAIRIX_E_OUT_OF_RANGE. */
-#define TAIRIX_SEEK_REGION_DATA 0u
-#define TAIRIX_SEEK_REGION_HOLE 1u
-
-/* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the
-* owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode
-* carrying any higher bit (a file-type bit, say) is rejected with
-* TAIRIX_E_OUT_OF_RANGE, never silently masked. */
-#define TAIRIX_FS_MODE_MASK 0xfffu
-
-/* fs_attr_*() bounds: an extended-attribute key (a `namespace.rest`
-* lib/fsmeta-grammar key) carries 1..=TAIRIX_FS_ATTR_KEY_MAX bytes, and a value
-* at most TAIRIX_FS_ATTR_VALUE_MAX opaque bytes; a call outside either bound is
-* rejected with TAIRIX_E_LENGTH_OUT_OF_RANGE before any copy. An absent
-* attribute reads as TAIRIX_E_NO_DATA (a value may be empty, so absence is
-* never an empty read), and a mount whose on-disk format stores no
-* attributes answers every fs_attr_*() call with TAIRIX_E_NOT_SUPPORTED. */
-#define TAIRIX_FS_ATTR_KEY_MAX 255u
-#define TAIRIX_FS_ATTR_VALUE_MAX 3072u
 
 /* fs_readdir() reads a directory a batch at a time from the open description's
 * position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,
@@ -571,7 +663,7 @@ uint64_t tairix_sys_irq_bind(uint32_t a0);
 int32_t tairix_sys_irq_wait(uint64_t a0, uint64_t a1);
 uint64_t tairix_sys_random_get(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t tairix_sys_stream_write(uint32_t a0, void * a1, uintptr_t a2);
-uint64_t tairix_sys_spawn(void * a0, uintptr_t a1, uint64_t a2, uintptr_t a3, uint64_t a4, uintptr_t a5);
+uint64_t tairix_sys_spawn(void * a0, uintptr_t a1, void * a2, uintptr_t a3, void * a4, uintptr_t a5);
 uint64_t tairix_sys_stream_read(uint32_t a0, void * a1, uintptr_t a2, uint64_t a3);
 uint64_t tairix_sys_mem_map(uintptr_t a0, uint32_t a1, uint64_t a2);
 int32_t tairix_sys_mem_unmap(uint64_t a0, uintptr_t a1);
@@ -605,7 +697,7 @@ int32_t tairix_sys_shm_unmap(uint64_t a0, uintptr_t a1);
 uint64_t tairix_sys_waitset_create(void);
 int32_t tairix_sys_waitset_ctl(uint64_t a0, uint32_t a1, uint32_t a2, uint64_t a3, uint64_t a4);
 int32_t tairix_sys_waitset_wait(uint64_t a0, uint64_t a1, void * a2);
-uint64_t tairix_sys_fs_open(void * a0, uintptr_t a1, uint32_t a2);
+uint64_t tairix_sys_fs_open(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4);
 int32_t tairix_sys_fs_close(uint32_t a0);
 uint64_t tairix_sys_fs_read(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_fs_write(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
@@ -613,10 +705,10 @@ uint64_t tairix_sys_fs_readdir(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3
 uint64_t tairix_sys_fs_stat(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_fs_truncate(uint32_t a0, uint64_t a1);
 int32_t tairix_sys_fs_sync(uint32_t a0);
-int32_t tairix_sys_fs_mkdir(void * a0, uintptr_t a1);
-int32_t tairix_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);
+int32_t tairix_sys_fs_mkdir(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3);
+int32_t tairix_sys_fs_unlink(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, void * a4);
 int32_t tairix_sys_dma_free(uint64_t a0, uint64_t a1);
-int32_t tairix_sys_fs_rename(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
+int32_t tairix_sys_fs_rename(void * a0, void * a1, uint32_t a2, void * a3);
 uint64_t tairix_sys_call_peer_origin(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_wall_time_get(void * a0, uintptr_t a1);
 int32_t tairix_sys_wall_time_set(void * a0, uintptr_t a1, uint32_t a2);
@@ -624,7 +716,7 @@ uint64_t tairix_sys_boot_id_get(void * a0, uintptr_t a1);
 uint64_t tairix_sys_sysinfo_introspect(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_terminal_size(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_signal(int64_t a0, uint32_t a1);
-int32_t tairix_sys_fs_chdir(void * a0, uintptr_t a1);
+int32_t tairix_sys_fs_chdir(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3);
 uint64_t tairix_sys_fs_getcwd(void * a0, uintptr_t a1);
 uint64_t tairix_sys_resource_open(void * a0, uintptr_t a1, uint32_t a2);
 uint64_t tairix_sys_self_origin(void * a0, uintptr_t a1);
@@ -633,7 +725,7 @@ int32_t tairix_sys_seat_switch(uint64_t a0, uint32_t a1);
 int32_t tairix_sys_seat_revoke(uint64_t a0);
 int32_t tairix_sys_console_foreground(uint32_t a0, int64_t a1);
 int32_t tairix_sys_pipe_create(void * a0);
-int32_t tairix_sys_fs_set_mode(void * a0, uintptr_t a1, uint32_t a2);
+int32_t tairix_sys_fs_set_mode(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4);
 uint64_t tairix_sys_port_resolve(void * a0, uintptr_t a1);
 uint64_t tairix_sys_file_map(uint32_t a0, uint64_t a1, uint64_t a2);
 int32_t tairix_sys_file_unmap(uint64_t a0, uint64_t a1);
@@ -643,10 +735,10 @@ int32_t tairix_sys_volume_attach(void * a0, uintptr_t a1);
 int32_t tairix_sys_volume_detach(void * a0, uintptr_t a1);
 uint64_t tairix_sys_shm_grant(uint64_t a0, uint64_t a1);
 uint64_t tairix_sys_call_peer_seat(uint64_t a0, uint64_t a1, uint64_t a2);
-uint64_t tairix_sys_fs_attr_get(void * a0, uintptr_t a1, void * a2, uintptr_t a3, void * a4, uintptr_t a5);
-int32_t tairix_sys_fs_attr_set(void * a0, uintptr_t a1, void * a2, uintptr_t a3, void * a4, uintptr_t a5);
-uint64_t tairix_sys_fs_attr_list(void * a0, uintptr_t a1, uint64_t a2, void * a3, uintptr_t a4);
-int32_t tairix_sys_fs_attr_remove(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
+uint64_t tairix_sys_fs_attr_get(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+int32_t tairix_sys_fs_attr_set(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+uint64_t tairix_sys_fs_attr_list(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
+int32_t tairix_sys_fs_attr_remove(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_port_bind(uint64_t a0, uintptr_t a1, uintptr_t a2);
 uint64_t tairix_sys_boot_facts_get(void * a0, uintptr_t a1);
 uint64_t tairix_sys_fd_grant(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
@@ -655,7 +747,7 @@ int32_t tairix_sys_mem_pin(void);
 int32_t tairix_sys_mem_unpin(void);
 uint64_t tairix_sys_signal_intake(uint32_t a0);
 int32_t tairix_sys_sched_set_realtime(uint32_t a0);
-int32_t tairix_sys_fs_set_owner(void * a0, uintptr_t a1, uint32_t a2, uint32_t a3);
+int32_t tairix_sys_fs_set_owner(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4, uint32_t a5);
 int32_t tairix_sys_pty_create(void * a0, uint32_t a1, uint32_t a2);
 int32_t tairix_sys_pty_set_size(uint32_t a0, uint32_t a1, uint32_t a2);
 int32_t tairix_sys_call_post(uint64_t a0, void * a1, uintptr_t a2, void * a3, uint64_t a4);
@@ -672,10 +764,10 @@ uint64_t tairix_sys_thread_create(void * a0, uint64_t a1, uintptr_t a2, uint64_t
 void tairix_sys_thread_exit(void);
 int32_t tairix_sys_futex_wait(void * a0, uint32_t a1, uint64_t a2);
 uint64_t tairix_sys_futex_wake(void * a0, uint32_t a1);
-int32_t tairix_sys_fs_symlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
-uint64_t tairix_sys_fs_readlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
-int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
-uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
+int32_t tairix_sys_fs_symlink(void * a0, uintptr_t a1, uint32_t a2, void * a3, uintptr_t a4);
+uint64_t tairix_sys_fs_readlink(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+int32_t tairix_sys_fs_link(void * a0, void * a1, uint32_t a2);
+uint64_t tairix_sys_fs_realpath(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4, uint32_t a5);
 uint64_t tairix_sys_port_read(uint64_t a0, uintptr_t a1, uint32_t a2);
 uint64_t tairix_sys_port_write(uint64_t a0, uintptr_t a1, uint32_t a2, uintptr_t a3);
 uint64_t tairix_sys_latency_watch(uint64_t a0);
@@ -712,6 +804,8 @@ int32_t tairix_sys_console_relinquish(void);
 uint64_t tairix_sys_share_map(void * a0);
 uint64_t tairix_sys_fs_seek_region(uint32_t a0, uint64_t a1, uint32_t a2);
 int32_t tairix_sys_fs_punch(uint32_t a0, uint64_t a1, uint64_t a2);
+uint64_t tairix_sys_fs_umask(uint32_t a0);
+int32_t tairix_sys_fs_access(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */

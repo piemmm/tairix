@@ -24,9 +24,8 @@
 //!   short-help switches.
 //!
 //! The binary that ships as `rmdir` wires the real syscall-backed
-//! filesystem and console; tests wire in-memory fixtures. This is the seam
-//! discipline of the sibling tools (`rm`'s `Removal`, `mkdir`'s
-//! `Filesystem`).
+//! filesystem and console; tests wire in-memory fixtures, as the sibling
+//! tools' do.
 //!
 //! The kernel stays the one path validator: an operand is handed to the
 //! removal seam as spelled, and only the `-p` ancestor walk parses it —
@@ -35,11 +34,13 @@
 //!
 //! # Fail closed
 //!
-//! An unknown option is [`RmdirError::Usage`] and nothing is removed; the
-//! first failing removal stops the run with the kernel's own
-//! [`Errno`] in [`RmdirError::Remove`] (unless it is the
-//! one refusal `--ignore-fail-on-non-empty` tolerates); a failed terminal
-//! write is [`RmdirError::Output`]. No `unsafe`, and no
+//! An option `getopt` refuses ([`RmdirError::Option`]) or a missing
+//! operand ([`RmdirError::Usage`]) removes nothing; a refused removal is
+//! reported with the kernel's own [`Errno`] in
+//! [`RmdirError::Remove`] (unless it is the one refusal
+//! `--ignore-fail-on-non-empty` tolerates) and the next operand is still
+//! removed, the run exiting 1; a failed terminal write is
+//! [`RmdirError::Output`]. No `unsafe`, and no
 //! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
@@ -55,10 +56,11 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `rmdir`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `rmdir`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: rmdir [-pv] [--ignore-fail-on-non-empty] [--] directory...
 
@@ -81,8 +83,10 @@ const OWN_WORD: &str = "rmdir";
 /// Why an `rmdir` invocation did not complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RmdirError {
-    /// The command line carried an unrecognised option or named no operand.
-    /// The caller should print [`USAGE`]. Nothing is removed.
+    /// An option `getopt` refuses, worded as it words it. Nothing is
+    /// removed.
+    Option(Refusal),
+    /// The command line named no operand. Nothing is removed.
     Usage,
     /// Removing `path` failed. Carries the kernel's [`Errno`] — e.g.
     /// [`Errno::NotEmpty`] for a populated directory,
@@ -98,9 +102,21 @@ pub enum RmdirError {
     Output(Errno),
 }
 
+impl Failure for RmdirError {
+    /// Everything but a refused removal, which is carried past.
+    fn is_fatal(&self) -> bool {
+        !matches!(self, Self::Remove { .. })
+    }
+
+    fn unreported(errno: Errno) -> Self {
+        Self::Output(errno)
+    }
+}
+
 impl fmt::Display for RmdirError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::Remove { path, errno } => {
                 write!(f, "failed to remove {path}: {errno}", path = quote(path))
@@ -137,47 +153,49 @@ pub enum Command {
     },
 }
 
-/// Parse an argument vector (without the program name).
+/// What each of `rmdir`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Parents,
+    Verbose,
+    IgnoreNonEmpty,
+    Help,
+}
+
+/// `rmdir`'s options, as GNU's `rmdir` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('p', &["parents"], Flag::Parents),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::long(
+        &["ignore-fail-on-non-empty"],
+        Takes::Nothing,
+        Flag::IgnoreNonEmpty,
+    ),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// Parse an argument vector (without the program name), read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// clustered, a long one by any unambiguous prefix, `--` ending them. The
+/// help switches (`-h`, `-?`, `--help`) answer at once.
 ///
 /// # Errors
 ///
-/// [`RmdirError::Usage`] on an unrecognised option or when no operand is
-/// named.
+/// * [`RmdirError::Option`] — an option `getopt` refuses, in its words.
+/// * [`RmdirError::Usage`] — no operand is named.
 pub fn parse(args: &[&str]) -> Result<Command, RmdirError> {
     let mut options = Options::default();
     let mut paths = Vec::new();
-    let mut options_ended = false;
-    for &arg in args {
-        if !options_ended {
-            if arg == "--" {
-                options_ended = true;
-                continue;
-            }
-            if let Some(word) = arg.strip_prefix("--") {
-                match word {
-                    "parents" => options.parents = true,
-                    "verbose" => options.verbose = true,
-                    "ignore-fail-on-non-empty" => options.ignore_non_empty = true,
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(RmdirError::Usage),
-                }
-                continue;
-            }
-            // A short-option cluster is a leading `-` followed by at least
-            // one letter (the bare `-` is a path, not an option).
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in letters.chars() {
-                    match letter {
-                        'p' => options.parents = true,
-                        'v' => options.verbose = true,
-                        'h' | '?' => return Ok(Command::Help),
-                        _ => return Err(RmdirError::Usage),
-                    }
-                }
-                continue;
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(RmdirError::Option)? {
+            Arg::Operand(path) => paths.push(String::from(path)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Parents, _) => options.parents = true,
+            Arg::Opt(Flag::Verbose, _) => options.verbose = true,
+            Arg::Opt(Flag::IgnoreNonEmpty, _) => options.ignore_non_empty = true,
         }
-        paths.push(String::from(arg));
     }
     if paths.is_empty() {
         return Err(RmdirError::Usage);
@@ -199,6 +217,7 @@ pub trait Filesystem {
 }
 
 pub use tairix_util::output::Output;
+use tairix_util::output::{Carried, Failure};
 
 /// Whether an operand's upward `-p` walk continues after one removal.
 enum Walk {
@@ -212,28 +231,32 @@ enum Walk {
 /// user's `LANG` preference, if set; `help` is the tool's own `Help/` tree,
 /// read by the short-help switches.
 ///
-/// Operands are removed in order; the first failure stops the run (a
-/// non-empty refusal under `--ignore-fail-on-non-empty` is not a failure).
+/// Operands are removed in order (a non-empty refusal under
+/// `--ignore-fail-on-non-empty` is not a failure). A refused one
+/// ([`RmdirError::Remove`]) is reported on `err` in GNU's words and the next
+/// is still removed, as GNU's are, answering `Ok(false)` at the end; every
+/// operand removed answers `Ok(true)`.
 ///
 /// # Errors
 ///
-/// * [`RmdirError::Remove`] — a removal the kernel refused.
-/// * [`RmdirError::Output`] — writing the short help or a `-v` report
-///   failed.
+/// [`RmdirError::Output`] — writing the short help, a `-v` report or a
+/// diagnostic failed.
 pub fn run(
     command: Command,
     locale: Option<&str>,
     fs: &dyn Filesystem,
     help: &dyn HelpSource,
     out: &dyn Output,
-) -> Result<(), RmdirError> {
+    err: &dyn Output,
+) -> Result<bool, RmdirError> {
     match command {
-        Command::Help => short_help(locale, help, out),
+        Command::Help => short_help(locale, help, out).map(|()| true),
         Command::Remove { options, paths } => {
+            let mut carried = Carried::new(err, OWN_WORD);
             for path in &paths {
-                remove_chain(fs, out, options, path)?;
+                carried.absorb(remove_chain(fs, out, options, path))?;
             }
-            Ok(())
+            Ok(carried.clean())
         }
     }
 }

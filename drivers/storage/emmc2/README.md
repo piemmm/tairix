@@ -7,7 +7,7 @@ drive.
 
 **Stability tier:** `experimental`. Host-tested against a register-level
 model of the controller and card; the Pi 4 runs it as the storage bootstrap
-floor (`crate::aarch64::root_unlock::emmc2_unlock` in the kernel).
+floor, opened through `floor::open`.
 
 ## Bus speed
 
@@ -35,7 +35,7 @@ the switch is attempted only where a failure can be undone. Bring-up selects
 that refuses even that is dropped, and the card runs at 3.3 V
 (`BringUpStage::InitialSignalling` in `Link::fallback`). On the BCM2711
 the capabilities offer DDR50 and SDR50-with-tuning, so a UHS-I card runs
-DDR50 — the mode Linux runs on this controller. Sampling-clock tuning is not
+DDR50, the fastest mode it offers untuned. Sampling-clock tuning is not
 performed, so a mode that needs it is never chosen.
 
 The UHS-I sequence is the SD and SDHCI specifications': `ACMD41` with S18R;
@@ -51,8 +51,8 @@ A failure in a step the rung added steps down one rung; if the card had left
 3.3 V it is power-cycled first (rail off, I/O rail to 3.3 V, 10 ms off, on,
 10 ms ramp). A card that never answers identification is power-cycled once
 and retried. What made the bring-up settle for less is kept in
-`Link::fallback`, and `Emmc2::link` reports the result, which the kernel logs
-as the `root-unlock: emmc2 link` record.
+`Link::fallback`, and `Emmc2::link` reports the result, which `floor::open`
+records as its `emmc2: link` event.
 
 `ACMD41` is polled every 10 ms for at most 100 rounds — the SD specification's
 one second — through `SdhciHost::delay_us`, a timed park, never back to back.
@@ -129,9 +129,10 @@ the bring-up tests record it to check each step.
 
 The state machine is written against `SdhciHost`: the shared `RegisterBlock`
 seam, the completion park, the timed wait, and the DMA areas. Metal drives it over
-`IrqSdhci` — a capability-gated `RegisterWindow`, a `CompletionWait` (which
-is also the `Delay`) parking on the controller's GIC line, and the two
-`DmaSlab`s — built by `wiring::open_discovered`. The `Board` (base clock,
+`IrqSdhci` — a capability-gated `RegisterWindow`, the host's
+`tairix_abi::driver::timing::CompletionWait` (which is also the `Delay`)
+parking on the controller's interrupt line, and the two `DmaSlab`s — built
+by `wiring::open_discovered`. The `Board` (base clock,
 `CardSupply`) is borrowed for the bring-up alone. Host tests drive the engine
 over `mock::MockSdhci`, a model of the controller, the card and the board's
 supplies that asserts the SD clock never exceeds what the card's state allows
@@ -144,10 +145,32 @@ and moves data only when the host's timing matches the card's.
 | `brcm,bcm2711-emmc2`  | Pi 4    | UHS-I DDR50, High Speed, ADMA2 + PIO (host-tested); metal pending |
 
 The aarch64 `FdtDiscovery` emits the `brcm,bcm2711-emmc2` node (Storage
-class, translated register window, and the DMA window of its `/emmc2bus`
-`dma-ranges`). The driver's `BIND_KEYS` match it; as part of the storage
-bootstrap floor the kernel binds it through the same `lib/devmatch` policy the
+class, translated register window, its one wired GIC line, the DMA window of
+its `/emmc2bus` `dma-ranges`, and the two firmware-switched rails its
+`vqmmc-supply` and `vmmc-supply` name). The driver's `BIND_KEYS`, built from
+`tairix_vcmailbox::SD_HOST_KEY`, match it; as part of the storage bootstrap
+floor the kernel binds it through the same `lib/devmatch` policy the
 user-space `devmgr` uses.
+
+## Bootstrap floor
+
+`Floor.toml` declares the driver part of the aarch64 bootstrap floor: the
+`host` bring-up, its bind table (a restatement of `BIND_KEYS` the kernel's
+build signs, and refuses to build if the two differ) and why it sits below
+the driver store. The kernel's build script discovers it and enters it in that
+target's floor table under `FLOOR_PATH`.
+
+The kernel claims the node, binds and arms its interrupt line, carves
+`floor::DMA_CARVES` inside the node's DMA window and lends `floor::open` a
+host confined to the node's own register windows, with the firmware's
+channel for the bring-up alone. `floor::open` asks that channel for the
+controller's base clock (a zero rate is none) and, when the node states both
+rails (`HwNode::io_rail`, `HwNode::power_rail`), switches the card's
+supplies on their lines, each switch waiting out the rail's settling,
+start-up and off-on times. The firmware's admission answers this driver those
+lines and its own clock alone. It records the bus it settled on as
+`emmc2: link` (`floor::LINK_SETTLED`) and a failed bring-up's step and error
+as `emmc2: bring-up failed` (`floor::BRING_UP_FAILED`).
 
 ## Required capabilities
 
@@ -187,12 +210,17 @@ closed with `DriverError::DeviceFault` rather than waiting forever.
   abandoning a misdirected or failing engine, R1 and post-write status
   errors, sensitive-staging scrubbing, recovery and the card-state check, and
   the `wiring` capability gate.
+- The floor (`floor_tests`), over the mock firmware: both rails or no
+  supply, a zero base clock read as none, each switch waiting out its rail's
+  timing, a refused switch, and a refused node or host recorded.
 
 ## Public surface
 
-The only public function is `register`. `Emmc2` is public so the host can
-build it through `wiring::open_discovered` and reach it through `Block`;
-`Emmc2::link`, `Link`, `BusMode`, `Rung`, `BringUpStage`, `BringUpFault` and
-the `trace` module are its diagnostic surface. `SdhciHost`, `DmaRegion`, `DmaArea`, `CompletionWait`,
+The public entry points are `register` and `floor::open`, the kernel's
+floor bring-up, with `FLOOR_PATH`, `floor::DMA_CARVES` and the two event
+ids. `Emmc2` is public so a host can build it through
+`wiring::open_discovered` and reach it through `Block`; `Emmc2::link`,
+`Link`, `BusMode`, `Rung`, `BringUpStage`, `BringUpFault` and the `trace`
+module are its diagnostic surface. `SdhciHost`, `DmaRegion`, `DmaArea`,
 `CardSupply`, `SignalVoltage`, `Board`, `IrqSdhci` and the `DMA_*` sizing
 constants are the seam a host implements or feeds.

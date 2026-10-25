@@ -2,16 +2,23 @@
 //! that project them.
 //!
 //! An [`Attachment`] is a volume: the driver serving it, the medium of the
-//! device it reads, and the [`MountFlags`] it was attached with. A projection
-//! ([`MountPoint`]) binds a view [`Path`] to a subtree of one attachment, and
+//! device it reads, and the [`MountFlags`] it was attached with. A
+//! [`Projection`] binds a view [`Path`] to a subtree of one attachment, and
 //! its flags are the attachment's plus whatever the projection narrows, so no
 //! projection can widen what its volume was attached with. A projection with
 //! no attachment is policy only: the `/Storage` catalog, or a boot-layout
 //! mount the boot path has yet to back.
 //!
-//! The most specific projection covering a path — the longest mount-point
-//! [`Path`] that prefixes it — decides each operation's policy. The root
-//! projection (`/`) covers everything, so resolution always succeeds.
+//! A projection is fixed once made and shared, by [`Arc`], with every
+//! descriptor opened through it: backing one replaces it with another, and
+//! one leaving the table is marked dead, so its descriptors answer
+//! [`VfsError::Stale`].
+//!
+//! Every projection but the root's sits directly beneath the floor of
+//! another, so a walk crosses into one only at a floor and climbs out of one
+//! only from its own. A runtime volume is shown only directly beneath the
+//! `/Storage` catalog, and nothing is shown beneath a runtime volume, so its
+//! listing is the volume's own.
 //!
 //! Every mutator records its change through `MountTable::changed` under the
 //! table's own lock, so the `Mounts` system notice and every directory watcher
@@ -19,14 +26,18 @@
 //! `docs/src/filesystem/watch.md`).
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::blkio::BlkMedium;
-use tairix_abi::driver::filesystem::{AllocationClass, MountFlags};
+use tairix_abi::driver::filesystem::{AllocationClass, MountFlags, NameMatching, NodeKind};
 use tairix_abi::driver::DriverHandle;
+use tairix_abi::fs::Access as Wanted;
+use tairix_abi::STORAGE_CATALOG;
 
 use super::path::Path;
-use super::perm::Metadata;
+use super::perm::{Access, Metadata};
 use super::VfsError;
 
 /// A volume attached to the namespace: the filesystem driver serving it, the
@@ -81,9 +92,11 @@ impl Attachment {
 }
 
 /// One projection in the [`MountTable`]: a view path onto a subtree of an
-/// attached volume, or a policy-only mount point.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MountPoint {
+/// attached volume, or a policy-only mount point. Equal by identity: two
+/// projections are one only if they are the same binding.
+#[derive(Debug)]
+pub struct Projection {
+    id: u64,
     path: Path,
     flags: MountFlags,
     backing: Option<DriverHandle>,
@@ -91,7 +104,7 @@ pub struct MountPoint {
     /// empty for a volume shown from its own root, `["System", "Logs"]` for
     /// `/System/Logs` carved out of the root volume. The delegated walk
     /// prepends it to the remainder below the mount point.
-    backing_subtree: Vec<String>,
+    subtree: Vec<String>,
     /// The permission template the delegated walk applies at and below the
     /// mount point, for a **runtime** mount whose mount point has no node
     /// in the in-RAM layout tree (a hotplug volume under `/Storage/<name>`).
@@ -103,6 +116,8 @@ pub struct MountPoint {
     class: AllocationClass,
     /// The table's epoch when this mount last changed.
     changed_at: u64,
+    /// Cleared when the projection leaves the table.
+    live: AtomicBool,
 }
 
 /// What a directory's listing shows of the backed mounts directly beneath
@@ -114,7 +129,7 @@ pub struct ChildMounts {
     latest: u64,
 }
 
-impl MountPoint {
+impl Projection {
     /// The mount-point path.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -141,7 +156,7 @@ impl MountPoint {
     /// `/System/Logs` directory).
     #[must_use]
     pub fn backing_subtree(&self) -> &[String] {
-        &self.backing_subtree
+        &self.subtree
     }
 
     /// The class every driver mutation through this projection allocates
@@ -164,63 +179,65 @@ impl MountPoint {
     pub fn template(&self) -> Option<&Metadata> {
         self.template.as_ref()
     }
-}
 
-/// A path and the mount that covered it at one reading of the table.
-///
-/// An operation is judged against this mount and served by the driver looked
-/// up under that same reading, so no later attach or detach can pair one
-/// volume's driver with another projection's flags.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CoveredPath {
-    path: Path,
-    mount: MountPoint,
-}
-
-impl CoveredPath {
-    /// The path.
+    /// Whether the projection is still in its table. Asked under the volume
+    /// driver's lock, which a detach holds while it withdraws the volume's
+    /// projections, so no operation that takes the lock after it misses the
+    /// withdrawal.
     #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
     }
 
-    /// The mount that covered it.
-    #[must_use]
-    pub fn mount(&self) -> &MountPoint {
-        &self.mount
+    /// The projection left the table.
+    fn withdraw(&self) {
+        self.live.store(false, Ordering::Release);
     }
 
-    /// The path's components below its mount point.
-    #[must_use]
-    pub fn remainder(&self) -> &[String] {
-        self.path
-            .components()
-            .get(self.mount.path.depth()..)
-            .unwrap_or_default()
+    /// Whether a runtime attach made this projection.
+    fn is_runtime(&self) -> bool {
+        self.template.is_some()
+    }
+
+    /// Whether this is the catalog runtime volumes are shown beneath, which
+    /// no volume backs.
+    fn is_catalog(&self) -> bool {
+        self.backing.is_none()
+            && matches!(self.path.components(), [name] if name.as_str() == STORAGE_CATALOG)
+    }
+
+    /// Whether this projection's flags let a node of `kind` shown through it
+    /// be had as `want` asks, once the node's own record has let it: the
+    /// second half of what `fs_access` judges.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::ReadOnly`] for a write where nothing may be written, and
+    /// [`VfsError::PermissionDenied`] for running a regular file on a
+    /// `noexec` projection.
+    pub fn admits(&self, kind: NodeKind, want: Wanted) -> Result<(), VfsError> {
+        let asks = |access| Access::asked_by(want).any(|asked| asked == access);
+        // A projection no volume backs stores nothing.
+        if asks(Access::Write) && (self.is_read_only() || self.backing.is_none()) {
+            return Err(VfsError::ReadOnly);
+        }
+        if asks(Access::Execute)
+            && kind == NodeKind::RegularFile
+            && self.flags.contains(MountFlags::NOEXEC)
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+        Ok(())
     }
 }
 
-/// Two paths and the mounts that covered them at one reading of the table,
-/// for an operation that names both.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CoveredPair {
-    first: CoveredPath,
-    second: CoveredPath,
-}
-
-impl CoveredPair {
-    /// The first path, covered.
-    #[must_use]
-    pub fn first(&self) -> &CoveredPath {
-        &self.first
-    }
-
-    /// The second path, covered.
-    #[must_use]
-    pub fn second(&self) -> &CoveredPath {
-        &self.second
+impl PartialEq for Projection {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
     }
 }
+
+impl Eq for Projection {}
 
 /// The system mount table.
 ///
@@ -232,13 +249,15 @@ impl CoveredPair {
 /// Every backed projection's attachment is in the table: a projection onto
 /// an unattached volume is refused, and detaching a volume withdraws every
 /// projection of it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct MountTable {
     attachments: Vec<Attachment>,
-    mounts: Vec<MountPoint>,
-    /// Advances with every mutation, so a directory watch can tell that what
-    /// its path reaches, or a listing's mount points, may have moved.
+    mounts: Vec<Arc<Projection>>,
+    /// Advances with every mutation, so a directory watch can tell that a
+    /// listing's mount points may have moved.
     epoch: u64,
+    /// The identity the next projection is given.
+    next_id: u64,
 }
 
 impl MountTable {
@@ -248,16 +267,19 @@ impl MountTable {
     pub fn new(root_flags: MountFlags) -> Self {
         Self {
             attachments: Vec::new(),
-            mounts: alloc::vec![MountPoint {
+            mounts: alloc::vec![Arc::new(Projection {
+                id: 0,
                 path: Path::root(),
                 flags: root_flags,
                 backing: None,
-                backing_subtree: Vec::new(),
+                subtree: Vec::new(),
                 template: None,
                 class: AllocationClass::Ordinary,
                 changed_at: 0,
-            }],
+                live: AtomicBool::new(true),
+            })],
             epoch: 0,
+            next_id: 1,
         }
     }
 
@@ -269,13 +291,91 @@ impl MountTable {
 
     /// Record a change and tell everything that depends on the table's
     /// composition: the `Mounts` notice's subscribers, and every directory
-    /// watcher, whose path may now reach another directory or list a mount
-    /// point that came or went.
+    /// watcher, whose listing may now show a mount point that came or went.
     fn changed(&mut self) -> u64 {
         self.epoch = self.epoch.wrapping_add(1);
         crate::notice::mounts_changed();
         crate::fswatch::mounts_changed();
         self.epoch
+    }
+
+    /// A new live projection, given the table's next identity.
+    fn project(
+        &mut self,
+        path: Path,
+        flags: MountFlags,
+        backing: Option<DriverHandle>,
+        subtree: Vec<String>,
+        template: Option<Metadata>,
+        class: AllocationClass,
+    ) -> Result<Arc<Projection>, VfsError> {
+        let projection = Arc::try_new(Projection {
+            id: self.next_id,
+            path,
+            flags,
+            backing,
+            subtree,
+            template,
+            class,
+            changed_at: self.epoch.wrapping_add(1),
+            live: AtomicBool::new(true),
+        })
+        .map_err(|_| VfsError::OutOfMemory)?;
+        self.next_id = self.next_id.wrapping_add(1);
+        Ok(projection)
+    }
+
+    /// The projection whose floor `path` sits directly beneath, if one does.
+    fn beneath(&self, path: &Path) -> Option<&Arc<Projection>> {
+        let parent = path.parent()?;
+        self.mounts.iter().find(|m| m.path == parent)
+    }
+
+    /// Whether a projection may be made at `path`: directly beneath the floor
+    /// of another that no runtime attach made.
+    fn may_project_at(&self, path: &Path) -> bool {
+        self.beneath(path)
+            .is_some_and(|parent| !parent.is_runtime())
+    }
+
+    /// Whether withdrawing every projection `leaving` names would leave
+    /// another beneath no projection's floor.
+    fn strands(&self, leaving: impl Fn(&Arc<Projection>) -> bool) -> bool {
+        self.mounts
+            .iter()
+            .any(|m| !leaving(m) && self.beneath(&m.path).is_some_and(&leaving))
+    }
+
+    /// The projection showing `/`.
+    pub(super) fn root(&self) -> Option<&Arc<Projection>> {
+        self.mounts.first()
+    }
+
+    /// The projection shown directly beneath `projection`'s floor as `name`.
+    pub(super) fn child(
+        &self,
+        projection: &Projection,
+        name: &str,
+        matching: NameMatching,
+    ) -> Option<&Arc<Projection>> {
+        self.mounts.iter().find(|m| {
+            m.path.depth() == projection.path.depth() + 1
+                && m.path
+                    .file_name()
+                    .is_some_and(|shown| matching.matches(shown.as_bytes(), name.as_bytes()))
+                && projection.path.is_prefix_of(&m.path)
+        })
+    }
+
+    /// The projection whose floor `projection` sits directly beneath; `None`
+    /// for the root's.
+    pub(super) fn parent(&self, projection: &Projection) -> Option<&Arc<Projection>> {
+        self.beneath(&projection.path)
+    }
+
+    /// `projection`, while the table holds it.
+    pub(super) fn live(&self, projection: &Projection) -> Option<&Arc<Projection>> {
+        self.mounts.iter().find(|m| m.id == projection.id)
     }
 
     /// Attach a volume, so projections can show it.
@@ -299,8 +399,30 @@ impl MountTable {
     ///
     /// * [`VfsError::InvalidPath`] if the volume backs the root projection,
     ///   which is permanent.
+    /// * [`VfsError::NotEmpty`] if another volume's projection sits beneath
+    ///   the floor of one of its own.
     /// * [`VfsError::NotFound`] if `driver` serves no attached volume.
     pub fn detach(&mut self, driver: DriverHandle) -> Result<(), VfsError> {
+        let at = self.detachable(driver)?;
+        self.changed();
+        self.attachments.remove(at);
+        self.mounts.retain(|m| {
+            let kept = m.backing != Some(driver);
+            if !kept {
+                m.withdraw();
+            }
+            kept
+        });
+        Ok(())
+    }
+
+    /// Where the volume `driver` serves is attached, once [`Self::detach`]
+    /// would take it out of the table, asking nothing of it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::detach`].
+    pub fn detachable(&self, driver: DriverHandle) -> Result<usize, VfsError> {
         let at = self
             .attachments
             .iter()
@@ -309,10 +431,10 @@ impl MountTable {
         if self.mounts[0].backing == Some(driver) {
             return Err(VfsError::InvalidPath);
         }
-        self.changed();
-        self.attachments.remove(at);
-        self.mounts.retain(|m| m.backing != Some(driver));
-        Ok(())
+        if self.strands(|m| m.backing == Some(driver)) {
+            return Err(VfsError::NotEmpty);
+        }
+        Ok(at)
     }
 
     /// The attached volume `driver` serves.
@@ -332,7 +454,7 @@ impl MountTable {
         let mut roots: Vec<(u64, &Path)> = self
             .mounts
             .iter()
-            .filter(|m| m.backing_subtree.is_empty())
+            .filter(|m| m.subtree.is_empty())
             .filter_map(|m| Some((m.backing?.as_u64(), &m.path)))
             .collect();
         // Stable, so the earliest projection of a volume sorts first among
@@ -376,6 +498,8 @@ impl MountTable {
     ///
     /// * [`VfsError::AlreadyExists`] if a mount already covers exactly
     ///   `path`.
+    /// * [`VfsError::InvalidPath`] if `path` is not directly beneath the
+    ///   root of another projection or the catalog.
     /// * [`VfsError::NotFound`] if `backing` serves no attached volume.
     pub fn mount(
         &mut self,
@@ -427,13 +551,15 @@ impl MountTable {
     }
 
     /// Attach `attachment` and show its root at `path` under its own
-    /// permission `template`, as one change: a hotplug volume arriving under
-    /// `/Storage`, whose mount point has no node in the in-RAM layout tree.
+    /// permission `template`, as one change: a hotplug volume arriving in the
+    /// `/Storage` catalog, whose mount point has no node in the in-RAM layout
+    /// tree.
     ///
     /// # Errors
     ///
     /// [`VfsError::AlreadyExists`] if the volume is already attached or a
-    /// mount already covers exactly `path`; nothing is changed.
+    /// mount already covers exactly `path`, and [`VfsError::InvalidPath`] if
+    /// `path` is not directly beneath the catalog; nothing is changed.
     pub fn attach_at(
         &mut self,
         attachment: Attachment,
@@ -445,17 +571,29 @@ impl MountTable {
         {
             return Err(VfsError::AlreadyExists);
         }
-        let changed_at = self.changed();
-        self.attachments.push(attachment);
-        self.mounts.push(MountPoint {
+        if !self
+            .beneath(&path)
+            .is_some_and(|parent| parent.is_catalog())
+        {
+            return Err(VfsError::InvalidPath);
+        }
+        let projection = self.project(
             path,
-            flags: attachment.flags,
-            backing: Some(attachment.driver),
-            backing_subtree: Vec::new(),
-            template: Some(template),
-            class: AllocationClass::Ordinary,
-            changed_at,
-        });
+            attachment.flags,
+            Some(attachment.driver),
+            Vec::new(),
+            Some(template),
+            AllocationClass::Ordinary,
+        )?;
+        self.mounts
+            .try_reserve(1)
+            .map_err(|_| VfsError::OutOfMemory)?;
+        self.attachments
+            .try_reserve(1)
+            .map_err(|_| VfsError::OutOfMemory)?;
+        self.changed();
+        self.attachments.push(attachment);
+        self.mounts.push(projection);
         Ok(())
     }
 
@@ -470,17 +608,16 @@ impl MountTable {
         if self.mounts.iter().any(|m| m.path == path) {
             return Err(VfsError::AlreadyExists);
         }
+        if !self.may_project_at(&path) {
+            return Err(VfsError::InvalidPath);
+        }
         let flags = self.projected(narrowing, backing)?;
-        let changed_at = self.changed();
-        self.mounts.push(MountPoint {
-            path,
-            flags,
-            backing,
-            backing_subtree,
-            template: None,
-            class,
-            changed_at,
-        });
+        let projection = self.project(path, flags, backing, backing_subtree, None, class)?;
+        self.mounts
+            .try_reserve(1)
+            .map_err(|_| VfsError::OutOfMemory)?;
+        self.changed();
+        self.mounts.push(projection);
         Ok(())
     }
 
@@ -527,22 +664,31 @@ impl MountTable {
         self.back(at, driver, backing_subtree)
     }
 
+    /// Replace the policy-only projection at `at` with one backed by the
+    /// subtree `backing_subtree` of the volume `driver` serves; what was
+    /// opened through the old one is not served by the volume.
     fn back(
         &mut self,
         at: usize,
         driver: DriverHandle,
         backing_subtree: Vec<String>,
     ) -> Result<(), VfsError> {
-        if self.mounts[at].backing.is_some() {
+        let old = Arc::clone(&self.mounts[at]);
+        if old.backing.is_some() {
             return Err(VfsError::AlreadyExists);
         }
-        let flags = self.projected(self.mounts[at].flags, Some(driver))?;
-        let changed_at = self.changed();
-        let mount = &mut self.mounts[at];
-        mount.flags = flags;
-        mount.backing = Some(driver);
-        mount.backing_subtree = backing_subtree;
-        mount.changed_at = changed_at;
+        let flags = self.projected(old.flags, Some(driver))?;
+        let backed = self.project(
+            old.path.clone(),
+            flags,
+            Some(driver),
+            backing_subtree,
+            old.template.clone(),
+            old.class,
+        )?;
+        self.changed();
+        self.mounts[at] = backed;
+        old.withdraw();
         Ok(())
     }
 
@@ -553,17 +699,22 @@ impl MountTable {
     ///
     /// * [`VfsError::InvalidPath`] if `path` is the root mount, which
     ///   cannot be unmounted.
+    /// * [`VfsError::NotEmpty`] if a projection sits beneath its floor.
     /// * [`VfsError::NotFound`] if no mount covers exactly `path`.
     pub fn unmount(&mut self, path: &Path) -> Result<(), VfsError> {
         if path.is_root() {
             return Err(VfsError::InvalidPath);
         }
-        let before = self.mounts.len();
-        self.mounts.retain(|m| &m.path != path);
-        if self.mounts.len() == before {
-            return Err(VfsError::NotFound);
+        let at = self
+            .mounts
+            .iter()
+            .position(|m| &m.path == path)
+            .ok_or(VfsError::NotFound)?;
+        if self.strands(|m| &m.path == path) {
+            return Err(VfsError::NotEmpty);
         }
         self.changed();
+        self.mounts.remove(at).withdraw();
         Ok(())
     }
 
@@ -571,30 +722,12 @@ impl MountTable {
     /// that is a prefix of `path`). Never fails: the root mount covers
     /// every path.
     #[must_use]
-    pub fn resolve(&self, path: &Path) -> &MountPoint {
+    pub fn resolve(&self, path: &Path) -> &Arc<Projection> {
         self.mounts
             .iter()
             .filter(|m| m.path.is_prefix_of(path))
             .max_by_key(|m| m.path.depth())
             .unwrap_or(&self.mounts[0])
-    }
-
-    /// `path` with the mount covering it.
-    #[must_use]
-    pub fn cover(&self, path: Path) -> CoveredPath {
-        CoveredPath {
-            mount: self.resolve(&path).clone(),
-            path,
-        }
-    }
-
-    /// `first` and `second` with the mounts covering them, read together.
-    #[must_use]
-    pub fn cover_pair(&self, first: Path, second: Path) -> CoveredPair {
-        CoveredPair {
-            first: self.cover(first),
-            second: self.cover(second),
-        }
     }
 
     /// `true` if writes to `path` are forbidden by the covering mount's
@@ -614,10 +747,11 @@ impl MountTable {
     /// enumerates the `Storage:` catalog view. A mount with no backing is
     /// listed too: the catalog itself is stored on no volume, so this merge is
     /// the only thing that shows it in `/`.
-    pub fn direct_children<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = &'a MountPoint> {
+    pub fn direct_children<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = &'a Projection> {
         self.mounts
             .iter()
             .filter(move |m| m.path.depth() == path.depth() + 1 && path.is_prefix_of(&m.path))
+            .map(|m| &**m)
     }
 
     /// What the listing of `path` shows of the mounts directly beneath it, for
@@ -637,8 +771,8 @@ impl MountTable {
     /// A read-only view for the System Information introspection feed: the
     /// order is stable across calls while the table is unchanged, so a broker
     /// paging the mount list never skips or repeats an entry.
-    pub fn iter(&self) -> impl Iterator<Item = &MountPoint> {
-        self.mounts.iter()
+    pub fn iter(&self) -> impl Iterator<Item = &Projection> {
+        self.mounts.iter().map(|m| &**m)
     }
 
     /// Number of mounts (including the root mount).
@@ -677,9 +811,28 @@ mod tests {
         driver
     }
 
+    /// A table projecting the `/Storage` catalog, as the boot layout does.
+    fn with_catalog() -> MountTable {
+        let mut table = MountTable::new(MountFlags::default());
+        table
+            .mount(
+                p("/Storage"),
+                MountFlags::READ_ONLY.union(MountFlags::NOEXEC),
+                None,
+            )
+            .expect("the catalog");
+        table
+    }
+
+    fn template() -> Metadata {
+        use super::super::perm::Mode;
+        use tairix_kernel_sec::{GroupId, UserId};
+        Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755))
+    }
+
     #[test]
     fn a_directorys_child_mounts_move_only_when_its_own_mounts_do() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let storage = p("/Storage");
         let users = p("/Users");
         let empty = table.children_of(&storage);
@@ -707,6 +860,9 @@ mod tests {
             one,
             "a deeper mount lists elsewhere"
         );
+        table
+            .unmount(&p("/Storage/usb/deeper"))
+            .expect("unmount the deeper");
         table.unmount(&p("/Storage/usb")).expect("unmount");
         let again = attached(&mut table, 3, MountFlags::default());
         table
@@ -789,7 +945,7 @@ mod tests {
 
     #[test]
     fn no_projection_widens_its_volumes_flags() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let stick = attached(
             &mut table,
             0x5A01,
@@ -808,6 +964,9 @@ mod tests {
         let root = attached(&mut table, 0x5A02, MountFlags::default());
         table.back_root(root).expect("root");
         table
+            .mount(p("/System"), MountFlags::NOEXEC, None)
+            .expect("policy mount");
+        table
             .mount_rebased(
                 p("/System/Logs"),
                 MountFlags::NOEXEC,
@@ -824,9 +983,6 @@ mod tests {
         // Backing a policy-only mount keeps its policy and adds the volume's.
         let system = attached(&mut table, 0x5A03, MountFlags::READ_ONLY);
         table
-            .mount(p("/System"), MountFlags::NOEXEC, None)
-            .expect("policy mount");
-        table
             .set_backing(&p("/System"), system, Vec::new())
             .expect("backs");
         assert_eq!(
@@ -837,7 +993,7 @@ mod tests {
 
     #[test]
     fn a_projection_onto_an_unattached_volume_is_refused() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let stranger = handle(0x5A10);
         assert_eq!(
             table.mount(p("/Storage/a"), MountFlags::default(), Some(stranger)),
@@ -851,13 +1007,17 @@ mod tests {
             table.set_backing(&p("/Storage/c"), stranger, Vec::new()),
             Err(VfsError::NotFound)
         );
-        assert_eq!(table.len(), 2, "only the policy mount and the root exist");
+        assert_eq!(
+            table.len(),
+            3,
+            "only the policy mount, the catalog and the root exist"
+        );
         assert_eq!(table.resolve(&p("/Storage/c")).backing(), None);
     }
 
     #[test]
     fn detaching_a_volume_withdraws_every_projection_of_it() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let volume = attached(&mut table, 0x5A20, MountFlags::NOEXEC);
         let other = attached(&mut table, 0x5A21, MountFlags::NOEXEC);
         table
@@ -874,16 +1034,23 @@ mod tests {
         table
             .mount(p("/Storage/other"), MountFlags::default(), Some(other))
             .expect("another volume");
+        let shown = Arc::clone(table.resolve(&p("/Storage/vol/x")));
+        let kept = Arc::clone(table.resolve(&p("/Storage/other/x")));
 
+        assert!(table.detachable(volume).is_ok());
+        assert!(shown.is_live(), "asking withdraws nothing");
         table.detach(volume).expect("detach");
+        assert!(!shown.is_live(), "a withdrawn projection is dead");
+        assert!(kept.is_live());
         assert_eq!(table.attachment(volume), None);
-        assert_eq!(table.resolve(&p("/Storage/vol/x")).path(), &Path::root());
-        assert_eq!(table.resolve(&p("/Storage/docs/x")).path(), &Path::root());
+        assert_eq!(table.resolve(&p("/Storage/vol/x")).path(), &p("/Storage"));
+        assert_eq!(table.resolve(&p("/Storage/docs/x")).path(), &p("/Storage"));
         assert_eq!(
             table.resolve(&p("/Storage/other/x")).backing(),
             Some(other),
             "an unrelated volume stays"
         );
+        assert_eq!(table.detachable(volume), Err(VfsError::NotFound));
         assert_eq!(table.detach(volume), Err(VfsError::NotFound));
     }
 
@@ -892,13 +1059,14 @@ mod tests {
         let mut table = MountTable::new(MountFlags::default());
         let root = attached(&mut table, 0x5A30, MountFlags::default());
         table.back_root(root).expect("root");
+        assert_eq!(table.detachable(root), Err(VfsError::InvalidPath));
         assert_eq!(table.detach(root), Err(VfsError::InvalidPath));
         assert_eq!(table.resolve(&p("/x")).backing(), Some(root));
     }
 
     #[test]
     fn an_unshown_volume_stays_attached() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let volume = attached(&mut table, 0x5A40, MountFlags::NOEXEC);
         table
             .mount(p("/Storage/vol"), MountFlags::default(), Some(volume))
@@ -912,11 +1080,14 @@ mod tests {
 
     #[test]
     fn each_volume_reports_the_earliest_projection_of_its_root() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let root = attached(&mut table, 0x5A51, MountFlags::default());
         let system = attached(&mut table, 0x5A50, MountFlags::READ_ONLY);
         let hidden = attached(&mut table, 0x5A52, MountFlags::NOEXEC);
         table.back_root(root).expect("root");
+        table
+            .mount(p("/System"), MountFlags::default(), Some(system))
+            .expect("system");
         table
             .mount_rebased(
                 p("/System/Logs"),
@@ -925,9 +1096,6 @@ mod tests {
                 alloc::vec![String::from("System"), String::from("Logs")],
             )
             .expect("a subtree of the root volume");
-        table
-            .mount(p("/System"), MountFlags::default(), Some(system))
-            .expect("system");
         table
             .mount(p("/Storage/again"), MountFlags::default(), Some(system))
             .expect("the system volume's root shown twice");
@@ -1040,16 +1208,13 @@ mod tests {
 
     #[test]
     fn a_runtime_mount_carries_its_own_template() {
-        use super::super::perm::Mode;
-        use tairix_kernel_sec::{GroupId, UserId};
-
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let volume = Attachment::new(
             handle(0x564F),
             Some(BlkMedium::of_transport(BlkTransport::Usb)),
             MountFlags::NOEXEC,
         );
-        let template = Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755));
+        let template = template();
         table
             .attach_at(volume, p("/Storage/usb1"), template.clone())
             .expect("runtime mount");
@@ -1065,11 +1230,8 @@ mod tests {
 
     #[test]
     fn a_runtime_attach_changes_nothing_when_refused() {
-        use super::super::perm::Mode;
-        use tairix_kernel_sec::{GroupId, UserId};
-
-        let mut table = MountTable::new(MountFlags::default());
-        let template = Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755));
+        let mut table = with_catalog();
+        let template = template();
         let first = Attachment::new(handle(0x5650), None, MountFlags::NOEXEC);
         table
             .attach_at(first, p("/Storage/usb1"), template.clone())
@@ -1088,12 +1250,12 @@ mod tests {
             Err(VfsError::AlreadyExists)
         );
         assert_eq!(table.volumes(), volumes);
-        assert_eq!(table.len(), 2);
+        assert_eq!(table.len(), 3);
     }
 
     #[test]
     fn direct_children_lists_the_mounts_one_level_below() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         let backed = attached(&mut table, 0x5704, MountFlags::NOEXEC);
         table
             .mount(p("/Storage/usb1"), MountFlags::default(), Some(backed))
@@ -1112,19 +1274,21 @@ mod tests {
             .expect("grandchild");
         // An unrelated sibling subtree is not listed either.
         table
+            .mount(p("/Users"), MountFlags::default(), None)
+            .expect("policy parent");
+        table
             .mount(p("/Users/vol"), MountFlags::default(), Some(backed))
             .expect("unrelated");
 
         let storage = p("/Storage");
         let children: Vec<_> = table
             .direct_children(&storage)
-            .map(MountPoint::path)
+            .map(Projection::path)
             .collect();
         assert_eq!(children, [&p("/Storage/usb1"), &p("/Storage/policy")]);
-        // Every mount here sits two levels deep, so the root itself has no
-        // direct-child mounts.
         let root = Path::root();
-        assert_eq!(table.direct_children(&root).count(), 0);
+        let children: Vec<_> = table.direct_children(&root).map(Projection::path).collect();
+        assert_eq!(children, [&p("/Storage"), &p("/Users")]);
     }
 
     #[test]
@@ -1141,14 +1305,171 @@ mod tests {
 
     #[test]
     fn mount_then_unmount_round_trips() {
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
         table
             .mount(p("/Storage/usb0"), MountFlags::NOEXEC, None)
             .expect("mount");
-        assert_eq!(table.len(), 2);
+        assert_eq!(table.len(), 3);
         table.unmount(&p("/Storage/usb0")).expect("unmount");
-        assert_eq!(table.len(), 1);
+        assert_eq!(table.len(), 2);
         assert!(!table.is_empty());
+    }
+
+    /// A projection sits directly beneath the floor of another, so a walk
+    /// crosses into one only at a floor; a placement that breaks this is
+    /// refused and changes nothing.
+    #[test]
+    fn a_projection_sits_beneath_another_projections_floor() {
+        let mut table = MountTable::new(MountFlags::default());
+        let backed = attached(&mut table, 0x5B00, MountFlags::NOEXEC);
+        assert_eq!(
+            table.mount(p("/Users/vol"), MountFlags::default(), Some(backed)),
+            Err(VfsError::InvalidPath),
+            "`/Users` is no projection's floor"
+        );
+        assert_eq!(
+            table.mount(p("/Storage/usb"), MountFlags::default(), Some(backed)),
+            Err(VfsError::InvalidPath),
+            "nor is `/Storage` until the catalog is projected"
+        );
+        assert_eq!(table.len(), 1, "a refused placement mounts nothing");
+        table
+            .mount(p("/Users"), MountFlags::default(), None)
+            .expect("beneath the root");
+        table
+            .mount(p("/Users/vol"), MountFlags::default(), Some(backed))
+            .expect("now beneath a projection's floor");
+    }
+
+    /// A runtime volume is shown only directly beneath the catalog, so nothing
+    /// is ever shown beneath one.
+    #[test]
+    fn a_runtime_volume_attaches_only_directly_beneath_the_catalog() {
+        let mut table = with_catalog();
+        let backed = attached(&mut table, 0x5B02, MountFlags::NOEXEC);
+        table
+            .mount(p("/Users"), MountFlags::default(), None)
+            .expect("a projection's floor");
+        let stick = Attachment::new(handle(0x5B01), None, MountFlags::NOEXEC);
+        for elsewhere in ["/Users/usb", "/Storage/usb/deeper", "/usb"] {
+            assert_eq!(
+                table.attach_at(stick, p(elsewhere), template()),
+                Err(VfsError::InvalidPath),
+                "{elsewhere}"
+            );
+        }
+        assert_eq!(table.len(), 3, "a refused attach mounts nothing");
+        assert_eq!(table.attachment(stick.driver()), None);
+
+        table
+            .attach_at(stick, p("/Storage/usb"), template())
+            .expect("beneath the catalog");
+        assert_eq!(
+            table.mount(
+                p("/Storage/usb/deeper"),
+                MountFlags::default(),
+                Some(backed)
+            ),
+            Err(VfsError::InvalidPath),
+            "nothing is shown beneath a runtime volume"
+        );
+    }
+
+    /// A volume backing `/Storage` makes it a volume's floor, not the
+    /// catalog, so no runtime volume is shown beneath it.
+    #[test]
+    fn a_backed_storage_is_no_catalog() {
+        let mut table = MountTable::new(MountFlags::default());
+        let disk = attached(&mut table, 0x5B03, MountFlags::default());
+        table
+            .mount(p("/Storage"), MountFlags::default(), Some(disk))
+            .expect("a volume at the catalog's name");
+        let stick = Attachment::new(handle(0x5B04), None, MountFlags::NOEXEC);
+        assert_eq!(
+            table.attach_at(stick, p("/Storage/usb"), template()),
+            Err(VfsError::InvalidPath)
+        );
+        assert_eq!(table.attachment(stick.driver()), None);
+    }
+
+    /// A withdrawal that would leave a projection beneath no projection's
+    /// floor is refused and changes nothing.
+    #[test]
+    fn a_withdrawal_stranding_a_projection_is_refused() {
+        let mut table = with_catalog();
+        let system = attached(&mut table, 0x5B20, MountFlags::READ_ONLY);
+        let root = attached(&mut table, 0x5B21, MountFlags::default());
+        table
+            .mount(p("/System"), MountFlags::default(), Some(system))
+            .expect("system");
+        table
+            .mount_rebased(
+                p("/System/Logs"),
+                MountFlags::NOEXEC,
+                Some(root),
+                alloc::vec![String::from("System"), String::from("Logs")],
+            )
+            .expect("a subtree of the root volume beneath it");
+        let logs = Arc::clone(table.resolve(&p("/System/Logs/x")));
+        assert_eq!(table.unmount(&p("/System")), Err(VfsError::NotEmpty));
+        // Asked first, the refusal is the one the detach gives, and asking
+        // changes nothing.
+        assert_eq!(table.detachable(system), Err(VfsError::NotEmpty));
+        assert_eq!(table.detach(system), Err(VfsError::NotEmpty));
+        assert!(logs.is_live());
+        assert_eq!(table.len(), 4);
+        assert!(table.attachment(system).is_some());
+
+        table.unmount(&p("/System/Logs")).expect("the deeper first");
+        table
+            .detach(system)
+            .expect("then the volume beneath nothing");
+    }
+
+    /// Backing a policy-only projection replaces it rather than changing it in
+    /// place, and the one it replaced is withdrawn, so nothing opened through
+    /// it is served by the volume.
+    #[test]
+    fn backing_a_projection_replaces_it_and_withdraws_the_old() {
+        let mut table = MountTable::new(MountFlags::default());
+        table
+            .mount(p("/Users"), MountFlags::NOEXEC, None)
+            .expect("policy mount");
+        let old = Arc::clone(table.resolve(&p("/Users/x")));
+        let volume = attached(&mut table, 0x5B10, MountFlags::default());
+        table
+            .set_backing(&p("/Users"), volume, Vec::new())
+            .expect("backs");
+        let new = Arc::clone(table.resolve(&p("/Users/x")));
+        assert_ne!(new, old, "another projection");
+        assert!(!old.is_live() && new.is_live());
+        assert_eq!(old.backing(), None, "the old one is unchanged");
+        assert_eq!(new.backing(), Some(volume));
+
+        let root = Arc::clone(table.resolve(&p("/x")));
+        let disk = attached(&mut table, 0x5B11, MountFlags::default());
+        table.back_root(disk).expect("root");
+        assert!(!root.is_live());
+        assert_ne!(*table.resolve(&p("/x")), root);
+    }
+
+    /// A projection unmounted is withdrawn, and one mounted again at the same
+    /// path is another projection.
+    #[test]
+    fn a_remount_at_the_same_path_is_another_projection() {
+        let mut table = with_catalog();
+        table
+            .mount(p("/Storage/a"), MountFlags::default(), None)
+            .expect("mount");
+        let first = Arc::clone(table.resolve(&p("/Storage/a")));
+        table.unmount(&p("/Storage/a")).expect("unmount");
+        assert!(!first.is_live());
+        table
+            .mount(p("/Storage/a"), MountFlags::default(), None)
+            .expect("remount");
+        let second = table.resolve(&p("/Storage/a"));
+        assert!(second.is_live());
+        assert_ne!(**second, *first);
     }
 
     /// Every successful mutation reaches the `Mounts` notice, so a
@@ -1160,12 +1481,10 @@ mod tests {
     /// binary runs tests concurrently.
     #[test]
     fn every_mutator_moves_the_mounts_notice_generation() {
-        use super::super::perm::Mode;
         use tairix_abi::NoticeTopic;
-        use tairix_kernel_sec::{GroupId, UserId};
         let generation =
             || crate::notice::generation(NoticeTopic::Mounts, &crate::seat::NULL_SEAT_REGISTRY);
-        let mut table = MountTable::new(MountFlags::default());
+        let mut table = with_catalog();
 
         let moved = |label: &str, before: u64| {
             assert!(generation() > before, "{label} owes a notice");
@@ -1184,7 +1503,7 @@ mod tests {
         let before = generation();
         table
             .mount_rebased(
-                p("/System/Logs"),
+                p("/Storage/logs"),
                 MountFlags::NOEXEC,
                 Some(backing),
                 alloc::vec![String::from("System"), String::from("Logs")],
@@ -1197,7 +1516,7 @@ mod tests {
             .attach_at(
                 Attachment::new(handle(0x5F02), None, MountFlags::NOEXEC),
                 p("/Storage/b"),
-                Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)),
+                template(),
             )
             .expect("runtime mount");
         moved("attach_at", before);

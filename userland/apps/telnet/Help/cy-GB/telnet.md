@@ -83,8 +83,8 @@ offeryn hanesyddol yn ei wneud.
 - `0` — bu'r sesiwn (pa bynnag ffordd y daeth y gwesteiwr â hi i ben), neu
   ysgrifennwyd yr help byr.
 - `1` — ni fu sesiwn: ni ddatryswyd y gwesteiwr, gwrthodwyd y soced, neu ni
-  allai'r derfynell fynd i'r modd crai.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  allai'r derfynell fynd i'r modd crai. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

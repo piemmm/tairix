@@ -16,12 +16,10 @@ The driver **stores** each inode's owner, mode, ACL, and capability gate
 but makes **no** permission decision itself: the VFS is the policy point
 (`AGENTS.md` §5.4). The stored record is read back through the versioned
 `FilesystemSecurity` trait (`security(node) -> NodeSecurity`) and written
-through `ARXFS::set_security`. Because `arxfs` implements
-`FilesystemSecurity`, the kernel host delegates to it through the VFS's
-`*_via_secured` operations, which judge each node against its **own**
-stored §5.3 record (`Metadata::from_node_security`) rather than a uniform
-mount-point template — so an owner-only or capability-gated file is
-enforced as stored. See [Driver delegation](./overview.md) and the
+through `ARXFS::set_security`. The kernel host serves it through the
+filesystem service, which judges each node against its **own** stored
+record (`Metadata::from_node_security`), so an owner-only or
+capability-gated file is enforced as stored. See [Driver delegation](./overview.md) and the
 [driver-trait reference](../abi/driver_traits.md).
 
 ## On-disk layout
@@ -574,7 +572,11 @@ otherwise) and:
   longer reaches — freeing their data blocks (releasing any shared-chunk
   references) and their inode slot; and
 - **reconciles every inode's stored name count** against the directory entries
-  that really name it.
+  that really name it. A directory the pending-delete set names — an orphan
+  the pass just published, or a removed one the kernel holds — names nothing,
+  so its own `.` and `..` and its entries are not counted, and the drain then
+  reclaims it and every orphan it held rather than finding them named again.
+  A node the kernel holds is never an orphan.
 
 The last three each derive one value per inode — reachable or not, still owed
 an expansion, how many names — so each lives in a **transient on-disk scratch
@@ -921,7 +923,10 @@ in place**:
   names — and the next writable mount finishes it before it serves. An ordinary
   delete is still one transaction, because the operation that detaches the name
   takes the first step itself; a hard-linked node with names left is not in the
-  set at all, and a node the set names can never be given a new name. A
+  set at all, and a node the set names can never be given a new name, nor take
+  a byte write unless the kernel holds it. A held node is passed over until its
+  last `unpin` reclaims it, and since no hold outlives the mount, a crash leaves
+  it to the next writable mount like any other. A
   `truncate` needs no set entry: it frees downward and publishes the shorter
   size at each boundary, so an interrupted one is a shorter file rather than one
   of its original length with holes where its data was.
@@ -1049,18 +1054,35 @@ in place**:
 
 ## Operations
 
-`FilesystemRead` provides `root`/`node_info`/`lookup`/`read_at`/`read_dir`;
-`FilesystemWrite` provides `create`/`write_at`/`truncate`/`remove`/`flush`,
-addressing a target as a `(dir, name)` pair. `write_at` extends files
+`FilesystemRead` provides
+`root`/`node_info`/`lookup`/`parent`/`read_at`/`read_link`/`seek_region`/`read_dir`
+and `pin`/`unpin`/`release_pins`;
+`FilesystemWrite` provides
+`create`/`create_link`/`link`/`write_at`/`truncate`/`punch`/`remove`/`rename`/`flush`.
+A name mutation addresses its target as a `(dir, name)` pair, a byte write
+(`write_at`, `truncate`, `punch`) the file's `NodeId`: its inode number, stable
+across a remount. `create` and `create_link` store the whole record they are
+given — mode, owner, group, ACL and capability gate — in the inode write that
+mints the node.
+
+`pin` holds a node for the kernel under its inode number, the id every lookup
+and listing answers, and holds count. A held node that loses its last name is
+published in the pending-delete set as any other but is not reclaimed: it keeps
+its data, reports `nlink` 0, and takes byte I/O and changes to its record and
+attributes, while `link` refuses to name it again. Its last `unpin` reclaims it
+(`Unpinned::Freed`), and `release_pins` drops every hold, reclaiming each such
+node. A removed directory a hold keeps lists nothing and answers `NotFound` to
+`lookup`, `parent` and every call that would add an entry. A node no name and
+no hold reaches — freed, or awaiting the pending-delete set's reclaim — answers
+`NotFound` to every call. `parent` answers the directory a directory's `..`
+names (the root its own). `write_at` extends files
 (zero-filling sparse gaps), `truncate` shrinks (freeing the tail from the high
 end down and copy-on-write zeroing the partial last block) or grows, and
 `remove` refuses a non-empty directory with `DirectoryNotEmpty`. Both may take
 several transactions over a very large file and report a failure part-way: a
 `truncate` then leaves the file at the last boundary it reached, and a `remove`
 leaves the name gone and the node named by the pending-delete set for the next
-unlink or mount to finish. A `NodeId` is the
-inode index;
-node identity is stable across a remount. The driver additionally exposes
+unlink or mount to finish. The driver additionally exposes
 `ARXFS::reflink(dir, src, dst)` — a copy-on-write clone that shares the
 source's data chunks until a side is written (see *Deduplication*) — as an
 inherent operation, not a widening of a frozen ABI trait (`AGENTS.md` §2.4).
@@ -1184,6 +1206,15 @@ transaction and asserts the re-opened volume always mounts, the
 pre-existing file is always intact, and the in-flight write is either
 fully applied or fully absent — never torn.
 
+The **pin tests** hold the driver's half of node-bound open files: a held file
+keeps its data and space past its last name, takes byte I/O and record changes
+while nameless, and is reclaimed by its last `unpin`; holds count; a rename over
+a held file keeps it; a removed held directory takes no entries and lists
+nothing; `release_pins` frees every nameless held node; the drain and `check`
+pass held nodes over; a held node a crash leaves unlinked is drained by the next
+mount; a node neither named nor held answers `NotFound` to every call; and
+`create` stores the whole record it is given.
+
 The allocation-map ordering tests additionally fail the first map-page write,
 fail the sync barrier after pages enter a volatile cache, retain none, all, or
 alternating page subsets, and retain or lose the publishing slot. Every case
@@ -1258,7 +1289,9 @@ decode path too, asserting it never panics and fails closed. Since Stage 12
 each successful mount additionally **walks every reachable directory**
 (`read_dir`/`lookup`, bounded), driving the spec's required "directory decode"
 target — the sealed dirent payload the free-space rebuild walk never
-reads — and asserting it never panics and fails closed. The
+reads — and asserting it never panics and fails closed. Each successful mount
+also drives the pin path: a file created with a record, held, written whole,
+read back, unlinked and released. The
 first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):
 the spec's required "compression decode" target (`arxfs-spec.md` §10,

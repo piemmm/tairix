@@ -17,7 +17,7 @@ workspace = true
 # command app rendering names) builds with `default-features = false`; the
 # `cargo xtask devids` generator and this crate's own tests use the default.
 default = ["textdb"]
-textdb = ["dep:tairix-util"]
+textdb = ["dep:tairix-visible"]
 # The loader a freestanding `Run` binary reads its bundled table through, so
 # no consumer carries a private copy of the path or the bound. Enabled only by
 # a `Run` binary's target-gated dependency.
@@ -26,7 +26,7 @@ rt = ["dep:tairix-abi", "dep:tairix-cmdres", "dep:tairix-rt"]
 [dependencies]
 # The one rule for which characters hide or reorder text, so the vetting
 # filter refuses exactly what every display would have to escape.
-tairix-util = { path = "../util", version = "=0.0.0", optional = true }
+tairix-visible = { path = "../visible", version = "=0.0.0", optional = true }
 # For the `rt` loader only: the bundle-entry and `Errno` vocabulary
 # (`tairix-abi`), the one bundle-resolution policy the program's own help
 # uses too (`tairix-cmdres`), and the `fs_*` file wrappers (`tairix-rt`).

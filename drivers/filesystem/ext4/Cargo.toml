@@ -24,6 +24,9 @@ tairix-bytedev = { path = "../../../lib/bytedev", version = "=0.0.0" }
 # Fallible zeroed buffers: block-sized scratch lives on the heap, not on the
 # small kernel stack the driver's paths nest on.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The fallible maps the kernel's holds and the orphan chain's predecessor index
+# are kept in, so a shortage of memory is an answer rather than an abort.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 # The budget, pressure gauge and pinned-memory ledger the open transaction
 # is bounded by.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }

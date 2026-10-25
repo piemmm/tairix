@@ -38,7 +38,7 @@ Operand.
 - `1` — das Register hat die Anlage abgelehnt oder sie ist
   fehlgeschlagen (etwa eine fehlende Berechtigung oder eine doppelte
   Kennung); der Grund wird auf der Standardfehlerausgabe ausgegeben.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Eine nicht verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

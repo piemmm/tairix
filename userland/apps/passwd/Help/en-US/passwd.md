@@ -46,8 +46,8 @@ stored.
 - `0` — the password was replaced.
 - `1` — the database refused or failed the replacement, the prompts
   disagreed, no randomness was available, or the record was malformed; the
-  reason is printed on standard error.
-- `2` — the command line was not understood.
+  reason is printed on standard error. A command line that was not
+  understood exits `1` too.
 
 ## ENVIRONMENT
 

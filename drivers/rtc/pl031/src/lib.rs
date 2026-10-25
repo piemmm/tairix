@@ -35,7 +35,8 @@
 use tairix_abi::driver::rtc::{Rtc, RtcStatus};
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+    RegisterWindow,
 };
 
 #[cfg(test)]
@@ -68,13 +69,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// match data can never drift from the driver.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(PL031_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(PL031_COMPATIBLE),
 )];
 
 /// Byte length of the register block the driver touches. The PrimeCell

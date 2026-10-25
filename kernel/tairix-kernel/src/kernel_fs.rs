@@ -22,7 +22,7 @@ use alloc::boxed::Box;
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
+    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -84,6 +84,10 @@ impl FilesystemRead for Box<dyn KernelFs> {
         (**self).lookup(dir, name)
     }
 
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        (**self).parent(dir)
+    }
+
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         (**self).read_at(file, offset, buf)
     }
@@ -97,11 +101,29 @@ impl FilesystemRead for Box<dyn KernelFs> {
     ) -> Result<(), DriverError> {
         (**self).read_dir(dir, cursor, after, visit)
     }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        (**self).pin(node)
+    }
+
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        (**self).unpin(pinned)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        (**self).release_pins()
+    }
 }
 
 impl FilesystemWrite for Box<dyn KernelFs> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        (**self).create(dir, name, kind)
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
+        (**self).create(dir, name, kind, record)
     }
 
     fn create_link(
@@ -109,36 +131,25 @@ impl FilesystemWrite for Box<dyn KernelFs> {
         dir: NodeId,
         name: &[u8],
         target: &[u8],
+        record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
-        (**self).create_link(dir, name, target)
+        (**self).create_link(dir, name, target, record)
     }
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
         (**self).link(dir, name, node)
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        (**self).write_at(dir, name, offset, data)
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        (**self).write_at(file, offset, data)
     }
 
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        (**self).truncate(dir, name, size)
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        (**self).truncate(file, size)
     }
 
-    fn punch(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        len: u64,
-    ) -> Result<(), DriverError> {
-        (**self).punch(dir, name, offset, len)
+    fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
+        (**self).punch(file, offset, len)
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
@@ -175,10 +186,6 @@ impl FilesystemSecurity for Box<dyn KernelFs> {
 
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
         (**self).set_security(node, security)
-    }
-
-    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
-        (**self).stamp_owner(node, uid, gid)
     }
 
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {

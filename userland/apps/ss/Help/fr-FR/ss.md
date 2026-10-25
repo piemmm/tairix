@@ -75,8 +75,8 @@ ignoré.
 
 - `0` — la liste a été produite (ou l'aide courte a été écrite).
 - `1` — la requête de sockets a été refusée ou a échoué, ou la sortie
-  n'a pu être écrite.
-- `2` — la ligne de commande n'a pas été comprise.
+  n'a pu être écrite. Une ligne de commande non comprise sort aussi avec
+  `1`.
 
 ## ENVIRONMENT
 

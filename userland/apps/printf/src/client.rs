@@ -8,7 +8,7 @@ use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::Command;
 use crate::error::PrintfError;
-use crate::template::{render_pass, Severity};
+use crate::template::{render_pass, Severity, Sink};
 use tairix_util::quote::quote;
 
 /// The usage banner a usage error is reported with, and the fallback the
@@ -21,6 +21,69 @@ pub const USAGE: &str = "usage: printf format [argument...]";
 const OWN_WORD: &str = "printf";
 
 pub use tairix_util::output::Output;
+
+/// A pass's output, written to the stream a block at a time as it fills, so
+/// a field of any width or precision is never held whole.
+struct Flushing<'a> {
+    out: &'a dyn Output,
+    buffer: Vec<u8>,
+    refused: bool,
+}
+
+impl<'a> Flushing<'a> {
+    /// The most a pass holds before writing it out.
+    const BLOCK: usize = 64 * 1024;
+
+    fn new(out: &'a dyn Output) -> Self {
+        Self {
+            out,
+            buffer: Vec::new(),
+            refused: false,
+        }
+    }
+
+    fn flush(&mut self) {
+        if !self.refused && self.out.write_all(&self.buffer).is_err() {
+            self.refused = true;
+        }
+        self.buffer.clear();
+    }
+
+    /// Write what is left.
+    ///
+    /// # Errors
+    ///
+    /// [`PrintfError::Output`] when the stream refused any of the pass.
+    fn finish(mut self) -> Result<(), PrintfError> {
+        self.flush();
+        if self.refused {
+            Err(PrintfError::Output)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Sink for Flushing<'_> {
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() >= Self::BLOCK {
+            self.flush();
+        }
+    }
+
+    fn repeat(&mut self, byte: u8, count: usize) {
+        let mut left = count;
+        while left > 0 {
+            let take = left.min(Self::BLOCK);
+            self.buffer.resize(self.buffer.len() + take, byte);
+            left -= take;
+            if self.buffer.len() >= Self::BLOCK {
+                self.flush();
+            }
+        }
+    }
+}
 
 /// Run one [`Command`], writing formatted data to `out` and diagnostics
 /// to `err`. `locale` is the user's `LANG` preference, if set; `help` is
@@ -56,17 +119,17 @@ pub fn run(
     let mut status = 0_u8;
     let mut used = 0_usize;
     loop {
-        let mut buffer = Vec::new();
+        let mut written = Flushing::new(out);
         let mut diagnostics = Vec::new();
         let pass = render_pass(
             &format,
             &argument_slices[used..],
-            &mut buffer,
+            &mut written,
             &mut diagnostics,
         );
         // Whatever the pass rendered stands, even before a fatal error —
         // GNU's exit flushes its stream the same way.
-        out.write_all(&buffer).map_err(|_| PrintfError::Output)?;
+        written.finish()?;
         for diagnostic in &diagnostics {
             err.write_all(format!("printf: {}\n", diagnostic.message).as_bytes())
                 .map_err(|_| PrintfError::Output)?;
@@ -150,6 +213,47 @@ mod tests {
         let err = Sink::default();
         let status = run(command, None, &NoHelp, &out, &err)?;
         Ok((out.text(), err.text(), status))
+    }
+
+    /// A field of any width or precision is written a block at a time,
+    /// never held whole.
+    #[test]
+    fn a_field_of_any_size_is_written_a_block_at_a_time() {
+        #[derive(Default)]
+        struct Blocks {
+            written: RefCell<usize>,
+            largest: RefCell<usize>,
+        }
+        impl Output for Blocks {
+            fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+                *self.written.borrow_mut() += bytes.len();
+                let mut largest = self.largest.borrow_mut();
+                *largest = (*largest).max(bytes.len());
+                Ok(())
+            }
+        }
+        for (args, written) in [
+            (&["%.1000000f", "1"][..], 1_000_002),
+            (&["%1000000d", "7"][..], 1_000_000),
+            (&["%.1000000d", "7"][..], 1_000_000),
+            (&["%-1000000s|", "x"][..], 1_000_001),
+            (&["%#01000000x", "255"][..], 1_000_000),
+        ] {
+            let out = Blocks::default();
+            let status = run(
+                parse(args).expect("parses"),
+                None,
+                &NoHelp,
+                &out,
+                &Sink::default(),
+            );
+            assert_eq!(status, Ok(0), "{args:?}");
+            assert_eq!(*out.written.borrow(), written, "{args:?}");
+            assert!(
+                *out.largest.borrow() < 2 * super::Flushing::BLOCK,
+                "{args:?}"
+            );
+        }
     }
 
     /// Every expectation here is the observed behaviour of GNU coreutils

@@ -1,5 +1,4 @@
-//! BCM2835-family GPIO controller driver (`brcm,bcm2711-gpio`,
-//! `brcm,bcm2835-gpio`).
+//! BCM2835-family GPIO controller driver (`brcm,bcm2711-gpio`).
 //!
 //! The controller's lines reach two kinds of holder (`plans/GPIO.md` G2,
 //! `plans/COOLING.md` CL3): a device the hardware tree links to a line waits
@@ -11,8 +10,9 @@
 //! `Run` binary maps the window, binds the bank interrupts and both endpoints,
 //! publishes the header and serves.
 //!
-//! Reference: BCM2711 ARM Peripherals §5, BCM2835 ARM Peripherals §6, and the
-//! Linux `pinctrl-bcm2835` driver.
+//! Reference: BCM2711 ARM Peripherals §5 and §6.2.4, BCM2835 ARM Peripherals
+//! §6, and the `brcm,bcm2835-gpio` binding (taken under BSD-2-Clause) for the
+//! order of the node's interrupts.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -24,8 +24,9 @@ pub mod controller;
 #[cfg(test)]
 mod controller_tests;
 
-use block::Layout;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the register window, the bank interrupts, the node's two endpoints, the
@@ -42,26 +43,11 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 const BIND_PRIORITY: u16 = 10;
 
 /// The driver's canonical bind table — the single source both the installed
-/// bundle's signed manifest and the autoload match are built from — each key
-/// with the layout its controller has, in [`LAYOUTS`] order.
-pub const BIND_KEYS: &[DriverBindKey] = &[
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(b"brcm,bcm2711-gpio")),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(b"brcm,bcm2835-gpio")),
-];
-
-/// The layout each entry of [`BIND_KEYS`] names.
-pub const LAYOUTS: [Layout; 2] = [Layout::BCM2711, Layout::BCM2835];
-
-const _: () = assert!(LAYOUTS.len() == BIND_KEYS.len());
-
-const fn compatible_key(compatible: &[u8]) -> HwMatchKey {
-    match HwMatchKey::compatible(compatible) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    }
-}
+/// bundle's signed manifest and the autoload match are built from.
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
+    BIND_PRIORITY,
+    compatible_key!(b"brcm,bcm2711-gpio"),
+)];
 
 /// Handle marker [`register`] returns; the host re-issues its own. `"GPIO"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x4750_494F_0000_0001;

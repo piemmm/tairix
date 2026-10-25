@@ -32,16 +32,13 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::volume::{VolumeDetachRequest, VOLUME_DETACH_LEN, VOLUME_ID_LEN};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
-    use tairix_unmount::{parse, run, Detacher, UnmountError, USAGE};
+    use tairix_unmount::{parse, run, Detacher};
 
     /// The production [`Detacher`]: encode the detach frame and issue the
     /// `volume_detach` syscall. It adds no authority — the kernel
@@ -69,21 +66,17 @@ mod program {
     /// syscall.
     ///
     /// Exit codes: `0` on success (or the short help), `1` when the
-    /// volume could not be resolved or the kernel refused the detach,
-    /// `2` on a usage error.
+    /// volume could not be resolved, the kernel refused the detach, or the
+    /// command line was not understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error,
-        // reported rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("unmount") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("unmount: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("unmount", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -99,13 +92,8 @@ mod program {
             &Stderr,
         ) {
             Ok(()) => 0,
-            Err(err @ UnmountError::Usage) => {
-                write_stderr_line(&format!("unmount: {err}"));
-                write_stderr_line(USAGE);
-                2
-            }
             Err(err) => {
-                write_stderr_line(&format!("unmount: {err}"));
+                write_stderr_line(format_args!("unmount: {err}"));
                 1
             }
         }

@@ -42,8 +42,8 @@ siendo eliminable.
 
 - `0` — el nombre se eliminó (o se escribió la ayuda breve).
 - `1` — el sistema de archivos rechazó la eliminación, o la salida
-  falló; la razón se imprime en la salida de error estándar.
-- `2` — no se entendió la línea de órdenes.
+  falló; la razón se imprime en la salida de error estándar. Una línea
+  de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

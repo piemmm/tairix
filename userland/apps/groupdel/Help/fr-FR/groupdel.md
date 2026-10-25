@@ -25,8 +25,7 @@ Le registre fait autorité sur ce qui peut être retiré. Il refuse la suppressi
 ## EXIT STATUS
 
 - `0` — le groupe a été supprimé.
-- `1` — le registre a refusé ou échoué la suppression (par exemple une capacité manquante, un groupe inconnu ou un groupe encore référencé) ; la raison est écrite sur la sortie d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — le registre a refusé ou échoué la suppression (par exemple une capacité manquante, un groupe inconnu ou un groupe encore référencé) ; la raison est écrite sur la sortie d'erreur. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

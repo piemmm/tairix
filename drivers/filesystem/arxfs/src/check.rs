@@ -40,8 +40,8 @@ use crate::scrub::{ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
 use crate::superblock;
 use crate::transaction::TxnRoot;
 use crate::{
-    as_usize, extent_spec, inode_spec, DirScan, Extent, Inode, InodeKind, Pin, ARXFS,
-    MAX_BLOCK_LEN, ROOT_INO,
+    as_usize, extent_spec, inode_spec, pending_delete_spec, DirScan, Extent, Inode, InodeKind, Pin,
+    ARXFS, MAX_BLOCK_LEN, ROOT_INO,
 };
 
 /// An offline `check` finished and the structure validated clean.
@@ -466,11 +466,21 @@ impl<B: Block> ARXFS<B> {
         let mut walk = TreeWalk::new(self.block_size)?;
         let mut scan = DirScan::new(self.block_size)?;
         while self.btree_next_leaf(self.inode_tree_root, spec, &mut walk)? {
-            for (_, value) in walk.entries() {
+            for (key, value) in walk.entries() {
                 let Some(inode) = Inode::decode(value)? else {
                     continue;
                 };
                 if !inode.is_dir() {
+                    continue;
+                }
+                // A directory the pending-delete set names is being reclaimed —
+                // an orphan this pass published, or a removed one a hold keeps —
+                // so its entries name nothing.
+                if inode.nlink == 0
+                    && self
+                        .btree_get(self.pending_delete_root, key, pending_delete_spec())?
+                        .is_some()
+                {
                     continue;
                 }
                 scan.seek(0);
@@ -639,8 +649,8 @@ impl<B: Block> ARXFS<B> {
         self.reclaim_orphans(reachable, report)
     }
 
-    /// Reclaim every live inode the directory walk did not reach, by
-    /// publishing it in the pending-delete set.
+    /// Reclaim every live inode the directory walk did not reach and the
+    /// kernel does not hold, by publishing it in the pending-delete set.
     ///
     /// The set is the same route an ordinary unlink takes, and for the same
     /// reason: a maximally fragmented very large orphan cannot be freed inside
@@ -674,7 +684,8 @@ impl<B: Block> ARXFS<B> {
                     // it would free live storage.
                     return Err(DriverError::DeviceFault);
                 }
-                if self.scratch_get(reachable, ino_key)? != 0 {
+                // A hold reaches an inode as surely as a name does.
+                if self.held.contains_key(ino_key) || self.scratch_get(reachable, ino_key)? != 0 {
                     continue;
                 }
                 orphan = Some((ino_key, ino));

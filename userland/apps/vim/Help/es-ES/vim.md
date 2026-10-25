@@ -70,7 +70,7 @@ etapas posteriores; la lista vive en `plans/VIM.md` del árbol fuente.
 - `0` — la sesión terminó con una orden de salida, o se mostró la
   ayuda breve.
 - `1` — el terminal falló; el motivo se imprime en la salida de error.
-- `2` — la línea de órdenes no se entendió.
+  Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

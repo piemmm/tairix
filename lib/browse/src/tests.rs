@@ -25,13 +25,10 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::browser::Browser;
 use crate::clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError};
-use crate::delete::{DeleteAction, DeleteError, DeletePlan, DeleteWalk, MAX_DELETE_DEPTH};
-use crate::entry::Entry;
+use crate::delete::{DeletePlan, DeleteTarget};
+use crate::entry::{Entry, Listed};
 use crate::error::BrowseError;
-use crate::execute::{
-    paste_strategy, CopyAction, CopyKind, CopyWalk, CopyWalkError, PasteStrategy, VolumeId,
-    MAX_COPY_DEPTH,
-};
+use crate::execute::{paste_strategy, PasteStrategy, VolumeId};
 use crate::media::MediaType;
 use crate::places::{PlaceKind, Places, Volume, VolumeFacts};
 use crate::presentation::{HiddenEndings, Pictures, Presentation};
@@ -5018,8 +5015,8 @@ fn a_drop_copies_by_default_moves_with_shift_and_refuses_what_moves_nothing() {
 
     let path = |parts: &[&str]| -> Vec<String> { parts.iter().map(ToString::to_string).collect() };
     let items = [
-        path(&["Users", "ann", "a.txt"]),
-        path(&["Users", "ann", "Work"]),
+        listed(&["Users", "ann", "a.txt"]),
+        listed(&["Users", "ann", "Work"]),
     ];
     let elsewhere = path(&["Users", "ann", "Desktop"]);
     assert_eq!(
@@ -5051,7 +5048,7 @@ fn a_drop_copies_by_default_moves_with_shift_and_refuses_what_moves_nothing() {
     );
     // Nothing dragged, and the root, move nothing.
     assert_eq!(drop_operation(&[], &elsewhere, false), None);
-    assert_eq!(drop_operation(&[Vec::new()], &elsewhere, false), None);
+    assert_eq!(drop_operation(&[listed(&[])], &elsewhere, false), None);
 }
 
 #[test]
@@ -5335,6 +5332,41 @@ fn comps(parts: &[&str]) -> Vec<String> {
     parts.iter().copied().map(str::to_string).collect()
 }
 
+/// `parts`, listed with no node of its own.
+fn listed(parts: &[&str]) -> Listed {
+    Listed {
+        path: comps(parts),
+        id: tairix_abi::FileId::NONE,
+    }
+}
+
+/// `parts` queued for removal, listed with no node of its own.
+fn target(parts: &[&str], is_directory: bool) -> DeleteTarget {
+    DeleteTarget::new(listed(parts), is_directory)
+}
+
+/// A node on a volume of its own, for the identities a listing names.
+fn node(number: u64) -> tairix_abi::FileId {
+    tairix_abi::FileId {
+        volume: [7; 16],
+        node: number,
+    }
+}
+
+/// The fixture with `/System`'s entries listed as nodes 1, 2 and 3.
+fn identified_fixture() -> MockFs {
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/System".to_string(),
+        vec![
+            Entry::directory("Fonts").with_id(node(1)),
+            Entry::directory("Security").with_id(node(2)),
+            Entry::file("Kernel").with_id(node(3)),
+        ],
+    );
+    fs
+}
+
 /// The selected indices, low-to-high, as a `Vec` for assertions.
 fn selected(selection: &Selection) -> Vec<usize> {
     selection.iter().collect()
@@ -5516,8 +5548,8 @@ fn an_empty_directory_has_an_empty_selection() {
 }
 
 #[test]
-fn clipboard_captures_the_selected_entries_absolute_paths() {
-    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+fn clipboard_captures_the_selected_entries_and_the_nodes_they_were_listed_as() {
+    let mut browser = Browser::open_root(identified_fixture()).expect("root");
     browser.open_index(2).expect("enter System");
     // /System sorted: [Fonts, Security, Kernel]. Select Fonts and Kernel.
     browser.select(0).expect("focus Fonts");
@@ -5526,8 +5558,19 @@ fn clipboard_captures_the_selected_entries_absolute_paths() {
     assert_eq!(clipboard.op(), ClipboardOp::Cut);
     assert_eq!(
         clipboard.items(),
-        &[comps(&["System", "Fonts"]), comps(&["System", "Kernel"])]
+        &[
+            Listed {
+                path: comps(&["System", "Fonts"]),
+                id: node(1)
+            },
+            Listed {
+                path: comps(&["System", "Kernel"]),
+                id: node(3)
+            },
+        ]
     );
+    let plan = plan_paste(&clipboard, &comps(&["Users"])).expect("plan");
+    assert_eq!(plan.items()[1].source_id(), node(3));
 }
 
 #[test]
@@ -5542,9 +5585,9 @@ fn clipboard_is_none_when_nothing_is_selected() {
 fn clipboard_new_refuses_empty_or_root_items() {
     assert!(Clipboard::new(ClipboardOp::Copy, Vec::new()).is_none());
     // A root (empty component) item is not a real entry.
-    assert!(Clipboard::new(ClipboardOp::Copy, vec![Vec::new()]).is_none());
-    assert!(Clipboard::new(ClipboardOp::Copy, vec![comps(&["a"]), Vec::new()]).is_none());
-    let ok = Clipboard::new(ClipboardOp::Copy, vec![comps(&["a"])]).expect("built");
+    assert!(Clipboard::new(ClipboardOp::Copy, vec![listed(&[])]).is_none());
+    assert!(Clipboard::new(ClipboardOp::Copy, vec![listed(&["a"]), listed(&[])]).is_none());
+    let ok = Clipboard::new(ClipboardOp::Copy, vec![listed(&["a"])]).expect("built");
     assert_eq!(ok.len(), 1);
     assert!(!ok.is_empty());
 }
@@ -5553,7 +5596,7 @@ fn clipboard_new_refuses_empty_or_root_items() {
 fn plan_paste_maps_each_source_into_the_target() {
     let clipboard = Clipboard::new(
         ClipboardOp::Cut,
-        vec![comps(&["Users", "alice"]), comps(&["System", "Kernel"])],
+        vec![listed(&["Users", "alice"]), listed(&["System", "Kernel"])],
     )
     .expect("clipboard");
     let plan = plan_paste(&clipboard, &comps(&["Storage"])).expect("plan");
@@ -5577,7 +5620,7 @@ fn plan_paste_maps_each_source_into_the_target() {
 #[test]
 fn plan_paste_flags_a_paste_back_into_the_same_directory() {
     let clipboard =
-        Clipboard::new(ClipboardOp::Copy, vec![comps(&["System", "Fonts"])]).expect("clipboard");
+        Clipboard::new(ClipboardOp::Copy, vec![listed(&["System", "Fonts"])]).expect("clipboard");
     // Paste into /System, where Fonts already lives.
     let plan = plan_paste(&clipboard, &comps(&["System"])).expect("plan");
     let item = &plan.items()[0];
@@ -5587,7 +5630,7 @@ fn plan_paste_flags_a_paste_back_into_the_same_directory() {
 
 #[test]
 fn plan_paste_refuses_a_folder_into_itself_or_a_descendant() {
-    let clipboard = Clipboard::new(ClipboardOp::Cut, vec![comps(&["System"])]).expect("clipboard");
+    let clipboard = Clipboard::new(ClipboardOp::Cut, vec![listed(&["System"])]).expect("clipboard");
     // Into itself.
     assert_eq!(
         plan_paste(&clipboard, &comps(&["System"])),
@@ -5622,8 +5665,8 @@ fn delete_target<'a>(
 }
 
 #[test]
-fn plan_delete_captures_the_selected_targets_and_their_kinds() {
-    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+fn plan_delete_captures_the_selected_targets_their_kinds_and_their_nodes() {
+    let mut browser = Browser::open_root(identified_fixture()).expect("root");
     browser.open_index(2).expect("enter System");
     // /System sorted: [Fonts (dir), Security (dir), Kernel (file)]. Select the
     // directory Fonts and the file Kernel.
@@ -5638,10 +5681,12 @@ fn plan_delete_captures_the_selected_targets_and_their_kinds() {
     let fonts = delete_target(&plan, "Fonts");
     assert_eq!(fonts.path(), comps(&["System", "Fonts"]).as_slice());
     assert!(fonts.is_directory());
+    assert_eq!(fonts.id(), node(1));
 
     let kernel = delete_target(&plan, "Kernel");
     assert_eq!(kernel.path(), comps(&["System", "Kernel"]).as_slice());
     assert!(!kernel.is_directory());
+    assert_eq!(kernel.id(), node(3));
 }
 
 #[test]
@@ -5699,254 +5744,16 @@ fn delete_plan_new_refuses_empty_or_root_targets() {
     // Nothing to delete.
     assert!(DeletePlan::new(Vec::new()).is_none());
     // A root (empty component) target could remove the root itself.
-    assert!(DeletePlan::new(vec![(Vec::new(), true)]).is_none());
+    assert!(DeletePlan::new(vec![target(&[], true)]).is_none());
     // Any root target in the set poisons the whole plan (fail closed).
-    assert!(DeletePlan::new(vec![(comps(&["a"]), false), (Vec::new(), true)]).is_none());
+    assert!(DeletePlan::new(vec![target(&["a"], false), target(&[], true)]).is_none());
 
-    let plan = DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("a valid plan");
+    let plan = DeletePlan::new(vec![target(&["System", "Kernel"], false)]).expect("a valid plan");
     assert_eq!(plan.len(), 1);
     let target = &plan.targets()[0];
     assert_eq!(target.name(), "Kernel");
     assert_eq!(target.path(), comps(&["System", "Kernel"]).as_slice());
     assert!(!target.is_directory());
-}
-
-// ---- FM7b: the recursive-delete execution model (`DeleteWalk`) ----
-
-/// Drive a [`DeleteWalk`] to completion against an in-memory tree keyed by
-/// absolute-path spelling → children `(name, is_directory)`, returning the
-/// absolute-path spelling of every node in the order it was removed.
-///
-/// A directory absent from `tree` lists as empty. Every `expand`/
-/// `complete_removal` must succeed — a walk driven strictly in step never
-/// errors — so any protocol slip is a test failure, not a swallowed result.
-fn drive_delete(plan: &DeletePlan, tree: &BTreeMap<String, Vec<(String, bool)>>) -> Vec<String> {
-    let mut walk = DeleteWalk::from_plan(plan);
-    let mut order = Vec::new();
-    // A generous ceiling so a modelling bug (a walk that never completes) fails
-    // the test rather than looping forever.
-    for _ in 0..10_000 {
-        match walk.next_action() {
-            None => return order,
-            Some(DeleteAction::List(path)) => {
-                let children = tree.get(&key(path)).cloned().unwrap_or_default();
-                walk.expand(&children).expect("expand in step");
-            }
-            Some(DeleteAction::Remove { path, .. }) => {
-                order.push(key(path));
-                walk.complete_removal().expect("remove in step");
-            }
-        }
-    }
-    panic!("delete walk did not complete within the step ceiling");
-}
-
-#[test]
-fn delete_walk_removes_a_single_file() {
-    let plan = DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("plan");
-    let mut walk = DeleteWalk::from_plan(&plan);
-
-    assert!(!walk.is_complete());
-    assert_eq!(walk.removed(), 0);
-    match walk.next_action() {
-        Some(DeleteAction::Remove { path, is_directory }) => {
-            assert_eq!(path, comps(&["System", "Kernel"]).as_slice());
-            assert!(!is_directory);
-        }
-        other => panic!("expected a Remove, got {other:?}"),
-    }
-    walk.complete_removal().expect("remove the file");
-    assert!(walk.is_complete());
-    assert_eq!(walk.removed(), 1);
-    assert!(walk.next_action().is_none());
-}
-
-#[test]
-fn delete_walk_lists_an_empty_directory_then_removes_it() {
-    let plan = DeletePlan::new(vec![(comps(&["Storage", "empty"]), true)]).expect("plan");
-    let mut walk = DeleteWalk::from_plan(&plan);
-
-    // A directory is always listed first, even when it turns out empty.
-    match walk.next_action() {
-        Some(DeleteAction::List(path)) => {
-            assert_eq!(path, comps(&["Storage", "empty"]).as_slice());
-        }
-        other => panic!("expected a List, got {other:?}"),
-    }
-    walk.expand(&[]).expect("expand empty");
-    // Now the emptied directory is removed as a leaf.
-    match walk.next_action() {
-        Some(DeleteAction::Remove { path, is_directory }) => {
-            assert_eq!(path, comps(&["Storage", "empty"]).as_slice());
-            assert!(is_directory);
-        }
-        other => panic!("expected a Remove, got {other:?}"),
-    }
-    walk.complete_removal().expect("remove the directory");
-    assert!(walk.is_complete());
-    assert_eq!(walk.removed(), 1);
-}
-
-#[test]
-fn delete_walk_removes_contents_before_the_directory_depth_first() {
-    // /Storage/tree/{a.txt, sub/{b.txt}}, listed in that order.
-    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
-    tree.insert(
-        key(&comps(&["Storage", "tree"])),
-        vec![("a.txt".to_string(), false), ("sub".to_string(), true)],
-    );
-    tree.insert(
-        key(&comps(&["Storage", "tree", "sub"])),
-        vec![("b.txt".to_string(), false)],
-    );
-
-    let plan = DeletePlan::new(vec![(comps(&["Storage", "tree"]), true)]).expect("plan");
-    let order = drive_delete(&plan, &tree);
-
-    // Contents before their container, listing order among siblings, and the
-    // subtree fully removed before we come back up to the parent.
-    assert_eq!(
-        order,
-        vec![
-            key(&comps(&["Storage", "tree", "a.txt"])),
-            key(&comps(&["Storage", "tree", "sub", "b.txt"])),
-            key(&comps(&["Storage", "tree", "sub"])),
-            key(&comps(&["Storage", "tree"])),
-        ]
-    );
-}
-
-#[test]
-fn delete_walk_processes_multiple_targets_in_listing_order() {
-    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
-    tree.insert(
-        key(&comps(&["Users", "dir"])),
-        vec![("inner".to_string(), false)],
-    );
-
-    // A file, then a directory, then another file — the plan's listing order.
-    let plan = DeletePlan::new(vec![
-        (comps(&["Users", "first.txt"]), false),
-        (comps(&["Users", "dir"]), true),
-        (comps(&["Users", "last.txt"]), false),
-    ])
-    .expect("plan");
-    let order = drive_delete(&plan, &tree);
-
-    assert_eq!(
-        order,
-        vec![
-            key(&comps(&["Users", "first.txt"])),
-            key(&comps(&["Users", "dir", "inner"])),
-            key(&comps(&["Users", "dir"])),
-            key(&comps(&["Users", "last.txt"])),
-        ]
-    );
-}
-
-#[test]
-fn delete_walk_expand_refuses_a_tree_deeper_than_the_bound() {
-    // A directory target that already sits at the maximum depth: expanding it
-    // would name a child one component deeper than the bound.
-    let deep: Vec<String> = (0..MAX_DELETE_DEPTH).map(|i| format!("d{i}")).collect();
-    assert_eq!(deep.len(), MAX_DELETE_DEPTH);
-    let plan = DeletePlan::new(vec![(deep, true)]).expect("plan");
-    let mut walk = DeleteWalk::from_plan(&plan);
-
-    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
-    assert_eq!(
-        walk.expand(&[("child".to_string(), false)]),
-        Err(DeleteError::TooDeep)
-    );
-    // Refused, and the walk is left exactly where it was (fail closed): still a
-    // List of the same directory, nothing removed.
-    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
-    assert_eq!(walk.removed(), 0);
-}
-
-#[test]
-fn delete_walk_fails_closed_when_driven_out_of_step() {
-    // `expand` on a leaf file is out of step.
-    let file_plan = DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("plan");
-    let mut walk = DeleteWalk::from_plan(&file_plan);
-    assert!(matches!(
-        walk.next_action(),
-        Some(DeleteAction::Remove { .. })
-    ));
-    assert_eq!(walk.expand(&[]), Err(DeleteError::OutOfStep));
-    // Unchanged.
-    assert!(matches!(
-        walk.next_action(),
-        Some(DeleteAction::Remove { .. })
-    ));
-
-    // `complete_removal` on a directory whose contents were not listed is out
-    // of step.
-    let dir_plan = DeletePlan::new(vec![(comps(&["Storage", "d"]), true)]).expect("plan");
-    let mut walk = DeleteWalk::from_plan(&dir_plan);
-    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
-    assert_eq!(walk.complete_removal(), Err(DeleteError::OutOfStep));
-    assert!(matches!(walk.next_action(), Some(DeleteAction::List(_))));
-
-    // Either driver call on a finished walk is out of step.
-    walk.expand(&[]).expect("empty the directory");
-    walk.complete_removal().expect("remove it");
-    assert!(walk.is_complete());
-    assert_eq!(walk.expand(&[]), Err(DeleteError::OutOfStep));
-    assert_eq!(walk.complete_removal(), Err(DeleteError::OutOfStep));
-}
-
-#[test]
-fn delete_walk_holds_its_position_across_an_interruption() {
-    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
-    tree.insert(
-        key(&comps(&["Users", "dir"])),
-        vec![("x".to_string(), false), ("y".to_string(), false)],
-    );
-    let plan = DeletePlan::new(vec![(comps(&["Users", "dir"]), true)]).expect("plan");
-    let mut walk = DeleteWalk::from_plan(&plan);
-
-    // List, then remove exactly one child, then "stop" (as a Cancel or a
-    // preemption would) holding the walk.
-    let list = walk.next_action().expect("a step");
-    assert!(matches!(list, DeleteAction::List(_)));
-    walk.expand(&[("x".to_string(), false), ("y".to_string(), false)])
-        .expect("expand");
-    if let Some(DeleteAction::Remove { .. }) = walk.next_action() {
-        walk.complete_removal().expect("remove x");
-    }
-    assert_eq!(walk.removed(), 1);
-    assert!(!walk.is_complete());
-
-    // Resuming from exactly here removes the remaining child then the directory
-    // — no repeat of the child already removed, no skip.
-    let mut order = Vec::new();
-    while let Some(action) = walk.next_action() {
-        match action {
-            DeleteAction::List(path) => {
-                let children = tree.get(&key(path)).cloned().unwrap_or_default();
-                walk.expand(&children).expect("expand");
-            }
-            DeleteAction::Remove { path, .. } => {
-                order.push(key(path));
-                walk.complete_removal().expect("remove");
-            }
-        }
-    }
-    assert_eq!(
-        order,
-        vec![
-            key(&comps(&["Users", "dir", "y"])),
-            key(&comps(&["Users", "dir"])),
-        ]
-    );
-    assert_eq!(walk.removed(), 3);
-}
-
-#[test]
-fn delete_error_messages_are_non_empty() {
-    assert!(!DeleteError::TooDeep.to_string().is_empty());
-    assert!(!DeleteError::OutOfStep.to_string().is_empty());
 }
 
 // ---- FM7b: the paste-execution model (`execute`) ----
@@ -5992,330 +5799,6 @@ fn a_cut_across_volumes_copies_then_deletes() {
         paste_strategy(ClipboardOp::Cut, vol(1), vol(2)),
         PasteStrategy::CopyThenDelete
     );
-}
-
-// ---- FM7b: the recursive-copy execution model (`CopyWalk`) ----
-
-/// Drive a [`CopyWalk`] to completion against an in-memory *source* tree keyed
-/// by absolute-path spelling → children `(name, kind)`, returning the
-/// absolute *destination*-path spelling of every node in the order the copy
-/// performed it (a directory when created, a file when copied).
-///
-/// A source directory absent from `tree` lists as empty. Every driver call
-/// must succeed — a walk driven strictly in step never errors — so any protocol
-/// slip is a test failure, not a swallowed result.
-fn drive_copy(
-    walk: &mut CopyWalk,
-    tree: &BTreeMap<String, Vec<(String, CopyKind)>>,
-) -> Vec<String> {
-    let mut order = Vec::new();
-    // A generous ceiling so a modelling bug (a walk that never completes) fails
-    // the test rather than looping forever.
-    for _ in 0..10_000 {
-        match walk.next_action() {
-            None => return order,
-            Some(CopyAction::MakeDir { dest, .. }) => {
-                order.push(key(dest));
-                walk.created().expect("created in step");
-            }
-            Some(CopyAction::List { source }) => {
-                let children = tree.get(&key(source)).cloned().unwrap_or_default();
-                walk.expand(&children).expect("expand in step");
-            }
-            Some(CopyAction::CopyFile { dest, .. }) => {
-                order.push(key(dest));
-                walk.copied_file().expect("copy file in step");
-            }
-            Some(CopyAction::CopyLink { dest, .. }) => {
-                order.push(key(dest));
-                walk.copied_link().expect("copy link in step");
-            }
-        }
-    }
-    panic!("copy walk did not complete within the step ceiling");
-}
-
-#[test]
-fn copy_walk_copies_a_single_file() {
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "a.txt"]),
-        comps(&["Storage", "a.txt"]),
-        CopyKind::File,
-    )])
-    .expect("walk");
-
-    assert!(!walk.is_complete());
-    assert_eq!(walk.copied(), 0);
-    match walk.next_action() {
-        Some(CopyAction::CopyFile { source, dest }) => {
-            assert_eq!(source, comps(&["Users", "a.txt"]).as_slice());
-            assert_eq!(dest, comps(&["Storage", "a.txt"]).as_slice());
-        }
-        other => panic!("expected a CopyFile, got {other:?}"),
-    }
-    walk.copied_file().expect("copy the file");
-    assert!(walk.is_complete());
-    assert_eq!(walk.copied(), 1);
-    assert!(walk.next_action().is_none());
-}
-
-#[test]
-fn copy_walk_makes_the_destination_directory_before_listing_an_empty_one() {
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "empty"]),
-        comps(&["Storage", "empty"]),
-        CopyKind::Directory,
-    )])
-    .expect("walk");
-
-    // The destination directory is created first, before its contents are
-    // read, naming the source whose attributes it takes.
-    match walk.next_action() {
-        Some(CopyAction::MakeDir { source, dest }) => {
-            assert_eq!(source, comps(&["Users", "empty"]).as_slice());
-            assert_eq!(dest, comps(&["Storage", "empty"]).as_slice());
-        }
-        other => panic!("expected a MakeDir, got {other:?}"),
-    }
-    walk.created().expect("dest dir made");
-    assert_eq!(walk.copied(), 1);
-    // Then the source is listed; an empty listing finishes the directory.
-    match walk.next_action() {
-        Some(CopyAction::List { source }) => {
-            assert_eq!(source, comps(&["Users", "empty"]).as_slice());
-        }
-        other => panic!("expected a List, got {other:?}"),
-    }
-    walk.expand(&[]).expect("expand empty");
-    assert!(walk.is_complete());
-    assert_eq!(walk.copied(), 1);
-}
-
-#[test]
-fn copy_walk_creates_containers_before_contents_depth_first() {
-    // /Users/tree/{a.txt, sub/{b.txt}}, listed in that order → /Storage/tree.
-    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
-    tree.insert(
-        key(&comps(&["Users", "tree"])),
-        vec![
-            ("a.txt".to_string(), CopyKind::File),
-            ("sub".to_string(), CopyKind::Directory),
-        ],
-    );
-    tree.insert(
-        key(&comps(&["Users", "tree", "sub"])),
-        vec![("b.txt".to_string(), CopyKind::File)],
-    );
-
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "tree"]),
-        comps(&["Storage", "tree"]),
-        CopyKind::Directory,
-    )])
-    .expect("walk");
-    let order = drive_copy(&mut walk, &tree);
-
-    // A container is created before its contents, siblings keep listing order,
-    // and a subtree is fully copied before we return to the parent.
-    assert_eq!(
-        order,
-        vec![
-            key(&comps(&["Storage", "tree"])),
-            key(&comps(&["Storage", "tree", "a.txt"])),
-            key(&comps(&["Storage", "tree", "sub"])),
-            key(&comps(&["Storage", "tree", "sub", "b.txt"])),
-        ]
-    );
-    // Every node counted once: tree, a.txt, sub, b.txt.
-    assert_eq!(walk.copied(), 4);
-}
-
-#[test]
-fn copy_walk_processes_multiple_items_in_order() {
-    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
-    tree.insert(
-        key(&comps(&["Users", "dir"])),
-        vec![("inner".to_string(), CopyKind::File)],
-    );
-
-    let mut walk = CopyWalk::from_items(vec![
-        (
-            comps(&["Users", "first.txt"]),
-            comps(&["Storage", "first.txt"]),
-            CopyKind::File,
-        ),
-        (
-            comps(&["Users", "dir"]),
-            comps(&["Storage", "dir"]),
-            CopyKind::Directory,
-        ),
-        (
-            comps(&["Users", "last.txt"]),
-            comps(&["Storage", "last.txt"]),
-            CopyKind::File,
-        ),
-    ])
-    .expect("walk");
-    let order = drive_copy(&mut walk, &tree);
-
-    assert_eq!(
-        order,
-        vec![
-            key(&comps(&["Storage", "first.txt"])),
-            key(&comps(&["Storage", "dir"])),
-            key(&comps(&["Storage", "dir", "inner"])),
-            key(&comps(&["Storage", "last.txt"])),
-        ]
-    );
-    assert_eq!(walk.copied(), 4);
-}
-
-#[test]
-fn copy_walk_expand_refuses_a_tree_deeper_than_the_bound() {
-    // A directory source that already sits at the maximum depth: expanding it
-    // would name a child one component deeper than the bound.
-    let deep: Vec<String> = (0..MAX_COPY_DEPTH).map(|i| format!("d{i}")).collect();
-    assert_eq!(deep.len(), MAX_COPY_DEPTH);
-    let mut walk = CopyWalk::from_items(vec![(
-        deep,
-        comps(&["Storage", "dst"]),
-        CopyKind::Directory,
-    )])
-    .expect("walk");
-
-    // Make the destination, then the list step refuses to descend further.
-    assert!(matches!(
-        walk.next_action(),
-        Some(CopyAction::MakeDir { .. })
-    ));
-    walk.created().expect("dest dir made");
-    assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
-    assert_eq!(
-        walk.expand(&[("child".to_string(), CopyKind::File)]),
-        Err(CopyWalkError::TooDeep)
-    );
-    // Refused, and the walk is left exactly where it was (fail closed): still a
-    // List of the same directory.
-    assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
-}
-
-#[test]
-fn copy_walk_fails_closed_when_driven_out_of_step() {
-    // `created` / `expand` on a leaf-file step are out of step.
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "a.txt"]),
-        comps(&["Storage", "a.txt"]),
-        CopyKind::File,
-    )])
-    .expect("walk");
-    assert!(matches!(
-        walk.next_action(),
-        Some(CopyAction::CopyFile { .. })
-    ));
-    assert_eq!(walk.created(), Err(CopyWalkError::OutOfStep));
-    assert_eq!(walk.expand(&[]), Err(CopyWalkError::OutOfStep));
-    assert!(matches!(
-        walk.next_action(),
-        Some(CopyAction::CopyFile { .. })
-    ));
-
-    // `expand` on a not-yet-created directory, and `copied_file` on a directory,
-    // are out of step.
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "d"]),
-        comps(&["Storage", "d"]),
-        CopyKind::Directory,
-    )])
-    .expect("walk");
-    assert!(matches!(
-        walk.next_action(),
-        Some(CopyAction::MakeDir { .. })
-    ));
-    assert_eq!(walk.expand(&[]), Err(CopyWalkError::OutOfStep));
-    assert_eq!(walk.copied_file(), Err(CopyWalkError::OutOfStep));
-    assert!(matches!(
-        walk.next_action(),
-        Some(CopyAction::MakeDir { .. })
-    ));
-
-    // Any driver call on a finished walk is out of step.
-    walk.created().expect("dest dir made");
-    walk.expand(&[]).expect("empty the directory");
-    assert!(walk.is_complete());
-    assert_eq!(walk.created(), Err(CopyWalkError::OutOfStep));
-    assert_eq!(walk.expand(&[]), Err(CopyWalkError::OutOfStep));
-    assert_eq!(walk.copied_file(), Err(CopyWalkError::OutOfStep));
-}
-
-#[test]
-fn copy_walk_holds_its_position_across_an_interruption() {
-    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
-    tree.insert(
-        key(&comps(&["Users", "dir"])),
-        vec![
-            ("x".to_string(), CopyKind::File),
-            ("y".to_string(), CopyKind::File),
-        ],
-    );
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "dir"]),
-        comps(&["Storage", "dir"]),
-        CopyKind::Directory,
-    )])
-    .expect("walk");
-
-    // Make the dest dir, list it, then copy exactly one child and "stop" (as a
-    // Cancel or a preemption would) holding the walk.
-    assert!(matches!(
-        walk.next_action(),
-        Some(CopyAction::MakeDir { .. })
-    ));
-    walk.created().expect("dest dir made");
-    assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
-    walk.expand(&[
-        ("x".to_string(), CopyKind::File),
-        ("y".to_string(), CopyKind::File),
-    ])
-    .expect("expand");
-    if let Some(CopyAction::CopyFile { .. }) = walk.next_action() {
-        walk.copied_file().expect("copy x");
-    }
-    // The directory and the first child are done; the second child remains.
-    assert_eq!(walk.copied(), 2);
-    assert!(!walk.is_complete());
-
-    // Resuming from exactly here copies the remaining child — no repeat of the
-    // child already copied, no skip.
-    let order = drive_copy(&mut walk, &tree);
-    assert_eq!(order, vec![key(&comps(&["Storage", "dir", "y"]))]);
-    assert_eq!(walk.copied(), 3);
-}
-
-#[test]
-fn copy_walk_from_items_fails_closed() {
-    // Nothing to copy.
-    assert!(CopyWalk::from_items(vec![]).is_none());
-    // A source or destination that names the root (an empty component list).
-    assert!(
-        CopyWalk::from_items(vec![(Vec::new(), comps(&["Storage", "a"]), CopyKind::File)])
-            .is_none()
-    );
-    assert!(
-        CopyWalk::from_items(vec![(comps(&["Users", "a"]), Vec::new(), CopyKind::File)]).is_none()
-    );
-    // A valid item builds a walk.
-    assert!(CopyWalk::from_items(vec![(
-        comps(&["Users", "a"]),
-        comps(&["Storage", "a"]),
-        CopyKind::File
-    )])
-    .is_some());
-}
-
-#[test]
-fn copy_walk_error_messages_are_non_empty() {
-    assert!(!CopyWalkError::TooDeep.to_string().is_empty());
-    assert!(!CopyWalkError::OutOfStep.to_string().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -10713,14 +10196,14 @@ use tairix_abi::window_ipc::{AlertButtonRole, AlertSeverity};
 
 /// A plan removing a single regular file.
 fn one_file_plan() -> DeletePlan {
-    DeletePlan::new(vec![(comps(&["System", "Kernel"]), false)]).expect("a plan")
+    DeletePlan::new(vec![target(&["System", "Kernel"], false)]).expect("a plan")
 }
 
 /// A plan removing two items, one of them a directory.
 fn folder_plan() -> DeletePlan {
     DeletePlan::new(vec![
-        (comps(&["System", "Fonts"]), true),
-        (comps(&["System", "Kernel"]), false),
+        target(&["System", "Fonts"], true),
+        target(&["System", "Kernel"], false),
     ])
     .expect("a plan")
 }
@@ -10744,7 +10227,7 @@ fn a_delete_question_names_a_single_target() {
 /// The question naming what it removes shows what would hide in the name.
 #[test]
 fn a_delete_question_shows_what_would_hide_in_the_name() {
-    let plan = DeletePlan::new(vec![(comps(&["Home", "a\u{200b}b"]), false)]).expect("a plan");
+    let plan = DeletePlan::new(vec![target(&["Home", "a\u{200b}b"], false)]).expect("a plan");
     let alert = delete_alert(&plan, DeleteDisposition::Permanent).expect("an alert");
     assert!(
         alert.headline().contains("a\u{fffd}b"),
@@ -10795,7 +10278,7 @@ fn a_move_to_trash_is_recoverable_and_the_default() {
 #[test]
 fn a_delete_question_about_a_very_long_name_still_asks() {
     let long = "n".repeat(255);
-    let plan = DeletePlan::new(vec![(comps(&["System", long.as_str()]), false)]).expect("a plan");
+    let plan = DeletePlan::new(vec![target(&["System", long.as_str()], false)]).expect("a plan");
     let alert = delete_alert(&plan, DeleteDisposition::Trash).expect("an alert");
     assert!(
         alert.headline().ends_with('\u{2026}'),
@@ -11135,6 +10618,7 @@ mod trash {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use crate::entry::Entry;
     use crate::execute::VolumeId;
     use crate::trash::{
         empty_trash_plan, trash_dest_path, trash_strategy, TrashError, TrashStrategy,
@@ -11148,8 +10632,12 @@ mod trash {
         parts.iter().map(|p| String::from(*p)).collect()
     }
 
-    fn child(name: &str, is_dir: bool) -> (String, bool) {
-        (String::from(name), is_dir)
+    fn child(name: &str, is_dir: bool) -> Entry {
+        if is_dir {
+            Entry::directory(name)
+        } else {
+            Entry::file(name)
+        }
     }
 
     #[test]
@@ -11256,7 +10744,10 @@ mod trash {
     #[test]
     fn emptying_removes_every_child_under_the_trash_dir_not_the_dir_itself() {
         let trash = owned(&["Users", "root", "Library", "Trash"]);
-        let children = vec![child("notes.txt", false), child("old_project", true)];
+        let children = vec![
+            child("notes.txt", false).with_id(super::node(1)),
+            child("old_project", true),
+        ];
         let plan = empty_trash_plan(&trash, &children)
             .expect("a valid listing")
             .expect("a non-empty Trash yields a plan");
@@ -11270,12 +10761,15 @@ mod trash {
             owned(&["Users", "root", "Library", "Trash", "notes.txt"]).as_slice()
         );
         assert!(!targets[0].is_directory());
+        // Each child carries the node the listing showed, so a name swapped
+        // since the listing is left alone.
+        assert_eq!(targets[0].id(), super::node(1));
         assert_eq!(
             targets[1].path(),
             owned(&["Users", "root", "Library", "Trash", "old_project"]).as_slice()
         );
         assert!(targets[1].is_directory());
-        // A directory-backed child means the recursive DeleteWalk is exercised.
+        // A directory-backed child is removed with everything beneath it.
         assert!(plan.has_directories());
     }
 
@@ -13028,55 +12522,6 @@ fn a_relative_link_target_resolves_against_the_links_own_directory() {
     );
     // A root parent is not doubled.
     assert_eq!(crate::entry::resolve_target("/", "x"), "/x");
-}
-
-#[test]
-fn the_copy_walk_recreates_a_link_rather_than_streaming_its_bytes() {
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "shortcut"]),
-        comps(&["Storage", "shortcut"]),
-        CopyKind::Link,
-    )])
-    .expect("walk");
-    match walk.next_action() {
-        Some(CopyAction::CopyLink { source, dest }) => {
-            assert_eq!(source, comps(&["Users", "shortcut"]).as_slice());
-            assert_eq!(dest, comps(&["Storage", "shortcut"]).as_slice());
-        }
-        other => panic!("expected a CopyLink, got {other:?}"),
-    }
-    // The acknowledgement must match the step: a link is not a file.
-    assert_eq!(walk.copied_file(), Err(CopyWalkError::OutOfStep));
-    walk.copied_link().expect("link copied");
-    assert!(walk.is_complete());
-    assert_eq!(walk.copied(), 1);
-}
-
-#[test]
-fn a_copied_tree_recreates_the_links_inside_it() {
-    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
-    tree.insert(
-        "/Users/dir".to_string(),
-        vec![
-            ("a.txt".to_string(), CopyKind::File),
-            ("shortcut".to_string(), CopyKind::Link),
-        ],
-    );
-    let mut walk = CopyWalk::from_items(vec![(
-        comps(&["Users", "dir"]),
-        comps(&["Storage", "dir"]),
-        CopyKind::Directory,
-    )])
-    .expect("walk");
-    let order = drive_copy(&mut walk, &tree);
-    assert_eq!(
-        order,
-        vec![
-            "/Storage/dir".to_string(),
-            "/Storage/dir/a.txt".to_string(),
-            "/Storage/dir/shortcut".to_string(),
-        ]
-    );
 }
 
 #[test]

@@ -1,5 +1,5 @@
-//! A multi-touch device: contacts reported by the slot protocol (Linux
-//! `Documentation/input/multi-touch-protocol.rst`, type B), each
+//! A multi-touch device: contacts reported by evdev's slot protocol (as
+//! FreeBSD's `evdev_mt.c` implements it), each
 //! `SYN_REPORT` closing one [`TouchFrame`] of every contact still down.
 
 use tairix_abi::touch::{

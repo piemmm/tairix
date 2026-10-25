@@ -46,8 +46,7 @@ what is enrolled, so they also survive one.
 - `0` — the operation was applied, or the short help was shown.
 - `1` — the manager refused the operation, recorded the enrolment but
   could not start or stop the service, or the control endpoint could not be
-  reached.
-- `2` — the command line was not understood; nothing was sent.
+  reached. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

@@ -52,23 +52,31 @@ than written. Creating a link grants no authority over what it names —
 authority is decided at each later use, per component, under the caller's
 attested identity.
 
-## Replacing a name removes it
+## Replacing a name
 
-`-f` (and an approved `-i`) **remove** the existing name before creating the
-link, so nothing ever travels through a link that was already there to
-whatever it points at. A directory is never replaced: a directory
-destination receives links inside it, and one that still blocks the name
-(under `-T`) is reported, not removed. An unanswerable `-i` question is
-never consent.
+`-f` (and an approved `-i`) put the new link in the existing name's place in
+one step: it is made under a staging name and renamed over the old one
+(`tairix_rt::replace_with_link`), so the name is never missing, a link that
+cannot be made leaves it, and nothing travels through a link already there
+to whatever it points at. A hard link's target is reached first, as GNU
+reaches it. A directory is never replaced: a directory destination receives
+links inside it, and one that still blocks the name (under `-T`) is
+reported, not removed. A link that would take the place of the very file it
+names is refused as the same file; a symbolic target is judged as the link
+will read it, from its own directory, where GNU judges it from the working
+directory and so replaces some files with a link to themselves. An
+unanswerable `-i` question is never consent, and a declined one fails the
+run, as GNU's does.
 
-The first failure stops the run before any later target (fail closed), as in
-`cp` and `mv`; links already created stay created.
+A link that cannot be made is reported and the next is still made, as
+GNU's are; the run exits 1 when any failed.
 
 ## Layering & safety
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `tairix-abi`, `tairix-path`, and `tairix-help` crates, so it never
+shared `tairix-abi`, `tairix-path`, `tairix-util` and `tairix-help` crates,
+and `tairix-rt` in its `Run` binary, so it never
 links a kernel or driver crate. Its manifest (`AppInfo.toml`) requests
 `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ` (the one line `-i` reads), and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
@@ -77,24 +85,29 @@ authorises every path per-inode under the caller's attested identity.
 ## Usage
 
 ```
-ln -s [-finvT] [-t dir] [--] target... [link_name]
+ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]
 
-  -s, --symbolic             make symbolic links (required, see above)
-  -f, --force                remove an existing link name and retry
-  -i, --interactive          ask before removing an existing link name
+  -s, --symbolic             make symbolic links
+  -r, --relative             store the target relative to the link (needs -s)
+  -L, --logical              hard-link what a link target names
+  -P, --physical             hard-link the target as spelled (default)
+  -d, -F, --directory        accept a directory operand (still refused)
+  -f, --force                replace an existing link name
+  -i, --interactive          ask before replacing an existing link name
   -n, --no-dereference       treat a link-to-directory destination as a name
   -v, --verbose              report each link made
   -t dir, --target-directory=dir
                              create every link in dir
   -T, --no-target-directory  treat the destination as a link name
-  -h, -?                     show this command's own short help
+  -h, -?, --help             show this command's own short help
 ```
 
 ## Exit status
 
 - `0` — every link was created (or the short help was written).
-- `1` — anything else, with the reason on standard error. GNU `ln` has no
-  separate usage status, so a malformed command line exits `1` too.
+- `1` — anything else, a declined `-i` question included, with any reason on
+  standard error. GNU `ln` has no separate usage status, so a malformed
+  command line exits `1` too.
 
 ## Stability
 

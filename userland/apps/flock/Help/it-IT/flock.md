@@ -68,9 +68,8 @@ eseguito senza il blocco che aveva chiesto.
   ha rinunciato; il comando non è stato eseguito.
 - `1` — il blocco non si è potuto prendere per un motivo che attendere non
   risolverebbe, o il comando non si è potuto eseguire; il motivo è stampato
-  sull'errore standard.
-- `2` — la riga di comando non è stata compresa; nulla è stato bloccato e
-  nulla eseguito.
+  sull'errore standard. Anche una riga di comando non compresa termina con
+  `1`, senza bloccare né eseguire nulla.
 - `126` — il comando è stato trovato ma non si è potuto eseguire.
 - `127` — il comando non è stato trovato.
 

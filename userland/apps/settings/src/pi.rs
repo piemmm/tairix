@@ -106,19 +106,12 @@ impl Cooling {
         }
     }
 
-    /// Whether `next` differs from this only in its temperature, so the rows
-    /// it shapes stand and only the temperature's reading moves.
+    /// Whether `next` moves only what the STATUS rows state — the
+    /// temperature, the fan and its fault — leaving the header's lines, which
+    /// the fan's own rows are built from, as they stand.
     #[must_use]
-    pub fn only_temperature_moves(&self, next: &Self) -> bool {
-        match (self, next) {
-            (Self::Read(held), Self::Read(next)) => {
-                ThermalStatus {
-                    temperature: next.temperature,
-                    ..*held
-                } == *next
-            }
-            _ => false,
-        }
+    pub(crate) fn moves_only_status(&self, next: &Self) -> bool {
+        matches!((self, next), (Self::Read(held), Self::Read(next)) if held.lines == next.lines)
     }
 }
 

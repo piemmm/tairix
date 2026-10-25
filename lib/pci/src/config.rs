@@ -3,8 +3,8 @@
 //! The types live in their own module so the enumeration logic in
 //! [`crate::enumerate`] and the mechanism-#1 PIO bridge in
 //! [`crate::mech_one`] both depend on a single source of truth for
-//! the on-wire layout. Nothing here is re-exported outside the
-//! crate; the test module exercises every type directly.
+//! the on-wire layout. [`ConfigAddress`] and [`ConfigSpace`] are re-exported
+//! for a root complex whose bus driver supplies its own mechanism.
 
 /// A `(bus, device, function, register)` quadruple addressing one
 /// 32-bit dword of PCI configuration space.
@@ -133,16 +133,16 @@ impl ConfigAddress {
 ///
 /// Implementations:
 ///
-/// * [`crate::mech_one::PortIoConfigSpace`] — real hardware PIO,
+/// * `mech_one::PortIoConfigSpace` — real hardware PIO,
 ///   behind the [`tairix_abi::PortIo`] seam so the unit tests can
 ///   drive it without touching the actual `in`/`out` instructions
 ///   (the x86_64 backend lives in the architecture port).
-/// * [`crate::mech_ecam::EcamConfigSpace`] — memory-mapped `PCIe`
+/// * `mech_ecam::EcamConfigSpace` — memory-mapped `PCIe`
 ///   enhanced configuration access over a kernel-mapped
 ///   [`tairix_abi::RegisterWindow`], the path of every host bridge with a
 ///   flat configuration region.
-/// * [`crate::mech_brcm::BrcmConfigSpace`] — the BCM2711 root complex's
-///   index/data window.
+/// * a root complex's own mechanism, which its bus driver hands to
+///   [`crate::mechanism_supplied`].
 /// * `tests::MockConfigSpace` — table-driven fixture for the
 ///   in-crate enumeration tests.
 pub trait ConfigSpace {
@@ -336,8 +336,8 @@ mod tests {
 
     #[test]
     fn ecam_offset_encodes_block_layout() {
-        // Bus 1, device 0, function 0, register 0 — the VL805 xHCI on
-        // the BCM2711 root complex sits one 1 MiB bus block in.
+        // Bus 1, device 0, function 0, register 0 — a function behind a
+        // root port sits one 1 MiB bus block in.
         assert_eq!(
             ConfigAddress {
                 bus: 1,

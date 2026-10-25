@@ -3,6 +3,7 @@
 use core::fmt;
 use tairix_abi::Errno;
 use tairix_procinfo::{CallError, ListError};
+use tairix_util::getopt::Refusal;
 
 /// Why a `mount` invocation did not complete.
 ///
@@ -10,11 +11,12 @@ use tairix_procinfo::{CallError, ListError};
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MountError {
-    /// The command line carried an unrecognised option or a number of
-    /// operands other than zero (list) or two (mount). The caller should
-    /// print [`crate::USAGE`].
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// The command line carried a number of operands other than zero (list)
+    /// or two (mount), or mount options with no operands.
     Usage,
     /// A `-o` option value named an unknown mount option, or `-t`/`-o` was
     /// given an empty value.
@@ -56,6 +58,7 @@ impl From<ListError> for MountError {
 impl fmt::Display for MountError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::BadOption => f.write_str("invalid mount option"),
             Self::Mount(errno) => write!(f, "mount failed: {errno}"),

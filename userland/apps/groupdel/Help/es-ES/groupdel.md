@@ -25,8 +25,7 @@ El registro decide qué puede retirarse. Rechaza eliminar un grupo al que una cu
 ## EXIT STATUS
 
 - `0` — el grupo fue eliminado.
-- `1` — el registro rechazó o no pudo completar la eliminación (por ejemplo una capacidad ausente, un grupo desconocido o un grupo aún referenciado); la razón se imprime en la salida de error.
-- `2` — no se entendió la línea de órdenes.
+- `1` — el registro rechazó o no pudo completar la eliminación (por ejemplo una capacidad ausente, un grupo desconocido o un grupo aún referenciado); la razón se imprime en la salida de error. Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

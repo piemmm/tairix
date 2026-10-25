@@ -1,8 +1,15 @@
 //! The checks every soak body shares: a driver result tagged with the
-//! reproducing seed, an expected refusal, and a directory listing.
+//! reproducing seed, an expected refusal, a directory listing, and the records
+//! its nodes are created with.
 
-use tairix_abi::driver::filesystem::{DirVisit, FilesystemRead, NodeId};
+use tairix_abi::driver::filesystem::{DirVisit, FilesystemRead, NodeId, NodeKind, NodeSecurity};
 use tairix_abi::DriverError;
+
+/// The record every file the soak creates is born with.
+pub(crate) const FILE_RECORD: NodeSecurity = NodeSecurity::created(NodeKind::RegularFile, 0, 0);
+
+/// The record every directory the soak creates is born with.
+pub(crate) const DIR_RECORD: NodeSecurity = NodeSecurity::created(NodeKind::Directory, 0, 0);
 
 /// Map a driver result into a descriptive soak error tagged with `what`
 /// and the reproducing `seed`.

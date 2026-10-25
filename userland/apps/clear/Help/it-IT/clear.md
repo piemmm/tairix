@@ -34,8 +34,7 @@ script e non cambia nulla.
 
 - `0` — la sequenza di cancellazione è stata scritta.
 - `1` — il terminale non può cancellare, o l'output non è stato
-  consegnato.
-- `2` — la riga di comando non è stata compresa.
+  consegnato. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

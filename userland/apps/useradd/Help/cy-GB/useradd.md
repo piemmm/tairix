@@ -54,8 +54,7 @@ yn operand.
 - `0` — crëwyd y cyfrif.
 - `1` — gwrthododd neu fethodd y gronfa ddata'r creu (er enghraifft
   gallu coll, id dyblyg neu grŵp anhysbys); argraffir y rheswm ar y
-  gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  gwall safonol. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

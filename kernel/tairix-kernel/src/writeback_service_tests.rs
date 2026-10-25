@@ -26,14 +26,14 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity, VolumeHost,
+    FilesystemRead, FilesystemStats, FilesystemWrite, NodeKind, NodeSecurity, VolumeHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
 use tairix_kernel_core::fs::writeback;
-use tairix_kernel_core::fs::LateFilesystem;
+use tairix_kernel_core::fs::{LateFilesystem, NodeRef};
 use tairix_kernel_core::test_sink::TestSink;
-use tairix_kernel_core::AuditEvent;
+use tairix_kernel_core::{AuditEvent, DriverLock};
 use tairix_sync::SpinLock;
 
 use crate::kernel_fs::KernelFs;
@@ -177,7 +177,12 @@ impl Fixture {
         let mut driver = driver.lock();
         let root = driver.root();
         driver
-            .create(root, name, NodeKind::RegularFile)
+            .create(
+                root,
+                name,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create");
     }
 }
@@ -367,6 +372,55 @@ fn a_timer_not_yet_armed_makes_every_operation_publish() {
     assert_eq!(fixture.mounts.earliest_writeback_due(), None);
 }
 
+/// The free blocks the volume behind `driver` reports once what it holds is
+/// committed.
+fn committed_free(driver: &DriverLock<Box<dyn KernelFs>>) -> u64 {
+    let mut fs = driver.lock();
+    fs.flush().expect("publish");
+    fs.stats().expect("its space").free_blocks
+}
+
+/// A descriptor's last reference only queues its pin's release, with no
+/// driver lock to take; the flusher's pass tells the driver, which frees the
+/// node the pin had kept past its last name.
+#[test]
+fn the_flusher_pass_releases_a_pin_a_dropped_descriptor_held() {
+    let fixture = Fixture::installed(false);
+    let volume = fixture.attach(VOLUME, 1);
+    let driver = fixture.mounts.driver(volume.handle).expect("registered");
+    let nodes = fixture.mounts.nodes(volume.handle).expect("registered");
+    let body = alloc::vec![0x5Au8; 32 << 10];
+    let node = {
+        let mut fs = driver.lock();
+        let root = fs.root();
+        let file = fs
+            .create(
+                root,
+                b"held",
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
+            .expect("create");
+        fs.write_all(file, 0, &body).expect("fill");
+        let slot = nodes.admit().expect("a release slot");
+        let pinned = fs.pin(file).expect("pin");
+        fs.remove(root, b"held").expect("unlink the held file");
+        NodeRef::new(slot, pinned, NodeKind::RegularFile).expect("a pin")
+    };
+    let held = committed_free(&driver);
+    drop(node);
+    assert_eq!(
+        committed_free(&driver),
+        held,
+        "the drop alone told the driver nothing"
+    );
+    assert_eq!(writeback::publish_due(&fixture.mounts, sink(), 0), None);
+    assert!(
+        committed_free(&driver) > held,
+        "the pass released the pin, and the node's storage with it"
+    );
+}
+
 #[test]
 fn a_volume_running_down_to_its_reserve_is_recorded_both_ways() {
     let (fixture, volume) = Fixture::with_volume();
@@ -380,11 +434,15 @@ fn a_volume_running_down_to_its_reserve_is_recorded_both_ways() {
         let root = driver.root();
         loop {
             let name = alloc::format!("f{files}");
-            if driver
-                .create(root, name.as_bytes(), NodeKind::RegularFile)
-                .is_err()
-                || driver.write_at(root, name.as_bytes(), 0, &body).is_err()
-            {
+            let filled = driver
+                .create(
+                    root,
+                    name.as_bytes(),
+                    NodeKind::RegularFile,
+                    &NodeSecurity::new(0o644, 0, 0),
+                )
+                .and_then(|made| driver.write_at(made, 0, &body));
+            if filled.is_err() {
                 break;
             }
             files += 1;

@@ -227,10 +227,10 @@ un i ben. Ni ellir byth rhwymo rhyngwyneb a gadwyd heb `match.mac` na
 - `0` — cwblhawyd y rhestr, y gwerth, y cymorth byr neu'r newid.
 - `1` — ni ellid darllen na newid y gosodiadau (er enghraifft ni chaiff
   y galwr newid gosodiadau'r peiriant, neu ni chaiff ddarllen ei
-  osodiadau rhwydwaith), neu ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn, mae'r allwedd yn anhysbys,
-  mae'r gwerth y tu allan i set yr allwedd, neu byddai'r newid yn gadael
-  cyfluniad y rhwydwaith yn anghyson.
+  osodiadau rhwydwaith), mae'r allwedd yn anhysbys, mae'r gwerth y tu allan
+  i set yr allwedd, byddai'r newid yn gadael cyfluniad y rhwydwaith yn
+  anghyson, neu ni ellid cyflwyno'r allbwn. Mae llinell orchymyn na
+  ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

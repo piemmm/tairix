@@ -25,8 +25,7 @@ A base decide o que pode ser removido. Recusa eliminar a última conta activa qu
 ## EXIT STATUS
 
 - `0` — a conta foi eliminada.
-- `1` — a base recusou ou falhou a eliminação (por exemplo uma capacidade em falta, uma conta desconhecida ou o último administrador); a razão é escrita no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — a base recusou ou falhou a eliminação (por exemplo uma capacidade em falta, uma conta desconhecida ou o último administrador); a razão é escrita no erro padrão. Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

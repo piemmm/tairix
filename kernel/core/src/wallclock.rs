@@ -1,5 +1,4 @@
-//! Kernel wall-clock time with an honest provenance state
-//! (`PREREQUISITES.md` P-D).
+//! Kernel wall-clock time with an honest provenance state.
 //!
 //! The kernel keeps an absolute wall-clock time alongside the per-CPU
 //! monotonic clock the scheduler and timeouts run on. The two are different

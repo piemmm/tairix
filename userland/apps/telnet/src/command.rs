@@ -11,6 +11,7 @@ use alloc::string::{String, ToString};
 use core::fmt;
 
 use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
 /// The default port when the command line names none: the assigned telnet port.
@@ -88,10 +89,8 @@ pub enum Command {
 /// Why an argument vector was not understood.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// An unrecognised option.
-    UnknownOption(String),
-    /// An option that takes a value was given none.
-    MissingValue(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// The port operand is not a number in `1..=65535`. TAIRiX has no services
     /// database, so a service *name* cannot be looked up.
     BadPort(String),
@@ -106,8 +105,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unknown option {opt}", opt = quote(opt)),
-            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::BadPort(port) => write!(
                 f,
                 "{port} is not a port number (a service name cannot be resolved)",
@@ -144,62 +142,78 @@ pub fn parse_escape(value: &str) -> Option<Option<u8>> {
     }
 }
 
+/// What each of `telnet`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+    Ipv4,
+    Ipv6,
+    Binary,
+    EightBitOutput,
+    NoEscape,
+    Login,
+    Debug,
+    Escape,
+    User,
+    Bind,
+}
+
+/// `telnet`'s options, as inetutils `telnet` spells them, and the reserved
+/// help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+    Opt::flag('4', &["ipv4"], Flag::Ipv4),
+    Opt::flag('6', &["ipv6"], Flag::Ipv6),
+    Opt::flag('8', &["binary"], Flag::Binary),
+    Opt::flag('L', &["eight-bit-output"], Flag::EightBitOutput),
+    Opt::flag('E', &["no-escape"], Flag::NoEscape),
+    Opt::flag('a', &["login"], Flag::Login),
+    Opt::flag('d', &["debug"], Flag::Debug),
+    Opt::valued('e', &["escape"], Flag::Escape),
+    Opt::valued('l', &["user"], Flag::User),
+    Opt::valued('b', &["bind"], Flag::Bind),
+];
+
 /// Parse a `telnet` argument vector.
 ///
-/// Options precede the operands; `--` ends option processing. A value-taking
-/// option accepts it attached (`-e^]`, `--escape=^]`) or as the next argument.
-/// `-?`, `-h` and `--help` request the short help and win over any operand.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among the
+/// operands, clustered, a value attached (`-e^]`, `--escape=^]`) or the next
+/// argument, a long option by any unambiguous prefix, `--` ending them. `-?`,
+/// `-h` and `--help` ask for the short help, answered once the whole line is
+/// read.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] describing the first malformed argument.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::BadEscape`] — an `-e` value that names no escape character.
+/// * [`ParseError::BadPort`] — a port operand that is not a port number.
+/// * [`ParseError::TooManyOperands`] — more operands than `host [port]`.
+/// * [`ParseError::FamilyConflict`] — `-4` with `-6`, and no help asked for.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut config = Config::default();
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut want_help = false;
-    let mut options_ended = false;
     let mut saw_v4 = false;
     let mut saw_v6 = false;
 
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if options_ended || !arg.starts_with('-') || arg == "-" {
-            // A bare `-` is an operand, not an option.
-            if host.is_none() {
-                host = Some(arg.to_string());
-            } else if port.is_none() {
-                port = Some(parse_port(arg)?);
-            } else {
-                return Err(ParseError::TooManyOperands);
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(word) => {
+                if host.is_none() {
+                    host = Some(word.to_string());
+                } else if port.is_none() {
+                    port = Some(parse_port(word)?);
+                } else {
+                    return Err(ParseError::TooManyOperands);
+                }
             }
-            continue;
+            Arg::Opt(Flag::Help, _) => want_help = true,
+            Arg::Opt(Flag::Ipv4, _) => saw_v4 = true,
+            Arg::Opt(Flag::Ipv6, _) => saw_v6 = true,
+            Arg::Opt(flag, value) => config.set(flag, value.unwrap_or_default())?,
         }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if apply_flag(arg, &mut config, &mut want_help, &mut saw_v4, &mut saw_v6) {
-            continue;
-        }
-        // The value-taking options resolve their value once, from whichever
-        // spelling was used, so the attached and separated forms cannot drift.
-        if let Some((kind, attached)) = value_option(arg) {
-            let value = if let Some(value) = attached {
-                value
-            } else {
-                let next = args
-                    .get(index)
-                    .ok_or_else(|| ParseError::MissingValue(arg.to_string()))?;
-                index += 1;
-                next
-            };
-            apply_value(kind, value, &mut config)?;
-            continue;
-        }
-        return Err(ParseError::UnknownOption(arg.to_string()));
     }
 
     if want_help {
@@ -236,83 +250,31 @@ pub fn parse_port(text: &str) -> Result<u16, ParseError> {
     }
 }
 
-/// Apply one argument-free option, reporting whether `arg` named one.
-fn apply_flag(
-    arg: &str,
-    config: &mut Config,
-    want_help: &mut bool,
-    saw_v4: &mut bool,
-    saw_v6: &mut bool,
-) -> bool {
-    match arg {
-        "-?" | "-h" | "--help" => *want_help = true,
-        "-4" | "--ipv4" => *saw_v4 = true,
-        "-6" | "--ipv6" => *saw_v6 = true,
-        "-8" | "--binary" => {
-            config.binary_in = true;
-            config.binary_out = true;
-        }
-        "-L" | "--eight-bit-output" => config.binary_out = true,
-        "-E" | "--no-escape" => config.escape = None,
-        "-a" | "--login" => config.auto_login = true,
-        "-d" | "--debug" => config.debug = true,
-        _ => return false,
-    }
-    true
-}
-
-/// Apply one value-taking option.
-fn apply_value(kind: ValueOption, value: &str, config: &mut Config) -> Result<(), ParseError> {
-    match kind {
-        ValueOption::Escape => {
-            config.escape =
-                parse_escape(value).ok_or_else(|| ParseError::BadEscape(value.to_string()))?;
-        }
-        ValueOption::User => {
-            config.user = Some(value.to_string());
-            config.auto_login = true;
-        }
-        ValueOption::Bind => config.bind = Some(value.to_string()),
-    }
-    Ok(())
-}
-
-/// The options that take a value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ValueOption {
-    /// `-e` / `--escape`.
-    Escape,
-    /// `-l` / `--user`.
-    User,
-    /// `-b` / `--bind`.
-    Bind,
-}
-
-/// The value-taking option `arg` names, with its attached value when it
-/// carried one (`-e^]`, `--escape=^]`) and [`None`] when the value is the next
-/// argument. [`None`] overall when `arg` names no value-taking option.
-fn value_option(arg: &str) -> Option<(ValueOption, Option<&str>)> {
-    for (kind, short, long) in [
-        (ValueOption::Escape, "-e", "--escape"),
-        (ValueOption::User, "-l", "--user"),
-        (ValueOption::Bind, "-b", "--bind"),
-    ] {
-        if arg == short || arg == long {
-            return Some((kind, None));
-        }
-        if let Some(rest) = arg.strip_prefix(long) {
-            if let Some(value) = rest.strip_prefix('=') {
-                return Some((kind, Some(value)));
+impl Config {
+    /// Apply the option `flag` names, with the value it took.
+    fn set(&mut self, flag: Flag, value: &str) -> Result<(), ParseError> {
+        match flag {
+            Flag::Binary => {
+                self.binary_in = true;
+                self.binary_out = true;
             }
-            continue;
-        }
-        if let Some(rest) = arg.strip_prefix(short) {
-            if !rest.is_empty() {
-                return Some((kind, Some(rest)));
+            Flag::EightBitOutput => self.binary_out = true,
+            Flag::NoEscape => self.escape = None,
+            Flag::Login => self.auto_login = true,
+            Flag::Debug => self.debug = true,
+            Flag::Escape => {
+                self.escape =
+                    parse_escape(value).ok_or_else(|| ParseError::BadEscape(value.to_string()))?;
             }
+            Flag::User => {
+                self.user = Some(value.to_string());
+                self.auto_login = true;
+            }
+            Flag::Bind => self.bind = Some(value.to_string()),
+            Flag::Help | Flag::Ipv4 | Flag::Ipv6 => {}
         }
+        Ok(())
     }
-    None
 }
 
 #[cfg(test)]

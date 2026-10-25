@@ -22,9 +22,10 @@ path = "src/lib.rs"
 # kernel crate through the HAL.
 #
 # - `tairix-abi` is a `lib/*` crate (no_std, dependency-free, no
-#   allocator). It is named here so the `PlatformDiscovery` slice
-#   can speak in the single hardware-tree ABI (`tairix_abi::hwtree`) rather
-#   than re-defining the node types. The layering permits the edge
+#   allocator). It is named here so the `PlatformDiscovery` and
+#   `MsiMultiplexer` slices speak in the shared ABI types
+#   (`tairix_abi::hwtree`, `tairix_abi::MsiMessage`) rather than
+#   re-defining them. The layering permits the edge
 #   `kernel/arch/api -> lib/abi`, and it pulls no kernel dependency or
 #   `#[global_allocator]` in.
 #

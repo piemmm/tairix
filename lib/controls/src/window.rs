@@ -34,7 +34,7 @@ use tairix_raster::{
     div255, pointwise, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL,
 };
 use tairix_theme::{Palette, TextRole, Theme};
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 
 use crate::damage;
 use crate::paint::{

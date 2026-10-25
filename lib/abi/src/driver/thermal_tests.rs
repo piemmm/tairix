@@ -6,10 +6,10 @@ use super::{
 use crate::hwtree::NodeEndpointBlock;
 use crate::Errno;
 
-/// The BCM2711's own zone: `coefficients = <(-487) 410040>`.
-const BCM2711: ThermalCalibration = ThermalCalibration {
-    slope: -487,
-    offset: 410_040,
+/// A sensor whose code falls as it warms: `coefficients = <(-500) 400000>`.
+const FALLING: ThermalCalibration = ThermalCalibration {
+    slope: -500,
+    offset: 400_000,
 };
 
 struct Fixed(Result<Millicelsius, Errno>);
@@ -81,11 +81,10 @@ fn the_server_answers_the_sensor_or_the_frame_s_refusal() {
 }
 
 #[test]
-fn the_bcm2711_calibration_converts_its_documented_codes() {
-    assert_eq!(BCM2711.convert(0), Some(Millicelsius(410_040)));
-    // 742 counts is about 48.7 degrees.
-    assert_eq!(BCM2711.convert(742), Some(Millicelsius(48_686)));
-    assert_eq!(BCM2711.convert(0x3FF), Some(Millicelsius(-88_161)));
+fn a_falling_calibration_converts_its_codes() {
+    assert_eq!(FALLING.convert(0), Some(Millicelsius(400_000)));
+    assert_eq!(FALLING.convert(742), Some(Millicelsius(29_000)));
+    assert_eq!(FALLING.convert(0x3FF), Some(Millicelsius(-111_500)));
     let steep = ThermalCalibration {
         slope: i32::MAX,
         offset: i32::MAX,
@@ -96,7 +95,7 @@ fn the_bcm2711_calibration_converts_its_documented_codes() {
 #[test]
 fn a_calibration_survives_its_property_word() {
     for calibration in [
-        BCM2711,
+        FALLING,
         ThermalCalibration {
             slope: i32::MIN,
             offset: -1,
@@ -120,6 +119,17 @@ fn tenths_round_half_away_from_zero() {
     assert_eq!(Millicelsius(48_649).tenths(), 486);
     assert_eq!(Millicelsius(-1_050).tenths(), -11);
     assert_eq!(Millicelsius::from_celsius(65), Millicelsius(65_000));
+}
+
+/// Any `i32` a sensor may answer has its tenths: the extremes cannot
+/// overflow the rounding.
+#[test]
+fn tenths_hold_at_the_ends_of_the_range() {
+    assert_eq!(Millicelsius(i32::MAX).tenths(), 21_474_836);
+    assert_eq!(Millicelsius(i32::MIN).tenths(), -21_474_836);
+    assert_eq!(Millicelsius(-50).tenths(), -1);
+    assert_eq!(Millicelsius(49).tenths(), 0);
+    assert_eq!(Millicelsius(-1_049).tenths(), -10);
 }
 
 #[test]

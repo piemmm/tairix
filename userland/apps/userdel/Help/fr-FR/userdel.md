@@ -25,8 +25,7 @@ La base fait autorité sur ce qui peut être retiré. Elle refuse la suppression
 ## EXIT STATUS
 
 - `0` — le compte a été supprimé.
-- `1` — la base a refusé ou échoué la suppression (par exemple une capacité manquante, un compte inconnu ou le dernier administrateur) ; la raison est écrite sur la sortie d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — la base a refusé ou échoué la suppression (par exemple une capacité manquante, un compte inconnu ou le dernier administrateur) ; la raison est écrite sur la sortie d'erreur. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

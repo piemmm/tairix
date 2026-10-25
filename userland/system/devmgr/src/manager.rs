@@ -260,13 +260,6 @@ mod tests {
         }
     }
 
-    fn compat(s: &[u8]) -> HwMatchKey {
-        match HwMatchKey::compatible(s) {
-            Ok(key) => key,
-            Err(_) => unreachable!("test compatible strings fit HW_COMPATIBLE_MAX"),
-        }
-    }
-
     fn node(id: u32, class: HwDeviceClass, keys: &[HwMatchKey]) -> HwNode {
         let mut n = HwNode::new(id, 1, class);
         for key in keys {
@@ -300,15 +293,26 @@ mod tests {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
         // boot); lower the threshold so the test observes it.
         tairix_log::set_max_level(tairix_log::Level::Trace);
-        let emmc = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
+        let emmc = [DriverBindKey::new(
+            5,
+            tairix_abi::compatible_key!(b"vendor,sd-host"),
+        )];
         let candidates = [DriverCandidate {
-            path: "/System/Drivers/emmc2",
+            path: "/System/Drivers/sd",
             bind_keys: &emmc,
         }];
         let tree = [
             HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
-            node(2, HwDeviceClass::Storage, &[compat(b"brcm,bcm2711-emmc2")]),
-            node(3, HwDeviceClass::Serial, &[compat(b"arm,pl011")]),
+            node(
+                2,
+                HwDeviceClass::Storage,
+                &[tairix_abi::compatible_key!(b"vendor,sd-host")],
+            ),
+            node(
+                3,
+                HwDeviceClass::Serial,
+                &[tairix_abi::compatible_key!(b"arm,pl011")],
+            ),
         ];
         let sink = RecordingSink::new();
         let mut loader = MockLoader::new();
@@ -319,13 +323,13 @@ mod tests {
         assert_eq!(report.unbound, 1);
         assert_eq!(report.ties_rejected, 0);
         assert_eq!(report.load_failures, 0);
-        assert_eq!(loader.calls, ["/System/Drivers/emmc2"]);
+        assert_eq!(loader.calls, ["/System/Drivers/sd"]);
         let ids = sink.ids();
         assert!(ids.contains(&events::NODE_BOUND.0), "{ids:?}");
         assert!(ids.contains(&events::NODE_UNBOUND.0), "{ids:?}");
         assert_eq!(
             sink.field_of(events::NODE_BOUND.0, "path").as_deref(),
-            Some("/System/Drivers/emmc2")
+            Some("/System/Drivers/sd")
         );
     }
 
@@ -334,10 +338,13 @@ mod tests {
         // a loaded driver receives only the resource capabilities
         // its matched node requested. The device manager must forward the
         // *matched* node's resources to the load mechanism verbatim.
-        let keys = [compat(b"brcm,bcm2711-emmc2")];
-        let candidate_keys = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
+        let keys = [tairix_abi::compatible_key!(b"vendor,sd-host")];
+        let candidate_keys = [DriverBindKey::new(
+            5,
+            tairix_abi::compatible_key!(b"vendor,sd-host"),
+        )];
         let candidates = [DriverCandidate {
-            path: "/System/Drivers/emmc2",
+            path: "/System/Drivers/sd",
             bind_keys: &candidate_keys,
         }];
         let window = HwResource::mmio(0xfe34_0000, 0x100);
@@ -353,10 +360,7 @@ mod tests {
         assert_eq!(report.bindings.len(), 1);
         assert_eq!(
             loader.resources_seen,
-            [(
-                "/System/Drivers/emmc2".to_string(),
-                alloc::vec![window, irq]
-            )],
+            [("/System/Drivers/sd".to_string(), alloc::vec![window, irq])],
             "the matched node's exact resource requests reach the loader"
         );
     }
@@ -481,7 +485,10 @@ mod tests {
         // loader grants each instance exactly its node's resources, so a
         // shared load would leave the second device granted to no one and
         // silently dead.
-        let uart = [DriverBindKey::new(2, compat(b"arm,pl011"))];
+        let uart = [DriverBindKey::new(
+            2,
+            tairix_abi::compatible_key!(b"arm,pl011"),
+        )];
         let candidates = [DriverCandidate {
             path: "/d/uart",
             bind_keys: &uart,
@@ -492,13 +499,13 @@ mod tests {
             node_with_resources(
                 2,
                 HwDeviceClass::Serial,
-                &[compat(b"arm,pl011")],
+                &[tairix_abi::compatible_key!(b"arm,pl011")],
                 &[window_a],
             ),
             node_with_resources(
                 3,
                 HwDeviceClass::Serial,
-                &[compat(b"arm,pl011")],
+                &[tairix_abi::compatible_key!(b"arm,pl011")],
                 &[window_b],
             ),
         ];

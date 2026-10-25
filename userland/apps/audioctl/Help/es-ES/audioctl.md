@@ -60,8 +60,8 @@ En la información estándar (fd 3), `audioctl streams` escribe un registro
 ## EXIT STATUS
 
 - `0` — la orden se completó.
-- `1` — se rechazó, o no pudo llevarse a cabo.
-- `2` — no se entendió la línea de órdenes.
+- `1` — se rechazó, o no pudo llevarse a cabo. Una línea de órdenes no
+  entendida también termina con `1`.
 
 ## ENVIRONMENT
 

@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::CapabilityId;
+use tairix_util::getopt::{Arg, Opt, Order, Scan};
 
 use crate::error::SetcapError;
 
@@ -25,57 +26,46 @@ pub enum Command {
     Help,
 }
 
+/// What each of `setcap`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Recursive,
+    Help,
+}
+
+/// `setcap`'s options and its help switches (`-h` and `--help`).
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('R', &["recursive"], Flag::Recursive),
+    Opt::flag('h', &["help"], Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `setcap [-R] [--] CAP file...`:
-///
-/// * `-R` / `--recursive` — descend into directories.
-/// * `-h` / `--help` — print the usage banner (wins immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * any other `-…` — a [`SetcapError::Usage`] error (fail closed; never a
-///   silently ignored token). The bare `-` (clear the gate) is an operand,
-///   not an option.
-/// * anything else — an operand.
+/// The grammar is `setcap [-R] [--] CAP file...`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// clustered, a long one by any unambiguous prefix, `--` ending them, and
+/// the bare `-` (clear the gate) an operand. The help switches (`-h`,
+/// `--help`) answer at once.
 ///
 /// The first operand is the capability spec; the rest are files.
 ///
 /// # Errors
 ///
-/// [`SetcapError::Usage`] for any unrecognised option before `--`, or when
-/// fewer than two operands (a capability spec and at least one file) are
-/// given. [`SetcapError::BadCapability`] when the capability operand is
-/// neither a known `CAP_*` name nor `-`.
+/// * [`SetcapError::Option`] — an option `getopt` refuses, in its words.
+/// * [`SetcapError::Usage`] — fewer than two operands (a capability spec and
+///   at least one file).
+/// * [`SetcapError::BadCapability`] — the capability operand is neither a
+///   known `CAP_*` name nor `-`.
 pub fn parse(args: &[&str]) -> Result<Command, SetcapError> {
     let mut recursive = false;
     let mut operands = Vec::new();
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
-            }
-            if let Some(name) = arg.strip_prefix("--") {
-                match name {
-                    "recursive" => recursive = true,
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(SetcapError::Usage),
-                }
-                continue;
-            }
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in letters.chars() {
-                    match letter {
-                        'R' => recursive = true,
-                        'h' => return Ok(Command::Help),
-                        _ => return Err(SetcapError::Usage),
-                    }
-                }
-                continue;
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(SetcapError::Option)? {
+            Arg::Operand(operand) => operands.push(String::from(operand)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Recursive, _) => recursive = true,
         }
-        operands.push(String::from(arg));
     }
     if operands.is_empty() {
         return Err(SetcapError::Usage);
@@ -115,7 +105,7 @@ pub fn parse_capability(spec: &str) -> Option<Option<CapabilityId>> {
 mod tests {
     use super::{parse, parse_capability, Command};
     use crate::error::SetcapError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use tairix_abi::CapabilityId;
 
@@ -180,20 +170,42 @@ mod tests {
     #[test]
     fn lowercase_r_is_not_recursive_and_is_usage() {
         // `setcap` spells recursive `-R`; a bare `-r` is not an option.
-        assert_eq!(parse(&["-r", "CAP_NET_RAW", "/f"]), Err(SetcapError::Usage));
+        assert_eq!(
+            refused(&["-r", "CAP_NET_RAW", "/f"]),
+            "invalid option -- 'r'"
+        );
+    }
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "CAP_NET_RAW", "/f"]), Err(SetcapError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
         assert_eq!(
-            parse(&["--frob", "CAP_NET_RAW", "/f"]),
-            Err(SetcapError::Usage)
+            refused(&["-x", "CAP_NET_RAW", "/f"]),
+            "invalid option -- 'x'"
         );
         assert_eq!(
-            parse(&["-Rx", "CAP_NET_RAW", "/f"]),
-            Err(SetcapError::Usage)
+            refused(&["--frob", "CAP_NET_RAW", "/f"]),
+            "unrecognized option '--frob'"
         );
+        // A bundle with one bad flag is refused whole.
+        assert_eq!(
+            refused(&["-Rx", "CAP_NET_RAW", "/f"]),
+            "invalid option -- 'x'"
+        );
+        assert_eq!(
+            refused(&["--recursive=1", "CAP_NET_RAW", "/f"]),
+            "option '--recursive' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--rec", "-", "/d"]), Ok(set(true, None, &["/d"])));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

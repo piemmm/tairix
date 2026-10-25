@@ -46,8 +46,8 @@ lados. O registo é verificado como bem formado antes de ser guardado.
 - `0` — a palavra-passe foi substituída.
 - `1` — a base recusou ou falhou a substituição, as duas entradas não
   coincidiram, não havia aleatoriedade disponível, ou o registo estava
-  malformado; a razão é escrita no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+  malformado; a razão é escrita no erro padrão. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

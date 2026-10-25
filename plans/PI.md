@@ -325,7 +325,7 @@ the production binary and the existing aarch64 verticals.
   `fdt::translated_reg` machinery, §2.2) — the real Pi tree's UARTs sit
   under `/soc` with one-cell *bus* `reg` values (`0x7E20_1000`) remapped
   to CPU-physical space (`0xFE20_1000`); an untranslatable node is
-  skipped, never poked at its raw bus address (§2.9). The
+  skipped, never poked at its raw bus address (§2.9). The aarch64 port's
   `raspi_like_arm` fixture mirrors that real shape (root 2+1 cells,
   `/soc` simple-bus with 1+1 cells and the three BCM2711 `ranges`,
   bus-address parameters). The BCM2835 **AUX mini-UART** is a
@@ -355,7 +355,7 @@ the production binary and the existing aarch64 verticals.
 
 **Done when:** host unit tests cover the mini-UART/PL011 register
 encoders and the `compatible`-string console selection + the discovered
-`serial` `HwNode` (against the new `tairix_fdt` `raspi_like_arm` fixture);
+`serial` `HwNode` (against the aarch64 port's `raspi_like_arm` fixture);
 and the new `tests/integration/uart_console_qemu_aarch64` vertical boots
 the `virt` board, **poisons** the console base, then proves
 `configure_from_fdt` overwrites it with the base read from the firmware
@@ -404,7 +404,7 @@ with one-cell bus `reg` values (`0x4004_1000` → `0xFF84_1000`).
 `platform::FdtDiscovery` emits an `InterruptController` `HwNode`
 carrying the discovered `compatible` bind key + every register window
 (`HwDeviceClass::InterruptController` already existed — no ABI change).
-The `lib/fdt` `virt_like_arm` / `raspi_like_arm` fixtures carry a GIC
+The `lib/fdt` `virt_like_arm` and the aarch64 port's `raspi_like_arm` fixtures carry a GIC
 node (virt `arm,cortex-a15-gic` at the root; Pi `arm,gic-400` under
 `/soc` with the real four bus-address regions); host tests cover the
 GIC discovery, the `HwNode`, and the fail-closed no-GIC path.
@@ -1722,9 +1722,10 @@ BIND_KEYS` (`tairix_drv_storage_emmc2` → compatible
 `brcm,bcm2711-emmc2`; `tairix_drv_storage_virtio_blk` → virtio device id
 2) — the single §18.3 source the signed manifest's bind table is authored
 from. As the storage path that must be up before the signed driver store
-is reachable, both are registered in the kernel binary's
-`driver_catalog::IN_KERNEL_DRIVERS` floor registry (`build.rs` bakes each
-an Ed25519-signed `InKernel` manifest carrying that same `BIND_KEYS`), so
+is reachable, both declare themselves in their own `Floor.toml`, from which
+`build.rs` generates the kernel binary's `driver_catalog::IN_KERNEL_DRIVERS`
+floor registry and bakes each an Ed25519-signed `InKernel` manifest carrying
+the bind table the build holds to that same `BIND_KEYS`, so
 the kernel binds the root block device because a discovered node matched a
 driver's bind table — through the one shared `lib/devmatch` policy
 `devmgr` uses (§2.2) — never a hand-wired probe (§18.5). Host-proven
@@ -1747,25 +1748,28 @@ host. Its design and test surface are `drivers/storage/emmc2/README.md` and
   the firmware's EMMC2 base clock (`FirmwareClock::Emmc2`), and bring-up
   negotiates down UHS-I → High Speed → Default Speed, verifying each rung
   with a read of block 0. UHS-I needs the `Board`'s `CardSupply`: on the Pi 4
-  the `vqmmc`/`vmmc` rails are firmware-expander GPIO lines resolved from the
-  device tree (`tairix_arch_aarch64::sd_supply`, `tairix_fdt::supply`) and
-  driven over the VideoCore mailbox (`tairix_vcmailbox::set_gpio_state`)
-  during the bring-up alone. SDR50 needs tuning on this controller and the
-  driver performs none, so DDR50 is the ceiling, as under Linux.
+  the `vqmmc`/`vmmc` rails are firmware-expander GPIO lines the aarch64
+  discovery reads from the device tree (`tairix_fdt::supply`) and states on
+  the node (`HwNode::io_rail`, `HwNode::power_rail`), and the driver's
+  `floor::open` switches them over the firmware channel the kernel lends it
+  for the bring-up alone (`tairix_vcmailbox::set_gpio_state`, admitted for
+  those two lines alone). SDR50 needs tuning on this controller and the
+  driver performs none, so DDR50 is the ceiling.
 - **ADMA2 moves 256 KiB per command** through staging carved inside the
   node's `/emmc2bus` DMA window and addressed through it; bring-up keeps DMA
   only after a DMA read of block 0 matches the PIO one, else serves the card
   over the data port. Auto-`CMD23` where the SCR offers it; R1 and post-write
   `CMD13` errors fail the transfer; `Sensitive` staging is zeroed.
-- The root-unlock bring-up logs the negotiated link (`root-unlock: emmc2
-  link`: mode, clock, base clock, signalling, `CMD23`, DMA, fallbacks), or
-  the stage and error it failed at.
+- The driver's `floor::open` records the negotiated link (`emmc2: link`,
+  event 24940: mode, clock, base clock, signalling, `CMD23`, DMA,
+  fallbacks), or the stage and error it failed at (`emmc2: bring-up failed`,
+  24941).
 
 **Metal acceptance.** A Pi 4B brings its card up at UHS-I DDR50, 50 MHz,
 1.8 V, with `CMD23` and ADMA2 and no fallback, and mounts `/System` over the
 link. Its firmware answers `SET_GPIO_STATE` with a zero per-tag code word, so
-the supply switch is judged by the status word alone, as Linux's expander
-driver judges it; and it reports no EMMC2 clock, so the host divides from its
+the supply switch is judged by the status word alone; and it reports no EMMC2
+clock, so the host divides from its
 capabilities' 100 MHz.
 
 **Done when:** host unit tests cover identification, the speed ladder and its
@@ -1959,8 +1963,8 @@ Each fact below was established on metal and is pinned by a
   `bring_up_enables_memory_space_and_bus_master_on_the_bridge`).
 - **Forward configuration only to device 0 of the secondary bus.** The root
   port is a single-device link: a forwarded configuration read nothing
-  answers times out into a CPU external abort, so `lib/pci`'s windowed
-  `mech_brcm` resolves every other downstream target to "no device" without
+  answers times out into a CPU external abort, so the driver's windowed
+  `config_window` resolves every other downstream target to "no device" without
   touching the controller
   (`phantom_downstream_targets_are_no_device_without_an_index_write`).
 - **The outbound window register packs the limit above the base.**
@@ -1992,8 +1996,8 @@ Each fact below was established on metal and is pinned by a
 - **Firmware.** The link bring-up's `PERST#` drops the VideoCore-loaded
   firmware on EEPROM-less boards, so `vl805` reloads it with one
   `NOTIFY_XHCI_RESET` (tag `0x30058`, `dev_addr` `0x10_0000`) once the BAR is
-  based. The reply can take longer than the 1 s Linux allows, so the
-  mailbox driver waits up to `REPLY_WINDOW_NS` (4 s). The reload is
+  based. The mailbox driver waits up to `REPLY_WINDOW_NS` (4 s) for the
+  reply. The reload is
   best-effort: the controller's own capability block at `Xhci::open` is the
   readiness gate, never the vendor version register at configuration
   `0x50`. The mailbox service's own bring-up revision probe tells a dead
@@ -2083,10 +2087,14 @@ What the finished parts guarantee:
   driver still bounded by its manifest's intersection. Proven on `-M virt`
   by `autoload_input_qemu_aarch64` (discover → signed gate → spawn →
   `key_inject`, all before the unlock).
-- **B4 — the EMMC2 root.** The unlock kthread dispatches on the floor block
-  driver bound — virtio-blk or EMMC2 — into one shared `finish_unlock`
-  tail. EMMC2 is admitted through the signed load gate and maps only its
-  node's sole register window. Its two bring-up facts: the controller reset
+- **B4 — the EMMC2 root.** The unlock kthread admits the bound floor driver
+  through the signed load gate, then brings it up as its `Floor.toml`
+  declares — virtio-blk or EMMC2 — into one shared `finish_unlock` tail.
+  EMMC2 opens the card itself (`floor::open`) over a host confined to its
+  node: its sole register window, DMA inside the node's window, its one
+  wired line, and the firmware channel for the bring-up alone, which
+  forwards it only its own clock's rate and its rails' lines. The kernel's
+  binary names no board for it. Its two bring-up facts: the controller reset
   clears SD Bus Power, so the card rail is powered (3.3 V) before clocking;
   and the controller right-aligns the CRC-stripped R2 response, so
   `CSD_STRUCTURE` is `RESP3[23:22]`
@@ -2547,8 +2555,9 @@ two users — or the same user twice — can be logged in concurrently.
        hardware-tree node carries the bootstrap root block device, and which
        floor block driver binds it, through the **same** shared `lib/devmatch`
        policy the user-space `devmgr` autoloader uses — applied against the
-       in-kernel bootstrap-floor catalogue (`driver_catalog`, the
-       `provides_root_block` entries: virtio-blk + EMMC2). The kernel binds a
+       in-kernel bootstrap-floor catalogue (`driver_catalog`, the storage
+       floor its drivers' `Floor.toml` files declare: virtio-blk + EMMC2).
+       The kernel binds a
        block driver because that driver's signed bind table matched a
        discovered node's identity, never because it *hunted* for a disk
        (§18.3 / §18.5 / §18.6). A streaming `RootBlockSelection`
@@ -2563,7 +2572,7 @@ two users — or the same user twice — can be logged in concurrently.
        explicit boot descriptor, not a guess). Wired into the aarch64 boot
        path (`aarch64::boot::audit_root_storage_binding`, post-MMU before the
        core hand-off) and audited `4135` `ROOT_STORAGE_AUTOLOAD`. Host-proven
-       (8 `root_storage` tests + the `driver_catalog` block-flag test);
+       (the `root_storage` and `driver_catalog` tests);
        aarch64 kernel builds freestanding. No `lib/abi`/C-header change.
      - **Chunk B-2 late-bound users-db cell — LANDED (host-proven).**
        `tairix_kernel_core::LateUsersDb` (`kernel/core/src/users.rs`) is the
@@ -2690,19 +2699,23 @@ two users — or the same user twice — can be logged in concurrently.
          names no concrete producer).
        - `aarch64::root_unlock` (`#[cfg(freestanding)]`, in the aarch64 boot
          subtree beside `boot`/`init_spawn`): the **arch-specific bring-up
-         only** — `spawn_if_present` + `run_unlock` (over the arch-neutral
-         helpers above) and the port's `MmioFloorPort` half: its bookkeeping
-         `PageTablePool` and window bases, the `DeviceWindows` register map,
-         the composite interrupt controller, and the `wfi` fallback park. The
-         virtio-blk disk is
+         only** — the port's `UnlockPort` (its console seam and its two floor
+         bring-ups, which the shared `unlock_orchestrate::spawn_unlock` /
+         `run_unlock` dispatch to once the bound driver is admitted at the
+         signed `drvhost::Host::load` gate) and its `MmioFloorPort` /
+         `HostFloorPort` halves: its bookkeeping `PageTablePool` and window
+         bases, the `DeviceWindows` register map, the composite interrupt
+         controller, the `wfi` fallback park, the cache maintenance and the
+         firmware channel. The virtio-blk disk is
          brought up by the shared `floor_mmio::bring_up_virtio_mmio` off the
          boot-discovered DTB — `virtio_mmio_bus_from_dtb` → `MmioMap` +
          `KernelMmioMapper` over a throwaway bookkeeping address space →
          `provision_virtio_mmio` → the slot's SPI bound on the core-published
          `IrqTable` and armed → `DmaPool` + `KernelVirtioHost` — and opened by
-         `finish_virtio_unlock` (the signed `drvhost::Host::load` gate →
-         `VirtioBlk::open` → `finish_unlock`). EMMC2 (the Pi SD host) shares
-         the register map, the line binding, and the DMA window.
+         `finish_virtio_unlock` (`VirtioBlk::open` → `finish_unlock`). EMMC2
+         (the Pi SD host) is opened by its driver's own `floor::open` over the
+         host `floor_mmio::bring_up_host_floor` lends it, sharing the register
+         map, the line binding, and the DMA pool.
        - **Interrupt-driven boot + task-parking device wait (load-bearing).**
          The production aarch64 boot brings the GICv2 up for delivery and runs
          interrupt-driven: `gic_irq::install_device_irq_dispatch` (kernel-core
@@ -2779,13 +2792,14 @@ two users — or the same user twice — can be logged in concurrently.
        - No `lib/abi`/C-header change (the enumeration adds a new trait-free
          seam; the device-IRQ + console wiring is internal).
        - **EMMC2 root bring-up — wired (host-tested at the driver level).**
-         The unlock kthread dispatches on the bound floor block driver
-         (`run_unlock` → `virtio_blk_unlock` / `emmc2_unlock`); the EMMC2
-         arm maps the matched node's sole SDHCI register window under
-         `CAP_MMIO_MAP` through a minimal in-kernel MMIO-only `Emmc2Host`,
-         admits `tairix-drv-storage-emmc2` through the signed §8 gate, and
-         feeds the opened `Block` to the shared `finish_unlock` tail
-         virtio-blk also uses (§2.2). See design B's **B4** above.
+         The unlock kthread admits the bound floor driver through the signed
+         §8 gate and dispatches on the bring-up its `Floor.toml` declares
+         (`run_unlock` → `UnlockPort::virtio_unlock` /
+         `UnlockPort::host_unlock`); the EMMC2 arm lends the driver's
+         `floor::open` a host confined to the matched node
+         (`floor_host::FloorDriverHost`) and feeds the opened `Block` to the
+         shared `finish_unlock` tail virtio-blk also uses (§2.2). See design
+         B's **B4** above.
        - **Remaining (metal-gated, §0.4 — `raspi4b` cannot model EMMC2):**
          (a) the §0.9 metal UART log of the EMMC2 `/System` + encrypted-root
          mount; (b) the §0.9 metal UART-typed-login acceptance.

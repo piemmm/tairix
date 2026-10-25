@@ -171,6 +171,9 @@ pub(crate) struct SystemUse {
     pub child: Option<u32>,
     /// This record is a relocated directory, reached only through its `CL`.
     pub relocated: bool,
+    /// The directory a relocated directory belongs in (`PL`), which its `..`
+    /// record carries.
+    pub parent: Option<u32>,
     /// A sparse file (`SF`), whose layout is not read.
     pub sparse: Sparse,
     pub zisofs: Option<Zisofs>,
@@ -198,6 +201,7 @@ impl SystemUse {
             },
             child: None,
             relocated: false,
+            parent: None,
             sparse: Sparse::No,
             zisofs: None,
             acorn: None,
@@ -334,6 +338,7 @@ impl SystemUse {
                 b"NM" => self.read_name(entry),
                 b"SL" => self.read_link(entry)?,
                 b"CL" => self.child = both_u32(entry, 4),
+                b"PL" => self.parent = both_u32(entry, 4),
                 b"RE" => self.relocated = true,
                 b"SF" => self.sparse = Sparse::of(entry),
                 b"TF" => self.read_stamps(entry),

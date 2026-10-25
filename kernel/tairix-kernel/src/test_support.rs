@@ -28,7 +28,7 @@ use tairix_abi::blkio::{BlkMedium, BlkTransport};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, NodeTimes,
+    NodeSecurity, NodeTimes, Unpinned,
 };
 use tairix_abi::driver::DriverError;
 use tairix_sync::SpinLock;
@@ -39,6 +39,59 @@ pub(crate) struct NullSink;
 impl tairix_log::Sink for NullSink {
     fn write_event(&self, _event: &tairix_log::Event<'_>) {}
 }
+
+/// A frame allocator over a few leaked pages, for a test context whose frames
+/// nothing draws on.
+pub(crate) fn scratch_frames() -> tairix_kernel_mem::FrameAllocator {
+    use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
+
+    #[repr(C, align(4096))]
+    struct Region([u8; PAGE_SIZE * 4]);
+    let region: &'static Region =
+        tairix_kernel_core::forever(alloc::boxed::Box::new(Region([0; PAGE_SIZE * 4])));
+    let mut map = BootMemoryMap::new();
+    map.push(MemoryRegion {
+        start: PhysAddr::new(core::ptr::from_ref(region) as u64),
+        length: (PAGE_SIZE * 4) as u64,
+        kind: RegionKind::Usable,
+    });
+    tairix_kernel_mem::FrameAllocator::new(&map).expect("one-region allocator")
+}
+
+/// The [`InitSpawnCtx`](tairix_kernel_core::InitSpawnCtx) methods a test's
+/// context shares with every other that boots nothing: frames from its
+/// `frames` field, a discarding audit, a fresh TLB set, and no process ever
+/// admitted.
+macro_rules! inert_spawn_ctx {
+    () => {
+        fn frames(&self) -> &tairix_kernel_mem::FrameAllocator {
+            &self.frames
+        }
+
+        fn audit(&self) -> &(dyn tairix_log::Sink + Sync) {
+            &$crate::test_support::NullSink
+        }
+
+        fn space_tlb(&self) -> Result<tairix_kernel_mem::SpaceTlb, tairix_kernel_mem::AllocError> {
+            tairix_kernel_core::new_space_tlb(None)
+        }
+
+        unsafe fn admit_init(
+            &self,
+            _caps: tairix_caps::CapabilitySet,
+            _space: alloc::boxed::Box<dyn tairix_kernel_mem::UserAddressSpace + Send + Sync>,
+            _physmap: alloc::boxed::Box<dyn tairix_kernel_mem::PhysMap + Send + Sync>,
+            _stack_span: tairix_kernel_core::StackSpan,
+            _stack: alloc::boxed::Box<dyn tairix_kernel_core::KernelStack + Send>,
+            _pre_resume: tairix_kernel_core::ProcessResume,
+            _live: Option<alloc::sync::Arc<tairix_kernel_core::ProcessSpace>>,
+            _entry: tairix_kernel_core::UserThreadEntry,
+        ) {
+            unreachable!("a test context admits no process")
+        }
+    };
+}
+pub(crate) use inert_spawn_ctx;
 
 /// A register mapper that maps nothing, for a PCI host whose test reaches no
 /// device register through it.
@@ -286,6 +339,7 @@ impl FilesystemRead for MockRootFs {
         Ok(NodeInfo {
             kind: n.kind,
             nlink: 1,
+            ino: node.raw(),
             size: n.content.len() as u64,
             allocated: n.content.len() as u64,
             times: NodeTimes::default(),
@@ -297,6 +351,21 @@ impl FilesystemRead for MockRootFs {
         let name = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
         self.child(dir.raw(), name)
             .map(NodeId::from_raw)
+            .ok_or(DriverError::NotFound)
+    }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        let node = self.nodes.get(&dir.raw()).ok_or(DriverError::NotFound)?;
+        if node.kind != NodeKind::Directory {
+            return Err(DriverError::Unsupported);
+        }
+        if dir.raw() == ROOT_ID {
+            return Ok(dir);
+        }
+        self.nodes
+            .iter()
+            .find(|(_, n)| n.children.iter().any(|(_, child)| *child == dir.raw()))
+            .map(|(&id, _)| NodeId::from_raw(id))
             .ok_or(DriverError::NotFound)
     }
 
@@ -338,6 +407,18 @@ impl FilesystemRead for MockRootFs {
                 break;
             }
         }
+        Ok(())
+    }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.node_info(node).map(|_| node)
+    }
+
+    fn unpin(&mut self, _pinned: NodeId) -> Result<Unpinned, DriverError> {
+        Ok(Unpinned::Released)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
 }

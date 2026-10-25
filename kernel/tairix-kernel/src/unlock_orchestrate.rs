@@ -11,6 +11,11 @@
 //! only its bring-up, its console-0 seam ([`UnlockConsole`]), and its
 //! process-spawn producer, and calls [`finish_unlock`].
 //!
+//! The kthread's admission ([`spawn_unlock`]) and the signed admission of the
+//! floor driver the boot bound are shared too: a port implements
+//! [`UnlockPort`] — its console, its serial log, and the bring-up of each
+//! kind of floor device its silicon carries — and nothing else.
+//!
 //! The two hardware-specific seams a port injects:
 //!
 //! * [`UnlockConsole`] — the primary-console (index 0) write + raw-read pair
@@ -29,14 +34,17 @@ use core::convert::Infallible;
 
 use tairix_abi::blkio::kernel_block_device;
 use tairix_abi::driver::block::Block;
+use tairix_abi::HwNode;
+use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_kernel_core::waitq::deadline_for;
 use tairix_kernel_core::{
-    park_on_until, wait_now_ns, ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx,
-    NotParkable, SecretFeedback, SleepLock, YieldHandle, HW_TREE_WAITQ,
+    park_on_until, wait_now_ns, ConsoleRead, ConsoleWrite, CooperativeYield, DriverLock,
+    InitSpawnCtx, NotParkable, SecretFeedback, YieldHandle, HW_TREE_WAITQ,
 };
+use tairix_kernel_mem::FrameAllocator;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
@@ -49,7 +57,7 @@ use tairix_virtio::{Transport, VirtioHost};
 use tairix_kernel_core::fs::blkmeter::MeteredBlock;
 
 use crate::block_cache::BlockCache;
-use crate::driver_catalog::{KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
+use crate::driver_catalog::{FloorBringUp, HostFloor, InKernelDriver, KERNEL_DRIVER_SIGNER_PUBKEY};
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{
@@ -57,13 +65,15 @@ use crate::root_mount::{
     UnlockInstall, UnlockOutcome, WritableRootSink, KEY_SOURCE_WAIT_NS, LATE_GROUPS_DB,
     LATE_IDENTITY, LATE_USERS_ADMIN, LATE_USERS_DB,
 };
+use crate::root_storage::RootBlockBinding;
 use crate::shared_block::{DriverStoreService, SharedBlock};
 use crate::system_mount::{
     install_system_mount, register_writable_state, KernelFs, ROOT_VOLUME_HANDLE, SYSTEM_WRITE_SET,
 };
 use crate::transform_cache::{SharedClusterCache, TransformClusterCache};
 use crate::unlock_service::{
-    autoload_caps, loader_caps, note, store_endpoint_binder_caps, KthreadConsoleRead, UNLOCK_TASK,
+    autoload_caps, loader_caps, note, service_caps, set_store_service_task,
+    store_endpoint_binder_caps, take_boot, KthreadConsoleRead, UNLOCK_TASK,
     USERS_DB_INSTALLED_MESSAGE,
 };
 
@@ -112,6 +122,188 @@ pub trait UnlockConsole: Sync {
     /// pending wait. Called exactly once on every unlock return path, so a
     /// successful unlock can never leave the console latched shut.
     fn release_console0_to_login(&self);
+}
+
+/// What every floor bring-up runs with: the unlock kthread's capability
+/// context, the frames the device's DMA is carved from, and the firmware's
+/// device-tree pointer (`0` where none was handed over).
+#[derive(Clone, Copy)]
+pub struct FloorEnv {
+    /// The unlock kthread's capability context, which every map and carve
+    /// is checked against.
+    pub caller: &'static TaskCapabilities,
+    /// The frames the device's DMA is carved from.
+    pub frames: &'static FrameAllocator,
+    /// The firmware's device-tree pointer.
+    pub dtb: u64,
+}
+
+/// What a port supplies the shared root unlock: its console, the log its
+/// decisions fall back to, and the bring-up of each kind of floor device its
+/// silicon carries.
+pub trait UnlockPort: UnlockConsole + 'static {
+    /// The serial log the unlock's decisions go to where the init seam wired
+    /// no audit sink.
+    fn serial_audit(&self) -> &'static (dyn Sink + Sync);
+
+    /// Bring up the virtio block device `node` names, on the transport the
+    /// port provisions, and run [`finish_virtio_unlock`] over it; on success
+    /// this never returns.
+    ///
+    /// # Errors
+    ///
+    /// The step that failed.
+    fn virtio_unlock(
+        &'static self,
+        coop: &CooperativeYield<'_>,
+        node: &HwNode,
+        floor: FloorEnv,
+        env: UnlockEnv,
+    ) -> Result<Infallible, &'static str>;
+
+    /// Bring up the device `node` names, which `driver` opens over a host
+    /// the kernel lends it, and run [`finish_unlock`] over it; on success
+    /// this never returns. A port whose silicon carries no such device
+    /// refuses.
+    ///
+    /// # Errors
+    ///
+    /// The step that failed.
+    fn host_unlock(
+        &'static self,
+        _coop: &CooperativeYield<'_>,
+        _node: &HwNode,
+        _driver: &HostFloor,
+        _floor: FloorEnv,
+        _env: UnlockEnv,
+    ) -> Result<Infallible, &'static str> {
+        Err("root-unlock: this port opens no host-attached floor driver")
+    }
+}
+
+/// Admit the in-kernel root-unlock kthread for the floor device the boot
+/// bound, returning whether it was started.
+///
+/// With no binding (headless, no disk, or an ambiguous set) or no `'static`
+/// frame allocator it starts nothing, releases console 0 to `login` — which
+/// then refuses every attempt, as no database is installed — and returns
+/// `false`. The kthread releases console 0 itself once the unlock resolves,
+/// so it is never left latched shut.
+#[must_use]
+pub fn spawn_unlock<P: UnlockPort>(
+    ctx: &'static (dyn InitSpawnCtx + Sync),
+    port: &'static P,
+) -> bool {
+    let boot = take_boot();
+    let audit: &'static (dyn Sink + Sync) =
+        ctx.static_audit().unwrap_or_else(|| port.serial_audit());
+    // Nothing will publish `/System`, so the application store resolves now:
+    // a store-bundle spawn fails closed rather than parking forever.
+    let give_up = || {
+        port.release_console0_to_login();
+        crate::app_store::APP_STORE.note_unavailable();
+    };
+    let Some(binding) = boot.binding else {
+        note(
+            audit,
+            Level::Info,
+            "root-unlock: no root block device bound; root unbound, login refuses",
+        );
+        give_up();
+        return false;
+    };
+    let Some(frames) = ctx.static_frames() else {
+        note(
+            audit,
+            Level::Error,
+            "root-unlock: no kernel frame allocator; root unbound, login refuses",
+        );
+        give_up();
+        return false;
+    };
+    let caps = service_caps();
+    // Every mounted volume's cache samples this one gauge over the spawn
+    // path's frame allocator, whose free frames are the authoritative reading.
+    let env = UnlockEnv {
+        ctx,
+        audit,
+        pressure: tairix_kernel_core::memstats::MEM_STATS.system_pressure(frames),
+    };
+    let dtb = boot.dtb;
+    let body = move |yielder: &mut dyn YieldHandle| {
+        // A live unlock parks for life as the driver-store service, so only
+        // a failed bring-up gets here.
+        let Err(stage) = run_unlock(port, yielder, &binding, dtb, frames, caps, env);
+        note(audit, Level::Error, stage);
+        port.release_console0_to_login();
+        crate::app_store::APP_STORE.note_unavailable();
+    };
+    let admitted = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
+    if let Some(task_id) = admitted {
+        // The serve loop registers on `SERVE_WAITQ` under this id, so a posted
+        // request unparks it: a real wake, never a busy-yield.
+        set_store_service_task(task_id);
+    }
+    let started = admitted.is_some();
+    note(
+        audit,
+        if started { Level::Info } else { Level::Error },
+        if started {
+            "root-unlock service kthread admitted (bring-up runs on first dispatch)"
+        } else {
+            "root-unlock service kthread could not be admitted; opening console gate"
+        },
+    );
+    if !started {
+        give_up();
+    }
+    started
+}
+
+/// Admit the bound floor driver at the signed load gate, then bring its
+/// device up through `port` and run the shared tail over it; on success this
+/// never returns.
+fn run_unlock<P: UnlockPort>(
+    port: &'static P,
+    yielder: &mut dyn YieldHandle,
+    binding: &RootBlockBinding,
+    dtb: u64,
+    frames: &'static FrameAllocator,
+    caps: CapabilitySet,
+    env: UnlockEnv,
+) -> Result<Infallible, &'static str> {
+    // The kthread's one yield handle, shared by the re-arming IRQ waiter and
+    // the console reader.
+    let coop = CooperativeYield::new(yielder);
+    // Leaked because the brought-up device's host borrows it for the life of
+    // the shared disk.
+    let caller: &'static TaskCapabilities = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, env.audit),
+    ));
+    admit_floor(binding.driver, env.audit)?;
+    let floor = FloorEnv {
+        caller,
+        frames,
+        dtb,
+    };
+    match &binding.driver.bring_up {
+        FloorBringUp::Virtio => port.virtio_unlock(&coop, &binding.node, floor, env),
+        FloorBringUp::Host(driver) => port.host_unlock(&coop, &binding.node, driver, floor, env),
+    }
+}
+
+/// Admit `driver` at the signed load gate before anything of its device is
+/// touched.
+///
+/// # Errors
+///
+/// The build's trust anchor is corrupt, or the gate refused the driver.
+fn admit_floor(driver: &InKernelDriver, audit: &(dyn Sink + Sync)) -> Result<(), &'static str> {
+    let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
+    loader
+        .admit(driver.path, &loader_caps())
+        .map(|_| ())
+        .map_err(|_| "root-unlock: the floor driver was refused at the signed load gate")
 }
 
 /// The `'static` boot environment a root-unlock bring-up threads through: the
@@ -248,7 +440,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
     fn publish(
         &self,
         keying: Keying<'_>,
-    ) -> Option<alloc::sync::Arc<SleepLock<alloc::boxed::Box<dyn KernelFs>>>> {
+    ) -> Option<alloc::sync::Arc<DriverLock<alloc::boxed::Box<dyn KernelFs>>>> {
         // Locate the ARXFSRoot extent on a throwaway probe window, then open
         // the durable owned `'static` window onto it.
         let extent = {
@@ -397,9 +589,9 @@ fn holds_key_source(tree: &crate::hwtree_store::HwTreeStore) -> bool {
     present
 }
 
-/// Admit the floor virtio-blk driver at the signed load gate, open the whole
-/// disk over `transport` and `host`, and run [`finish_unlock`] over it: the
-/// tail every port's virtio bring-up ends in.
+/// Open the whole virtio disk over `transport` and `host` and run
+/// [`finish_unlock`] over it: the tail every port's virtio bring-up ends in,
+/// once its driver was admitted.
 ///
 /// On success this never returns.
 ///
@@ -413,10 +605,6 @@ pub fn finish_virtio_unlock<T: Transport + 'static>(
     env: UnlockEnv,
     console: &'static dyn UnlockConsole,
 ) -> Result<Infallible, &'static str> {
-    let loader = KernelDriverLoader::new(env.audit).ok_or("root-unlock: driver trust anchor")?;
-    loader
-        .admit(VIRTIO_BLK_PATH, &loader_caps())
-        .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
     let blk = VirtioBlk::open(transport, host).map_err(|_| "root-unlock: virtio-blk open")?;
     finish_unlock(blk, coop, env, console)
 }
@@ -425,7 +613,7 @@ pub fn finish_virtio_unlock<T: Transport + 'static>(
 /// brought-up disk into a disk shared for life by two independent preemptive
 /// tasks (Design D D2b-2c).
 ///
-/// `blk` is the brought-up whole-disk [`Block`] device (virtio-blk or EMMC2),
+/// `blk` is the brought-up whole-disk [`Block`] device (virtio-blk or an SD host),
 /// already boot-leaked to `'static` by its bring-up. It is wrapped in a leaked
 /// `&'static` [`DriverStoreService`] (over the [`SharedBlock`] layer), so two
 /// tasks reach it through independent serialised windows:
@@ -643,7 +831,7 @@ pub fn finish_unlock<B: Block + 'static>(
 
     // Publish the read-only `/System` volume as the userland `fs_*` mount
     // before entering the serve loop: a second, park-safe `'static` window
-    // onto the same `'static`-leaked disk (`PREREQUISITES.md` P-A). The store
+    // onto the same `'static`-leaked disk. The store
     // serve loop below keeps its own independent window, so the two never
     // conflict. Fail-soft and audited: a disk with no readable `/System`
     // volume simply leaves the `fs_*` syscalls failing closed.
@@ -718,15 +906,15 @@ fn serve_driver_store<B: Block + 'static>(
     // the delegatable `autoload_caps` gate superset (`CAP_DRV_LOAD` to pass
     // the gate plus the resource caps an autoloaded driver's class may request
     // — `CAP_INPUT_INJECT`/`CAP_IRQ_BIND` for an input driver and
-    // `CAP_IPC_BIND_PRIVILEGED` for a bus service driver such as the VideoCore
-    // `vcmailbox`, intersected per driver with its signed manifest request),
+    // `CAP_IPC_BIND_PRIVILEGED` for a bus service driver such as a firmware
+    // mailbox, intersected per driver with its signed manifest request),
     // the port process-spawn seam, and the **live** hardware inventory
     // (`crate::hwtree_store::HW_TREE`) a matched `node_id` is resolved against
     // to mint exactly that node's grants (no ambient authority). Resolving
     // against the live store (not a frozen boot snapshot) is what lets a node
     // a user-space bus driver publishes at runtime through `hw_emit_node` be
-    // loaded the moment it appears — the recursive bus chain (pcie → vl805 →
-    // usb_kbd) depends on it. The user-space `devmgr` owns the matching
+    // loaded the moment it appears — the recursive bus chain (root complex →
+    // USB host → keyboard) depends on it. The user-space `devmgr` owns the matching
     // *policy*; this kthread serves the *mechanism* over the capability-gated
     // store endpoint below.
     let serve_ctx = crate::driver_store_server::StoreServeContext {
@@ -794,6 +982,28 @@ fn serve_driver_store<B: Block + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every driver the floor holds passes the signed gate, the virtio ones
+    /// included now that they are admitted before their device is touched;
+    /// a driver the gate holds no image for is refused.
+    #[test]
+    fn every_floor_driver_is_admitted_and_no_other() {
+        use crate::driver_catalog::IN_KERNEL_DRIVERS;
+        use crate::test_support::NullSink;
+
+        for driver in &IN_KERNEL_DRIVERS {
+            assert_eq!(admit_floor(driver, &NullSink), Ok(()), "{}", driver.path);
+        }
+        let known = &IN_KERNEL_DRIVERS[0];
+        let stranger = InKernelDriver {
+            path: "/System/Drivers/storage/stranger",
+            bind_keys: known.bind_keys,
+            image: known.image,
+            register: known.register,
+            bring_up: known.bring_up,
+        };
+        assert!(admit_floor(&stranger, &NullSink).is_err());
+    }
 
     /// An image written to a medium four times its size grows its root
     /// partition to the medium's end, and the volume on it then grows into

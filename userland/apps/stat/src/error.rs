@@ -4,6 +4,7 @@ use alloc::string::String;
 use core::fmt;
 
 use tairix_abi::Errno;
+use tairix_util::getopt::Refusal;
 use tairix_util::quote::quote_if_needed;
 
 /// Why a `stat` invocation did not complete.
@@ -13,9 +14,9 @@ use tairix_util::quote::quote_if_needed;
 /// frozen [`Errno`], never a parallel error set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StatError {
-    /// The command line carried an unrecognised option, or a switch that
-    /// takes a value was given none. No path is touched.
-    Usage,
+    /// An option `getopt` refuses, worded as it words it. No path is
+    /// touched.
+    Option(Refusal),
     /// No operand was given.
     MissingOperand,
     /// A format named a letter that is not a specifier of the active
@@ -32,7 +33,7 @@ pub enum StatError {
 impl fmt::Display for StatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage => f.write_str("invalid usage"),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::MissingOperand => f.write_str("missing operand"),
             Self::UnknownSpecifier(letter) => {
                 write!(

@@ -78,8 +78,7 @@ The rows are sorted by `%CPU`, biggest consumer first, and carry:
 
 - `0` — the session ended with `q`, or the short help was shown.
 - `1` — the service or the terminal failed; the reason is printed on
-  standard error.
-- `2` — the command line was not understood.
+  standard error. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

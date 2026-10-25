@@ -243,7 +243,7 @@ handlers.
 
 ## Per-console controlling owner (Stage D5)
 
-Text consoles get the controlling-terminal arbitration Linux builds from
+Text consoles get the controlling-terminal arbitration POSIX job control builds from
 session leaders, foreground process groups, and `SIGTTIN`/`SIGTTOU` — but
 as a kernel-tracked fact with fail-closed refusals instead of racy
 asynchronous signals.
@@ -479,8 +479,8 @@ straight over the desktop's composited pixels.
 **Retained, not discarded.** A hidden console keeps interpreting everything
 written to it into its retained cell grid and touches no pixel; taking the
 surface back repaints the whole screen from that grid. So text that arrived
-while a graphical session held the screen is not thrown away as Linux
-discards `printk` under `KD_GRAPHICS` — it is on screen the moment the
+while a graphical session held the screen is not thrown away — it is on
+screen the moment the
 session ends. A user who runs `desktop` from a shell and later leaves it
 returns to that shell exactly as they left it, with whatever the session
 reported printed beneath.

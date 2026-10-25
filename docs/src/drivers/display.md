@@ -187,9 +187,9 @@ coherent DMA in the software PTE metadata. The HVS software fallback and its
 plane uploads use one bounds-checked bulk transfer rather than millions of
 individually checked volatile word stores.
 
-No current backend advertises Linux-style y-wrap. Linux enables y-wrap only
-when the driver explicitly reports hardware wrap and the visible and virtual
-heights align to text rows. QEMU `ramfb` has no wrap primitive, and the Pi
+No current backend advertises y-wrap: a console may wrap its scan-out only
+where the hardware reports wrapping and the visible and virtual heights align
+to text rows. QEMU `ramfb` has no wrap primitive, and the Pi
 firmware mailbox exposes virtual panning but does not prove wrap-at-end
 semantics; treating either as wrap could scan beyond the allocation. The
 retained console grid therefore keeps its correct coalesced damage repaint
@@ -416,12 +416,19 @@ device type 16 as a `Display` node, the first marked `ConsoleHost`.
   device offers no EDID. A `VIRTIO_GPU_EVENT_DISPLAY` configuration change
   re-reads both.
 - **Presents.** Each frame is the backing of a 2D resource made at its first
-  present, which transfers it whole. A present is one batch on the control
-  queue — a transfer per damage rectangle, the scan-out switch, a flush per
-  rectangle — published with one notify (`RequestQueue::submit_all_and_wait`)
-  and answered on the device interrupt, so it answers `Shown`. The batch
-  relies on the device processing its control queue in order, as every
-  virtio-gpu device does and Linux's driver relies on.
+  present, which transfers it whole. The device may run its control queue's
+  commands in any order and answer one before it has run it (virtio 1.2
+  §2.6, §5.7.6), so every command carries `VIRTIO_GPU_FLAG_FENCE` — an
+  answer without its fence is a device fault — and a present goes in stages,
+  each published with one notify (`RequestQueue::submit_all_and_wait`) once
+  every command before it has been answered: a new frame's creation, its
+  backing, a transfer per damage rectangle, the scan-out switch, then a flush
+  per rectangle beside the unreference of the frame it replaced. A present
+  that switches frames is three stages, one that does not is two, and it
+  answers `Shown` once the last has run.
+- **Ordering across the queues.** The pointer image's transfer is fenced and
+  answered before the cursor queue names it, as the specification requires
+  of `UPDATE_CURSOR`.
 - **The cursor plane.** A pointer image is copied into the driver's own
   64 × 64 image, transferred, and shown on the cursor queue at its hot spot.
 - **The console.** It is hosted at the output's mode under the node's DMA
@@ -437,8 +444,8 @@ device type 16 as a `Display` node, the first marked `ConsoleHost`.
 
 ### `tairix-drv-display-bcm2711-hvs`
 
-The Raspberry Pi 4's display engine, driven natively as Linux's full-KMS
-`vc4` drives it: the fifth-generation HVS composites the seat's surface into
+The Raspberry Pi 4's display engine, driven natively rather than through the
+firmware: the fifth-generation HVS composites the seat's surface into
 the pixel valves feeding HDMI0 and HDMI1, and each HDMI block is an encoder
 driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
 
@@ -462,9 +469,10 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   The engine then tells the firmware the display is the ARM's
   (`NOTIFY_DISPLAY_DONE`, tag `0x0003_0066`, which the mailbox service admits
   only for the HVS node's driver) and records the answer: the message header
-  is all the firmware answers for a tag with no values, as Linux reads it, so
-  a refused message is logged with the firmware's codes, and the display is
-  taken over regardless, as Linux's `vc4` does. It brings down whatever pipe
+  is all the firmware answers for a tag with no values, so a refused message
+  is logged with the firmware's codes, and the display is taken over
+  regardless, since a refusal would otherwise leave it with no driver. It
+  brings down whatever pipe
   the firmware left running — the valve's video stopped and its pixels
   drained, the encoder disabled, the valve reset, the HVS channel the
   output's mux names stopped, the encoder powered down — before it sets the
@@ -531,8 +539,8 @@ metal run is `plans/SOUND.md` SND19q.
 ### `tairix-drv-display-bcm2711-hdmi`
 
 Each of the Pi 4's HDMI blocks as an [`encoder-v1`](../lib/encoder.md)
-encoder and an [`audiochan-v1`](../lib/audiochan.md) audio device, driven as
-Linux's `vc4_hdmi` drives it, its sink found and its mode chosen by the driver
+encoder and an [`audiochan-v1`](../lib/audiochan.md) audio device, its sink
+found and its mode chosen by the driver
 while the display engine takes it through the mode set and the mixer plays
 through it. One thread serves both (`tairix_encoder::serve_with_audio`).
 
@@ -567,7 +575,8 @@ through it. One thread serves both (`tairix_encoder::serve_with_audio`).
 - **Audio.** The jack is present while a connected HDMI sink declares audio.
   The endpoint offers the widest layout the sink's speakers place without a
   gap — stereo, 5.1 or 7.1 — at the rates its descriptors name for that many
-  channels, as Linux's ELD constraints read them, and refuses a layout whose
+  channels, a descriptor covering every count up to its own as CTA-861 has
+  it, and refuses a layout whose
   speakers the sink lacks, and states the widest sample the sink takes as its
   resolution, which the mixer dithers to. A stream is fed to the MAI by a
   DMA4 channel as IEC 60958 subframes carrying the rate and the sink's word

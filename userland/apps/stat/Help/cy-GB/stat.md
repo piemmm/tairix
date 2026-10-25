@@ -54,6 +54,12 @@ gan ddynodydd 16 beit yn hytrach na rhif dyfais, felly `%d` yw'r dynodydd
 hwnnw'n ddegol a `%D` yn hecsadegol; mae cymharu `%d` dwy ffeil yn dal i
 ateb yn union "a ydynt ar un gyfrol?".
 
+Wrth derfynell, dyfynnir pob enw a ddangosir yn yr allbwn lle byddai
+angen hynny ar gragen, ac ysgrifennir unrhyw nod rheoli neu nod
+anweledig arall sydd ynddo wedi'i ddianc, fel na all enw reoli nac
+aildrefnu'r sgrin; mae GNU yn ei ddangos heb ei newid. Mae pibell neu
+ffeil yn derbyn yr enw beit am feit.
+
 ## OPTIONS
 
 - `-L, --dereference` — disgrifio'r hyn y mae cyswllt symbolaidd yn ei
@@ -78,9 +84,9 @@ ateb yn union "a ydynt ar un gyfrol?".
 ## EXIT STATUS
 
 - `0` — disgrifiwyd pob operand (neu ysgrifennwyd y cymorth byr).
-- `1` — ni allwyd darllen un operand o leiaf, neu methodd yr allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn, neu enwodd ei fformat
-  gyfarwyddeb na all y system hon ei gwasanaethu.
+- `1` — ni allwyd darllen un operand o leiaf, neu methodd yr allbwn. Mae
+  llinell orchymyn na ddeallwyd, neu yr enwodd ei fformat gyfarwyddeb na
+  all y system hon ei gwasanaethu, hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -1,6 +1,9 @@
 //! The parsed shape of a `groupdel` command line.
 
 use alloc::string::String;
+use core::fmt;
+
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
 /// One thing the `groupdel` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11,58 +14,68 @@ pub enum Command {
     Help,
 }
 
-/// The command line was not understood. The caller prints
-/// [`USAGE`](crate::USAGE) and deletes nothing.
+/// The command line was not understood. Nothing is deleted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UsageError {
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// No operand, or more than one.
+    Usage,
+}
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::Usage => f.write_str("invalid usage"),
+        }
+    }
+}
+
+/// What each of `groupdel`'s options means.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageError;
+enum Flag {
+    Help,
+}
+
+/// The reserved help switches, `groupdel`'s only options.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
 
 /// Parse `args` (the tool's arguments, excluding the program name).
 ///
-/// The grammar is `groupdel [--] NAME`:
-///
-/// * `-h` / `-?` / `--help` — this command's own short help (wins
-///   immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * any other `-…` — a [`UsageError`] (fail closed).
-///
-/// Exactly one operand is required. The group name is not validated
-/// here: the registry is the authority on what names exist, and a name it
-/// does not hold is simply not found.
+/// The grammar is `groupdel [--] NAME`, read as GNU's `getopt_long` reads it
+/// ([`Scan`]): the help switches (`-h`, `-?`, `--help`) answer at once
+/// wherever they stand, and `--` ends the options. Exactly one operand is
+/// required. The group name is not validated here: the registry is the
+/// authority on what names exist, and a name it does not hold is simply not
+/// found.
 ///
 /// # Errors
 ///
-/// [`UsageError`] for an unrecognised option or an operand count other
-/// than one.
+/// [`UsageError::Option`] for an option `getopt` refuses, and
+/// [`UsageError::Usage`] for an operand count other than one.
 pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
     let mut operand: Option<&str> = None;
-    let mut options_done = false;
     let mut extra = false;
-    for arg in args {
-        if !options_done {
-            match *arg {
-                "--" => {
-                    options_done = true;
-                    continue;
-                }
-                "-h" | "-?" | "--help" => return Ok(Command::Help),
-                _ if arg.starts_with('-') && arg.len() > 1 => return Err(UsageError),
-                _ => {}
-            }
-        }
-        if operand.replace(arg).is_some() {
-            extra = true;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(UsageError::Option)? {
+            Arg::Operand(name) => extra |= operand.replace(name).is_some(),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
     }
     match (operand, extra) {
         (Some(name), false) => Ok(Command::Delete(String::from(name))),
-        _ => Err(UsageError),
+        _ => Err(UsageError::Usage),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse, Command, UsageError};
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
 
     #[test]
     fn one_operand_is_the_deletion() {
@@ -89,10 +102,30 @@ mod tests {
     }
 
     #[test]
-    fn no_operand_too_many_operands_and_unknown_options_fail_closed() {
-        assert_eq!(parse(&[]), Err(UsageError));
-        assert_eq!(parse(&["a", "b"]), Err(UsageError));
-        assert_eq!(parse(&["-x", "a"]), Err(UsageError));
-        assert_eq!(parse(&["--frob", "a"]), Err(UsageError));
+    fn no_operand_and_too_many_operands_fail_closed() {
+        assert_eq!(parse(&[]), Err(UsageError::Usage));
+        assert_eq!(parse(&["a", "b"]), Err(UsageError::Usage));
+    }
+
+    /// `getopt`'s words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "a"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob", "a"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--help=x", "a"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// `getopt_long` reads `--he` as `--help`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--he", "staff"]), Ok(Command::Help));
+        assert_eq!(parse(&["staff", "--h"]), Ok(Command::Help));
     }
 }

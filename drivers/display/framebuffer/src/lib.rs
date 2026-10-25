@@ -11,7 +11,7 @@
 //! The match key is the canonical `simple-framebuffer` model name
 //! ([`SIMPLE_FRAMEBUFFER_COMPATIBLE`]) a platform's boot path publishes for
 //! its programmed linear scan-out surface (`plans/DISPLAY.md` D7d): the FDT
-//! `simple-framebuffer` shape, QEMU `ramfb`, the `VideoCore` mailbox
+//! `simple-framebuffer` shape, QEMU `ramfb`, a firmware mailbox
 //! surface, or a UEFI GOP hand-off all normalise to it, so one driver binds
 //! them all — the surface's base, geometry, and pixel format travel in the
 //! node's `Framebuffer` resource, never in the key. A driver for a surface
@@ -22,7 +22,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
+use tairix_abi::{compatible_key, CapabilityId, DriverBindKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 
 /// The bind priority [`BIND_KEYS`] carries: the concrete-identity tier of an
 /// exact `compatible` match. A surface-specific driver outranks it.
@@ -42,18 +42,13 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// scan-out surface, matched by the canonical model name.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the shared constant is well within
-        // `HW_COMPATIBLE_MAX`. A too-long value would be a compile-time
-        // const-eval error here, never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(SIMPLE_FRAMEBUFFER_COMPATIBLE),
 )];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::HwMatchKey;
 
     #[test]
     fn the_bind_table_matches_a_boot_display_node_key() {

@@ -20,10 +20,17 @@ caso opposto, e non può essere zero. `ultimo` può essere `inf` per
 contare senza fine. La precisione di stampa predefinita segue la
 scrittura degli operandi (`seq 1 0.25 2` stampa due cifre decimali), e
 le sequenze di interi sono generate in modo esatto, per quanto grandi
-siano i numeri.
+siano i numeri. Un numero esadecimale con l'esponente maiuscolo
+(`0X1P-1`) è letto come lo è uno con l'esponente minuscolo; GNU `seq` ne
+legge la forma come quella di un intero e stampa numeri errati.
 
 L'analisi delle opzioni si ferma al primo operando, e un numero negativo
 iniziale è un operando, non un'opzione: `seq -5 5` conta da -5.
+
+Una diagnostica mostra il formato, e una direttiva sconosciuta che
+contiene, con ogni carattere di controllo o altro carattere invisibile
+in forma di escape, così che nessuno dei due possa comandare il
+terminale; GNU mostra la direttiva invariata.
 
 ## OPTIONS
 
@@ -52,9 +59,9 @@ iniziale è un operando, non un'opzione: `seq -5 5` conta da -5.
 ## EXIT STATUS
 
 - `0` — la sequenza (o la guida breve richiesta) è stata scritta.
-- `1` — l'output ha smesso di accettare byte.
-- `2` — la riga di comando non è stata compresa (opzione sconosciuta,
-  numero non valido, incremento zero o formato errato).
+- `1` — l'output ha smesso di accettare byte. Anche una riga di comando
+  non compresa (opzione sconosciuta, numero non valido, incremento zero
+  o formato errato) termina con `1`.
 
 ## ENVIRONMENT
 

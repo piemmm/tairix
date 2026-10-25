@@ -74,8 +74,8 @@ continua con il resto. Le opzioni GNU `--output`, `--sync` e
 - `0` — il rapporto ha coperto tutto quanto richiesto (o la guida
   breve è stata scritta).
 - `1` — un operando non è stato riportabile, i filtri non hanno
-  lasciato nulla, o la richiesta o l'output sono falliti.
-- `2` — la riga di comando non è stata compresa.
+  lasciato nulla, o la richiesta o l'output sono falliti. Anche una
+  riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

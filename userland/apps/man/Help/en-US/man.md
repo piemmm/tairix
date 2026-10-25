@@ -48,8 +48,7 @@ is redirected or the console's size is unknown, the whole page streams.
 
 - `0` — the page was shown.
 - `1` — the command or its help document was not found, or the page could
-  not be delivered.
-- `2` — the command line was not understood.
+  not be delivered. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

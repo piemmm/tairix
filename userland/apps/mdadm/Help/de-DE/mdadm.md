@@ -92,8 +92,8 @@ Standard-Informationsstrom (fd 3) geschrieben. Er ist optional und
 - `0` — die Anfrage war erfolgreich (oder die Hilfe wurde geschrieben).
 - `1` — eine Berechtigung wurde verweigert, ein Name ließ sich nicht
   auflösen, der Composer lehnte die Anfrage ab, oder die Ausgabe konnte
-  nicht geschrieben werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  nicht geschrieben werden. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

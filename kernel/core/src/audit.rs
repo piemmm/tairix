@@ -29,7 +29,7 @@
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
-//! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused, the `cause` field naming why: the caller holds no spawn authority, or the session placement was refused before any of the child existed. `cause=session_ending` is a child refused at admission because its session began ending while it was built: it never runs and its parent reaps it as killed, and the `task`, `proc` and `comm` fields name it. |
+//! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused, the `cause` field naming why: the caller holds no spawn authority, or the session placement was refused before any of the child existed. `cause=session_ending` is a child refused at admission because its session began ending while it was built: it never runs and its parent reaps it as killed, and the `task`, `proc` and `comm` fields name it. `cause=deferred_load_failed` is a child whose own load refused its bundle: the `task` field names it, `status` the reserved load-failure status it exits with, and `errno` the refusal that status classifies. |
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
 //! | 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit | The `signal` syscall's cross-principal authority decision, reached only once the target is not the caller's own child: allowed (`Info`) by same-uid or `CAP_PROC_CONTROL`, denied (`Warn`) otherwise. The `caller`, `pid`, `target`, `signal`, and `rule` fields name the decision. |
 //! | 4037 | Info/Warn | `PROCESS_PRIORITY_CHANGE` | audit | A `sched_set_priority` decision that needed authority beyond the caller's own child: a cross-principal target (same-uid or `CAP_PROC_CONTROL`) or a raise toward `High` (always `CAP_PROC_CONTROL`). Allowed is `Info`, denied is `Warn`; the `caller`, `pid`, `target`, `priority`, `rule`, and `raise` fields carry the decision. An own-child lowering is the caller's standing grant and is not recorded here. |
@@ -374,7 +374,7 @@ pub enum AuditEvent {
     /// output; it fails closed.
     EntropyReserveUnseeded,
     /// The kernel minted the per-boot identifier ([`tairix_abi::BootId`])
-    /// from the seeded CSPRNG output reserve (`PREREQUISITES.md` P-E).
+    /// from the seeded CSPRNG output reserve.
     ///
     /// Emitted once at boot by [`crate::init`] after the reserve is seeded.
     /// The record carries **neither** the entropy nor the id itself — only
@@ -384,7 +384,7 @@ pub enum AuditEvent {
     /// The kernel could **not** mint the per-boot identifier: the CSPRNG
     /// output reserve was not seeded in time, so the boot id stays
     /// [`tairix_abi::BootId::UNSET`] and `boot_id_get` fails closed with
-    /// `EntropyNotReady` (`PREREQUISITES.md` P-E).
+    /// `EntropyNotReady`.
     ///
     /// Emitted once at boot by [`crate::init`] on a port whose entropy source
     /// could not seed the reserve. The kernel never substitutes a predictable

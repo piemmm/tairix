@@ -22,6 +22,7 @@ use tairix_abi::driver::net_ring::{
     aligned_region, FrameRings, RingGeometry, REGION_ALIGN_PADDING,
 };
 use tairix_abi::driver::BufferClass;
+use tairix_abi::HwMatchKey;
 
 use super::*;
 
@@ -2235,4 +2236,13 @@ fn a_segment_size_past_a_transmit_buffer_is_refused_rather_than_wedging() {
     assert!(device.staged.is_none());
     let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
     assert_eq!(device.frames.as_bytes()[start], 0x2A);
+}
+
+/// The completion sources sit where both BSD-2-Clause GENET headers place
+/// them (NetBSD `bcmgenetreg.h`, FreeBSD `if_genetreg.h`); the device model
+/// shares the driver's constants, so only this pins their positions.
+#[test]
+fn the_dma_completion_sources_are_the_documented_bits() {
+    assert_eq!(regs::IRQ_RXDMA_DONE, 1 << 13);
+    assert_eq!(regs::IRQ_TXDMA_DONE, 1 << 16);
 }

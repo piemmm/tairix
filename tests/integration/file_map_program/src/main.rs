@@ -132,7 +132,7 @@ mod program {
     /// The `verify` role body. Returns `0` on success or a distinct
     /// diagnostic exit code per failure site.
     fn verify() -> i32 {
-        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ)) else {
+        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ, 0)) else {
             return 20;
         };
         let base = tairix_rt::file_map(fd, 0, FILE_LEN);
@@ -182,7 +182,7 @@ mod program {
             // page has not been touched, so the kernel copy-in takes the
             // fault this probe exists to prove resolvable.
             unsafe { core::slice::from_raw_parts((base + PATH_OFFSET) as *const u8, FILE_PATH.len()) };
-        let Ok(fd2) = u32::try_from(tairix_rt::fs_open(path_in_map, OpenFlags::READ)) else {
+        let Ok(fd2) = u32::try_from(tairix_rt::fs_open(path_in_map, OpenFlags::READ, 0)) else {
             return 27;
         };
         if tairix_rt::fs_close(fd2) != 0 {
@@ -198,7 +198,7 @@ mod program {
     /// read must fault-kill the task (exit 139); every return here is a
     /// distinct failure the parent will surface.
     fn wild() -> i32 {
-        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ)) else {
+        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ, 0)) else {
             return 40;
         };
         let base = tairix_rt::file_map(fd, 0, FILE_LEN);
@@ -222,7 +222,7 @@ mod program {
     /// to it. File mappings are read-only, so the write must fault-kill the
     /// task (exit 139) — never resolve, and never spin retrying.
     fn store() -> i32 {
-        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ)) else {
+        let Ok(fd) = u32::try_from(tairix_rt::fs_open(FILE_PATH, OpenFlags::READ, 0)) else {
             return 50;
         };
         let base = tairix_rt::file_map(fd, 0, FILE_LEN);

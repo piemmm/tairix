@@ -349,7 +349,6 @@ impl DriverLoader for SpawnDriverLoader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::NullSink;
 
     /// A tree holding exactly one node.
     struct OnlyNode(u32);
@@ -572,13 +571,9 @@ mod tests {
         );
     }
 
-    use alloc::boxed::Box;
+    use tairix_kernel_mem::FrameAllocator;
 
-    use tairix_kernel_core::KernelStack;
-    use tairix_kernel_mem::{
-        BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, PhysMap, RegionKind,
-        UserAddressSpace, PAGE_SIZE,
-    };
+    use crate::test_support::{inert_spawn_ctx, scratch_frames};
 
     /// One recorded [`InitSpawnCtx::spawn_driver_process`] call: the
     /// driver-store path, the payload bytes, whether the forwarded
@@ -596,12 +591,9 @@ mod tests {
     /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process) is
     /// handed and returns a fixed PID, so the host suite can prove
     /// [`InitCtxDriverProcessSpawn`] forwards its inputs to the seam
-    /// unchanged. `frames`/`audit` exist only to satisfy the trait — the
-    /// recorded override never consults them — and `admit_init` is
-    /// unreachable for the same reason.
+    /// unchanged.
     struct RecordingInitCtx {
         frames: FrameAllocator,
-        sink: NullSink,
         recorded: RefCell<Option<RecordedDriverProcess>>,
         /// The forwarded node's id, and whether its tree holds that id and
         /// the next.
@@ -611,18 +603,8 @@ mod tests {
 
     impl RecordingInitCtx {
         fn new(pid: u64) -> Self {
-            #[repr(C, align(4096))]
-            struct Region([u8; PAGE_SIZE * 4]);
-            let region: &'static Region = Box::leak(Box::new(Region([0; PAGE_SIZE * 4])));
-            let mut map = BootMemoryMap::new();
-            map.push(MemoryRegion {
-                start: PhysAddr::new(core::ptr::from_ref(region) as u64),
-                length: (PAGE_SIZE * 4) as u64,
-                kind: RegionKind::Usable,
-            });
             Self {
-                frames: FrameAllocator::new(&map).expect("one-region allocator"),
-                sink: NullSink,
+                frames: scratch_frames(),
                 recorded: RefCell::new(None),
                 node: RefCell::new(None),
                 pid,
@@ -631,31 +613,7 @@ mod tests {
     }
 
     impl InitSpawnCtx for RecordingInitCtx {
-        fn frames(&self) -> &FrameAllocator {
-            &self.frames
-        }
-
-        fn audit(&self) -> &(dyn Sink + Sync) {
-            &self.sink
-        }
-
-        fn space_tlb(&self) -> Result<tairix_kernel_mem::SpaceTlb, tairix_kernel_mem::AllocError> {
-            tairix_kernel_core::new_space_tlb(None)
-        }
-
-        unsafe fn admit_init(
-            &self,
-            _caps: CapabilitySet,
-            _space: Box<dyn UserAddressSpace + Send + Sync>,
-            _physmap: Box<dyn PhysMap + Send + Sync>,
-            _stack_span: tairix_kernel_core::StackSpan,
-            _stack: Box<dyn KernelStack + Send>,
-            _pre_resume: tairix_kernel_core::ProcessResume,
-            _live: Option<alloc::sync::Arc<tairix_kernel_core::ProcessSpace>>,
-            _entry: tairix_kernel_core::UserThreadEntry,
-        ) {
-            unreachable!("the driver-spawn adapter drives spawn_driver_process, not admit_init")
-        }
+        inert_spawn_ctx!();
 
         fn spawn_driver_process(
             &self,

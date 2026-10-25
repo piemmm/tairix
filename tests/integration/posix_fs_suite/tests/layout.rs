@@ -71,14 +71,11 @@ fn system_logs_and_settings_are_writable() {
 
 #[test]
 fn write_to_a_read_only_mount_is_refused() {
-    // A volume mounted read-only refuses delegated mutation
-    // before the driver is ever touched.
-    let (vfs, mut fs) = arxfs_backed_vfs(true);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-
+    // A volume mounted read-only refuses a mutation before the driver is
+    // ever touched.
+    let vol = arxfs_volume(true);
     assert_eq!(
-        vfs.create_via_secured(&owner, &vfs.cover(&vol_path("nope")), &mut fs),
-        Err(VfsError::ReadOnly)
+        vol.create(ROOT.caller(), &vol_path("nope"), new_file()),
+        Err(Errno::ReadOnly)
     );
 }

@@ -47,10 +47,10 @@
 //!
 //! # Fail closed
 //!
-//! An unrecognised option, or anything other than exactly two operands, is
-//! [`LinkError::Usage`] and no link is made. A refused creation carries the
-//! kernel's own [`Errno`]. No `unsafe`, and no `unwrap`/`expect`/`panic!`
-//! in production paths.
+//! An option `getopt` refuses ([`LinkError::Option`]), or anything other
+//! than exactly two operands ([`LinkError::Usage`]), makes no link. A
+//! refused creation carries the kernel's own [`Errno`]. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -64,10 +64,11 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `link`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `link`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: link [--] existing new
 
@@ -86,9 +87,10 @@ const OWN_WORD: &str = "link";
 /// Why a `link` invocation did not complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkError {
-    /// The command line carried an unrecognised option, or anything other
-    /// than exactly two operands. The caller should print [`USAGE`]. No link
-    /// is made.
+    /// An option `getopt` refuses, worded as it words it. No link is made.
+    Option(Refusal),
+    /// The command line named anything other than exactly two operands. No
+    /// link is made.
     Usage,
     /// The link could not be created. Carries both names the GNU tool's own
     /// diagnostic reports and the kernel's [`Errno`] — e.g.
@@ -112,6 +114,7 @@ pub enum LinkError {
 impl fmt::Display for LinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::Create {
                 existing,
@@ -142,33 +145,37 @@ pub enum Command {
     },
 }
 
-/// Parse an argument vector (without the program name).
+/// What `link`'s one option means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `link`'s options: the reserved help switches alone (`link` has no `-h`,
+/// as GNU's has none).
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::long(&["help"], Takes::Nothing, Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// Parse an argument vector (without the program name), read as GNU's
+/// `getopt_long` reads it ([`Scan`]): the help switches (`-?`, `--help`)
+/// answer at once wherever they stand, a long one by any unambiguous prefix,
+/// and `--` ends the options, so a name that begins with a dash may follow
+/// it. A third operand is refused where it stands.
 ///
 /// # Errors
 ///
-/// [`LinkError::Usage`] on an unrecognised option, or on anything other than
-/// exactly two operands.
+/// * [`LinkError::Option`] — an option `getopt` refuses, in its words.
+/// * [`LinkError::Usage`] — anything other than exactly two operands.
 pub fn parse(args: &[&str]) -> Result<Command, LinkError> {
     let mut operands: Vec<&str> = Vec::new();
-    let mut options_ended = false;
-    for &arg in args {
-        if !options_ended {
-            if arg == "--" {
-                options_ended = true;
-                continue;
-            }
-            // The bare `-` is a name, not an option cluster.
-            if arg.len() > 1 && arg.starts_with('-') {
-                match arg {
-                    "-?" | "--help" => return Ok(Command::Help),
-                    _ => return Err(LinkError::Usage),
-                }
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(LinkError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Operand(_) if operands.len() == 2 => return Err(LinkError::Usage),
+            Arg::Operand(operand) => operands.push(operand),
         }
-        if operands.len() == 2 {
-            return Err(LinkError::Usage);
-        }
-        operands.push(arg);
     }
     match operands[..] {
         [existing, new] => Ok(Command::Create {

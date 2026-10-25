@@ -1,12 +1,12 @@
-//! Userland filesystem API wire types (`PREREQUISITES.md` P-A).
+//! Userland filesystem API wire types.
 //!
 //! These types describe the data a program exchanges with the kernel over
-//! the `fs_open` / `fs_read` / `fs_write` / `fs_readdir` / `fs_stat` /
-//! `fs_truncate` / `fs_sync` / `fs_mkdir` / `fs_unlink` / `fs_close`
-//! syscalls. The syscalls themselves resolve a path or an open-file handle
-//! against the kernel's secured VFS, which makes every per-inode
-//! owner/mode/ACL/capability decision; this module only fixes the *shapes*
-//! that cross the boundary, so the kernel and `lib/rt` cannot drift
+//! the `fs_*` syscalls. A path a call takes is resolved from the directory
+//! descriptor beside it, or from the working directory under [`FD_CWD`]; the
+//! syscalls resolve it, or act on an open-file handle, against the kernel's
+//! secured VFS, which makes every
+//! per-inode owner/mode/ACL/capability decision; this module only fixes the
+//! *shapes* that cross the boundary, so the kernel and `lib/rt` cannot drift
 //! (no duplication).
 //!
 //! Like the rest of the ABI surface the encodings are little-endian and
@@ -15,7 +15,7 @@
 //! an [`Errno`] rather than indexing out of range.
 
 use crate::driver::filesystem::NodeTimes;
-use crate::le::{put_u32, put_u64, read_u32, read_u64};
+use crate::le::{put_i64, put_u32, put_u64, read_i64, read_u32, read_u64};
 use crate::time::Time64;
 use crate::Errno;
 
@@ -43,6 +43,10 @@ pub fn stored_root_entries() -> impl Iterator<Item = &'static str> {
 /// refused before any resolution begins.
 pub const FS_PATH_MAX: usize = 4096;
 
+/// The `dirfd` naming the caller's working directory: a relative path given
+/// with it resolves from there. No descriptor is ever numbered so.
+pub const FD_CWD: u32 = u32::MAX;
+
 /// Maximum length, in bytes, of a symbolic link's target.
 ///
 /// A link's target *is* a path, so this is [`FS_PATH_MAX`] rather than an
@@ -68,9 +72,11 @@ pub const FS_IO_MAX: usize = 1 << 20;
 /// amortises its call.
 pub const READDIR_BATCH_MAX: usize = 1 << 16;
 
-/// The permission bits a [`fs_set_mode`](crate::SyscallNumber::FS_SET_MODE)
-/// word may carry: the owner/group/other `rwx` triads plus the
-/// setuid/setgid/sticky bits (`0o7777`).
+/// The permission bits a mode word may carry: the one
+/// [`fs_set_mode`](crate::SyscallNumber::FS_SET_MODE) sets, and the one a
+/// create asks for through [`fs_open`](crate::SyscallNumber::FS_OPEN) and
+/// [`fs_mkdir`](crate::SyscallNumber::FS_MKDIR). The owner/group/other `rwx`
+/// triads plus the setuid/setgid/sticky bits (`0o7777`).
 ///
 /// A fixed validation bound on untrusted input: the dispatcher refuses a
 /// mode word carrying any higher bit with [`Errno::OutOfRange`] rather than
@@ -79,30 +85,71 @@ pub const READDIR_BATCH_MAX: usize = 1 << 16;
 /// the filesystem's own and are never settable through the call.
 pub const FS_MODE_MASK: u32 = 0o7777;
 
-/// The set-user-ID permission bit (`0o4000`).
-///
-/// A successful ownership change through
-/// [`fs_set_owner`](crate::SyscallNumber::FS_SET_OWNER) always clears this bit,
-/// so a file whose owner is reassigned can never carry a stale
-/// setuid-to-someone-else escalation (the standard `chown(2)` safety
-/// behaviour). One definition, shared by the secured VFS that enforces it.
+/// The set-user-ID permission bit (`0o4000`), which an ownership change takes
+/// from anything but a directory ([`mode_after_owner_change`]).
 pub const FS_SETUID_BIT: u32 = 0o4000;
 
-/// The set-group-ID permission bit (`0o2000`).
-///
-/// A successful ownership change clears this bit **only** when the node is
-/// group-executable ([`FS_GROUP_EXEC_BIT`] set) — a set-group-ID *directory*
-/// legitimately keeps the bit to drive group inheritance, exactly as
-/// `chown(2)` does — so a reassigned group-executable file cannot become a
-/// setgid escalation while collaborative directories survive a group change.
+/// The set-group-ID permission bit (`0o2000`): on a directory, the group its
+/// entries are born in; on anything else group-executable, a privilege an
+/// ownership change takes away ([`mode_after_owner_change`]).
 pub const FS_SETGID_BIT: u32 = 0o2000;
 
 /// The group-execute permission bit (`0o0010`).
-///
-/// Distinguishes a group-executable file (whose [`FS_SETGID_BIT`] is cleared
-/// on an ownership change) from a set-group-ID directory (whose bit is
-/// preserved).
 pub const FS_GROUP_EXEC_BIT: u32 = 0o0010;
+
+/// The mode bits a node with `mode` keeps once its owner or group changes.
+///
+/// A directory keeps them all, so a shared set-group-ID directory goes on
+/// giving its entries its group. Anything else loses [`FS_SETUID_BIT`], and
+/// [`FS_SETGID_BIT`] where [`FS_GROUP_EXEC_BIT`] makes it a privilege, so a
+/// reassigned file never carries one granted for its old owner.
+#[must_use]
+pub const fn mode_after_owner_change(mode: u32, directory: bool) -> u32 {
+    if directory {
+        return mode;
+    }
+    let mode = mode & !FS_SETUID_BIT;
+    if mode & FS_GROUP_EXEC_BIT == 0 {
+        mode
+    } else {
+        mode & !FS_SETGID_BIT
+    }
+}
+
+/// The sticky bit (`0o1000`): in a directory carrying it, an entry is removed
+/// or renamed only by its own owner or the directory's.
+pub const FS_STICKY_BIT: u32 = 0o1000;
+
+/// The owner/group/other `rwx` triads (`0o777`).
+pub const FS_PERMISSION_BITS: u32 = 0o777;
+
+/// The mode a file is created with when its creator asks for no narrower one
+/// (`0o666`); the creator's umask narrows it.
+pub const FS_NEW_FILE_MODE: u32 = 0o666;
+
+/// The mode a directory is created with when its creator asks for no narrower
+/// one (`0o777`); the creator's umask narrows it.
+pub const FS_NEW_DIR_MODE: u32 = 0o777;
+
+/// The mode every symbolic link is born with (`0o777`), which no umask
+/// narrows: a link's own mode never gates access.
+pub const FS_LINK_MODE: u32 = 0o777;
+
+/// The file mode creation mask PID 1 starts with (`0o022`), and so every
+/// process whose ancestors kept the mask they were given.
+pub const FS_INITIAL_UMASK: u32 = 0o022;
+
+/// The bits a file mode creation mask may carry: the permission triads. A mask
+/// never withholds the setuid, setgid or sticky bit.
+///
+/// [`fs_umask`](crate::SyscallNumber::FS_UMASK) refuses a mask carrying any
+/// other bit with [`Errno::OutOfRange`].
+pub const FS_UMASK_BITS: u32 = FS_PERMISSION_BITS;
+
+/// The [`fs_umask`](crate::SyscallNumber::FS_UMASK) word that reads the
+/// caller's mask without changing it. It carries bits no mask may, so it is
+/// never taken for one.
+pub const FS_UMASK_QUERY: u32 = u32::MAX;
 
 /// The [`fs_set_owner`](crate::SyscallNumber::FS_SET_OWNER) `uid`/`gid`
 /// sentinel meaning "leave this field unchanged" (the `(uid_t)-1` /
@@ -253,7 +300,12 @@ impl OpenFlags {
     pub const READ: Self = Self(1 << 0);
     /// Request write access. `fs_write`/`fs_truncate` require it.
     pub const WRITE: Self = Self(1 << 1);
-    /// Create the file if it does not exist (regular file only).
+    /// Create the file if it does not exist, born with the mode the open
+    /// names less the caller's umask. Only an open carrying this flag may
+    /// name a mode. With [`DIRECTORY`](Self::DIRECTORY) and
+    /// [`EXCLUSIVE`](Self::EXCLUSIVE), and neither access bit, it makes a
+    /// directory and answers it open, so no name can be swapped in between
+    /// the make and the open.
     pub const CREATE: Self = Self(1 << 2);
     /// Truncate the file to zero length on open. Requires
     /// [`WRITE`](Self::WRITE).
@@ -264,8 +316,9 @@ impl OpenFlags {
     pub const APPEND: Self = Self(1 << 4);
     /// The target must be a directory; opening a regular file fails closed.
     pub const DIRECTORY: Self = Self(1 << 5);
-    /// With [`CREATE`](Self::CREATE), fail closed if the file already
-    /// exists (exclusive create).
+    /// With [`CREATE`](Self::CREATE), fail closed if the name already
+    /// exists (exclusive create); a symbolic link there, dangling or not, is
+    /// never followed.
     pub const EXCLUSIVE: Self = Self(1 << 6);
     /// Do not follow a symbolic link in the **final** path component: the
     /// handle names the link itself. Intermediate components are still
@@ -314,10 +367,12 @@ impl OpenFlags {
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] if `bits` sets a reserved bit, or if
+    /// [`Errno::OutOfRange`] if `bits` sets a reserved bit, if
     /// [`TRUNCATE`](Self::TRUNCATE) / [`APPEND`](Self::APPEND) /
-    /// [`EXCLUSIVE`](Self::EXCLUSIVE) appears without the access it requires
-    /// (so an illegal request is rejected at the boundary, never half-applied).
+    /// [`EXCLUSIVE`](Self::EXCLUSIVE) appears without the access it requires,
+    /// or if [`CREATE`](Self::CREATE) with [`DIRECTORY`](Self::DIRECTORY)
+    /// lacks [`EXCLUSIVE`](Self::EXCLUSIVE) or asks an access (so an illegal
+    /// request is rejected at the boundary, never half-applied).
     pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
         if bits & !Self::DEFINED_BITS != 0 {
             return Err(Errno::OutOfRange);
@@ -335,6 +390,13 @@ impl OpenFlags {
         }
         if flags.contains(Self::DIRECTORY) && writes {
             // A directory is never opened for byte writes.
+            return Err(Errno::OutOfRange);
+        }
+        // A directory made by its open is answered with no access at all, so
+        // asking it to read is a request that cannot be honoured.
+        if flags.contains(Self::CREATE.union(Self::DIRECTORY))
+            && (!flags.contains(Self::EXCLUSIVE) || flags.is_read())
+        {
             return Err(Errno::OutOfRange);
         }
         Ok(flags)
@@ -384,6 +446,43 @@ impl OpenFlags {
     }
 }
 
+/// Whether a symbolic link in a path's **final** position is followed — the
+/// `stat` versus `lstat` reading.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FinalLink {
+    /// Resolve through it to whatever it names (the default posture).
+    Follow,
+    /// Stop at the link itself — the `lstat` / `readlink` / `unlink`
+    /// posture, and the only one under which a dangling link is a node.
+    Keep,
+}
+
+impl FinalLink {
+    /// The posture an open descriptor's flags fix, so an open and a later
+    /// stat through the same handle cannot disagree. An exclusive create keeps
+    /// a final link, as POSIX's `O_CREAT | O_EXCL` does, so a link planted at
+    /// the name, dangling or not, is an existing name rather than a path to
+    /// create through.
+    #[must_use]
+    pub const fn for_open(flags: OpenFlags) -> Self {
+        if flags.is_no_follow() || flags.contains(OpenFlags::CREATE.union(OpenFlags::EXCLUSIVE)) {
+            Self::Keep
+        } else {
+            Self::Follow
+        }
+    }
+
+    /// The resolve-only open that takes this posture: no access asked for,
+    /// and [`OpenFlags::NO_FOLLOW`] when the link is kept.
+    #[must_use]
+    pub const fn resolve_only(self) -> OpenFlags {
+        match self {
+            Self::Follow => OpenFlags::empty(),
+            Self::Keep => OpenFlags::NO_FOLLOW,
+        }
+    }
+}
+
 /// Flags accepted by [`fs_unlink`](crate::SyscallNumber::FS_UNLINK).
 ///
 /// A `#[repr(transparent)]` newtype over the `u32` flags register, mirroring
@@ -398,6 +497,12 @@ impl OpenFlags {
 /// the name is an (empty) **directory**, decided atomically by the
 /// filesystem under its own lock — never by a caller-side `fs_stat` that a
 /// concurrent rename could invalidate between the check and the removal.
+///
+/// [`EXPECT_NODE`](Self::EXPECT_NODE) and
+/// [`EXPECT_UNCHANGED`](Self::EXPECT_UNCHANGED) make the removal conditional
+/// on the [`NodeExpect`] the call carries, checked under the volume's lock: a
+/// name that no longer names that node, or one changed since, answers
+/// [`Errno::Stale`] and nothing is removed.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub struct UnlinkFlags(u32);
@@ -406,9 +511,15 @@ impl UnlinkFlags {
     /// Remove the name only if it is an (empty) directory; a non-directory
     /// fails closed with [`Errno::NotADirectory`].
     pub const DIRECTORY: Self = Self(1 << 0);
+    /// Remove the name only if it names the node the expectation names; the
+    /// expectation's other fields must be zero.
+    pub const EXPECT_NODE: Self = Self(1 << 1);
+    /// Remove the name only if it names that node with every field of the
+    /// expectation unchanged.
+    pub const EXPECT_UNCHANGED: Self = Self(1 << 2);
 
     /// The set of all defined flag bits.
-    const DEFINED_BITS: u32 = Self::DIRECTORY.0;
+    const DEFINED_BITS: u32 = Self::DIRECTORY.0 | Self::EXPECT_NODE.0 | Self::EXPECT_UNCHANGED.0;
 
     /// An empty flag set: remove the named file or (empty) directory.
     #[must_use]
@@ -422,23 +533,47 @@ impl UnlinkFlags {
         self.0
     }
 
+    /// Every flag `self` or `other` sets. Both expectation bits together are
+    /// still refused where the kernel decodes the word.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
     /// Build a flag set from raw bits, rejecting any reserved bit.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfRange`] if `bits` sets a reserved bit (an unknown
-    /// request is rejected at the boundary, never silently ignored).
+    /// request is rejected at the boundary, never silently ignored), or both
+    /// expectation bits, which ask two different things of one node.
     pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
         if bits & !Self::DEFINED_BITS != 0 {
             return Err(Errno::OutOfRange);
         }
+        let expect_both = Self::EXPECT_NODE.0 | Self::EXPECT_UNCHANGED.0;
+        if bits & expect_both == expect_both {
+            return Err(Errno::OutOfRange);
+        }
         Ok(Self(bits))
+    }
+
+    /// Whether every bit set in `other` is also set in `self`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 
     /// Whether the removal is restricted to an (empty) directory.
     #[must_use]
     pub const fn is_directory_only(self) -> bool {
         self.0 & Self::DIRECTORY.0 != 0
+    }
+
+    /// Whether the removal carries a [`NodeExpect`].
+    #[must_use]
+    pub const fn expects(self) -> bool {
+        self.0 & (Self::EXPECT_NODE.0 | Self::EXPECT_UNCHANGED.0) != 0
     }
 }
 
@@ -519,6 +654,11 @@ impl LinkFlags {
 /// ignores letter case a re-spelling of the source (`Foo` to `foo`) is the
 /// source's own entry and is renamed, while a sibling spelled differently in
 /// case only is a clash.
+///
+/// [`EXPECT_NODE`](Self::EXPECT_NODE) makes the move conditional on the
+/// source still naming the node the call's [`NodeExpect`] names, checked under
+/// the volume's lock; any other node answers [`Errno::Stale`] and nothing
+/// moves.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub struct RenameFlags(u32);
@@ -526,11 +666,81 @@ pub struct RenameFlags(u32);
 impl RenameFlags {
     /// Refuse the move, rather than replace, when the destination exists.
     pub const NO_REPLACE: Self = Self(1 << 0);
+    /// Move the source only if it names the node the expectation names; the
+    /// expectation's other fields must be zero.
+    pub const EXPECT_NODE: Self = Self(1 << 1);
 
     /// The set of all defined flag bits.
-    const DEFINED_BITS: u32 = Self::NO_REPLACE.0;
+    const DEFINED_BITS: u32 = Self::NO_REPLACE.0 | Self::EXPECT_NODE.0;
 
     /// An empty flag set: POSIX `rename()`, replacing an existing destination.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Every flag `self` or `other` sets.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Build a flag set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `bits` sets a reserved bit (an unknown
+    /// request is rejected at the boundary, never silently ignored).
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether an existing destination refuses the move.
+    #[must_use]
+    pub const fn refuses_replace(self) -> bool {
+        self.0 & Self::NO_REPLACE.0 != 0
+    }
+
+    /// Whether the move carries a [`NodeExpect`].
+    #[must_use]
+    pub const fn expects(self) -> bool {
+        self.0 & Self::EXPECT_NODE.0 != 0
+    }
+}
+
+/// Flags of the descriptor-relative calls that act on a node in place:
+/// [`fs_chdir`](crate::SyscallNumber::FS_CHDIR),
+/// [`fs_set_mode`](crate::SyscallNumber::FS_SET_MODE),
+/// [`fs_set_owner`](crate::SyscallNumber::FS_SET_OWNER) and
+/// [`fs_access`](crate::SyscallNumber::FS_ACCESS).
+///
+/// [`AtFlags::from_bits`] rejects any reserved bit. Without
+/// [`EMPTY_PATH`](Self::EMPTY_PATH) an empty path is refused, as it is
+/// everywhere a path is taken.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct AtFlags(u32);
+
+impl AtFlags {
+    /// Act on a final symbolic link itself rather than on what it names.
+    pub const NO_FOLLOW: Self = Self(1 << 0);
+    /// Act on the node `dirfd` holds, which an empty path then names: the
+    /// `fchmod` / `fchown` / `fchdir` spelling.
+    pub const EMPTY_PATH: Self = Self(1 << 1);
+
+    /// The set of all defined flag bits.
+    const DEFINED_BITS: u32 = Self::NO_FOLLOW.0 | Self::EMPTY_PATH.0;
+
+    /// An empty flag set: follow a final link, and take a non-empty path.
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
@@ -555,10 +765,229 @@ impl RenameFlags {
         Ok(Self(bits))
     }
 
-    /// Whether an existing destination refuses the move.
+    /// Whether every bit set in `other` is also set in `self`.
     #[must_use]
-    pub const fn refuses_replace(self) -> bool {
-        self.0 & Self::NO_REPLACE.0 != 0
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The final-link posture these flags ask for.
+    #[must_use]
+    pub const fn final_link(self) -> FinalLink {
+        if self.contains(Self::NO_FOLLOW) {
+            FinalLink::Keep
+        } else {
+            FinalLink::Follow
+        }
+    }
+}
+
+/// What [`fs_access`](crate::SyscallNumber::FS_ACCESS) asks of a node: POSIX
+/// `access()`'s bits, with their values. No bit at all asks only whether the
+/// node exists.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct Access(u32);
+
+impl Access {
+    /// Read the file, or list the directory.
+    pub const READ: Self = Self(4);
+    /// Write the file, or add and remove the directory's names.
+    pub const WRITE: Self = Self(2);
+    /// Run the file, or search the directory.
+    pub const EXEC: Self = Self(1);
+
+    /// The set of all defined bits.
+    const DEFINED_BITS: u32 = Self::READ.0 | Self::WRITE.0 | Self::EXEC.0;
+
+    /// No access asked: only whether the node can be reached.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Every access `self` or `other` asks.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Raw bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build a request from raw bits, rejecting any other bit.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a bit outside [`READ`](Self::READ),
+    /// [`WRITE`](Self::WRITE) and [`EXEC`](Self::EXEC).
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether every bit set in `other` is also set in `self`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+/// A path and the directory it is relative to, as
+/// [`fs_rename`](crate::SyscallNumber::FS_RENAME) and
+/// [`fs_link`](crate::SyscallNumber::FS_LINK) take each of their two names:
+/// [`WIRE_LEN`](Self::WIRE_LEN) bytes, little-endian, laid out as the C view
+/// `tairix_path_at_t`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PathAt {
+    /// The directory a relative path resolves from, or [`FD_CWD`]; an
+    /// absolute path ignores it.
+    pub dirfd: u32,
+    /// The path's length in bytes, `1..=FS_PATH_MAX`.
+    pub len: u32,
+    /// The caller's address of the path's bytes; never zero.
+    pub path: u64,
+}
+
+impl PathAt {
+    /// Byte length on the wire.
+    pub const WIRE_LEN: usize = 16;
+
+    /// The little-endian wire encoding.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.dirfd);
+        put_u32(&mut out, 4, self.len);
+        put_u64(&mut out, 8, self.path);
+        out
+    }
+
+    /// Decode the wire encoding, refusing what no path call accepts.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a length outside `1..=FS_PATH_MAX`, and
+    /// [`Errno::BadAlignment`] for a zero address, as the dispatcher answers a
+    /// null pointer register.
+    pub fn from_le_bytes(raw: &[u8; Self::WIRE_LEN]) -> Result<Self, Errno> {
+        let at = Self {
+            dirfd: read_u32(raw, 0),
+            len: read_u32(raw, 4),
+            path: read_u64(raw, 8),
+        };
+        if !usize::try_from(at.len).is_ok_and(|len| (1..=FS_PATH_MAX).contains(&len)) {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if at.path == 0 {
+            return Err(Errno::BadAlignment);
+        }
+        Ok(at)
+    }
+}
+
+/// What a removal or a move expects of the node it is about to act on, so the
+/// call fails rather than act on a node swapped in or changed since the caller
+/// looked: [`WIRE_LEN`](Self::WIRE_LEN) bytes, little-endian, laid out as the
+/// C view `tairix_node_expect_t`.
+///
+/// Every field is as [`FileStat`] reports it, so a volume swapped in under the
+/// same name is never taken for the one looked at. The wire keeps each field
+/// at its natural alignment, so both stamps' seconds precede both stamps'
+/// nanoseconds.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct NodeExpect {
+    /// The node's identity, [`FileStat::id`]: its volume and its number there.
+    pub id: FileId,
+    /// Its content generation.
+    pub content_gen: u64,
+    /// Its length in bytes.
+    pub size: u64,
+    /// Its contents-modification stamp.
+    pub modified: Time64,
+    /// Its metadata-change stamp.
+    pub changed: Time64,
+}
+
+impl NodeExpect {
+    /// Byte length on the wire.
+    pub const WIRE_LEN: usize = 64;
+
+    /// The expectation that the node `stat` describes is still there exactly
+    /// as described.
+    #[must_use]
+    pub const fn of(stat: &FileStat) -> Self {
+        Self {
+            id: stat.id,
+            content_gen: stat.content_gen,
+            size: stat.size,
+            modified: stat.times.modified,
+            changed: stat.times.changed,
+        }
+    }
+
+    /// The expectation that the node `id` is still the one named, whatever has
+    /// changed in it: what `EXPECT_NODE` carries.
+    #[must_use]
+    pub const fn of_node(id: FileId) -> Self {
+        Self {
+            id,
+            content_gen: 0,
+            size: 0,
+            modified: Time64::UNIX_EPOCH,
+            changed: Time64::UNIX_EPOCH,
+        }
+    }
+
+    /// Whether only the node is named, every other field zero, as an
+    /// expectation of the node alone must be.
+    #[must_use]
+    pub fn names_only_the_node(&self) -> bool {
+        self.content_gen == 0
+            && self.size == 0
+            && self.modified == Time64::UNIX_EPOCH
+            && self.changed == Time64::UNIX_EPOCH
+    }
+
+    /// The little-endian wire encoding.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..16].copy_from_slice(&self.id.volume);
+        put_u64(&mut out, 16, self.id.node);
+        put_u64(&mut out, 24, self.content_gen);
+        put_u64(&mut out, 32, self.size);
+        put_i64(&mut out, 40, self.modified.secs());
+        put_i64(&mut out, 48, self.changed.secs());
+        put_u32(&mut out, 56, self.modified.subsec_nanos());
+        put_u32(&mut out, 60, self.changed.subsec_nanos());
+        out
+    }
+
+    /// Decode the wire encoding.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::TimestampOutOfRange`] for a stamp whose nanoseconds are not
+    /// canonical.
+    pub fn from_le_bytes(raw: &[u8; Self::WIRE_LEN]) -> Result<Self, Errno> {
+        let mut volume = [0u8; 16];
+        volume.copy_from_slice(&raw[..16]);
+        Ok(Self {
+            id: FileId {
+                volume,
+                node: read_u64(raw, 16),
+            },
+            content_gen: read_u64(raw, 24),
+            size: read_u64(raw, 32),
+            modified: Time64::new(read_i64(raw, 40), read_u32(raw, 56))?,
+            changed: Time64::new(read_i64(raw, 48), read_u32(raw, 60))?,
+        })
     }
 }
 
@@ -691,11 +1120,14 @@ impl SeekRegion {
 ///
 /// A node is identified by the pair `(volume, node)`: `volume` is the
 /// 16-byte identifier of the mounted volume the node lives on (the value the
-/// mount was registered with), and `node` is that volume's driver-assigned
-/// node number (its `NodeId`). The pair is stable across renames — a rename
-/// preserves the node's identity — so two paths that resolve to the same
-/// `FileId` name the same file, and a path whose `FileId` changed between two
-/// stats has been replaced by a different file at that name (log rotation).
+/// mount was registered with), and `node` is the number the volume's format
+/// gives the node
+/// ([`NodeInfo::ino`](crate::driver::filesystem::NodeInfo::ino)). Two paths
+/// that resolve to the same `FileId` name the same file, and a path whose
+/// `FileId` changed between two stats has been replaced by a different file
+/// at that name (log rotation). A format that numbers its nodes keeps the
+/// number across a rename; a FAT file's number is where its directory entry
+/// lies, which a rename moves.
 ///
 /// `tail -f`/`-F` uses it to distinguish "the file I am following grew" from
 /// "a different file now sits at this name", and the kernel keys its
@@ -703,11 +1135,11 @@ impl SeekRegion {
 /// on it so a write wakes only the watchers of *that* node, never every
 /// watcher on every write.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FileId {
     /// The 16-byte identifier of the mounted volume the node lives on.
     pub volume: [u8; 16],
-    /// The volume's driver-assigned node number.
+    /// The number the volume's format gives the node.
     pub node: u64,
 }
 
@@ -1389,9 +1821,10 @@ impl core::iter::FusedIterator for DirChanges<'_> {}
 mod tests {
     extern crate alloc;
     use super::{
-        mode_string, DirChange, DirChangeBatch, DirEntries, DirEntry, DirWatchStatus, FileId,
-        FileKind, FileStat, NodeTimes, OpenFlags, RealpathMode, RenameFlags, UnlinkFlags,
-        FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX,
+        mode_after_owner_change, mode_string, Access, AtFlags, DirChange, DirChangeBatch,
+        DirEntries, DirEntry, DirWatchStatus, FileId, FileKind, FileStat, FinalLink, NodeExpect,
+        NodeTimes, OpenFlags, PathAt, RealpathMode, RenameFlags, UnlinkFlags, FD_CWD, FS_MODE_MASK,
+        FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, FS_UMASK_BITS, FS_UMASK_QUERY,
     };
     use crate::time::Time64;
     use crate::Errno;
@@ -1440,6 +1873,13 @@ mod tests {
     }
 
     #[test]
+    fn the_umask_query_word_is_no_mask_and_a_mask_withholds_only_mode_bits() {
+        assert_ne!(FS_UMASK_QUERY & !FS_UMASK_BITS, 0);
+        assert_eq!(FS_UMASK_BITS & !FS_MODE_MASK, 0);
+        assert_eq!(FS_UMASK_BITS, 0o777);
+    }
+
+    #[test]
     fn open_flags_reject_reserved_bits() {
         assert_eq!(OpenFlags::from_bits(1 << 8), Err(Errno::OutOfRange));
         assert_eq!(OpenFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
@@ -1468,11 +1908,12 @@ mod tests {
 
     #[test]
     fn unlink_flags_reject_reserved_bits_and_decode_directory() {
-        // Only bit 0 (DIRECTORY) is defined; anything else fails closed.
-        assert_eq!(UnlinkFlags::from_bits(1 << 1), Err(Errno::OutOfRange));
+        // Bits 0..=2 are defined; anything else fails closed.
+        assert_eq!(UnlinkFlags::from_bits(1 << 3), Err(Errno::OutOfRange));
         assert_eq!(UnlinkFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
         let plain = UnlinkFlags::from_bits(0).unwrap();
         assert!(!plain.is_directory_only());
+        assert!(!plain.expects());
         assert_eq!(plain, UnlinkFlags::empty());
         let dir_only = UnlinkFlags::from_bits(UnlinkFlags::DIRECTORY.bits()).unwrap();
         assert!(dir_only.is_directory_only());
@@ -1480,14 +1921,237 @@ mod tests {
     }
 
     #[test]
+    fn unlink_expectations_are_exclusive_and_compose_with_directory() {
+        let node = UnlinkFlags::from_bits(UnlinkFlags::EXPECT_NODE.bits()).unwrap();
+        assert!(node.expects() && node.contains(UnlinkFlags::EXPECT_NODE));
+        let unchanged = UnlinkFlags::from_bits(UnlinkFlags::EXPECT_UNCHANGED.bits()).unwrap();
+        assert!(unchanged.expects() && !unchanged.contains(UnlinkFlags::EXPECT_NODE));
+        assert_eq!(
+            UnlinkFlags::from_bits(
+                UnlinkFlags::EXPECT_NODE.bits() | UnlinkFlags::EXPECT_UNCHANGED.bits()
+            ),
+            Err(Errno::OutOfRange),
+            "one node cannot be expected two ways"
+        );
+        let rmdir =
+            UnlinkFlags::from_bits(UnlinkFlags::DIRECTORY.bits() | UnlinkFlags::EXPECT_NODE.bits())
+                .unwrap();
+        assert!(rmdir.is_directory_only() && rmdir.expects());
+    }
+
+    #[test]
     fn rename_flags_reject_reserved_bits_and_decode_no_replace() {
-        assert_eq!(RenameFlags::from_bits(1 << 1), Err(Errno::OutOfRange));
+        assert_eq!(RenameFlags::from_bits(1 << 2), Err(Errno::OutOfRange));
         assert_eq!(RenameFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
         let plain = RenameFlags::from_bits(0).unwrap();
         assert!(!plain.refuses_replace());
+        assert!(!plain.expects());
         assert_eq!(plain, RenameFlags::empty());
         let exclusive = RenameFlags::from_bits(RenameFlags::NO_REPLACE.bits()).unwrap();
         assert!(exclusive.refuses_replace());
+        let expecting = RenameFlags::from_bits(
+            RenameFlags::NO_REPLACE.bits() | RenameFlags::EXPECT_NODE.bits(),
+        )
+        .unwrap();
+        assert!(expecting.refuses_replace() && expecting.expects());
+    }
+
+    #[test]
+    fn the_working_directory_word_is_no_descriptor_number() {
+        assert_eq!(FD_CWD, u32::MAX);
+    }
+
+    #[test]
+    fn at_flags_reject_reserved_bits_and_fix_the_final_link() {
+        assert_eq!(AtFlags::from_bits(1 << 2), Err(Errno::OutOfRange));
+        assert_eq!(AtFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
+        assert_eq!(AtFlags::empty().final_link(), FinalLink::Follow);
+        let both = AtFlags::from_bits(3).unwrap();
+        assert!(both.contains(AtFlags::NO_FOLLOW) && both.contains(AtFlags::EMPTY_PATH));
+        assert_eq!(both.final_link(), FinalLink::Keep);
+        assert_eq!(AtFlags::EMPTY_PATH.final_link(), FinalLink::Follow);
+    }
+
+    #[test]
+    fn access_takes_posix_values_and_refuses_any_other_bit() {
+        assert_eq!(
+            (
+                Access::READ.bits(),
+                Access::WRITE.bits(),
+                Access::EXEC.bits()
+            ),
+            (4, 2, 1)
+        );
+        for bits in 0..=7 {
+            assert_eq!(Access::from_bits(bits).map(Access::bits), Ok(bits));
+        }
+        assert_eq!(Access::from_bits(8), Err(Errno::OutOfRange));
+        assert_eq!(Access::from_bits(u32::MAX), Err(Errno::OutOfRange));
+        let all = Access::READ.union(Access::WRITE).union(Access::EXEC);
+        assert_eq!(Access::from_bits(7), Ok(all));
+        assert!(all.contains(Access::WRITE) && !Access::empty().contains(Access::EXEC));
+        assert_eq!(Access::empty().bits(), 0);
+    }
+
+    #[test]
+    fn a_path_at_round_trips_and_refuses_what_no_path_call_takes() {
+        let at = PathAt {
+            dirfd: FD_CWD,
+            len: 7,
+            path: 0x7fff_0000_1000,
+        };
+        let raw = at.to_le_bytes();
+        assert_eq!(raw.len(), PathAt::WIRE_LEN);
+        assert_eq!(&raw[0..4], &u32::MAX.to_le_bytes());
+        assert_eq!(&raw[4..8], &7u32.to_le_bytes());
+        assert_eq!(PathAt::from_le_bytes(&raw), Ok(at));
+        let longest = PathAt {
+            len: u32::try_from(FS_PATH_MAX).unwrap(),
+            ..at
+        };
+        assert_eq!(PathAt::from_le_bytes(&longest.to_le_bytes()), Ok(longest));
+        for len in [0, u32::try_from(FS_PATH_MAX + 1).unwrap(), u32::MAX] {
+            let bad = PathAt { len, ..at };
+            assert_eq!(
+                PathAt::from_le_bytes(&bad.to_le_bytes()),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        let null = PathAt { path: 0, ..at };
+        assert_eq!(
+            PathAt::from_le_bytes(&null.to_le_bytes()),
+            Err(Errno::BadAlignment)
+        );
+    }
+
+    #[test]
+    fn a_node_expectation_round_trips_at_natural_alignment() {
+        let expect = NodeExpect {
+            id: FileId {
+                volume: [0xA5; 16],
+                node: 0x0102_0304_0506_0708,
+            },
+            content_gen: 9,
+            size: 4096,
+            modified: Time64::new(-86_400, 999_999_999).unwrap(),
+            changed: Time64::new(4_102_444_800, 1).unwrap(),
+        };
+        let raw = expect.to_le_bytes();
+        assert_eq!(raw.len(), NodeExpect::WIRE_LEN);
+        assert_eq!(&raw[..16], &[0xA5; 16]);
+        assert_eq!(&raw[16..24], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(&raw[40..48], &(-86_400i64).to_le_bytes());
+        assert_eq!(&raw[48..56], &4_102_444_800i64.to_le_bytes());
+        assert_eq!(&raw[56..60], &999_999_999u32.to_le_bytes());
+        assert_eq!(&raw[60..64], &1u32.to_le_bytes());
+        assert_eq!(NodeExpect::from_le_bytes(&raw), Ok(expect));
+        let mut torn = raw;
+        torn[56..60].copy_from_slice(&1_000_000_000u32.to_le_bytes());
+        assert_eq!(
+            NodeExpect::from_le_bytes(&torn),
+            Err(Errno::TimestampOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_node_expectation_is_what_stat_reports() {
+        let stat = FileStat {
+            kind: FileKind::Regular,
+            nlink: 1,
+            size: 12,
+            allocated: 4096,
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+            id: FileId {
+                volume: [7; 16],
+                node: 42,
+            },
+            times: NodeTimes {
+                created: Time64::from_secs(1),
+                modified: Time64::from_secs(2),
+                accessed: Time64::from_secs(3),
+                changed: Time64::from_secs(4),
+            },
+            content_gen: 5,
+        };
+        let expect = NodeExpect::of(&stat);
+        assert_eq!(
+            (expect.id, expect.content_gen, expect.size),
+            (stat.id, 5, 12)
+        );
+        assert_eq!(
+            (expect.modified, expect.changed),
+            (Time64::from_secs(2), Time64::from_secs(4))
+        );
+        assert!(!expect.names_only_the_node());
+        let node_only = NodeExpect::of_node(stat.id);
+        assert_eq!(
+            node_only,
+            NodeExpect {
+                id: stat.id,
+                ..NodeExpect::default()
+            }
+        );
+        assert!(node_only.names_only_the_node());
+    }
+
+    #[test]
+    fn an_owner_change_takes_a_files_set_id_privileges_and_keeps_a_directorys_bits() {
+        assert_eq!(mode_after_owner_change(0o6755, false), 0o0755);
+        // Without group-execute the set-group-ID bit grants nothing.
+        assert_eq!(mode_after_owner_change(0o6745, false), 0o2745);
+        assert_eq!(mode_after_owner_change(0o2775, true), 0o2775);
+        assert_eq!(mode_after_owner_change(0o7777, true), 0o7777);
+    }
+
+    #[test]
+    fn flag_words_combine_what_each_sets() {
+        assert_eq!(
+            UnlinkFlags::DIRECTORY
+                .union(UnlinkFlags::EXPECT_NODE)
+                .bits(),
+            UnlinkFlags::DIRECTORY.bits() | UnlinkFlags::EXPECT_NODE.bits()
+        );
+        let both = UnlinkFlags::EXPECT_NODE.union(UnlinkFlags::EXPECT_UNCHANGED);
+        assert_eq!(UnlinkFlags::from_bits(both.bits()), Err(Errno::OutOfRange));
+        assert_eq!(
+            RenameFlags::NO_REPLACE
+                .union(RenameFlags::EXPECT_NODE)
+                .bits(),
+            RenameFlags::NO_REPLACE.bits() | RenameFlags::EXPECT_NODE.bits()
+        );
+    }
+
+    #[test]
+    fn a_final_link_posture_is_the_resolve_only_open_that_takes_it() {
+        for link in [FinalLink::Follow, FinalLink::Keep] {
+            let open = link.resolve_only();
+            assert!(open.access().is_empty(), "{link:?} asks for no access");
+            assert_eq!(FinalLink::for_open(open), link);
+        }
+        assert_eq!(FinalLink::Keep.resolve_only(), OpenFlags::NO_FOLLOW);
+        assert_eq!(
+            FinalLink::for_open(OpenFlags::READ.union(OpenFlags::NO_FOLLOW)),
+            FinalLink::Keep
+        );
+    }
+
+    #[test]
+    fn an_exclusive_create_keeps_a_final_link() {
+        let exclusive = OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::EXCLUSIVE);
+        assert_eq!(FinalLink::for_open(exclusive), FinalLink::Keep);
+        let made_dir = OpenFlags::CREATE
+            .union(OpenFlags::DIRECTORY)
+            .union(OpenFlags::EXCLUSIVE);
+        assert_eq!(FinalLink::for_open(made_dir), FinalLink::Keep);
+        // A create that may open what is there follows a link to it.
+        assert_eq!(
+            FinalLink::for_open(OpenFlags::WRITE.union(OpenFlags::CREATE)),
+            FinalLink::Follow
+        );
     }
 
     #[test]
@@ -1556,6 +2220,28 @@ mod tests {
         )
         .expect("create+excl valid");
         assert!(excl.contains(OpenFlags::EXCLUSIVE));
+    }
+
+    #[test]
+    fn a_directory_made_by_its_open_is_exclusive_and_asks_no_access() {
+        let make = OpenFlags::CREATE
+            .union(OpenFlags::DIRECTORY)
+            .union(OpenFlags::EXCLUSIVE);
+        assert_eq!(OpenFlags::from_bits(make.bits()), Ok(make));
+        assert_eq!(
+            OpenFlags::from_bits(make.union(OpenFlags::NO_FOLLOW).bits()),
+            Ok(make.union(OpenFlags::NO_FOLLOW))
+        );
+        assert_eq!(
+            OpenFlags::from_bits(OpenFlags::CREATE.union(OpenFlags::DIRECTORY).bits()),
+            Err(Errno::OutOfRange),
+            "an existing directory is never opened as if made"
+        );
+        assert_eq!(
+            OpenFlags::from_bits(make.union(OpenFlags::READ).bits()),
+            Err(Errno::OutOfRange),
+            "the new directory is answered with no access"
+        );
     }
 
     #[test]

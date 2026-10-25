@@ -110,7 +110,7 @@ const READAHEAD_TRIGGER_BYTES: u64 = 32 * 1024;
 
 /// The first readahead window opened when a sequential access pattern is
 /// detected. It then doubles on each further sequential miss up to
-/// [`READAHEAD_MAX_BYTES`], the ramp Linux's page-cache readahead uses, so an
+/// [`READAHEAD_MAX_BYTES`], so an
 /// isolated read pays no speculation and a long stream quickly reaches the
 /// widest coalesced I/O.
 const READAHEAD_INIT_BYTES: u64 = 32 * 1024;

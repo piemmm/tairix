@@ -35,7 +35,7 @@ motivo sull'errore standard — non spodesta mai una sessione in corso.
 ## EXIT STATUS
 
 - `0` — la guida breve è stata servita.
-- `2` — la riga di comando non è stata compresa.
+- `1` — la riga di comando non è stata compresa.
 - qualsiasi altro codice diverso da zero — la sessione non è potuta
   partire (nessuna postazione, nessun servizio di visualizzazione) o è
   terminata (il lease della postazione è andato perso); il motivo è

@@ -993,7 +993,7 @@ impl BlkDeviceClass {
         match self {
             // A medium that may rotate may be spinning up on any access, so
             // each media command covers a spin-up: 30 s, twice that for a
-            // flush, as Linux's `sd` allows.
+            // flush.
             Self::Rotational => IoBudget::serial(
                 CommandBudget {
                     media_ns: 30_000_000_000,
@@ -2929,10 +2929,7 @@ mod tests {
     fn a_device_name_admits_only_printable_ascii() {
         assert_eq!(BlkDeviceName::new("virtio-blk").as_str(), "virtio-blk");
         assert_eq!(BlkDeviceName::new("nvme0n1").as_str(), "nvme0n1");
-        assert_eq!(
-            BlkDeviceName::new("bcm2711_emmc2").as_str(),
-            "bcm2711_emmc2"
-        );
+        assert_eq!(BlkDeviceName::new("mmc0_host2").as_str(), "mmc0_host2");
         assert!(BlkDeviceName::new("virtio-blk").is_named());
 
         // No name is a valid answer; it simply is not a name.

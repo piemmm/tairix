@@ -538,6 +538,9 @@ pub struct DiscoveredConsole {
     pub len: u64,
     /// The register layout selected by the node's `compatible` string.
     pub model: ConsoleModel,
+    /// The GIC INTID the UART raises ([`crate::fdt::gic_device_intid`]);
+    /// [`None`] when its `interrupts` specifier is absent or unrepresentable.
+    pub intid: Option<u32>,
 }
 
 /// Locate the console UART in `fdt`.
@@ -565,7 +568,12 @@ pub fn find_console(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
             .iter_strings()
             .find_map(ConsoleModel::from_compatible)?;
         let (base, len) = tairix_fdt::translated_reg(node, depth, levels, 0)?;
-        let found = DiscoveredConsole { base, len, model };
+        let found = DiscoveredConsole {
+            base,
+            len,
+            model,
+            intid: crate::fdt::gic_device_intid(node),
+        };
         match model {
             // A PL011 is the preferred console; take it immediately.
             ConsoleModel::Pl011 => Some(found),
@@ -600,7 +608,11 @@ pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm};
+    use crate::fdt::gic_intid_from_cells;
+    use crate::raspi_fixture::raspi_like_arm;
+    use std::vec::Vec;
+    use tairix_fdt::fixture::virt_like_arm;
+    use tairix_fdt::write::FdtWriter;
 
     #[test]
     fn compatible_selects_the_register_layout() {
@@ -885,6 +897,38 @@ mod tests {
         assert_eq!(console.model, ConsoleModel::MiniUart);
         assert_eq!(console.base, 0xfe21_5040);
         assert_eq!(console.len, 0x40);
+    }
+
+    #[test]
+    fn the_console_s_interrupt_is_the_selected_node_s() {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let uart = |b: &mut FdtWriter, name: &str, compatible: &str, base: u32, spi: u32| {
+            b.begin_node(name);
+            b.prop_str("compatible", compatible);
+            b.prop("reg", &cells(&[base, 0x200]));
+            b.prop("interrupts", &cells(&[0, spi, 4]));
+            b.end_node();
+        };
+        let tree = |pl011: bool| {
+            let mut b = FdtWriter::new();
+            b.begin_node("");
+            b.prop_u32("#address-cells", 1);
+            b.prop_u32("#size-cells", 1);
+            uart(&mut b, "serial@1000", "brcm,bcm2835-aux-uart", 0x1000, 61);
+            if pl011 {
+                uart(&mut b, "serial@2000", "arm,pl011", 0x2000, 57);
+            }
+            b.end_node();
+            b.build()
+        };
+        let both = tree(true);
+        let found = find_console(&Fdt::new(&both).expect("valid fdt")).expect("a console");
+        assert_eq!(found.model, ConsoleModel::Pl011);
+        assert_eq!(found.intid, gic_intid_from_cells(0, 57));
+        let mini = tree(false);
+        let found = find_console(&Fdt::new(&mini).expect("valid fdt")).expect("a console");
+        assert_eq!(found.intid, gic_intid_from_cells(0, 61));
     }
 
     #[test]

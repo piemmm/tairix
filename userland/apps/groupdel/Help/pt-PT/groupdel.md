@@ -25,8 +25,7 @@ O registo decide o que pode ser removido. Recusa eliminar um grupo que uma conta
 ## EXIT STATUS
 
 - `0` — o grupo foi eliminado.
-- `1` — o registo recusou ou falhou a eliminação (por exemplo uma capacidade em falta, um grupo desconhecido ou um grupo ainda referenciado); a razão é escrita no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — o registo recusou ou falhou a eliminação (por exemplo uma capacidade em falta, um grupo desconhecido ou um grupo ainda referenciado); a razão é escrita no erro padrão. Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

@@ -45,8 +45,9 @@ unrhyw weinydd, mae `host` yn adrodd am oediad ar yr allbwn gwall.
 
 - `0` — canfuwyd o leiaf un cyfeiriad (neu ysgrifennwyd y cymorth byr).
 - `1` — ni ddatrysodd yr enw i unrhyw gyfeiriad (ateb negyddol, oediad neu
-  fethiant y datryswr).
-- `2` — ni ddeallwyd y llinell orchymyn, neu ni ellid ysgrifennu'r allbwn.
+  fethiant y datryswr). Mae llinell orchymyn na ddeallwyd hefyd yn gorffen
+  â `1`.
+- `2` — ni ellid agor unrhyw soced DNS, neu ni ellid ysgrifennu'r allbwn.
 
 ## ENVIRONMENT
 

@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use tairix_abi::time::Time64;
 use tairix_abi::FileKind;
 use tairix_curses::{truncate_to_width, Pos, Window};
+use tairix_fscopy::tree::Kind;
 use tairix_vt::{Attributes, BasicColor, Color};
 
 use crate::model::{
@@ -594,7 +595,7 @@ fn render_settings(model: &Model, window: &mut Window, body: u16, cols: u16) {
     lines.push(String::new());
     lines.push(match model.settings_refusal {
         None => String::from("saved in this app's own settings"),
-        Some(errno) => format!("not saved ({errno:?}) — this session only"),
+        Some(errno) => format!("not saved ({errno}) — this session only"),
     });
     for (line, text) in (0..body - 2).zip(lines.iter()) {
         let _ = window.move_add_str(Pos::new(line + 1, 1), truncate_to_width(text, width));
@@ -851,7 +852,7 @@ fn prompt_line(prompt: &Prompt) -> String {
             Some(conflict) => {
                 format!(
                     "{} exists{} — o)verwrite  s)kip  c)ancel",
-                    conflict.dst,
+                    conflict.target,
                     occupant_note(conflict.occupant)
                 )
             }
@@ -866,7 +867,7 @@ fn prompt_line(prompt: &Prompt) -> String {
             Some(conflict) => {
                 format!(
                     "{} exists{} — o)verwrite  s)kip  c)ancel batch",
-                    conflict.dst,
+                    conflict.target,
                     occupant_note(conflict.occupant)
                 )
             }
@@ -880,10 +881,10 @@ fn prompt_line(prompt: &Prompt) -> String {
 /// What a conflicting name currently holds, when saying so changes the
 /// decision: replacing a symbolic link destroys the link rather than
 /// overwriting a file's bytes, so the question states it.
-fn occupant_note(occupant: FileKind) -> &'static str {
+fn occupant_note(occupant: Kind) -> &'static str {
     match occupant {
-        FileKind::Symlink => " as a symbolic link",
-        FileKind::Regular | FileKind::Directory => "",
+        Kind::Link => " as a symbolic link",
+        Kind::File | Kind::Directory => "",
     }
 }
 

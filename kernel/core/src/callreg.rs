@@ -306,7 +306,7 @@ fn revoke_grants_for(
 /// endpoints a dead task *served*; this scrubs the calls a dead task *sent*.
 ///
 /// Without it a dead caller's queued request outlives it and is later
-/// handed to the server as if live — the Pi 4 USB defect where an unloaded
+/// handed to the server as if live — the USB defect where an unloaded
 /// class driver's final URB submit survived its death and wedged the
 /// single-slot URB transport against the replacement driver. Each endpoint
 /// with cancellations records one `CallPosterVanished` audit event. No wake

@@ -50,8 +50,8 @@ pagina scorre senza pause.
 
 - `0` — la pagina è stata mostrata.
 - `1` — il comando o il suo documento di aiuto non è stato trovato,
-  oppure la pagina non è stata consegnata.
-- `2` — la riga di comando non è stata compresa.
+  oppure la pagina non è stata consegnata. Anche una riga di comando non
+  compresa termina con `1`.
 
 ## ENVIRONMENT
 

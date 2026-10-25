@@ -114,9 +114,10 @@ run-queue averages (fixed-point, `LOAD_FIXED_SHIFT` fractional bits) plus
 the runnable/total-thread and logged-in-user censuses — is the classic
 `uptime(1)` line, system-wide and secret-free. `USER_DIRECTORY` is
 ungated for the same reason: each `UserDirectoryRecord` carries only the
-`/etc/passwd`-class public uid + username pairing — never credential
-material, which stays behind the capability-gated `users_db_read`
-syscall — so any task may resolve account names for display.
+`/etc/passwd`-class public fields — uid, login group and username, never
+credential material, which stays behind the capability-gated
+`users_db_read` syscall — so any task may resolve an account's name for
+display and its login group for `chown OWNER:`.
 `GROUP_DIRECTORY` is its sibling on identical ground: each
 `GroupDirectoryRecord` carries a gid and a group name and nothing else —
 no membership list, no ACL, no grant — because rendering a gid as a name

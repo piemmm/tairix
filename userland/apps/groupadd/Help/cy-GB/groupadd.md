@@ -35,8 +35,8 @@ yn operand.
 
 - `0` — crëwyd y grŵp.
 - `1` — gwrthododd neu fethodd y gofrestr y creu (er enghraifft gallu
-  coll neu id dyblyg); argraffir y rheswm ar y gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  coll neu id dyblyg); argraffir y rheswm ar y gwall safonol. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

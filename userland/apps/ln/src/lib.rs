@@ -37,7 +37,7 @@
 //! The binary that ships as `ln` wires the real syscall-backed filesystem and
 //! standard streams; tests wire in-memory fixtures. This is the seam
 //! discipline of the other userland crates (`cp`'s `FileSystem`/`Prompt`,
-//! `ls`'s `Listing`, `rm`'s `Removal`), and it keeps every parsing, operand,
+//! `ls`'s `Listing`), and it keeps every parsing, operand,
 //! and replacement decision testable without a kernel.
 //!
 //! # A target is data
@@ -56,16 +56,15 @@
 //! unless `-f`/`-i` said to replace it, and replacing it **removes** the
 //! name first, so bytes and names never travel through a link that was
 //! already there. A directory is never replaced. An unanswerable `-i`
-//! question is never consent. The first failure stops the run before any
-//! later target, exactly as `cp` and `mv` do. There is no partial-guess path
-//! and no panic.
+//! question is never consent. A link that cannot be made is reported and the
+//! next is still made, as GNU's are, the run exiting 1. There is no
+//! partial-guess path and no panic.
 //!
 //! # Module map
 //!
 //! * [`error`] — [`LnError`], the outcomes of [`run`].
 //! * [`command`] — the [`Command`] shape and its [`parse`]r.
-//! * [`io`] — the [`FileSystem`]/[`Prompt`]/[`Output`] seams and the
-//!   [`Occupant`] vocabulary they carry.
+//! * [`io`] — the [`FileSystem`]/[`Prompt`]/[`Output`] seams.
 //! * [`client`] — the [`run`] entry point and the link-planning engine.
 //!
 //! The bundle's `Help/` documents are **not** embedded in this crate: they
@@ -96,4 +95,4 @@ pub mod io;
 pub use client::{run, USAGE};
 pub use command::{parse, Clobber, Command, Options, TargetMode};
 pub use error::LnError;
-pub use io::{FileSystem, Occupant, Output, Prompt};
+pub use io::{FileSystem, FinalLink, Node, Output, Prompt};

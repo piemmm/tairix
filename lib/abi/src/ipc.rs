@@ -31,7 +31,7 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// Whether `id` is a **reserved well-known** call-endpoint id — a fixed
 /// rendezvous a system service publishes: the driver-store server
 /// ([`crate::driver_store::DRIVER_STORE_ENDPOINT`]), the log-ingress
-/// journal ([`crate::log_ingress::LOG_INGRESS_ENDPOINT`]), the `VideoCore`
+/// journal ([`crate::log_ingress::LOG_INGRESS_ENDPOINT`]), the firmware
 /// mailbox service ([`crate::mailbox_ipc::MAILBOX_ENDPOINT`]), the System
 /// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the audio
 /// mixer service ([`crate::audio::AUDIO_ENDPOINT`]), the seat
@@ -514,9 +514,29 @@ mod tests {
         assert!(is_reserved_endpoint(crate::font_ipc::FONT_ENDPOINT));
         assert!(is_reserved_endpoint(crate::session_ipc::SESSION_ENDPOINT));
         assert!(is_reserved_endpoint(crate::settings_ipc::SETTINGS_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::audio::AUDIO_ENDPOINT));
         assert!(is_reserved_endpoint(
-            crate::service_control::SERVICE_NOTICE_ENDPOINT
+            crate::discovery_ipc::DISCOVERY_ENDPOINT
         ));
+        assert!(is_reserved_endpoint(crate::sound_cue::SOUND_CUE_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::thermal_ipc::THERMAL_ENDPOINT));
+        assert!(is_reserved_endpoint(
+            crate::raid_ipc::RAID_REGISTRY_ENDPOINT
+        ));
+        assert!(is_reserved_endpoint(
+            crate::raid_admin::RAID_CONTROL_ENDPOINT
+        ));
+        for endpoint in [
+            crate::service_control::SERVICE_CONTROL_ENDPOINT,
+            crate::service_control::SERVICE_ENROL_ENDPOINT,
+            crate::service_control::SERVICE_ACTIVATION_ENDPOINT,
+            crate::service_control::SERVICE_NOTICE_ENDPOINT,
+        ] {
+            assert!(is_reserved_endpoint(endpoint), "{endpoint:#x}");
+        }
+        for block in crate::hwtree::NodeEndpointBlock::ALL {
+            assert!(is_reserved_endpoint(block.endpoint(0)), "{block:?}");
+        }
         let base = crate::elevate::ELEVATE_ENDPOINT_BASE;
         let max = u64::from(crate::process::CONSOLE_INDEX_MAX);
         assert!(is_reserved_endpoint(base));

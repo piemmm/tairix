@@ -34,7 +34,7 @@ padrão — nunca desaloja uma sessão em curso.
 ## EXIT STATUS
 
 - `0` — a ajuda curta foi servida.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — a linha de comandos não foi compreendida.
 - qualquer outro código diferente de zero — a sessão não pôde arrancar
   (sem posto, sem serviço de ecrã) ou terminou (o arrendamento do posto
   perdeu-se); o motivo é escrito na saída de erro padrão.

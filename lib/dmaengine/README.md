@@ -13,4 +13,4 @@ tier: `experimental`.
   channels reset, the device declared quiesced and the endpoint served.
 
 Every DMA controller driver links it, so the protocol's rules are written
-once: `drivers/dma/bcm2835`.
+once.

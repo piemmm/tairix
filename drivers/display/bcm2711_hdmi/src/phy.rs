@@ -1,5 +1,5 @@
 //! The HDMI transmitter's PHY: its PLL set for a TMDS rate and its lanes'
-//! drive strengths, as Linux's `vc5_hdmi_phy_init` programs the BCM2711's.
+//! drive strengths.
 
 use tairix_abi::driver::mmio::RegisterBlock;
 use tairix_abi::DriverError;
@@ -43,8 +43,7 @@ const fn drive(preemphasis: u32, main_driver: u32, resistor: u32, termination: u
     }
 }
 
-/// The data lanes' and the clock lane's drive for TMDS rates up to the bound,
-/// Linux's `vc5_hdmi_phy_settings`.
+/// The data lanes' and the clock lane's drive for TMDS rates up to the bound.
 const DRIVES: [(u64, Drive, Drive); 7] = [
     (50_000_000, drive(0, 0x0A, 0x12, 0), drive(0, 0x0A, 0x18, 0)),
     (75_000_000, drive(0, 0x09, 0x12, 0), drive(0, 0x0C, 0x18, 3)),

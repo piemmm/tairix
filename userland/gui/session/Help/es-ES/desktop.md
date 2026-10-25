@@ -35,7 +35,7 @@ salida de error estándar — nunca desplaza una sesión en curso.
 ## EXIT STATUS
 
 - `0` — se sirvió la ayuda corta.
-- `2` — la línea de comandos no se entendió.
+- `1` — la línea de comandos no se entendió.
 - cualquier otro código distinto de cero — la sesión no pudo iniciarse
   (sin puesto, sin servicio de pantalla) o terminó (se perdió el
   arrendamiento del puesto); el motivo se escribe en la salida de error

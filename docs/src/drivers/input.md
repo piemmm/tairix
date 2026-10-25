@@ -111,7 +111,7 @@ exposes — the `virt`-board analogue of the x86 PS/2 keyboard.
 
 It consumes the device-to-driver **event queue** (queue 0). The wire
 record is `struct virtio_input_event { __le16 type; __le16 code;
-__le32 value; }` (virtio 1.1 §5.8.6) in the Linux `evdev` namespaces,
+__le32 value; }` (virtio 1.1 §5.8.6) in the evdev namespaces,
 which `poll` maps onto the platform-neutral `InputEvent`: `EV_KEY` →
 `Key` (the evdev keycode, `value` 1 press / 0 release), `EV_REL` `REL_X`
 / `REL_Y` → `Pointer`, and both wheels → `Scroll` in scroll units. Which

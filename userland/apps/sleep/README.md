@@ -45,7 +45,7 @@ sleep NUMBER[SUFFIX]...
 ```
 
 Exit codes: `0` when the interval elapsed (or a requested short help was
-written); `1` when the short-help write failed; `2` on a usage error (an
+written); `1` when the short-help write failed or on a usage error (an
 unrecognised option, a missing operand, or an invalid time interval).
 
 ## Layout

@@ -1,6 +1,6 @@
 //! Display lists as the fifth-generation HVS reads them: planes of linear RGB
 //! surfaces, each placed and scaled onto a channel's output and blended over
-//! those before it, after Linux's `vc4_plane_mode_set`.
+//! those before it.
 
 use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::DriverError;
@@ -180,7 +180,7 @@ pub(crate) const fn lbm_words(source_width: u32, x: Scaling, y: Scaling, place_w
 }
 
 /// The polyphase filter word resizing a `src`-pixel axis to `dst` pixels, its
-/// phase starting half a pixel in, as Linux's `vc4_write_ppf` sets it.
+/// phase starting half a pixel in.
 fn ppf(src: u32, dst: u32) -> u32 {
     let src = src << 16;
     let scale = (src / dst) & !1;
@@ -334,7 +334,7 @@ const fn coefficients(c0: i32, c1: i32, c2: i32) -> u32 {
 /// through, in display-list memory's mirrored form.
 ///
 /// Reference: Mitchell and Netravali, "Reconstruction Filters in Computer
-/// Graphics" (SIGGRAPH 1988), as Linux's `vc4_hvs` uploads it.
+/// Graphics" (SIGGRAPH 1988).
 pub(crate) const fn kernel() -> [u32; KERNEL_WORDS] {
     let half = [
         coefficients(0, -2, -6),

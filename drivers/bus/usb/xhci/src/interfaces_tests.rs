@@ -295,7 +295,7 @@ struct Mock {
     queued: Vec<(u64, u64, Vec<u8>)>,
     faulted: bool,
     reset_fails: bool,
-    /// A detach latches a controller fault, as the VL805's does.
+    /// A detach latches a controller fault.
     detach_faults: bool,
     refuse: Refusals,
     /// The region each live node carries.

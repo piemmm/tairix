@@ -18,10 +18,11 @@
 
 #![cfg(loom)]
 
+use loom::sync::atomic::AtomicU64;
 use loom::sync::Arc;
 use loom::thread;
 
-use tairix_sync::{McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
+use tairix_sync::{claims, McsLock, McsNode, OnceCell, RwLock, SeqLock, SpinLock};
 
 #[test]
 fn loom_spinlock_mutual_exclusion() {
@@ -121,5 +122,41 @@ fn loom_oncecell_single_init() {
         t1.join().unwrap();
         let v = cell.get().unwrap().unwrap();
         assert!(*v == 11 || *v == 22);
+    });
+}
+
+#[test]
+fn loom_racing_claims_never_share_a_bit() {
+    loom::model(|| {
+        let words = Arc::new([AtomicU64::new(0)]);
+        let theirs = {
+            let words = words.clone();
+            thread::spawn(move || claims::claim_lowest(&*words, 2))
+        };
+        let mine = claims::claim_lowest(&*words, 2);
+        let theirs = theirs.join().unwrap();
+        assert!(
+            mine.is_some() && theirs.is_some(),
+            "two bits for two claims"
+        );
+        assert_ne!(mine, theirs, "two claims took one bit");
+    });
+}
+
+#[test]
+fn loom_one_bit_has_exactly_one_winner() {
+    loom::model(|| {
+        let words = Arc::new([AtomicU64::new(0)]);
+        let theirs = {
+            let words = words.clone();
+            thread::spawn(move || claims::claim_lowest(&*words, 1))
+        };
+        let mine = claims::claim_lowest(&*words, 1);
+        let theirs = theirs.join().unwrap();
+        assert_eq!(
+            usize::from(mine.is_some()) + usize::from(theirs.is_some()),
+            1,
+            "one bit must have exactly one winner"
+        );
     });
 }

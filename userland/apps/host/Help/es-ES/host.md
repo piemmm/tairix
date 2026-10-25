@@ -47,8 +47,10 @@ espera agotado en la salida de error.
 
 - `0` — se encontró al menos una dirección (o se escribió la ayuda breve).
 - `1` — el nombre no resolvió ninguna dirección (respuesta negativa, tiempo
-  de espera agotado o fallo del resolvedor).
-- `2` — no se entendió la línea de órdenes, o no se pudo escribir la salida.
+  de espera agotado o fallo del resolvedor). Una línea de órdenes no
+  entendida también termina con `1`.
+- `2` — no se pudo abrir ningún socket DNS, o no se pudo escribir la
+  salida.
 
 ## ENVIRONMENT
 

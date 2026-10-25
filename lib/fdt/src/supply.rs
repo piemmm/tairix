@@ -1,8 +1,8 @@
 //! Supply and GPIO bindings: the regulator a consumer's `<name>-supply`
 //! property names, and the one GPIO line that switches it.
 //!
-//! Two regulator shapes are decoded, as the Linux regulator bindings define
-//! them (`Documentation/devicetree/bindings/regulator/`): a `regulator-gpio`
+//! Two regulator shapes are decoded, as OpenBSD's `ofw_regulator.c` (ISC)
+//! reads them: a `regulator-gpio`
 //! whose single select line picks between voltage `states`, and a
 //! `regulator-fixed` whose single `gpio` enables its output. Anything wider —
 //! several select lines, a separate enable line on a selecting regulator, a
@@ -156,7 +156,7 @@ pub fn gpio_selected_regulator<'a>(
 ///
 /// The fixed-regulator binding takes the line's polarity from
 /// `enable-active-high` alone (active-low without it) and ignores the
-/// specifier's flags cell, as Linux's GPIO quirk for it does.
+/// specifier's flags cell, which that property overrides.
 #[must_use]
 pub fn gpio_enabled_regulator(fdt: &Fdt<'_>, node: &Node<'_>) -> Option<GpioEnabledRegulator> {
     if !node.is_compatible("regulator-fixed") {
@@ -227,14 +227,14 @@ mod tests {
     const IO_REGULATOR: u32 = 0x37;
     const CARD_REGULATOR: u32 = 0x38;
 
-    /// The Pi 4's SD supply wiring: a firmware GPIO expander, the
+    /// An SD host's supply wiring: a GPIO expander, the
     /// GPIO-selected I/O regulator on its line 4, the GPIO-enabled card
     /// regulator on its line 6, and an SD host naming both.
-    fn pi4_like(io_gpio_flags: u32, card_active_high: bool) -> Vec<u8> {
+    fn sd_supply_tree(io_gpio_flags: u32, card_active_high: bool) -> Vec<u8> {
         let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("gpio");
-        b.prop_str("compatible", "raspberrypi,firmware-gpio");
+        b.prop_str("compatible", "vendor,gpio-expander");
         b.prop("gpio-controller", &[]);
         b.prop_u32("#gpio-cells", 2);
         b.prop_u32("phandle", EXPANDER);
@@ -256,7 +256,7 @@ mod tests {
         b.prop_u32("phandle", CARD_REGULATOR);
         b.end_node();
         b.begin_node("mmc@7e340000");
-        b.prop_str("compatible", "brcm,bcm2711-emmc2");
+        b.prop_str("compatible", "vendor,sd-host");
         b.prop_u32("vqmmc-supply", IO_REGULATOR);
         b.prop_u32("vmmc-supply", CARD_REGULATOR);
         b.end_node();
@@ -269,13 +269,12 @@ mod tests {
     }
 
     fn host<'a>(fdt: &Fdt<'a>) -> Node<'a> {
-        fdt.find_compatible("brcm,bcm2711-emmc2")
-            .expect("host node")
+        fdt.find_compatible("vendor,sd-host").expect("host node")
     }
 
     #[test]
     fn the_io_regulator_is_selected_by_its_line_and_states() {
-        let blob = pi4_like(0, true);
+        let blob = sd_supply_tree(0, true);
         let fdt = Fdt::new(&blob).expect("fdt");
         let node = supply(&fdt, &host(&fdt), "vqmmc-supply").expect("vqmmc");
         let regulator = gpio_selected_regulator(&fdt, &node).expect("regulator-gpio");
@@ -295,7 +294,7 @@ mod tests {
 
     #[test]
     fn an_active_low_select_line_inverts_every_state() {
-        let blob = pi4_like(GPIO_ACTIVE_LOW, true);
+        let blob = sd_supply_tree(GPIO_ACTIVE_LOW, true);
         let fdt = Fdt::new(&blob).expect("fdt");
         let node = supply(&fdt, &host(&fdt), "vqmmc-supply").expect("vqmmc");
         let regulator = gpio_selected_regulator(&fdt, &node).expect("regulator-gpio");
@@ -306,7 +305,7 @@ mod tests {
     #[test]
     fn the_card_regulator_takes_its_polarity_from_enable_active_high_alone() {
         for (active_high, active_low) in [(true, false), (false, true)] {
-            let blob = pi4_like(0, active_high);
+            let blob = sd_supply_tree(0, active_high);
             let fdt = Fdt::new(&blob).expect("fdt");
             let node = supply(&fdt, &host(&fdt), "vmmc-supply").expect("vmmc");
             let regulator = gpio_enabled_regulator(&fdt, &node).expect("regulator-fixed");
@@ -319,7 +318,7 @@ mod tests {
 
     #[test]
     fn a_shape_the_decoders_do_not_describe_is_refused() {
-        let blob = pi4_like(0, true);
+        let blob = sd_supply_tree(0, true);
         let fdt = Fdt::new(&blob).expect("fdt");
         let host = host(&fdt);
         let io = supply(&fdt, &host, "vqmmc-supply").expect("vqmmc");
@@ -429,7 +428,7 @@ mod tests {
 
     #[test]
     fn a_phandle_naming_no_node_finds_none() {
-        let blob = pi4_like(0, true);
+        let blob = sd_supply_tree(0, true);
         let fdt = Fdt::new(&blob).expect("fdt");
         assert!(fdt.node_by_phandle(0).is_none());
         assert!(fdt.node_by_phandle(u32::MAX).is_none());

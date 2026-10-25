@@ -99,8 +99,9 @@ impl<'a> Ivrs<'a> {
     }
 
     /// Every translation unit, in table order: for a unit firmware describes
-    /// in several blocks, the one of the highest type the kernel reads, as
-    /// Linux takes it.
+    /// in several blocks, the one of the highest type the kernel reads: 10h
+    /// is the backward-compatible description, 11h and 40h the full one (AMD
+    /// IOMMU specification 48882, §5.2).
     pub fn units(&self) -> impl Iterator<Item = Ivhd<'a>> + 'a {
         let blocks = self.blocks();
         blocks.clone().filter_map(Ivhd::decode).filter(move |unit| {

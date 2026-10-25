@@ -1,6 +1,7 @@
 //! The parsed shape of a `log` command line.
 
 use tairix_log::Stream;
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
 use crate::error::LogError;
 
@@ -46,10 +47,13 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is one subcommand, an optional positional stream name, and
-/// optional flags. It **fails closed**: an unknown subcommand, an unknown
-/// stream name, an unknown or disallowed `--format`, a repeated or missing
-/// flag value, or a stray argument is a [`LogError::Usage`] rather than a
-/// silently ignored token.
+/// optional flags, read after the subcommand as GNU's `getopt_long` reads
+/// them ([`Scan`]): `--format` by any unambiguous prefix, its value attached
+/// (`--format=json`) or following. It **fails closed** rather than silently
+/// ignore a token: an unknown subcommand, an unknown stream name, an unknown
+/// or disallowed `--format` value, a repeated `--format`, or a stray argument
+/// is a [`LogError::Usage`], and an option `getopt` refuses a
+/// [`LogError::Option`].
 ///
 /// Recognised forms:
 ///
@@ -67,7 +71,8 @@ pub enum Command {
 ///
 /// # Errors
 ///
-/// [`LogError::Usage`] for any input outside the grammar above.
+/// * [`LogError::Option`] — an option `getopt` refuses, in its words.
+/// * [`LogError::Usage`] — any other input outside the grammar above.
 pub fn parse(args: &[&str]) -> Result<Command, LogError> {
     let Some((&subcommand, rest)) = args.split_first() else {
         return Ok(Command::Help);
@@ -82,6 +87,18 @@ pub fn parse(args: &[&str]) -> Result<Command, LogError> {
     }
 }
 
+/// What the rendering subcommands' one option means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Format,
+}
+
+/// The rendering subcommands' one option.
+const SHOW_OPTIONS: &[Opt<Flag>] = &[Opt::long(&["format"], Takes::Value, Flag::Format)];
+
+/// `verify` takes no options.
+const VERIFY_OPTIONS: &[Opt<Flag>] = &[];
+
 /// Parse `[stream] [--format F]` for a rendering subcommand: `default` is the
 /// format used when no `--format` is given, and `allow` maps a `--format`
 /// value to the subset this subcommand permits (rejecting the rest).
@@ -93,23 +110,22 @@ fn parse_show(
     let mut stream: Option<Stream> = None;
     let mut format: Option<Format> = None;
     let mut seen_stream = false;
-    let mut iter = args.iter();
-    while let Some(&arg) = iter.next() {
-        if arg == "--format" {
-            let &value = iter.next().ok_or(LogError::Usage)?;
-            if format.is_some() {
-                return Err(LogError::Usage);
+    for arg in Scan::new(SHOW_OPTIONS, args, Order::Permute) {
+        match arg.map_err(LogError::Option)? {
+            Arg::Opt(Flag::Format, value) => {
+                if format.is_some() {
+                    return Err(LogError::Usage);
+                }
+                format = Some(value.and_then(allow).ok_or(LogError::Usage)?);
             }
-            format = Some(allow(value).ok_or(LogError::Usage)?);
-        } else if arg.starts_with('-') {
-            return Err(LogError::Usage);
-        } else {
-            // A single positional operand: the stream name.
-            if seen_stream {
-                return Err(LogError::Usage);
+            Arg::Operand(name) => {
+                // A single positional operand: the stream name.
+                if seen_stream {
+                    return Err(LogError::Usage);
+                }
+                seen_stream = true;
+                stream = Some(Stream::from_name(name).map_err(|_| LogError::Usage)?);
             }
-            seen_stream = true;
-            stream = Some(Stream::from_name(arg).map_err(|_| LogError::Usage)?);
         }
     }
     Ok(Command::Show {
@@ -121,11 +137,13 @@ fn parse_show(
 /// Parse `verify [stream]`.
 fn parse_verify(args: &[&str]) -> Result<Command, LogError> {
     let mut stream: Option<Stream> = None;
-    for &arg in args {
-        if arg.starts_with('-') || stream.is_some() {
-            return Err(LogError::Usage);
+    for arg in Scan::new(VERIFY_OPTIONS, args, Order::Permute) {
+        match arg.map_err(LogError::Option)? {
+            Arg::Operand(name) if stream.is_none() => {
+                stream = Some(Stream::from_name(name).map_err(|_| LogError::Usage)?);
+            }
+            Arg::Operand(_) | Arg::Opt(..) => return Err(LogError::Usage),
         }
-        stream = Some(Stream::from_name(arg).map_err(|_| LogError::Usage)?);
     }
     Ok(Command::Verify { stream })
 }
@@ -169,6 +187,8 @@ fn no_more(args: &[&str]) -> Result<(), LogError> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
+
     use super::{parse, Command, Format};
     use crate::error::LogError;
     use tairix_log::Stream;
@@ -272,14 +292,37 @@ mod tests {
         assert_eq!(parse(&["verify", "Runtime"]), Err(LogError::Usage));
     }
 
-    #[test]
-    fn unknown_flag_is_usage() {
-        assert_eq!(parse(&["show", "--colour"]), Err(LogError::Usage));
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn missing_format_value_is_usage() {
-        assert_eq!(parse(&["show", "--format"]), Err(LogError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(
+            refused(&["show", "--colour"]),
+            "unrecognized option '--colour'"
+        );
+        assert_eq!(refused(&["show", "-x"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["show", "--format"]),
+            "option '--format' requires an argument"
+        );
+        assert_eq!(
+            refused(&["verify", "--format=json"]),
+            "unrecognized option '--format=json'"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["show", "--form=json", "runtime"]),
+            Ok(Command::Show {
+                stream: Some(Stream::Runtime),
+                format: Format::Json,
+            })
+        );
     }
 
     #[test]

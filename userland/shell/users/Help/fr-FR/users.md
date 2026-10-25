@@ -39,9 +39,10 @@ commandes tapées dans la session.
 
 ## EXIT STATUS
 
-- `0` — la session s'est terminée proprement, ou l'aide courte a été
-  affichée.
-- `2` — la ligne de commande n'a pas été comprise.
+- `0` — la session s'est terminée proprement, le listage a été affiché,
+  ou l'aide courte a été affichée.
+- `1` — le listage n'a pas pu être lu. Une ligne de commande non
+  comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

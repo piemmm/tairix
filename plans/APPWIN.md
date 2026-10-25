@@ -318,13 +318,14 @@ Done (code + host coverage). What now holds:
   which is redrawn once its task is gone. The instance is recorded with
   the delegation and `fd_redeem` admits it alone, so a pick that concludes
   after the requesting app exited cannot land on a later holder of its
-  number. The grantor's uid + effective capability set are captured beside
-  the path; the recipient-bound handle travels in-band and
-  `fd_redeem` consumes it **once** (atomically — only after the
-  descriptor allocation succeeds) into an
-  `OpenBacking::Delegated` entry. Delegated reads (`fs_read` and the
-  wired stream arm) are re-authorised through the secured VFS under the
-  **grantor's** captured identity on every call; a read-only delegation
+  number. The grantor's uid + effective capability set are frozen beside
+  the node the descriptor pins; the recipient-bound handle travels in-band
+  and `fd_redeem` consumes it **once** (atomically — only after the
+  descriptor allocation succeeds) into a descriptor of that node whose
+  authority is the grantor's frozen identity and the grant's ceiling
+  (`plans/OPENFILE.md`). Its reads (`fs_read` and the wired stream arm)
+  are checked on the node under the **grantor's** frozen identity on every
+  call; a read-only delegation
   refuses every write, and one handed on keeps the first grantor's
   authority and at most its ceiling (`plans/CAPABILITY_USE.md` CU6), so no
   chain forms and nothing widens. The grant is dispatcher-audited with

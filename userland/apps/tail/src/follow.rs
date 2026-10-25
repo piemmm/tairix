@@ -15,13 +15,13 @@ use alloc::vec::Vec;
 
 use tairix_abi::FileId;
 
-use crate::client::{
-    diagnose, emit_omission_record, serve_stdin, write_header, Engine, READ_CHUNK,
-};
+use crate::client::{diagnose, emit_omission_record, serve_stdin, Engine, READ_CHUNK};
 use crate::command::{Count, Follow, HeaderMode, Job, Source};
 use crate::error::TailError;
 use crate::io::{Input, Output, Watcher};
-use tairix_util::quote::{quote, quote_if_needed};
+use tairix_path::dir_name;
+use tairix_util::banner::Banners;
+use tairix_util::quote::{quote, quote_subject};
 
 /// One followed file source's live state.
 struct FollowSource {
@@ -62,7 +62,7 @@ pub fn run_follow(
     let lines = matches!(job.count, Count::Lines(_));
 
     let mut all_ok = true;
-    let mut header_written = false;
+    let mut banners = Banners::new(out);
     let mut omitted_total: u64 = 0;
     // The source index whose header was last written, so multi-file follow
     // reprints a header only when the emitting file changes (the GNU rule).
@@ -75,8 +75,7 @@ pub fn run_follow(
             // and do not follow it (as the GNU tool warns and does).
             Source::Stdin => {
                 if show_headers {
-                    write_header(out, "standard input", &mut header_written)
-                        .map_err(TailError::Output)?;
+                    banners.stdin(out).map_err(TailError::Output)?;
                     active = None;
                 }
                 let (ok, omitted) = serve_stdin(job, stdin, out, err)?;
@@ -92,7 +91,7 @@ pub fn run_follow(
                     out,
                     err,
                     show_headers,
-                    &mut header_written,
+                    &mut banners,
                     &mut active,
                     index,
                     &mut sources,
@@ -124,7 +123,7 @@ pub fn run_follow(
         err,
         show_headers,
         &mut sources,
-        &mut header_written,
+        &mut banners,
         &mut active,
     )?;
     Ok(all_ok)
@@ -143,7 +142,7 @@ fn follow_loop(
     err: &dyn Output,
     show_headers: bool,
     sources: &mut [FollowSource],
-    header_written: &mut bool,
+    banners: &mut Banners,
     active: &mut Option<usize>,
 ) -> Result<(), TailError> {
     loop {
@@ -158,7 +157,7 @@ fn follow_loop(
                 show_headers,
                 sources,
                 i,
-                header_written,
+                banners,
                 active,
             )?;
         }
@@ -176,7 +175,7 @@ fn follow_loop(
                         show_headers,
                         sources,
                         i,
-                        header_written,
+                        banners,
                         active,
                     )?;
                 }
@@ -213,7 +212,7 @@ fn poll_source(
     show_headers: bool,
     sources: &mut [FollowSource],
     i: usize,
-    header_written: &mut bool,
+    banners: &mut Banners,
     active: &mut Option<usize>,
 ) -> Result<(), TailError> {
     // A currently-missing name: reopen it if it has appeared (name follow,
@@ -269,7 +268,7 @@ fn poll_source(
         let path = sources[i].path.clone();
         diagnose(
             err,
-            &format!("{path}: file truncated", path = quote_if_needed(&path)),
+            &format!("{path}: file truncated", path = quote_subject(&path)),
         )?;
         sources[i].offset = 0;
     }
@@ -277,7 +276,7 @@ fn poll_source(
     if meta.size > sources[i].offset {
         if show_headers && *active != Some(i) {
             let path = sources[i].path.clone();
-            write_header(out, &path, header_written).map_err(TailError::Output)?;
+            banners.file(out, &path).map_err(TailError::Output)?;
             *active = Some(i);
         }
         let new_offset = emit_appended(
@@ -378,17 +377,6 @@ fn emit_appended(
     Ok(offset)
 }
 
-/// The parent directory of a path, for the name-follow directory watch.
-/// `.`/empty for a bare filename.
-fn parent_dir(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) => "/",
-        Some(idx) => &trimmed[..idx],
-        None => ".",
-    }
-}
-
 /// Open a named source, emit its initial tail, register the watch(es), and
 /// record its follow state. A source that cannot be opened is diagnosed; it
 /// is still recorded (for `--retry`) so the follow loop can reopen it.
@@ -402,7 +390,7 @@ fn open_and_emit_initial(
     out: &dyn Output,
     err: &dyn Output,
     show_headers: bool,
-    header_written: &mut bool,
+    banners: &mut Banners,
     active: &mut Option<usize>,
     index: usize,
     sources: &mut Vec<FollowSource>,
@@ -411,7 +399,7 @@ fn open_and_emit_initial(
     // engine immediately; a failure to open it is non-fatal (the loop still
     // re-checks on its bounded timeout).
     let dir = if mode == Follow::Name {
-        match watcher.open_dir(parent_dir(path)) {
+        match watcher.open_dir(dir_name(path)) {
             Ok(d) => {
                 let _ = watcher.watch(d);
                 Some(d)
@@ -425,7 +413,7 @@ fn open_and_emit_initial(
     match watcher.open(path) {
         Ok(handle) => {
             if show_headers {
-                write_header(out, path, header_written).map_err(TailError::Output)?;
+                banners.file(out, path).map_err(TailError::Output)?;
                 *active = Some(index);
             }
             let mut engine = Engine::new(job);

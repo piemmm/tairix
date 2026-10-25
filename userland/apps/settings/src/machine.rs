@@ -284,7 +284,11 @@ impl MachineSetting {
                 syncookies_label,
             ),
             Self::FanMode => pick(&FanMode::ALL, config.cooling_fan.mode(), fan_mode_label),
-            Self::FanSignal => pick(&POLARITIES, config.cooling_fan.polarity(), polarity_label),
+            Self::FanSignal => pick(
+                &Polarity::ALL,
+                config.cooling_fan.polarity(),
+                polarity_label,
+            ),
             Self::FanLine | Self::FanStart | Self::FanHysteresis => (Vec::new(), 0),
         }
     }
@@ -373,7 +377,7 @@ impl MachineSetting {
                     fan.hysteresis_celsius(),
                 )
             }),
-            Self::FanSignal => POLARITIES.get(index).and_then(|&polarity| {
+            Self::FanSignal => Polarity::ALL.get(index).and_then(|&polarity| {
                 refan(
                     fan.mode(),
                     fan.line(),
@@ -464,7 +468,7 @@ impl MachineSetting {
         let control = match self {
             Self::FanLine => {
                 let mut text = self.stated(config);
-                if let Some(in_use) = in_use_sentence(cooling) {
+                if let Some(in_use) = in_use_sentence(config, cooling) {
                     text.push(' ');
                     text.push_str(&in_use);
                 }
@@ -486,9 +490,6 @@ impl MachineSetting {
         FieldRow::new(self.label(), control).with_description(self.stated(config))
     }
 }
-
-/// Every fan signal polarity, in the order the row offers them.
-const POLARITIES: [Polarity; 2] = [Polarity::ActiveHigh, Polarity::ActiveLow];
 
 /// The lines the fan may be put on, in the order the line row offers them:
 /// none, every line the header lends that is free, and the line the store
@@ -524,13 +525,21 @@ fn line_control(config: &SystemConfig, cooling: &Cooling) -> FieldControl {
     FieldControl::Combo(combo)
 }
 
-/// Why the header's other lines are not offered, where any are not.
-fn in_use_sentence(cooling: &Cooling) -> Option<String> {
-    let held = cooling.status()?.lines?.held();
-    if held.is_empty() {
+/// Why the header's other lines are not offered, where any are not: those
+/// something else holds, but the one the row shows as staged.
+fn in_use_sentence(config: &SystemConfig, cooling: &Cooling) -> Option<String> {
+    let staged = config.cooling_fan.line();
+    let named: Vec<String> = cooling
+        .status()?
+        .lines?
+        .held()
+        .iter()
+        .filter(|line| Some(*line) != staged)
+        .map(pi::line_label)
+        .collect();
+    if named.is_empty() {
         return None;
     }
-    let named: Vec<String> = held.iter().map(pi::line_label).collect();
     Some(alloc::format!(
         "In use and not offered: {}.",
         named.join(", ")

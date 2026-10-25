@@ -16,23 +16,44 @@ i'r cyfeiriadur hwnnw o dan ei henw sail ei hun.
 
 Dim ond gydag `-r` y copïir ffynhonnell sy'n gyfeiriadur, sy'n
 atgynhyrchu'r is-goeden gyfan; heb `-r` gwrthodir operand cyfeiriadur.
-Trosysgrifir ffeil gyrchfan sy'n bodoli yn ragosodedig, fe'i hepgorir
-o dan `-n`, a gofynnir amdani ar ffrwd y gwall safonol o dan `-i`
-(mae cwestiwn a wrthodwyd yn hepgor y copi hwnnw heb wall; ni thrinnir
-ateb annarllenadwy byth fel cydsyniad).
+Trosysgrifir ffeil gyrchfan sy'n bodoli yn ragosodedig, fe'i hepgorir o
+dan `-n`, a gofynnir amdani ar ffrwd y gwall safonol o dan `-i` (mae
+cwestiwn a wrthodwyd yn hepgor y copi hwnnw ac yn peri i'r rhediad
+fethu, fel un GNU; ni thrinnir ateb annarllenadwy byth fel cydsyniad).
 Gwrthodir cyrchfan sy'n ffeil y ffynhonnell ei hun — yr un enw, enw
-arall arni, neu ddolen iddi — fel yr un ffeil, a'i gadael fel yr oedd.
+arall arni, neu ddolen iddi — fel yr un ffeil, a'i gadael fel yr oedd,
+ac eithrio bod `-l` yn ei chyfrif yn un sydd eisoes wedi'i chysylltu.
+Mae dolen y mae `-f` yn ei rhoi yn lle enw sy'n bodoli yn cymryd y lle
+hwnnw mewn un cam, wedi'i gwneud cyn i ddim gael ei ddisodli, felly mae
+un na ellir ei gwneud yn gadael yr enw yn ei le.
 
-Mae'r methiant cyntaf yn atal y rhediad cyn unrhyw operand
-diweddarach. Mae `--` yn gorffen dosrannu opsiynau: mae pob ymresymiad
-diweddarach yn llwybr.
+Adroddir am ffeil na ellir ei darllen, ei chreu na'i hysgrifennu, a
+chopïir y gweddill o hyd, gweddill ei chyfeiriadur hefyd. Mae `--` yn
+gorffen dosrannu opsiynau: mae pob ymresymiad diweddarach yn llwybr.
+
+Gwneir ffeil newydd â didau caniatâd ei ffynhonnell, heb y didau set-ID
+a gludiog, llai'r umask, felly mae copi ffeil breifat yn aros yn
+breifat; mae cyrchfan sydd eisoes yn bodoli yn cadw ei modd ei hun. Mae
+cyfeiriadur newydd yn gorffen â didau caniatâd a gludiog ei ffynhonnell
+llai'r umask; tra copïir ei gofnodion i mewn iddo mae'n agored i'w
+berchennog, felly caiff cyfeiriadur ffynhonnell darllen yn unig ei
+gopïo'n gyfan serch hynny, ac felly hefyd o dan umask sy'n atal y
+perchennog rhag ysgrifennu. Ni chaiff dim ei ysgrifennu byth drwy ddolen
+symbolaidd a geir y tu mewn i goeden gyrchfan.
+
+Caiff `-a`/`--archive` GNU a'r setiau `--preserve` heblaw
+`--preserve=links,xattr` eu **gwrthod**, nid eu culhau. Mae `-a` yn
+golygu `-dR --preserve=all`, ac mae `--preserve=all` yn cynnwys stampiau
+amser nod, na all unrhyw alwad ar y system hon eu gosod — felly byddai
+parchu `-a` yn adrodd cadwraeth na ddigwyddodd. Defnyddiwch `-dR` ar
+gyfer y gweddill.
 
 Mae pob copi'n cario priodoleddau estynedig y ffynhonnell — math ffeil
-RISC OS, math a chrëwr Mac — lle bynnag y gall y cyrchfan eu cadw, ac mae'n
-cadw tyllau ffeil denau yn dyllau. Adroddir y priodoleddau na all cyrchfan
-eu cadw mewn un rhybudd pan ddaw'r rhediad i ben, ac mewn cofnod `omission`
-ar y ffrwd wybodaeth safonol; gyda `--preserve=xattr` mae copi o'r fath yn
-methu yn lle hynny.
+RISC OS, math a chrëwr Mac — lle bynnag y gall y cyrchfan eu cadw, ac
+mae'n cadw tyllau ffeil denau yn dyllau. Adroddir y priodoleddau na all
+cyrchfan eu cadw mewn un rhybudd pan ddaw'r rhediad i ben, ac mewn
+cofnod `omission` ar y ffrwd wybodaeth safonol; gyda `--preserve=xattr`
+mae copi o'r fath yn methu yn lle hynny.
 
 Nid yw cyfeiriadur byth yn cael ei gopïo i mewn iddo'i hun: gwrthodir
 cyrchfan y tu mewn i'r ffynhonnell — sut bynnag y'i sillefir, drwy
@@ -43,17 +64,19 @@ atal y copi lle mae'r daith yn ei gyfarfod.
 ## OPTIONS
 
 - `-r, -R, --recursive` — copïo cyfeiriaduron a'u cynnwys.
-- `-f, --force` — pan na ellir creu ffeil gyrchfan, ei dileu a
-  cheisio'r copi unwaith eto.
-- `-i, --interactive` — gofyn cyn trosysgrifo ffeil sy'n bodoli; dim
-  ond ateb yn dechrau ag `y`/`Y` sy'n cydsynio.
+- `-f, --force` — pan na ellir creu ffeil gyrchfan, ei dileu a cheisio'r
+  copi unwaith eto; gydag `-l`, `-s`, neu ddolen y mae `-P` yn ei
+  hatgynhyrchu, rhoi'r ddolen yn lle enw sy'n bodoli.
+- `-i, --interactive` — gofyn cyn trosysgrifo ffeil sy'n bodoli; dim ond
+  ateb yn dechrau ag `y`/`Y` sy'n cydsynio, ac mae cwestiwn a wrthodwyd
+  yn hepgor y ffeil honno ac yn peri i'r rhediad fethu.
 - `-n, --no-clobber` — peidio byth â throsysgrifo ffeil sy'n bodoli.
   Y diweddaraf o `-i` ac `-n` sy'n ennill.
 - `-l, --link` — rhoi i'r cyrchfan ail enw i nod y ffynhonnell yn lle
   copïo ei beitiau, fel na all y ddau enw wahanu wrth ysgrifennu'n
   ddiweddarach. Mae angen `-r` ar ffynhonnell sy'n gyfeiriadur o hyd.
-- `-s, --symbolic-link` — creu cyswllt symbolaidd sy'n enwi'r ffynhonnell
-  yn lle ei chopïo.
+- `-s, --symbolic-link` — creu cyswllt symbolaidd sy'n enwi'r
+  ffynhonnell yn lle ei chopïo.
 - `-P, --no-dereference` — atgynhyrchu pob dolen symbolaidd ymhlith y
   ffynonellau fel dolen sy'n storio'r un targed, air am air, yn hytrach
   na chopïo'r hyn y mae'n ei enwi (felly mae dolen berthynol neu ddolen
@@ -66,17 +89,21 @@ atal y copi lle mae'r daith yn ei gyfarfod.
   ac mae unrhyw gopi arall yn dilyn dolenni ei operandau, fel un GNU;
   mae `-l` yn cysylltu'r hyn y mae dolen a ddilynwyd yn ei enwi.
 - `--preserve=links` — mae dwy ffynhonnell sy'n enwi un nod yn cael dau
-  enw yn y cyrchfan yn lle dau gopi, fel nad yw'r copi'n dyblu'r storfa'n
-  ddistaw.
-- `--preserve=xattr` — rhaid cario pob priodoledd estynedig: mae copi na all
-  ei gyrchfan gadw un yn methu, gan ei enwi. Mae `--preserve=links,xattr` yn
-  gofyn am y ddau.
+  enw yn y cyrchfan yn lle dau gopi, fel nad yw'r copi'n dyblu'r
+  storfa'n ddistaw.
+- `--preserve=xattr` — rhaid cario pob priodoledd estynedig: mae copi na
+  all ei gyrchfan gadw un yn methu, gan ei enwi. Mae
+  `--preserve=links,xattr` yn gofyn am y ddau.
 - `--no-preserve=xattr` — peidio â chopïo unrhyw briodoledd estynedig.
-  Derbynnir `mode`, `ownership` a `timestamps` hefyd, ac nid ydynt yn cael eu
+  Derbynnir `ownership` a `timestamps` hefyd, ac nid ydynt yn cael eu
   cadw beth bynnag.
-- `--sparse=WHEN` — sut y copïir ffeil denau: mae `auto`, y rhagosodiad, yn
-  cadw ei thyllau; mae `always` hefyd yn gadael heb ei ysgrifennu bob bloc o
-  sero y mae'n ei storio; mae `never` yn ysgrifennu pob beit.
+- `--no-preserve=mode` — gwneud pob ffeil a chyfeiriadur newydd yn y
+  modd a gaiff un newydd pan nad oes dim yn enwi un, llai'r umask, yn
+  hytrach na modd ei ffynhonnell. Mae `--no-preserve=all` yn gwneud hyn
+  hefyd.
+- `--sparse=WHEN` — sut y copïir ffeil denau: mae `auto`, y rhagosodiad,
+  yn cadw ei thyllau; mae `always` hefyd yn gadael heb ei ysgrifennu bob
+  bloc o sero y mae'n ei storio; mae `never` yn ysgrifennu pob beit.
 - `-d` — `-P` a `--preserve=links` gyda'i gilydd, fel yn yr offeryn GNU.
 - `-v, --verbose` — adrodd am bob copi fel `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copïo pob ffynhonnell i `dir`,
@@ -97,11 +124,10 @@ atal y copi lle mae'r daith yn ei gyfarfod.
 
 ## EXIT STATUS
 
-- `0` — llwyddodd pob copi (nid yw hepgoriad `-n` na chwestiwn `-i` a
-  wrthodwyd yn fethiannau).
-- `1` — methiant system ffeiliau, anogwr neu allbwn; argraffir y
-  rheswm ar y gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `0` — llwyddodd pob copi (nid yw hepgoriad `-n` yn fethiant).
+- `1` — ni ellid copïo ffeil, gwrthodwyd cwestiwn `-i`, neu fe fethodd
+  anogwr neu allbwn; argraffir rheswm pob methiant ar y gwall safonol.
+  Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

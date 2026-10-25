@@ -21,11 +21,27 @@ but non-executable bundle exits `126`.
 
 The builtins:
 
-- `cd <path>`, `pwd` — change and print the working directory.
+- `cd [-L | -P [-e]] [directory]`, `cd -` — change the working
+  directory: to `directory`, to `HOME` without one, or with `-` back to
+  `OLDPWD`, printing it. `-L`, the default, applies `directory` to `PWD`
+  as written while `PWD` still names the working directory, so
+  `cd link` then `cd ..` comes back to where the link is; `-P` follows
+  the links first, and `PWD` becomes the directory's own path (`-e`
+  then fails when that path cannot be read). `/..` is `/`, and beneath
+  an alias root (`Home:/`) a `..` never climbs above it.
+- `pwd [-L | -P]` — print the working directory: `PWD` while it still
+  names it (`-L`, the default), or the directory's own path (`-P`).
 - `echo ...` — print its operands.
 - `export NAME=value`, `unset NAME` — edit the exported environment.
 - `jobs`, `fg`, `bg` — job control.
-- `ulimit` — read and impose resource limits.
+- `ulimit [-a] [-H | -S] [resource [value]]` — read and impose resource
+  limits; `ulimit -n [value]` reads or sets the limit on open files.
+- `umask [-S] [mode]` — show the file mode creation mask (`0022`), or
+  with `-S` the permissions it leaves (`u=rwx,g=rx,o=rx`), or set it: an
+  octal `mode` is the mask itself, a symbolic one (`g-w`, `u=rwx,g=rx,o=`)
+  edits the permissions it leaves. Every command launched afterwards
+  creates its files under it, and a redirection creates its file
+  `0666` less it.
 - `elevate <user> <program> [argument ...]` — run one command, with the
   arguments given, re-authenticated through the console's login
   supervisor.
@@ -80,9 +96,15 @@ grammar.
 
 ## ENVIRONMENT
 
+- `HOME` — where `cd` goes with no operand.
+- `PWD`, `OLDPWD` — the working directory as `cd` reached it, and the
+  one before; `cd` sets both. A `PWD` the shell starts with is kept
+  while it names the working directory, and otherwise becomes that
+  directory's own path.
 - `PATH` — the directories searched after the fixed store prefix.
 - `GLOBIGNORE` — `:`-separated patterns whose matches a filename pattern
-  drops.
+  drops. While the variable is not empty, a filename pattern also matches
+  names beginning with `.`, so `rm *` then removes `.profile` too.
 - `LANG` — the preferred locale for the short help (a BCP-47 tag such
   as `fr-FR`), exported to every launched command.
 

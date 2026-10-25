@@ -142,6 +142,9 @@ pub const AUTHORISERS_REFUSED: EventId = EventId(10_034);
 /// A text-prompt attempt named an account still cooling down after refused
 /// passwords; its password was neither asked for nor checked.
 pub const AUTH_COOLING: EventId = EventId(10_035);
+/// A session's home could not be entered as its account, so the session
+/// started at the root; the refusal is recorded with it.
+pub const SESSION_HOME_REFUSED: EventId = EventId(10_036);
 
 #[cfg(test)]
 mod tests {
@@ -151,12 +154,13 @@ mod tests {
         GREETER_DEGRADED, GREETER_FAILED, LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED,
         LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START, ROUND_CHOSEN, SESSION_ACCOUNTS_SENT,
         SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED,
-        SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED,
-        SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED, TEXT_ROUND_SUPERSEDED,
-        TEXT_ROUND_UNWATCHED, VERIFY_GRANTED, VERIFY_REFUSED, ZONE_STORE_WITHHELD,
+        SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE, SESSION_HOME_REFUSED,
+        SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED,
+        TEXT_ROUND_SUPERSEDED, TEXT_ROUND_UNWATCHED, VERIFY_GRANTED, VERIFY_REFUSED,
+        ZONE_STORE_WITHHELD,
     };
 
-    const ALL: [u32; 33] = [
+    const ALL: [u32; 34] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -190,6 +194,7 @@ mod tests {
         AUTHORISERS_SENT.0,
         AUTHORISERS_REFUSED.0,
         AUTH_COOLING.0,
+        SESSION_HOME_REFUSED.0,
     ];
 
     #[test]

@@ -12,13 +12,14 @@ use tairix_abi::{
     EnrolOutcome, Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState,
 };
 
-use crate::command::{Command, UsageError, USAGE};
-use tairix_util::quote::quote_if_needed;
+use crate::command::Command;
+use tairix_util::quote::{quote_if_needed, quote_subject};
 
 /// Exit status of a `servicectl` run.
 ///
-/// The coreutils shape: success, a general failure, and a usage error, with
-/// the same numbers a shell script would expect from any other tool.
+/// The coreutils shape, with the numbers a shell script would expect from any
+/// other tool. A command line that was not understood ends with
+/// [`tairix_help::MISUSE`], `1` too.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]
 pub enum Exit {
@@ -27,8 +28,6 @@ pub enum Exit {
     /// The manager refused the operation, or the endpoint could not be
     /// reached.
     Failed = 1,
-    /// The command line was not understood; nothing was sent.
-    Usage = 2,
 }
 
 impl Exit {
@@ -56,22 +55,6 @@ pub trait ToolIo {
     fn write_line(&mut self, line: &str);
     /// Write one line to the diagnostic stream (fd 2).
     fn write_error(&mut self, line: &str);
-}
-
-/// Render the parse failure and return the usage status.
-///
-/// Every refusal states its reason before exiting, so a non-zero status is
-/// never silent.
-pub fn report_usage<I: ToolIo>(io: &mut I, err: UsageError) -> Exit {
-    let reason = match err {
-        UsageError::MissingCommand => "servicectl: no command given",
-        UsageError::UnknownCommand => "servicectl: unknown command",
-        UsageError::WrongOperandCount => "servicectl: exactly one service name is required",
-        UsageError::NameTooLong => "servicectl: service name is too long",
-    };
-    io.write_error(reason);
-    io.write_error(USAGE);
-    Exit::Usage
 }
 
 /// Drive one parsed control command over `channel`, reporting the outcome.
@@ -205,14 +188,14 @@ fn enrol_refused_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc
             return alloc::format!(
                 "servicectl: {} {service}: {other}",
                 enrol_verb(op),
-                service = quote_if_needed(service)
+                service = quote_subject(service)
             )
         }
     };
     alloc::format!(
         "servicectl: {} {service}: {reason}",
         enrol_verb(op),
-        service = quote_if_needed(service)
+        service = quote_subject(service)
     )
 }
 
@@ -227,14 +210,14 @@ fn unapplied_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc::st
             return alloc::format!(
                 "servicectl: {} {service}: recorded, but {other}",
                 enrol_verb(op),
-                service = quote_if_needed(service)
+                service = quote_subject(service)
             )
         }
     };
     alloc::format!(
         "servicectl: {} {service}: recorded, but {reason}",
         enrol_verb(op),
-        service = quote_if_needed(service)
+        service = quote_subject(service)
     )
 }
 
@@ -274,14 +257,14 @@ fn refused_message(op: ServiceControlOp, service: &str, err: Errno) -> alloc::st
             return alloc::format!(
                 "servicectl: {} {service}: {other}",
                 verb(op),
-                service = quote_if_needed(service)
+                service = quote_subject(service)
             )
         }
     };
     alloc::format!(
         "servicectl: {} {service}: {reason}",
         verb(op),
-        service = quote_if_needed(service)
+        service = quote_subject(service)
     )
 }
 

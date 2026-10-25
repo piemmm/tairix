@@ -5,7 +5,7 @@
 
 use tairix_abi::driver::rtc::Rtc;
 use tairix_abi::driver::thermal::{
-    self, ThermalSensor, ThermalZone, THERMAL_SENSOR_ENDPOINTS, THERMAL_SENSOR_NODE_COMPATIBLE,
+    self, ThermalSensor, THERMAL_SENSOR_ENDPOINTS, THERMAL_SENSOR_NODE_COMPATIBLE,
 };
 use tairix_abi::driver::{named_register_window, sole_register_window, DeviceWake};
 use tairix_abi::hwlink::{LinkDuty, LinkRole};
@@ -14,7 +14,7 @@ use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
 use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
-    CapabilityId, Delay, Errno, HwDeviceClass, HwMatchKey, HwNode, HwProperty, MmioMapper, ProcId,
+    CapabilityId, Delay, Errno, HwDeviceClass, HwMatchKey, HwNode, MmioMapper, ProcId,
     RegisterWindow, PROC_ID_HEX_LEN,
 };
 use tairix_caps::CapabilitySet;
@@ -347,8 +347,7 @@ pub fn rtc<R: Rtc + ?Sized>(chip: &mut R) -> i32 {
 }
 
 /// A device channel's endpoint: the id its driver's node is given in
-/// `block`, served to the one service holding `gate`, and its protocol's
-/// bounds.
+/// `block`, served to the holders of `gate`, and its protocol's bounds.
 pub struct DeviceChannel {
     /// The block the channel's id is the driver's node's entry of.
     pub block: NodeEndpointBlock,
@@ -408,13 +407,14 @@ pub fn publish_channel(
 /// answered before the next is received.
 const SENSOR_CHANNEL_CAPACITY: usize = 4;
 
-/// Serve `sensor`, which measures `zone`, on its node's sensor channel for
-/// the life of the driver, answering the status the driver ends with.
+/// Serve `sensor` on its node's sensor channel for the life of the driver,
+/// answering the status the driver ends with.
 ///
 /// Only a holder of `CAP_SYSINFO_HW` may call: a sensor is hardware the
 /// machine's inventory reads. The channel's node is published once the
-/// channel serves.
-pub fn thermal_sensor<S: ThermalSensor + ?Sized>(sensor: &mut S, zone: ThermalZone) -> i32 {
+/// channel serves; what the sensor measures is discovery's to state, on the
+/// sensor's own node, never the driver's.
+pub fn thermal_sensor<S: ThermalSensor + ?Sized>(sensor: &mut S) -> i32 {
     let channel = DeviceChannel {
         block: THERMAL_SENSOR_ENDPOINTS,
         gate: CapabilityId::SYSINFO_HW,
@@ -428,12 +428,11 @@ pub fn thermal_sensor<S: ThermalSensor + ?Sized>(sensor: &mut S, zone: ThermalZo
             &[step("sensor: the channel could not be bound")],
         );
     };
-    let zone = HwResource::property(HwProperty::ThermalZone, zone.as_u64());
     if publish_channel(
         HwDeviceClass::Other,
         THERMAL_SENSOR_NODE_COMPATIBLE,
         endpoint,
-        &[zone],
+        &[],
     )
     .is_none()
     {

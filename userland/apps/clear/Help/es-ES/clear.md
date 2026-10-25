@@ -34,7 +34,7 @@ cambia nada.
 
 - `0` — la secuencia de borrado fue escrita.
 - `1` — el terminal no puede borrar, o la salida no pudo entregarse.
-- `2` — la línea de órdenes no fue comprendida.
+  Una línea de órdenes no comprendida también termina con `1`.
 
 ## ENVIRONMENT
 

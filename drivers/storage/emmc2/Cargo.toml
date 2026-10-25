@@ -11,6 +11,18 @@ publish.workspace = true
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
+# The SD host's one identity, which the bind table, the platform's discovery
+# and the firmware's admission all name it by, and the property protocol the
+# floor bring-up asks the firmware for its base clock and supplies through.
+tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
+# The floor bring-up's link and failure records.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[dev-dependencies]
+# The protocol-faithful mock firmware the supply and clock tests answer from.
+tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [
+    "mock-firmware",
+] }
 
 [lints]
 workspace = true

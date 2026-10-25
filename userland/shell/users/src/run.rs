@@ -39,7 +39,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::{Errno, InputMode, OpenFlags};
-    use tairix_rt::io::{write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
+    use tairix_rt::io::{Read, Stderr, Stdin, Stdout, Write};
     use tairix_users::{Salt, SALT_LEN};
     use tairix_users_cli::{
         parse, print_listing, run_session, AdminChannel, Command, SaltSource, SessionConfig,
@@ -145,14 +145,12 @@ mod program {
     /// syscall.
     ///
     /// Exit codes: the session's own code on a normal run (`0` for a clean
-    /// exit, or the served short help), `2` on a usage error (a malformed
-    /// argument vector or an unrecognised option).
+    /// exit, or the served short help), `1` on a command line that was not
+    /// understood (a malformed argument vector, an unrecognised option, or
+    /// an operand).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error,
-        // reported rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("users") else {
+            return tairix_help::MISUSE;
         };
         match parse(&arguments) {
             Ok(Command::Session) => {}
@@ -160,9 +158,9 @@ mod program {
             // The non-interactive read: no session, no prompts, just the
             // relayable listing on standard output.
             Ok(Command::List) => return print_listing(&mut RtIo, &RtChannel),
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
+            Err(err) => {
+                tairix_help::report_misuse("users", &err);
+                return tairix_help::MISUSE;
             }
         }
         run_session(&mut RtIo, &RtChannel, &mut RtSalt, SessionConfig::default())

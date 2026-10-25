@@ -24,9 +24,13 @@
 //!
 //! # Ordering
 //!
-//! A present's commands go to the device in one batch: the transfers, the
-//! scan-out switch, the flushes. The device processes its control queue in
-//! order, as every virtio-gpu device does and Linux's driver relies on.
+//! The device may run its control queue's commands in any order, and answer
+//! one before it has run it (virtio 1.2 §2.6, §5.7.6). So every command is
+//! fenced, answered only once it has run, and a batch goes in stages: the
+//! commands of a stage depend on no other in it, and a stage is sent only
+//! once every command before it has been answered. A present's frame is
+//! made and backed, then transferred, then switched to, then flushed beside
+//! the unreference of the frame it replaced.
 //!
 //! # Capabilities
 //!
@@ -90,13 +94,12 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     HwMatchKey::virtio(VIRTIO_GPU_DEVICE_ID),
 )];
 
-/// The widest and tallest output the driver drives, as Linux's virtio-gpu
-/// bounds its modes (`XRES_MAX`, `YRES_MAX`): a bound on what a device
+/// The widest and tallest output the driver drives: a bound on what a device
 /// states, which keeps every backing addressable by one memory entry.
 pub const SIDE_MAX: u32 = 8192;
 
 /// The pointer image's side: the cursor resource a device shows is exactly
-/// this size, as Linux's driver and QEMU's device both fix it.
+/// this size (virtio 1.2 §5.7.6: it "must be 64x64 in size").
 pub const CURSOR_SIDE: u32 = 64;
 
 const CURSOR_STRIDE: usize = CURSOR_SIDE as usize * 4;
@@ -111,6 +114,10 @@ const COMMAND_TIMEOUT_NS: u64 = 1_000_000_000;
 /// a transfer per damage rectangle, the scan-out switch, the unreference of
 /// a frame it replaces, and a flush per damage rectangle.
 const BATCH_MAX: usize = 2 * MAX_DAMAGE_RECTS + 4;
+
+/// Stages one batch goes in at most: a fresh frame's creation, its backing,
+/// its transfers, the scan-out switch, then its flushes.
+const STAGES_MAX: usize = 5;
 
 /// Bytes one command's request slot holds.
 const REQUEST_SLOT: usize = 64;
@@ -362,6 +369,70 @@ impl Answers<'_> {
     }
 }
 
+/// Commands for the device, in stages: a stage's commands depend on no other
+/// in it, and each runs only once every command of the stages before it has.
+struct Batch {
+    requests: ArrayVec<Request, BATCH_MAX>,
+    /// Where each stage after the first begins.
+    breaks: ArrayVec<usize, { STAGES_MAX - 1 }>,
+}
+
+impl Batch {
+    fn new() -> Self {
+        Self {
+            requests: ArrayVec::new(),
+            breaks: ArrayVec::new(),
+        }
+    }
+
+    /// `requests`, each run only once the one before it has.
+    fn sequence<const N: usize>(requests: [Request; N]) -> Result<Self, DriverError> {
+        let mut batch = Self::new();
+        for request in requests {
+            batch.then()?;
+            batch.push(request)?;
+        }
+        Ok(batch)
+    }
+
+    /// Add `request` to the stage being built.
+    fn push(&mut self, request: Request) -> Result<(), DriverError> {
+        self.requests
+            .try_push(request)
+            .map_err(|_| DriverError::LengthOutOfRange)
+    }
+
+    /// End the stage being built: what is added next runs after it.
+    fn then(&mut self) -> Result<(), DriverError> {
+        let at = self.requests.len();
+        if at == 0 || self.breaks.last() == Some(&at) {
+            return Ok(());
+        }
+        self.breaks
+            .try_push(at)
+            .map_err(|_| DriverError::LengthOutOfRange)
+    }
+
+    fn len(&self) -> usize {
+        self.requests.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    /// Each stage, as the range of the batch it holds.
+    fn stages(&self) -> impl Iterator<Item = core::ops::Range<usize>> + '_ {
+        let starts = core::iter::once(0).chain(self.breaks.iter().copied());
+        let ends = self
+            .breaks
+            .iter()
+            .copied()
+            .chain(core::iter::once(self.len()));
+        starts.zip(ends).map(|(start, end)| start..end)
+    }
+}
+
 /// The virtio-gpu engine.
 pub struct VirtioGpu<'h, T: Transport, M: BufferMemory, C, L> {
     transport: T,
@@ -387,6 +458,8 @@ pub struct VirtioGpu<'h, T: Transport, M: BufferMemory, C, L> {
     power: DisplayPower,
     hosting: Hosting,
     pointer: Pointer,
+    /// The fence the next command carries.
+    fence: u64,
 }
 
 /// Driver entry point.
@@ -531,6 +604,7 @@ where
                 hot: (0, 0),
                 shown: false,
             },
+            fence: 1,
         };
         gpu.take_display_events();
         gpu.output = gpu.read_output()?;
@@ -572,52 +646,65 @@ where
         raised != 0
     }
 
-    /// Publish `batch`, each command in its own slot, and wait for every
-    /// answer.
+    /// Publish `batch`, each command fenced in its own slot, a stage at a
+    /// time, and wait for every answer.
+    ///
+    /// A command the device refuses does not stop the stages after it: the
+    /// answers say what was done.
     ///
     /// # Errors
     ///
     /// The queue's refusal, or a device that did not answer in time: the
-    /// commands' memory may then still be read.
-    fn submit(&mut self, batch: &[Request]) -> Result<Answers<'_>, DriverError> {
-        if batch.len() > BATCH_MAX {
-            return Err(DriverError::LengthOutOfRange);
-        }
+    /// commands' memory may then still be read. [`DriverError::DeviceFault`]
+    /// for an answer without its command's fence.
+    fn submit(&mut self, batch: &Batch) -> Result<Answers<'_>, DriverError> {
         self.control.settle(&mut self.transport, self.host)?;
+        let first = self.fence;
+        self.fence = first.wrapping_add(batch.len() as u64);
+        let fence_of = |at: usize| first.wrapping_add(at as u64);
         let area = self.commands.as_bytes_mut();
-        for (at, request) in batch.iter().enumerate() {
+        for (at, request) in batch.requests.iter().enumerate() {
+            let slot = &mut area[at * REQUEST_SLOT..(at + 1) * REQUEST_SLOT];
             let bytes = request.as_bytes();
-            area[at * REQUEST_SLOT..at * REQUEST_SLOT + bytes.len()].copy_from_slice(bytes);
+            slot[..bytes.len()].copy_from_slice(bytes);
+            wire::fence(header_of(slot)?, fence_of(at));
             let response = RESPONSES_AT + at * RESPONSE_SLOT;
             area[response..response + RESPONSE_SLOT].fill(0);
         }
-        let mut chains: ArrayVec<[ChainSegment; 2], BATCH_MAX> = ArrayVec::new();
-        for (at, request) in batch.iter().enumerate() {
-            let len = request.as_bytes().len();
-            let chain = [
-                self.segment(at * REQUEST_SLOT, len, Direction::DeviceRead)?,
-                self.segment(
-                    RESPONSES_AT + at * RESPONSE_SLOT,
-                    wire::HEADER_LEN,
-                    Direction::DeviceWrite,
-                )?,
-            ];
-            chains
-                .try_push(chain)
-                .map_err(|_| DriverError::LengthOutOfRange)?;
+        for stage in batch.stages() {
+            let mut chains: ArrayVec<[ChainSegment; 2], BATCH_MAX> = ArrayVec::new();
+            for at in stage.clone() {
+                let len = batch.requests[at].as_bytes().len();
+                let chain = [
+                    self.segment(at * REQUEST_SLOT, len, Direction::DeviceRead)?,
+                    self.segment(
+                        RESPONSES_AT + at * RESPONSE_SLOT,
+                        wire::HEADER_LEN,
+                        Direction::DeviceWrite,
+                    )?,
+                ];
+                chains
+                    .try_push(chain)
+                    .map_err(|_| DriverError::LengthOutOfRange)?;
+            }
+            let mut requests: ArrayVec<&[ChainSegment], BATCH_MAX> = ArrayVec::new();
+            for chain in &chains {
+                requests
+                    .try_push(chain)
+                    .map_err(|_| DriverError::LengthOutOfRange)?;
+            }
+            self.control.submit_all_and_wait(
+                &mut self.transport,
+                self.host,
+                &requests,
+                COMMAND_TIMEOUT_NS,
+            )?;
+            let area = self.commands.as_bytes();
+            for at in stage {
+                let response = RESPONSES_AT + at * RESPONSE_SLOT;
+                wire::fenced(&area[response..response + RESPONSE_SLOT], fence_of(at))?;
+            }
         }
-        let mut requests: ArrayVec<&[ChainSegment], BATCH_MAX> = ArrayVec::new();
-        for chain in &chains {
-            requests
-                .try_push(chain)
-                .map_err(|_| DriverError::LengthOutOfRange)?;
-        }
-        self.control.submit_all_and_wait(
-            &mut self.transport,
-            self.host,
-            &requests,
-            COMMAND_TIMEOUT_NS,
-        )?;
         Ok(Answers {
             area: self.commands.as_bytes(),
             count: batch.len(),
@@ -625,8 +712,15 @@ where
     }
 
     /// Run `batch` and read the device's verdict on it.
-    fn run(&mut self, batch: &[Request]) -> Result<(), DriverError> {
+    fn run(&mut self, batch: &Batch) -> Result<(), DriverError> {
         self.submit(batch)?.verdict(None)
+    }
+
+    /// The fence a command carries next, taken.
+    fn take_fence(&mut self) -> u64 {
+        let fence = self.fence;
+        self.fence = fence.wrapping_add(1);
+        fence
     }
 
     /// `backing` with any doubt settled: a resource an unanswered batch may
@@ -639,7 +733,7 @@ where
     fn settled(&mut self, backing: Backing) -> Result<Backing, DriverError> {
         match backing {
             Backing::Doubtful(resource) => {
-                self.submit(&[wire::resource_unref(resource)])?;
+                self.submit(&Batch::sequence([wire::resource_unref(resource)])?)?;
                 Ok(Backing::Unmade)
             }
             known => Ok(known),
@@ -667,9 +761,12 @@ where
     /// bytes.
     fn ask(&mut self, request: &Request, len: usize) -> Result<&[u8], DriverError> {
         self.control.settle(&mut self.transport, self.host)?;
+        let fence = self.take_fence();
         let bytes = request.as_bytes();
         let area = self.commands.as_bytes_mut();
-        area[..bytes.len()].copy_from_slice(bytes);
+        let slot = &mut area[..REQUEST_SLOT];
+        slot[..bytes.len()].copy_from_slice(bytes);
+        wire::fence(header_of(slot)?, fence);
         area[LONG_AT..LONG_AT + len].fill(0);
         let chain = [
             self.segment(0, bytes.len(), Direction::DeviceRead)?,
@@ -677,7 +774,9 @@ where
         ];
         self.control
             .submit_and_wait(&mut self.transport, self.host, &chain, COMMAND_TIMEOUT_NS)?;
-        Ok(&self.commands.as_bytes()[LONG_AT..LONG_AT + len])
+        let answer = &self.commands.as_bytes()[LONG_AT..LONG_AT + len];
+        wire::fenced(answer, fence)?;
+        Ok(answer)
     }
 
     /// The output the device describes now.
@@ -756,10 +855,12 @@ where
             return;
         };
         let resource = self.fresh_resource();
-        if let Err(reason) = self.run(&[
+        let made = Batch::sequence([
             wire::resource_create_2d(resource, Format::B8G8R8X8, width, height),
             wire::attach_backing(resource, adopted.device_addr, len),
-        ]) {
+        ])
+        .and_then(|batch| self.run(&batch));
+        if let Err(reason) = made {
             self.hosting = Hosting::Doubtful(resource);
             // Settled now if the device answers, else before it is next hosted.
             let _ = self.unhost_console();
@@ -789,10 +890,10 @@ where
             Hosting::Doubtful(resource) => resource,
         };
         // An answer of any kind means the device has let the backing go.
-        self.submit(&[
+        self.submit(&Batch::sequence([
             wire::detach_backing(resource),
             wire::resource_unref(resource),
-        ])?;
+        ])?)?;
         self.hosting = Hosting::Unheld;
         self.console
             .as_mut()
@@ -803,7 +904,7 @@ where
     /// frame as its resource last held it, and a frame given back and no
     /// longer shown unreferenced.
     fn show(&mut self, what: Shown) -> Result<(), DriverError> {
-        let mut batch: ArrayVec<Request, BATCH_MAX> = ArrayVec::new();
+        let mut batch = Batch::new();
         if let Some(output) = self.output.filter(|_| self.power == DisplayPower::On) {
             self.scan_out(&mut batch, output, what)?;
         }
@@ -817,24 +918,22 @@ where
 
     /// Add to `batch` what has `output`'s scanout show `what`, each at its
     /// own size: a frame of an output that has since moved stays shown until
-    /// its presenter presents one of the new size.
-    fn scan_out(
-        &self,
-        batch: &mut ArrayVec<Request, BATCH_MAX>,
-        output: Output,
-        what: Shown,
-    ) -> Result<(), DriverError> {
+    /// its presenter presents one of the new size. The batch is left in the
+    /// stage after the switch.
+    fn scan_out(&self, batch: &mut Batch, output: Output, what: Shown) -> Result<(), DriverError> {
         match what {
-            Shown::Nothing => push(batch, wire::set_scanout(output.scanout, 0, &whole(0, 0))),
+            Shown::Nothing => {
+                batch.push(wire::set_scanout(output.scanout, 0, &whole(0, 0)))?;
+                batch.then()
+            }
             Shown::Console => {
                 let hosted = self.hosting.hosted().ok_or(DriverError::NotFound)?;
                 let area = whole(hosted.mode.width_px, hosted.mode.height_px);
-                push(batch, wire::transfer_to_host_2d(hosted.resource, &area, 0))?;
-                push(
-                    batch,
-                    wire::set_scanout(output.scanout, hosted.resource, &area),
-                )?;
-                push(batch, wire::resource_flush(hosted.resource, &area))
+                batch.push(wire::transfer_to_host_2d(hosted.resource, &area, 0))?;
+                batch.then()?;
+                batch.push(wire::set_scanout(output.scanout, hosted.resource, &area))?;
+                batch.then()?;
+                batch.push(wire::resource_flush(hosted.resource, &area))
             }
             Shown::Frame {
                 resource,
@@ -842,19 +941,16 @@ where
                 ..
             } => {
                 let area = whole(width, height);
-                push(batch, wire::set_scanout(output.scanout, resource, &area))?;
-                push(batch, wire::resource_flush(resource, &area))
+                batch.push(wire::set_scanout(output.scanout, resource, &area))?;
+                batch.then()?;
+                batch.push(wire::resource_flush(resource, &area))
             }
         }
     }
 
     /// Add to `batch` the unreference of a given-back frame `next` replaces,
     /// answering where in the batch it lies.
-    fn retire_shown(
-        &self,
-        batch: &mut ArrayVec<Request, BATCH_MAX>,
-        next: Shown,
-    ) -> Result<Option<usize>, DriverError> {
+    fn retire_shown(&self, batch: &mut Batch, next: Shown) -> Result<Option<usize>, DriverError> {
         if let Shown::Frame {
             resource,
             buffer: None,
@@ -862,7 +958,7 @@ where
         } = self.shown
         {
             if next != self.shown {
-                push(batch, wire::resource_unref(resource))?;
+                batch.push(wire::resource_unref(resource))?;
                 return Ok(Some(batch.len() - 1));
             }
         }
@@ -898,7 +994,11 @@ where
         let left =
             before.filter(|old| lit && self.output.is_none_or(|new| new.scanout != old.scanout));
         if let Some(old) = left {
-            self.run(&[wire::set_scanout(old.scanout, 0, &whole(0, 0))])?;
+            self.run(&Batch::sequence([wire::set_scanout(
+                old.scanout,
+                0,
+                &whole(0, 0),
+            )])?)?;
         }
         let Some(output) = self.output else {
             return Ok(());
@@ -953,10 +1053,12 @@ where
             return;
         }
         let offset = offset_of(&rows, hosted.mode.width_px);
-        if let Err(reason) = self.run(&[
+        let shown = Batch::sequence([
             wire::transfer_to_host_2d(hosted.resource, &rows, offset),
             wire::resource_flush(hosted.resource, &rows),
-        ]) {
+        ])
+        .and_then(|batch| self.run(&batch));
+        if let Err(reason) = shown {
             self.log.record(Record::ConsoleUnshown { reason });
         }
     }
@@ -995,12 +1097,15 @@ where
             return true;
         };
         let shown = matches!(self.shown, Shown::Frame { resource: on, .. } if on == resource);
-        let mut batch: ArrayVec<Request, 2> = ArrayVec::new();
-        let _ = batch.try_push(wire::detach_backing(resource));
-        if !shown {
-            let _ = batch.try_push(wire::resource_unref(resource));
-        }
-        self.submit(&batch).is_ok()
+        let batch = if shown {
+            Batch::sequence([wire::detach_backing(resource)])
+        } else {
+            Batch::sequence([
+                wire::detach_backing(resource),
+                wire::resource_unref(resource),
+            ])
+        };
+        batch.is_ok_and(|batch| self.submit(&batch).is_ok())
     }
 
     /// Send `request` on the cursor queue.
@@ -1015,7 +1120,7 @@ where
     }
 
     /// The pointer's position as the device takes it: the hot spot's, its
-    /// coordinates two's-complement words, as Linux sends an off-screen one.
+    /// coordinates two's-complement words, which QEMU's device reads as signed.
     const fn position(&self) -> (u32, u32) {
         (
             self.pointer.at.0.cast_unsigned(),
@@ -1037,10 +1142,12 @@ where
         }
         let resource = self.fresh_resource();
         let image = self.pointer.image.device_addr();
-        if let Err(reason) = self.run(&[
+        let made = Batch::sequence([
             wire::resource_create_2d(resource, Format::B8G8R8A8, CURSOR_SIDE, CURSOR_SIDE),
             wire::attach_backing(resource, image, CURSOR_BYTES),
-        ]) {
+        ])
+        .and_then(|batch| self.run(&batch));
+        if let Err(reason) = made {
             let doubt = Backing::Doubtful(resource);
             self.pointer.resource = self.settled(doubt).unwrap_or(doubt);
             return Err(reason);
@@ -1050,11 +1157,11 @@ where
     }
 }
 
-/// Add `request` to `batch`.
-fn push(batch: &mut ArrayVec<Request, BATCH_MAX>, request: Request) -> Result<(), DriverError> {
-    batch
-        .try_push(request)
-        .map_err(|_| DriverError::LengthOutOfRange)
+/// The header of the request written at the start of `slot`.
+fn header_of(slot: &mut [u8]) -> Result<&mut [u8; wire::HEADER_LEN], DriverError> {
+    slot.get_mut(..wire::HEADER_LEN)
+        .and_then(|header| <&mut [u8; wire::HEADER_LEN]>::try_from(header).ok())
+        .ok_or(DriverError::LengthOutOfRange)
 }
 
 impl<T, M, C, L> Display for VirtioGpu<'_, T, M, C, L>
@@ -1191,33 +1298,38 @@ where
         };
         let switching = self.shown != next;
         let lit = self.power == DisplayPower::On;
-        let mut batch: ArrayVec<Request, BATCH_MAX> = ArrayVec::new();
+        let mut batch = Batch::new();
         let whole_frame = [full];
         let rects = if fresh { &whole_frame[..] } else { damage };
         let made_at = fresh.then_some(batch.len());
         if fresh {
             let len = u32::try_from(buffer.len()).map_err(|_| DriverError::LengthOutOfRange)?;
-            push(
-                &mut batch,
-                wire::resource_create_2d(resource, Format::B8G8R8X8, width, height),
-            )?;
-            push(
-                &mut batch,
-                wire::attach_backing(resource, buffer.memory.device_addr(), len),
-            )?;
+            batch.push(wire::resource_create_2d(
+                resource,
+                Format::B8G8R8X8,
+                width,
+                height,
+            ))?;
+            batch.then()?;
+            batch.push(wire::attach_backing(
+                resource,
+                buffer.memory.device_addr(),
+                len,
+            ))?;
+            batch.then()?;
         }
         for rect in rects {
-            push(
-                &mut batch,
-                wire::transfer_to_host_2d(resource, rect, offset_of(rect, width)),
-            )?;
+            batch.push(wire::transfer_to_host_2d(
+                resource,
+                rect,
+                offset_of(rect, width),
+            ))?;
         }
+        batch.then()?;
         let scanned_at = (lit && switching).then_some(batch.len());
         if lit && switching {
-            push(
-                &mut batch,
-                wire::set_scanout(output.scanout, resource, &full),
-            )?;
+            batch.push(wire::set_scanout(output.scanout, resource, &full))?;
+            batch.then()?;
         }
         let retire = if switching {
             self.retire_shown(&mut batch, next)?
@@ -1226,7 +1338,7 @@ where
         };
         if lit {
             for rect in if switching { &whole_frame[..] } else { rects } {
-                push(&mut batch, wire::resource_flush(resource, rect))?;
+                batch.push(wire::resource_flush(resource, rect))?;
             }
         }
         // Each command is taken at its own answer, so what the device did is
@@ -1281,7 +1393,11 @@ where
         };
         match power {
             DisplayPower::Off => {
-                self.run(&[wire::set_scanout(output.scanout, 0, &whole(0, 0))])?;
+                self.run(&Batch::sequence([wire::set_scanout(
+                    output.scanout,
+                    0,
+                    &whole(0, 0),
+                )])?)?;
                 self.power = power;
                 Ok(())
             }
@@ -1339,11 +1455,13 @@ where
             )
         })?;
         let resource = self.pointer_resource()?;
-        self.run(&[wire::transfer_to_host_2d(
+        // Fenced, so the image is in the resource before the cursor queue
+        // names it.
+        self.run(&Batch::sequence([wire::transfer_to_host_2d(
             resource,
             &whole(CURSOR_SIDE, CURSOR_SIDE),
             0,
-        )])?;
+        )])?)?;
         let show = wire::update_cursor(
             self.pointer_scanout(),
             self.position(),

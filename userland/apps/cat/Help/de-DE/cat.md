@@ -37,9 +37,8 @@ Die Markierungsoptionen machen unsichtbare Bytes sichtbar: `-E` gibt
 `M-`-Notation dar. `-e`, `-t` und `-A` sind die üblichen
 Kombinationen `-vE`, `-vT` und `-vET`.
 
-Eine Quelle, die nicht gelesen werden kann, stoppt den Befehl, bevor
-eine spätere Quelle berührt wird; bereits geschriebene Bytes bleiben
-geschrieben.
+Eine Quelle, die nicht gelesen werden kann, wird gemeldet, und die
+nächste wird trotzdem gelesen.
 
 ## OPTIONS
 
@@ -76,8 +75,8 @@ geschrieben.
 
 - `0` — jede Quelle wurde geschrieben.
 - `1` — eine Quelle konnte nicht gelesen oder die Ausgabe nicht
-  zugestellt werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  zugestellt werden. Eine nicht verstandene Befehlszeile endet ebenfalls
+  mit `1`.
 
 ## ENVIRONMENT
 

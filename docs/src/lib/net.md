@@ -504,7 +504,7 @@ Every name and label a peer sends is display text no consumer may trust, so
 (the octets in presentation form when it does not decode), and `DisplayLabel`
 renders a label for a display that draws text — printable Unicode kept, as
 DNS-SD instance names are written, and every character `lib/util`'s
-`utf8::is_hidden` names — a control, a line or paragraph separator, a
+`tairix_visible::is_hidden` names — a control, a line or paragraph separator, a
 bidirectional control, a default-ignorable character — escaped as `\DDD`, so no
 label can pass for another by an invisible difference. `mdns::TxtStrings::over`
 walks the length-prefixed strings of any `TXT` rdata.
@@ -807,9 +807,7 @@ than in each such driver.
 
 `TcpSegmenter` splits a `FrameOffload::TxSegment` super-frame into wire
 segments. A device with a segmentation engine forwards the request (the
-`virtio_net` path); a device without one — the Broadcom GENET, and the case
-Linux's `net/core/tso.c` serves for `mvneta`, `mvpp2`, and `fec` — splits it
-here and still gets the offload's real win: one ring slot and one stack
+`virtio_net` path); a device without one splits it here and still gets the offload's real win: one ring slot and one stack
 transmit pass for tens of wire packets. Each emitted segment is the
 super-frame's `hdr_len`-byte header plus at most `gso_size` payload bytes,
 with the header retargeted: the IPv4 total length and a distinct
@@ -1190,7 +1188,7 @@ The symmetric transmit path lets a device that negotiated
 interface advertised the offload and the segment is a single unfragmented
 frame, `send_tcp` writes it through `ChecksumMode::Partial`: the checksum
 field holds only the folded pseudo-header sum (`Checksum::partial`, the
-uncomplemented fold Linux's `CHECKSUM_PARTIAL` leaves), and the frame
+uncomplemented fold virtio 1.2 §5.1.6.2 asks for), and the frame
 carries a `TxOffload::PartialChecksum { csum_start, csum_offset }`
 descriptor whose offsets address the transport checksum within the
 Ethernet frame (14 + IPv4 20 or IPv6 40, then the TCP header's 16-byte
@@ -1225,8 +1223,8 @@ and SACK recovery always stay per-MSS, so a lost super-segment recovers as
 ordinary segments. `send_tcp` emits it as one IP packet — never
 IP-fragmented, never MTU-refused — carrying `TxOffload::TcpSegment {
 csum_start, csum_offset, gso_size, hdr_len, ipv6 }` and a **length-0**
-pseudo-header partial checksum (`ChecksumMode::PartialGso`, matching
-Linux's `CHECKSUM_PARTIAL` for GSO), so the device adds each split
+pseudo-header partial checksum (`ChecksumMode::PartialGso`), so the device
+adds each split
 segment's own length before folding. `TSO_MAX_PAYLOAD` bounds the one IP
 packet to the 16-bit length field for either family.
 `tcp_v4_tx_segmentation_offload_matches_the_software_path` splits the

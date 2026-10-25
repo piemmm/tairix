@@ -60,6 +60,9 @@ extern crate alloc;
 use tairix_abi::cpufreq::{CpuFreqLimits, CpuFreqTarget};
 use tairix_abi::driver::DmaReach;
 use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
+use tairix_abi::fs::{
+    Access, AtFlags, LinkFlags, NodeExpect, PathAt, RenameFlags, UnlinkFlags, FD_CWD,
+};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 pub use tairix_abi::seat::ReleaseSurface;
@@ -98,7 +101,7 @@ pub mod net;
 pub mod pressure;
 
 mod replace;
-pub use replace::{replace_file, staging_name, ParentDir};
+pub use replace::{replace_file, replace_with_link, staging_name, NewLink, ParentDir};
 
 pub mod servicenotice;
 
@@ -440,6 +443,9 @@ const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
 /// `fs_mkdir` syscall number (as above).
 const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 
+/// `fs_umask` syscall number (as above).
+const NUM_FS_UMASK: u64 = SyscallNumber::FS_UMASK.as_u16() as u64;
+
 /// `fs_unlink` syscall number (as above).
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
@@ -463,6 +469,9 @@ const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
 const NUM_FS_ATTR_SET: u64 = SyscallNumber::FS_ATTR_SET.as_u16() as u64;
 const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
 const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
+
+/// `fs_access` syscall number (as above).
+const NUM_FS_ACCESS: u64 = SyscallNumber::FS_ACCESS.as_u16() as u64;
 /// `port_bind` syscall number (as above).
 const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
 /// `port_admit` syscall number (as above).
@@ -1603,6 +1612,42 @@ pub fn spawn_attached(
     spawn_encoded(path, &attach.to_le_bytes(), &block)
 }
 
+/// [`spawn_attached`] with the child started in `working_directory`,
+/// resolved as the child from this process's working directory: a spawner may
+/// start a child where only the child may go, as login starts a session in a
+/// home its own identity cannot enter. A directory the child may not search
+/// refuses the spawn with the resolution's error.
+#[must_use]
+pub fn spawn_attached_in(
+    path: &[u8],
+    attach: &tairix_abi::SpawnAttach,
+    working_directory: &[u8],
+    args: &[&[u8]],
+    env: &[&[u8]],
+) -> i64 {
+    match in_directory(attach, working_directory) {
+        Some(attach) => spawn_attached(path, &attach, args, env),
+        None => -i64::from(Errno::LengthOutOfRange.as_i32()),
+    }
+}
+
+/// `attach` naming `working_directory` from the working directory, or `None`
+/// for a path too long to name.
+fn in_directory(
+    attach: &tairix_abi::SpawnAttach,
+    working_directory: &[u8],
+) -> Option<tairix_abi::SpawnAttach> {
+    let len = u32::try_from(working_directory.len()).ok()?;
+    Some(tairix_abi::SpawnAttach {
+        working_directory: Some(PathAt {
+            dirfd: FD_CWD,
+            len,
+            path: address(working_directory),
+        }),
+        ..*attach
+    })
+}
+
 /// The console-and-credential spawn [`spawn`] and [`spawn_with`] issue, in
 /// an otherwise all-`Inherit` attach block.
 ///
@@ -1634,9 +1679,10 @@ fn spawn_encoded(path: &[u8], attach: &[u8], strings: &[u8]) -> i64 {
     };
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `(path, len)`, `(attach, attach_len)`, and `(strings, strings_len)`
-    // against the caller's address space before touching them. All three
-    // slices are live shared `&[u8]`s for the duration of the call, so
-    // each `(ptr, len)` pair denotes readable memory.
+    // against the caller's address space before touching them, as it does
+    // the working directory a `PathAt` inside `attach` may name. All three
+    // slices, and any path that record names, are live shared memory for the
+    // duration of the call, so each `(ptr, len)` pair denotes readable bytes.
     let ret = unsafe {
         raw_syscall(
             NUM_SPAWN,
@@ -2131,8 +2177,8 @@ pub fn sched_set_realtime(realtime: bool) -> i64 {
 /// access, so a mapping may exceed RAM by orders of magnitude (a
 /// multi-terabyte file is viewed through the pages actually touched). `fd`
 /// must be open for reading and filesystem-backed; every demand-paged read
-/// is re-checked by the secured VFS under the mapping-time identity, and
-/// the mapping survives a later `fs_close(fd)`. Touching a page wholly
+/// is checked as a read through `fd` would be, and the mapping survives a
+/// later `fs_close(fd)`. Touching a page wholly
 /// at/past end-of-file terminates the process (the `SIGBUS` analogue), so
 /// callers bound their accesses by the file size (`fs_stat`). The mapping
 /// is never writable and never executable (W^X).
@@ -3704,6 +3750,56 @@ pub fn call_cancel(endpoint: u64, ticket: u64) -> i64 {
     ret as i64
 }
 
+/// Await the reply to the call `ticket` posted to `endpoint`, copying it into
+/// `reply`: [`call_reap`] each time the wait-set `set` wakes.
+///
+/// `set` must hold the endpoint's [`WaitSourceKind::CallReply`] member — which
+/// the call's deadline readies, as the endpoint's end does — and no other
+/// member that can stay ready, so every wake is this call's and no wait
+/// outlasts its answer.
+///
+/// # Errors
+///
+/// The reap's refusal — [`Errno::TimedOut`] once a deadline passes
+/// unanswered, [`Errno::NotFound`] for an endpoint that ended — or the wait's,
+/// the call then withdrawn.
+pub fn call_await(set: u64, endpoint: u64, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno> {
+    loop {
+        match call_reap(endpoint, ticket, reply).map_err(Errno::from_syscall) {
+            Err(Errno::WouldBlock) => {}
+            reaped => return reaped,
+        }
+        let mut token = 0u64;
+        let waited = waitset_wait(set, u64::MAX, &mut token);
+        if waited < 0 {
+            // A withdrawal that finds the call already answered has nothing
+            // left to withdraw.
+            let _ = call_cancel(endpoint, ticket);
+            return Err(Errno::from_syscall(waited));
+        }
+    }
+}
+
+/// Call `endpoint` with `request`, its answer copied into `reply` within
+/// `deadline_ns`: [`call_post`], then [`call_await`] on `set`.
+///
+/// A timed-out call says nothing of what the server did: one still queued at
+/// its deadline was never received, one in service may have been carried out.
+///
+/// # Errors
+///
+/// The post's refusal, or [`call_await`]'s.
+pub fn call_within(
+    set: u64,
+    endpoint: u64,
+    request: &[u8],
+    reply: &mut [u8],
+    deadline_ns: u64,
+) -> Result<usize, Errno> {
+    let ticket = call_post(endpoint, request, deadline_ns).map_err(Errno::from_syscall)?;
+    call_await(set, endpoint, ticket, reply)
+}
+
 /// Emit one pre-encoded diagnostic [`tairix_abi::LogRecordRef`] wire image to
 /// the kernel's diagnostic log sink (`SyscallNumber::LOG_EMIT`).
 ///
@@ -5212,8 +5308,9 @@ fn count_result(ret: u64, cap: usize) -> Result<usize, i64> {
     Ok((ret as usize).min(cap))
 }
 
-/// Open the file or directory at the absolute `path` with `flags`
-/// (`SyscallNumber::FS_OPEN`), returning the new descriptor number.
+/// Open the file or directory at `path` with `flags`
+/// (`SyscallNumber::FS_OPEN`), a relative `path` resolved from the working
+/// directory, returning the new descriptor number.
 ///
 /// The kernel resolves and authorises `path` through its secured VFS under
 /// the caller's kernel-attested identity, applying the
@@ -5224,24 +5321,83 @@ fn count_result(ret: u64, cap: usize) -> Result<usize, i64> {
 /// the higher-level [`File`] / [`Dir`] wrappers build on; a program names a
 /// descriptor, never a device.
 ///
+/// A file [`OpenFlags::CREATE`] makes is born with `mode` less the process's
+/// [`umask`]; an existing one keeps its own. `mode` must fit
+/// [`tairix_abi::FS_MODE_MASK`], and be `0` when `flags` do not create.
+///
 /// Returns the descriptor (≥ 0) or `-errno` (recover the
 /// [`tairix_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
 /// signed-result convention; the wrapper hides no error.
 #[must_use]
+pub fn fs_open(path: &[u8], flags: OpenFlags, mode: u32) -> i64 {
+    fs_open_at(FD_CWD, path, flags, mode)
+}
+
+/// [`fs_open`] with a relative `path` resolved from the directory `dirfd`
+/// holds, or from the working directory for [`FD_CWD`].
+#[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 fd-result encoding (fd ≥ 0, else -errno).
-pub fn fs_open(path: &[u8], flags: OpenFlags) -> i64 {
-    let ptr = path.as_ptr() as usize as u64;
+fn fs_open_at(dirfd: u32, path: &[u8], flags: OpenFlags, mode: u32) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // the `(ptr, len)` pair against the caller's address space before reading
-    // it. `path` is a live shared `&[u8]` for the duration of the call, so the
-    // pair denotes readable memory.
+    // the path's `(address, len)` pair against the caller's address space
+    // before reading it, and `path` is a live shared slice for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_OPEN,
-            [ptr, path.len() as u64, u64::from(flags.bits()), 0, 0, 0],
+            [
+                u64::from(dirfd),
+                address(path),
+                path.len() as u64,
+                u64::from(flags.bits()),
+                u64::from(mode),
+                0,
+            ],
         )
     };
     ret as i64
+}
+
+/// The register a byte operand travels in: its address, which a slice never
+/// has null, so an empty operand is a well-formed one the kernel reads no
+/// byte of.
+fn address(bytes: &[u8]) -> u64 {
+    bytes.as_ptr() as usize as u64
+}
+
+/// The register the path of a call that may name its descriptor's own node
+/// travels in: null for the empty path of [`AtFlags::EMPTY_PATH`], which
+/// names no memory, else the path's address.
+fn path_or_null(path: &[u8], flags: AtFlags) -> u64 {
+    if path.is_empty() && flags.contains(AtFlags::EMPTY_PATH) {
+        0
+    } else {
+        address(path)
+    }
+}
+
+/// The `PathAt` record naming `path` from `dirfd`, or `None` for a path
+/// longer than the record's length field holds, which the kernel's own bound
+/// refuses anyway.
+fn path_at(dirfd: u32, path: &[u8]) -> Option<[u8; PathAt::WIRE_LEN]> {
+    let len = u32::try_from(path.len()).ok()?;
+    Some(
+        PathAt {
+            dirfd,
+            len,
+            path: address(path),
+        }
+        .to_le_bytes(),
+    )
+}
+
+/// A `(0, else -errno)` syscall result as a [`Result`], the refusal kept as
+/// the raw `-errno`.
+fn errno_result(ret: i64) -> Result<(), i64> {
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(())
+    }
 }
 
 /// Resolve the resource reference `reference` (e.g. `b"sys:random"`) and open
@@ -5552,12 +5708,12 @@ pub fn fs_punch(fd: u32, offset: u64, len: u64) -> i64 {
     ret as i64
 }
 
-/// Flush the mounted filesystem's pending writes to its backing store
-/// (`SyscallNumber::FS_SYNC`).
+/// Flush the pending writes of the volume the descriptor `fd` is on to its
+/// backing store (`SyscallNumber::FS_SYNC`).
 ///
-/// `fd` must be one of the caller's own live handles on the mounted volume (a
-/// forged or foreign number fails closed); the flush itself is
-/// filesystem-wide. Returns `0` on success or `-errno`.
+/// `fd` must be one of the caller's own live handles (a forged or foreign
+/// number fails closed); a catalog descriptor has nothing to flush. Returns
+/// `0` on success or `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn fs_sync(fd: u32) -> i64 {
@@ -5568,82 +5724,37 @@ pub fn fs_sync(fd: u32) -> i64 {
     ret as i64
 }
 
-/// Create a directory at the absolute `path` (`SyscallNumber::FS_MKDIR`).
+/// Create a directory at `path` (`SyscallNumber::FS_MKDIR`), a relative
+/// `path` resolved from the working directory, born with `mode` less the
+/// process's [`umask`].
 ///
 /// The kernel resolves the parent and authorises the create through the
 /// secured VFS under the caller's attested identity (an existing path, a
-/// read-only mount, or a permission denial fails closed). Returns `0` on
-/// success or `-errno`.
+/// read-only mount, a permission denial, or a `mode` past
+/// [`tairix_abi::FS_MODE_MASK`] fails closed); a directory made in a
+/// set-group-ID directory takes that directory's group and bit. Returns `0`
+/// on success or `-errno`.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_mkdir(path: &[u8]) -> i64 {
-    let ptr = path.as_ptr() as usize as u64;
-    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
-    // `(ptr, len)` pair against the caller's address space before reading it.
-    // `path` is a live shared `&[u8]` for the duration of the call.
-    let ret = unsafe { raw_syscall(NUM_FS_MKDIR, [ptr, path.len() as u64, 0, 0, 0, 0]) };
-    ret as i64
+pub fn fs_mkdir(path: &[u8], mode: u32) -> i64 {
+    fs_mkdir_at(FD_CWD, path, mode)
 }
 
-/// Remove the file or empty directory at the absolute `path`
-/// (`SyscallNumber::FS_UNLINK`).
-///
-/// With [`UnlinkFlags::DIRECTORY`](tairix_abi::UnlinkFlags::DIRECTORY) the
-/// removal succeeds only when the name is an (empty) directory — the atomic
-/// `rmdir` posture, decided by the filesystem under its own lock; a
-/// non-directory is refused with the dedicated `Errno::NotADirectory`.
-/// [`UnlinkFlags::empty`](tairix_abi::UnlinkFlags::empty) removes the named
-/// file or (empty) directory.
-///
-/// The kernel authorises the removal through the secured VFS under the
-/// caller's attested identity (a missing path, a non-empty directory, a
-/// read-only mount, or a permission denial fails closed). Returns `0` on
-/// success or `-errno`.
+/// [`fs_mkdir`] with a relative `path` resolved from `dirfd`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_unlink(path: &[u8], flags: tairix_abi::UnlinkFlags) -> i64 {
-    let ptr = path.as_ptr() as usize as u64;
+fn fs_mkdir_at(dirfd: u32, path: &[u8], mode: u32) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
-    // `(ptr, len)` pair against the caller's address space before reading it.
-    // `path` is a live shared `&[u8]` for the duration of the call.
+    // path's `(address, len)` pair against the caller's address space before
+    // reading it, and `path` is a live shared slice for the call.
     let ret = unsafe {
         raw_syscall(
-            NUM_FS_UNLINK,
-            [ptr, path.len() as u64, u64::from(flags.bits()), 0, 0, 0],
-        )
-    };
-    ret as i64
-}
-
-/// Move the file or directory at absolute `src` to absolute `dst`
-/// (`SyscallNumber::FS_RENAME`).
-///
-/// Both paths must resolve under the same mounted volume. The kernel
-/// authorises the move through the secured VFS under the caller's attested
-/// identity (a missing source, a non-empty directory destination, a
-/// directory-into-its-own-subtree move, a read-only mount, or a permission
-/// denial fails closed; a cross-mount move is refused with the dedicated
-/// `Errno::CrossVolume`, the `EXDEV` equivalent a mover falls back to
-/// copy-then-remove on). With [`tairix_abi::RenameFlags::NO_REPLACE`] an
-/// occupied destination refuses the move with `Errno::AlreadyExists` instead
-/// of being replaced. Returns `0` on success or `-errno`.
-#[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_rename(src: &[u8], dst: &[u8], flags: tairix_abi::RenameFlags) -> i64 {
-    let src_ptr = src.as_ptr() as usize as u64;
-    let dst_ptr = dst.as_ptr() as usize as u64;
-    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // both `(ptr, len)` pairs against the caller's address space before
-    // reading them. `src`/`dst` are live shared slices for the call.
-    let ret = unsafe {
-        raw_syscall(
-            NUM_FS_RENAME,
+            NUM_FS_MKDIR,
             [
-                src_ptr,
-                src.len() as u64,
-                dst_ptr,
-                dst.len() as u64,
-                u64::from(flags.bits()),
+                u64::from(dirfd),
+                address(path),
+                path.len() as u64,
+                u64::from(mode),
+                0,
                 0,
             ],
         )
@@ -5651,8 +5762,143 @@ pub fn fs_rename(src: &[u8], dst: &[u8], flags: tairix_abi::RenameFlags) -> i64 
     ret as i64
 }
 
-/// Create a symbolic link at the absolute `link` whose stored target is
-/// `target` (`SyscallNumber::FS_SYMLINK`, the `symlink(2)` shape).
+/// Replace this process's file mode creation mask with `mask`
+/// (`SyscallNumber::FS_UMASK`), answering the mask it replaced.
+///
+/// A file or directory the process creates is born without the bits its mask
+/// holds, and a child launched afterwards starts with the same mask. Only the
+/// permission bits are a mask's, as POSIX's `umask` takes them, so the call is
+/// never refused.
+#[must_use]
+pub fn umask(mask: u32) -> u32 {
+    fs_umask(mask & tairix_abi::fs::FS_PERMISSION_BITS)
+}
+
+/// This process's file mode creation mask, left as it is
+/// (`SyscallNumber::FS_UMASK` asked [`tairix_abi::fs::FS_UMASK_QUERY`]).
+#[must_use]
+pub fn umask_get() -> u32 {
+    fs_umask(tairix_abi::fs::FS_UMASK_QUERY)
+}
+
+/// One `fs_umask` call, its answer read as a mask. The kernel answers one
+/// within `0o777`; anything else reads as the mask that withholds every bit,
+/// so a garbled answer never grants one.
+fn fs_umask(mask: u32) -> u32 {
+    use tairix_abi::fs::FS_PERMISSION_BITS;
+    // SAFETY: `raw_syscall` is always safe to invoke; `fs_umask` takes one
+    // by-value mask and no memory operand.
+    let ret = unsafe { raw_syscall(NUM_FS_UMASK, [u64::from(mask), 0, 0, 0, 0, 0]) };
+    u32::try_from(ret)
+        .ok()
+        .filter(|answer| answer & !FS_PERMISSION_BITS == 0)
+        .unwrap_or(FS_PERMISSION_BITS)
+}
+
+/// Remove the file or empty directory at `path` (`SyscallNumber::FS_UNLINK`),
+/// a relative `path` resolved from the working directory.
+///
+/// With [`UnlinkFlags::DIRECTORY`] the removal succeeds only when the name is
+/// an (empty) directory — the atomic `rmdir` posture, decided by the
+/// filesystem under its own lock; a non-directory is refused with the
+/// dedicated `Errno::NotADirectory`. [`UnlinkFlags::empty`] removes the named
+/// file or (empty) directory.
+///
+/// The kernel authorises the removal through the secured VFS under the
+/// caller's attested identity (a missing path, a non-empty directory, a
+/// read-only mount, or a permission denial fails closed). Returns `0` on
+/// success or `-errno`.
+#[must_use]
+pub fn fs_unlink(path: &[u8], flags: UnlinkFlags) -> i64 {
+    fs_unlink_at(FD_CWD, path, flags, None)
+}
+
+/// [`fs_unlink`] with a relative `path` resolved from `dirfd`, and `expect`
+/// — required by an `EXPECT_*` flag, and only with one — checked under the
+/// volume's lock: a name no longer holding the node it describes is refused
+/// with `Errno::Stale`, changing nothing.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+fn fs_unlink_at(dirfd: u32, path: &[u8], flags: UnlinkFlags, expect: Option<&NodeExpect>) -> i64 {
+    let expected = expect.map(NodeExpect::to_le_bytes);
+    let expected_at = expected.as_ref().map_or(0, |record| address(record));
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // path's `(address, len)` pair and copies the expectation record from the
+    // caller's address space before acting. `path` and `expected` are live
+    // for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_UNLINK,
+            [
+                u64::from(dirfd),
+                address(path),
+                path.len() as u64,
+                u64::from(flags.bits()),
+                expected_at,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Move the file or directory at `src` to `dst` (`SyscallNumber::FS_RENAME`),
+/// relative paths resolved from the working directory.
+///
+/// Both paths must resolve under the same mounted volume. The kernel
+/// authorises the move through the secured VFS under the caller's attested
+/// identity (a missing source, a non-empty directory destination, a
+/// directory-into-its-own-subtree move, a read-only mount, or a permission
+/// denial fails closed; a cross-mount move is refused with the dedicated
+/// `Errno::CrossVolume`, the `EXDEV` equivalent a mover falls back to
+/// copy-then-remove on). With [`RenameFlags::NO_REPLACE`] an occupied
+/// destination refuses the move with `Errno::AlreadyExists` instead of being
+/// replaced. Returns `0` on success or `-errno`.
+#[must_use]
+pub fn fs_rename(src: &[u8], dst: &[u8], flags: RenameFlags) -> i64 {
+    fs_rename_at(FD_CWD, src, FD_CWD, dst, flags, None)
+}
+
+/// [`fs_rename`] with `src` resolved from `src_dir` and `dst` from `dst_dir`,
+/// and `expect` describing the source as [`fs_unlink_at`] reads it.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+fn fs_rename_at(
+    src_dir: u32,
+    src: &[u8],
+    dst_dir: u32,
+    dst: &[u8],
+    flags: RenameFlags,
+    expect: Option<&NodeExpect>,
+) -> i64 {
+    let (Some(from), Some(to)) = (path_at(src_dir, src), path_at(dst_dir, dst)) else {
+        return -i64::from(Errno::LengthOutOfRange.as_i32());
+    };
+    let expected = expect.map(NodeExpect::to_le_bytes);
+    let expected_at = expected.as_ref().map_or(0, |record| address(record));
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel copies both
+    // `PathAt` records and the expectation record from the caller's address
+    // space, and validates the paths they name, before acting. The records
+    // and the paths they point at are live for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_RENAME,
+            [
+                address(&from),
+                address(&to),
+                u64::from(flags.bits()),
+                expected_at,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Create a symbolic link at `link` whose stored target is `target`
+/// (`SyscallNumber::FS_SYMLINK`, the `symlink(2)` shape), a relative `link`
+/// resolved from the working directory.
 ///
 /// `target` is the link's **body**, not a path the kernel walks: it is stored
 /// verbatim, may be relative, may carry `.`/`..`, and is never resolved at
@@ -5667,22 +5913,26 @@ pub fn fs_rename(src: &[u8], dst: &[u8], flags: tairix_abi::RenameFlags) -> i64 
 /// format with no link object type refuses with `Errno::NotSupported` rather
 /// than approximating one. Returns `0` on success or `-errno`.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn fs_symlink(target: &[u8], link: &[u8]) -> i64 {
-    let target_ptr = target.as_ptr() as usize as u64;
-    let link_ptr = link.as_ptr() as usize as u64;
+    fs_symlink_at(target, FD_CWD, link)
+}
+
+/// [`fs_symlink`] with a relative `link` resolved from `dirfd`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+fn fs_symlink_at(target: &[u8], dirfd: u32, link: &[u8]) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // both `(ptr, len)` pairs against the caller's address space before
-    // reading them. `target`/`link` are live shared slices for the call.
+    // both `(address, len)` pairs against the caller's address space before
+    // reading them. `target` and `link` are live shared slices for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_SYMLINK,
             [
-                target_ptr,
+                address(target),
                 target.len() as u64,
-                link_ptr,
+                u64::from(dirfd),
+                address(link),
                 link.len() as u64,
-                0,
                 0,
             ],
         )
@@ -5690,17 +5940,18 @@ pub fn fs_symlink(target: &[u8], link: &[u8]) -> i64 {
     ret as i64
 }
 
-/// Add the absolute `link` as a second name for the node the absolute
-/// `existing` already names (`SyscallNumber::FS_LINK`, the `link(2)` shape).
+/// Add `link` as a second name for the node `existing` already names
+/// (`SyscallNumber::FS_LINK`, the `link(2)` shape), relative paths resolved
+/// from the working directory.
 ///
 /// A hard link, not a symbolic one: both names reach the same node, so a
 /// write through either is visible through the other and the node's storage
 /// survives until the last name is unlinked. With an empty `flags` **neither
 /// final component is followed** — the node that gains a name is the one
 /// spelled, never one a symbolic link redirects to (POSIX `link()`).
-/// [`LinkFlags::FOLLOW`](tairix_abi::LinkFlags::FOLLOW) is the
-/// `linkat(AT_SYMLINK_FOLLOW)` posture, resolving the existing name's final
-/// link; the new name is never followed under either.
+/// [`LinkFlags::FOLLOW`] is the `linkat(AT_SYMLINK_FOLLOW)` posture,
+/// resolving the existing name's final link; the new name is never followed
+/// under either.
 ///
 /// Both paths must lie on one mounted volume (`Errno::CrossVolume`
 /// otherwise), a directory is refused (`Errno::IsADirectory`), a node whose
@@ -5709,22 +5960,37 @@ pub fn fs_symlink(target: &[u8], link: &[u8]) -> i64 {
 /// with `Errno::NotSupported`. The new name confers no authority the caller
 /// did not already hold over the node. Returns `0` on success or `-errno`.
 #[must_use]
+pub fn fs_link(existing: &[u8], link: &[u8], flags: LinkFlags) -> i64 {
+    fs_link_at(FD_CWD, existing, FD_CWD, link, flags)
+}
+
+/// [`fs_link`] with `existing` resolved from `existing_dir` and `link` from
+/// `link_dir`.
+#[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_link(existing: &[u8], link: &[u8], flags: tairix_abi::LinkFlags) -> i64 {
-    let existing_ptr = existing.as_ptr() as usize as u64;
-    let link_ptr = link.as_ptr() as usize as u64;
-    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // both `(ptr, len)` pairs against the caller's address space before
-    // reading them. `existing`/`link` are live shared slices for the call.
+fn fs_link_at(
+    existing_dir: u32,
+    existing: &[u8],
+    link_dir: u32,
+    link: &[u8],
+    flags: LinkFlags,
+) -> i64 {
+    let (Some(from), Some(to)) = (path_at(existing_dir, existing), path_at(link_dir, link)) else {
+        return -i64::from(Errno::LengthOutOfRange.as_i32());
+    };
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel copies both
+    // `PathAt` records from the caller's address space and validates the
+    // paths they name before acting. The records and the paths they point at
+    // are live for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_LINK,
             [
-                existing_ptr,
-                existing.len() as u64,
-                link_ptr,
-                link.len() as u64,
+                address(&from),
+                address(&to),
                 u64::from(flags.bits()),
+                0,
+                0,
                 0,
             ],
         )
@@ -5732,8 +5998,9 @@ pub fn fs_link(existing: &[u8], link: &[u8], flags: tairix_abi::LinkFlags) -> i6
     ret as i64
 }
 
-/// Read the stored target of the symbolic link at the absolute `path` into
-/// `out` (`SyscallNumber::FS_READLINK`, the `readlink(2)` shape).
+/// Read the stored target of the symbolic link at `path` into `out`
+/// (`SyscallNumber::FS_READLINK`, the `readlink(2)` shape), a relative `path`
+/// resolved from the working directory.
 ///
 /// The final component is never followed — the call is about the link
 /// itself — and the target comes back exactly as it was stored, still
@@ -5744,25 +6011,38 @@ pub fn fs_link(existing: &[u8], link: &[u8], flags: tairix_abi::LinkFlags) -> i6
 /// truncated one, which would name somewhere else entirely, so the caller
 /// retries with a larger buffer.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (length, else -errno).
 pub fn fs_readlink(path: &[u8], out: &mut [u8]) -> i64 {
-    let path_ptr = path.as_ptr() as usize as u64;
+    fs_readlink_at(FD_CWD, path, out)
+}
+
+/// [`fs_readlink`] with a relative `path` resolved from `dirfd`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (length, else -errno).
+fn fs_readlink_at(dirfd: u32, path: &[u8], out: &mut [u8]) -> i64 {
     let out_ptr = out.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // both `(ptr, len)` pairs against the caller's address space before
+    // both `(address, len)` pairs against the caller's address space before
     // touching them, and writes at most `out.len()` bytes. Both slices are
     // live for the duration of the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_READLINK,
-            [path_ptr, path.len() as u64, out_ptr, out.len() as u64, 0, 0],
+            [
+                u64::from(dirfd),
+                address(path),
+                path.len() as u64,
+                out_ptr,
+                out.len() as u64,
+                0,
+            ],
         )
     };
     ret as i64
 }
 
-/// Canonicalise the absolute `path` into `out` (`SyscallNumber::FS_REALPATH`,
-/// the `realpath(3)` shape).
+/// Canonicalise `path` into `out` (`SyscallNumber::FS_REALPATH`, the
+/// `realpath(3)` shape), a relative `path` resolved from the working
+/// directory.
 ///
 /// The kernel resolves every component itself — each symbolic link followed,
 /// each `..` applied to the nodes the walk really traversed, search
@@ -5782,22 +6062,21 @@ pub fn fs_readlink(path: &[u8], out: &mut [u8]) -> i64 {
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (length, else -errno).
 pub fn fs_realpath(path: &[u8], out: &mut [u8], mode: tairix_abi::RealpathMode) -> i64 {
-    let path_ptr = path.as_ptr() as usize as u64;
     let out_ptr = out.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // both `(ptr, len)` pairs against the caller's address space before
+    // both `(address, len)` pairs against the caller's address space before
     // touching them, and writes at most `out.len()` bytes. Both slices are
     // live for the duration of the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_REALPATH,
             [
-                path_ptr,
+                u64::from(FD_CWD),
+                address(path),
                 path.len() as u64,
                 out_ptr,
                 out.len() as u64,
                 u64::from(mode.as_u32()),
-                0,
             ],
         )
     };
@@ -5832,9 +6111,14 @@ pub fn realpath(
 /// kernel checks a target's grammar before storing it, so one that is not is
 /// a corrupt or hostile volume, refused rather than copied onward lossily.
 pub fn readlink(path: &str) -> Result<alloc::string::String, Errno> {
+    link_target(FD_CWD, path.as_bytes())
+}
+
+/// [`readlink`] with a relative `path` resolved from `dirfd`.
+fn link_target(dirfd: u32, path: &[u8]) -> Result<alloc::string::String, Errno> {
     // The ABI's own target bound, so one call always suffices.
     let mut buf = answer_buffer(tairix_abi::fs::FS_SYMLINK_MAX)?;
-    let ret = fs_readlink(path.as_bytes(), &mut buf);
+    let ret = fs_readlink_at(dirfd, path, &mut buf);
     text_answer(ret, &buf)
 }
 
@@ -5859,8 +6143,9 @@ fn text_answer(ret: i64, buf: &[u8]) -> Result<alloc::string::String, Errno> {
     Ok(alloc::string::String::from(text))
 }
 
-/// Set the permission bits of the file or directory at the absolute `path`
-/// to `mode` (`SyscallNumber::FS_SET_MODE`, the `chmod(2)` shape).
+/// Set the permission bits of the file or directory at `path` to `mode`
+/// (`SyscallNumber::FS_SET_MODE`, the `chmod(2)` shape), a relative `path`
+/// resolved from the working directory and a final link followed.
 ///
 /// `mode` carries at most [`tairix_abi::FS_MODE_MASK`] (the
 /// owner/group/other `rwx` triads plus the setuid/setgid/sticky bits); any
@@ -5871,24 +6156,39 @@ fn text_answer(ret: i64, buf: &[u8]) -> Result<alloc::string::String, Errno> {
 /// ACL, and capability gate are untouched. Returns `0` on success or
 /// `-errno`.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn fs_set_mode(path: &[u8], mode: u32) -> i64 {
-    let ptr = path.as_ptr() as usize as u64;
+    fs_set_mode_at(FD_CWD, path, mode, AtFlags::empty())
+}
+
+/// [`fs_set_mode`] with a relative `path` resolved from `dirfd`:
+/// [`AtFlags::NO_FOLLOW`] sets a final link's own bits, and
+/// [`AtFlags::EMPTY_PATH`] with an empty `path` those of `dirfd`'s own node.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+fn fs_set_mode_at(dirfd: u32, path: &[u8], mode: u32, flags: AtFlags) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
-    // `(ptr, len)` pair against the caller's address space before reading it.
-    // `path` is a live shared `&[u8]` for the duration of the call.
+    // path's `(address, len)` pair against the caller's address space before
+    // reading it, and `path` is a live shared slice for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_SET_MODE,
-            [ptr, path.len() as u64, u64::from(mode), 0, 0, 0],
+            [
+                u64::from(dirfd),
+                path_or_null(path, flags),
+                path.len() as u64,
+                u64::from(mode),
+                u64::from(flags.bits()),
+                0,
+            ],
         )
     };
     ret as i64
 }
 
-/// Set the owning user and/or group of the file or directory at the
-/// absolute `path` to `uid` / `gid` (`SyscallNumber::FS_SET_OWNER`, the
-/// `chown(2)` / `chgrp(2)` shape).
+/// Set the owning user and/or group of the file or directory at `path` to
+/// `uid` / `gid` (`SyscallNumber::FS_SET_OWNER`, the `chown(2)` / `chgrp(2)`
+/// shape), a relative `path` resolved from the working directory and a final
+/// link followed.
 ///
 /// Pass [`tairix_abi::FS_OWNER_UNCHANGED`] for either field to leave it
 /// unchanged (so an owner-only or group-only change touches only the field
@@ -5901,132 +6201,182 @@ pub fn fs_set_mode(path: &[u8], mode: u32) -> i64 {
 /// and the covering mount must be writable. Returns `0` on success or
 /// `-errno`.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn fs_set_owner(path: &[u8], uid: u32, gid: u32) -> i64 {
-    let ptr = path.as_ptr() as usize as u64;
+    fs_set_owner_at(FD_CWD, path, uid, gid, AtFlags::empty())
+}
+
+/// [`fs_set_owner`] with a relative `path` resolved from `dirfd`, `flags` as
+/// [`fs_set_mode_at`] reads them.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+fn fs_set_owner_at(dirfd: u32, path: &[u8], uid: u32, gid: u32, flags: AtFlags) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
-    // `(ptr, len)` pair against the caller's address space before reading it.
-    // `path` is a live shared `&[u8]` for the duration of the call.
+    // path's `(address, len)` pair against the caller's address space before
+    // reading it, and `path` is a live shared slice for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_SET_OWNER,
-            [ptr, path.len() as u64, u64::from(uid), u64::from(gid), 0, 0],
+            [
+                u64::from(dirfd),
+                path_or_null(path, flags),
+                path.len() as u64,
+                u64::from(uid),
+                u64::from(gid),
+                u64::from(flags.bits()),
+            ],
         )
     };
     ret as i64
 }
 
-/// Read the extended attribute `key` of the file or directory at the
-/// absolute `path` into `value_out` (`SyscallNumber::FS_ATTR_GET`, the
-/// `getxattr(2)` shape).
+/// Read the extended attribute `key` of the node the descriptor `fd` holds
+/// into `value_out` (`SyscallNumber::FS_ATTR_GET`, the `fgetxattr(2)`
+/// shape).
 ///
 /// `key` is a `lib/fsmeta`-grammar `namespace.rest` key of
 /// `1..=`[`tairix_abi::FS_ATTR_KEY_MAX`] bytes. Returns the value's byte
 /// count (a value may be empty), or `-errno`: `Errno::NoData` when the node
 /// carries no such attribute, `Errno::BufferTooSmall` when the value does
 /// not fit `value_out` (never truncated), `Errno::NotSupported` on a mount
-/// whose format stores no attributes, and the usual path/permission
-/// refusals. The kernel authorises through the secured VFS: read permission
-/// on the node, privileged namespaces refused.
+/// whose format stores no attributes. The kernel authorises the read as the
+/// caller: read permission on the node, privileged namespaces refused.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
-pub fn fs_attr_get(path: &[u8], key: &[u8], value_out: &mut [u8]) -> i64 {
+pub fn fs_attr_get(fd: u32, key: &[u8], value_out: &mut [u8]) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // every `(ptr, len)` pair against the caller's address space before
-    // touching it. All three buffers are live for the duration of the call.
+    // both `(address, len)` pairs against the caller's address space before
+    // touching them, and writes at most `value_out.len()` bytes. Both buffers
+    // are live for the duration of the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_ATTR_GET,
             [
-                path.as_ptr() as usize as u64,
-                path.len() as u64,
-                key.as_ptr() as usize as u64,
+                u64::from(fd),
+                address(key),
                 key.len() as u64,
                 value_out.as_mut_ptr() as usize as u64,
                 value_out.len() as u64,
+                0,
             ],
         )
     };
     ret as i64
 }
 
-/// Set (insert or replace) the extended attribute `key` of the file or
-/// directory at the absolute `path` to `value`
-/// (`SyscallNumber::FS_ATTR_SET`, the `setxattr(2)` shape).
+/// Set (insert or replace) the extended attribute `key` of the node the
+/// descriptor `fd` holds to `value` (`SyscallNumber::FS_ATTR_SET`, the
+/// `fsetxattr(2)` shape).
 ///
 /// `value` carries at most [`tairix_abi::FS_ATTR_VALUE_MAX`] opaque bytes;
 /// a larger payload is refused at dispatch with `Errno::LengthOutOfRange`.
 /// The write is one copy-on-write transaction. Returns `0` on success or
 /// `-errno` (`Errno::NoSpace` at the per-inode bounds,
 /// `Errno::NotSupported` on a mount without attribute storage, and the
-/// usual path/permission refusals — write permission on the node, a
-/// writable mount, privileged namespaces refused).
+/// caller's own refusals — write permission on the node, a writable mount,
+/// privileged namespaces refused).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
-pub fn fs_attr_set(path: &[u8], key: &[u8], value: &[u8]) -> i64 {
-    // SAFETY: as `fs_attr_get`; all three buffers are live shared slices.
+pub fn fs_attr_set(fd: u32, key: &[u8], value: &[u8]) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(address, len)` pairs against the caller's address space before
+    // reading them. Both buffers are live shared slices for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_ATTR_SET,
             [
-                path.as_ptr() as usize as u64,
-                path.len() as u64,
-                key.as_ptr() as usize as u64,
+                u64::from(fd),
+                address(key),
                 key.len() as u64,
-                value.as_ptr() as usize as u64,
+                address(value),
                 value.len() as u64,
+                0,
             ],
         )
     };
     ret as i64
 }
 
-/// Yield the `index`-th visible extended-attribute key of the file or
-/// directory at the absolute `path` into `key_out`
-/// (`SyscallNumber::FS_ATTR_LIST`).
+/// Yield the `index`-th visible extended-attribute key of the node the
+/// descriptor `fd` holds into `key_out` (`SyscallNumber::FS_ATTR_LIST`).
 ///
 /// Returns the key's byte count, `0` once `index` is past the last visible
 /// attribute (a real key is never empty), or `-errno`. Keys whose namespace
 /// the caller may not read are omitted, never revealed.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
-pub fn fs_attr_list(path: &[u8], index: u64, key_out: &mut [u8]) -> i64 {
-    // SAFETY: as `fs_attr_get`; both buffers are live for the call.
+pub fn fs_attr_list(fd: u32, index: u64, key_out: &mut [u8]) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(address, len)` pair against the caller's address space before writing
+    // at most `key_out.len()` bytes, and `key_out` is live for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_ATTR_LIST,
             [
-                path.as_ptr() as usize as u64,
-                path.len() as u64,
+                u64::from(fd),
                 index,
                 key_out.as_mut_ptr() as usize as u64,
                 key_out.len() as u64,
                 0,
+                0,
             ],
         )
     };
     ret as i64
 }
 
-/// Remove the extended attribute `key` from the file or directory at the
-/// absolute `path` (`SyscallNumber::FS_ATTR_REMOVE`, the `removexattr(2)`
-/// shape).
+/// Remove the extended attribute `key` from the node the descriptor `fd`
+/// holds (`SyscallNumber::FS_ATTR_REMOVE`, the `fremovexattr(2)` shape).
 ///
 /// Returns `0` on success or `-errno` (`Errno::NoData` when no such
 /// attribute is stored, `Errno::NotSupported` on a mount without attribute
-/// storage, and the usual path/permission refusals).
+/// storage, and the caller's own refusals).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding.
-pub fn fs_attr_remove(path: &[u8], key: &[u8]) -> i64 {
-    // SAFETY: as `fs_attr_get`; both buffers are live shared slices.
+pub fn fs_attr_remove(fd: u32, key: &[u8]) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(address, len)` pair against the caller's address space before reading
+    // it, and `key` is a live shared slice for the call.
     let ret = unsafe {
         raw_syscall(
             NUM_FS_ATTR_REMOVE,
+            [u64::from(fd), address(key), key.len() as u64, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Change the calling process's working directory to `path`
+/// (`SyscallNumber::FS_CHDIR`), a relative `path` resolved from the working
+/// directory.
+///
+/// The kernel resolves `path` and requires a directory the caller may search,
+/// under the caller's attested identity, gated on
+/// [`tairix_abi::CapabilityId::FS_ACCESS`]; the working directory then holds
+/// that directory itself, so it follows the directory wherever it is moved.
+/// A refusal leaves the working directory unchanged. Returns `0` on success
+/// or `-errno`.
+#[must_use]
+pub fn fs_chdir(path: &[u8]) -> i64 {
+    fs_chdir_at(FD_CWD, path, AtFlags::empty())
+}
+
+/// [`fs_chdir`] with a relative `path` resolved from `dirfd`;
+/// [`AtFlags::EMPTY_PATH`] with an empty `path` enters `dirfd`'s own
+/// directory.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+fn fs_chdir_at(dirfd: u32, path: &[u8], flags: AtFlags) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // path's `(address, len)` pair against the caller's address space before
+    // reading it, and `path` is a live shared slice for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_CHDIR,
             [
-                path.as_ptr() as usize as u64,
+                u64::from(dirfd),
+                path_or_null(path, flags),
                 path.len() as u64,
-                key.as_ptr() as usize as u64,
-                key.len() as u64,
+                u64::from(flags.bits()),
                 0,
                 0,
             ],
@@ -6035,116 +6385,64 @@ pub fn fs_attr_remove(path: &[u8], key: &[u8]) -> i64 {
     ret as i64
 }
 
-/// Every visible extended-attribute key of the file or directory at the
-/// absolute `path`, in the backing's stable order.
+/// Whether the caller may reach the node at `path` as `want` asks
+/// (`SyscallNumber::FS_ACCESS`), a relative `path` resolved from the working
+/// directory and a final link followed unless `flags` carry
+/// [`AtFlags::NO_FOLLOW`].
 ///
-/// The one drain of [`fs_attr_list`]'s index iteration every consumer shares,
-/// so no tool re-derives the end-of-list rule: a return of `0` is the end (a
-/// stored key is never empty) and a negative value the frozen errno. Keys
-/// whose namespace the caller may not read never appear — the kernel omits
-/// them, so this sees only what it may show.
-///
-/// Keys are UTF-8 by the shared `lib/fsmeta` grammar; one that is not comes
-/// from a hostile or corrupt backing and is refused with `OutOfRange` rather
-/// than lossily shown.
-///
-/// # Errors
-///
-/// The raw negative kernel result (`-errno`) of the failing `fs_attr_list` —
-/// `-NotSupported` on a mount whose format stores no attributes, which a
-/// caller states rather than reporting as an empty set — or `-OutOfRange` for
-/// a key the backing spelled malformed.
-pub fn fs_attr_keys(path: &[u8]) -> Result<alloc::vec::Vec<alloc::string::String>, i64> {
-    let out_of_range = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
-    let mut keys = alloc::vec::Vec::new();
-    let mut buf = [0u8; tairix_abi::FS_ATTR_KEY_MAX];
-    // Counted rather than ranged: the index saturates instead of overflowing,
-    // so the walk has no arithmetic panic on any answer the kernel could give.
-    let mut index = 0u64;
-    loop {
-        let ret = fs_attr_list(path, index, &mut buf);
-        if ret < 0 {
-            return Err(ret);
-        }
-        let Ok(len) = usize::try_from(ret) else {
-            return Err(out_of_range);
-        };
-        if len == 0 {
-            break;
-        }
-        let Some(key) = buf.get(..len).and_then(|b| core::str::from_utf8(b).ok()) else {
-            return Err(out_of_range);
-        };
-        keys.push(alloc::string::String::from(key));
-        index = index.saturating_add(1);
-    }
-    Ok(keys)
-}
-
-/// The value of extended attribute `key` on the file or directory at the
-/// absolute `path`, as the opaque bytes it is stored as (a value may be
-/// empty).
-///
-/// One fixed-size read always suffices and nothing is ever truncated: a stored
-/// value never exceeds [`tairix_abi::FS_ATTR_VALUE_MAX`], which is the bound
-/// the dispatcher itself enforces.
+/// The answer is the caller's own: the node's mode bits, ACL and capability
+/// gate under the caller's identity, then the mount's flags — writing on a
+/// read-only mount is `ReadOnly`, running a file on a `noexec` one
+/// `PermissionDenied`. An empty `want` asks only that the node exists. It
+/// answers what holds now, so it decides what a program asks or shows, never
+/// whether a later call is allowed: the kernel checks that call again.
 ///
 /// # Errors
 ///
-/// The raw negative kernel result (`-errno`) of the failing `fs_attr_get` —
-/// `-NoData` when the node carries no such attribute — or `-OutOfRange` for a
-/// backing that reports more bytes than it was handed room for.
-pub fn fs_attr_value(path: &[u8], key: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
-    let mut buf = alloc::vec![0u8; tairix_abi::FS_ATTR_VALUE_MAX];
-    let ret = fs_attr_get(path, key, &mut buf);
-    if ret < 0 {
-        return Err(ret);
-    }
-    let Ok(len) = usize::try_from(ret) else {
-        return Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()));
-    };
-    if len > buf.len() {
-        return Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()));
-    }
-    buf.truncate(len);
-    Ok(buf)
+/// The raw `-errno` the kernel refused with.
+pub fn access(path: &[u8], want: Access, flags: AtFlags) -> Result<(), i64> {
+    errno_result(fs_access_at(FD_CWD, path, want, flags))
 }
 
-/// Change the calling process's working directory to `path`
-/// (`SyscallNumber::FS_CHDIR`).
-///
-/// `path` may be absolute or relative to the current working directory. The
-/// kernel resolves and normalises it with the shared path parser, then
-/// re-authorises it as a searchable directory through the secured VFS under
-/// the caller's attested identity; only on success does it become the new
-/// working directory (against which later relative [`fs_open`] paths
-/// resolve). A path that is not a searchable directory fails closed and
-/// leaves the working directory unchanged. Gated on
-/// [`tairix_abi::CapabilityId::FS_ACCESS`]. Returns `0` on success or
-/// `-errno`.
+/// [`access`] with a relative `path` resolved from `dirfd`;
+/// [`AtFlags::EMPTY_PATH`] with an empty `path` asks about `dirfd`'s own node
+/// under that descriptor's authority.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_chdir(path: &[u8]) -> i64 {
-    let ptr = path.as_ptr() as usize as u64;
+fn fs_access_at(dirfd: u32, path: &[u8], want: Access, flags: AtFlags) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
-    // `(ptr, len)` pair against the caller's address space before reading it.
-    // `path` is a live shared `&[u8]` for the duration of the call.
-    let ret = unsafe { raw_syscall(NUM_FS_CHDIR, [ptr, path.len() as u64, 0, 0, 0, 0]) };
+    // path's `(address, len)` pair against the caller's address space before
+    // reading it, and `path` is a live shared slice for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_ACCESS,
+            [
+                u64::from(dirfd),
+                path_or_null(path, flags),
+                path.len() as u64,
+                u64::from(want.bits()),
+                u64::from(flags.bits()),
+                0,
+            ],
+        )
+    };
     ret as i64
 }
 
-/// Read the calling process's working directory — a normalised absolute
-/// path — into `buf` (`SyscallNumber::FS_GETCWD`), returning the number of
-/// bytes written.
+/// Read the calling process's working directory — the absolute path that
+/// names it now, however it has moved — into `buf`
+/// (`SyscallNumber::FS_GETCWD`), returning the number of bytes written.
 ///
 /// The whole path is delivered or none: a `buf` too small to hold it fails
 /// closed with `BufferTooSmall` (the path is never truncated); the caller
-/// grows `buf` and retries. Needs no capability.
+/// grows `buf` and retries. Asks `CAP_FS_ACCESS`.
 ///
 /// # Errors
 ///
 /// The raw negative kernel result (`-errno`): the buffer is too small
-/// (`BufferTooSmall`), the buffer pointer faults, or no filesystem is
+/// (`BufferTooSmall`), the directory has been removed (`NotFound`), the
+/// caller lacks the capability or may not search a directory above it
+/// (`PermissionDenied`), the buffer pointer faults, or no filesystem is
 /// mounted (`NotImplemented`).
 pub fn fs_getcwd(buf: &mut [u8]) -> Result<usize, i64> {
     let ptr = buf.as_mut_ptr() as usize as u64;
@@ -6257,8 +6555,10 @@ pub fn fs_lock_query(
 /// An open file or directory handle: an owned descriptor that issues
 /// [`fs_close`] when dropped, so a handle is never leaked.
 ///
-/// Construct one with [`File::open`] (or the [`open`]/[`create`]/[`open_dir`]
-/// free functions). The handle's access is fixed by the [`OpenFlags`] it was
+/// Construct one with [`File::open`] or [`File::create`] (or the
+/// [`open`]/[`create`] free functions, or a [`Dir`]'s relative opens). The
+/// handle's access is
+/// fixed by the [`OpenFlags`] it was
 /// opened with: a [`File::read_at`] against a handle opened without
 /// [`OpenFlags::READ`], or a [`File::write_at`] without [`OpenFlags::WRITE`],
 /// fails closed kernel-side. A program holds a descriptor, never a device.
@@ -6289,15 +6589,45 @@ impl File {
     /// `./name`; a name that is not UTF-8 can never spell a reference and is
     /// always a path.
     ///
+    /// It opens what exists: `flags` carrying [`OpenFlags::CREATE`] are
+    /// refused before any call, since a node is created through
+    /// [`File::create`], which names the mode it is born with.
+    ///
     /// # Errors
     ///
     /// The raw negative kernel result (`-errno`) the [`fs_open`] or
-    /// [`resource_open`] syscall returns on any refusal.
+    /// [`resource_open`] syscall returns on any refusal; `-OutOfRange` for
+    /// `flags` that would create.
     pub fn open(target: &[u8], flags: OpenFlags) -> Result<Self, i64> {
+        if flags.contains(OpenFlags::CREATE) {
+            return Err(-i64::from(Errno::OutOfRange.as_i32()));
+        }
+        Self::open_named(target, flags, 0)
+    }
+
+    /// Open the named `target` with `flags`, creating it when it is absent:
+    /// a new file is born with `mode` less the process's [`umask`], and an
+    /// existing one keeps its own.
+    ///
+    /// The name is routed as [`File::open`] routes it, so a resource
+    /// reference, which already exists, opens as itself and `mode` goes
+    /// unused.
+    ///
+    /// # Errors
+    ///
+    /// As [`File::open`]; `-OutOfRange` for a `mode` past
+    /// [`tairix_abi::FS_MODE_MASK`].
+    pub fn create(target: &[u8], flags: OpenFlags, mode: u32) -> Result<Self, i64> {
+        Self::open_named(target, flags.union(OpenFlags::CREATE), mode)
+    }
+
+    /// The one routing of a name between the filesystem and the resource
+    /// resolver, for an open and a create alike.
+    fn open_named(target: &[u8], flags: OpenFlags, mode: u32) -> Result<Self, i64> {
         if core::str::from_utf8(target).is_ok_and(tairix_resref::names_resource_reference) {
             return Self::open_resource(target, flags);
         }
-        Self::from_open_result(fs_open(target, flags))
+        Self::from_open_result(fs_open(target, flags, mode))
     }
 
     /// Resolve the resource reference `reference` (e.g. `b"sys:random"`) and
@@ -6543,12 +6873,7 @@ impl File {
     /// The raw negative kernel result (`-errno`) of the [`fs_truncate`]
     /// syscall.
     pub fn truncate(&self, size: u64) -> Result<(), i64> {
-        let ret = fs_truncate(self.fd, size);
-        if ret < 0 {
-            Err(ret)
-        } else {
-            Ok(())
-        }
+        errno_result(fs_truncate(self.fd, size))
     }
 
     /// Where the next region of `region`'s kind begins at or after
@@ -6581,26 +6906,146 @@ impl File {
     /// The raw negative kernel result (`-errno`) of the [`fs_punch`]
     /// syscall.
     pub fn punch(&self, offset: u64, len: u64) -> Result<(), i64> {
-        let ret = fs_punch(self.fd, offset, len);
-        if ret < 0 {
-            Err(ret)
-        } else {
-            Ok(())
-        }
+        errno_result(fs_punch(self.fd, offset, len))
     }
 
-    /// Flush the mounted filesystem's pending writes to its backing store.
+    /// Flush the pending writes of the volume this file is on to its backing
+    /// store.
     ///
     /// # Errors
     ///
     /// The raw negative kernel result (`-errno`) of the [`fs_sync`] syscall.
     pub fn sync(&self) -> Result<(), i64> {
-        let ret = fs_sync(self.fd);
-        if ret < 0 {
-            Err(ret)
-        } else {
-            Ok(())
+        errno_result(fs_sync(self.fd))
+    }
+
+    /// Give the node this handle holds the permission bits `mode`, under the
+    /// rules [`fs_set_mode`] states: `fs_set_mode` through
+    /// [`AtFlags::EMPTY_PATH`], so a name moved since the open is never
+    /// reached.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn set_mode(&self, mode: u32) -> Result<(), i64> {
+        errno_result(fs_set_mode_at(self.fd, &[], mode, AtFlags::EMPTY_PATH))
+    }
+
+    /// Give the node this handle holds the owner `uid` and group `gid`, under
+    /// the rules [`fs_set_owner`] states, through [`AtFlags::EMPTY_PATH`].
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn set_owner(&self, uid: u32, gid: u32) -> Result<(), i64> {
+        errno_result(fs_set_owner_at(self.fd, &[], uid, gid, AtFlags::EMPTY_PATH))
+    }
+
+    /// Every visible extended-attribute key of the node this handle holds, in
+    /// the backing's stable order.
+    ///
+    /// The one drain of [`fs_attr_list`]'s index iteration, so no tool
+    /// re-derives its end-of-list rule: a return of `0` is the end (a stored
+    /// key is never empty). Keys whose namespace the caller may not read never
+    /// appear, and one the backing spelled as no UTF-8 is refused with
+    /// `OutOfRange` rather than shown lossily.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the failing
+    /// `fs_attr_list` — `-NotSupported` on a mount whose format stores no
+    /// attributes, which a caller states rather than reporting an empty set —
+    /// `-OutOfRange` for a malformed key, or `-OutOfMemory` when the keys
+    /// cannot be held.
+    pub fn attr_keys(&self) -> Result<alloc::vec::Vec<alloc::string::String>, i64> {
+        let out_of_range = -i64::from(Errno::OutOfRange.as_i32());
+        let mut keys = alloc::vec::Vec::new();
+        let mut buf = [0u8; tairix_abi::FS_ATTR_KEY_MAX];
+        // Counted rather than ranged: the index saturates instead of
+        // overflowing, so no answer the kernel could give panics the walk.
+        let mut index = 0u64;
+        loop {
+            let ret = fs_attr_list(self.fd, index, &mut buf);
+            if ret < 0 {
+                return Err(ret);
+            }
+            let len = usize::try_from(ret).map_err(|_| out_of_range)?;
+            if len == 0 {
+                return Ok(keys);
+            }
+            let key = buf
+                .get(..len)
+                .and_then(|bytes| core::str::from_utf8(bytes).ok())
+                .ok_or(out_of_range)?;
+            let mut owned = alloc::string::String::new();
+            owned
+                .try_reserve_exact(key.len())
+                .map_err(|_| out_of_memory())?;
+            owned.push_str(key);
+            keys.try_reserve(1).map_err(|_| out_of_memory())?;
+            keys.push(owned);
+            index = index.saturating_add(1);
         }
+    }
+
+    /// The value of the node's extended attribute `key`, as the opaque bytes
+    /// it is stored as (a value may be empty).
+    ///
+    /// One read always suffices and nothing is ever truncated: a stored value
+    /// never exceeds [`tairix_abi::FS_ATTR_VALUE_MAX`], the bound the
+    /// dispatcher itself enforces.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the failing
+    /// `fs_attr_get` — `-NoData` when the node carries no such attribute —
+    /// `-OutOfRange` for a backing reporting more bytes than it was handed
+    /// room for, or `-OutOfMemory` when the value cannot be held.
+    pub fn attr_value(&self, key: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
+        let mut buf = answer_buffer(tairix_abi::FS_ATTR_VALUE_MAX)
+            .map_err(|errno| -i64::from(errno.as_i32()))?;
+        let ret = fs_attr_get(self.fd, key, &mut buf);
+        if ret < 0 {
+            return Err(ret);
+        }
+        let len = usize::try_from(ret)
+            .ok()
+            .filter(|&len| len <= buf.len())
+            .ok_or(-i64::from(Errno::OutOfRange.as_i32()))?;
+        buf.truncate(len);
+        Ok(buf)
+    }
+
+    /// Set the node's extended attribute `key` to `value`, as [`fs_attr_set`]
+    /// states.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn attr_set(&self, key: &[u8], value: &[u8]) -> Result<(), i64> {
+        errno_result(fs_attr_set(self.fd, key, value))
+    }
+
+    /// Remove the node's extended attribute `key`, as [`fs_attr_remove`]
+    /// states.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`): `-NoData` when no such
+    /// attribute is stored.
+    pub fn attr_remove(&self, key: &[u8]) -> Result<(), i64> {
+        errno_result(fs_attr_remove(self.fd, key))
+    }
+
+    /// Whether the caller may reach the node this handle holds as `want`
+    /// asks: [`access`] through [`AtFlags::EMPTY_PATH`], answered under this
+    /// descriptor's authority.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn access(&self, want: Access) -> Result<(), i64> {
+        errno_result(fs_access_at(self.fd, &[], want, AtFlags::EMPTY_PATH))
     }
 }
 
@@ -6698,17 +7143,260 @@ fn positional_errno(err: io::Error) -> i64 {
 }
 
 /// An open directory handle wrapping a [`File`] opened with
-/// [`OpenFlags::DIRECTORY`].
+/// [`OpenFlags::DIRECTORY`]: the place its relative calls start from.
 ///
 /// [`Dir::read`] reads one batch of packed [`tairix_abi::DirEntry`] records
 /// into the caller's buffer, [`Dir::for_each_batch`] every batch in turn
-/// through one, and [`Dir::read_all`] the whole listing.
+/// through one, and [`Dir::read_all`] the whole listing. Its relative calls —
+/// [`Dir::open_file`], [`Dir::unlink`], [`Dir::rename`] and the rest — resolve
+/// a relative name from this directory, wherever it has been moved since it
+/// was opened, and an absolute one as the free functions do; every one runs
+/// as the caller.
 #[derive(Debug)]
 pub struct Dir {
     file: File,
 }
 
+/// The flags that make a directory and answer it open: exclusive, since a
+/// directory already there is not the one made.
+const NEW_DIRECTORY: OpenFlags = OpenFlags::CREATE
+    .union(OpenFlags::DIRECTORY)
+    .union(OpenFlags::EXCLUSIVE);
+
 impl Dir {
+    /// Open the directory at `path`, a relative `path` resolved from the
+    /// working directory.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fs_open`.
+    pub fn open(path: &[u8]) -> Result<Self, i64> {
+        Self::from_open_result(fs_open_at(FD_CWD, path, OpenFlags::DIRECTORY, 0))
+    }
+
+    /// Make the directory at `path`, a relative `path` resolved from the
+    /// working directory, born with `mode` less the process's [`umask`], and
+    /// answer it open with no read or write access: what is done to it next
+    /// reaches the directory made, whatever its name holds by then.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fs_open`:
+    /// `-AlreadyExists` for a name already taken.
+    pub fn create(path: &[u8], mode: u32) -> Result<Self, i64> {
+        Self::from_open_result(fs_open_at(FD_CWD, path, NEW_DIRECTORY, mode))
+    }
+
+    /// Wrap an open of a directory as an owned handle.
+    fn from_open_result(ret: i64) -> Result<Self, i64> {
+        File::from_open_result(ret).map(|file| Self { file })
+    }
+
+    /// This directory as the [`File`] it is held through, which reaches the
+    /// directory's own node: its stat, mode, owner, attributes and access.
+    #[must_use]
+    pub fn as_file(&self) -> &File {
+        &self.file
+    }
+
+    /// Open the directory `name` names from here, never through a final
+    /// link: a link there answers `-NotADirectory`.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fs_open`.
+    pub fn open_dir(&self, name: &[u8]) -> Result<Self, i64> {
+        Self::from_open_result(fs_open_at(
+            self.fd(),
+            name,
+            OpenFlags::DIRECTORY.union(OpenFlags::NO_FOLLOW),
+            0,
+        ))
+    }
+
+    /// Open the directory `name` names from here, through a final link as a
+    /// path walk passes through one.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fs_open`.
+    pub fn enter(&self, name: &[u8]) -> Result<Self, i64> {
+        Self::from_open_result(fs_open_at(self.fd(), name, OpenFlags::DIRECTORY, 0))
+    }
+
+    /// Open what `name` names from here with `flags`, which open what exists:
+    /// a node is created through [`Dir::create_file`], which names its mode.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fs_open`;
+    /// `-OutOfRange` for `flags` that would create, refused before any call.
+    pub fn open_file(&self, name: &[u8], flags: OpenFlags) -> Result<File, i64> {
+        if flags.contains(OpenFlags::CREATE) {
+            return Err(-i64::from(Errno::OutOfRange.as_i32()));
+        }
+        File::from_open_result(fs_open_at(self.fd(), name, flags, 0))
+    }
+
+    /// Open `name` from here with `flags`, creating it when it is absent: a
+    /// new file is born with `mode` less the process's [`umask`], and an
+    /// existing one keeps its own. A directory is made through
+    /// [`Dir::make_dir`], which answers it as one.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fs_open`;
+    /// `-OutOfRange` for `flags` naming a directory, refused before any call.
+    pub fn create_file(&self, name: &[u8], flags: OpenFlags, mode: u32) -> Result<File, i64> {
+        if flags.contains(OpenFlags::DIRECTORY) {
+            return Err(-i64::from(Errno::OutOfRange.as_i32()));
+        }
+        File::from_open_result(fs_open_at(
+            self.fd(),
+            name,
+            flags.union(OpenFlags::CREATE),
+            mode,
+        ))
+    }
+
+    /// [`Dir::create`] with a relative `name` made here.
+    ///
+    /// # Errors
+    ///
+    /// As [`Dir::create`].
+    pub fn make_dir(&self, name: &[u8], mode: u32) -> Result<Self, i64> {
+        Self::from_open_result(fs_open_at(self.fd(), name, NEW_DIRECTORY, mode))
+    }
+
+    /// [`fs_mkdir`] with a relative `name` made here.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn mkdir(&self, name: &[u8], mode: u32) -> Result<(), i64> {
+        errno_result(fs_mkdir_at(self.fd(), name, mode))
+    }
+
+    /// [`fs_unlink`] of what `name` names from here, `expect` — required by
+    /// an `EXPECT_*` flag, and only with one — checked under the volume's
+    /// lock: a name no longer holding the node it describes is refused with
+    /// `-Stale`, changing nothing.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn unlink(
+        &self,
+        name: &[u8],
+        flags: UnlinkFlags,
+        expect: Option<&NodeExpect>,
+    ) -> Result<(), i64> {
+        errno_result(fs_unlink_at(self.fd(), name, flags, expect))
+    }
+
+    /// [`fs_rename`] of what `from` names from here to `to` named from
+    /// `to_dir`, `expect` describing the source as [`Dir::unlink`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`); `-LengthOutOfRange` for a
+    /// name too long to be one.
+    pub fn rename(
+        &self,
+        from: &[u8],
+        to_dir: &Self,
+        to: &[u8],
+        flags: RenameFlags,
+        expect: Option<&NodeExpect>,
+    ) -> Result<(), i64> {
+        errno_result(fs_rename_at(
+            self.fd(),
+            from,
+            to_dir.fd(),
+            to,
+            flags,
+            expect,
+        ))
+    }
+
+    /// [`fs_link`]: `new`, named from `new_dir`, as a second name for the node
+    /// `existing` names from here.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`); `-LengthOutOfRange` for a
+    /// name too long to be one.
+    pub fn link(
+        &self,
+        existing: &[u8],
+        new_dir: &Self,
+        new: &[u8],
+        flags: LinkFlags,
+    ) -> Result<(), i64> {
+        errno_result(fs_link_at(self.fd(), existing, new_dir.fd(), new, flags))
+    }
+
+    /// [`fs_symlink`]: the link `link`, made here, holding `target`.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn symlink(&self, target: &[u8], link: &[u8]) -> Result<(), i64> {
+        errno_result(fs_symlink_at(target, self.fd(), link))
+    }
+
+    /// [`readlink`] of the link `name` names from here.
+    ///
+    /// # Errors
+    ///
+    /// As [`readlink`].
+    pub fn readlink(&self, name: &[u8]) -> Result<alloc::string::String, Errno> {
+        link_target(self.fd(), name)
+    }
+
+    /// [`fs_set_mode`] of what `name` names from here: [`AtFlags::NO_FOLLOW`]
+    /// sets a final link's own bits, and [`AtFlags::EMPTY_PATH`] with an
+    /// empty `name` this directory's.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn set_mode_at(&self, name: &[u8], mode: u32, flags: AtFlags) -> Result<(), i64> {
+        errno_result(fs_set_mode_at(self.fd(), name, mode, flags))
+    }
+
+    /// [`fs_set_owner`] of what `name` names from here, `flags` as
+    /// [`Dir::set_mode_at`] reads them.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn set_owner_at(&self, name: &[u8], uid: u32, gid: u32, flags: AtFlags) -> Result<(), i64> {
+        errno_result(fs_set_owner_at(self.fd(), name, uid, gid, flags))
+    }
+
+    /// [`access`] of what `name` names from here, `flags` as
+    /// [`Dir::set_mode_at`] reads them; with [`AtFlags::EMPTY_PATH`] the
+    /// answer is under this descriptor's authority.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn access(&self, name: &[u8], want: Access, flags: AtFlags) -> Result<(), i64> {
+        errno_result(fs_access_at(self.fd(), name, want, flags))
+    }
+
+    /// Make this directory the working directory, through
+    /// [`AtFlags::EMPTY_PATH`]: the working directory follows it wherever it
+    /// is moved.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn chdir(&self) -> Result<(), i64> {
+        errno_result(fs_chdir_at(self.fd(), &[], AtFlags::EMPTY_PATH))
+    }
+
     /// The raw descriptor number this directory handle owns.
     #[must_use]
     pub fn fd(&self) -> u32 {
@@ -6785,7 +7473,7 @@ impl Dir {
     }
 }
 
-/// Open the existing file at the absolute `path` for reading.
+/// Open the existing file at `path` for reading.
 ///
 /// # Errors
 ///
@@ -6794,47 +7482,33 @@ pub fn open(path: &[u8]) -> Result<File, i64> {
     File::open(path, OpenFlags::READ)
 }
 
-/// Create (or truncate) the file at the absolute `path` for writing,
-/// creating it if absent.
+/// Create (or truncate) the file at `path` for writing, a new one born with
+/// `mode` less the process's [`umask`].
 ///
 /// # Errors
 ///
-/// The raw negative kernel result (`-errno`) of [`File::open`].
-pub fn create(path: &[u8]) -> Result<File, i64> {
-    File::open(
-        path,
-        OpenFlags::WRITE
-            .union(OpenFlags::CREATE)
-            .union(OpenFlags::TRUNCATE),
-    )
+/// The raw negative kernel result (`-errno`) of [`File::create`].
+pub fn create(path: &[u8], mode: u32) -> Result<File, i64> {
+    File::create(path, OpenFlags::WRITE.union(OpenFlags::TRUNCATE), mode)
 }
 
-/// Create the file at `path` for writing, refusing any name already taken —
-/// a file, a directory, or a link, which is never followed — rather than
-/// truncating or writing through it.
+/// Create the file at `path` for writing, born with `mode` less the process's
+/// [`umask`], refusing any name already taken — a file, a directory, or a
+/// link, which is never followed — rather than truncating or writing through
+/// it.
 ///
 /// # Errors
 ///
-/// The raw negative kernel result (`-errno`) of [`File::open`]: `-AlreadyExists`
-/// when `path` is taken.
-pub fn create_new(path: &[u8]) -> Result<File, i64> {
-    File::open(
+/// The raw negative kernel result (`-errno`) of [`File::create`]:
+/// `-AlreadyExists` when `path` is taken.
+pub fn create_new(path: &[u8], mode: u32) -> Result<File, i64> {
+    File::create(
         path,
         OpenFlags::WRITE
-            .union(OpenFlags::CREATE)
             .union(OpenFlags::EXCLUSIVE)
             .union(OpenFlags::NO_FOLLOW),
+        mode,
     )
-}
-
-/// Open the directory at the absolute `path` for listing.
-///
-/// # Errors
-///
-/// The raw negative kernel result (`-errno`) of [`File::open`].
-pub fn open_dir(path: &[u8]) -> Result<Dir, i64> {
-    let file = File::open(path, OpenFlags::DIRECTORY)?;
-    Ok(Dir { file })
 }
 
 /// A whole listing read through `read`, a [`READDIR_BATCH_MAX`] batch at a
@@ -6910,12 +7584,12 @@ const fn ends_listing(used: usize, room: usize) -> bool {
     used == 0 || used.saturating_add(tairix_abi::DirEntry::MAX_LEN) <= room
 }
 
-/// Read the whole directory listing at the absolute `path`, returning the
-/// packed [`tairix_abi::DirEntry`] stream sized to its exact byte length —
-/// walk it with [`tairix_abi::fs::DirEntries`].
+/// Read the whole directory listing at `path`, returning the packed
+/// [`tairix_abi::DirEntry`] stream sized to its exact byte length — walk it
+/// with [`tairix_abi::fs::DirEntries`].
 ///
 /// The one directory-listing call every tool shares (`ls`, the filesystem
-/// browser): an [`open_dir`] resolve-and-authorise, then [`Dir::read_all`]'s
+/// browser): a [`Dir::open`] resolve-and-authorise, then [`Dir::read_all`]'s
 /// batch loop, so no consumer re-derives it.
 ///
 /// # Errors
@@ -6923,7 +7597,7 @@ const fn ends_listing(used: usize, room: usize) -> bool {
 /// The raw negative kernel result (`-errno`) of the failing `fs_open` or
 /// `fs_readdir` syscall.
 pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
-    open_dir(path)?.read_all()
+    Dir::open(path)?.read_all()
 }
 
 /// The least a whole-file read grows by while the file runs past the size its
@@ -7199,72 +7873,78 @@ mod tests {
     }
 
     #[test]
-    fn the_attribute_key_walk_marshals_the_path_and_index_and_ends_on_zero() {
+    fn the_attribute_key_walk_marshals_the_descriptor_and_index_and_ends_on_zero() {
         // A node with no visible attributes: the first call answers
         // end-of-list, which is what ends the walk.
+        let file = File { fd: 6 };
         seam::arm(0);
-        let keys = fs_attr_keys(b"/f").expect("an empty set is an answer");
+        let keys = file.attr_keys().expect("an empty set is an answer");
         assert!(keys.is_empty());
         let (number, args) = seam::last_call().expect("exactly one trap");
         assert_eq!(number, NUM_FS_ATTR_LIST);
-        assert_eq!(args[1], 2, "the path's length");
-        assert_eq!(args[2], 0, "the first index asked for");
+        assert_eq!(args[0], 6, "the descriptor asked about");
+        assert_eq!(args[1], 0, "the first index asked for");
         assert_eq!(
-            args[4],
+            args[3],
             u64::try_from(tairix_abi::FS_ATTR_KEY_MAX).expect("fits"),
             "a buffer the longest key always fits"
         );
+        core::mem::forget(file);
     }
 
     #[test]
     fn a_volume_without_attribute_storage_refuses_the_walk_rather_than_answering_empty() {
         // `NotSupported` is a different fact from "this node has none", and a
         // caller states it rather than showing an empty set.
+        let file = File { fd: 6 };
         seam::arm(refusal(Errno::NotSupported));
         assert_eq!(
-            fs_attr_keys(b"/f"),
+            file.attr_keys(),
             Err(-i64::from(Errno::NotSupported.as_i32()))
         );
         seam::arm(refusal(Errno::PermissionDenied));
         assert_eq!(
-            fs_attr_keys(b"/f"),
+            file.attr_keys(),
             Err(-i64::from(Errno::PermissionDenied.as_i32()))
         );
+        core::mem::forget(file);
     }
 
     #[test]
-    fn an_attribute_value_read_marshals_both_names_and_is_sized_to_the_answer() {
+    fn an_attribute_value_read_marshals_the_descriptor_and_key_and_is_sized_to_the_answer() {
+        let file = File { fd: 6 };
         seam::arm(3);
-        let value = fs_attr_value(b"/f", b"user.k").expect("a value");
+        let value = file.attr_value(b"user.k").expect("a value");
         assert_eq!(value.len(), 3, "sized to what the kernel reported");
         let (number, args) = seam::last_call().expect("exactly one trap");
         assert_eq!(number, NUM_FS_ATTR_GET);
-        assert_eq!(args[1], 2, "the path's length");
-        assert_eq!(args[3], 6, "the key's length");
+        assert_eq!(args[0], 6, "the descriptor asked about");
+        assert_eq!(args[2], 6, "the key's length");
         assert_eq!(
-            args[5],
+            args[4],
             u64::try_from(tairix_abi::FS_ATTR_VALUE_MAX).expect("fits"),
             "a buffer the largest stored value always fits"
         );
 
         // An empty value is a legitimate answer, not an absent attribute.
         seam::arm(0);
-        assert_eq!(fs_attr_value(b"/f", b"user.k"), Ok(alloc::vec::Vec::new()));
+        assert_eq!(file.attr_value(b"user.k"), Ok(alloc::vec::Vec::new()));
 
         // A backing that reports more bytes than it was handed room for is
         // refused rather than trusted.
         seam::arm(u64::try_from(tairix_abi::FS_ATTR_VALUE_MAX + 1).expect("fits"));
         assert_eq!(
-            fs_attr_value(b"/f", b"user.k"),
+            file.attr_value(b"user.k"),
             Err(-i64::from(Errno::OutOfRange.as_i32()))
         );
 
         // And a refusal surfaces unchanged: no such attribute is an answer.
         seam::arm(refusal(Errno::NoData));
         assert_eq!(
-            fs_attr_value(b"/f", b"user.k"),
+            file.attr_value(b"user.k"),
             Err(-i64::from(Errno::NoData.as_i32()))
         );
+        core::mem::forget(file);
     }
 
     #[test]
@@ -7616,6 +8296,29 @@ mod tests {
         assert_ne!(raw[4], 0);
         let expected_len = tairix_abi::process_start_encoded_len(&args, &[]).expect("sized") as u64;
         assert_eq!(raw[5], expected_len);
+    }
+
+    #[test]
+    fn spawn_attached_in_names_its_directory_from_the_working_directory() {
+        let home = *b"/Users/ada";
+        let attach = in_directory(&tairix_abi::SpawnAttach::INHERIT, &home).expect("a short path");
+        assert_eq!(
+            attach.working_directory,
+            Some(PathAt {
+                dirfd: FD_CWD,
+                len: 10,
+                path: home.as_ptr() as usize as u64,
+            })
+        );
+        let path = *b"/System/Commands/elsh.app/Run";
+        let (number, raw) = capture(5, || {
+            assert_eq!(
+                spawn_attached_in(&path, &tairix_abi::SpawnAttach::INHERIT, &home, &[], &[]),
+                5
+            );
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(raw[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
     }
 
     #[test]
@@ -8603,7 +9306,7 @@ mod tests {
         let want = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(rlimit_get(LimitKind::OpenStreams), Err(want));
+            assert_eq!(rlimit_get(LimitKind::OpenFiles), Err(want));
         });
     }
 
@@ -9260,20 +9963,70 @@ mod tests {
         });
     }
 
-    // --- filesystem wrappers (PREREQUISITES.md P-A) -----------------------
+    #[test]
+    fn a_call_refused_at_its_post_is_answered_without_a_park() {
+        let mut reply = [0u8; 8];
+        let (number, args) = capture(refusal(Errno::PermissionDenied), || {
+            assert_eq!(
+                call_within(5, 9, b"request", &mut reply, 250),
+                Err(Errno::PermissionDenied)
+            );
+        });
+        assert_eq!(number, NUM_CALL_POST, "nothing after the refused post");
+        assert_eq!((args[0], args[4]), (9, 250));
+    }
+
+    #[test]
+    fn a_reply_already_there_is_reaped_without_a_park() {
+        let mut reply = [0u8; 8];
+        let (number, args) = capture(3, || {
+            assert_eq!(call_within(5, 9, b"request", &mut reply, 250), Ok(3));
+        });
+        assert_eq!(number, NUM_CALL_REAP, "reaped, never parked");
+        assert_eq!(args[0], 9);
+    }
+
+    #[test]
+    fn an_answer_that_ends_the_call_is_returned_without_a_park() {
+        let mut reply = [0u8; 8];
+        for ended in [Errno::TimedOut, Errno::NotFound] {
+            let (number, args) = capture(refusal(ended), || {
+                assert_eq!(call_await(5, 9, 4, &mut reply), Err(ended));
+            });
+            assert_eq!(number, NUM_CALL_REAP, "{ended:?}");
+            assert_eq!((args[0], args[1]), (9, 4));
+        }
+    }
 
     #[test]
     fn fs_open_marshals_path_flags_and_returns_the_descriptor() {
         let path = b"/System/Logs/boot";
         let flags = OpenFlags::READ.union(OpenFlags::WRITE);
         let (number, args) = capture(4, || {
-            assert_eq!(fs_open(path, flags), 4);
+            assert_eq!(fs_open(path, flags, 0), 4);
         });
         assert_eq!(number, NUM_FS_OPEN);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], u64::from(flags.bits()));
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(
+            args[0],
+            u64::from(FD_CWD),
+            "a path alone starts from the working directory"
+        );
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], u64::from(flags.bits()));
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_open_carries_a_creations_mode_in_its_fifth_register() {
+        let flags = OpenFlags::WRITE.union(OpenFlags::CREATE);
+        let (number, args) = capture(4, || {
+            assert_eq!(fs_open(b"/Users/me/new", flags, 0o640), 4);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        assert_eq!(args[3], u64::from(flags.bits()));
+        assert_eq!(args[4], 0o640);
+        assert_eq!(args[5], 0);
     }
 
     #[test]
@@ -9281,8 +10034,59 @@ mod tests {
         let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(fs_open(b"/x", OpenFlags::READ), want);
+            assert_eq!(fs_open(b"/x", OpenFlags::READ, 0), want);
         });
+    }
+
+    /// A node is created only where its mode is named, so an open asking to
+    /// create reaches no kernel.
+    #[test]
+    fn file_open_refuses_a_create_before_any_call() {
+        let refused = -i64::from(Errno::OutOfRange.as_i32());
+        seam::no_trap(|| {
+            let flags = OpenFlags::WRITE.union(OpenFlags::CREATE);
+            assert_eq!(File::open(b"/f", flags).map(drop), Err(refused));
+            assert_eq!(File::open(b"sys:null", flags).map(drop), Err(refused));
+        });
+    }
+
+    #[test]
+    fn file_create_names_its_mode_and_opens_a_reference_as_itself() {
+        let (number, args) = capture(4, || {
+            let file = File::create(b"/Users/me/new", OpenFlags::WRITE, 0o600)
+                .expect("armed create must succeed");
+            core::mem::forget(file);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        let flags = OpenFlags::from_bits(u32::try_from(args[3]).expect("flag bits fit u32"))
+            .expect("a legal flag combination");
+        assert!(flags.contains(OpenFlags::WRITE.union(OpenFlags::CREATE)));
+        assert_eq!(args[4], 0o600);
+        let (number, _) = capture(5, || {
+            let file = File::create(b"sys:null", OpenFlags::WRITE, 0o600)
+                .expect("armed create must succeed");
+            core::mem::forget(file);
+        });
+        assert_eq!(number, NUM_RESOURCE_OPEN, "a reference already exists");
+    }
+
+    #[test]
+    fn umask_sets_only_permission_bits_and_answers_the_mask_it_replaced() {
+        let (number, args) = capture(0o022, || assert_eq!(umask(0o7077), 0o022));
+        assert_eq!(number, NUM_FS_UMASK);
+        assert_eq!(args[0], 0o077, "only the permission bits are a mask's");
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn umask_get_asks_without_changing_and_a_garbled_answer_grants_nothing() {
+        let (number, args) = capture(0o027, || assert_eq!(umask_get(), 0o027));
+        assert_eq!(number, NUM_FS_UMASK);
+        assert_eq!(args[0], u64::from(tairix_abi::fs::FS_UMASK_QUERY));
+        seam::arm(refusal(Errno::OutOfRange));
+        assert_eq!(umask_get(), 0o777);
+        seam::arm(0o1000);
+        assert_eq!(umask_get(), 0o777);
     }
 
     #[test]
@@ -9333,8 +10137,8 @@ mod tests {
                 core::mem::forget(file);
             });
             assert_eq!(number, NUM_FS_OPEN, "{path:?} must be a filesystem open");
-            assert_eq!(args[0], path.as_ptr() as usize as u64);
-            assert_eq!(args[1], path.len() as u64);
+            assert_eq!(args[1], path.as_ptr() as usize as u64);
+            assert_eq!(args[2], path.len() as u64);
         }
     }
 
@@ -9520,27 +10324,30 @@ mod tests {
     }
 
     #[test]
-    fn fs_mkdir_marshals_path_pointer_and_len() {
+    fn fs_mkdir_marshals_path_pointer_len_and_mode() {
         let path = b"/System/Logs/runtime";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_mkdir(path), 0);
+            assert_eq!(fs_mkdir(path, 0o750), 0);
         });
         assert_eq!(number, NUM_FS_MKDIR);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], 0o750);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
     fn fs_unlink_marshals_path_pointer_and_len() {
         let path = b"/System/Logs/old";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_unlink(path, tairix_abi::UnlinkFlags::empty()), 0);
+            assert_eq!(fs_unlink(path, UnlinkFlags::empty()), 0);
         });
         assert_eq!(number, NUM_FS_UNLINK);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0], "no flags, and no expectation");
     }
 
     #[test]
@@ -9550,10 +10357,11 @@ mod tests {
             assert_eq!(fs_set_mode(path, 0o640), 0);
         });
         assert_eq!(number, NUM_FS_SET_MODE);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], 0o640);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], 0o640);
+        assert_eq!(&args[4..], &[0, 0], "a final link followed");
     }
 
     #[test]
@@ -9563,88 +10371,123 @@ mod tests {
             assert_eq!(fs_set_owner(path, 1000, tairix_abi::FS_OWNER_UNCHANGED), 0);
         });
         assert_eq!(number, NUM_FS_SET_OWNER);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], 1000);
-        assert_eq!(args[3], u64::from(tairix_abi::FS_OWNER_UNCHANGED));
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], 1000);
+        assert_eq!(args[4], u64::from(tairix_abi::FS_OWNER_UNCHANGED));
+        assert_eq!(args[5], 0, "a final link followed");
     }
 
     #[test]
-    fn fs_attr_calls_marshal_path_key_and_buffers() {
-        let path = b"/Users/me/notes.txt";
+    fn fs_attr_calls_marshal_the_descriptor_key_and_buffers() {
         let key = b"user.comment";
         let mut out = [0u8; 16];
 
         let (number, args) = capture(0, || {
-            assert_eq!(fs_attr_get(path, key, &mut out), 0);
+            assert_eq!(fs_attr_get(5, key, &mut out), 0);
         });
         assert_eq!(number, NUM_FS_ATTR_GET);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], key.as_ptr() as usize as u64);
-        assert_eq!(args[3], key.len() as u64);
-        assert_eq!(args[4], out.as_ptr() as usize as u64);
-        assert_eq!(args[5], out.len() as u64);
-
-        let value = b"hi";
-        let (number, args) = capture(0, || {
-            assert_eq!(fs_attr_set(path, key, value), 0);
-        });
-        assert_eq!(number, NUM_FS_ATTR_SET);
-        assert_eq!(args[4], value.as_ptr() as usize as u64);
-        assert_eq!(args[5], value.len() as u64);
-
-        let (number, args) = capture(0, || {
-            assert_eq!(fs_attr_list(path, 3, &mut out), 0);
-        });
-        assert_eq!(number, NUM_FS_ATTR_LIST);
-        assert_eq!(args[2], 3);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[1], key.as_ptr() as usize as u64);
+        assert_eq!(args[2], key.len() as u64);
         assert_eq!(args[3], out.as_ptr() as usize as u64);
         assert_eq!(args[4], out.len() as u64);
         assert_eq!(args[5], 0);
 
+        let value = b"hi";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_attr_remove(path, key), 0);
+            assert_eq!(fs_attr_set(5, key, value), 0);
+        });
+        assert_eq!(number, NUM_FS_ATTR_SET);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[3], value.as_ptr() as usize as u64);
+        assert_eq!(args[4], value.len() as u64);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_attr_list(5, 3, &mut out), 0);
+        });
+        assert_eq!(number, NUM_FS_ATTR_LIST);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[1], 3);
+        assert_eq!(args[2], out.as_ptr() as usize as u64);
+        assert_eq!(args[3], out.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_attr_remove(5, key), 0);
         });
         assert_eq!(number, NUM_FS_ATTR_REMOVE);
-        assert_eq!(args[2], key.as_ptr() as usize as u64);
-        assert_eq!(args[3], key.len() as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[1], key.as_ptr() as usize as u64);
+        assert_eq!(args[2], key.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    /// A handle's attribute writes reach the node it holds, by descriptor.
+    #[test]
+    fn a_handles_attribute_writes_name_its_descriptor() {
+        let file = File { fd: 8 };
+        let (number, args) = capture(0, || {
+            assert_eq!(file.attr_set(b"user.k", b"v"), Ok(()));
+        });
+        assert_eq!((number, args[0]), (NUM_FS_ATTR_SET, 8));
+        let (number, args) = capture(refusal(Errno::NoData), || {
+            assert_eq!(
+                file.attr_remove(b"user.k"),
+                Err(-i64::from(Errno::NoData.as_i32()))
+            );
+        });
+        assert_eq!((number, args[0]), (NUM_FS_ATTR_REMOVE, 8));
+        core::mem::forget(file);
     }
 
     #[test]
     fn fs_unlink_marshals_the_directory_flag() {
         let path = b"/Users/me/empty";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_unlink(path, tairix_abi::UnlinkFlags::DIRECTORY), 0);
+            assert_eq!(fs_unlink(path, UnlinkFlags::DIRECTORY), 0);
         });
         assert_eq!(number, NUM_FS_UNLINK);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(
-            args[2],
-            u64::from(tairix_abi::UnlinkFlags::DIRECTORY.bits())
-        );
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], u64::from(UnlinkFlags::DIRECTORY.bits()));
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
-    fn fs_rename_marshals_both_paths_and_lens() {
-        let src = b"/System/Logs/old";
-        let dst = b"/System/Logs/new";
+    fn fs_rename_marshals_two_path_records_and_the_flags() {
         let (number, args) = capture(0, || {
-            assert_eq!(fs_rename(src, dst, tairix_abi::RenameFlags::NO_REPLACE), 0);
+            assert_eq!(
+                fs_rename(
+                    b"/System/Logs/old",
+                    b"/System/Logs/new",
+                    RenameFlags::NO_REPLACE
+                ),
+                0
+            );
         });
         assert_eq!(number, NUM_FS_RENAME);
-        assert_eq!(args[0], src.as_ptr() as usize as u64);
-        assert_eq!(args[1], src.len() as u64);
-        assert_eq!(args[2], dst.as_ptr() as usize as u64);
-        assert_eq!(args[3], dst.len() as u64);
-        assert_eq!(
-            &args[4..],
-            &[u64::from(tairix_abi::RenameFlags::NO_REPLACE.bits()), 0]
-        );
+        // Each path travels in a `PathAt` record freed when the call returns
+        // (the seam records only the registers); the record's layout is the
+        // ABI codec's contract, its spelling here `path_at`'s test.
+        assert_ne!(args[0], 0);
+        assert_ne!(args[1], 0);
+        assert_ne!(args[0], args[1]);
+        assert_eq!(args[2], u64::from(RenameFlags::NO_REPLACE.bits()));
+        assert_eq!(&args[3..], &[0, 0, 0], "no expectation");
+    }
+
+    /// A `PathAt` record spells the directory, the length and the address, in
+    /// that order, little-endian.
+    #[test]
+    fn a_path_record_spells_its_directory_length_and_address() {
+        let path = b"notes";
+        let record = path_at(7, path).expect("a short path fits");
+        assert_eq!(record[..4], 7u32.to_le_bytes());
+        assert_eq!(record[4..8], 5u32.to_le_bytes());
+        assert_eq!(record[8..], (path.as_ptr() as usize as u64).to_le_bytes());
     }
 
     #[test]
@@ -9657,24 +10500,27 @@ mod tests {
         assert_eq!(number, NUM_FS_SYMLINK);
         assert_eq!(args[0], target.as_ptr() as usize as u64);
         assert_eq!(args[1], target.len() as u64);
-        assert_eq!(args[2], link.as_ptr() as usize as u64);
-        assert_eq!(args[3], link.len() as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(args[2], u64::from(FD_CWD));
+        assert_eq!(args[3], link.as_ptr() as usize as u64);
+        assert_eq!(args[4], link.len() as u64);
+        assert_eq!(args[5], 0);
     }
 
     #[test]
     fn fs_readlink_marshals_the_path_then_the_output_buffer() {
         let path = b"/Users/me/alias";
         let mut out = [0u8; 32];
+        let out_ptr = out.as_ptr() as usize as u64;
         let (number, args) = capture(12, || {
             assert_eq!(fs_readlink(path, &mut out), 12);
         });
         assert_eq!(number, NUM_FS_READLINK);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], out.as_ptr() as usize as u64);
-        assert_eq!(args[3], out.len() as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], out_ptr);
+        assert_eq!(args[4], 32);
+        assert_eq!(args[5], 0);
     }
 
     #[test]
@@ -9690,12 +10536,12 @@ mod tests {
                 assert_eq!(fs_realpath(path, &mut out, mode), 9);
             });
             assert_eq!(number, NUM_FS_REALPATH);
-            assert_eq!(args[0], path.as_ptr() as usize as u64);
-            assert_eq!(args[1], path.len() as u64);
-            assert_eq!(args[2], out.as_ptr() as usize as u64);
-            assert_eq!(args[3], out.len() as u64);
-            assert_eq!(args[4], u64::from(mode.as_u32()));
-            assert_eq!(&args[5..], &[0]);
+            assert_eq!(args[0], u64::from(FD_CWD));
+            assert_eq!(args[1], path.as_ptr() as usize as u64);
+            assert_eq!(args[2], path.len() as u64);
+            assert_eq!(args[3], out.as_ptr() as usize as u64);
+            assert_eq!(args[4], out.len() as u64);
+            assert_eq!(args[5], u64::from(mode.as_u32()));
         }
     }
 
@@ -9736,9 +10582,10 @@ mod tests {
             assert_eq!(fs_chdir(path), 0);
         });
         assert_eq!(number, NUM_FS_CHDIR);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
@@ -9834,31 +10681,329 @@ mod tests {
     }
 
     #[test]
-    fn create_requests_write_create_truncate() {
+    fn create_requests_write_create_truncate_with_its_mode() {
         let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (number, args) = capture(neg, || {
-            assert_eq!(create(b"/System/Logs/seg").err(), Some(want));
+            assert_eq!(create(b"/System/Logs/seg", 0o640).err(), Some(want));
         });
         assert_eq!(number, NUM_FS_OPEN);
-        let flags = OpenFlags::from_bits(u32::try_from(args[2]).expect("flag bits fit u32"))
+        let flags = OpenFlags::from_bits(u32::try_from(args[3]).expect("flag bits fit u32"))
             .expect("create requests a legal flag combination");
         assert!(flags.contains(OpenFlags::WRITE));
         assert!(flags.contains(OpenFlags::CREATE));
         assert!(flags.contains(OpenFlags::TRUNCATE));
+        assert_eq!(args[4], 0o640);
     }
 
     #[test]
-    fn open_dir_requests_the_directory_flag() {
+    fn create_new_requests_an_exclusive_unfollowed_create_with_its_mode() {
+        let (number, args) = capture(refusal(Errno::AlreadyExists), || {
+            assert!(create_new(b"/System/Logs/seg", 0o600).is_err());
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        let flags = OpenFlags::from_bits(u32::try_from(args[3]).expect("flag bits fit u32"))
+            .expect("create_new requests a legal flag combination");
+        assert!(flags.contains(
+            OpenFlags::WRITE
+                .union(OpenFlags::CREATE)
+                .union(OpenFlags::EXCLUSIVE)
+                .union(OpenFlags::NO_FOLLOW)
+        ));
+        assert_eq!(args[4], 0o600);
+    }
+
+    #[test]
+    fn dir_open_requests_the_directory_flag_from_the_working_directory() {
         let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (number, args) = capture(neg, || {
-            assert_eq!(open_dir(b"/System/Logs").map(|_| ()), Err(want));
+            assert_eq!(Dir::open(b"/System/Logs").map(|_| ()), Err(want));
         });
         assert_eq!(number, NUM_FS_OPEN);
-        let flags = OpenFlags::from_bits(u32::try_from(args[2]).expect("flag bits fit u32"))
-            .expect("open_dir requests a legal flag combination");
+        assert_eq!(args[0], u64::from(FD_CWD));
+        let flags = OpenFlags::from_bits(u32::try_from(args[3]).expect("flag bits fit u32"))
+            .expect("Dir::open requests a legal flag combination");
         assert!(flags.contains(OpenFlags::DIRECTORY));
+    }
+
+    /// The flags an `fs_open` trap carried.
+    fn open_flags(args: &[u64; 6]) -> OpenFlags {
+        OpenFlags::from_bits(u32::try_from(args[3]).expect("flag bits fit u32"))
+            .expect("a legal flag combination")
+    }
+
+    #[test]
+    fn a_directory_made_is_answered_open() {
+        let (number, args) = capture(5, || {
+            let made = Dir::create(b"/Users/me/new", 0o700).expect("armed create succeeds");
+            assert_eq!(made.fd(), 5);
+            core::mem::forget(made);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(
+            open_flags(&args),
+            OpenFlags::CREATE
+                .union(OpenFlags::DIRECTORY)
+                .union(OpenFlags::EXCLUSIVE),
+            "made exclusively, with no read or write access"
+        );
+        assert_eq!(args[4], 0o700);
+
+        let parent = Dir {
+            file: File { fd: 3 },
+        };
+        let (number, args) = capture(6, || {
+            let made = parent
+                .make_dir(b"child", 0o755)
+                .expect("armed create succeeds");
+            core::mem::forget(made);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        assert_eq!(args[0], 3, "a relative name is made in the directory held");
+        assert_eq!(args[4], 0o755);
+        core::mem::forget(parent);
+    }
+
+    #[test]
+    fn a_directorys_relative_opens_start_from_it() {
+        let dir = Dir {
+            file: File { fd: 7 },
+        };
+        let name = b"notes";
+        let (number, args) = capture(8, || {
+            let file = dir
+                .open_file(name, OpenFlags::READ)
+                .expect("armed open succeeds");
+            core::mem::forget(file);
+        });
+        assert_eq!(number, NUM_FS_OPEN);
+        assert_eq!(args[0], 7);
+        assert_eq!(args[1], name.as_ptr() as usize as u64);
+        assert_eq!(args[2], name.len() as u64);
+        assert_eq!(args[3], u64::from(OpenFlags::READ.bits()));
+
+        let (_, args) = capture(9, || {
+            let file = dir
+                .create_file(name, OpenFlags::WRITE, 0o600)
+                .expect("armed create succeeds");
+            core::mem::forget(file);
+        });
+        assert_eq!(args[0], 7);
+        assert!(open_flags(&args).contains(OpenFlags::CREATE));
+        assert_eq!(args[4], 0o600);
+
+        let (_, args) = capture(10, || {
+            let sub = dir.open_dir(b"sub").expect("armed open succeeds");
+            core::mem::forget(sub);
+        });
+        assert_eq!(args[0], 7);
+        assert!(open_flags(&args).contains(OpenFlags::DIRECTORY));
+        assert!(
+            open_flags(&args).contains(OpenFlags::NO_FOLLOW),
+            "a child directory is never opened through a link"
+        );
+
+        // A node is created only where its mode is named, and a directory
+        // only as one.
+        seam::no_trap(|| {
+            let flags = OpenFlags::WRITE.union(OpenFlags::CREATE);
+            assert_eq!(
+                dir.open_file(name, flags).map(drop),
+                Err(-i64::from(Errno::OutOfRange.as_i32()))
+            );
+            let flags = OpenFlags::DIRECTORY.union(OpenFlags::EXCLUSIVE);
+            assert_eq!(
+                dir.create_file(name, flags, 0o700).map(drop),
+                Err(-i64::from(Errno::OutOfRange.as_i32()))
+            );
+        });
+        core::mem::forget(dir);
+    }
+
+    /// A descriptor's own node is reached through `EMPTY_PATH` and an empty
+    /// path, which names no memory.
+    #[test]
+    fn a_descriptor_reaches_its_own_node_through_an_empty_path() {
+        let empty = u64::from(AtFlags::EMPTY_PATH.bits());
+        let file = File { fd: 9 };
+        let (number, args) = capture(0, || assert_eq!(file.set_mode(0o640), Ok(())));
+        assert_eq!(number, NUM_FS_SET_MODE);
+        assert_eq!(args, [9, 0, 0, 0o640, empty, 0]);
+
+        let (number, args) = capture(0, || assert_eq!(file.set_owner(1000, 100), Ok(())));
+        assert_eq!(number, NUM_FS_SET_OWNER);
+        assert_eq!(args, [9, 0, 0, 1000, 100, empty]);
+
+        let read = u64::from(Access::READ.bits());
+        let (number, args) = capture(0, || assert_eq!(file.access(Access::READ), Ok(())));
+        assert_eq!(number, NUM_FS_ACCESS);
+        assert_eq!(args, [9, 0, 0, read, empty, 0]);
+
+        let dir = Dir {
+            file: File { fd: 4 },
+        };
+        let (number, args) = capture(0, || assert_eq!(dir.chdir(), Ok(())));
+        assert_eq!(number, NUM_FS_CHDIR);
+        assert_eq!(args, [4, 0, 0, empty, 0, 0]);
+
+        let (number, args) = capture(refusal(Errno::PermissionDenied), || {
+            assert_eq!(
+                dir.set_mode_at(&[], 0o700, AtFlags::EMPTY_PATH),
+                Err(-i64::from(Errno::PermissionDenied.as_i32()))
+            );
+        });
+        assert_eq!(number, NUM_FS_SET_MODE);
+        assert_eq!(args, [4, 0, 0, 0o700, empty, 0]);
+        core::mem::forget(file);
+        core::mem::forget(dir);
+    }
+
+    /// An empty operand of a call that takes no null still names its address:
+    /// a slice's is never null, and the kernel reads no byte of it.
+    #[test]
+    fn an_empty_operand_is_never_sent_as_null() {
+        let (number, args) = capture(0, || assert_eq!(fs_attr_set(9, b"user.k", b""), 0));
+        assert_eq!(number, NUM_FS_ATTR_SET);
+        assert_ne!(args[3], 0, "the empty value has an address");
+        assert_eq!(args[4], 0);
+        let (_, args) = capture(0, || {
+            let _ = fs_set_mode_at(9, b"", 0o640, AtFlags::empty());
+        });
+        assert_ne!(args[1], 0, "without EMPTY_PATH an empty path is a path");
+    }
+
+    #[test]
+    fn access_marshals_the_path_the_want_and_the_flags() {
+        let path = b"/Users/me/ro";
+        let (number, args) = capture(0, || {
+            assert_eq!(access(path, Access::WRITE, AtFlags::NO_FOLLOW), Ok(()));
+        });
+        assert_eq!(number, NUM_FS_ACCESS);
+        assert_eq!(args[0], u64::from(FD_CWD));
+        assert_eq!(args[1], path.as_ptr() as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], u64::from(Access::WRITE.bits()));
+        assert_eq!(args[4], u64::from(AtFlags::NO_FOLLOW.bits()));
+        assert_eq!(args[5], 0);
+
+        let (_, _) = capture(refusal(Errno::PermissionDenied), || {
+            assert_eq!(
+                access(path, Access::WRITE, AtFlags::NO_FOLLOW),
+                Err(-i64::from(Errno::PermissionDenied.as_i32()))
+            );
+        });
+
+        let dir = Dir {
+            file: File { fd: 3 },
+        };
+        let (number, args) = capture(0, || {
+            assert_eq!(dir.access(b"x", Access::empty(), AtFlags::empty()), Ok(()));
+        });
+        assert_eq!(number, NUM_FS_ACCESS);
+        assert_eq!(args[0], 3);
+        assert_eq!(args[3], 0, "an empty want asks only that the node exists");
+        core::mem::forget(dir);
+    }
+
+    #[test]
+    fn a_directorys_name_calls_start_from_it() {
+        let dir = Dir {
+            file: File { fd: 5 },
+        };
+        let other = Dir {
+            file: File { fd: 6 },
+        };
+
+        let (number, args) = capture(0, || assert_eq!(dir.mkdir(b"sub", 0o750), Ok(())));
+        assert_eq!(number, NUM_FS_MKDIR);
+        assert_eq!((args[0], args[3]), (5, 0o750));
+
+        let target = b"../real";
+        let link = b"alias";
+        let (number, args) = capture(0, || assert_eq!(dir.symlink(target, link), Ok(())));
+        assert_eq!(number, NUM_FS_SYMLINK);
+        assert_eq!(args[0], target.as_ptr() as usize as u64);
+        assert_eq!(args[2], 5);
+        assert_eq!(args[3], link.as_ptr() as usize as u64);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(dir.link(b"a", &other, b"b", LinkFlags::FOLLOW), Ok(()));
+        });
+        assert_eq!(number, NUM_FS_LINK);
+        assert!(args[0] != 0 && args[1] != 0);
+        assert_eq!(args[2], u64::from(LinkFlags::FOLLOW.bits()));
+
+        let no_follow = u64::from(AtFlags::NO_FOLLOW.bits());
+        let (number, args) = capture(0, || {
+            assert_eq!(dir.set_mode_at(b"l", 0o600, AtFlags::NO_FOLLOW), Ok(()));
+        });
+        assert_eq!(number, NUM_FS_SET_MODE);
+        assert_eq!((args[0], args[3], args[4]), (5, 0o600, no_follow));
+
+        let (number, args) = capture(0, || {
+            assert_eq!(dir.set_owner_at(b"l", 1, 2, AtFlags::NO_FOLLOW), Ok(()));
+        });
+        assert_eq!(number, NUM_FS_SET_OWNER);
+        assert_eq!((args[0], args[3], args[4], args[5]), (5, 1, 2, no_follow));
+
+        let (number, args) = capture(refusal(Errno::OutOfRange), || {
+            assert_eq!(dir.readlink(b"l"), Err(Errno::OutOfRange));
+        });
+        assert_eq!(number, NUM_FS_READLINK);
+        assert_eq!(args[0], 5);
+        core::mem::forget(dir);
+        core::mem::forget(other);
+    }
+
+    /// An expectation travels by address, and only when the caller names one.
+    #[test]
+    fn an_expectation_travels_only_when_named() {
+        let dir = Dir {
+            file: File { fd: 5 },
+        };
+        let other = Dir {
+            file: File { fd: 6 },
+        };
+        let expect = NodeExpect {
+            id: tairix_abi::FileId {
+                volume: [3; 16],
+                node: 7,
+            },
+            content_gen: 0,
+            size: 0,
+            modified: Time64::UNIX_EPOCH,
+            changed: Time64::UNIX_EPOCH,
+        };
+
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                dir.unlink(b"f", UnlinkFlags::EXPECT_NODE, Some(&expect)),
+                Ok(())
+            );
+        });
+        assert_eq!(number, NUM_FS_UNLINK);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[3], u64::from(UnlinkFlags::EXPECT_NODE.bits()));
+        assert_ne!(args[4], 0, "the record's address");
+
+        let (_, args) = capture(0, || {
+            assert_eq!(dir.unlink(b"f", UnlinkFlags::empty(), None), Ok(()));
+        });
+        assert_eq!(args[4], 0, "no expectation, no address");
+
+        let (number, args) = capture(refusal(Errno::Stale), || {
+            assert_eq!(
+                dir.rename(b"a", &other, b"b", RenameFlags::EXPECT_NODE, Some(&expect)),
+                Err(-i64::from(Errno::Stale.as_i32()))
+            );
+        });
+        assert_eq!(number, NUM_FS_RENAME);
+        assert_eq!(args[2], u64::from(RenameFlags::EXPECT_NODE.bits()));
+        assert_ne!(args[3], 0, "the record's address");
+        core::mem::forget(dir);
+        core::mem::forget(other);
     }
 
     #[test]

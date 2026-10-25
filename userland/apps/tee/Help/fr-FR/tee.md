@@ -61,8 +61,8 @@ arrivera avec ce travail noyau plutôt que d'être accepté et ignoré.
   l'aide courte demandée a été affichée) ; une défaillance de la sortie
   standard tolérée par un mode `-nopipe` ne change rien.
 - `1` — une sortie a échoué d'une manière que le mode choisi compte, ou
-  l'entrée n'a pas pu être lue.
-- `2` — la ligne de commande n'a pas été comprise.
+  l'entrée n'a pas pu être lue. Une ligne de commande non comprise sort
+  aussi avec `1`.
 
 ## ENVIRONMENT
 

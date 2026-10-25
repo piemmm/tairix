@@ -42,10 +42,10 @@ use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::boot_session::{LateBootSession, LATE_BOOT_SESSION};
 use tairix_kernel_core::{
     build_identity_table, load_groups_db, load_users_db_source, read_bootstrap_file,
-    read_image_system_config, BoundedReadError, ConsoleRead, ConsoleWrite, GroupsLoadError,
-    HeldUsersDbSource, ImageConfig, LateGroupsDb, LateIdentity, LateUsersAdmin, LateUsersDb,
-    SleepLock, UserAdminEngine, UsersDbSource, UsersLoadError, VfsError, GROUPS_DB, SYSTEM_CONFIG,
-    USERS_DB,
+    read_image_system_config, BoundedReadError, ConsoleRead, ConsoleWrite, DriverLock,
+    GroupsLoadError, HeldUsersDbSource, ImageConfig, LateGroupsDb, LateIdentity, LateUsersAdmin,
+    LateUsersDb, UserAdminEngine, UsersDbSource, UsersLoadError, VfsError, GROUPS_DB,
+    SYSTEM_CONFIG, USERS_DB,
 };
 use tairix_kernel_sec::{GroupId, IdentityTable};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -219,8 +219,7 @@ impl RootMountError {
 /// user/group [`IdentityTable`] the userland `fs_*` path resolves a
 /// caller's groups against. They are produced together — from the one
 /// mounted root that holds both `/System/Security/Users` and
-/// `/System/Security/Groups` — so a single trusted step installs both
-/// (`PREREQUISITES.md` P-A).
+/// `/System/Security/Groups` — so a single trusted step installs both.
 pub struct UnlockedRoot {
     /// The validated `users-v1` text (zeroed on drop), installed into the
     /// [`LateUsersDb`] cell and served to `users_db_read`.
@@ -237,8 +236,8 @@ pub struct UnlockedRoot {
     pub groups_db: GroupsDb,
     /// How the root volume opens, carried out of the mount so a
     /// [`WritableRootSink`] can open its read-write view and publish it as the
-    /// writable `/System/Logs` + `/System/Settings` backing
-    /// (`PREREQUISITES.md` P-B). An encrypted root's key is the most sensitive
+    /// writable `/System/Logs` + `/System/Settings` backing.
+    /// An encrypted root's key is the most sensitive
     /// value the mount produces: it lives no longer than the publish step and
     /// is wiped the instant this struct drops.
     pub keying: RootKeying,
@@ -291,7 +290,7 @@ pub enum RootUnlock<'a> {
 
 /// A seam the interactive unlock calls, on success, to publish a writable
 /// view of the just-unlocked root volume as the `/System/Logs` +
-/// `/System/Settings` backing (`PREREQUISITES.md` P-B).
+/// `/System/Settings` backing.
 ///
 /// The unlock itself cannot do this: it holds the key but not a second
 /// `'static` block window onto the root partition (it reuses one borrowed
@@ -306,7 +305,7 @@ pub trait WritableRootSink {
     /// and publish it as the writable-state backing.
     ///
     /// Additionally returns the **registered driver itself** — the one
-    /// `SleepLock`-serialised instance the `fs_*` syscalls run against —
+    /// `DriverLock`-serialised instance the `fs_*` syscalls run against —
     /// so the `CAP_USER_ADMIN` account-administration engine's storage
     /// (`plans/CAPABILITY_USE.md` CU4) shares it: the volume has exactly
     /// one writer, never a second independent window whose copy-on-write
@@ -315,7 +314,7 @@ pub trait WritableRootSink {
     /// the engine persists through this driver directly, below the VFS.
     /// `None` leaves account administration failing closed
     /// (`NotImplemented`).
-    fn publish(&self, keying: Keying<'_>) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>>;
+    fn publish(&self, keying: Keying<'_>) -> Option<Arc<DriverLock<Box<dyn KernelFs>>>>;
 }
 
 /// A [`WritableRootSink`] that publishes nothing.
@@ -327,7 +326,7 @@ pub trait WritableRootSink {
 pub struct NoWritableRootSink;
 
 impl WritableRootSink for NoWritableRootSink {
-    fn publish(&self, _keying: Keying<'_>) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
+    fn publish(&self, _keying: Keying<'_>) -> Option<Arc<DriverLock<Box<dyn KernelFs>>>> {
         None
     }
 }
@@ -936,7 +935,7 @@ pub static LATE_USERS_DB: LateUsersDb = LateUsersDb::new();
 pub static LATE_USERS_ADMIN: LateUsersAdmin = LateUsersAdmin::new();
 
 /// The authoritative user/group identity cell the `fs_*` syscalls resolve
-/// a caller's groups against (`PREREQUISITES.md` P-A). The kernel core's
+/// a caller's groups against. The kernel core's
 /// sec phase installs the compiled-in system identity into it at boot
 /// (every port hands it over through `with_spawn_identity`); the trusted
 /// unlock step that installs [`LATE_USERS_DB`] then replaces the held
@@ -1908,7 +1907,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use tairix_abi::driver::block::BlockGeometry;
-    use tairix_abi::driver::filesystem::FilesystemWrite;
+    use tairix_abi::driver::filesystem::{FilesystemWrite, NodeSecurity};
     use tairix_abi::BootSession;
     use tairix_drv_fs_arxfs::{EntropySource, UNLOCK_MIN_ITERATIONS};
     use tairix_kernel_core::UsersDbSource;
@@ -2094,10 +2093,16 @@ mod tests {
         let mut fs =
             Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS), 0x0B00_7001).expect("FAT32 formats");
         let root = fs.root();
-        fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)
+        let file = fs
+            .create(
+                root,
+                ROOT_UNLOCK_NAME.as_bytes(),
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("the descriptor file is created");
         let written = fs
-            .write_at(root, ROOT_UNLOCK_NAME.as_bytes(), 0, payload)
+            .write_at(file, 0, payload)
             .expect("the descriptor bytes are written");
         assert_eq!(written, payload.len(), "the whole descriptor is written");
         fs.flush().expect("the partition flushes");

@@ -57,6 +57,9 @@ tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # transient plaintext buffers are overwritten before they are freed, and a
 # hand-rolled wipe would be elided by the optimiser.
 zeroize = { version = "1.8.1", default-features = false, features = ["alloc"] }
+# The mode a new blob or document is created with, the one every creator
+# names.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harness for the sealed scope's on-disk records draws its

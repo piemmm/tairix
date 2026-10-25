@@ -10,11 +10,13 @@
 //! # Nothing here polls
 //!
 //! An automatic fan is sampled once a [`SAMPLE_PERIOD_US`] on a deadline
-//! [`Thermald::deadline_us`] states; a fan that is off, always on or has no
-//! line to switch states none, so the service sleeps until its policy, the
-//! hardware tree or a caller wakes it. A status is answered from readings at
-//! most [`READING_MAX_AGE_US`] old, so no number of callers reads a sensor
-//! more often than that.
+//! [`Thermald::deadline_us`] states, and a call the header left unanswered is
+//! asked again on the same cadence until it is answered; a fan that is off,
+//! always on or has no line to switch, and owes the header no call, states
+//! none, so the service sleeps until its policy, the hardware tree or a
+//! caller wakes it. A status is answered from readings at most
+//! [`READING_MAX_AGE_US`] old, so no number of callers reads a sensor more
+//! often than that.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -36,8 +38,9 @@ use tairix_abi::Errno;
 pub use fan::{Entry, Fan, Header, Journal, Reading};
 pub use inventory::Inventory;
 
-/// How often an automatic fan is decided, in microseconds: the cadence Linux
-/// polls the same thermal zone at.
+/// How often an automatic fan is decided, and a call its header left
+/// unanswered asked again, in microseconds: a second, quick against how
+/// slowly a board's temperature moves.
 pub const SAMPLE_PERIOD_US: u64 = 1_000_000;
 
 /// The oldest a reading a status reports may be, in microseconds.
@@ -133,7 +136,7 @@ pub struct Thermald {
     inventory: Inventory,
     temperature: Option<Taken<Option<Millicelsius>>>,
     lines: Option<Taken<Option<FanLines>>>,
-    next_sample_us: Option<u64>,
+    next_due_us: Option<u64>,
 }
 
 impl Thermald {
@@ -176,34 +179,35 @@ impl Thermald {
         self.settled(machine);
     }
 
-    /// When, on [`Machine::now_us`]'s clock, the fan is next due a sample;
-    /// [`None`] while it samples nothing.
+    /// When, on [`Machine::now_us`]'s clock, the fan is next due a sample, or
+    /// a call its header left unanswered is due again; [`None`] while it owes
+    /// neither.
     #[must_use]
     pub const fn deadline_us(&self) -> Option<u64> {
-        self.next_sample_us
+        self.next_due_us
     }
 
-    /// The sample deadline came: decide the fan, and arm the next.
+    /// The deadline came: decide an automatic fan, or ask the header again
+    /// what it left unanswered, and arm the next.
     pub fn expired(&mut self, machine: &mut dyn Machine, journal: &mut dyn Journal) {
-        if !self.fan.samples() {
-            self.next_sample_us = None;
-            return;
-        }
-        let reading = self.read(machine);
         let header = self.inventory.header;
-        self.fan.sample(
-            reading,
-            header_at(machine, header).as_mut().map(as_header),
-            journal,
-        );
+        if self.fan.samples() {
+            let reading = self.read(machine);
+            self.fan.sample(
+                reading,
+                header_at(machine, header).as_mut().map(as_header),
+                journal,
+            );
+            self.temperature = Some(Taken {
+                at_us: machine.now_us(),
+                value: reading.temperature(),
+            });
+        } else if self.fan.unanswered() {
+            self.fan
+                .reconcile(header_at(machine, header).as_mut().map(as_header), journal);
+        }
         let now = machine.now_us();
-        self.temperature = Some(Taken {
-            at_us: now,
-            value: reading.temperature(),
-        });
-        self.next_sample_us = self
-            .fan
-            .samples()
+        self.next_due_us = (self.fan.samples() || self.fan.unanswered())
             .then(|| now.saturating_add(SAMPLE_PERIOD_US));
     }
 
@@ -244,11 +248,19 @@ impl Thermald {
     }
 
     /// The fan was brought into step with its policy and the tree: what a
-    /// status reported of the lines is stale, and an automatic fan is due a
-    /// sample at once.
+    /// status reported of the lines is stale, an automatic fan is due a
+    /// sample at once, and a call the header left unanswered is due again a
+    /// period later.
     fn settled(&mut self, machine: &dyn Machine) {
         self.lines = None;
-        self.next_sample_us = self.fan.samples().then(|| machine.now_us());
+        let now = machine.now_us();
+        self.next_due_us = if self.fan.samples() {
+            Some(now)
+        } else {
+            self.fan
+                .unanswered()
+                .then(|| now.saturating_add(SAMPLE_PERIOD_US))
+        };
     }
 }
 

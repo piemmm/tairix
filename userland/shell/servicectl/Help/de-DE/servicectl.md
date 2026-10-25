@@ -49,8 +49,8 @@ eingetragener Dienst kommt also beim nächsten Start wieder; `enable` und
 - `0` — die Operation wurde angewendet, oder die Kurzhilfe wurde angezeigt.
 - `1` — der Verwalter hat die Operation abgewiesen, er hat die Einschreibung
   vermerkt, den Dienst aber nicht starten oder stoppen können, oder der
-  Steuerungsendpunkt war nicht erreichbar.
-- `2` — die Befehlszeile wurde nicht verstanden; es wurde nichts gesendet.
+  Steuerungsendpunkt war nicht erreichbar. Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

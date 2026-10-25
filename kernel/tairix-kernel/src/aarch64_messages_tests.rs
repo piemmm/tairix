@@ -8,6 +8,9 @@ use super::*;
 const ITS: u32 = 0x8003;
 const ITS_BASE: u64 = 0x0808_0000;
 
+/// The first LPI line past a 32-vector multiplexer's.
+const FIRST_LINE: u32 = MSI_LINE_BASE + 32;
+
 /// What QEMU's ITS reports: 16 `DeviceID` and 16 `EventID` bits.
 const FEATURES: ItsFeatures = ItsFeatures {
     device_bits: 16,
@@ -71,7 +74,7 @@ fn take(planner: &mut LpiPlanner, fdt: &Fdt<'_>, requester: u16) -> Option<Messa
 fn each_function_raises_its_own_device_s_first_event_on_a_line_of_its_own() {
     let blob = host_tree(Some(&[0, ITS, 0, 0x1_0000]));
     let fdt = Fdt::new(&blob).unwrap();
-    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64);
+    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64, FIRST_LINE);
     let first = take(&mut planner, &fdt, 0x0008).expect("routed");
     let second = take(&mut planner, &fdt, 0x0010).expect("routed");
     assert_eq!(
@@ -81,10 +84,7 @@ fn each_function_raises_its_own_device_s_first_event_on_a_line_of_its_own() {
             data: 0,
         }
     );
-    assert_eq!(
-        (first.line, second.line),
-        (LPI_LINE_BASE, LPI_LINE_BASE + 1)
-    );
+    assert_eq!((first.line, second.line), (FIRST_LINE, FIRST_LINE + 1));
     assert_eq!(
         second.message.data, 0,
         "a device of its own starts at event zero"
@@ -115,9 +115,9 @@ fn each_function_raises_its_own_device_s_first_event_on_a_line_of_its_own() {
             },
         ]
     );
-    assert_eq!(routes.line_of(FIRST_LPI + 1), Some(LPI_LINE_BASE + 1));
+    assert_eq!(routes.line_of(FIRST_LPI + 1), Some(FIRST_LINE + 1));
     assert_eq!(routes.line_of(FIRST_LPI + 2), None, "an LPI no route took");
-    assert_eq!(routes.last_line(), Some(LPI_LINE_BASE + 1));
+    assert_eq!(routes.last_line(), Some(FIRST_LINE + 1));
 }
 
 /// Functions whose messages reach the service as one `DeviceID` — behind a
@@ -126,7 +126,7 @@ fn each_function_raises_its_own_device_s_first_event_on_a_line_of_its_own() {
 fn functions_sharing_a_device_id_take_its_events_in_turn() {
     let blob = host_tree(Some(&[0, ITS, 0, 0x1_0000]));
     let fdt = Fdt::new(&blob).unwrap();
-    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64);
+    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64, FIRST_LINE);
     let events: std::vec::Vec<u32> = (0..3)
         .map(|_| {
             take(&mut planner, &fdt, 0x0200)
@@ -142,7 +142,7 @@ fn functions_sharing_a_device_id_take_its_events_in_turn() {
 fn a_route_its_function_did_not_take_is_offered_again() {
     let blob = host_tree(Some(&[0, ITS, 0, 0x1_0000]));
     let fdt = Fdt::new(&blob).unwrap();
-    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64);
+    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64, FIRST_LINE);
     each_pci_host(&fdt, |host| {
         let refused = planner.offer(&fdt, &host, 0, 0x0008).expect("offered");
         let again = planner.offer(&fdt, &host, 0, 0x0008).expect("offered");
@@ -155,7 +155,7 @@ fn a_route_its_function_did_not_take_is_offered_again() {
 fn a_function_the_service_cannot_name_is_offered_nothing() {
     let none = host_tree(None);
     let fdt = Fdt::new(&none).unwrap();
-    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64);
+    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64, FIRST_LINE);
     assert!(take(&mut planner, &fdt, 0x0008).is_none(), "no msi-map");
 
     let elsewhere = host_tree(Some(&[0, 0x8009, 0, 0x1_0000]));
@@ -179,7 +179,7 @@ fn a_function_the_service_cannot_name_is_offered_nothing() {
     };
     let mapped = host_tree(Some(&[0, ITS, 0, 0x1_0000]));
     let fdt = Fdt::new(&mapped).unwrap();
-    let mut planner = LpiPlanner::new(std::vec![service(narrow)], 64);
+    let mut planner = LpiPlanner::new(std::vec![service(narrow)], 64, FIRST_LINE);
     assert!(
         take(&mut planner, &fdt, 0x0010).is_none(),
         "a DeviceID past its bits"
@@ -196,12 +196,12 @@ fn a_function_the_service_cannot_name_is_offered_nothing() {
 fn no_more_lpis_are_routed_than_the_distributor_names() {
     let blob = host_tree(Some(&[0, ITS, 0, 0x1_0000]));
     let fdt = Fdt::new(&blob).unwrap();
-    let mut planner = LpiPlanner::for_distributor(std::vec![service(FEATURES)], 13);
+    let mut planner = LpiPlanner::for_distributor(std::vec![service(FEATURES)], 13, FIRST_LINE);
     assert!(
         take(&mut planner, &fdt, 0x0008).is_none(),
         "thirteen bits name no LPI"
     );
-    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 1);
+    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 1, FIRST_LINE);
     assert!(take(&mut planner, &fdt, 0x0008).is_some());
     assert!(take(&mut planner, &fdt, 0x0010).is_none());
 }
@@ -216,11 +216,52 @@ fn lpi_tables_cover_every_route_and_never_fewer_than_fourteen_bits() {
             lpi: FIRST_LPI + index,
         },
     };
-    let mut routes = LpiRoutes::default();
+    let mut routes = LpiRoutes {
+        services: std::vec::Vec::new(),
+        lpis: std::vec::Vec::new(),
+        first_line: FIRST_LINE,
+    };
     assert_eq!(routes.id_bits(), 14);
     assert_eq!(routes.last_line(), None);
     routes.lpis = (0..8192).map(lpi).collect();
     assert_eq!(routes.id_bits(), 14, "the last of fourteen bits' LPIs");
     routes.lpis.push(lpi(8192));
     assert_eq!(routes.id_bits(), 15);
+}
+
+#[test]
+fn lpis_follow_the_mux_lines() {
+    let blob = host_tree(Some(&[0, ITS, 0, 0x1_0000]));
+    let fdt = Fdt::new(&blob).unwrap();
+    let mux = MSI_LINE_BASE..MSI_LINE_BASE + 32;
+    let mut planner = LpiPlanner::new(
+        std::vec![service(FEATURES)],
+        64,
+        first_lpi_line(Some(mux.clone())),
+    );
+    let route = take(&mut planner, &fdt, 0x0008).expect("routed");
+    assert_eq!(
+        route.line,
+        MSI_LINE_BASE + 32,
+        "the first LPI follows the mux"
+    );
+    let routes = planner.into_routes();
+    assert_eq!(
+        max_line(Some(&routes), Some(mux.clone())),
+        MSI_LINE_BASE + 32
+    );
+    assert_eq!(max_line(None, Some(mux)), MSI_LINE_BASE + 31);
+}
+
+#[test]
+fn without_a_mux_lpis_start_past_the_gic() {
+    let blob = host_tree(Some(&[0, ITS, 0, 0x1_0000]));
+    let fdt = Fdt::new(&blob).unwrap();
+    let mut planner = LpiPlanner::new(std::vec![service(FEATURES)], 64, first_lpi_line(None));
+    let route = take(&mut planner, &fdt, 0x0008).expect("routed");
+    assert_eq!(route.line, tairix_arch_aarch64::gic::MAX_INTID + 1);
+    let routes = planner.into_routes();
+    assert_eq!(routes.line_of(FIRST_LPI), Some(MSI_LINE_BASE));
+    assert_eq!(max_line(Some(&routes), None), MSI_LINE_BASE);
+    assert_eq!(max_line(None, None), tairix_arch_aarch64::gic::MAX_INTID);
 }

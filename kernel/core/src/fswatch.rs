@@ -11,27 +11,27 @@
 //!   machine's memory, each an equal part of it and never past
 //!   [`JOURNAL_BYTES`], so a watcher that never drains crowds out no other.
 //!
-//! The tables, the watches each process holds, the heap every journal holds
-//! together and the epochs a watched path resolves against live in one
-//! [`WatchRegistry`] per kernel, handed to the
+//! The tables, the watches each process holds and the heap every journal
+//! holds together live in one [`WatchRegistry`] per kernel, handed to the
 //! syscall layer and to the volume bring-up that claims tables. A table is
 //! fed by the one cache wrapper ([`super::fs::CachedFs`]) that
 //! [claims](WatchRegistry::claim) it, through which every mutation of the volume passes
 //! under the volume lock, so the record order is the mutation order and no
-//! writer is missed. The table outlives the claim: a volume that leaves and
-//! returns is watched through the same table, so its watchers carry on.
+//! writer is missed. A table serves one registration of its volume: nodes are
+//! keyed on the id the driver pinned them under, which names nothing in the
+//! next registration, so a claim always publishes a fresh table and the one
+//! it replaces is retired, its watchers told their directories are gone.
 //! A journal that cannot name what happened — it overflowed, memory is short,
-//! the volume folds case, a directory's authority changed — says *rescan*
-//! instead. That is never a loss: the watcher re-reads the directory.
+//! the volume folds case — says *rescan* instead. That is never a loss: the
+//! watcher re-reads the directory.
 //!
 //! # Lock order
 //!
-//! A table's lock is taken under the volume lock (a mutation), an address
-//! space's lock (a descriptor closing) or the registry's table lock (sharing
-//! out the journal budget); under it only the heap and the registry's epoch
-//! lock are taken. A wake is issued once the table lock is released, directly,
-//! except a mount change's, which is deferred because the mount table's lock
-//! is held.
+//! A table's lock is taken under the volume lock (a mutation), with no lock
+//! held (a descriptor closing) or under the registry's table lock (sharing out
+//! the journal budget); under it only the heap is taken. A wake is issued once
+//! the table lock is released, directly, except a mount change's, which is
+//! deferred because the mount table's lock is held.
 //!
 //! [`WaitSourceKind::File`]: tairix_abi::WaitSourceKind::File
 
@@ -43,7 +43,7 @@ use core::hash::{Hash, Hasher};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::driver::filesystem::{NameMatching, NodeId};
-use tairix_abi::{DirChange, Errno, FileId, LimitKind};
+use tairix_abi::{DirChange, Errno, LimitKind};
 use tairix_collections::{HashMap, LruMap};
 use tairix_hash::BuildSipHash13;
 use tairix_kernel_sec::{Charge, ResourceCharges};
@@ -116,8 +116,8 @@ fn copy_name(name: &[u8]) -> Option<Name> {
 pub struct Position {
     /// Every change at or below this has been delivered.
     pub at: u64,
-    /// What the watcher's path last resolved under.
-    pub epochs: Epochs,
+    /// The mount table's epoch at the watcher's last drain.
+    pub mounts: u64,
 }
 
 /// A directory's change journal.
@@ -280,8 +280,8 @@ impl Journal {
         self.recount();
     }
 
-    /// A change no name expresses: the directory moved, or what its path
-    /// reaches may have.
+    /// A change no name expresses: the directory was removed, or its volume
+    /// left.
     fn revalidate(&mut self) {
         self.seq += 1;
         self.lose_names();
@@ -291,12 +291,11 @@ impl Journal {
         self.cursors.get(&watcher).copied()
     }
 
-    /// Start `watcher` where the journal stands, its path having resolved
-    /// under `epochs`.
-    fn join(&mut self, watcher: u64, epochs: Epochs) -> Result<(), Errno> {
+    /// Start `watcher` where the journal stands, under mount epoch `mounts`.
+    fn join(&mut self, watcher: u64, mounts: u64) -> Result<(), Errno> {
         let at = self.seq;
         self.cursors
-            .try_insert(watcher, Position { at, epochs })
+            .try_insert(watcher, Position { at, mounts })
             .map_err(|_| Errno::OutOfMemory)?;
         // No cursor stands past the journal, so the new one is the oldest only
         // where every other stands with it.
@@ -386,13 +385,13 @@ impl Journal {
         Ok(Some(Drain::Names { names, upto, more }))
     }
 
-    fn commit(&mut self, watcher: u64, upto: u64, epochs: Epochs) {
+    fn commit(&mut self, watcher: u64, upto: u64, mounts: u64) {
         let Some(cursor) = self.cursors.get_mut(&watcher) else {
             return;
         };
         let was = cursor.at;
         cursor.at = was.max(upto);
-        cursor.epochs = epochs;
+        cursor.mounts = mounts;
         if cursor.at != was {
             self.passed(was);
         }
@@ -518,27 +517,12 @@ impl Drain {
     }
 }
 
-/// The epochs a watched path resolves against. Any of them moving may change
-/// what the path reaches or who may list it. The path and access epochs are
-/// the whole machine's, because a path's ancestors need not be on the volume
-/// its directory is.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Epochs {
-    /// The mount table's epoch.
-    pub mounts: u64,
-    /// Moves when any directory or symbolic link is renamed, removed or
-    /// replaced.
-    pub paths: u64,
-    /// Moves when any directory's security changes.
-    pub access: u64,
-}
-
-/// What a watch's path last resolved under: its epochs, and the mounts its
-/// directory's listing showed directly beneath it.
+/// What a watch's directory last showed of the mount table: the table's
+/// epoch, and the mounts its listing showed directly beneath it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Resolved {
-    /// The epochs.
-    pub epochs: Epochs,
+    /// The mount table's epoch, read before the directory was listed.
+    pub mounts: u64,
     /// The mounts directly beneath the directory.
     pub children: ChildMounts,
 }
@@ -552,8 +536,8 @@ pub struct Pacing {
     pub watcher: u64,
     /// The journal position the member last reported.
     pub observed: u64,
-    /// The epochs the member last reported under.
-    pub epochs: Epochs,
+    /// The mount table's epoch the member last reported under.
+    pub mounts: u64,
     /// The least interval between two reports, from the watch.
     pub latency_ns: u64,
     /// When the member last reported, in monotonic nanoseconds; [`None`]
@@ -702,13 +686,6 @@ impl VolumeWatch {
         self.retired.load(Ordering::Acquire)
     }
 
-    /// The epochs a path on this volume resolves against now, given the
-    /// mount table's `mounts`.
-    #[must_use]
-    pub fn epochs(&self, mounts: u64) -> Epochs {
-        self.registry.epochs(mounts)
-    }
-
     /// An entry was added to or removed from `dir`: `dir`'s generation and its
     /// journal both move, and so does `dir`'s own entry in the directory
     /// holding it, `within`, when that is known — its stamp and link count
@@ -787,9 +764,12 @@ impl VolumeWatch {
         wake_all(wakes);
     }
 
-    /// `node` was removed, replaced or moved: what reaches it changed. Its
-    /// watchers re-validate their path; its File members see a change.
-    pub fn node_relocated(&self, node: NodeId) {
+    /// `node` lost a name — it was removed, or replaced by a rename — or its
+    /// security changed. Its File members see a change, and its watchers
+    /// rescan, where a drain finds the directory gone once no name is left or
+    /// the watcher may no longer list it. A node that only moved is
+    /// [`Self::node_changed`]: its watchers' directory is the one it was.
+    pub fn node_removed(&self, node: NodeId) {
         if self.idle() {
             return;
         }
@@ -804,20 +784,6 @@ impl VolumeWatch {
             })
         };
         wake_all([wake, None]);
-    }
-
-    /// A directory or symbolic link was renamed, removed or replaced: a path
-    /// through it may now reach somewhere else, or nowhere. Every watcher
-    /// re-checks its path at its next drain.
-    pub fn paths_moved(&self) {
-        self.registry.moved(&self.registry.paths);
-    }
-
-    /// A directory's security changed: a watcher may have lost, or regained,
-    /// the right to list what its journal names. Every watcher rescans, so no
-    /// name recorded while it could not list the directory is ever delivered.
-    pub fn access_moved(&self) {
-        self.registry.moved(&self.registry.access);
     }
 
     /// Every watcher of this volume re-validates and rescans, and every File
@@ -852,10 +818,9 @@ impl VolumeWatch {
         nodes.get_mut(&node).ok_or(Errno::OutOfMemory)
     }
 
-    /// Arm a watch on directory `node` for a path that resolved under
-    /// `epochs`, returning the watcher's identity and whether the directory's
-    /// journal is new.
-    pub(crate) fn watch(&self, node: u64, epochs: Epochs) -> Result<(u64, bool), Errno> {
+    /// Arm a watch on directory `node` under mount epoch `mounts`, returning
+    /// the watcher's identity and whether the directory's journal is new.
+    pub(crate) fn watch(&self, node: u64, mounts: u64) -> Result<(u64, bool), Errno> {
         let watcher = self.registry.next_watcher.fetch_add(1, Ordering::Relaxed);
         let mut nodes = self.nodes.lock();
         let watch = self.watched_node(&mut nodes, node)?;
@@ -863,7 +828,7 @@ impl VolumeWatch {
         let journal = watch
             .journal
             .get_or_insert_with(|| Journal::new(self.registry));
-        if journal.join(watcher, epochs).is_ok() {
+        if journal.join(watcher, mounts).is_ok() {
             return Ok((watcher, created));
         }
         if created {
@@ -916,17 +881,23 @@ impl VolumeWatch {
         journal.take(watcher, budget, rescan)
     }
 
-    /// Record that `watcher` was delivered everything up to `upto`, its path
-    /// having resolved under `epochs`.
-    pub fn commit(&self, node: u64, watcher: u64, upto: u64, epochs: Epochs) {
+    /// Record that `watcher` was delivered everything up to `upto`, under
+    /// mount epoch `mounts`.
+    pub fn commit(&self, node: u64, watcher: u64, upto: u64, mounts: u64) {
         let mut nodes = self.nodes.lock();
         if let Some(journal) = nodes.get_mut(&node).and_then(|w| w.journal.as_mut()) {
-            journal.commit(watcher, upto, epochs);
+            journal.commit(watcher, upto, mounts);
         }
     }
 
-    /// Add a File member watching `node`, returning its baseline generation.
-    fn file_member_add(&self, node: u64) -> Result<u64, Errno> {
+    /// Add a File member watching the node this table's registration pinned
+    /// as `node`, returning its baseline generation. The member holds the
+    /// table, and its node's pin, for its life.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`].
+    pub fn file_member_add(&self, node: u64) -> Result<u64, Errno> {
         let mut nodes = self.nodes.lock();
         let watch = self.watched_node(&mut nodes, node)?;
         watch.file_members += 1;
@@ -971,12 +942,12 @@ impl VolumeWatch {
 
     /// A `DirWatch` member's state at `now`, given the mount table's epoch
     /// `mounts`. A member is due once its journal advanced — a retired table
-    /// revalidates every journal — or an epoch its path resolves against moved.
-    /// An epoch move is reported once and then held until the watcher drains,
-    /// because until its drain re-resolves the path the directory may no
-    /// longer be the watcher's to follow. Marks the node parked when the member
-    /// is idle. A member whose watcher is no longer armed is idle for ever, as
-    /// a closed descriptor is.
+    /// revalidates every journal — or the mount table moved since its watcher
+    /// last drained, which may have changed the mounts its directory lists. A
+    /// mount move is reported once and then held until the watcher drains.
+    /// Marks the node parked when the member is idle; a mount move wakes it
+    /// through the deferred broadcast. A member whose watcher is no longer
+    /// armed is idle for ever, as a closed descriptor is.
     #[must_use]
     pub fn dir_state(&self, node: u64, pacing: &Pacing, mounts: u64, now: u64) -> MemberState {
         let mut nodes = self.nodes.lock();
@@ -989,20 +960,14 @@ impl VolumeWatch {
         let Some(cursor) = journal.cursor(pacing.watcher) else {
             return MemberState::Idle;
         };
-        // Decided under the epoch lock, so a move that lands after the epochs
-        // are read finds the park and wakes it.
-        let mut parked_for_epochs = self.registry.epoch_park.lock();
-        let epochs = self.registry.epochs(mounts);
-        if epochs != cursor.epochs {
-            if pacing.epochs != cursor.epochs {
+        if mounts != cursor.mounts {
+            if pacing.mounts != cursor.mounts {
                 return MemberState::Idle;
             }
         } else if journal.seq == pacing.observed {
             watch.parked = true;
-            *parked_for_epochs = true;
             return MemberState::Idle;
         }
-        drop(parked_for_epochs);
         let due = pacing
             .reported_at
             .map_or(0, |at| at.saturating_add(pacing.latency_ns));
@@ -1031,24 +996,27 @@ impl VolumeWatch {
             .and_then(|j| j.cursor(watcher))
     }
 
-    /// Let go of claim `id`, if it is still the one feeding the table: the
-    /// volume left, so every watcher re-validates and every File member sees
-    /// a change.
+    /// Let go of claim `id`, if it is still the one feeding the table: its
+    /// registration ended, so no node it watches can change again and the
+    /// table retires.
     fn release(&self, id: u64) {
         if self
             .claimed
             .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            self.revalidate_all();
-            crate::waitq::fswatch_wake_all();
+            self.retire();
         }
     }
 
-    /// The registry replaced this table: its watchers learn their directories
-    /// are gone.
+    /// Nothing will feed this table again: its watchers learn their
+    /// directories are gone, and every File member sees a change. Only the
+    /// first retirement reports: a released table is retired again when a
+    /// claim replaces it.
     fn retire(&self) {
-        self.retired.store(true, Ordering::Release);
+        if self.retired.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.revalidate_all();
         crate::waitq::fswatch_wake_all();
     }
@@ -1070,28 +1038,15 @@ fn wake_all(keys: [Option<WakeKey>; 2]) {
 /// The published tables, by volume id.
 type VolumeTables = HashMap<[u8; 16], Arc<VolumeWatch>, BuildSipHash13>;
 
-/// The key every `DirWatch` waiter also parks under, woken when an epoch
-/// moves; node keys are minted after it.
-const EPOCH_KEY: WakeKey = WakeKey::new(1);
-
-/// Every volume's watch table, the watches each process holds, the heap every
-/// journal holds together and the epochs every watched path resolves against:
-/// one per kernel, handed to the syscall layer and to the volume bring-up that
-/// claims tables.
+/// Every volume's watch table, the watches each process holds and the heap
+/// every journal holds together: one per kernel, handed to the syscall layer
+/// and to the volume bring-up that claims tables.
 pub struct WatchRegistry {
     volumes: SpinLock<Option<VolumeTables>>,
     /// The heap every journal holds, measured from the maps themselves.
     journal_bytes: AtomicUsize,
     /// How many journals share that heap.
     journal_count: AtomicUsize,
-    /// [`Epochs::paths`].
-    paths: AtomicU64,
-    /// [`Epochs::access`].
-    access: AtomicU64,
-    /// A `DirWatch` member is parked until an epoch moves. The lock orders
-    /// that decision against the move, so a move never passes a member
-    /// parking on the epochs it replaced.
-    epoch_park: SpinLock<bool>,
     next_key: AtomicU64,
     next_watcher: AtomicU64,
     next_claim: AtomicU64,
@@ -1111,10 +1066,7 @@ impl WatchRegistry {
             volumes: SpinLock::new(None),
             journal_bytes: AtomicUsize::new(0),
             journal_count: AtomicUsize::new(0),
-            paths: AtomicU64::new(0),
-            access: AtomicU64::new(0),
-            epoch_park: SpinLock::new(false),
-            next_key: AtomicU64::new(2),
+            next_key: AtomicU64::new(1),
             next_watcher: AtomicU64::new(1),
             next_claim: AtomicU64::new(1),
         }
@@ -1122,33 +1074,6 @@ impl WatchRegistry {
 
     fn mint_key(&self) -> WakeKey {
         WakeKey::new(self.next_key.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// The key a `DirWatch` waiter parks under for an epoch move.
-    #[must_use]
-    pub const fn epoch_key(&self) -> WakeKey {
-        EPOCH_KEY
-    }
-
-    /// The epochs a watched path resolves against now, given the mount
-    /// table's `mounts`. Read before the path resolves, so a move after it is
-    /// the next drain's to see.
-    #[must_use]
-    pub fn epochs(&self, mounts: u64) -> Epochs {
-        Epochs {
-            mounts,
-            paths: self.paths.load(Ordering::Acquire),
-            access: self.access.load(Ordering::Acquire),
-        }
-    }
-
-    /// `epoch` moved: whichever member parked on the epochs it replaced is
-    /// woken, once however many moves follow before it parks again.
-    fn moved(&self, epoch: &AtomicU64) {
-        epoch.fetch_add(1, Ordering::AcqRel);
-        if core::mem::take(&mut *self.epoch_park.lock()) {
-            crate::waitq::fswatch_wake(EPOCH_KEY);
-        }
     }
 
     /// Hold every journal to its share of the budget, now that one more
@@ -1160,15 +1085,14 @@ impl WatchRegistry {
         }
     }
 
-    /// Claim volume `volume`'s table for the cache wrapper about to feed it,
-    /// publishing one if the volume has none: a volume that returns is watched
-    /// through the table it left, so its watchers carry on.
+    /// Claim a fresh table for volume `volume` and the cache wrapper about to
+    /// feed it, retiring any table an earlier registration of the volume left
+    /// behind: its nodes' pinned ids name nothing in this one.
     ///
     /// [`None`] while a live wrapper already feeds a volume of the same
     /// identity — a second device carrying the same volume id must not report
     /// its changes to the first one's watchers — or if the registry cannot
-    /// grow. A table left behind by a volume whose names matched differently
-    /// is retired.
+    /// grow.
     #[must_use]
     pub fn claim(
         &'static self,
@@ -1177,7 +1101,8 @@ impl WatchRegistry {
         pressure: &'static MemoryPressure,
     ) -> Option<Claim> {
         let id = self.next_claim.fetch_add(1, Ordering::Relaxed);
-        let (table, retired) = {
+        let table = Arc::new(VolumeWatch::new(volume, matching, pressure, self));
+        let replaced = {
             let mut volumes = self.volumes.lock();
             let map = volumes.get_or_insert_with(|| HashMap::with_hasher(hasher()));
             // A table nothing feeds and nothing else holds watches nothing.
@@ -1190,50 +1115,15 @@ impl WatchRegistry {
             {
                 return None;
             }
-            let reused = map
-                .get(&volume)
-                .filter(|table| table.matching == matching)
-                .cloned();
-            let (table, retired) = if let Some(table) = reused {
-                (Some(table), None)
-            } else {
-                let table = Arc::new(VolumeWatch::new(volume, matching, pressure, self));
-                // A table left behind is replaced in place, which never
-                // allocates, so it is always handed back to be retired; only
-                // a volume with none can be refused.
-                match map.try_insert(volume, Arc::clone(&table)) {
-                    Ok(replaced) => (Some(table), replaced),
-                    Err(_) => (None, None),
-                }
-            };
-            if let Some(table) = &table {
-                table.claimed.store(id, Ordering::Release);
-            }
-            (table, retired)
+            table.claimed.store(id, Ordering::Release);
+            // A table left behind is replaced in place, which never allocates;
+            // only a volume with none can be refused.
+            map.try_insert(volume, Arc::clone(&table)).ok()?
         };
-        if let Some(old) = retired {
+        if let Some(old) = replaced {
             old.retire();
         }
-        table.map(|table| Claim { table, id })
-    }
-
-    /// The table of volume `volume`, if one is published.
-    #[must_use]
-    pub fn volume(&self, volume: [u8; 16]) -> Option<Arc<VolumeWatch>> {
-        self.volumes.lock().as_ref()?.get(&volume).cloned()
-    }
-
-    /// Add a File member on node `file`: its volume's table, which the member
-    /// holds for its life, and the node's baseline generation.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::NotFound`] for a node on a volume with no published table —
-    /// no change to it could ever be reported — or [`Errno::OutOfMemory`].
-    pub fn file_member_add(&self, file: FileId) -> Result<(Arc<VolumeWatch>, u64), Errno> {
-        let table = self.volume(file.volume).ok_or(Errno::NotFound)?;
-        let baseline = table.file_member_add(file.node)?;
-        Ok((table, baseline))
+        Some(Claim { table, id })
     }
 }
 
@@ -1281,12 +1171,17 @@ impl ClaimRef {
     pub fn release(&self) {
         self.table.release(self.id);
     }
+
+    /// The claimed table.
+    #[must_use]
+    pub fn table(&self) -> &Arc<VolumeWatch> {
+        &self.table
+    }
 }
 
-/// A mount table changed: a mount point may have appeared in a listing, or a
-/// watched path may now reach another directory. Every member re-checks the
-/// table's epoch, and a drain rescans only a directory whose own mounts
-/// moved.
+/// A mount table changed: a mount point may have appeared in a listing. Every
+/// member re-checks the table's epoch, and a drain rescans only a directory
+/// whose own mounts moved.
 ///
 /// Called with the mount table's lock held, so the wake is the deferred
 /// broadcast rather than a direct unpark.
@@ -1297,11 +1192,12 @@ pub fn mounts_changed() {
 /// A watch armed on an open directory description, released with it.
 pub struct ArmedWatch {
     table: Arc<VolumeWatch>,
+    /// The id the directory is pinned under, the table's key for it.
     node: u64,
     watcher: u64,
     latency_ns: u64,
-    /// The mounts directly beneath the directory when its path last
-    /// resolved; the epochs it resolved under are its cursor's.
+    /// The mounts directly beneath the directory at the last drain; the epoch
+    /// they were read under is the cursor's.
     children: SpinLock<ChildMounts>,
     /// What the owner is charged against its `dir-watches` limit.
     _charge: Charge,
@@ -1318,33 +1214,31 @@ impl core::fmt::Debug for ArmedWatch {
 }
 
 impl ArmedWatch {
-    /// Arm a watch on directory `dir` for `owner`, charged against its
-    /// `limit`. `resolved` is what its path resolved under: epochs read before
-    /// the path resolved, so a move during the resolution reports at once,
-    /// and the mounts its listing showed beneath it.
+    /// Arm a watch for `owner`, charged against its `limit`, on the
+    /// directory `table`'s registration pinned as `node`. `resolved` is the
+    /// mount epoch read before the directory was looked up, so a move
+    /// meanwhile reports at once, and the mounts its listing showed beneath
+    /// it.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotImplemented`] for a volume with no published table (a
-    /// directory no mutation could ever be recorded against),
     /// [`Errno::LimitExceeded`] past `limit`, [`Errno::OutOfMemory`].
     pub fn arm(
-        registry: &'static WatchRegistry,
-        dir: FileId,
+        table: Arc<VolumeWatch>,
+        node: u64,
         latency_ns: u64,
         owner: &Arc<ResourceCharges>,
         limit: u64,
         resolved: Resolved,
     ) -> Result<Self, Errno> {
-        let table = registry.volume(dir.volume).ok_or(Errno::NotImplemented)?;
         let charge = owner.charge(LimitKind::DirWatches, 1, limit)?;
-        let (watcher, created) = table.watch(dir.node, resolved.epochs)?;
+        let (watcher, created) = table.watch(node, resolved.mounts)?;
         if created {
-            registry.share_out();
+            table.registry.share_out();
         }
         Ok(Self {
             table,
-            node: dir.node,
+            node,
             watcher,
             latency_ns,
             children: SpinLock::new(resolved.children),
@@ -1352,13 +1246,10 @@ impl ArmedWatch {
         })
     }
 
-    /// The watched directory.
+    /// The id the watched directory is pinned under.
     #[must_use]
-    pub fn dir(&self) -> FileId {
-        FileId {
-            volume: self.table.volume,
-            node: self.node,
-        }
+    pub const fn node(&self) -> u64 {
+        self.node
     }
 
     /// The table of the volume the watched directory is on.
@@ -1389,15 +1280,15 @@ impl ArmedWatch {
         self.table.take(self.node, self.watcher, budget, rescan)
     }
 
-    /// Advance the cursor past what was delivered, the path having resolved
-    /// under `resolved`.
+    /// Advance the cursor past what was delivered, the directory having
+    /// listed `resolved`.
     pub fn commit(&self, upto: u64, resolved: Resolved) {
         self.table
-            .commit(self.node, self.watcher, upto, resolved.epochs);
+            .commit(self.node, self.watcher, upto, resolved.mounts);
         *self.children.lock() = resolved.children;
     }
 
-    /// The mounts directly beneath the directory when its path last resolved.
+    /// The mounts directly beneath the directory at the last drain.
     #[must_use]
     pub fn children(&self) -> ChildMounts {
         *self.children.lock()

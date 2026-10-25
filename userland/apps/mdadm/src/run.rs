@@ -32,13 +32,12 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::vec::Vec;
 
     use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord, RAID_CONTROL_ENDPOINT};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_mdadm::{parse, run, Controller, Reader, USAGE};
+    use tairix_mdadm::{parse, run, Controller, Reader};
     use tairix_rt::io::{write_stderr_line, Stdout};
 
     /// The command word this bundle is named by.
@@ -75,19 +74,17 @@ mod program {
     ///
     /// Exit codes: `0` on success, `1` on a runtime failure (a denied
     /// capability, a name that did not resolve, a service or composer refusal,
-    /// or an output failure — the reason lands on standard error), `2` on a
-    /// usage error.
+    /// or an output failure — the reason lands on standard error) or a
+    /// command line that was not understood.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments(OWN_WORD) else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("mdadm: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse(OWN_WORD, &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -101,7 +98,7 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("mdadm: {err}"));
+                write_stderr_line(format_args!("mdadm: {err}"));
                 1
             }
         }

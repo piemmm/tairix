@@ -25,6 +25,7 @@ const ERR_INVALID_PARAMETER: u32 = 0x1205;
 
 const GET_DISPLAY_INFO: u32 = 0x0100;
 const CREATE_2D: u32 = 0x0101;
+const UNREF: u32 = 0x0102;
 const SET_SCANOUT: u32 = 0x0103;
 const UPDATE_CURSOR: u32 = 0x0300;
 const MOVE_CURSOR: u32 = 0x0301;
@@ -85,6 +86,10 @@ struct Model {
     fall_silent_at: Option<u32>,
     /// Whether the device has stopped answering.
     mute: bool,
+    /// The fence each control-queue command carried, if it carried one.
+    fences: Vec<Option<u64>>,
+    /// The device answers without echoing a command's fence.
+    drops_fences: bool,
 }
 
 impl Model {
@@ -101,7 +106,7 @@ impl Model {
             GET_DISPLAY_INFO => self.display_info(response),
             0x010A => self.edid(response),
             CREATE_2D => self.create(request),
-            0x0102 => self.unref(word(request, 24)),
+            UNREF => self.unref(word(request, 24)),
             SET_SCANOUT => {
                 self.set_scanout(rect_at(request, 24), word(request, 40), word(request, 44))
             }
@@ -249,6 +254,13 @@ fn transport(model: &Shared, host: &MockHost, features: u64) -> Rc<RefCell<MockT
             response.fill(0);
             let kind = model.apply(request, response);
             response[..4].copy_from_slice(&kind.to_le_bytes());
+            let fence = (word(request, 4) & 1 != 0)
+                .then(|| u64::from_le_bytes(request[8..16].try_into().expect("a fence")));
+            model.fences.push(fence);
+            if let Some(fence) = fence.filter(|_| !model.drops_fences) {
+                response[4..8].copy_from_slice(&1u32.to_le_bytes());
+                response[8..16].copy_from_slice(&fence.to_le_bytes());
+            }
             u32::try_from(response.len()).map_err(|_| VirtioError::DeviceFault)
         }),
     );
@@ -608,7 +620,7 @@ fn a_frame_s_first_present_makes_its_resource_and_transfers_it_whole() {
 }
 
 #[test]
-fn a_later_present_moves_only_its_damage_in_one_batch() {
+fn a_later_present_moves_only_its_damage_and_flushes_it_once_moved() {
     let rig = Rig::new();
     let (mut gpu, transport) = rig.open();
     let (frame, shown) = present_frame(&mut gpu, &rig);
@@ -638,9 +650,92 @@ fn a_later_present_moves_only_its_damage_in_one_batch() {
     );
     assert_eq!(
         transport.borrow().notify_log.borrow().len(),
-        kicks + 1,
-        "one notify for the whole present"
+        kicks + 2,
+        "the transfers together, then the flushes once they have run"
     );
+}
+
+/// The device may run commands in any order and answer one before it has
+/// run it, so each is fenced and answered only once it has.
+#[test]
+fn every_control_command_is_fenced_with_a_fence_of_its_own() {
+    let rig = Rig::new();
+    let (mut gpu, _) = rig.open();
+    let (frame, _) = present_frame(&mut gpu, &rig);
+    assert_eq!(
+        gpu.present(frame.id, &[rect(0, 0, 8, 8)]),
+        Ok(Presented::Shown)
+    );
+    let pointer = gpu.alloc_buffer(16, 16).expect("a pointer image");
+    gpu.set_cursor(pointer.id, 1, 1).expect("a pointer");
+    let carried = rig.model.borrow().fences.clone();
+    assert!(carried.len() > 10, "{carried:?}");
+    let ids: Vec<u64> = carried.iter().map(|fence| fence.expect("fenced")).collect();
+    assert!(
+        ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "each command its own fence: {ids:?}"
+    );
+}
+
+#[test]
+fn an_answer_without_its_fence_is_a_fault() {
+    let rig = Rig::new();
+    let (mut gpu, _) = rig.open();
+    let frame = gpu.alloc_buffer(1280, 800).expect("a frame");
+    rig.model().drops_fences = true;
+    assert_eq!(
+        gpu.present(frame.id, &[whole(1280, 800)]),
+        Err(DriverError::DeviceFault),
+        "an answer that may come before the command ran says nothing"
+    );
+}
+
+/// A frame switched to is made and backed, transferred, put on the scanout,
+/// then flushed beside the unreference of the frame it replaces: each stage
+/// sent once the one before it has run.
+#[test]
+fn a_switching_present_goes_in_stages() {
+    let rig = Rig::new();
+    let (mut gpu, transport) = rig.open();
+    let (first, _) = present_frame(&mut gpu, &rig);
+    let second = gpu.alloc_buffer(1280, 800).expect("a second frame");
+    let kicks = |transport: &Rc<RefCell<MockTransport>>| {
+        let log = transport.borrow();
+        let count = log
+            .notify_log
+            .borrow()
+            .iter()
+            .filter(|queue| **queue == wire::CONTROL_QUEUE)
+            .count();
+        count
+    };
+    rig.model().commands.clear();
+    let before = kicks(&transport);
+    assert_eq!(
+        gpu.present(second.id, &[whole(1280, 800)]),
+        Ok(Presented::Shown)
+    );
+    assert_eq!(
+        rig.model.borrow().commands,
+        [CREATE_2D, 0x0106, 0x0105, SET_SCANOUT, 0x0104]
+    );
+    assert_eq!(
+        kicks(&transport) - before,
+        5,
+        "create, back, move, switch, flush"
+    );
+    rig.model().commands.clear();
+    let before = kicks(&transport);
+    assert_eq!(
+        gpu.present(first.id, &[rect(0, 0, 8, 8)]),
+        Ok(Presented::Shown)
+    );
+    assert_eq!(
+        rig.model.borrow().commands,
+        [0x0105, SET_SCANOUT, 0x0104],
+        "a frame made before is moved, switched to and flushed whole"
+    );
+    assert_eq!(kicks(&transport) - before, 3);
 }
 
 #[test]
@@ -1127,9 +1222,10 @@ fn an_unanswered_first_present_leaves_a_resource_detached_before_its_buffer_goes
     );
 }
 
-/// A first present the device answers late may have unreferenced the frame
-/// it replaced; the next present finds that frame gone and carries on, rather
-/// than refusing every present after it for the unreference it repeats.
+/// A first present the device answers late, in its last stage, may have
+/// unreferenced the frame it replaced; the next present finds that frame gone
+/// and carries on, rather than refusing every present after it for the
+/// unreference it repeats.
 #[test]
 fn a_frame_a_late_batch_already_retired_does_not_fail_the_presents_after_it() {
     let rig = Rig::new();
@@ -1137,7 +1233,7 @@ fn a_frame_a_late_batch_already_retired_does_not_fail_the_presents_after_it() {
     let (old, retired) = present_frame(&mut gpu, &rig);
     gpu.free_buffer(old.id).expect("given back while shown");
     let frame = gpu.alloc_buffer(1280, 800).expect("a frame");
-    rig.model().fall_silent_at = Some(CREATE_2D);
+    rig.model().fall_silent_at = Some(UNREF);
     assert!(gpu.present(frame.id, &[whole(1280, 800)]).is_err());
     rig.model().mute = false;
     transport

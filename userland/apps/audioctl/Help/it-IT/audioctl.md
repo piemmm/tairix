@@ -59,8 +59,8 @@ Sull'informazione standard (fd 3) `audioctl streams` scrive un record
 ## EXIT STATUS
 
 - `0` — il comando è stato completato.
-- `1` — è stato rifiutato, o non è stato possibile eseguirlo.
-- `2` — la riga di comando non è stata compresa.
+- `1` — è stato rifiutato, o non è stato possibile eseguirlo. Anche una riga
+  di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

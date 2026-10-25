@@ -659,7 +659,8 @@ tairix/
 │   ├── font/            # Shared text rasterisation (monospace font + blitter).
 │   ├── fontface/        # Shared glyph-coverage engine: TrueType outlines,
 │   │                    #   grid fitting, and pixel-exact line art.
-│   ├── fscopy/          # The one file copy: holes, attributes, what was not kept.
+│   ├── fscopy/          # The one file copy: holes, attributes, what was not kept;
+│   │                    #   the tree seam tools walk and change trees through.
 │   ├── fsmeta/          # Shared extended-file-metadata model.
 │   ├── fsprobe/         # Shared filesystem signature/label/identity probe.
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.
@@ -724,7 +725,7 @@ tairix/
 │   ├── ssh/             # The pure SSH protocol engine (no I/O, clock, or RNG).
 │   ├── supervisor/      # Pre-boot Supervisor REPL engine + built-in commands.
 │   ├── svg/             # Shared fail-closed no_std SVG decoder.
-│   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
+│   ├── sync/            # Synchronisation primitives (locks, Once, bit claims).
 │   ├── syntax/          # Document formats: detection, lexers, settings validation.
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
 │   ├── termcap/         # Compiled-in TERM->capability database.
@@ -742,6 +743,7 @@ tairix/
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.
 │   ├── virtio_net/      # Arch-neutral virtio-net device logic.
+│   ├── visible/         # The one hidden-character rule; links no allocator.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
 │   ├── wallpaper/       # Desktop user-scope settings document, wallpaper
 │   │                    #   catalog, fit geometry, the savers' option values,
@@ -989,7 +991,7 @@ an update to this section.
   project (never scoped to a single crate with `-p`):
   1. `cargo fmt --all` (and verify with `cargo fmt --all --check`).
   2. `cargo xtask ci` — the full pull-request pipeline (clippy, deps-check,
-     cfg-check, the test matrix, docs-check, `cargo deny`, supply-chain,
+     cfg-check, board-check, the test matrix, docs-check, `cargo deny`, supply-chain,
      the per-PR `--quick` fuzz and proptest gates, the `miri` and `loom`
      oracles over their enrolled sets (§19.11), model-check, spec-review,
      crypto constant-time, and abi-check). Run this **exactly once**: the
@@ -1658,6 +1660,7 @@ You are not exempt from any rule above. In addition:
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
 | Foreign media and the copy that keeps their metadata: ISO 9660, UDF, USB optical drives and the disc layout, and `lib/fscopy`'s holes, attributes and omission report | `plans/FOREIGN-MEDIA.md`; `plans/ARXFS-METADATA.md` |
     | Boot namespace assembly: which volume backs which root, the signed namespace policy on `/System`, volume attachment vs view projection, mount-flag narrowing, and the user-space root-volume unlock | `plans/NEW-NAMESPACE.md` |
+    | Open files and names: open file descriptions bound to a pinned node, driver pins and each format's deferred deletion, the descriptor-relative calls and their one resolver, create modes and the umask, setgid and sticky directories, the descriptor limit | `plans/OPENFILE.md` |
     | Advisory file locking: byte-range locks owned by the open file description, the conflict/fairness/deadlock rules, the `file-locks` bound, `fs_lock`/`fs_lock_query`, and the `flock` command | `plans/FILELOCK.md` |
     | Links, symbolic and hard, and path canonicalisation: the `FileKind`/`NodeKind` kind, `NO_FOLLOW`, `fs_symlink`/`fs_readlink`/`fs_link`/`fs_realpath`, VFS per-component resolution with its hop bound and mount-projection floor, `RealpathMode`, the per-format on-disk spellings, the link-count lifecycle, `ln`/`ls`/`readlink`, desktop shortcuts | `plans/SYMLINKS.md` |
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` (the ordered ledger of what is left); `plans/SPARSE.md`; `plans/ARXFS-METADATA.md`; `plans/ARXFS-WRITEBACK.md`; `plans/ARXFS-MAINTENANCE.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md` |
@@ -2199,7 +2202,9 @@ written to match **GNU coreutils** (and, for the process/system tools, the
 established `procps`/coreutils command surface) as closely as possible. A user
 or script that knows the GNU tool must find the TAIRiX tool's options and
 output already familiar; the burden of proof is on any *deviation*, not on the
-compatibility.
+compatibility. Compatibility is established from the tools' manuals and
+black-box runs, never from their source: GNU, Linux and other incompatibly
+licensed code is not read or cited.
 
 - **Options match coreutils.** Each command implements the GNU tool's option
   names — the short flags, their `--long` equivalents, argument grammar, and
@@ -2395,14 +2400,14 @@ as non-negotiable as §2.
   register/MMIO arming is arch-specific.
   - **The CFQ policy is deliberately non-tickless — the sole
     exception, and the only scheduler permitted to be.** CFQ
-    (`kernel/sched/cfq`) is a Linux-CFS-like Completely-Fair-Queuing policy
+    (`kernel/sched/cfq`) is a Completely-Fair-Queuing policy
     that keeps a fixed-frequency periodic quantum tick armed for *any*
     running task — including a lone CPU-bound one, exactly the case the
     tickless rule otherwise forbids arming for — so the timer interrupt
-    fires at a steady `HZ` cadence like Linux's scheduler tick. This is a
+    fires at a steady `HZ` cadence, the classic periodic tick. This is a
     deliberate, charter-blessed violation of the tickless mandate, granted
-    to CFQ alone; **no other policy may take it.** As in Linux
-    (`check_preempt_tick`), a fired tick forces a context switch only when
+    to CFQ alone; **no other policy may take it.** A fired tick forces a
+    context switch only when
     there is another runnable task to switch to (or pending
     interrupt-context work to drain); a lone task's tick does its periodic
     accounting without a needless switch-to-self, and a genuinely idle CPU
@@ -2454,12 +2459,16 @@ as non-negotiable as §2.
   estimator derives the live "cpu MHz" the System Information API reports,
   `plans/FIX-HARDWARE-FEATURES.md`), and the
   lockup-watchdog non-maskable liveness sample + cross-CPU recovery
-  (`plans/WATCHDOG.md`), and the **optional** machine-takeover mechanism
+  (`plans/WATCHDOG.md`), the **optional** message-interrupt multiplexer
+  (`MsiMultiplexer`: a root complex's bank of message vectors behind one
+  wired parent line, which the kernel demultiplexes onto a line per vector,
+  `plans/WIRING.md` W18), and the **optional** machine-takeover mechanism
   (`MachineTakeover`: quiesce the secondary CPUs, mask interrupts, stop the
   watchdog, and flatten paging) the pre-boot Supervisor's one-way destructive
-  whole-RAM test drives (`plans/NEW-SUPERVISOR.md` §9) — optional because a
-  port that has not wired it fails closed to "not supported" rather than
-  blocking the boot floor, unlike the mandatory slices above.
+  whole-RAM test drives (`plans/NEW-SUPERVISOR.md` §9) — both optional
+  because a port without the hardware, or one that has not wired it, fails
+  closed to "not supported" rather than blocking the boot floor, unlike the
+  mandatory slices above.
   Each slice carries a
   conformance vertical in `kernel/arch/api`. Adding to this surface
   requires a PLAN.md entry and updates this section; per-slice migration
@@ -2548,7 +2557,12 @@ kernel internals; they consume `lib/abi` only.
 - A companion `cargo xtask cfg-check` scans the source tree and
   fails if `cfg(target_arch …)` or `cfg(target_pointer_width …)`
   appears outside the allow-list in §17.2.
-- Both checks are part of `cargo xtask ci` (add to §7) and are
+- `cargo xtask board-check` scans the Rust sources and crate READMEs
+  under `lib/`, `kernel/`, `drivers/` and `userland/` and fails where
+  generic code names a board, SoC or board part (§2.20); the ports, each
+  device's own driver or support crate, and the Settings application's
+  Raspberry Pi category are its allow-list.
+- All three checks are part of `cargo xtask ci` (add to §7) and are
   blocking in CI.
 - The headless build is a Tier-1 image: `cargo xtask build
   --headless --target <platform>` must succeed for every Tier-1
@@ -3113,8 +3127,8 @@ may store absolute time as 32-bit seconds.
 
 - The canonical time ABI lives in `lib/abi/src/time.rs` as `Time64`
   and `Duration64`: signed 64-bit seconds plus nanoseconds.
-- `Time64` is TAIRiX's equivalent of Linux's `timespec64`, not
-  seconds-only `time64_t`. Seconds-only values may exist internally,
+- `Time64` is a POSIX `struct timespec` with 64-bit seconds, not a
+  seconds-only `time_t`. Seconds-only values may exist internally,
   but not as ABI or persistent absolute-time storage.
 - Do not expose `time_t`, `usize`, `isize`, `u32`, or `i32` as ABI or
   persistent time storage. Pointer width is not time width.

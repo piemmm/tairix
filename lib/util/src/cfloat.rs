@@ -18,6 +18,7 @@
 //! than overflowing.
 
 use alloc::string::String;
+use core::fmt::{self, Write};
 
 /// The conversion letter of a floating-point `%` directive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,11 +79,18 @@ impl FloatDirective {
         }
     }
 
-    /// Render `x` through this directive (sign, body, padding), exactly
-    /// as C's `printf` renders it in the C locale, appending to `out`.
-    pub fn render_into(&self, x: f64, out: &mut String) {
-        use core::fmt::Write;
-
+    /// Write `x` through this directive (sign, body, padding) to `out`,
+    /// exactly as C's `printf` renders it in the C locale.
+    ///
+    /// Memory is bounded whatever the width and precision: the digits an
+    /// `f64` can carry are rendered, and the zeros past them and the padding
+    /// are written to `out` as they go, so a sink that flushes holds no more
+    /// than its own buffer.
+    ///
+    /// # Errors
+    ///
+    /// `out`'s own refusal.
+    pub fn render_into<W: Write + ?Sized>(&self, x: f64, out: &mut W) -> fmt::Result {
         let negative = x.is_sign_negative();
         let sign = if negative {
             "-"
@@ -96,9 +104,9 @@ impl FloatDirective {
 
         let magnitude = x.abs();
         let body = if magnitude.is_infinite() {
-            String::from(if self.uppercase { "INF" } else { "inf" })
+            Body::text(if self.uppercase { "INF" } else { "inf" })
         } else if magnitude.is_nan() {
-            String::from(if self.uppercase { "NAN" } else { "nan" })
+            Body::text(if self.uppercase { "NAN" } else { "nan" })
         } else {
             match self.conversion {
                 FloatConversion::Fixed => self.body_fixed(magnitude),
@@ -109,107 +117,136 @@ impl FloatDirective {
         };
 
         let width = self.width.unwrap_or(0);
-        let printed = sign.len() + body.len();
-        let padding = width.saturating_sub(printed);
+        let padding = width.saturating_sub(sign.len().saturating_add(body.len()));
         if padding == 0 {
-            out.push_str(sign);
-            out.push_str(&body);
-            return;
+            out.write_str(sign)?;
+            return body.write(out);
         }
         if self.left {
-            out.push_str(sign);
-            out.push_str(&body);
-            for _ in 0..padding {
-                out.push(' ');
-            }
+            out.write_str(sign)?;
+            body.write(out)?;
+            repeat(out, SPACES, padding)
         } else if self.zero && magnitude.is_finite() {
             // Zero padding goes between the sign (and any `0x`) and the
             // digits; C ignores it for infinities.
-            out.push_str(sign);
+            out.write_str(sign)?;
             let digits_at = if self.conversion == FloatConversion::Hex {
                 2 // after "0x"
             } else {
                 0
             };
-            out.push_str(&body[..digits_at]);
-            let _ = write!(out, "{:0>1$}", "", padding);
-            out.push_str(&body[digits_at..]);
+            out.write_str(&body.digits[..digits_at])?;
+            repeat(out, ZEROS, padding)?;
+            out.write_str(&body.digits[digits_at..])?;
+            repeat(out, ZEROS, body.zeros)?;
+            out.write_str(&body.exponent)
         } else {
-            let _ = write!(out, "{: >1$}", "", padding);
-            out.push_str(sign);
-            out.push_str(&body);
+            repeat(out, SPACES, padding)?;
+            out.write_str(sign)?;
+            body.write(out)
         }
+    }
+
+    /// The value `x` reads back as once written through this directive —
+    /// `x` rounded to the digits the directive shows — or `None` for a NaN.
+    /// Only the digits an `f64` carries are rendered, so it costs no more
+    /// for an absurd precision.
+    #[must_use]
+    pub fn rounded(&self, x: f64) -> Option<f64> {
+        if x.is_nan() {
+            return None;
+        }
+        let magnitude = x.abs();
+        let body = match self.conversion {
+            _ if magnitude.is_infinite() => return Some(x),
+            FloatConversion::Fixed => self.body_fixed(magnitude),
+            FloatConversion::Scientific => self.body_scientific(magnitude),
+            FloatConversion::Shortest => self.body_shortest(magnitude),
+            FloatConversion::Hex => self.body_hex(magnitude),
+        };
+        // The zeros past the held digits leave the value as it is.
+        let mut text = body.digits;
+        text.push_str(&body.exponent);
+        let (value, _) = crate::cnum::scan_double(&text)?;
+        Some(if x.is_sign_negative() { -value } else { value })
     }
 
     /// Render `x` through this directive into a fresh `String`.
     #[must_use]
     pub fn render(&self, x: f64) -> String {
         let mut out = String::new();
-        self.render_into(x, &mut out);
+        // A `String` takes every write.
+        let _ = self.render_into(x, &mut out);
         out
     }
 
     /// `%f`: fixed-point, default precision 6.
-    fn body_fixed(&self, magnitude: f64) -> String {
-        use core::fmt::Write;
-
+    fn body_fixed(&self, magnitude: f64) -> Body {
         let precision = self.precision.unwrap_or(6);
-        let mut body = String::new();
-        let _ = write!(body, "{magnitude:.precision$}");
+        let shown = precision.min(EXACT_DIGITS);
+        let mut digits = String::new();
+        let _ = write!(digits, "{magnitude:.shown$}");
         if precision == 0 && self.alternate {
-            body.push('.');
+            digits.push('.');
         }
-        body
+        Body {
+            digits,
+            zeros: precision - shown,
+            exponent: String::new(),
+        }
     }
 
     /// `%e`: scientific, default precision 6, exponent `e±dd`.
-    fn body_scientific(&self, magnitude: f64) -> String {
+    fn body_scientific(&self, magnitude: f64) -> Body {
         let precision = self.precision.unwrap_or(6);
-        let (mantissa, exponent) = split_exponential(magnitude, precision);
-        let mut body = mantissa;
+        let shown = precision.min(EXACT_DIGITS);
+        let (mut digits, exponent) = split_exponential(magnitude, shown);
         if precision == 0 && self.alternate {
-            body.push('.');
+            digits.push('.');
         }
-        body.push(if self.uppercase { 'E' } else { 'e' });
-        push_exponent(&mut body, exponent);
-        body
+        Body {
+            digits,
+            zeros: precision - shown,
+            exponent: self.exponent_text(exponent),
+        }
     }
 
     /// `%g`: the C rule — `%e` style when the rounded exponent `X` is
     /// below -4 or at least the significant-digit count `P`, else `%f`
     /// style with precision `P-1-X`; trailing zeros stripped unless `#`.
-    fn body_shortest(&self, magnitude: f64) -> String {
-        use core::fmt::Write;
-
+    fn body_shortest(&self, magnitude: f64) -> Body {
         let p = match self.precision.unwrap_or(6) {
             0 => 1,
             p => p,
         };
-        let (mantissa, x) = split_exponential(magnitude, p - 1);
-        let mut body = String::new();
-        if x < -4 || len_i64(p) <= i64::from(x) {
-            body.push_str(&mantissa);
-            if !self.alternate {
-                strip_trailing_zeros(&mut body);
-            }
-            body.push(if self.uppercase { 'E' } else { 'e' });
-            push_exponent(&mut body, x);
+        let fraction = p - 1;
+        let (mantissa, x) = split_exponential(magnitude, fraction.min(EXACT_DIGITS));
+        let (mut digits, fraction, exponent) = if x < -4 || len_i64(p) <= i64::from(x) {
+            (mantissa, fraction, self.exponent_text(x))
         } else {
-            let precision = usize::try_from(len_i64(p) - 1 - i64::from(x)).unwrap_or(0);
-            let _ = write!(body, "{magnitude:.precision$}");
-            if !self.alternate {
-                strip_trailing_zeros(&mut body);
-            }
+            let fraction = usize::try_from(len_i64(p) - 1 - i64::from(x)).unwrap_or(0);
+            let shown = fraction.min(EXACT_DIGITS);
+            let mut digits = String::new();
+            let _ = write!(digits, "{magnitude:.shown$}");
+            (digits, fraction, String::new())
+        };
+        let zeros = if self.alternate {
+            fraction - fraction.min(EXACT_DIGITS)
+        } else {
+            strip_trailing_zeros(&mut digits);
+            0
+        };
+        Body {
+            digits,
+            zeros,
+            exponent,
         }
-        body
     }
 
     /// `%a`: hexadecimal significand (`0x1.8p+1`), glibc-style: normals
     /// carry a leading `1`, subnormals a leading `0`; without a precision
     /// the fraction is exact with trailing zeros stripped.
-    fn body_hex(&self, magnitude: f64) -> String {
-        use core::fmt::Write;
-
+    fn body_hex(&self, magnitude: f64) -> Body {
         let bits = magnitude.to_bits();
         // The 11-bit exponent field always fits an i64.
         let raw_exponent = i64::try_from((bits >> 52) & 0x7FF).unwrap_or(0);
@@ -232,48 +269,113 @@ impl FloatDirective {
             Some(p) => round_hex_fraction(lead, frac, p),
         };
 
-        let mut body = String::from(if self.uppercase { "0X" } else { "0x" });
-        let _ = write!(body, "{lead}");
-        let digits = match self.precision {
+        let mut digits = String::from(if self.uppercase { "0X" } else { "0x" });
+        let _ = write!(digits, "{lead}");
+        let count = match self.precision {
             // Exact: the 13 fraction digits with trailing zeros stripped.
             None => {
                 let mut field = frac >> 8;
-                let mut digits = 13_usize;
-                while digits > 0 && (field == 0 || field.trailing_zeros() >= 4) {
+                let mut count = 13_usize;
+                while count > 0 && (field == 0 || field.trailing_zeros() >= 4) {
                     field >>= 4;
-                    digits -= 1;
+                    count -= 1;
                 }
-                digits
+                count
             }
             Some(p) => p,
         };
-        if digits > 0 || self.alternate {
-            body.push('.');
+        if count > 0 || self.alternate {
+            digits.push('.');
         }
-        for i in 0..digits {
-            // Digit i of the 15-digit field (only 13 carry value).
-            let digit = if i < 15 {
-                (frac >> ((14 - i) * 4)) & 0xF
-            } else {
-                0
-            };
+        // Past the 15-digit field every digit is a zero.
+        let field = count.min(15);
+        for i in 0..field {
+            let digit = (frac >> ((14 - i) * 4)) & 0xF;
             let _ = write!(
-                body,
+                digits,
                 "{}",
-                char::from_digit(u32::try_from(digit & 0xF).unwrap_or(0), 16).unwrap_or('0')
+                char::from_digit(u32::try_from(digit).unwrap_or(0), 16).unwrap_or('0')
             );
         }
         if self.uppercase {
-            body = body.to_ascii_uppercase();
+            digits = digits.to_ascii_uppercase();
         }
-        body.push(if self.uppercase { 'P' } else { 'p' });
-        if exponent < 0 {
-            let _ = write!(body, "-{}", -exponent);
-        } else {
-            let _ = write!(body, "+{exponent}");
+        let mut text = String::from(if self.uppercase { "P" } else { "p" });
+        let _ = write!(
+            text,
+            "{}{}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.unsigned_abs()
+        );
+        Body {
+            digits,
+            zeros: count - field,
+            exponent: text,
         }
-        body
     }
+
+    /// A C-style `e±dd` exponent (sign always, at least two digits).
+    fn exponent_text(&self, exponent: i32) -> String {
+        let mut text = String::from(if self.uppercase { "E" } else { "e" });
+        let _ = write!(
+            text,
+            "{}{:02}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.unsigned_abs()
+        );
+        text
+    }
+}
+
+/// The most digits after the point any rendering needs held: an `f64`'s
+/// longest exact decimal expansion, a subnormal's, has 1074, so every digit
+/// past this is a zero and is written as a count rather than held.
+const EXACT_DIGITS: usize = 1100;
+
+/// A rendered body: its digits, then `zeros` zeros, then its exponent.
+struct Body {
+    digits: String,
+    zeros: usize,
+    exponent: String,
+}
+
+impl Body {
+    fn text(text: &str) -> Self {
+        Self {
+            digits: String::from(text),
+            zeros: 0,
+            exponent: String::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.digits
+            .len()
+            .saturating_add(self.zeros)
+            .saturating_add(self.exponent.len())
+    }
+
+    fn write<W: Write + ?Sized>(&self, out: &mut W) -> fmt::Result {
+        out.write_str(&self.digits)?;
+        repeat(out, ZEROS, self.zeros)?;
+        out.write_str(&self.exponent)
+    }
+}
+
+/// Sixty-four zeros, and sixty-four spaces: the padding blocks.
+const ZEROS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const SPACES: &str = "                                                                ";
+
+/// Write `count` characters of the padding `block` is made of, a block at a
+/// time.
+fn repeat<W: Write + ?Sized>(out: &mut W, block: &str, count: usize) -> fmt::Result {
+    let mut left = count;
+    while left > 0 {
+        let take = left.min(block.len());
+        out.write_str(&block[..take])?;
+        left -= take;
+    }
+    Ok(())
 }
 
 /// Round the 60-bit left-aligned hex fraction to `p` hex digits,
@@ -323,8 +425,6 @@ fn len_i64(n: usize) -> i64 {
 /// Split `magnitude` into its `%e` mantissa (rounded to `precision`
 /// digits after the point) and decimal exponent.
 fn split_exponential(magnitude: f64, precision: usize) -> (String, i32) {
-    use core::fmt::Write;
-
     let mut text = String::new();
     let _ = write!(text, "{magnitude:.precision$e}");
     // Rust renders `1.50e-2`; the exponent part is always present.
@@ -333,18 +433,6 @@ fn split_exponential(magnitude: f64, precision: usize) -> (String, i32) {
         // Unreachable: `{:e}` always emits an exponent; fail closed.
         None => (text, 0),
     }
-}
-
-/// Append a C-style `±dd` exponent (sign always, at least two digits).
-fn push_exponent(body: &mut String, exponent: i32) {
-    use core::fmt::Write;
-
-    let _ = write!(
-        body,
-        "{}{:02}",
-        if exponent < 0 { '-' } else { '+' },
-        exponent.unsigned_abs()
-    );
 }
 
 /// Remove trailing zeros of a `%g` fixed/mantissa body, and the point
@@ -363,13 +451,18 @@ fn strip_trailing_zeros(body: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FloatConversion, FloatDirective};
+    use super::{FloatConversion, FloatDirective, EXACT_DIGITS};
     use alloc::string::String;
 
     /// Render `x` through a directive spelled as printf flags, width,
     /// precision, and a conversion letter (a tiny test-only reader; the
     /// consumers own their real grammars).
     fn render(spec: &str, x: f64) -> String {
+        directive(spec).render(x)
+    }
+
+    /// The directive `spec` spells.
+    fn directive(spec: &str) -> FloatDirective {
         let bytes = spec.as_bytes();
         let mut d = FloatDirective::plain(FloatConversion::Fixed);
         let mut i = 0;
@@ -413,7 +506,95 @@ mod tests {
             _ => FloatConversion::Fixed,
         };
         d.uppercase = conv.is_ascii_uppercase();
-        d.render(x)
+        d
+    }
+
+    /// A sink that keeps only the length written and the longest write.
+    #[derive(Default)]
+    struct Measure {
+        written: usize,
+        longest: usize,
+        head: String,
+    }
+
+    impl core::fmt::Write for Measure {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            self.written += text.len();
+            self.longest = self.longest.max(text.len());
+            if self.head.len() < 32 {
+                self.head
+                    .push_str(&text[..text.len().min(32 - self.head.len())]);
+            }
+            Ok(())
+        }
+    }
+
+    fn measure(spec: &str, x: f64) -> Measure {
+        let mut sink = Measure::default();
+        directive(spec)
+            .render_into(x, &mut sink)
+            .expect("the sink takes every write");
+        sink
+    }
+
+    #[test]
+    fn a_field_of_any_size_is_written_without_being_held() {
+        let fixed = measure(".1000000f", 1.5);
+        assert_eq!(fixed.written, 1_000_002);
+        assert!(fixed.head.starts_with("1.50000"), "{}", fixed.head);
+        assert!(fixed.longest <= EXACT_DIGITS + 64, "{}", fixed.longest);
+
+        let padded = measure("1000000.1f", -2.0);
+        assert_eq!(padded.written, 1_000_000);
+        assert!(padded.longest <= 64);
+
+        let zero_padded = measure("0100000.2e", 3.0);
+        assert_eq!(zero_padded.written, 100_000);
+        assert!(zero_padded.head.starts_with("00000"));
+
+        assert_eq!(measure("#.100000g", 0.5).written, "0.".len() + 100_000);
+        assert_eq!(
+            measure(".100000a", 1.0).written,
+            "0x1.".len() + 100_000 + "p+0".len()
+        );
+    }
+
+    #[test]
+    fn a_value_reads_back_as_its_rendering_rounds_it() {
+        assert_eq!(
+            directive(".1f").rounded(0.300_000_000_000_000_04),
+            Some(0.3)
+        );
+        assert_eq!(directive(".0f").rounded(2.5), Some(2.0), "ties to even");
+        assert_eq!(directive("g").rounded(1.000_000_1), Some(1.0));
+        assert_eq!(directive(".1000000f").rounded(0.25), Some(0.25));
+        assert_eq!(directive(".3e").rounded(-12_345.0), Some(-12_340.0));
+        assert_eq!(directive("a").rounded(1.5), Some(1.5));
+        assert_eq!(
+            directive("f").rounded(f64::NEG_INFINITY),
+            Some(f64::NEG_INFINITY)
+        );
+        assert_eq!(directive("f").rounded(f64::NAN), None);
+    }
+
+    #[test]
+    fn a_precision_past_the_exact_digits_pads_them_with_zeros() {
+        use core::fmt::Write as _;
+        for x in [1.0 / 3.0, 5e-324, 123_456.789, 2.0f64.powi(-1074) * 3.0] {
+            let mut exact = String::new();
+            let _ = write!(exact, "{x:.3000}");
+            assert_eq!(render(".3000f", x), exact, "{x:e}");
+            let mut exact = String::new();
+            let _ = write!(exact, "{x:.2500e}");
+            let mut ours = render(".2500e", x);
+            // Rust spells the exponent `e-5`, C `e-05`.
+            ours.truncate(ours.rfind('e').expect("an exponent"));
+            assert_eq!(
+                ours,
+                exact[..exact.rfind('e').expect("an exponent")],
+                "{x:e}"
+            );
+        }
     }
 
     #[test]

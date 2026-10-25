@@ -59,8 +59,8 @@ nicht selbst hält.
 - `0` — jede verlangte Änderung wurde vorgenommen.
 - `1` — die Datenbank hat eine Änderung verweigert oder sie ist
   fehlgeschlagen; Schritt und Grund erscheinen auf der
-  Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Standardfehlerausgabe. Eine nicht verstandene Befehlszeile endet ebenfalls
+  mit `1`.
 
 ## ENVIRONMENT
 

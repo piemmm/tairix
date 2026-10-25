@@ -34,7 +34,6 @@ mod program {
     extern crate alloc;
 
     use alloc::collections::BTreeMap;
-    use alloc::format;
     use core::cell::RefCell;
 
     use tairix_abi::fs::OpenFlags;
@@ -42,7 +41,7 @@ mod program {
     use tairix_help::BundleHelp;
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout};
     use tairix_rt::File;
-    use tairix_tee::{parse, run, FileSink, Input, USAGE};
+    use tairix_tee::{parse, run, FileSink, Input};
 
     /// The production [`Input`] over the inherited standard input (fd 0):
     /// the tool names only descriptors its spawner chose, never a console
@@ -64,8 +63,8 @@ mod program {
     ///
     /// Each operand's handle stays open for the whole run — a file is
     /// opened once, not once per chunk — keyed by its command-line
-    /// position, so a file named twice gets two independent handles exactly
-    /// as two GNU file descriptors would. The tracked offset advances past
+    /// position, so a file named twice gets two independent handles, as two
+    /// separate `open`s would. The tracked offset advances past
     /// each write; under the `APPEND` posture the kernel positions every
     /// write at end-of-file regardless.
     struct RtFileSink {
@@ -87,8 +86,9 @@ mod program {
             } else {
                 OpenFlags::TRUNCATE
             };
-            let flags = OpenFlags::WRITE.union(OpenFlags::CREATE).union(mode);
-            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            let flags = OpenFlags::WRITE.union(mode);
+            let file = File::create(path.as_bytes(), flags, tairix_abi::fs::FS_NEW_FILE_MODE)
+                .map_err(Errno::from_syscall)?;
             self.open.borrow_mut().insert(id, (file, 0));
             Ok(())
         }
@@ -123,22 +123,18 @@ mod program {
     ///
     /// Exit codes: `0` when every output was served to end-of-input (or the
     /// short help was written), `1` when an output failed in a way the
-    /// selected mode counts or a diagnostic could not be delivered, `2` on
-    /// a usage error (a malformed argument vector, an unrecognised option,
-    /// or an invalid `--output-error` mode).
+    /// selected mode counts, a diagnostic could not be delivered, or the
+    /// command line was not understood (a malformed argument vector, an
+    /// unrecognised option, or an invalid `--output-error` mode).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("tee") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("tee: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("tee", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -156,7 +152,7 @@ mod program {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("tee: {err}"));
+                write_stderr_line(format_args!("tee: {err}"));
                 1
             }
         }

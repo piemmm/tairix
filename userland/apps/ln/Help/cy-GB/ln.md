@@ -23,13 +23,21 @@ hynny — awdurdodir pob defnydd diweddarach gydran wrth gydran dan eich
 hunaniaeth eich hun.
 
 Gwrthodir enw cysylltiad a gymerwyd eisoes oni bai bod `-f` neu `-i` yn
-dweud ei ddisodli, ac mae'r disodli yn **tynnu** yr enw hwnnw yn gyntaf,
-fel nad aiff dim drwy gysylltiad a oedd yno eisoes at yr hyn y mae'n
-pwyntio ato. Ni ddisodlir cyfeiriadur byth.
+dweud ei ddisodli. Yna mae'r cysylltiad newydd yn cymryd lle'r enw mewn
+un cam, a dim ond ar ôl iddo fodoli, felly mae cysylltiad na ellir ei
+wneud — targed coll, dyweder — yn gadael yr enw fel yr oedd, ac nid aiff
+dim drwy gysylltiad sydd yno eisoes at yr hyn y mae'n pwyntio ato. Ni
+ddisodlir cyfeiriadur byth. Gwrthodir fel yr un ffeil unrhyw gysylltiad
+a fyddai'n cymryd lle'r union ffeil y mae'n ei henwi: ffeil a orfodir ar
+ei henw ei hun, neu gysylltiad symbolaidd y mae ei darged, o'i ddarllen
+o gyfeiriadur y cysylltiad ei hun, yn enwi'r ffeil y byddai'n ei
+disodli. Mae GNU yn darllen y targed hwnnw o'r cyfeiriadur gwaith yn lle
+hynny, ac ar ôl cydsyniad o dan `-i` mae'n disodli ffeil â chysylltiad
+ati hi ei hun.
 
-Mae'r methiant cyntaf yn atal y rhediad cyn unrhyw darged diweddarach;
-erys y cysylltiadau a wnaed eisoes. Mae `--` yn terfynu dadansoddi
-dewisiadau: mae pob dadl ddiweddarach yn operand.
+Adroddir am gysylltiad na ellir ei wneud, a gwneir y nesaf serch hynny.
+Mae `--` yn terfynu dadansoddi dewisiadau: mae pob dadl ddiweddarach yn
+operand.
 
 Heb `-s` mae'r cysylltiad yn un **caled**: ail gofnod cyfeiriadur ar
 gyfer inode y targed ei hun. Mae'r ddau enw'n cyrraedd un ffeil, mae
@@ -60,16 +68,18 @@ Gwrthodir `-b`/`-S` am nad oes peiriannwaith wrth gefn i'w alw.
 - `-d, -F, --directory` — derbyn operand cyfeiriadur. Gwrthodir y
   cysylltiad serch hynny: ni chaiff unrhyw ddefnyddiwr roi ail enw i
   gyfeiriadur.
-- `-f, --force` — tynnu enw cysylltiad presennol, ac wedyn creu'r
-  cysylltiad.
-- `-i, --interactive` — gofyn cyn tynnu enw cysylltiad presennol; dim
-  ond ateb sy'n dechrau â `y`/`Y` sy'n cydsynio. Yr olaf o `-f` a `-i`
-  sy'n ennill.
+- `-f, --force` — disodli enw cysylltiad presennol â'r cysylltiad
+  newydd.
+- `-i, --interactive` — gofyn cyn disodli enw cysylltiad presennol; dim
+  ond ateb sy'n dechrau â `y`/`Y` sy'n cydsynio, ac mae cwestiwn a
+  wrthodwyd yn hepgor y cysylltiad hwnnw ac yn peri i'r rhediad fethu.
+  Yr olaf o `-f` a `-i` sy'n ennill.
 - `-n, --no-dereference` — trin cyrchfan sy'n gysylltiad symbolaidd at
   gyfeiriadur fel yr enw syml y mae hefyd, yn hytrach na chyfeiriadur i
   greu'r cysylltiadau ynddo.
 - `-v, --verbose` — adrodd pob cysylltiad a wnaed fel
-  `'link' -> 'target'`.
+  `'link' -> 'target'` ar gyfer cysylltiad symbolaidd a
+  `'link' => 'target'` ar gyfer cysylltiad caled.
 - `-t dir, --target-directory=dir` — creu pob cysylltiad yn `dir`, sy'n
   rhaid iddo fod yn gyfeiriadur eisoes. Daw'r gwerth ynghlwm (`-tdir`,
   `--target-directory=dir`) neu fel y ddadl nesaf.
@@ -91,10 +101,10 @@ Gwrthodir `-b`/`-S` am nad oes peiriannwaith wrth gefn i'w alw.
 
 ## EXIT STATUS
 
-- `0` — crëwyd pob cysylltiad (neu ysgrifennwyd y cymorth byr); nid yw
-  cwestiwn `-i` a wrthodwyd yn fethiant.
-- `1` — unrhyw beth arall, gyda'r rheswm ar y llif gwallau. Mae llinell
-  orchymyn na ddeallwyd hefyd yn gorffen â `1`.
+- `0` — crëwyd pob cysylltiad (neu ysgrifennwyd y cymorth byr).
+- `1` — unrhyw beth arall, gan gynnwys cwestiwn `-i` a wrthodwyd, gydag
+  unrhyw reswm ar y llif gwallau. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

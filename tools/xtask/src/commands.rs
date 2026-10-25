@@ -16,6 +16,7 @@ use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 mod abi_check;
 mod artsheet;
 mod bench;
+mod board_check;
 mod c_header;
 mod cfg_check;
 mod charter_cite;
@@ -74,6 +75,7 @@ pub enum Command {
     Devids,
     DepsCheck,
     CfgCheck,
+    BoardCheck,
     EventIds,
     DriverExits,
     HelpLint,
@@ -116,6 +118,7 @@ impl Command {
         Command::Devids,
         Command::DepsCheck,
         Command::CfgCheck,
+        Command::BoardCheck,
         Command::EventIds,
         Command::DriverExits,
         Command::HelpLint,
@@ -157,6 +160,7 @@ impl Command {
             "devids" => Command::Devids,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
+            "board-check" => Command::BoardCheck,
             "event-ids" => Command::EventIds,
             "driver-exits" => Command::DriverExits,
             "help-lint" => Command::HelpLint,
@@ -200,6 +204,7 @@ impl Command {
             Command::Devids => "devids",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
+            Command::BoardCheck => "board-check",
             Command::EventIds => "event-ids",
             Command::DriverExits => "driver-exits",
             Command::HelpLint => "help-lint",
@@ -256,6 +261,7 @@ impl Command {
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
+            Command::BoardCheck => "Reject a board, SoC or board part named in generic code.",
             Command::EventIds => "Check every crate's event ids against the id registry.",
             Command::DriverExits => "Refuse a driver exit code declared outside the driver runtime.",
             Command::HelpLint => {
@@ -322,6 +328,7 @@ impl Command {
             Command::Devids => devids::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
+            Command::BoardCheck => run_board_check(ctx),
             Command::EventIds => run_event_ids(ctx),
             Command::DriverExits => run_driver_exits(ctx),
             Command::HelpLint => help_lint::run(ctx),
@@ -1200,6 +1207,11 @@ fn run_cfg_check(ctx: &Context) -> Result<(), String> {
     cfg_check::run(&ctx.workspace_root)
 }
 
+fn run_board_check(ctx: &Context) -> Result<(), String> {
+    eprintln!("xtask: [board-check] {}", ctx.workspace_root.display());
+    board_check::run(&ctx.workspace_root)
+}
+
 fn run_event_ids(ctx: &Context) -> Result<(), String> {
     eprintln!("xtask: [event-ids] {}", ctx.workspace_root.display());
     event_ids::run(&ctx.workspace_root)
@@ -1525,6 +1537,8 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // scan, no compilation (plans/APPS.md §8.1 for help-lint).
         static_gate("deps-check", ctx, run_deps_check),
         static_gate("cfg-check", ctx, run_cfg_check),
+        // Generic code names no board, SoC or board part; a source scan.
+        static_gate("board-check", ctx, run_board_check),
         // One event id, one meaning: every crate's ids from its registered
         // range, no value defined by two crates; a source scan.
         static_gate("event-ids", ctx, run_event_ids),
@@ -1614,9 +1628,8 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // ordering: `fmt`, then the concurrent static-gate group, then docs-check,
     // then clippy).
     run_fmt(ctx, &[])?;
-    // The same concurrent cheap-gate group `run_ci` uses (deps-check,
-    // cfg-check, help-lint, spec-review, supply-chain, abi-check, c-header,
-    // model-check) — one definition, no re-listing.
+    // The same concurrent cheap-gate group `run_ci` uses — one definition,
+    // no re-listing.
     run_static_gates(ctx)?;
     // docs-check needs only a doc build (never the QEMU matrix) and is the
     // gate most often tripped first, so it runs ahead of clippy and the long

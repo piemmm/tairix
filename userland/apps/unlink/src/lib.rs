@@ -40,11 +40,12 @@
 //!
 //! # Fail closed
 //!
-//! An unrecognised option, no operand, or more than one operand is
-//! [`UnlinkError::Usage`] and nothing is removed — GNU `unlink` takes
-//! exactly one, and a second operand is far more likely a mistake than an
-//! intention. A refused removal carries the kernel's own [`Errno`]. No
-//! `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
+//! An option `getopt` refuses ([`UnlinkError::Option`]), no operand, or
+//! more than one operand ([`UnlinkError::Usage`]) removes nothing — GNU
+//! `unlink` takes exactly one, and a second operand is far more likely a
+//! mistake than an intention. A refused removal carries the kernel's own
+//! [`Errno`]. No `unsafe`, and no `unwrap`/`expect`/`panic!` in production
+//! paths.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -57,10 +58,11 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `unlink`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `unlink`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: unlink [--] file
 
@@ -78,8 +80,11 @@ const OWN_WORD: &str = "unlink";
 /// Why an `unlink` invocation did not complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnlinkError {
-    /// The command line carried an unrecognised option, no operand, or more
-    /// than one. The caller should print [`USAGE`]. Nothing is removed.
+    /// An option `getopt` refuses, worded as it words it. Nothing is
+    /// removed.
+    Option(Refusal),
+    /// The command line named no operand, or more than one. Nothing is
+    /// removed.
     Usage,
     /// Removing `path` failed. Carries the kernel's [`Errno`] — e.g.
     /// [`Errno::IsADirectory`] for a directory operand,
@@ -97,6 +102,7 @@ pub enum UnlinkError {
 impl fmt::Display for UnlinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::Remove { path, errno } => {
                 write!(f, "cannot unlink {path}: {errno}", path = quote(path))
@@ -115,31 +121,39 @@ pub enum Command {
     Remove(String),
 }
 
-/// Parse an argument vector (without the program name).
+/// What `unlink`'s one option means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `unlink`'s options: the reserved help switches alone (`unlink` has no
+/// `-h`, as GNU's has none).
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::long(&["help"], Takes::Nothing, Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// Parse an argument vector (without the program name), read as GNU's
+/// `getopt_long` reads it ([`Scan`]): the help switches (`-?`, `--help`)
+/// answer at once wherever they stand, a long one by any unambiguous prefix,
+/// and `--` ends the options, so a name that begins with a dash may follow
+/// it. A second operand is refused where it stands.
 ///
 /// # Errors
 ///
-/// [`UnlinkError::Usage`] on an unrecognised option, no operand, or a second
-/// operand.
+/// * [`UnlinkError::Option`] — an option `getopt` refuses, in its words.
+/// * [`UnlinkError::Usage`] — no operand, or a second one.
 pub fn parse(args: &[&str]) -> Result<Command, UnlinkError> {
     let mut operand: Option<&str> = None;
-    let mut options_ended = false;
-    for &arg in args {
-        if !options_ended {
-            if arg == "--" {
-                options_ended = true;
-                continue;
-            }
-            // The bare `-` is a name, not an option cluster.
-            if arg.len() > 1 && arg.starts_with('-') {
-                match arg {
-                    "-?" | "--help" => return Ok(Command::Help),
-                    _ => return Err(UnlinkError::Usage),
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(UnlinkError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Operand(name) => {
+                if operand.replace(name).is_some() {
+                    return Err(UnlinkError::Usage);
                 }
             }
-        }
-        if operand.replace(arg).is_some() {
-            return Err(UnlinkError::Usage);
         }
     }
     operand

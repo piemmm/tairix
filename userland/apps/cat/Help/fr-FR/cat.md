@@ -36,8 +36,8 @@ imprime `$` avant chaque saut de ligne, `-T` imprime TAB sous la forme
 et les octets non ASCII en notation `M-`. `-e`, `-t` et `-A` sont les
 combinaisons habituelles `-vE`, `-vT` et `-vET`.
 
-Une source qui ne peut pas être lue arrête la commande avant qu'une
-source ultérieure ne soit touchée ; les octets déjà écrits le restent.
+Une source qui ne peut pas être lue est signalée et la suivante est tout
+de même lue.
 
 ## OPTIONS
 
@@ -73,8 +73,7 @@ source ultérieure ne soit touchée ; les octets déjà écrits le restent.
 
 - `0` — chaque source a été écrite.
 - `1` — une source n'a pas pu être lue, ou la sortie n'a pas pu être
-  délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+  délivrée. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

@@ -68,9 +68,8 @@ statt ohne die verlangte Sperre zu laufen.
   aufgegeben; der Befehl lief nicht.
 - `1` — die Sperre war aus einem Grund nicht zu bekommen, den Warten nicht
   behebt, oder der Befehl war nicht startbar; der Grund steht auf der
-  Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden; es wurde nichts gesperrt
-  und nichts ausgeführt.
+  Standardfehlerausgabe. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`, ohne dass etwas gesperrt oder ausgeführt wurde.
 - `126` — der Befehl wurde gefunden, war aber nicht ausführbar.
 - `127` — der Befehl wurde nicht gefunden.
 

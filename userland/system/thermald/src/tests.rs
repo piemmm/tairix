@@ -1,5 +1,6 @@
 extern crate std;
 
+use alloc::collections::btree_map::Entry as Slot;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -13,8 +14,24 @@ use crate::{
     Entry, Inventory, Journal, Machine, Reading, Thermald, READING_MAX_AGE_US, SAMPLE_PERIOD_US,
 };
 
+/// Every request the test binary makes, so a test can refuse them.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 const HEADER: u64 = 0x4748_0000_0000_0005;
 const SENSOR: u64 = 0x5453_0000_0000_0003;
+
+/// How the header answers a call.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+enum Answer {
+    /// At once.
+    #[default]
+    Prompt,
+    /// Not before the call's deadline, which withdrew it unreceived.
+    Withdrawn,
+    /// Not before the call's deadline, though it was carried out.
+    Late,
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Call {
@@ -34,6 +51,7 @@ struct FakeMachine {
     foreign: Option<u8>,
     refuse_claim: Option<Errno>,
     refuse_drive: Option<Errno>,
+    answer: Answer,
     calls: Vec<Call>,
     sensor_reads: usize,
     line_reads: usize,
@@ -50,6 +68,16 @@ impl FakeMachine {
     fn set(&mut self, celsius: i16) {
         self.sensors
             .insert(SENSOR, Ok(Millicelsius::from_celsius(celsius)));
+    }
+
+    /// What the service is answered for a call the header carried out to
+    /// `outcome`.
+    fn reply(&self, outcome: Result<(), Errno>) -> Result<(), Errno> {
+        if self.answer == Answer::Late {
+            Err(Errno::TimedOut)
+        } else {
+            outcome
+        }
     }
 }
 
@@ -71,31 +99,48 @@ impl Machine for FakeMachine {
     ) -> Result<(), Errno> {
         assert_eq!(endpoint, HEADER);
         self.calls.push(Call::Claim(line, polarity, asserted));
-        if let Some(refusal) = self.refuse_claim {
-            return Err(refusal);
+        if self.answer == Answer::Withdrawn {
+            return Err(Errno::TimedOut);
         }
-        if self.held.contains_key(&line) {
-            return Err(Errno::Busy);
-        }
-        self.held.insert(line, asserted);
-        Ok(())
+        let outcome = if let Some(refusal) = self.refuse_claim {
+            Err(refusal)
+        } else {
+            match self.held.entry(line) {
+                Slot::Occupied(_) => Err(Errno::Busy),
+                Slot::Vacant(slot) => {
+                    slot.insert(asserted);
+                    Ok(())
+                }
+            }
+        };
+        self.reply(outcome)
     }
 
     fn drive(&mut self, endpoint: u64, line: u8, asserted: bool) -> Result<(), Errno> {
         assert_eq!(endpoint, HEADER);
         self.calls.push(Call::Drive(line, asserted));
-        if let Some(refusal) = self.refuse_drive {
-            return Err(refusal);
+        if self.answer == Answer::Withdrawn {
+            return Err(Errno::TimedOut);
         }
-        let held = self.held.get_mut(&line).ok_or(Errno::NotFound)?;
-        *held = asserted;
-        Ok(())
+        let outcome = match (self.refuse_drive, self.held.get_mut(&line)) {
+            (Some(refusal), _) => Err(refusal),
+            (None, Some(held)) => {
+                *held = asserted;
+                Ok(())
+            }
+            (None, None) => Err(Errno::NotFound),
+        };
+        self.reply(outcome)
     }
 
     fn release(&mut self, endpoint: u64, line: u8) -> Result<(), Errno> {
         assert_eq!(endpoint, HEADER);
         self.calls.push(Call::Release(line));
-        self.held.remove(&line).map(|_| ()).ok_or(Errno::NotFound)
+        if self.answer == Answer::Withdrawn {
+            return Err(Errno::TimedOut);
+        }
+        let outcome = self.held.remove(&line).map(|_| ()).ok_or(Errno::NotFound);
+        self.reply(outcome)
     }
 
     fn lines(&mut self, endpoint: u64) -> Result<LineTable, Errno> {
@@ -155,7 +200,7 @@ fn service(machine: &mut FakeMachine, policy: FanPolicy, log: &mut Log) -> Therm
 
 /// Advance to the next sample and take it.
 fn tick(service: &mut Thermald, machine: &mut FakeMachine, log: &mut Log) {
-    let due = service.deadline_us().expect("an automatic fan samples");
+    let due = service.deadline_us().expect("the fan is owed a deadline");
     machine.now_us = machine.now_us.max(due);
     service.expired(machine, log);
 }
@@ -249,7 +294,7 @@ fn a_reading_that_cannot_be_taken_runs_the_fan_until_one_can() {
             *entry
                 == Entry::Fault {
                     fault: FanFault::SensorFailed,
-                    refusal: None,
+                    refusal: Some(Errno::NoData),
                 }
         })
         .expect("the fault is recorded");
@@ -502,7 +547,209 @@ fn the_hottest_reading_decides_and_any_failure_fails_the_sample() {
     );
     assert_eq!(
         Reading::hottest([Ok(at(40)), Err(Errno::NoData)]),
-        Reading::Failed
+        Reading::Failed(Errno::NoData)
     );
     assert_eq!(Reading::hottest([]), Reading::NoSensor);
+}
+
+/// The plausible range's ends are readings; one past either fails the sample.
+#[test]
+fn only_a_temperature_a_processor_can_be_at_is_a_reading() {
+    let at = Millicelsius::from_celsius;
+    for edge in [Millicelsius(-55_000), Millicelsius(150_000)] {
+        assert_eq!(Reading::hottest([Ok(edge)]), Reading::Measured(edge));
+    }
+    for past in [
+        Millicelsius(-55_001),
+        Millicelsius(150_001),
+        Millicelsius(i32::MIN),
+        Millicelsius(i32::MAX),
+    ] {
+        assert_eq!(
+            Reading::hottest([Ok(at(60)), Ok(past)]),
+            Reading::Failed(Errno::OutOfRange)
+        );
+    }
+}
+
+/// D1331: a sensor stuck at its code's end reads what no processor could be
+/// at: a failure that runs the fan, and no temperature on the status.
+#[test]
+fn a_reading_no_processor_could_be_at_runs_the_fan() {
+    let (mut machine, mut log) = (FakeMachine::at(40), Log::default());
+    let mut service = service(&mut machine, policy(FanMode::Automatic, Some(18)), &mut log);
+    tick(&mut service, &mut machine, &mut log);
+    assert!(!service.fan().running());
+    machine.sensors.insert(SENSOR, Ok(Millicelsius(-88_161)));
+    tick(&mut service, &mut machine, &mut log);
+    assert!(service.fan().running());
+    assert_eq!(service.fan().fault(), Some(FanFault::SensorFailed));
+    assert!(log.0.contains(&Entry::Fault {
+        fault: FanFault::SensorFailed,
+        refusal: Some(Errno::OutOfRange)
+    }));
+    assert_eq!(service.status(&mut machine).temperature, None);
+}
+
+/// D1329: an automatic fan that last decided to stop runs the moment it is
+/// set always on.
+#[test]
+fn a_stopped_automatic_fan_set_always_on_starts() {
+    let (mut machine, mut log) = (FakeMachine::at(40), Log::default());
+    let mut service = service(&mut machine, policy(FanMode::Automatic, Some(18)), &mut log);
+    tick(&mut service, &mut machine, &mut log);
+    assert!(!service.fan().running());
+    service.policy_changed(policy(FanMode::On, Some(18)), &mut machine, &mut log);
+    assert_eq!(machine.calls.last(), Some(&Call::Drive(18, true)));
+    assert_eq!(machine.held.get(&18), Some(&true));
+    assert!(service.fan().running());
+    assert_eq!(
+        service.deadline_us(),
+        None,
+        "an always-on fan samples nothing"
+    );
+}
+
+/// D1330: a switch the stalled header never answers keeps the claim and is
+/// asked again a period later; the line is neither given back nor claimed
+/// again, so it is never refused as busy.
+#[test]
+fn a_switch_left_unanswered_keeps_the_claim_and_is_asked_again() {
+    let (mut machine, mut log) = (FakeMachine::at(70), Log::default());
+    let mut service = service(&mut machine, policy(FanMode::Automatic, Some(18)), &mut log);
+    tick(&mut service, &mut machine, &mut log);
+    assert!(service.fan().running());
+    machine.set(40);
+    machine.answer = Answer::Withdrawn;
+    let asked = machine.calls.len();
+    tick(&mut service, &mut machine, &mut log);
+    assert_eq!(machine.calls[asked..], [Call::Drive(18, false)]);
+    assert_eq!(service.fan().line(), Some(18), "the claim is kept");
+    assert_eq!(service.fan().fault(), Some(FanFault::LineUnavailable));
+    assert!(log.0.contains(&Entry::Fault {
+        fault: FanFault::LineUnavailable,
+        refusal: Some(Errno::TimedOut)
+    }));
+    assert_eq!(
+        service.deadline_us(),
+        Some(machine.now_us + SAMPLE_PERIOD_US)
+    );
+    machine.answer = Answer::Prompt;
+    tick(&mut service, &mut machine, &mut log);
+    assert_eq!(
+        machine.calls[asked..],
+        [Call::Drive(18, false), Call::Drive(18, false)]
+    );
+    assert!(!service.fan().running());
+    assert_eq!(service.fan().fault(), None);
+    assert!(log.0.contains(&Entry::Recovered));
+}
+
+/// D1330: an always-on fan samples nothing, so a switch its header leaves
+/// unanswered is asked again on a deadline of its own until it is answered.
+#[test]
+fn an_always_on_fan_asks_its_header_again_until_it_answers() {
+    let (mut machine, mut log) = (FakeMachine::at(30), Log::default());
+    let mut service = service(&mut machine, policy(FanMode::On, Some(18)), &mut log);
+    assert_eq!(service.deadline_us(), None);
+    machine.answer = Answer::Withdrawn;
+    service.inventory_changed(present(), &mut machine, &mut log);
+    assert_eq!(service.fan().fault(), Some(FanFault::LineUnavailable));
+    assert_eq!(
+        service.deadline_us(),
+        Some(machine.now_us + SAMPLE_PERIOD_US)
+    );
+    tick(&mut service, &mut machine, &mut log);
+    assert_eq!(service.fan().fault(), Some(FanFault::LineUnavailable));
+    machine.answer = Answer::Prompt;
+    tick(&mut service, &mut machine, &mut log);
+    assert_eq!(service.fan().fault(), None);
+    assert_eq!(service.deadline_us(), None, "tickless once answered");
+    assert_eq!(
+        machine.calls[1..],
+        [
+            Call::Drive(18, true),
+            Call::Drive(18, true),
+            Call::Drive(18, true)
+        ]
+    );
+    let faults = log
+        .0
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Fault { .. }))
+        .count();
+    assert_eq!(faults, 1, "recorded once as it begins");
+}
+
+/// D1330: a claim the header carries out but answers too late is switched,
+/// which finds it held, never claimed again, which the header refuses as
+/// busy.
+#[test]
+fn a_claim_answered_too_late_is_found_held_not_claimed_again() {
+    let (mut machine, mut log) = (FakeMachine::at(30), Log::default());
+    machine.answer = Answer::Late;
+    let mut service = service(&mut machine, policy(FanMode::On, Some(18)), &mut log);
+    assert_eq!(service.fan().fault(), Some(FanFault::LineUnavailable));
+    assert_eq!(machine.held.get(&18), Some(&true), "the claim landed");
+    machine.answer = Answer::Prompt;
+    tick(&mut service, &mut machine, &mut log);
+    assert_eq!(
+        machine.calls,
+        [
+            Call::Claim(18, Polarity::ActiveHigh, true),
+            Call::Drive(18, true)
+        ]
+    );
+    assert_eq!(service.fan().fault(), None);
+    assert!(service.fan().running());
+}
+
+/// D1330: a line given back unanswered may still be the fan's, so it is
+/// given back again before another is taken.
+#[test]
+fn a_release_left_unanswered_is_asked_again_before_another_line_is_taken() {
+    let (mut machine, mut log) = (FakeMachine::at(30), Log::default());
+    let mut service = service(&mut machine, policy(FanMode::On, Some(18)), &mut log);
+    machine.answer = Answer::Withdrawn;
+    service.policy_changed(policy(FanMode::On, Some(23)), &mut machine, &mut log);
+    assert_eq!(service.fan().line(), Some(18), "still the fan's");
+    assert_eq!(service.fan().fault(), Some(FanFault::LineUnavailable));
+    machine.answer = Answer::Prompt;
+    tick(&mut service, &mut machine, &mut log);
+    assert_eq!(
+        machine.calls,
+        [
+            Call::Claim(18, Polarity::ActiveHigh, true),
+            Call::Release(18),
+            Call::Release(18),
+            Call::Claim(23, Polarity::ActiveHigh, true),
+        ]
+    );
+    assert_eq!(machine.held.keys().copied().collect::<Vec<_>>(), [23]);
+    assert_eq!(service.fan().fault(), None);
+}
+
+/// D1335: a line refused at every tree change is recorded once, as the
+/// fault begins, with the refusal behind it.
+#[test]
+fn a_fault_is_recorded_once_however_often_it_is_met() {
+    let mut machine = FakeMachine::at(30);
+    machine.refuse_claim = Some(Errno::Busy);
+    let mut log = Log::default();
+    let mut service = service(&mut machine, policy(FanMode::On, Some(14)), &mut log);
+    for _ in 0..3 {
+        service.inventory_changed(present(), &mut machine, &mut log);
+    }
+    let faults: Vec<_> = log
+        .0
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Fault { .. }))
+        .collect();
+    assert_eq!(
+        faults,
+        [&Entry::Fault {
+            fault: FanFault::LineUnavailable,
+            refusal: Some(Errno::Busy)
+        }]
+    );
 }

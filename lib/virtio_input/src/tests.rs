@@ -111,7 +111,7 @@ fn open_input(t: MockTransport, host: &MockHost) -> (Box<VirtioInput<'_, Device>
     (dev, device)
 }
 
-/// Scancode-neutral keycode for the `A` key (Linux `KEY_A`).
+/// Scancode-neutral keycode for the `A` key (evdev `KEY_A`).
 const KEY_A: u16 = 30;
 
 #[test]

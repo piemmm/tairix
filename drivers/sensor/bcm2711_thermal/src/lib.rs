@@ -8,7 +8,8 @@
 //! calibration; the `Run` binary maps the window and serves [`AvsSensor`] on
 //! the node's `thermal-sensor-v1` channel.
 //!
-//! Reference: the Linux `bcm2711_thermal` driver.
+//! Reference: OpenBSD `sys/dev/fdt/bcm2711_tmon.c` (ISC), for the status
+//! register's offset, valid bit and code field.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -16,7 +17,7 @@
 
 use tairix_abi::driver::thermal::{Millicelsius, ThermalCalibration, ThermalSensor};
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, Errno, HwMatchKey,
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, Errno,
     RegisterBlock,
 };
 
@@ -32,12 +33,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// The driver's canonical bind table: an exact `compatible` match.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     10,
-    match HwMatchKey::compatible(b"brcm,bcm2711-thermal") {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(b"brcm,bcm2711-thermal"),
 )];
 
 /// The temperature status register within the monitor's window.

@@ -57,8 +57,8 @@ capacidade que a conta chamadora não possua.
 
 - `0` — todas as alterações pedidas foram feitas.
 - `1` — a base recusou ou falhou uma alteração; o passo e a razão são
-  escritos no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+  escritos no erro padrão. Uma linha de comandos não compreendida também
+  termina com `1`.
 
 ## ENVIRONMENT
 

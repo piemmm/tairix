@@ -21,8 +21,8 @@ root prefix ends is decided by the shared path grammar's own rule
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
-shared `tairix-path` and `tairix-help` crates, so it never links a kernel
-or driver crate. Its manifest (`AppInfo.toml`) requests
+shared `tairix-path`, `tairix-util` and `tairix-help` crates, so it never
+links a kernel or driver crate. Its manifest (`AppInfo.toml`) requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every path per-inode under the
 caller's attested identity.
@@ -42,8 +42,8 @@ basename [-az] [-s suffix] name...
 ## Exit status
 
 - `0` — the results (or short help) were written.
-- `1` — the output could not be delivered.
-- `2` — the command line was not understood.
+- `1` — the output could not be delivered. A command line that was not
+  understood exits `1` too.
 
 ## Stability
 

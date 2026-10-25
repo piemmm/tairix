@@ -105,8 +105,7 @@ impl<B: Block> MirrorMember<B> {
     }
 
     /// A slot the array is *defined* to have but for which no device is
-    /// present ([`MemberState::Absent`]) — a missing member, the equivalent
-    /// of a Linux md "removed" slot.
+    /// present ([`MemberState::Absent`]) — a missing member.
     ///
     /// Pass one per missing member when assembling so the array knows its
     /// full width: the assembled array counts the absent slot toward its
@@ -931,9 +930,8 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     }
 
     /// Install a spare `device` into a currently-[`MemberState::Absent`]
-    /// (missing) slot and begin rebuilding it from a surviving copy — the Linux
-    /// md "add a spare to a removed slot" operation that restores a missing
-    /// member's redundancy without a reboot.
+    /// (missing) slot and begin rebuilding it from a surviving copy, restoring
+    /// a missing member's redundancy without a reboot.
     ///
     /// The slot moves [`MemberState::Absent`] → [`MemberState::Resyncing`] on
     /// success; the rebuild is driven by [`resync_step`](Self::resync_step)
@@ -960,8 +958,8 @@ impl<'a, B: Block> MirrorArray<'a, B> {
     }
 
     /// Remove a faulted member's device from its slot, leaving the slot
-    /// [`MemberState::Absent`] and returning the removed device — the Linux
-    /// md "remove a failed disk" operation. The vacated slot keeps counting
+    /// [`MemberState::Absent`] and returning the removed device. The vacated
+    /// slot keeps counting
     /// toward the array's width (so the array stays
     /// [`ArrayHealth::Degraded`]), and a spare can be installed into it with
     /// [`add_member`](Self::add_member).

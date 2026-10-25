@@ -1,10 +1,11 @@
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use tairix_abi::audio::AudioGain;
 use tairix_audio::target::AudioTarget;
+use tairix_util::getopt::Refusal;
 
 use super::{parse, Command, Interface, Options, Passes, Span, UsageError};
 
@@ -206,17 +207,20 @@ fn help_and_version_answer_whatever_else_is_said() {
 fn what_is_not_an_option_is_refused_by_name() {
     assert_eq!(
         parse(&["-x", "f"]),
-        Err(UsageError::Unknown("-x".to_string()))
+        Err(UsageError::Option(Refusal::UnknownShort('x')))
     );
     assert_eq!(
         parse(&["--colour", "f"]),
-        Err(UsageError::Unknown("--colour".to_string()))
+        Err(UsageError::Option(Refusal::UnknownLong("--colour".into())))
     );
     assert_eq!(
         parse(&["--quiet=yes", "f"]),
-        Err(UsageError::Unwanted("--quiet"))
+        Err(UsageError::Option(Refusal::UnwantedValue("quiet")))
     );
-    assert_eq!(parse(&["f", "-g"]), Err(UsageError::Missing("--gain")));
+    assert_eq!(
+        parse(&["f", "-g"]),
+        Err(UsageError::Option(Refusal::MissingShortValue('g')))
+    );
     assert_eq!(parse(&[]), Err(UsageError::NoFiles));
     assert_eq!(parse(&["-"]), Err(UsageError::StandardInput));
 }
@@ -271,4 +275,39 @@ fn help_documents_the_parser_switches() {
         let pinned: Vec<&str> = SWITCHES.iter().map(|(key, _)| *key).collect();
         assert_eq!(documented, pinned, "{locale}/play.md");
     }
+}
+
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-Q", "f"]), "invalid option -- 'Q'");
+    assert_eq!(refused(&["-qQ", "f"]), "invalid option -- 'Q'");
+    assert_eq!(refused(&["--frob", "f"]), "unrecognized option '--frob'");
+    assert_eq!(refused(&["f", "-t"]), "option requires an argument -- 't'");
+    assert_eq!(
+        refused(&["f", "--duration"]),
+        "option '--duration' requires an argument"
+    );
+    assert_eq!(
+        refused(&["--quiet=yes", "f"]),
+        "option '--quiet' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let options = play(&["--verb", "--dur=2", "--lo=3", "x"]);
+    assert!(options.verbose);
+    assert_eq!(options.duration, Some(Span::from_nanos(2_000_000_000)));
+    let three = Passes::Times(NonZeroU32::new(3).expect("nonzero"));
+    assert_eq!(options.passes, three);
+    assert_eq!(parse(&["--vers"]), Ok(Command::Version));
+    assert_eq!(
+        refused(&["--ver", "x"]),
+        "option '--ver' is ambiguous; possibilities: '--verbose' '--version'"
+    );
 }

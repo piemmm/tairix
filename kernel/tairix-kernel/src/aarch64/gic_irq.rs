@@ -49,7 +49,7 @@
 // `arch_wrapper`), so both imports are gated to where they compile rather
 // than left unused under clippy's `-D warnings`.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_arch_aarch64::gic::{GicController, GicOps};
 // The port's one interrupt-masking primitive, which every lock an interrupt
@@ -59,8 +59,6 @@ use tairix_arch_aarch64::irqmask::{DaifIrqControl, DaifState};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use tairix_kernel_core::IrqRouting;
 use tairix_kernel_irq::{IrqController, IrqTable, MaskError, Trigger};
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-use tairix_sync::once::Once;
 use tairix_sync::once::OnceCell;
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use tairix_sync::{InterruptControl, IrqSafeSpinLock};
@@ -247,71 +245,61 @@ pub static GIC_IRQ_CONTROLLER: GicIrqController<tairix_arch_aarch64::gic::Active
     ));
 
 /// The [`IrqRouting`] the aarch64 boot path installs: the [composite
-/// controller](CompositeIrqController) routing real GIC INTIDs to the GIC,
-/// virtual MSI lines to the BCM2711 root-complex MSI controller and LPI
-/// lines to the LPIs the boot routed, the last of those lines the inclusive
-/// bind ceiling.
+/// controller](CompositeIrqController), whose inclusive bind ceiling is the
+/// last line the boot laid out.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 #[must_use]
 pub fn gic_irq_routing() -> IrqRouting {
     IrqRouting {
-        max_line: crate::aarch64_messages::published()
-            .and_then(crate::aarch64_messages::LpiRoutes::last_line)
-            .unwrap_or(MSI_LINE_TOP),
+        max_line: crate::aarch64_messages::max_line(
+            crate::aarch64_messages::published(),
+            msi_mux().map(tairix_kernel_core::MsiMuxLines::lines),
+        ),
         controller: &COMPOSITE_IRQ_CONTROLLER,
     }
 }
 
-// --- BCM2711 root-complex MSI: composite controller + vector allocator ---
-//
-// The VL805 xHCI raises an MSI the BCM2711 PCIe root complex demultiplexes
-// onto one shared GIC SPI; the kernel owns that controller (a chained
-// interrupt handler a user-space driver cannot be) and fans the SPI out to
-// per-vector *virtual* IRQ lines a driver binds with `irq_wait`. The virtual
-// lines live in a range immediately above the GIC INTID ceiling, so one
-// composite `IrqController` routes a real GIC INTID to the GIC and a virtual
-// MSI line to the root-complex controller without the kernel IRQ core needing
-// a second controller field (`plans/PI.md` U-MSI).
+// A chained message multiplexer raises one GIC SPI for a bank of vectors, and
+// only the kernel can demultiplex it: a chained handler no user-space driver
+// can be. Its vectors are virtual lines from `MSI_LINE_BASE`, just past the
+// GIC's INTIDs, so one composite controller routes a GIC INTID to the GIC and
+// a vector's line to the multiplexer.
 
+/// The chained multiplexer's lines, once the boot path discovered one.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub use crate::aarch64_messages::{MSI_LINE_BASE, MSI_LINE_TOP};
+static MSI_MUX: OnceCell<tairix_kernel_core::MsiMuxLines> = OnceCell::new();
 
-/// The kernel-side BCM2711 root-complex MSI controller over the discovered RC
-/// register base. A zero-sized `VolatileMsiMmio` handle reads the base
-/// `brcm_msi::configure` resolved from the device tree on every access, so the
-/// controller carries no board constant.
+/// Lay the multiplexer the boot path discovered out on the lines from
+/// [`MSI_LINE_BASE`](crate::aarch64_messages::MSI_LINE_BASE). Publish-once:
+/// a board without one never calls it, and `msi_alloc` then answers
+/// `NotImplemented`, as it does where the lines cannot be laid out.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-static BRCM_MSI: tairix_arch_aarch64::brcm_msi::BrcmMsi<
-    tairix_arch_aarch64::brcm_msi::VolatileMsiMmio,
-> = tairix_arch_aarch64::brcm_msi::BrcmMsi::new(tairix_arch_aarch64::brcm_msi::VolatileMsiMmio);
+pub fn install_msi_mux(mux: &'static dyn tairix_arch_api::MsiMultiplexer) {
+    if let Ok(lines) = tairix_kernel_core::MsiMuxLines::new(
+        mux,
+        crate::aarch64_messages::MSI_LINE_BASE,
+        enable_msi_mux_parent,
+    ) {
+        let _ = MSI_MUX.set(lines);
+    }
+}
 
-/// The discovered shared GIC SPI INTID the root-complex MSI controller raises
-/// (the `brcm,bcm2711-pcie` node's MSI `interrupts` entry — a discovered
-/// value, never a board constant). Recorded once by the boot path
-/// ([`set_brcm_msi_spi`]); empty on a board with no such controller, which
-/// leaves [`allocate_msi_vector`] failing closed.
+/// The multiplexer's lines, or [`None`] on a board without one.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-static BRCM_MSI_SPI: OnceCell<u32> = OnceCell::new();
+#[must_use]
+pub fn msi_mux() -> Option<&'static tairix_kernel_core::MsiMuxLines> {
+    MSI_MUX.get().ok().flatten()
+}
 
-/// One-shot bring-up of the root-complex MSI controller (program its
-/// doorbell, route + enable its shared GIC SPI), run on the first
-/// allocation, and whether its SPI could be routed.
+/// Route the multiplexer's parent SPI to [`DEVICE_IRQ_CPU`] and unmask it, as
+/// every SPI is routed.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-static BRCM_MSI_READY: Once<bool> = Once::new();
-
-/// Bitmap of allocated MSI vectors (bit `v` set means vector `v` is in use),
-/// minted by [`allocate_msi_vector`]. Set-only: a node keeps its vectors
-/// across its drivers, and once it is removed nothing proves its devices
-/// stopped raising them.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-static BRCM_MSI_ALLOCATED: AtomicU32 = AtomicU32::new(0);
-
-/// Record the discovered shared GIC SPI INTID the root-complex MSI controller
-/// raises. Idempotent (publish-once); a board with no such controller never
-/// calls it and [`allocate_msi_vector`] fails closed.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub fn set_brcm_msi_spi(intid: u32) {
-    let _ = BRCM_MSI_SPI.set(intid);
+fn enable_msi_mux_parent(intid: u32) -> bool {
+    // SAFETY: bring-up runs on an allocation, which a syscall makes only after
+    // the core's `irq` phase ran `gic::init` and installed the device
+    // dispatch, so a delivered SPI reaches `production_device_irq_dispatch`.
+    unsafe { tairix_arch_aarch64::gic::route_spi(intid, DEVICE_IRQ_CPU) }.is_ok()
+        && GIC_IRQ_CONTROLLER.unmask_line(intid).is_ok()
 }
 
 /// Names the kernel-internal GIC SPIs this port enables **without** a task
@@ -319,23 +307,21 @@ pub fn set_brcm_msi_spi(intid: u32) {
 /// stable category name (`stuck_owner=<name>`) instead of a bare `unbound`.
 ///
 /// Two enabled lines have no task owner by construction because the kernel
-/// services them itself: the platform PCIe root-complex MSI multiplexer's
-/// shared SPI (the chained handler in [`production_device_irq_dispatch`] that
-/// fans messages out to virtual MSI lines) and the console UART's receive
-/// SPI. Their interrupt numbers are discovered from the device tree at boot
-/// and recorded in [`BRCM_MSI_SPI`] / [`UART_RX_INTID`] — never board
-/// constants — so this lookup compares against those discovered values and
-/// returns board-neutral category names. Any other line is unknown here and
-/// falls back to the task-owner attribution.
+/// services them itself: the chained multiplexer's parent SPI (fanned out to
+/// its vectors' lines in [`production_device_irq_dispatch`]) and the console
+/// UART's receive SPI. Both are discovered from the device tree at boot, so
+/// this compares against discovered values and returns board-neutral
+/// category names. Any other line is unknown here and falls back to the
+/// task-owner attribution.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub struct KernelInternalLineNames;
 
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 impl tairix_kernel_core::KernelInternalLines for KernelInternalLineNames {
     fn name_of_line(&self, line: u32) -> Option<&'static str> {
-        if BRCM_MSI_SPI.get().ok().flatten().copied() == Some(line) {
-            // The root-complex MSI multiplexer's shared SPI: a chained line
-            // the kernel owns, never a driver's `irq_wait` binding.
+        if msi_mux().is_some_and(|mux| mux.parent_line() == line) {
+            // The multiplexer's parent SPI: a chained line the kernel owns,
+            // never a driver's `irq_wait` binding.
             return Some("pcie-msi");
         }
         if UART_RX_INTID.get().ok().flatten().copied() == Some(line) {
@@ -353,65 +339,48 @@ impl tairix_kernel_core::KernelInternalLines for KernelInternalLineNames {
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub static KERNEL_INTERNAL_LINE_NAMES: KernelInternalLineNames = KernelInternalLineNames;
 
-/// The virtual-MSI vector a routing line names, or [`None`] if `line` is a
-/// real GIC INTID.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-fn msi_vector_of_line(line: u32) -> Option<u32> {
-    if (MSI_LINE_BASE..=MSI_LINE_TOP).contains(&line) {
-        Some(line - MSI_LINE_BASE)
-    } else {
-        None
-    }
-}
-
-/// A kernel-side [`IrqController`] routing a real GIC INTID to
-/// [`GIC_IRQ_CONTROLLER`], a virtual MSI line to [`BRCM_MSI`], and an LPI
-/// line to nothing.
+/// A kernel-side [`IrqController`] routing a multiplexer line to the
+/// multiplexer, any other line past the GIC's INTIDs to nothing, and every
+/// other line to [`GIC_IRQ_CONTROLLER`].
 ///
 /// This is the one line->controller fan-out the kernel IRQ core drives
-/// through `IrqRouting.controller`: a line in `[MSI_LINE_BASE, MSI_LINE_TOP]`
-/// is a BCM2711 MSI vector (masked/unmasked at the root complex's `INTR2`
-/// block); a line past it is an LPI, an edge raised by a message, with no
-/// line to mask before a waiter takes its fire, as an x86 MSI; every other
-/// line is a GIC INTID.
+/// through `IrqRouting.controller`. A line past the GIC's INTIDs that is not
+/// a vector's is an LPI, an edge raised by a message, with no line to mask
+/// before a waiter takes its fire, as an x86 MSI.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub struct CompositeIrqController;
 
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 impl IrqController for CompositeIrqController {
     fn mask(&self, line: u32) -> Result<(), MaskError> {
-        match msi_vector_of_line(line) {
-            Some(vector) => {
-                BRCM_MSI.mask(vector);
-                Ok(())
-            }
-            None if line > MSI_LINE_TOP => Ok(()),
-            None => GIC_IRQ_CONTROLLER.mask(line),
+        if let Some(masked) = msi_mux().and_then(|mux| mux.mask(line)) {
+            return masked;
         }
+        if line > tairix_arch_aarch64::gic::MAX_INTID {
+            return Ok(());
+        }
+        GIC_IRQ_CONTROLLER.mask(line)
     }
 
     fn rearm(&self, line: u32) -> Result<(), MaskError> {
-        match msi_vector_of_line(line) {
-            // The MSI controller's shared GIC SPI is routed + enabled once at
-            // controller bring-up; re-arming a vector only unmasks its
-            // `INTR2` bit for the next message.
-            Some(vector) => {
-                BRCM_MSI.unmask(vector);
-                Ok(())
-            }
-            None if line > MSI_LINE_TOP => Ok(()),
-            None => GIC_IRQ_CONTROLLER.rearm(line),
+        // The multiplexer's parent SPI is routed and enabled once, at its
+        // bring-up; re-arming a vector only unmasks it for the next message.
+        if let Some(rearmed) = msi_mux().and_then(|mux| mux.rearm(line)) {
+            return rearmed;
         }
+        if line > tairix_arch_aarch64::gic::MAX_INTID {
+            return Ok(());
+        }
+        GIC_IRQ_CONTROLLER.rearm(line)
     }
 
     /// A vector or an LPI is raised by a message, so it has no trigger to
     /// configure.
     fn set_trigger(&self, line: u32, trigger: Trigger) -> Result<(), MaskError> {
-        match msi_vector_of_line(line) {
-            Some(_) => Ok(()),
-            None if line > MSI_LINE_TOP => Ok(()),
-            None => GIC_IRQ_CONTROLLER.set_trigger(line, trigger),
+        if line > tairix_arch_aarch64::gic::MAX_INTID {
+            return Ok(());
         }
+        GIC_IRQ_CONTROLLER.set_trigger(line, trigger)
     }
 }
 
@@ -419,81 +388,6 @@ impl IrqController for CompositeIrqController {
 /// the `irq_wait` park path re-arms through.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub static COMPOSITE_IRQ_CONTROLLER: CompositeIrqController = CompositeIrqController;
-
-/// Allocate a free BCM2711 MSI vector, bring the controller up on first use,
-/// and return the [`MsiAllocation`](tairix_abi::MsiAllocation) the `msi_alloc`
-/// syscall reports.
-///
-/// The returned line is `MSI_LINE_BASE + vector`; the doorbell is
-/// `brcm_msi::msi_message(vector)`. The vector's `INTR2` bit stays **masked**
-/// until the binding driver's first `irq_wait` re-arm unmasks it, so no
-/// message is delivered before a waiter exists. Fails closed with
-/// [`Errno::NotImplemented`](tairix_abi::Errno) when no MSI SPI was discovered
-/// (no controller on this board) and [`Errno::OutOfRange`](tairix_abi::Errno)
-/// when every vector is in use.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub fn allocate_msi_vector() -> Result<tairix_abi::MsiAllocation, tairix_abi::Errno> {
-    // No discovered MSI SPI means no root-complex MSI controller on this
-    // board: fail closed rather than fabricating a vector.
-    let Some(spi) = BRCM_MSI_SPI.get().ok().flatten().copied() else {
-        return Err(tairix_abi::Errno::NotImplemented);
-    };
-    // Bring the controller up exactly once: program its doorbell + data
-    // pattern and mask every vector, then route + enable its shared GIC SPI
-    // so a later message reaches the chained dispatcher. Every vector stays
-    // masked, so enabling the SPI is additive — no message fires until a
-    // vector is unmasked by its driver's first `irq_wait`.
-    let routed = BRCM_MSI_READY.call_once_infallible(|| {
-        BRCM_MSI.init();
-        // SAFETY: the GIC is up (`install_device_irq_dispatch` ran
-        // `gic::init`) and the EL1 device dispatch is installed, so a
-        // delivered SPI reaches `production_device_irq_dispatch`.
-        unsafe { tairix_arch_aarch64::gic::route_spi(spi, DEVICE_IRQ_CPU) }.is_ok()
-            && GIC_IRQ_CONTROLLER.unmask_line(spi).is_ok()
-    });
-    if !matches!(routed, Ok(true)) {
-        return Err(tairix_abi::Errno::NotImplemented);
-    }
-    // Claim the lowest free vector with a CAS loop over the set-only bitmap.
-    let vector = loop {
-        let current = BRCM_MSI_ALLOCATED.load(Ordering::Acquire);
-        let Some(vector) = (0..tairix_arch_aarch64::brcm_msi::NUM_MSI_VECTORS)
-            .find(|v| current & (1u32 << v) == 0)
-        else {
-            return Err(tairix_abi::Errno::OutOfRange);
-        };
-        let updated = current | (1u32 << vector);
-        if BRCM_MSI_ALLOCATED
-            .compare_exchange(current, updated, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            break vector;
-        }
-    };
-    let (address, data) = tairix_arch_aarch64::brcm_msi::msi_message(vector);
-    Ok(tairix_abi::MsiAllocation::new(
-        address,
-        data,
-        MSI_LINE_BASE + vector,
-    ))
-}
-
-/// The `'static` [`MsiAllocFacility`](tairix_kernel_core::MsiAllocFacility)
-/// the `msi_alloc` syscall handler drives (installed by the boot path through
-/// [`tairix_kernel_core::KernelArch::msi_alloc_facility`]).
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub struct BrcmMsiAllocFacility;
-
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-impl tairix_kernel_core::MsiAllocFacility for BrcmMsiAllocFacility {
-    fn allocate(&self) -> Result<tairix_abi::MsiAllocation, tairix_abi::Errno> {
-        allocate_msi_vector()
-    }
-}
-
-/// The shared [`BrcmMsiAllocFacility`] the boot path installs.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub static BRCM_MSI_ALLOC_FACILITY: BrcmMsiAllocFacility = BrcmMsiAllocFacility;
 
 /// The production device-IRQ dispatcher the arch crate's EL1 IRQ-vector
 /// path invokes with each acknowledged non-timer GIC INTID.
@@ -544,23 +438,16 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     let Ok(Some(table)) = IRQ_TABLE_SLOT.get() else {
         return;
     };
-    // The BCM2711 root-complex MSI controller multiplexes up to 32 message
-    // vectors onto one shared GIC SPI: this is the *chained* handler. When
-    // that SPI fires, read which vectors are pending, fire each onto its
-    // virtual MSI line (masking that vector before the waiter wakes —
-    // mask-before-wake holds through the composite controller), and clear its
-    // `INTR2` status so the level-sensitive SPI deasserts rather than
-    // re-storming. A vector with no binding still has its status cleared, so a
-    // stray message cannot wedge the line.
-    if BRCM_MSI_SPI.get().ok().flatten().copied() == Some(intid) {
-        let pending = BRCM_MSI.pending();
-        for vector in tairix_arch_aarch64::brcm_msi::pending_vectors(pending) {
-            let _ = table.fire(MSI_LINE_BASE + vector, &COMPOSITE_IRQ_CONTROLLER);
-            BRCM_MSI.clear(vector);
+    // The chained handler: the multiplexer's parent SPI fans out to each
+    // pending vector's line, each masked by its fire before the multiplexer
+    // acknowledges it, so the level-sensitive SPI deasserts and a vector
+    // nobody waits on stays masked rather than re-raising it.
+    if let Some(mux) = msi_mux() {
+        if mux.service(intid, table, &COMPOSITE_IRQ_CONTROLLER) {
+            tairix_kernel_core::irq_wake();
+            note_resched_here();
+            return;
         }
-        tairix_kernel_core::irq_wake();
-        note_resched_here();
-        return;
     }
     // An LPI raises the line the route its message took was given; one no
     // route took is a stray, which wakes nothing.
@@ -1018,11 +905,11 @@ pub fn arm_preemption(cpu_count: u32) {
         // `DAIF.I`-masked wedge (a single-Security-state GIC — measured:
         // QEMU `virt` with `secure=off`), the watchdog routes its cadence to
         // Group 0 as a non-maskable FIQ; if not (a two-Security-state GIC —
-        // QEMU `virt,secure=on` or a real Pi 4 GIC-400, where Group 0 is
-        // secure) it falls back to the complete cross-CPU buddy detector with
-        // no broken channel — the empirical, fail-closed capability the D13
-        // masked-section sampler consumes (`plans/WATCHDOG.md`,
-        // `plans/FIX-HARDWARE-FEATURES.md`).
+        // QEMU `virt,secure=on`, or a board whose firmware keeps Group 0 in
+        // the secure world) it falls back to the complete cross-CPU buddy
+        // detector with no broken channel — the empirical, fail-closed
+        // capability the D13 masked-section sampler consumes
+        // (`plans/WATCHDOG.md`, `plans/FIX-HARDWARE-FEATURES.md`).
         //
         // Report that verdict too: it decides whether the non-maskable
         // self-sample exists at all, so a reader of a later

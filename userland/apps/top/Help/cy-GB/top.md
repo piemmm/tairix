@@ -80,8 +80,7 @@ yn cario:
 
 - `0` — daeth y sesiwn i ben gyda `q`, neu dangoswyd y cymorth byr.
 - `1` — methodd y gwasanaeth neu'r derfynell; argraffir y rheswm ar y
-  gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  gwall safonol. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

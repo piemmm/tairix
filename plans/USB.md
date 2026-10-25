@@ -529,9 +529,8 @@ nothing of the VL805's own behaviour.
       completion, regardless of whether the class driver has a URB in flight or
       is running at all. `next_report` then simply pops the FIFO when the class
       driver next submits — its consume rate no longer gates hardware polling.
-      This is the analogue of Linux `usbhid`'s IRQ-context URB resubmission,
-      adapted to the microkernel's user-space HCD: the re-arm is on the
-      controller's interrupt, not on a starvable per-URB path.
+      The re-arm is on the controller's interrupt, not on a starvable
+      per-URB path.
     - **The HCD runs in the strict-priority real-time scheduling class.** The
       capture above removes the dependency on the *class driver* being
       scheduled, but the capture itself runs in the HCD task, which is woken by the
@@ -547,8 +546,8 @@ nothing of the VL805's own behaviour.
       already sends the placement IPI, so the IRQ-woken HCD preempts the
       `stress` tasks and runs within interrupt-return + context-switch latency
       — microseconds, which the `INT_ARM_DEPTH`-deep armed ring covers many
-      times over. This is the microkernel analogue of Linux's threaded-IRQ /
-      `SCHED_FIFO` context: the report path no longer depends on how busy
+      times over. This is the microkernel analogue of an interrupt thread
+      under POSIX `SCHED_FIFO`: the report path no longer depends on how busy
       userland is at any layer. The scheduling class is a general kernel
       facility (`SchedClass::Realtime`, honoured by every policy — CFQ, EEVDF,
       MLFQ — and exercised by the `kernel/sched/api` conformance suite), not a
@@ -670,8 +669,7 @@ nothing of the VL805's own behaviour.
     way enumeration disables the slot, resets the port — returning the device
     to Default state, where a fresh slot's `SET_ADDRESS` reaches it — and
     re-drives a fresh Enable Slot + Address Device up to `ENUM_ATTEMPTS` (4)
-    times, as Linux `hub_port_init` resets the port on each of its
-    `PORT_INIT_TRIES`. Before this, one transient split fault failed the
+    times, resetting the port before each. Before this, one transient split fault failed the
     attach; because the Pi 4's only connected root port is its onboard hub,
     that took the *whole* controller down (`bring_up` attached nothing →
     errored → the HCD task exited nonzero). The retry is scoped to the
@@ -976,7 +974,7 @@ nothing of the VL805's own behaviour.
     rejected on its own slot/port state
     (`CompletionCode::indicates_state_disagreement`). A device that *answers*
     wrong (STALL, babble, a forged descriptor) still fails on the first
-    attempt. Bounded by `ENUM_ATTEMPTS` (4, Linux's `PORT_INIT_TRIES`), never
+    attempt. Bounded by `ENUM_ATTEMPTS` (4), never
     an unbounded retry. A command that completes with a non-Success code also
     retires its command-ring slot now — the controller consumed the TRB — so
     the ring no longer leaks a slot per rejection.
@@ -1000,7 +998,7 @@ nothing of the VL805's own behaviour.
     connected-but-unserved port on every tier and leaves an already-served
     port untouched (the re-drive resets the port, which would tear a working
     device down). It fires **once ever**, so a genuinely broken device cannot
-    loop; after that the port waits for a physical re-plug, as Linux's does.
+    loop; after that the port waits for a physical re-plug.
     Host regressions:
     `a_skipped_root_port_is_re_attached_by_the_deferred_retry`,
     `the_deferred_retry_never_resets_an_already_served_port`,
@@ -1134,8 +1132,8 @@ nothing of the VL805's own behaviour.
     interrupt and after each teardown, and recovers through
     `UsbDevice::reset_and_reenumerate`, the full reset and fresh walk a cold
     boot performs (routine hot-plug never resets the controller).
-    The reset does **not** remove the controller's children — the Linux USB
-    core's `usb_reset_and_verify_device` model:
+    The reset does **not** remove the controller's children; each is
+    re-verified against its identity:
     - A held URB is answered once its device's fate is known: with the URB
       protocol's reissuable `WouldBlock` where the device came back (the reset
       discarded whatever transfer it had armed), which every class driver

@@ -72,6 +72,7 @@ impl Filesystem for MockFs {
 struct MockOut {
     text: RefCell<String>,
     fail: bool,
+    terminal: bool,
 }
 
 impl MockOut {
@@ -89,6 +90,10 @@ impl Output for MockOut {
             .borrow_mut()
             .push_str(core::str::from_utf8(bytes).unwrap_or("<non-utf8>"));
         Ok(())
+    }
+
+    fn at_terminal(&self) -> bool {
+        self.terminal
     }
 }
 
@@ -264,10 +269,44 @@ fn a_refused_canonicalisation_is_diagnosed_and_exits_non_zero() {
     assert!(err.text().contains("/gone"), "{}", err.text());
 }
 
+/// GNU 9.4's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
 #[test]
-fn an_unknown_option_is_usage() {
-    assert_eq!(parse(&["-x", "a"]), Err(ReadlinkError::Usage));
-    assert_eq!(parse(&["--nonsense", "a"]), Err(ReadlinkError::Usage));
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-x", "a"]), "invalid option -- 'x'");
+    assert_eq!(
+        refused(&["--nonsense", "a"]),
+        "unrecognized option '--nonsense'"
+    );
+    // `-h` is no help switch here, as in GNU's `readlink`.
+    assert_eq!(refused(&["-nh", "a"]), "invalid option -- 'h'");
+    assert_eq!(
+        refused(&["--zero=1", "a"]),
+        "option '--zero' doesn't allow an argument"
+    );
+}
+
+/// GNU 9.4 reads `readlink --verb --canonicalize-e a` as
+/// `readlink --verbose --canonicalize-existing a`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let options = Options {
+        canonicalize: Some(RealpathMode::Existing),
+        verbose: true,
+        ..Options::default()
+    };
+    assert_eq!(
+        parse(&["--verb", "--canonicalize-e", "a"]),
+        Ok(print(options, &["a"]))
+    );
+    assert_eq!(
+        refused(&["--canon", "a"]),
+        "option '--canon' is ambiguous; possibilities: '--canonicalize' \
+         '--canonicalize-existing' '--canonicalize-missing'"
+    );
 }
 
 #[test]
@@ -370,8 +409,8 @@ fn help_falls_back_to_the_usage_banner() {
 #[test]
 fn a_failed_write_is_fatal() {
     let out = MockOut {
-        text: RefCell::new(String::new()),
         fail: true,
+        ..MockOut::default()
     };
     assert_eq!(
         run(
@@ -414,4 +453,24 @@ fn help_documents_the_parser_switches() {
             );
         }
     }
+}
+
+#[test]
+fn a_target_is_escaped_at_a_terminal_and_kept_in_a_pipe() {
+    let fs = MockFs::new(&[("hostile", Ok("t\u{1b}[2Jx"))]);
+    let out = MockOut {
+        terminal: true,
+        ..MockOut::default()
+    };
+    let command = parse(&["hostile"]).expect("parse");
+    assert!(run(command, None, &fs, &NoHelp, &out, &MockOut::default()).expect("run"));
+    assert_eq!(out.text(), "'t'$'\\033''[2Jx'\n");
+    let zero = MockOut {
+        terminal: true,
+        ..MockOut::default()
+    };
+    let command = parse(&["-z", "hostile"]).expect("parse");
+    assert!(run(command, None, &fs, &NoHelp, &zero, &MockOut::default()).expect("run"));
+    assert_eq!(zero.text(), "t\u{1b}[2Jx\0");
+    assert_eq!(run_case(&["hostile"], &fs).1, "t\u{1b}[2Jx\n");
 }

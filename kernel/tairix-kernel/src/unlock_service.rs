@@ -17,12 +17,10 @@
 //! [`GatedConsoleRead`]) that keeps `login` from stealing the passphrase
 //! bytes while the unlock is in progress.
 //!
-//! The freestanding, architecture-specific other half — the live block
-//! bring-up that runs the unlock policy inside the kthread — lives beside
-//! the rest of the aarch64 boot pipeline in `crate::aarch64::root_unlock`
-//! (virtio-blk-MMIO for the QEMU `virt` path, and the Raspberry Pi 4 EMMC2
-//! SD host for the Pi-metal root), so this arch-neutral core names no
-//! architecture.
+//! The kthread's admission and the shared tail it runs are
+//! [`crate::unlock_orchestrate`]'s; each port's `root_unlock` supplies only
+//! the floor device bring-ups its silicon decides, so this arch-neutral core
+//! names no architecture.
 
 use alloc::vec::Vec;
 
@@ -38,7 +36,7 @@ use crate::root_storage::RootBlockBinding;
 /// The audit message the unlock kthread logs once it has brought the root
 /// block device up, mounted the root, and installed the users
 /// database into [`crate::root_mount::LATE_USERS_DB`] (the `UNLOCK_SERVICE`
-/// event, logged from the `crate::aarch64::root_unlock` kthread body).
+/// event, logged from the shared unlock tail).
 ///
 /// Exposed as a stable `pub const` so the `-M virt` admission vertical can
 /// key its PASS on the production message — the witness that the in-kernel
@@ -142,6 +140,34 @@ pub fn record_boot(dtb: u64, mut tree: Vec<HwNode>, audit: &dyn Sink) {
 #[must_use]
 pub fn take_boot() -> UnlockBoot {
     *UNLOCK_BOOT.lock()
+}
+
+/// The device tree `dtb` points at, as the bytes its own header bounds.
+///
+/// # Safety
+///
+/// `dtb` is null or the tree the firmware handed the boot, mapped there and
+/// immutable for the life of the kernel.
+///
+/// # Errors
+///
+/// No tree was handed over, or its header is not a tree's.
+#[cfg(any(
+    test,
+    all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "riscv64"))
+))]
+pub(crate) unsafe fn boot_tree(dtb: *const u8) -> Result<&'static [u8], &'static str> {
+    if dtb.is_null() {
+        return Err("root-unlock: no device tree; root unbound");
+    }
+    // SAFETY: the caller's contract makes `dtb` the handed-over tree;
+    // `Fdt::from_ptr` checks its magic and bounds it by its own `totalsize`
+    // before any read past the header.
+    let fdt = unsafe { tairix_fdt::Fdt::from_ptr(dtb) }
+        .map_err(|_| "root-unlock: device tree unreadable; root unbound")?;
+    // SAFETY: `dtb` and the size bound the blob `Fdt::from_ptr` validated,
+    // which the caller's contract keeps for the life of the kernel.
+    Ok(unsafe { core::slice::from_raw_parts(dtb, fdt.total_size()) })
 }
 
 /// The console-0 input ownership gate (`plans/PI.md` P11 Chunk B-2 item 5).
@@ -254,10 +280,9 @@ impl ConsoleRead for GatedConsoleRead {
 /// from the kthread. Sits beside the root-mount audit
 /// ids (`4135`–`4138`, [`crate::root_mount`] / [`crate::root_storage`]).
 ///
-/// Architecture-neutral: the one lifecycle event id
-/// every port's live bring-up (`crate::aarch64::root_unlock` and its
-/// future x86_64 / riscv64 siblings) logs through [`note`], never a
-/// per-arch copy.
+/// Architecture-neutral: the one lifecycle event id every port's unlock
+/// logs through [`note`], never a per-arch copy. A floor driver records its
+/// own bring-up under its own range.
 pub const UNLOCK_SERVICE: EventId = EventId(4139);
 
 /// Audit event: the hardware inventory refused the boot tree, so no device
@@ -302,11 +327,11 @@ pub fn service_caps() -> CapabilitySet {
 /// [`CapabilityId::IRQ_BIND`] for an input driver (e.g. the virtio-input
 /// keyboard) — the keyboard-injection authority `key_inject` requires and the
 /// `irq_bind`/`irq_wait` authority its interrupt-driven event loop parks on;
-/// [`CapabilityId::IPC_BIND_PRIVILEGED`] for a bus *service* driver (e.g. the
-/// `VideoCore` `vcmailbox` mailbox) to bind the restricted-sender endpoint its
-/// consumers call it through; [`CapabilityId::HW_EMIT`] and
-/// [`CapabilityId::MAILBOX`] for the user-space USB bus drivers (`pcie_brcm`,
-/// `vl805`) that publish enumerated devices and reload controller firmware;
+/// [`CapabilityId::IPC_BIND_PRIVILEGED`] for a bus *service* driver (e.g. a
+/// firmware mailbox) to bind the restricted-sender endpoint its consumers
+/// call it through; [`CapabilityId::HW_EMIT`] and [`CapabilityId::MAILBOX`]
+/// for the user-space bus drivers (a root complex, a USB host) that publish
+/// enumerated devices and reload controller firmware;
 /// [`CapabilityId::SHM`] / [`CapabilityId::IPC_ENDPOINT`] for the
 /// USB host-controller driver and its HID class driver to stand up and submit
 /// on the per-interface URB transport; [`CapabilityId::SCHED_REALTIME`] for the
@@ -331,29 +356,26 @@ pub fn autoload_caps() -> CapabilitySet {
     // `CAP_IRQ_BIND` too; the per-driver manifest intersection still binds, so
     // a driver that does not request it receives nothing extra (no ambient authority).
     caps.insert(CapabilityId::IRQ_BIND);
-    // A user-space *service* driver (the VideoCore `vcmailbox` mailbox, whose
-    // consumers reach it through a restricted-sender call endpoint) must hold
+    // A user-space *service* driver (a firmware mailbox, whose consumers reach
+    // it through a restricted-sender call endpoint) must hold
     // `CAP_IPC_BIND_PRIVILEGED` to bind that endpoint (`kernel/ipc` requires it
     // for any non-empty required-sender set). The delegatable set carries it so
     // such a signed driver can be granted it; the per-driver manifest
     // intersection still binds, so a driver that does not request it receives
     // nothing extra (no ambient authority).
     caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-    // A user-space *bus* driver (the `pcie_brcm` root complex, the `vl805` USB
-    // host) publishes the devices it enumerates into the live hardware tree
+    // A user-space *bus* driver (a root complex, a USB host) publishes the
+    // devices it enumerates into the live hardware tree
     // with `hw_emit_node`, so the device manager autoloads each in turn — the
     // recursive, data-driven discovery chain. That
     // requires `CAP_HW_EMIT`, so the delegatable set carries it; a driver whose
     // manifest does not request it (a storage or input leaf) receives nothing
     // extra (the per-driver intersection still binds).
     caps.insert(CapabilityId::HW_EMIT);
-    // The `vl805` USB-host bus driver reloads its controller's firmware over
-    // the VideoCore property mailbox before bring-up, reaching the `vcmailbox`
-    // service's restricted-sender call endpoint, which requires the caller to
-    // hold `CAP_MAILBOX` (`crate::driver_store_server` / `lib/abi`
-    // `MAILBOX_ENDPOINT`). The delegatable set carries it so such a signed
-    // driver can be granted it; a driver that does not request it receives
-    // nothing extra (no ambient authority).
+    // A USB-host bus driver that reloads its controller's firmware over the
+    // firmware property mailbox before bring-up reaches the mailbox service's
+    // restricted-sender endpoint, which requires `CAP_MAILBOX`; a driver that
+    // does not request it receives nothing extra.
     caps.insert(CapabilityId::MAILBOX);
     // An autoloaded user-space driver emits its structured diagnostics
     // (e.g. the USB boot-keyboard driver's one-shot bring-up failure record)
@@ -397,7 +419,7 @@ pub fn autoload_caps() -> CapabilitySet {
     // extra (the per-driver manifest intersection still binds, so no ambient
     // authority).
     caps.insert(CapabilityId::SYSINFO_HW);
-    // The frequency mechanism driver (`drivers/clock/rpi_firmware`) takes the
+    // The frequency mechanism driver (a firmware clock driver) takes the
     // machine's one frequency-mechanism role and parks in the kernel applying
     // the governor's targets, both gated on `CAP_CPUFREQ`. The delegatable set
     // carries it so such a signed driver can be granted it; a driver that does
@@ -566,45 +588,6 @@ pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {
             id: UNLOCK_SERVICE,
             message,
             fields: &[],
-        },
-    );
-}
-
-/// Like [`note`], but carries the `stage` naming the bring-up step a
-/// failure was localised to and the `error` it failed with.
-///
-/// Used by the per-device root bring-up to surface *which* step of a
-/// floor block-device bring-up stalled and *how* (e.g. the EMMC2
-/// SD-identification command on a real Raspberry Pi 4, which `raspi4b`
-/// cannot emulate, so the metal UART log is the only signal —
-/// `plans/PI.md` §0.4 / P8 / B4). Both values are stable `&'static str`s
-/// from the driver (`tairix_drv_storage_emmc2::BringUpStage::as_str` and
-/// the caller's `DriverError` name), so no name is re-spelled here. The `error` distinguishes a controller/command
-/// fault from a decode rejection at the same stage (e.g. CMD9 `SEND_CSD`
-/// timing out vs. returning an unsupported CSD).
-pub fn note_stage(
-    audit: &dyn Sink,
-    level: Level,
-    message: &'static str,
-    stage: &'static str,
-    error: &'static str,
-) {
-    log(
-        audit,
-        &Event {
-            level,
-            id: UNLOCK_SERVICE,
-            message,
-            fields: &[
-                tairix_log::Field {
-                    key: "stage",
-                    value: tairix_log::FieldValue::Str(stage),
-                },
-                tairix_log::Field {
-                    key: "error",
-                    value: tairix_log::FieldValue::Str(error),
-                },
-            ],
         },
     );
 }
@@ -892,6 +875,22 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_boot_tree_is_the_handed_over_blob_and_none_is_refused() {
+        let mut builder = tairix_fdt::write::FdtWriter::new();
+        builder.begin_node("");
+        builder.prop_str("compatible", "test,board");
+        builder.end_node();
+        let blob: &'static [u8] = tairix_kernel_core::forever(builder.build().into_boxed_slice());
+        // SAFETY: the blob is kept for the rest of the test binary, mapped and
+        // unchanged.
+        let tree = unsafe { boot_tree(blob.as_ptr()) }.expect("a tree");
+        assert_eq!(tree, blob);
+        // SAFETY: null names no tree, which `boot_tree` refuses before any
+        // read.
+        assert!(unsafe { boot_tree(core::ptr::null()) }.is_err());
+    }
+
     /// A console read source that hands out a fixed byte once per poll and
     /// records how many times it was polled, so a test can prove the gate
     /// withholds polls while closed.
@@ -1036,8 +1035,7 @@ mod tests {
 
         // `record_boot` stashes the binding + DTB and seeds the authoritative
         // inventory with the discovered tree `FdtDiscovery` built — here a
-        // root plus a discovered bus (the `brcm,bcm2711-pcie` root complex
-        // stands in), against which `devmgr` autoloads the user-space bus
+        // root plus a discovered bus (a root complex stands in), against which `devmgr` autoloads the user-space bus
         // chain, and a probed sound card, whose probe region lies above the
         // virtual bus's id.
         let audio = crate::hwtree_node_ids::VIRTIO_AUDIO_PROBE_NODE_BASE_ID;
@@ -1175,8 +1173,8 @@ mod tests {
         // minimal caps plus the resource caps an autoloaded driver's
         // manifest∩caller intersection may legitimately grant: `INPUT_INJECT`
         // and `IRQ_BIND` for an input driver, and `IPC_BIND_PRIVILEGED` for a
-        // bus service driver that binds a restricted-sender endpoint (the
-        // VideoCore `vcmailbox`) — none of which the kthread's own
+        // bus service driver that binds a restricted-sender endpoint (a
+        // firmware mailbox) — none of which the kthread's own
         // `service_caps` hold (no ambient authority for the bring-up
         // context; the per-driver intersection still binds).
         let service = service_caps();
@@ -1185,9 +1183,9 @@ mod tests {
             CapabilityId::INPUT_INJECT,
             CapabilityId::IRQ_BIND,
             CapabilityId::IPC_BIND_PRIVILEGED,
-            // A user-space bus driver (`pcie_brcm`, `vl805`) publishes
-            // enumerated devices with `hw_emit_node` (`CAP_HW_EMIT`), and
-            // `vl805` reloads its controller firmware over the `vcmailbox`
+            // A user-space bus driver (a root complex, a USB host) publishes
+            // enumerated devices with `hw_emit_node` (`CAP_HW_EMIT`), and a
+            // USB host reloads its controller firmware over the mailbox's
             // restricted-sender endpoint (`CAP_MAILBOX`) — both delegatable to
             // a signed manifest that requests them, neither held by the
             // kthread itself (no ambient authority).

@@ -130,7 +130,7 @@ pub enum DisasmError {
 #[must_use]
 pub fn describe(error: DisasmError) -> String {
     match error {
-        DisasmError::Fs(errno) => format!("read failed: {errno:?}"),
+        DisasmError::Fs(errno) => format!("read failed: {errno}"),
         DisasmError::Decode(failure) => String::from(failure_reason(failure)),
     }
 }

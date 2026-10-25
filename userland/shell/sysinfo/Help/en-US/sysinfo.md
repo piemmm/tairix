@@ -129,8 +129,7 @@ With no query, the short help is shown.
 
 - `0` — the query was answered and rendered.
 - `1` — the service refused or failed, or the result could not be
-  delivered.
-- `2` — the command line was not understood.
+  delivered. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

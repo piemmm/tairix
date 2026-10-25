@@ -23,13 +23,21 @@ que nombra: cada uso posterior se autoriza componente a componente bajo
 su propia identidad.
 
 Un nombre de enlace ya ocupado se rechaza salvo que `-f` o `-i` indique
-reemplazarlo, y el reemplazo **elimina** primero ese nombre, de modo que
-nada atraviesa un enlace ya presente hacia lo que señala. Un directorio
-nunca se reemplaza.
+reemplazarlo. El nuevo enlace ocupa entonces el lugar de ese nombre en
+un solo paso, y solo una vez que existe, de modo que un enlace que no
+puede crearse — un destino inexistente, por ejemplo — deja el nombre
+como estaba, y nada atraviesa un enlace ya presente hacia lo que señala.
+Un directorio nunca se reemplaza. Un enlace que ocuparía el lugar
+precisamente del archivo que nombra se rechaza por tratarse del mismo
+archivo: un archivo enlazado a la fuerza sobre su propio nombre, o un
+enlace simbólico cuyo destino, leído desde el directorio del propio
+enlace, es el archivo que reemplazaría. GNU, en cambio, lee ese destino
+desde el directorio de trabajo y, tras una pregunta `-i` aceptada,
+reemplaza un archivo por un enlace a sí mismo.
 
-El primer fallo detiene la ejecución antes de cualquier destino
-posterior; los enlaces ya creados permanecen. `--` termina el análisis
-de opciones: todo argumento posterior es un operando.
+Un enlace que no puede crearse se notifica, y el siguiente se crea de
+todos modos. `--` termina el análisis de opciones: todo argumento
+posterior es un operando.
 
 Sin `-s` el enlace es **duro**: una segunda entrada de directorio para
 el propio inodo del destino. Ambos nombres alcanzan un solo archivo,
@@ -62,16 +70,18 @@ seguridad.
 - `-d, -F, --directory` — aceptar un operando de directorio. El enlace
   se rechaza igualmente: ningún usuario puede dar un segundo nombre a
   un directorio.
-- `-f, --force` — eliminar un nombre de enlace existente y crear
-  entonces el enlace.
-- `-i, --interactive` — preguntar antes de eliminar un nombre de enlace
-  existente; solo consiente una respuesta que empiece por `y`/`Y`. Gana
-  la última de `-f` e `-i`.
+- `-f, --force` — reemplazar un nombre de enlace existente por el nuevo
+  enlace.
+- `-i, --interactive` — preguntar antes de reemplazar un nombre de
+  enlace existente; solo consiente una respuesta que empiece por
+  `y`/`Y`, y una pregunta rechazada omite ese enlace y hace fallar la
+  ejecución. Gana la última de `-f` e `-i`.
 - `-n, --no-dereference` — tratar un destino que es un enlace
   simbólico a un directorio como el simple nombre que también es, en
   lugar de un directorio donde crear los enlaces.
 - `-v, --verbose` — informar de cada enlace creado como
-  `'link' -> 'target'`.
+  `'link' -> 'target'` si es simbólico y como `'link' => 'target'` si es
+  duro.
 - `-t dir, --target-directory=dir` — crear cada enlace en `dir`, que ya
   debe ser un directorio. El valor va adjunto (`-tdir`,
   `--target-directory=dir`) o como argumento siguiente.
@@ -94,10 +104,10 @@ seguridad.
 
 ## EXIT STATUS
 
-- `0` — se crearon todos los enlaces (o se escribió la ayuda breve);
-  una pregunta `-i` rechazada no es un fallo.
-- `1` — cualquier otro caso, con el motivo en la salida de error. Una
-  línea de órdenes no entendida también termina con `1`.
+- `0` — se crearon todos los enlaces (o se escribió la ayuda breve).
+- `1` — cualquier otro caso, incluida una pregunta `-i` rechazada, con
+  el motivo, si lo hay, en la salida de error. Una línea de órdenes no
+  entendida también termina con `1`.
 
 ## ENVIRONMENT
 

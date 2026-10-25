@@ -2,6 +2,8 @@
 
 use alloc::string::String;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan};
+
 use crate::error::UnmountError;
 
 /// One thing the `unmount` tool can do.
@@ -21,60 +23,47 @@ pub enum Command {
     Help,
 }
 
+/// What each of `unmount`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Force,
+    Help,
+}
+
+/// `unmount`'s option, as `umount` spells it, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('f', &["force"], Flag::Force),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
 /// The grammar is `unmount [-f] [--] NAME`, following the established
-/// `umount` surface:
+/// `umount` surface, read as GNU's `getopt_long` reads it ([`Scan`]):
+/// options anywhere among the operands, a long one by any unambiguous
+/// prefix, `--` ending them.
 ///
 /// * `NAME` — the volume to detach, by catalog name or mount-point path.
 /// * `-f` / `--force` — force-unmount: retract the volume even when its
 ///   uncommitted data cannot be committed, deliberately discarding the
 ///   retained set (an audited, capability-gated kernel decision).
 /// * `-?` / `--help` — the tool's own short help (wins immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-///
-/// Short toggles cluster (`-f` alone today, so clustering is trivial but
-/// consistent with the sibling tools).
 ///
 /// # Errors
 ///
-/// [`UnmountError::Usage`] for an unrecognised option or a number of
-/// operands other than exactly one.
+/// * [`UnmountError::Option`] — an option `getopt` refuses, in its words.
+/// * [`UnmountError::Usage`] — a number of operands other than exactly one.
 pub fn parse(args: &[&str]) -> Result<Command, UnmountError> {
     let mut force = false;
     let mut name: Option<String> = None;
-    let mut options_done = false;
-
-    for arg in args {
-        if !options_done {
-            match *arg {
-                "--" => {
-                    options_done = true;
-                    continue;
-                }
-                "--help" => return Ok(Command::Help),
-                "--force" => {
-                    force = true;
-                    continue;
-                }
-                _ => {}
-            }
-            if let Some(rest) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in rest.chars() {
-                    match letter {
-                        '?' => return Ok(Command::Help),
-                        'f' => force = true,
-                        _ => return Err(UnmountError::Usage),
-                    }
-                }
-                continue;
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(UnmountError::Option)? {
+            Arg::Operand(_) if name.is_some() => return Err(UnmountError::Usage),
+            Arg::Operand(operand) => name = Some(String::from(operand)),
+            Arg::Opt(Flag::Force, _) => force = true,
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
-        if name.is_some() {
-            return Err(UnmountError::Usage);
-        }
-        name = Some(String::from(*arg));
     }
 
     match name {
@@ -87,7 +76,7 @@ pub fn parse(args: &[&str]) -> Result<Command, UnmountError> {
 mod tests {
     use super::{parse, Command};
     use crate::error::UnmountError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
 
     fn unmount(name: &str, force: bool) -> Command {
         Command::Unmount {
@@ -135,10 +124,26 @@ mod tests {
         assert_eq!(parse(&["a", "b"]), Err(UnmountError::Usage));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_options_are_usage() {
-        assert_eq!(parse(&["-x", "usb1"]), Err(UnmountError::Usage));
-        assert_eq!(parse(&["--frob", "usb1"]), Err(UnmountError::Usage));
-        assert_eq!(parse(&["-fx", "usb1"]), Err(UnmountError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "usb1"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob", "usb1"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-fx", "usb1"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--force=1", "usb1"]),
+            "option '--force' doesn't allow an argument"
+        );
+    }
+
+    /// `getopt_long` reads `unmount --for usb1` as `unmount --force usb1`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--for", "usb1"]), Ok(unmount("usb1", true)));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 }

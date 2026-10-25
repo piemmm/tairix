@@ -10,7 +10,7 @@
 //! until the next operation, an explicit `fs_sync`, or unmount: bounded in
 //! content, unbounded in time.
 //!
-//! So the expiry lives here, above the driver, where Linux also puts it: one
+//! So the expiry lives here, above the driver: one
 //! kernel task parks on [`WRITEBACK_WAITQ`](crate::waitq::WRITEBACK_WAITQ)
 //! until the soonest deadline any mounted volume has published, then calls
 //! the ordinary [`FilesystemWrite::flush`] on each volume that is due.
@@ -37,20 +37,27 @@
 //! aged-out transaction itself, but one that *fails* rolls back and leaves it
 //! open, so a skipped volume could keep its transaction with nothing left to
 //! fire.
+//!
+//! # Reaping released pins
+//!
+//! A descriptor's last reference may drop where no driver's lock can be
+//! taken, so its pin is queued and the flusher woken ([`crate::fs::node`]);
+//! each pass first tells every driver a release left due of what was
+//! released, waiting for its lock as a publish does.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::sync::Arc;
 
-use tairix_abi::driver::filesystem::FilesystemWrite;
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
 use tairix_abi::driver::DriverHandle;
 use tairix_log::{Field, FieldValue, Level, Sink};
 
 use crate::audit::{self, AuditEvent};
-use crate::sleeplock::SleepLock;
 use crate::waitq::NO_DEADLINE;
 
 use super::mounted::LateFilesystem;
+use super::node::DriverLock;
 
 /// One mounted volume's published write-back deadline: the absolute
 /// monotonic instant its open transaction must be published by, or
@@ -124,9 +131,10 @@ impl WritebackDue {
     }
 }
 
-/// Publish every registered volume whose write-back deadline is at or before
-/// `through_ns`, returning the soonest deadline still pending — the instant
-/// the flusher parks until, or `None` for "nothing is dirty, arm nothing".
+/// Reap every registered volume a released pin left due, then publish every
+/// one whose write-back deadline is at or before `through_ns`, returning the
+/// soonest deadline still pending — the instant the flusher parks until, or
+/// `None` for "nothing is dirty, arm nothing".
 ///
 /// A failed publish is not retried here: the driver's own commit failure
 /// path abandons the transaction and reports that it holds nothing, so the
@@ -139,8 +147,9 @@ pub fn publish_due<F>(
     through_ns: u64,
 ) -> Option<u64>
 where
-    F: FilesystemWrite + Send + 'static,
+    F: FilesystemRead + FilesystemWrite + Send + 'static,
 {
+    mounts.reap_due();
     for (volume, driver) in mounts.take_writeback_due(through_ns) {
         publish_one(volume, &driver, audit_sink);
     }
@@ -148,7 +157,7 @@ where
 }
 
 /// Publish one volume, logging a failure against the volume's handle.
-fn publish_one<F>(volume: DriverHandle, driver: &Arc<SleepLock<F>>, audit_sink: &dyn Sink)
+fn publish_one<F>(volume: DriverHandle, driver: &Arc<DriverLock<F>>, audit_sink: &dyn Sink)
 where
     F: FilesystemWrite + Send + 'static,
 {

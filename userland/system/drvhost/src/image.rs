@@ -185,7 +185,7 @@ mod tests {
     }
 
     fn sample_bind_keys() -> [DriverBindKey; 2] {
-        let Ok(key) = tairix_abi::HwMatchKey::compatible(b"brcm,bcm2711-emmc2") else {
+        let Ok(key) = tairix_abi::HwMatchKey::compatible(b"vendor,sd-host") else {
             unreachable!("compatible string fits HW_COMPATIBLE_MAX")
         };
         [

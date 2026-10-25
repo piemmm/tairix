@@ -272,9 +272,8 @@ impl<A: SchedulerArch> Scheduler<A> {
         )
     }
 
-    /// Place `task`'s vruntime at `max(its own vruntime, rq's front)` — the
-    /// CFS `place_entity` rule, where the front is one sleeper credit ahead
-    /// of the monotonic floor.
+    /// Place `task`'s vruntime at `max(its own vruntime, rq's front)`, where
+    /// the front is one sleeper credit ahead of the monotonic floor.
     ///
     /// A brand-new task (vruntime `0`) or one that slept long enough for the
     /// floor to pass it lands at that front, so it is neither penalised for
@@ -331,7 +330,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// migration, whose ledger moves its weight off the CPU it left. A
     /// real-time task joins the strict-priority band (weight counted, no
     /// virtual-runtime placement); a time-shared task is
-    /// `place_entity`-admitted to the fair set.
+    /// admitted to the fair set at its placed vruntime.
     fn admit_fresh_on(&self, task: &Arc<TaskInner>, cpu: CpuId) {
         // Queued even if it has left the competition since it was made ready:
         // an exit in between retired it trusting this entry to drop its record.
@@ -607,8 +606,8 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// CFQ is the non-tickless carve-out: the fixed-frequency tick must
     /// keep firing for a running task even when it is alone, so the CPU
-    /// re-checks its run queue at the steady HZ cadence (the Linux
-    /// scheduler-tick model) and promptly picks up work later enqueued
+    /// re-checks its run queue at the steady HZ cadence (the classic
+    /// periodic-tick model) and promptly picks up work later enqueued
     /// here *without* an IPI — a task drained back from overflow, a
     /// rebalance. The kernel preempt path calls this when it consumes a
     /// tick without switching; re-arming only the timer avoids the
@@ -766,8 +765,8 @@ impl<A: SchedulerArch> Scheduler<A> {
         // unconditionally, even when it is the sole runnable task. Unlike
         // the tickless siblings, which disarm for a lone task so a quiet
         // core takes no interrupts, CFQ leaves the fixed-frequency tick
-        // running so the timer interrupt fires at a steady HZ cadence (the
-        // Linux scheduler tick). Whether a fired tick actually switches is
+        // running so the timer interrupt fires at a steady HZ cadence.
+        // Whether a fired tick actually switches is
         // the kernel's decision (its `preempt_current` gate switches only
         // when there is a competitor to run, so a lone task's tick does its
         // accounting without a needless switch-to-self); the policy's job
@@ -803,8 +802,8 @@ impl<A: SchedulerArch> Scheduler<A> {
         let service_ticks = self.settle_run_accounting(cpu, task, tick);
 
         // Charge the weighted service this run consumed so `vruntime`
-        // reflects CPU time regardless of *why* the task stopped — CFS
-        // charges execution, not just voluntary yields. A task that runs
+        // reflects CPU time regardless of *why* the task stopped — virtual
+        // runtime charges execution, not just voluntary yields. A task that runs
         // then parks must still advance its vruntime; otherwise it would
         // re-enter at the front on every wake (`admit`) and starve a task
         // that has been ready all along.

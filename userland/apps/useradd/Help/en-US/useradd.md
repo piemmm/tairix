@@ -50,8 +50,8 @@ widens it afterwards with the `users` tool's `grant` command.
 - `0` — the account was created.
 - `1` — the database refused or failed the creation (for example a
   missing capability, a duplicate id, or an unknown group); the reason
-  is printed on standard error.
-- `2` — the command line was not understood.
+  is printed on standard error. A command line that was not understood
+  exits `1` too.
 
 ## ENVIRONMENT
 

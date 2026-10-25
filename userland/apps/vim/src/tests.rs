@@ -117,10 +117,10 @@ fn an_empty_editor_holds_one_empty_line() {
 
 #[test]
 fn parse_accepts_the_documented_grammar() {
-    assert_eq!(parse(&["vim", "-h"]), Ok(Command::Help));
-    assert_eq!(parse(&["vim", "-?"]), Ok(Command::Help));
+    assert_eq!(parse(&["-h"]), Ok(Command::Help));
+    assert_eq!(parse(&["-?"]), Ok(Command::Help));
     assert_eq!(
-        parse(&["vim", "-R", "+7", "a.txt", "b.txt"]),
+        parse(&["-R", "+7", "a.txt", "b.txt"]),
         Ok(Command::Run {
             readonly: true,
             start: Some(Start::Line(7)),
@@ -128,7 +128,7 @@ fn parse_accepts_the_documented_grammar() {
         })
     );
     assert_eq!(
-        parse(&["vim", "+/needle", "hay.txt"]),
+        parse(&["+/needle", "hay.txt"]),
         Ok(Command::Run {
             readonly: false,
             start: Some(Start::Pattern(String::from("needle"))),
@@ -136,15 +136,49 @@ fn parse_accepts_the_documented_grammar() {
         })
     );
     assert_eq!(
-        parse(&["vim", "+", "--", "-R"]),
+        parse(&["+", "--", "-R"]),
         Ok(Command::Run {
             readonly: false,
             start: Some(Start::LastLine),
             files: vec![String::from("-R")],
         })
     );
-    assert!(parse(&["vim", "-x"]).is_err());
-    assert!(parse(&["vim", "+zero"]).is_err());
+    assert!(parse(&["-x"]).is_err());
+    assert!(parse(&["+zero"]).is_err());
+}
+
+#[test]
+fn past_the_end_of_options_a_plus_word_is_a_file() {
+    assert_eq!(
+        parse(&["-R", "--", "+5", "-x"]),
+        Ok(Command::Run {
+            readonly: true,
+            start: None,
+            files: vec![String::from("+5"), String::from("-x")],
+        })
+    );
+}
+
+/// GNU's words for each refusal.
+fn refused(arguments: &[&str]) -> String {
+    parse(arguments).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+    assert_eq!(refused(&["-Rx", "a.txt"]), "invalid option -- 'x'");
+    assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+    assert_eq!(
+        refused(&["--help=1"]),
+        "option '--help' doesn't allow an argument"
+    );
+    assert_eq!(refused(&["+zero"]), "unknown argument: +zero");
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(parse(&["--he", "a.txt"]), Ok(Command::Help));
 }
 
 // ---- Buffer and undo ---------------------------------------------------

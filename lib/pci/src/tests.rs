@@ -10,7 +10,7 @@
 //!
 //! The tests reach into the `pub(crate)` enumeration core directly,
 //! alongside the public [`crate::mechanism_one`] / [`crate::mechanism_ecam`]
-//! / [`crate::mechanism_brcm`] constructors.
+//! / [`crate::mechanism_supplied`] constructors.
 
 extern crate alloc;
 
@@ -561,17 +561,17 @@ fn map_bar_window_propagates_capability_denial() {
 // ---- BAR assignment ------------------------------------------------------
 
 /// A single function whose 64-bit memory BAR0 is **unassigned** — its
-/// address bits read zero, exactly as the VL805's BAR0 does after the
-/// OS resets and re-enumerates the BCM2711 root complex. Dword 4 carries
+/// address bits read zero, exactly as a function's BAR0 does after the
+/// OS resets and re-enumerates its root complex. Dword 4 carries
 /// only the memory-type bits, dword 5 (the high half) is zero, and the
 /// 4 KiB size probe yields the writable mask.
-fn vl805_like_fixture() -> MockConfigSpace {
+fn unassigned_bar_fixture() -> MockConfigSpace {
     let func = MockFunction {
         bus: 0,
         device: 0,
         function: 0,
         regs: vec![
-            id(0x1106, 0x3483),
+            id(XHCI_VENDOR, XHCI_DEVICE),
             class(0x0C03),
             header(0x00),
             // BAR0 (dword 4): 64-bit memory (bits[2:1]=10), address zero.
@@ -587,7 +587,7 @@ fn vl805_like_fixture() -> MockConfigSpace {
     MockConfigSpace::new(vec![func])
 }
 
-fn vl805_bdf() -> u64 {
+fn unassigned_bar_bdf() -> u64 {
     ConfigAddress {
         bus: 0,
         device: 0,
@@ -600,11 +600,11 @@ fn vl805_bdf() -> u64 {
 
 #[test]
 fn assign_bar_places_an_unassigned_64bit_bar_in_the_window() {
-    let cfg = vl805_like_fixture();
+    let cfg = unassigned_bar_fixture();
     let state = cfg.shared_state();
     let pci = Pci::new(cfg, None);
     let base = pci
-        .assign_bar(vl805_bdf(), 0, 0xC000_0000, 0x4000_0000)
+        .assign_bar(unassigned_bar_bdf(), 0, 0xC000_0000, 0x4000_0000)
         .expect("the unassigned BAR is placed in the window");
     // Placed at the lowest size-aligned PCIe-bus address in the window.
     assert_eq!(base, 0xC000_0000);
@@ -659,11 +659,11 @@ fn assign_bar_leaves_an_already_based_bar_untouched() {
 
 #[test]
 fn assign_bar_refuses_a_bar_that_does_not_fit_the_window() {
-    let pci = Pci::new(vl805_like_fixture(), None);
+    let pci = Pci::new(unassigned_bar_fixture(), None);
     // The window is smaller than the 4 KiB BAR: fail closed rather than
     // place the BAR partially outside it.
     assert_eq!(
-        pci.assign_bar(vl805_bdf(), 0, 0xC000_0000, 0x800)
+        pci.assign_bar(unassigned_bar_bdf(), 0, 0xC000_0000, 0x800)
             .unwrap_err(),
         DriverError::OutOfRange
     );
@@ -1236,7 +1236,7 @@ fn route_msix_propagates_capability_denial() {
 // ---- MSI (not MSI-X) interrupt routing -----------------------------------
 
 /// A function advertising the legacy **MSI** capability at byte 0x50,
-/// 64-bit-address capable — the shape the Pi 4's VL805 xHCI presents.
+/// 64-bit-address capable — the shape an MSI-only xHCI presents.
 /// `addr64` selects whether the Message Control "64-bit capable" bit
 /// (MC bit 7) is set, and `per_vector_masking` selects whether the mask
 /// register is present, so tests can exercise both data-register placements
@@ -1262,7 +1262,7 @@ fn capability_fixture(at: u8, header_dword: u32) -> MockConfigSpace {
         device: 6,
         function: 0,
         regs: vec![
-            id(VL805_VENDOR, VL805_DEVICE),
+            id(XHCI_VENDOR, XHCI_DEVICE),
             status_with_caplist(),
             class(0x0C03),
             header(0x00),
@@ -1320,7 +1320,7 @@ fn route_msi_programs_address_data_and_enables_single_vector() {
     let config = msi_fixture(true, false);
     let state = config.shared_state();
     let pci = Pci::new(config, None);
-    // A BCM2711-style doorbell pair: the RC MSI controller's target
+    // A root-complex doorbell pair: the RC MSI controller's target
     // address and the data word selecting one vector.
     let message = MsiMessage {
         address: 0xFFFF_FFFC,
@@ -1491,10 +1491,10 @@ fn mechanism_one_exposes_the_frozen_bus_seams() {
 
 // ---- ECAM (PCIe enhanced configuration access) ---------------------------
 //
-// The Raspberry Pi 4 (BCM2711) reaches its VL805 USB host controller
-// through ECAM, not the x86 legacy ports. The fixture below lays a
+// A root port's downstream xHCI is reached through ECAM, not the x86
+// legacy ports. The fixture below lays a
 // real configuration region flat into a heap buffer — a root-port
-// bridge at 00:00.0 and the VL805 xHCI at 01:00.0 — and drives the
+// bridge at 00:00.0 and an xHCI at 01:00.0 — and drives the
 // enumeration core over it through `EcamConfigSpace`, exactly as the
 // ring-0 boot walk drives a kernel-mapped ECAM window. The
 // read-only enumeration and capability-walk paths are mechanism-
@@ -1505,9 +1505,12 @@ fn mechanism_one_exposes_the_frozen_bus_seams() {
 
 use crate::mech_ecam::EcamConfigSpace;
 
-/// VID/DID of the VIA VL805, the Pi 4's PCIe-attached xHCI controller.
-const VL805_VENDOR: u16 = 0x1106;
-const VL805_DEVICE: u16 = 0x3483;
+/// VID/DID of the PCIe-attached xHCI controller the fixtures model.
+const XHCI_VENDOR: u16 = 0xABCD;
+const XHCI_DEVICE: u16 = 0x1234;
+
+/// The vendor ID of the root port above it, whose device ID is zero.
+const BRIDGE_VENDOR: u16 = 0xABCE;
 
 /// Plant one configuration dword at `(bus, device, function, register)`
 /// into the flat ECAM `backing`.
@@ -1524,15 +1527,15 @@ fn put_ecam(backing: &mut [u32], bus: u8, device: u8, function: u8, register: u1
 }
 
 /// Build a flat ECAM region (two 1 MiB bus blocks) holding a root-port
-/// bridge at 00:00.0 and the VL805 xHCI at 01:00.0, plus the heap
+/// bridge at 00:00.0 and an xHCI at 01:00.0, plus the heap
 /// `Vec` that owns it (returned so it outlives the window).
-fn vl805_ecam_region() -> (Vec<u32>, RegisterWindow) {
-    vl805_ecam_planted(|_| {})
+fn xhci_ecam_region() -> (Vec<u32>, RegisterWindow) {
+    xhci_ecam_planted(|_| {})
 }
 
-/// [`vl805_ecam_region`], with `plant` writing more of its registers before
+/// [`xhci_ecam_region`], with `plant` writing more of its registers before
 /// the window over them is taken.
-fn vl805_ecam_planted(plant: impl FnOnce(&mut Vec<u32>)) -> (Vec<u32>, RegisterWindow) {
+fn xhci_ecam_planted(plant: impl FnOnce(&mut Vec<u32>)) -> (Vec<u32>, RegisterWindow) {
     // Two buses × 1 MiB = 2 MiB region. An absent function's
     // configuration space reads all-ones on real hardware (the host
     // bridge master-aborts), so the region starts filled with the
@@ -1540,18 +1543,18 @@ fn vl805_ecam_planted(plant: impl FnOnce(&mut Vec<u32>)) -> (Vec<u32>, RegisterW
     let mut backing = vec![0xFFFF_FFFFu32; (2 * 0x10_0000) / 4];
 
     // 00:00.0 — PCIe root port (class 0x0604, type-1 header).
-    put_ecam(&mut backing, 0, 0, 0, 0, 0x14E4); // Broadcom host bridge ID (device 0x0000).
+    put_ecam(&mut backing, 0, 0, 0, 0, u32::from(BRIDGE_VENDOR));
     put_ecam(&mut backing, 0, 0, 0, 2, 0x0604 << 16); // class = PCI bridge.
     put_ecam(&mut backing, 0, 0, 0, 3, 0x01 << 16); // header type 1.
 
-    // 01:00.0 — VL805 xHCI (class 0x0C03, type-0, MSI-X capable).
+    // 01:00.0 — the xHCI (class 0x0C03, type-0, MSI-X capable).
     put_ecam(
         &mut backing,
         1,
         0,
         0,
         0,
-        (u32::from(VL805_DEVICE) << 16) | u32::from(VL805_VENDOR),
+        (u32::from(XHCI_DEVICE) << 16) | u32::from(XHCI_VENDOR),
     );
     put_ecam(&mut backing, 1, 0, 0, 1, (1u32 << 4) << 16); // status: cap list present.
     put_ecam(&mut backing, 1, 0, 0, 2, 0x0C_03_30 << 8); // class = xHCI USB host (prog-if 0x30).
@@ -1575,8 +1578,8 @@ fn vl805_ecam_planted(plant: impl FnOnce(&mut Vec<u32>)) -> (Vec<u32>, RegisterW
 }
 
 #[test]
-fn ecam_enumeration_finds_root_port_and_vl805() {
-    let (_backing, window) = vl805_ecam_region();
+fn ecam_enumeration_finds_root_port_and_xhci() {
+    let (_backing, window) = xhci_ecam_region();
     let pci = Pci::new(
         EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
         None,
@@ -1592,7 +1595,7 @@ fn ecam_enumeration_finds_root_port_and_vl805() {
     let got: Vec<_> = buf[..n].to_vec();
     let want = vec![
         BusDevice {
-            vendor: 0x14E4,
+            vendor: u32::from(BRIDGE_VENDOR),
             device: 0x0000,
             class: 0x0604,
             reserved0: 0,
@@ -1606,8 +1609,8 @@ fn ecam_enumeration_finds_root_port_and_vl805() {
             .unwrap(),
         },
         BusDevice {
-            vendor: u32::from(VL805_VENDOR),
-            device: u32::from(VL805_DEVICE),
+            vendor: u32::from(XHCI_VENDOR),
+            device: u32::from(XHCI_DEVICE),
             class: 0x0C03,
             reserved0: 0,
             address: ConfigAddress {
@@ -1624,13 +1627,13 @@ fn ecam_enumeration_finds_root_port_and_vl805() {
 }
 
 #[test]
-fn ecam_capability_walk_decodes_vl805_msix() {
-    let (_backing, window) = vl805_ecam_region();
+fn ecam_capability_walk_decodes_xhci_msix() {
+    let (_backing, window) = xhci_ecam_region();
     let pci = Pci::new(
         EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
         None,
     );
-    let vl805 = ConfigAddress {
+    let xhci_fn = ConfigAddress {
         bus: 1,
         device: 0,
         function: 0,
@@ -1639,7 +1642,7 @@ fn ecam_capability_walk_decodes_vl805_msix() {
     .pack_bdf()
     .unwrap();
     let mut out = [Capability::Other { offset: 0, id: 0 }; 4];
-    let n = pci.capabilities(vl805, &mut out).expect("cap walk ok");
+    let n = pci.capabilities(xhci_fn, &mut out).expect("cap walk ok");
     assert_eq!(n, 1);
     assert_eq!(
         out[0],
@@ -1664,15 +1667,44 @@ fn mechanism_ecam_exposes_the_frozen_bus_seams() {
 
     fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
 
-    let (_backing, window) = vl805_ecam_region();
+    let (_backing, window) = xhci_ecam_region();
     let bus = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     assert_seams(&bus, &bus, &bus);
 }
 
-/// The VL805 with a PCI Express capability after its MSI-X one, its Device
+#[test]
+fn mechanism_supplied_drives_a_caller_supplied_config_space() {
+    use tairix_abi::driver::msix::MsixBus;
+    use tairix_abi::driver::virtio_pci::VirtioPciBus;
+
+    fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
+
+    let bus = crate::mechanism_supplied(unassigned_bar_fixture());
+    let mut buf = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; 2];
+    let n = (&bus as &dyn Bus).enumerate(&mut buf).expect("enumerates");
+    assert_eq!(
+        buf[..n],
+        [BusDevice {
+            vendor: u32::from(XHCI_VENDOR),
+            device: u32::from(XHCI_DEVICE),
+            class: 0x0C03,
+            reserved0: 0,
+            address: unassigned_bar_bdf(),
+        }]
+    );
+    assert_seams(&bus, &bus, &bus);
+}
+
+/// The xHCI with a PCI Express capability after its MSI-X one, its Device
 /// Control dword `control`.
-fn vl805_with_device_control(control: u32) -> (Vec<u32>, RegisterWindow) {
-    vl805_ecam_planted(|backing| {
+fn xhci_with_device_control(control: u32) -> (Vec<u32>, RegisterWindow) {
+    xhci_ecam_planted(|backing| {
         // MSI-X's next pointer -> the Express capability at byte 0x90.
         put_ecam(backing, 1, 0, 0, 32, (0x0007u32 << 16) | (0x90 << 8) | 0x11);
         put_ecam(backing, 1, 0, 0, 36, 0x0002_0010);
@@ -1705,21 +1737,24 @@ impl<C: ConfigSpace> ConfigSpace for Deaf<C> {
 fn a_function_masters_only_with_no_snoop_forbidden() {
     const NO_SNOOP: u32 = 1 << 11;
     const STATUS: u32 = 0x0001_0000;
-    let vl805 = ConfigAddress {
+    let xhci_fn = ConfigAddress {
         bus: 1,
         device: 0,
         function: 0,
         register: 0,
     };
     let at = |register| {
-        ConfigAddress { register, ..vl805 }
-            .ecam_offset()
-            .expect("address in range")
+        ConfigAddress {
+            register,
+            ..xhci_fn
+        }
+        .ecam_offset()
+        .expect("address in range")
             / 4
     };
-    let bdf = vl805.pack_bdf().unwrap();
+    let bdf = xhci_fn.pack_bdf().unwrap();
 
-    let (backing, window) = vl805_with_device_control(STATUS | NO_SNOOP | 0x2010);
+    let (backing, window) = xhci_with_device_control(STATUS | NO_SNOOP | 0x2010);
     let pci = Pci::new(
         EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
         Some(everywhere()),
@@ -1733,13 +1768,13 @@ fn a_function_masters_only_with_no_snoop_forbidden() {
     );
     assert_ne!(backing[at(1)] & BUS_MASTER_ENABLE, 0);
 
-    let (backing, window) = vl805_with_device_control(NO_SNOOP);
+    let (backing, window) = xhci_with_device_control(NO_SNOOP);
     let pci = Pci::new(
         Deaf {
             config: EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
             deaf: ConfigAddress {
                 register: 38,
-                ..vl805
+                ..xhci_fn
             },
         },
         Some(everywhere()),
@@ -1758,19 +1793,19 @@ fn mechanism_ecam_exposes_the_pci_bus_seam() {
 
     fn assert_pci_bus(_: &dyn PciBus) {}
 
-    let (_backing, window) = vl805_ecam_region();
+    let (_backing, window) = xhci_ecam_region();
     let bus = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     assert_pci_bus(&bus);
 }
 
 /// Decoding, bus mastering and the INTx pin each change only their own
-/// command bit on the VL805, the RW1C status half written as zero.
+/// command bit on the xHCI, the RW1C status half written as zero.
 #[test]
 fn pci_bus_decoding_mastering_and_intx_change_only_their_own_bits() {
     use tairix_abi::driver::pci::PciBus;
 
-    let (backing, window) = vl805_ecam_region();
-    let vl805 = ConfigAddress {
+    let (backing, window) = xhci_ecam_region();
+    let xhci_fn = ConfigAddress {
         bus: 1,
         device: 0,
         function: 0,
@@ -1791,27 +1826,27 @@ fn pci_bus_decoding_mastering_and_intx_change_only_their_own_bits() {
         Some(everywhere()),
     );
     let bus: &dyn PciBus = &pci;
-    bus.enable_memory_space(vl805).expect("decode");
+    bus.enable_memory_space(xhci_fn).expect("decode");
     assert_eq!(backing[off / 4], 0x2);
-    bus.set_bus_master(vl805, true).expect("master");
+    bus.set_bus_master(xhci_fn, true).expect("master");
     assert_eq!(backing[off / 4], 0x6);
-    bus.set_bus_master(vl805, false).expect("stop");
+    bus.set_bus_master(xhci_fn, false).expect("stop");
     assert_eq!(backing[off / 4], 0x2);
-    bus.set_intx(vl805, false).expect("stop the pin");
+    bus.set_intx(xhci_fn, false).expect("stop the pin");
     assert_eq!(backing[off / 4], 0x2 | INTERRUPT_DISABLE);
-    bus.set_intx(vl805, true).expect("raise the pin");
+    bus.set_intx(xhci_fn, true).expect("raise the pin");
     assert_eq!(backing[off / 4], 0x2, "only the pin's bit changes");
 }
 
-/// `map_bar_window` resolves the VL805's memory BAR0 and routes the
+/// `map_bar_window` resolves the xHCI's memory BAR0 and routes the
 /// mapping through the supplied [`MmioMapper`] (the kernel allocates
 /// the window).
 #[test]
-fn pci_bus_map_bar_window_maps_vl805_bar0() {
+fn pci_bus_map_bar_window_maps_xhci_bar0() {
     use tairix_abi::driver::pci::PciBus;
 
-    let (_backing, window) = vl805_ecam_region();
-    let vl805 = ConfigAddress {
+    let (_backing, window) = xhci_ecam_region();
+    let xhci_fn = ConfigAddress {
         bus: 1,
         device: 0,
         function: 0,
@@ -1822,7 +1857,7 @@ fn pci_bus_map_bar_window_maps_vl805_bar0() {
     let pci = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     let mapper = MockMapper::new(true);
     let bar = (&pci as &dyn PciBus)
-        .map_bar_window(vl805, 0, &mapper)
+        .map_bar_window(xhci_fn, 0, &mapper)
         .expect("map bar0");
     // 32-bit memory BAR planted with base 0x6010_0000; the size probe
     // over the flat backing reads a 16-byte span.
@@ -1834,8 +1869,8 @@ fn pci_bus_map_bar_window_maps_vl805_bar0() {
 fn pci_bus_map_bar_window_rejects_absent_bar() {
     use tairix_abi::driver::pci::PciBus;
 
-    let (_backing, window) = vl805_ecam_region();
-    let vl805 = ConfigAddress {
+    let (_backing, window) = xhci_ecam_region();
+    let xhci_fn = ConfigAddress {
         bus: 1,
         device: 0,
         function: 0,
@@ -1849,21 +1884,21 @@ fn pci_bus_map_bar_window_rejects_absent_bar() {
     // resolves to an (I/O-looking) unused slot — not a mappable
     // memory window.
     assert!((&pci as &dyn PciBus)
-        .map_bar_window(vl805, 5, &mapper)
+        .map_bar_window(xhci_fn, 5, &mapper)
         .is_err());
 }
 
-/// `describe_function` emits the VL805 as a discovered child node whose
+/// `describe_function` emits the xHCI as a discovered child node whose
 /// PCI match key carries its full 24-bit class, so the generic xHCI
 /// driver's wildcard bind key (`0x0C_03_30`) resolves against it
 /// (autoload is match *data*, not composition).
 #[test]
-fn describe_function_emits_the_vl805_child_node() {
+fn describe_function_emits_the_xhci_child_node() {
     use tairix_abi::driver::pci::PciBus;
     use tairix_abi::{HwDeviceClass, HwMatchKey};
 
-    let (_backing, window) = vl805_ecam_region();
-    let vl805 = ConfigAddress {
+    let (_backing, window) = xhci_ecam_region();
+    let xhci_fn = ConfigAddress {
         bus: 1,
         device: 0,
         function: 0,
@@ -1873,16 +1908,16 @@ fn describe_function_emits_the_vl805_child_node() {
     .unwrap();
     let pci = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     let node = (&pci as &dyn PciBus)
-        .describe_function(vl805)
-        .expect("describes the VL805");
+        .describe_function(xhci_fn)
+        .expect("describes the xHCI");
     // Identity (id/parent) is unassigned here — the `hw_emit_node` publish
     // path assigns it; only the match key matters.
     // A serial-bus (USB host) controller is a bus to further devices.
     assert_eq!(node.class(), Some(HwDeviceClass::Bus));
     assert_eq!(node.match_keys().len(), 1);
     let key = node.match_keys()[0];
-    assert_eq!(key.vendor(), VL805_VENDOR);
-    assert_eq!(key.product(), VL805_DEVICE);
+    assert_eq!(key.vendor(), XHCI_VENDOR);
+    assert_eq!(key.product(), XHCI_DEVICE);
     assert_eq!(key.class(), 0x0C_03_30);
     // The generic xHCI bind key (class only, vendor/device wildcard)
     // binds; a key naming the older USB class (prog-if `0x20`, EHCI)
@@ -1899,7 +1934,7 @@ fn describe_function_classes_a_processing_accelerator() {
     use tairix_abi::driver::pci::PciBus;
     use tairix_abi::HwDeviceClass;
 
-    let (mut backing, window) = vl805_ecam_region();
+    let (mut backing, window) = xhci_ecam_region();
     // Plant 01:01.0 as a processing accelerator: base class 0x12, sub-class
     // and prog-if zero (the spec's "other" accelerator).
     put_ecam(&mut backing, 1, 1, 0, 0, (0xABCDu32 << 16) | 0x1234);
@@ -1927,7 +1962,7 @@ fn describe_function_classes_a_processing_accelerator() {
 fn describe_function_rejects_an_absent_function() {
     use tairix_abi::driver::pci::PciBus;
 
-    let (_backing, window) = vl805_ecam_region();
+    let (_backing, window) = xhci_ecam_region();
     // 00:01.0 was never planted: it reads all-ones.
     let absent = ConfigAddress {
         bus: 0,

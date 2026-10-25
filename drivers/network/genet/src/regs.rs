@@ -1,7 +1,8 @@
 //! The BCM2711 GENET v5 register map and DMA descriptor layout.
 //!
-//! Offsets and bit fields are the published Broadcom GENET register map (as
-//! carried by the Linux `bcmgenet` and U-Boot `bcmgenet` drivers). Everything
+//! Offsets and bit fields are Broadcom's GENET v5 map as NetBSD's
+//! `bcmgenetreg.h` and FreeBSD's `if_genetreg.h` (BSD-2-Clause) carry it; what
+//! those headers lack is held to the on-metal run (`plans/PI.md`). Everything
 //! is expressed relative to the single register aperture the discovered
 //! `brcm,bcm2711-genet-v5` node names — the driver never bakes in a base
 //! address.
@@ -145,9 +146,9 @@ pub const IRQ_LINK_UP: u32 = 1 << 4;
 /// The PHY reported the link went down.
 pub const IRQ_LINK_DOWN: u32 = 1 << 5;
 /// The receive DMA engine finished a burst of buffers.
-pub const IRQ_RXDMA_DONE: u32 = 1 << 12;
+pub const IRQ_RXDMA_DONE: u32 = 1 << 13;
 /// The transmit DMA engine finished a burst of buffers.
-pub const IRQ_TXDMA_DONE: u32 = 1 << 15;
+pub const IRQ_TXDMA_DONE: u32 = 1 << 16;
 
 /// The data-path completion sources, masked while the driver drains the
 /// rings and unmasked once they are empty.
@@ -340,8 +341,6 @@ pub const DMA_OWN: u32 = 0x8000;
 pub const DMA_EOP: u32 = 0x4000;
 /// This descriptor holds the start of a frame.
 pub const DMA_SOP: u32 = 0x2000;
-/// Last descriptor of the ring: the engine wraps after it.
-pub const DMA_WRAP: u32 = 0x1000;
 
 /// Transmit: have the MAC append the frame check sequence.
 pub const DMA_TX_APPEND_CRC: u32 = 0x0040;

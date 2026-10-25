@@ -1,4 +1,4 @@
-//! riscv64 (QEMU `virt` / SiFive) runtime `spawn` producer —
+//! riscv64 runtime `spawn` producer —
 //! `plans/PI.md` RV-P3 / `plans/SPAWN.md` `SP3b`.
 //!
 //! [`RiscvProcessSpawn`] implements the architecture-neutral

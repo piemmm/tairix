@@ -80,9 +80,10 @@ with as a `ttl=` field, as `iputils` does.
 ## EXIT STATUS
 
 - `0` — at least one reply was received (or the short help was written).
-- `1` — every request went unanswered.
-- `2` — the command line was not understood, the target did not resolve,
-  or the socket could not be opened.
+- `1` — every request went unanswered. A command line that was not
+  understood exits `1` too.
+- `2` — the target did not resolve, the socket could not be opened, or a
+  reply could not be received or written.
 
 ## ENVIRONMENT
 

@@ -84,6 +84,7 @@
 extern crate alloc;
 
 pub mod appbar;
+pub mod change;
 pub mod chrome;
 pub mod command;
 pub mod deferred;
@@ -120,7 +121,9 @@ mod program {
 
     use crate::route;
     use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode, RefreshRate};
-    use tairix_abi::fs::{FileKind, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX};
+    use tairix_abi::fs::{
+        FileId, FileKind, OpenFlags, FS_MODE_MASK, FS_NAME_MAX, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE,
+    };
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
@@ -132,8 +135,8 @@ mod program {
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, RenameFlags,
-        SpawnAttach, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus,
-        APPINFO_WIRE_MAX, STDIN, STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+        SpawnAttach, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, APPINFO_WIRE_MAX, STDIN,
+        STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::document;
@@ -156,16 +159,16 @@ mod program {
         manager_opening, paste_strategy, plan_paste, quick_applications, trash_dest_path,
         trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation, AppAssociation,
         Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard, ClipboardOp,
-        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyKind,
-        CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteTarget, DeleteWalk,
-        DirectorySource, Drive, DriveChange, DriveSample, Entry, EntryKind, HiddenEndings, Listing,
-        ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NewEntry,
-        OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
-        PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties, RenameError,
-        RowList, RtLinkReader, ScrollColumn, SortMode, Subject, Survey, SurveyStep, Tally, Took,
-        ToolbarBand, ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate,
-        WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_WINDOW_GROUND,
-        WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
+        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, DeleteDisposition,
+        DeletePlan, DeleteTarget, DirectorySource, Drive, DriveChange, DriveSample, Entry,
+        EntryKind, HiddenEndings, Listed, Listing, ListingDesk, ListingJob, ManagerChrome,
+        ManagerTool, ManagerToolModel, Marquee, NewEntry, OpenWithCandidate, OpenWithChooser,
+        OwnerChange, PasteItem, PasteStrategy, PendingEntry, PendingRename, Places, Probe, Probes,
+        ProgressModel, ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn,
+        SortMode, Subject, Survey, SurveyStep, Tally, Took, ToolbarBand, ToolbarCommand,
+        TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate, WatchedDirectory, Watches,
+        MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::text::{Keystroke, TextAction, TextField};
@@ -194,6 +197,7 @@ mod program {
     };
 
     use crate::appbar;
+    use crate::change::Change;
     use crate::chrome::{Accelerator, Chrome, SelectionVerb};
     use crate::command::{self, Command, Ladder, Role, UsageError, USAGE};
     use crate::deferred::{
@@ -208,10 +212,10 @@ mod program {
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::notice::{self, next_alert, NextAlert, NoticeSource, Notices};
     use crate::operation::{
-        attribute_refusal, change_refusal, completion_closes_at, confirmation_may_open,
-        create_refusal, empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal,
-        progress_control, progress_due, read_refusal, remove_refusal, trash_read_refusal, BarPace,
-        ProgressControl, INTO_ITSELF,
+        change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
+        destination_refusal, empty_confirmation_may_open, item_refusal, mode_flip_allowed,
+        operation_refusal, progress_control, progress_due, reach_refusal, trash_read_refusal,
+        BarPace, ProgressControl,
     };
     use crate::operations::{run_slice, Ending, Finished, OperationDesk, Reading, Refusal, Step};
     use crate::preferences::Preferences;
@@ -219,10 +223,11 @@ mod program {
     use crate::settings::{SettingsRequest, SettingsWindow, TITLE as SETTINGS_TITLE};
     use crate::sidebar::{self, press_point};
     use tairix_appdata::{Publication, PublishWorker};
-    use tairix_fscopy::{
-        copy_attributes, DataCopy, DataError, Omissions, Refusal as Unkept, Sparse,
+    use tairix_fscopy::op::{
+        Decision, Named, OpError, Operation as TreeOp, Progress as Advanced, Report, Taken, Verb,
     };
-    use tairix_rt::copy::{RtAncestry, RtAttributes, RtFile};
+    use tairix_fscopy::Omissions;
+    use tairix_rt::copy::WorkingDirectory;
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -616,6 +621,16 @@ mod program {
                 PropertiesState::Ready(props) => Some(props),
                 PropertiesState::Reading | PropertiesState::Refused(_) => None,
             }
+        }
+
+        /// `change`, to be made to the node the window describes; `None`
+        /// while it describes none.
+        fn change(&self, change: Change) -> Option<WriteAct> {
+            Some(WriteAct::Change {
+                path: self.path.clone(),
+                described: self.props()?.id(),
+                change,
+            })
         }
 
         /// Which section is on show, how far it is scrolled, and where each
@@ -3193,12 +3208,7 @@ mod program {
     /// Run a drop of `sources` into `folder` in `win`, as the paste the
     /// pointer showed. The drop policy is asked again first, so a drop the
     /// folder no longer allows moves nothing.
-    fn begin_drop(
-        win: &mut OpenWindow,
-        sources: Vec<Vec<String>>,
-        folder: &[String],
-        op: ClipboardOp,
-    ) {
+    fn begin_drop(win: &mut OpenWindow, sources: Vec<Listed>, folder: &[String], op: ClipboardOp) {
         let refused = if drop_operation(&sources, folder, op == ClipboardOp::Cut) == Some(op) {
             let Some(state) = win.browser() else {
                 return;
@@ -4029,37 +4039,6 @@ mod program {
         }
     }
 
-    /// What a paste must do with a node of `kind`.
-    ///
-    /// A symbolic link is *recreated*: streaming its bytes would leave a
-    /// regular file holding the target's text, and following it would copy
-    /// something the link only points at.
-    fn copy_kind_of(kind: FileKind) -> CopyKind {
-        match kind {
-            FileKind::Directory => CopyKind::Directory,
-            FileKind::Regular => CopyKind::File,
-            FileKind::Symlink => CopyKind::Link,
-        }
-    }
-
-    /// Recreate the symbolic link `source` at `dest` with the same stored
-    /// target, or a terse reason.
-    ///
-    /// The target is copied verbatim and never resolved, so a relative one
-    /// still reads relative to the *new* link's own directory — which is what
-    /// duplicating a link means. Nothing is read or written through either
-    /// link.
-    fn recreate_link(source: &[String], dest: &[String]) -> Result<(), &'static str> {
-        let from = spell_path(source)?;
-        let to = spell_path(dest)?;
-        let target =
-            tairix_rt::readlink(&from).map_err(|_| "a shortcut's target could not be read")?;
-        if tairix_rt::fs_symlink(target.as_bytes(), to.as_bytes()) != 0 {
-            return Err("a shortcut could not be recreated");
-        }
-        Ok(())
-    }
-
     /// The grid's [`ArtworkReader`]: one shipped icon asset read through the
     /// app's own capability-checked filesystem access, under its own identity
     /// and with no authority beyond it.
@@ -4312,18 +4291,13 @@ mod program {
         MakeFolder(String),
         /// Make the empty file at the path, exclusively.
         MakeFile(String),
-        /// Set the permission bits of the node at `path`.
-        SetMode { path: String, mode: u32 },
-        /// Set the owner and group of the node at `path`.
-        SetOwner { path: String, uid: u32, gid: u32 },
-        /// Set the extended attribute `key` of the node at `path`.
-        SetAttr {
+        /// Make a Properties window's change to the node at `path`, while it
+        /// is the node `described`.
+        Change {
             path: String,
-            key: String,
-            value: String,
+            described: FileId,
+            change: Change,
         },
-        /// Remove the extended attribute `key` from the node at `path`.
-        RemoveAttr { path: String, key: String },
         /// Make sure the Trash folder exists.
         EnsureTrash(Vec<String>),
         /// Decide whether removing the plan's targets can be a recoverable
@@ -4362,7 +4336,7 @@ mod program {
     }
 
     /// The source→destination renames a move to Trash is carried out as.
-    type TrashMoves = alloc::vec::Vec<(alloc::vec::Vec<String>, alloc::vec::Vec<String>)>;
+    type TrashMoves = alloc::vec::Vec<(Listed, alloc::vec::Vec<String>)>;
 
     /// The most one-shot writes the app holds in flight at once: a containment
     /// bound on what gestures can queue behind a slow or failing disk, not a
@@ -4385,6 +4359,9 @@ mod program {
     const STILL_WRITING: &str =
         "the window is still making a change; try again once it has finished";
 
+    /// Why a Properties change is refused before the window has read the node.
+    const NOT_READ: &str = "the window has not read it yet";
+
     /// Carry `act` out on this thread.
     fn write_now(act: WriteAct) -> WriteAnswer {
         let status = |ret: i64| match ret {
@@ -4397,31 +4374,24 @@ mod program {
                 to.as_bytes(),
                 RenameFlags::NO_REPLACE,
             )),
-            WriteAct::MakeFolder(path) => status(tairix_rt::fs_mkdir(path.as_bytes())),
-            WriteAct::MakeFile(path) => tairix_rt::create_new(path.as_bytes())
+            WriteAct::MakeFolder(path) => {
+                status(tairix_rt::fs_mkdir(path.as_bytes(), FS_NEW_DIR_MODE))
+            }
+            WriteAct::MakeFile(path) => tairix_rt::create_new(path.as_bytes(), FS_NEW_FILE_MODE)
                 .map(drop)
                 .map_err(Errno::from_syscall),
-            WriteAct::SetMode { path, mode } => {
-                status(tairix_rt::fs_set_mode(path.as_bytes(), mode))
-            }
-            WriteAct::SetOwner { path, uid, gid } => {
-                status(tairix_rt::fs_set_owner(path.as_bytes(), uid, gid))
-            }
-            WriteAct::SetAttr { path, key, value } => status(tairix_rt::fs_attr_set(
-                path.as_bytes(),
-                key.as_bytes(),
-                value.as_bytes(),
-            )),
-            WriteAct::RemoveAttr { path, key } => {
-                status(tairix_rt::fs_attr_remove(path.as_bytes(), key.as_bytes()))
-            }
+            WriteAct::Change {
+                path,
+                described,
+                change,
+            } => crate::change::make(&WorkingDirectory, (&path, described), &change),
             WriteAct::EnsureTrash(trash) => ensure_trash_dir(&trash),
             WriteAct::PlanTrash(plan) => {
                 let moves = plan_trash_moves(&plan);
                 return WriteAnswer::Planned(plan, moves);
             }
             WriteAct::PlanEmptyTrash(trash) => {
-                let planned = match removal_children(&trash) {
+                let planned = match listed_children(&trash) {
                     Ok(children) => {
                         empty_trash_plan(&trash, &children).map_err(TrashError::message)
                     }
@@ -5296,11 +5266,11 @@ mod program {
             EntryKind::File => OpenFlags::READ,
             EntryKind::Directory | EntryKind::Bundle => OpenFlags::DIRECTORY,
         };
-        let stat = tairix_rt::File::open(job.path.as_bytes(), flags)
-            .and_then(|file| file.stat())
-            .map_err(Errno::from_syscall)?;
+        let node =
+            tairix_rt::File::open(job.path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+        let stat = node.stat().map_err(Errno::from_syscall)?;
         Ok(Properties::from_stat(path_leaf(&job.path), job.kind, &stat)
-            .with_attributes(read_attributes(&job.path)))
+            .with_attributes(read_attributes(&node)))
     }
 
     /// Read what is mounted at `job`'s mount point and its device's service
@@ -5346,7 +5316,7 @@ mod program {
         }))
     }
 
-    /// The visible extended attributes of the node at `path`.
+    /// The visible extended attributes of the node `node` holds.
     ///
     /// The kernel omits keys whose namespace the caller may not read, so this
     /// only ever sees what it may show. A volume that stores no attributes is
@@ -5357,8 +5327,8 @@ mod program {
     /// A value the node lost between the listing and the read is dropped
     /// rather than shown as empty: the key is gone, which is what the next
     /// read will say.
-    fn read_attributes(path: &str) -> Attributes {
-        let keys = match tairix_rt::fs_attr_keys(path.as_bytes()) {
+    fn read_attributes(node: &tairix_rt::File) -> Attributes {
+        let keys = match node.attr_keys() {
             Ok(keys) => keys,
             Err(ret) => {
                 return match Errno::from_syscall(ret) {
@@ -5370,7 +5340,7 @@ mod program {
         Attributes::Visible(
             keys.into_iter()
                 .filter_map(|key| {
-                    tairix_rt::fs_attr_value(path.as_bytes(), key.as_bytes())
+                    node.attr_value(key.as_bytes())
                         .ok()
                         .map(|value| Attribute::new(key, value))
                 })
@@ -5775,7 +5745,7 @@ mod program {
                 .map(|target| (target.path().to_vec(), target.is_directory(), 0));
             Self::counted(
                 Survey::new(roots),
-                Walk::Delete(DeleteWalk::from_plan(plan)),
+                Walk::Delete(Box::new(Removal::new(plan.clone()))),
             )
         }
 
@@ -5785,7 +5755,7 @@ mod program {
             Self {
                 survey: None,
                 total: Some(Tally { items, bytes: 0 }),
-                walk: Walk::Trash(TrashRun::new(moves)),
+                walk: Walk::Trash(Box::new(TrashRun::new(moves))),
                 current: String::new(),
                 held: None,
             }
@@ -5862,17 +5832,164 @@ mod program {
 
     /// The walk a [`Job`] carries out.
     enum Walk {
-        /// A recursive removal, driven by a single [`DeleteWalk`]. The
-        /// cross-volume-move source cleanup inside a [`Paste`] reuses the same
-        /// walk definition, so a delete and a move's cleanup can never diverge.
-        Delete(DeleteWalk),
+        /// A removal of a captured plan, each target removed with everything
+        /// beneath it by the shared engine, which removes a cross-volume move's
+        /// originals too, so a delete and a move's cleanup can never diverge.
+        Delete(Box<Removal>),
         /// A move/copy paste of a captured plan, driven by the [`Paste`] state
-        /// machine, boxed for the copy machinery it carries.
+        /// machine, boxed for the operation it carries.
         Paste(Box<Paste>),
         /// A recoverable move to Trash (`plans/NEW-FILEMANAGER.md` `FM10`),
-        /// driven by a [`TrashRun`]: one same-volume `fs_rename` per target
-        /// into the user's Trash directory, in place of an irreversible unlink.
-        Trash(TrashRun),
+        /// driven by a [`TrashRun`]: one same-volume rename per target into
+        /// the user's Trash directory, in place of an irreversible unlink.
+        Trash(Box<TrashRun>),
+    }
+
+    /// The items of a removal or a paste, each carried out in turn by an
+    /// operation of the shared engine, and what those finished did.
+    #[derive(Default)]
+    struct Turns {
+        /// The next item to begin.
+        next: usize,
+        /// The item in hand: the source its refusal names, and its operation.
+        in_hand: Option<(alloc::vec::Vec<String>, TreeOp<tairix_rt::Dir>)>,
+        /// What the items finished did.
+        finished: Tally,
+        /// One copy buffer for every file, grown to at most a chunk by the
+        /// thread doing the copy.
+        buf: alloc::vec::Vec<u8>,
+        /// The extended attributes the finished items' copies could not keep.
+        omissions: Omissions,
+    }
+
+    impl Turns {
+        /// Take `op`, carrying out the item at `source`, in hand.
+        fn take(&mut self, source: &[String], op: TreeOp<tairix_rt::Dir>) {
+            self.in_hand = Some((source.to_vec(), op));
+        }
+
+        /// One unit of the item in hand, a refusal stated with `verb`: once it
+        /// ends, what it did joins what the items before it did, and the next
+        /// unit begins the next item. `None` with no item in hand.
+        fn unit(&mut self, verb: &str) -> Option<Step> {
+            let (source, op) = self.in_hand.as_mut()?;
+            let source = source.as_slice();
+            let refusal =
+                match op.advance(1, &mut self.buf) {
+                    Advanced::Yielded => return Some(Step::Working),
+                    Advanced::Done => op.report().kept.first().map(|kept| {
+                        operation_refusal(verb, source, &OpError::Changed(kept.clone()))
+                    }),
+                    Advanced::Failed(error) => Some(operation_refusal(verb, source, &error)),
+                    // An operation refusing taken names never asks.
+                    Advanced::Paused => {
+                        wind(op, &mut self.buf);
+                        Some(item_refusal(verb, source, LOST_TRACK))
+                    }
+                };
+            self.finished = with_done(self.finished, op.report());
+            self.omissions.merge(op.omissions());
+            self.in_hand = None;
+            Some(refusal.map_or(Step::Working, Step::Stopped))
+        }
+
+        /// What the items finished and the one in hand have done.
+        fn done(&self) -> Tally {
+            match &self.in_hand {
+                Some((_, op)) => with_done(self.finished, op.report()),
+                None => self.finished,
+            }
+        }
+
+        /// Whether the item in hand is a move removing the originals it carried.
+        fn removing(&self) -> bool {
+            self.in_hand.as_ref().is_some_and(|(_, op)| op.removing())
+        }
+
+        /// The operation ends part-way: what the item in hand made is settled,
+        /// and a file it was writing removed rather than left half-copied.
+        fn abandon(&mut self) {
+            if let Some((_, op)) = self.in_hand.as_mut() {
+                wind(op, &mut self.buf);
+            }
+        }
+
+        /// The extended attributes the copies could not keep, the item in
+        /// hand's among them.
+        fn omissions(&self) -> Omissions {
+            let mut omissions = self.omissions.clone();
+            if let Some((_, op)) = &self.in_hand {
+                omissions.merge(op.omissions());
+            }
+            omissions
+        }
+    }
+
+    /// `tally` with what `report` says was done added.
+    fn with_done(tally: Tally, report: &Report) -> Tally {
+        Tally {
+            items: tally
+                .items
+                .saturating_add(u64::try_from(report.done).unwrap_or(u64::MAX)),
+            bytes: tally.bytes.saturating_add(report.bytes),
+        }
+    }
+
+    /// Cancel `op` and let it settle what it made: its folders given their
+    /// modes, a file part-written removed.
+    fn wind(op: &mut TreeOp<tairix_rt::Dir>, buf: &mut alloc::vec::Vec<u8>) {
+        op.resolve(Decision::Cancel);
+        // Settling ends within the units it takes; a refusal on the way is moot
+        // beside the stop already being stated.
+        let _ = op.advance(usize::MAX, buf);
+    }
+
+    /// The name `path` ends in, in its folder opened through the rest of it,
+    /// to hold the node `seen` ([`Named::seen`]).
+    fn named(path: &[String], seen: FileId) -> Result<Named<tairix_rt::Dir>, Errno> {
+        let spelled = tairix_browse::vfs::absolute_path(path)?;
+        Ok(Named {
+            seen,
+            ..Named::parent(&WorkingDirectory, &spelled)?
+        })
+    }
+
+    /// A removal of a captured plan's targets, each with everything beneath
+    /// it.
+    struct Removal {
+        plan: DeletePlan,
+        turns: Turns,
+    }
+
+    impl Removal {
+        fn new(plan: DeletePlan) -> Self {
+            Self {
+                plan,
+                turns: Turns::default(),
+            }
+        }
+
+        /// One unit of the removal, the target in hand named in `current`. The
+        /// first refusal stops it, leaving what was already removed removed.
+        fn unit(&mut self, current: &mut String) -> Step {
+            if let Some(step) = self.turns.unit("delete") {
+                return step;
+            }
+            let Some(target) = self.plan.targets().get(self.turns.next) else {
+                return Step::Done;
+            };
+            self.turns.next += 1;
+            name_into(current, target.path());
+            match named(target.path(), target.id()) {
+                Ok(source) => {
+                    self.turns.take(target.path(), TreeOp::remove(source));
+                    Step::Working
+                }
+                Err(errno) => {
+                    Step::Stopped(item_refusal("delete", target.path(), reach_refusal(errno)))
+                }
+            }
+        }
     }
 
     /// One window's link to the desktop's menu service: the channel a chain is
@@ -6126,8 +6243,8 @@ mod program {
 
     /// What a window handed the desktop to carry.
     struct Carrying {
-        /// Every dragged entry's absolute path, in listing order.
-        sources: Vec<Vec<String>>,
+        /// Every dragged entry as listed, in listing order.
+        sources: Vec<Listed>,
         /// The one file a drop on an application opens, when the drag is one
         /// file.
         file: Option<PendingChooser>,
@@ -6139,7 +6256,7 @@ mod program {
         fn of<S: DirectorySource>(browser: &Browser<S>) -> Option<(Self, DragItems)> {
             let first = browser.selection().iter().next()?;
             let name = DocumentName::new(browser.entries().get(first)?.name()).ok()?;
-            let sources = browser.selected_component_paths();
+            let sources = browser.listed_selection();
             let file = open_with_target(browser);
             let count = u32::try_from(sources.len()).ok()?;
             let items = DragItems::new(name, count, file.is_some()).ok()?;
@@ -7437,7 +7554,11 @@ mod program {
             if let Some(leaf) = dest.last() {
                 taken.push(leaf.clone());
             }
-            moves.push((target.path().to_vec(), dest));
+            let source = Listed {
+                path: target.path().to_vec(),
+                id: target.id(),
+            };
+            moves.push((source, dest));
         }
         Some(moves)
     }
@@ -7478,7 +7599,7 @@ mod program {
     /// refused, or the name exists as a non-directory.
     fn ensure_dir(components: &[String]) -> Result<(), Errno> {
         let spelled = tairix_browse::vfs::absolute_path(components)?;
-        match tairix_rt::fs_mkdir(spelled.as_bytes()) {
+        match tairix_rt::fs_mkdir(spelled.as_bytes(), FS_NEW_DIR_MODE) {
             0 => Ok(()),
             _ if matches!(stat_node(components), Some(stat) if stat.kind == FileKind::Directory) => {
                 Ok(())
@@ -7665,9 +7786,9 @@ mod program {
         fn step(&mut self) -> Step {
             let Some(survey) = self.survey.as_mut() else {
                 return match &mut self.walk {
-                    Walk::Delete(walk) => delete_step(walk, &mut self.current),
+                    Walk::Delete(removal) => removal.unit(&mut self.current),
                     Walk::Paste(paste) => paste.unit(&mut self.current),
-                    Walk::Trash(run) => trash_step(run, &mut self.current),
+                    Walk::Trash(run) => run.unit(&mut self.current),
                 };
             };
             let counting = match &mut self.walk {
@@ -7688,58 +7809,43 @@ mod program {
             Step::Working
         }
 
-        /// The operation ends part-way: a destination file it was writing is
-        /// removed rather than left half-copied.
+        /// The operation ends part-way: what the item in hand made is settled,
+        /// and a file it was writing removed rather than left half-copied.
         fn abandon(&mut self) {
-            if let Walk::Paste(paste) = &mut self.walk {
-                paste.abandon();
+            match &mut self.walk {
+                Walk::Delete(removal) => removal.turns.abandon(),
+                Walk::Paste(paste) => paste.turns.abandon(),
+                Walk::Trash(run) => run.turns.abandon(),
             }
         }
 
         /// The extended attributes its copies could not keep.
         fn omissions(&self) -> Omissions {
             match &self.walk {
-                Walk::Paste(paste) => paste.omissions.clone(),
-                Walk::Delete(_) | Walk::Trash(_) => Omissions::default(),
+                Walk::Paste(paste) => paste.turns.omissions(),
+                Walk::Trash(run) => run.turns.omissions(),
+                Walk::Delete(_) => Omissions::default(),
             }
         }
     }
 
-    /// Carry the extended attributes of `source` to its new copy `dest`,
-    /// answering those `dest`'s volume could not keep.
-    fn carry_attributes(source: &str, dest: &str) -> Result<Vec<(String, Unkept)>, &'static str> {
-        copy_attributes(
-            &RtAttributes,
-            source,
-            dest,
-            tairix_fscopy::Attributes::Carry,
-        )
-        .map_err(|error| attribute_refusal(&error))
-    }
-
     impl Walk {
-        /// What is done so far.
         /// Whether a move across volumes is removing the originals of what it
         /// has carried.
         fn removing(&self) -> bool {
-            matches!(self, Walk::Paste(paste) if matches!(paste.stage, PasteStage::Deleting(_)))
+            match self {
+                Walk::Paste(paste) => paste.turns.removing(),
+                Walk::Trash(run) => run.turns.removing(),
+                Walk::Delete(_) => false,
+            }
         }
 
+        /// What is done so far.
         fn done(&self) -> Tally {
-            let items = |count: usize| u64::try_from(count).unwrap_or(u64::MAX);
             match self {
-                Walk::Delete(walk) => Tally {
-                    items: items(walk.removed()),
-                    bytes: 0,
-                },
-                Walk::Paste(paste) => Tally {
-                    items: items(paste.done),
-                    bytes: paste.bytes_done(),
-                },
-                Walk::Trash(run) => Tally {
-                    items: items(run.index),
-                    bytes: 0,
-                },
+                Walk::Delete(removal) => removal.turns.done(),
+                Walk::Paste(paste) => paste.turns.done(),
+                Walk::Trash(run) => run.turns.done(),
             }
         }
     }
@@ -7767,12 +7873,15 @@ mod program {
                     paste_strategy(landing.op, VolumeId::new(stat.id.volume), landing.volume)
                         == PasteStrategy::Rename
                 });
-                let kind = copy_kind_of(stat.kind);
                 if renamed {
                     survey.stated(false, 0);
                 } else {
-                    let bytes = if kind == CopyKind::File { stat.size } else { 0 };
-                    survey.stated(kind == CopyKind::Directory, bytes);
+                    let bytes = if stat.kind == FileKind::Regular {
+                        stat.size
+                    } else {
+                        0
+                    };
+                    survey.stated(stat.kind == FileKind::Directory, bytes);
                 }
             }
             SurveyStep::List(path) => {
@@ -7881,137 +7990,93 @@ mod program {
     }
 
     /// A recoverable move to Trash in progress (`plans/NEW-FILEMANAGER.md`
-    /// `FM10`): the captured per-target source→destination renames, one a
-    /// unit. Each is a single same-volume `fs_rename`, the item moving intact.
+    /// `FM10`): each target moved by an operation of the shared engine to the
+    /// Trash name chosen free when the dialog opened — one rename on the
+    /// Trash's volume, the item moving intact.
     struct TrashRun {
-        /// The source→destination renames, in listing order.
+        /// The sources and the Trash names they take, in listing order.
         moves: TrashMoves,
-        /// The next move to carry out, which is the count already done.
-        index: usize,
+        turns: Turns,
     }
 
     impl TrashRun {
         fn new(moves: TrashMoves) -> Self {
-            Self { moves, index: 0 }
-        }
-    }
-
-    /// One unit of a recursive removal: read a directory or unlink a node,
-    /// contents before their container. The first refusal stops the removal,
-    /// leaving what was already removed removed.
-    fn delete_step(walk: &mut DeleteWalk, current: &mut String) -> Step {
-        let step = walk.next_action().map(|action| match action {
-            DeleteAction::List(path) => (true, path.to_vec(), false),
-            DeleteAction::Remove { path, is_directory } => (false, path.to_vec(), is_directory),
-        });
-        let Some((is_list, path, is_directory)) = step else {
-            return Step::Done;
-        };
-        name_into(current, &path);
-        if is_list {
-            let children = match removal_children(&path) {
-                Ok(children) => children,
-                Err(err) => return Step::Stopped(item_refusal("delete", &path, read_refusal(err))),
-            };
-            if walk.expand(&children).is_err() {
-                return Step::Stopped(item_refusal("delete", &path, "it is nested too deep"));
+            Self {
+                moves,
+                turns: Turns::default(),
             }
-            return Step::Working;
         }
-        if let Err(err) = unlink(&path, is_directory) {
-            return Step::Stopped(item_refusal("delete", &path, remove_refusal(err)));
+
+        /// One unit of the move, the target in hand named in `current`. The
+        /// first refusal stops it, leaving what was already moved in Trash.
+        fn unit(&mut self, current: &mut String) -> Step {
+            if let Some(step) = self.turns.unit("move") {
+                return step;
+            }
+            let Some((source, dest)) = self.moves.get(self.turns.next) else {
+                return Step::Done;
+            };
+            self.turns.next += 1;
+            name_into(current, &source.path);
+            let named_source = match named(&source.path, source.id) {
+                Ok(named_source) => named_source,
+                Err(errno) => {
+                    return Step::Stopped(item_refusal("move", &source.path, reach_refusal(errno)))
+                }
+            };
+            let target = match named(dest, FileId::NONE) {
+                Ok(target) => target,
+                Err(errno) => {
+                    return Step::Stopped(item_refusal(
+                        "move",
+                        &source.path,
+                        destination_refusal(errno),
+                    ))
+                }
+            };
+            self.turns.take(
+                &source.path,
+                TreeOp::transfer(
+                    Verb::Move,
+                    named_source,
+                    target,
+                    Taken::Refuse,
+                    tairix_rt::staging_name,
+                ),
+            );
+            Step::Working
         }
-        if walk.complete_removal().is_err() {
-            return Step::Stopped(item_refusal("delete", &path, LOST_TRACK));
-        }
-        Step::Working
     }
 
-    /// Remove the node at `path`, a directory only when `is_directory`.
-    fn unlink(path: &[String], is_directory: bool) -> Result<(), Errno> {
-        let spelled = tairix_browse::vfs::absolute_path(path)?;
-        let flags = if is_directory {
-            UnlinkFlags::DIRECTORY
-        } else {
-            UnlinkFlags::empty()
-        };
-        match tairix_rt::fs_unlink(spelled.as_bytes(), flags) {
-            0 => Ok(()),
-            ret => Err(Errno::from_syscall(ret)),
-        }
-    }
-
-    /// One unit of a move to Trash: one target renamed into its captured Trash
-    /// destination, resolved collision-free when the dialog opened.
-    fn trash_step(run: &mut TrashRun, current: &mut String) -> Step {
-        let Some((source, dest)) = run.moves.get(run.index) else {
-            return Step::Done;
-        };
-        name_into(current, source);
-        if let Err(reason) = rename_item(source, dest) {
-            return Step::Stopped(item_refusal("move", source, reason));
-        }
-        run.index += 1;
-        Step::Working
-    }
-
-    /// Why a walk stopped when its own record of what it had done disagreed
-    /// with the step it just took: going on would act on a guess.
+    /// Why an operation stopped at a state its own record says cannot arise:
+    /// going on would act on a guess.
     const LOST_TRACK: &str =
         "the file manager lost track of its progress and stopped rather than guess";
 
-    /// Read the children of the directory at `path`: each child's leaf name
-    /// and the browser's own classification of it, through the same
-    /// capability-checked listing call and shared decode the browser
-    /// navigates with, so a walk sees what is a directory, a file or a link
-    /// exactly as the browser would. Where a link points is not read: every
-    /// walk acts on a link as the leaf it is.
-    ///
-    /// One read serves the survey and both walks, each taking the reading it
-    /// needs: the delete walk asks whether a child is directory-backed *on
-    /// disk* ([`removal_children`]), while the copy walk asks what a copy must
-    /// *do* with it ([`copy_children`]) — which is not the same question for a
-    /// symbolic link.
+    /// Read the children of the directory at `path`: each child's leaf name,
+    /// the browser's own classification of it and its size, through the same
+    /// capability-checked listing call and shared decode the browser navigates
+    /// with, so the count and the Trash's plans see what is a directory, a
+    /// file or a link exactly as the browser would. Where a link points is not
+    /// read: a link is the leaf it is.
     fn read_children(path: &[String]) -> Result<alloc::vec::Vec<(String, EntryKind, u64)>, Errno> {
-        let spelled = tairix_browse::vfs::absolute_path(path)?;
-        let stream = tairix_rt::read_dir_all(spelled.as_bytes()).map_err(Errno::from_syscall)?;
-        let entries = tairix_browse::vfs::entries_from_dir_stream(
-            &spelled,
-            &stream,
-            &mut tairix_browse::vfs::NoLinks,
-        )?;
-        Ok(entries
+        Ok(listed_children(path)?
             .into_iter()
             .map(|entry| (entry.name().to_string(), entry.kind(), entry.size()))
             .collect())
     }
 
-    /// The children of `path` as a [`DeleteWalk`] expansion wants them:
-    /// whether each is directory-backed on disk, so a link is unlinked as the
-    /// leaf it is rather than recursed into.
-    fn removal_children(path: &[String]) -> Result<alloc::vec::Vec<(String, bool)>, Errno> {
-        Ok(read_children(path)?
-            .into_iter()
-            .map(|(name, kind, _)| (name, kind.is_directory_backed()))
-            .collect())
-    }
-
-    /// The children of `path` as a [`CopyWalk`] expansion wants them: what a
-    /// copy must do with each.
-    fn copy_children(path: &[String]) -> Result<alloc::vec::Vec<(String, CopyKind)>, Errno> {
-        Ok(read_children(path)?
-            .into_iter()
-            .map(|(name, kind, _)| {
-                let copy = if kind.is_directory_backed() {
-                    CopyKind::Directory
-                } else if kind.is_link() {
-                    CopyKind::Link
-                } else {
-                    CopyKind::File
-                };
-                (name, copy)
-            })
-            .collect())
+    /// The children of `path` as the browser lists them, each naming the node
+    /// it was listed as, so emptying the Trash removes a link as the leaf it is
+    /// and leaves a name that has come to hold another node.
+    fn listed_children(path: &[String]) -> Result<alloc::vec::Vec<Entry>, Errno> {
+        let spelled = tairix_browse::vfs::absolute_path(path)?;
+        let stream = tairix_rt::read_dir_all(spelled.as_bytes()).map_err(Errno::from_syscall)?;
+        tairix_browse::vfs::entries_from_dir_stream(
+            &spelled,
+            &stream,
+            &mut tairix_browse::vfs::NoLinks,
+        )
     }
 
     /// State a `files:`-prefixed diagnosis on `stderr` — the one fail-loud
@@ -8127,13 +8192,13 @@ mod program {
     /// It does not begin while the window waits on a one-shot change, whose
     /// answer would otherwise act on the listing it is planned from, nor
     /// while an operation asked for just before it is still being started.
-    /// Pasting a folder into itself is refused outright ([`plan_paste`]). The
-    /// operations worker reads the destination's volume once, then decides
-    /// each item's move-vs-copy by [`paste_strategy`] as it runs — a
-    /// same-volume move is one `fs_rename`, a cross-volume move is
-    /// copy-then-delete, a copy always streams. The first refusal stops the
-    /// paste, is stated in the window, and leaves whatever already landed in
-    /// place rather than a fabricated success.
+    /// Pasting a folder into itself is refused outright ([`plan_paste`]), and
+    /// the shared engine refuses it again from the folders themselves. Each
+    /// item is one of the engine's operations: a move is one `fs_rename` on its
+    /// own volume, and across volumes a copy after which what it copied goes;
+    /// a copy always streams. The first refusal stops the paste, is stated in
+    /// the window, and leaves whatever already landed in place rather than a
+    /// fabricated success.
     fn start_paste(
         clip: &Clipboard,
         target: &[String],
@@ -8162,208 +8227,28 @@ mod program {
         Ok(())
     }
 
-    /// Move a same-volume item with a single `fs_rename` from its source to its
-    /// destination path, under the user's own identity. The destination was
-    /// chosen free when the run began, so one taken since refuses the move
-    /// rather than being replaced.
-    fn rename_item(source: &[String], dest: &[String]) -> Result<(), &'static str> {
-        let from = spell_path(source)?;
-        let to = spell_path(dest)?;
-        match tairix_rt::fs_rename(from.as_bytes(), to.as_bytes(), RenameFlags::NO_REPLACE) {
-            0 => Ok(()),
-            ret => Err(move_refusal(Errno::from_syscall(ret))),
-        }
-    }
-
-    /// A paste in progress: a captured plan carried out one bounded unit of
-    /// work at a time so the event loop stays responsive.
+    /// A paste in progress: each item of a captured plan carried out by an
+    /// operation of the shared engine, one bounded unit at a time, so the event
+    /// loop stays responsive.
     ///
-    /// The move-vs-copy decision for each item is made as it runs
-    /// ([`paste_strategy`]) from the two nodes' volume ids; a same-volume move
-    /// is a single `fs_rename`, a copy streams the bytes through the reused
-    /// buffer a chunk at a time, and a cross-volume move copies then removes
-    /// the source through the shared delete walk. Every step is the user's own
-    /// permission-checked write — no new capability, no ambient authority — so
-    /// the read-only picker never builds a [`Paste`].
+    /// The plan chose every destination name free, so a name taken since
+    /// refuses the item rather than being replaced. Every step is the user's
+    /// own permission-checked call — no new capability, no ambient authority —
+    /// so the read-only picker never builds a [`Paste`].
     struct Paste {
         /// Whether the plan moves (`Cut`) or copies (`Copy`) its items.
         op: ClipboardOp,
         /// The paste target directory.
         dest: alloc::vec::Vec<String>,
-        /// The target directory's volume — one side of every item's same- vs
-        /// cross-volume decision — once the first unit has read it.
+        /// The target directory's volume once the count has read it: what
+        /// tells an item a move renames, carrying nothing, from one it copies.
         dest_vol: Option<VolumeId>,
         /// The resolved plan items, carried out in order.
         items: alloc::vec::Vec<PasteItem>,
-        /// The next item to begin (once [`stage`](Self::stage) is idle).
-        index: usize,
-        /// The in-flight stage of the item currently being carried out.
-        stage: PasteStage,
-        /// The source of the item currently in flight, for fail-loud error
-        /// reporting (its leaf names the item the user sees).
-        current_source: alloc::vec::Vec<String>,
-        /// The honest count of nodes moved/copied so far (the progress figure);
-        /// cross-volume cleanup removals are not counted as copied.
-        done: usize,
-        /// The bytes of the files copied whole so far.
-        bytes: u64,
-        /// The name of the item in hand.
-        leaf: String,
-        /// One reused, fixed-size copy buffer — never a per-file allocation and
-        /// never sized to a file's length, so a copy of any size stays bounded.
-        /// Taken on the first file copied, by the thread doing the copy.
-        buf: alloc::vec::Vec<u8>,
-        /// Where the item being copied is landing, spelled, until it is copied
-        /// whole ([`Job::sync_hold`]).
+        turns: Turns,
+        /// Where the item in hand is landing, spelled, until it is carried out
+        /// ([`Job::sync_hold`]).
         writing: Option<String>,
-        /// The extended attributes its copies' destinations could not keep.
-        omissions: Omissions,
-        /// The folder the item in hand was copied to first. Every folder the
-        /// copy makes lies beneath it, so a walk that would enter it as a
-        /// source would copy its own copy, and stops there instead.
-        own_copy: Option<tairix_abi::FileId>,
-    }
-
-    /// The stage of the item a [`Paste`] is currently carrying out.
-    enum PasteStage {
-        /// No item in flight — [`Paste::step`] begins `items[index]` next, or
-        /// finishes the paste when the queue is drained.
-        Idle,
-        /// Copying the current item's tree (a [`CopyWalk`] over one item);
-        /// `transfer` is the in-flight leaf-file stream when a
-        /// [`CopyAction::CopyFile`] step is underway. `then_delete` names a
-        /// cross-volume move's source to remove once the copy fully succeeds.
-        Copying {
-            /// The recursive-copy cursor for this item's tree.
-            walk: CopyWalk,
-            /// The leaf file being streamed, or `None` between files.
-            transfer: Option<Transfer>,
-            /// A cross-volume move's `(source, is_directory)` to remove after
-            /// the copy completes; `None` for a plain copy.
-            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
-        },
-        /// Removing a cross-volume move's source after its copy fully
-        /// succeeded, through the shared delete walk.
-        Deleting(DeleteWalk),
-    }
-
-    /// One leaf-file transfer in flight: the open source and destination
-    /// handles and the copy engine's place in the file, stepped one bounded
-    /// chunk at a time so a large file never blocks the event loop.
-    struct Transfer {
-        /// The source file opened read-only.
-        reader: tairix_rt::File,
-        /// The destination file, created exclusively (a pre-existing name is
-        /// refused, never clobbered).
-        writer: tairix_rt::File,
-        /// Where the source is, for its attributes.
-        source: String,
-        /// Where the destination was created.
-        dest: String,
-        /// The file's bytes and holes, a chunk at a time.
-        copy: DataCopy,
-        /// The bytes accounted for so far: copied, or a hole passed over.
-        moved: u64,
-    }
-
-    impl Transfer {
-        /// Open the source (read-only) and create the destination (exclusively)
-        /// for a leaf-file copy, or a terse reason on refusal.
-        fn open(source: &[String], dest: &[String]) -> Result<Self, &'static str> {
-            let source_spelled = spell_path(source)?;
-            let dest_spelled = spell_path(dest)?;
-            let reader = tairix_rt::File::open(source_spelled.as_bytes(), OpenFlags::READ)
-                .map_err(|_| "a source file could not be opened")?;
-            let stat = reader
-                .stat()
-                .map_err(|_| "a source file could not be read")?;
-            let writer = tairix_rt::create_new(dest_spelled.as_bytes())
-                .map_err(|ret| create_refusal(Errno::from_syscall(ret)))?;
-            Ok(Self {
-                reader,
-                writer,
-                source: source_spelled,
-                dest: dest_spelled,
-                copy: DataCopy::new(stat.size, Sparse::Auto),
-                moved: 0,
-            })
-        }
-
-        /// Give the copy up part-way, removing the file it was writing. That
-        /// file was created exclusively by this copy, and it is removed only
-        /// while its name still names it: a node another program has put
-        /// there since is left alone.
-        fn abandon(self) {
-            let Self {
-                reader,
-                writer,
-                dest,
-                ..
-            } = self;
-            let written = writer.stat().map(|stat| stat.id);
-            drop((reader, writer));
-            let still_named = written.is_ok_and(|written| {
-                tairix_rt::File::open(dest.as_bytes(), OpenFlags::NO_FOLLOW)
-                    .and_then(|node| node.stat())
-                    .is_ok_and(|named| named.id == written)
-            });
-            if still_named {
-                let _ = tairix_rt::fs_unlink(dest.as_bytes(), UnlinkFlags::empty());
-            }
-        }
-
-        /// Carry one bounded chunk of the transfer through `buf`, returning
-        /// `Ok(true)` once the whole file has been copied and `Ok(false)` when
-        /// more remains. A source that shrinks under the copy ends it where it
-        /// ended.
-        fn step(&mut self, buf: &mut [u8]) -> Result<bool, &'static str> {
-            match self
-                .copy
-                .step(&mut RtFile(&self.reader), &mut RtFile(&self.writer), buf)
-            {
-                Ok(tairix_fscopy::Step::Moved(count)) => {
-                    self.moved = self.moved.saturating_add(count);
-                    Ok(false)
-                }
-                Ok(tairix_fscopy::Step::Done) => Ok(true),
-                Err(DataError::Read(_)) => Err("a source file could not be read"),
-                Err(DataError::Write(_)) => Err("a destination file could not be written"),
-            }
-        }
-
-        /// Carry the source's extended attributes to the copy, answering those
-        /// its volume could not keep.
-        fn carry_attributes(&self) -> Result<Vec<(String, Unkept)>, &'static str> {
-            carry_attributes(&self.source, &self.dest)
-        }
-    }
-
-    /// One resolved [`CopyWalk`] step, copied out of the walk's borrowed
-    /// [`CopyAction`] so the walk is free to be mutated by the report call that
-    /// follows it.
-    enum CopyStep {
-        /// Create this destination directory (`fs_mkdir`), giving it this
-        /// source directory's attributes.
-        MakeDir(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
-        /// List this source directory's children (`fs_readdir`).
-        List(alloc::vec::Vec<String>),
-        /// Stream this leaf file's bytes from source to destination.
-        CopyFile(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
-        /// Recreate this symbolic link at the destination, with the target it
-        /// stores — never a byte-wise copy, which would leave a regular file
-        /// holding the target's text.
-        CopyLink(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
-    }
-
-    /// The outcome of one [`Paste::step`] unit of work.
-    enum StepOutcome {
-        /// One bounded unit was carried out; the paste has more to do.
-        Working,
-        /// Every item is done — the paste has finished.
-        Done,
-        /// The step was refused; the paste stops fail-closed with this reason
-        /// (stated on `stderr` naming the current item).
-        Failed(&'static str),
     }
 
     impl Paste {
@@ -8379,16 +8264,8 @@ mod program {
                 dest,
                 dest_vol: None,
                 items,
-                index: 0,
-                stage: PasteStage::Idle,
-                current_source: alloc::vec::Vec::new(),
-                done: 0,
-                bytes: 0,
-                leaf: String::new(),
-                buf: alloc::vec::Vec::new(),
+                turns: Turns::default(),
                 writing: None,
-                omissions: Omissions::default(),
-                own_copy: None,
             }
         }
 
@@ -8417,391 +8294,73 @@ mod program {
 
         /// One unit of the paste, its refusal stated naming the item, and the
         /// item in hand named in `current`.
+        ///
+        /// A `Cut` back into the item's own directory is already done; a
+        /// `Copy` onto itself is refused rather than duplicating a file onto
+        /// itself.
         fn unit(&mut self, current: &mut String) -> Step {
             let verb = match self.op {
                 ClipboardOp::Copy => "copy",
                 ClipboardOp::Cut => "move",
             };
-            if let Err(refusal) = self.landing() {
-                return refusal;
-            }
-            let outcome = self.step();
-            if *current != self.leaf {
-                current.clear();
-                current.push_str(&self.leaf);
-            }
-            match outcome {
-                StepOutcome::Working => Step::Working,
-                StepOutcome::Done => Step::Done,
-                StepOutcome::Failed(reason) => {
-                    Step::Stopped(item_refusal(verb, &self.current_source, reason))
+            if let Some(step) = self.turns.unit(verb) {
+                if self.turns.in_hand.is_none() {
+                    self.writing = None;
                 }
+                return step;
             }
-        }
-
-        /// The bytes copied so far, the file in flight's among them.
-        fn bytes_done(&self) -> u64 {
-            let flight = match &self.stage {
-                PasteStage::Copying {
-                    transfer: Some(transfer),
-                    ..
-                } => transfer.moved,
-                _ => 0,
+            let Some(item) = self.items.get(self.turns.next) else {
+                return Step::Done;
             };
-            self.bytes.saturating_add(flight)
-        }
-
-        /// The paste ends part-way: a file it was copying is removed rather
-        /// than left half-written.
-        fn abandon(&mut self) {
-            if let PasteStage::Copying { transfer, .. } = &mut self.stage {
-                if let Some(transfer) = transfer.take() {
-                    transfer.abandon();
-                }
-            }
-        }
-
-        /// Carry out one bounded unit of work, dispatching on the current
-        /// stage. The stage is taken out (leaving [`Idle`](PasteStage::Idle))
-        /// so each handler owns it and installs the next stage, sidestepping a
-        /// self-borrow across the open file handles a [`Transfer`] holds.
-        fn step(&mut self) -> StepOutcome {
-            match core::mem::replace(&mut self.stage, PasteStage::Idle) {
-                PasteStage::Idle => self.begin_next_item(),
-                PasteStage::Copying {
-                    walk,
-                    transfer,
-                    then_delete,
-                } => self.step_copy(walk, transfer, then_delete),
-                PasteStage::Deleting(walk) => self.step_delete(walk),
-            }
-        }
-
-        /// Begin the next planned item, or finish when the queue is drained.
-        ///
-        /// A `Cut` back into the item's own directory is a no-op (the item is
-        /// already where it would land); a `Copy` onto itself is refused rather
-        /// than duplicating a file onto itself. Otherwise the source is stat'd
-        /// for its kind and volume and [`paste_strategy`] picks the mechanism:
-        /// a same-volume move renames in one syscall, a copy (and a
-        /// cross-volume move's copy phase) starts a [`CopyWalk`].
-        fn begin_next_item(&mut self) -> StepOutcome {
-            let Some(item) = self.items.get(self.index) else {
-                return StepOutcome::Done;
-            };
-            self.index += 1;
-            self.current_source = item.source().to_vec();
-            name_into(&mut self.leaf, item.source());
+            self.turns.next += 1;
+            name_into(current, item.source());
             if item.overwrites_source() {
                 return match self.op {
                     ClipboardOp::Cut => {
-                        // Already where it would land: done, as the count of
-                        // the whole counted it.
-                        self.done += 1;
-                        StepOutcome::Working
+                        // Done, as the count of the whole counted it.
+                        self.turns.finished.items = self.turns.finished.items.saturating_add(1);
+                        Step::Working
                     }
-                    ClipboardOp::Copy => {
-                        StepOutcome::Failed("an item cannot be copied onto itself")
-                    }
+                    ClipboardOp::Copy => Step::Stopped(item_refusal(
+                        verb,
+                        item.source(),
+                        "an item cannot be copied onto itself",
+                    )),
                 };
             }
-            let source = item.source().to_vec();
-            let dest = item.dest().to_vec();
-            // The name as typed: a symbolic link is what gets copied or
-            // moved, so its own kind decides *how* (recreate, never stream
-            // its bytes) and its own volume decides rename-vs-copy.
-            let Some(stat) = stat_name(&source) else {
-                return StepOutcome::Failed("a source item could not be read");
-            };
-            let source_vol = VolumeId::new(stat.id.volume);
-            let kind = copy_kind_of(stat.kind);
-            // A link is a leaf on disk however its target resolves, so the
-            // removal half of a cross-volume move unlinks the link itself.
-            let is_directory = kind == CopyKind::Directory;
-            let Some(dest_vol) = self.dest_vol else {
-                return StepOutcome::Failed("the destination folder could not be read");
-            };
-            let strategy = paste_strategy(self.op, source_vol, dest_vol);
-            // The plan's test is of the paths as navigated; this one is of
-            // what the kernel resolves them to, so a link on the way to the
-            // destination cannot hide the source.
-            if is_directory && strategy != PasteStrategy::Rename {
-                let (Ok(from), Ok(to)) = (spell_path(&source), spell_path(&dest)) else {
-                    return StepOutcome::Failed("a path could not be spelled");
-                };
-                match tairix_fscopy::landing(&RtAncestry, &from, stat.id, &to) {
-                    Ok(tairix_fscopy::Landing::Apart) => {}
-                    Ok(_) => return StepOutcome::Failed(INTO_ITSELF),
-                    Err(_) => {
-                        return StepOutcome::Failed("the destination folder could not be read");
-                    }
-                }
-            }
-            match strategy {
-                PasteStrategy::Rename => match rename_item(&source, &dest) {
-                    Ok(()) => {
-                        self.done += 1;
-                        StepOutcome::Working
-                    }
-                    Err(reason) => StepOutcome::Failed(reason),
-                },
-                PasteStrategy::Copy => self.start_copy(source, dest, kind, None),
-                PasteStrategy::CopyThenDelete => {
-                    self.start_copy(source.clone(), dest, kind, Some((source, is_directory)))
-                }
-            }
-        }
-
-        /// Start copying one item's tree, installing the [`Copying`] stage.
-        fn start_copy(
-            &mut self,
-            source: alloc::vec::Vec<String>,
-            dest: alloc::vec::Vec<String>,
-            kind: CopyKind,
-            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
-        ) -> StepOutcome {
-            self.writing = spell_path(&dest).ok();
-            self.own_copy = None;
-            match CopyWalk::from_items(alloc::vec![(source, dest, kind)]) {
-                Some(walk) => {
-                    self.stage = PasteStage::Copying {
-                        walk,
-                        transfer: None,
-                        then_delete,
-                    };
-                    StepOutcome::Working
-                }
-                None => StepOutcome::Failed("nothing to copy"),
-            }
-        }
-
-        /// Advance the current item's tree copy by one unit: carry one chunk of
-        /// an in-flight leaf file, or take the next [`CopyWalk`] step (create a
-        /// directory, list one, or open the next file). When the tree is
-        /// complete, either begin the cross-volume source removal or fall back
-        /// to idle for the next item.
-        fn step_copy(
-            &mut self,
-            mut walk: CopyWalk,
-            transfer: Option<Transfer>,
-            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
-        ) -> StepOutcome {
-            if let Some(transfer) = transfer {
-                return self.step_transfer(walk, transfer, then_delete);
-            }
-            // Copy the current step out so the walk is free to be mutated.
-            let next = match walk.next_action() {
-                None => None,
-                Some(CopyAction::MakeDir { source, dest }) => {
-                    Some(CopyStep::MakeDir(source.to_vec(), dest.to_vec()))
-                }
-                Some(CopyAction::List { source }) => Some(CopyStep::List(source.to_vec())),
-                Some(CopyAction::CopyFile { source, dest }) => {
-                    Some(CopyStep::CopyFile(source.to_vec(), dest.to_vec()))
-                }
-                Some(CopyAction::CopyLink { source, dest }) => {
-                    Some(CopyStep::CopyLink(source.to_vec(), dest.to_vec()))
+            let source = match named(item.source(), item.source_id()) {
+                Ok(source) => source,
+                Err(errno) => {
+                    return Step::Stopped(item_refusal(verb, item.source(), reach_refusal(errno)))
                 }
             };
-            let Some(step) = next else {
-                // The tree is fully copied. A cross-volume move now removes the
-                // source through the shared delete walk; a plain copy is done
-                // with this item.
-                self.writing = None;
-                if let Some((source, is_directory)) = then_delete {
-                    let Some(plan) = DeletePlan::new(alloc::vec![(source, is_directory)]) else {
-                        return StepOutcome::Failed("a moved source could not be removed");
-                    };
-                    self.stage = PasteStage::Deleting(DeleteWalk::from_plan(&plan));
+            // The plan chose the name free: nothing was listed there.
+            let target = match named(item.dest(), FileId::NONE) {
+                Ok(target) => target,
+                Err(errno) => {
+                    return Step::Stopped(item_refusal(
+                        verb,
+                        item.source(),
+                        destination_refusal(errno),
+                    ))
                 }
-                return StepOutcome::Working;
             };
-            match &step {
-                CopyStep::MakeDir(named, _)
-                | CopyStep::CopyFile(named, _)
-                | CopyStep::CopyLink(named, _) => {
-                    name_into(&mut self.leaf, named);
-                }
-                CopyStep::List(_) => {}
-            }
-            match step {
-                CopyStep::MakeDir(source, dest) => {
-                    let (spelled, from) = match (spell_path(&dest), spell_path(&source)) {
-                        (Ok(spelled), Ok(from)) => (spelled, from),
-                        (Err(reason), _) | (_, Err(reason)) => return StepOutcome::Failed(reason),
-                    };
-                    if let Some(own) = self.own_copy {
-                        if stat_name(&source).is_some_and(|met| met.id == own) {
-                            return StepOutcome::Failed(INTO_ITSELF);
-                        }
-                    }
-                    let made = tairix_rt::fs_mkdir(spelled.as_bytes());
-                    if made != 0 {
-                        return StepOutcome::Failed(create_refusal(Errno::from_syscall(made)));
-                    }
-                    if self.own_copy.is_none() {
-                        self.own_copy = stat_name(&dest)
-                            .map(|made| made.id)
-                            .filter(|id| !id.is_none());
-                    }
-                    match carry_attributes(&from, &spelled) {
-                        Ok(left) => self.omissions.note(&left),
-                        Err(reason) => return StepOutcome::Failed(reason),
-                    }
-                    if walk.created().is_err() {
-                        return StepOutcome::Failed(LOST_TRACK);
-                    }
-                    self.done += 1;
-                    self.stage = PasteStage::Copying {
-                        walk,
-                        transfer: None,
-                        then_delete,
-                    };
-                    StepOutcome::Working
-                }
-                CopyStep::List(source) => {
-                    let children = match copy_children(&source) {
-                        Ok(children) => children,
-                        Err(err) => return StepOutcome::Failed(read_refusal(err)),
-                    };
-                    if walk.expand(&children).is_err() {
-                        return StepOutcome::Failed("a folder is nested too deep");
-                    }
-                    self.stage = PasteStage::Copying {
-                        walk,
-                        transfer: None,
-                        then_delete,
-                    };
-                    StepOutcome::Working
-                }
-                CopyStep::CopyFile(source, dest) => match Transfer::open(&source, &dest) {
-                    Ok(transfer) => {
-                        self.stage = PasteStage::Copying {
-                            walk,
-                            transfer: Some(transfer),
-                            then_delete,
-                        };
-                        StepOutcome::Working
-                    }
-                    Err(reason) => StepOutcome::Failed(reason),
-                },
-                CopyStep::CopyLink(source, dest) => {
-                    self.step_copy_link(walk, &source, &dest, then_delete)
-                }
-            }
-        }
-
-        /// Carry one chunk of the leaf file in flight, moving the walk past it
-        /// once it is whole.
-        fn step_transfer(
-            &mut self,
-            mut walk: CopyWalk,
-            mut transfer: Transfer,
-            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
-        ) -> StepOutcome {
-            if self.buf.is_empty() {
-                let Some(buf) = tairix_util::fallible::filled(FS_IO_MAX, 0) else {
-                    transfer.abandon();
-                    return StepOutcome::Failed("there was not enough memory to copy it");
-                };
-                self.buf = buf;
-            }
-            match transfer.step(&mut self.buf) {
-                Ok(true) => {
-                    match transfer.carry_attributes() {
-                        Ok(left) => self.omissions.note(&left),
-                        Err(reason) => {
-                            transfer.abandon();
-                            return StepOutcome::Failed(reason);
-                        }
-                    }
-                    if walk.copied_file().is_err() {
-                        return StepOutcome::Failed(LOST_TRACK);
-                    }
-                    self.done += 1;
-                    self.bytes = self.bytes.saturating_add(transfer.moved);
-                    self.stage = PasteStage::Copying {
-                        walk,
-                        transfer: None,
-                        then_delete,
-                    };
-                    StepOutcome::Working
-                }
-                Ok(false) => {
-                    self.stage = PasteStage::Copying {
-                        walk,
-                        transfer: Some(transfer),
-                        then_delete,
-                    };
-                    StepOutcome::Working
-                }
-                Err(reason) => {
-                    transfer.abandon();
-                    StepOutcome::Failed(reason)
-                }
-            }
-        }
-
-        /// Recreate one symbolic link at its destination and advance the walk
-        /// past it.
-        ///
-        /// A link is copied by being *recreated* with the target it stores:
-        /// streaming its bytes would leave a regular file holding the
-        /// target's text, and following it would copy something the link only
-        /// points at.
-        fn step_copy_link(
-            &mut self,
-            mut walk: CopyWalk,
-            source: &[String],
-            dest: &[String],
-            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
-        ) -> StepOutcome {
-            if let Err(reason) = recreate_link(source, dest) {
-                return StepOutcome::Failed(reason);
-            }
-            if walk.copied_link().is_err() {
-                return StepOutcome::Failed(LOST_TRACK);
-            }
-            self.done += 1;
-            self.stage = PasteStage::Copying {
-                walk,
-                transfer: None,
-                then_delete,
+            let carried = match self.op {
+                ClipboardOp::Copy => Verb::Copy,
+                ClipboardOp::Cut => Verb::Move,
             };
-            StepOutcome::Working
-        }
-
-        /// Advance a cross-volume move's source removal by one step, over the
-        /// shared delete walk. These removals are cleanup, so they are not
-        /// counted toward the copied figure.
-        fn step_delete(&mut self, mut walk: DeleteWalk) -> StepOutcome {
-            // Copy the current step out so the walk is free to be mutated.
-            let step = walk.next_action().map(|action| match action {
-                DeleteAction::List(path) => (true, path.to_vec(), false),
-                DeleteAction::Remove { path, is_directory } => (false, path.to_vec(), is_directory),
-            });
-            let Some((is_list, path, is_directory)) = step else {
-                // The source is gone; this item is done.
-                return StepOutcome::Working;
-            };
-            if is_list {
-                let children = match removal_children(&path) {
-                    Ok(children) => children,
-                    Err(err) => return StepOutcome::Failed(read_refusal(err)),
-                };
-                if walk.expand(&children).is_err() {
-                    return StepOutcome::Failed("a folder is nested too deep");
-                }
-            } else {
-                if let Err(err) = unlink(&path, is_directory) {
-                    return StepOutcome::Failed(remove_refusal(err));
-                }
-                if walk.complete_removal().is_err() {
-                    return StepOutcome::Failed(LOST_TRACK);
-                }
-            }
-            self.stage = PasteStage::Deleting(walk);
-            StepOutcome::Working
+            self.writing = Some(target.path.clone());
+            self.turns.take(
+                item.source(),
+                TreeOp::transfer(
+                    carried,
+                    source,
+                    target,
+                    Taken::Refuse,
+                    tairix_rt::staging_name,
+                ),
+            );
+            Step::Working
         }
     }
 
@@ -8829,12 +8388,6 @@ mod program {
         tairix_rt::File::open(spelled.as_bytes(), OpenFlags::NO_FOLLOW)
             .and_then(|file| file.stat())
             .ok()
-    }
-
-    /// Spell a root-first component path to its validated absolute string, the
-    /// one shared spelling the browser navigates with, or a terse reason.
-    fn spell_path(path: &[String]) -> Result<String, &'static str> {
-        tairix_browse::vfs::absolute_path(path).map_err(|_| "a path could not be spelled")
     }
 
     /// Route one primary-button press at window-local `point` in navigation
@@ -10634,9 +10187,8 @@ mod program {
             app::report(APP_NAME, err.message());
             return (Repaint::Nothing, false);
         }
-        let act = WriteAct::SetMode {
-            path: win.path.clone(),
-            mode,
+        let Some(act) = win.change(Change::Mode(mode)) else {
+            return (Repaint::Nothing, false);
         };
         properties_write(win, window_id, reads, act, PropertiesWrite::Mode)
     }
@@ -10694,6 +10246,12 @@ mod program {
         let Err(errno) = result else {
             return Repaint::Nothing;
         };
+        // The name holds another node now: show that one, which the next
+        // change is computed from.
+        if errno == Errno::Stale {
+            reads.want_properties(window_id, win.job());
+            win.rereading = true;
+        }
         let reason = change_refusal(errno);
         let title = then.refusal_title();
         match then {
@@ -10788,10 +10346,8 @@ mod program {
                 return (Repaint::Whole, false);
             }
         };
-        let act = WriteAct::SetOwner {
-            path: win.path.clone(),
-            uid,
-            gid,
+        let Some(act) = win.change(Change::Owner { uid, gid }) else {
+            return (Repaint::Nothing, false);
         };
         properties_write(win, window_id, reads, act, PropertiesWrite::Owner)
     }
@@ -10804,22 +10360,18 @@ mod program {
             win.editor.set_message(Some(String::from(ATTR_EDITOR_HINT)));
             return (Repaint::Whole, false);
         };
-        let shown = String::from(key.as_str());
+        let then = PropertiesWrite::Attribute {
+            shown: String::from(key.as_str()),
+            removing: false,
+        };
         if win.writing.is_some() {
-            let then = PropertiesWrite::Attribute {
-                shown,
-                removing: false,
-            };
             return (refuse_properties_write(win, &then, STILL_WRITING), false);
         }
-        let act = WriteAct::SetAttr {
-            path: win.path.clone(),
+        let Some(act) = win.change(Change::SetAttr {
             key: String::from(key.as_str()),
             value: String::from(value),
-        };
-        let then = PropertiesWrite::Attribute {
-            shown,
-            removing: false,
+        }) else {
+            return (refuse_properties_write(win, &then, NOT_READ), false);
         };
         properties_write(win, window_id, reads, act, then)
     }
@@ -10845,9 +10397,8 @@ mod program {
         if win.writing.is_some() {
             return (refuse_properties_write(win, &then, STILL_WRITING), false);
         }
-        let act = WriteAct::RemoveAttr {
-            path: win.path.clone(),
-            key,
+        let Some(act) = win.change(Change::RemoveAttr(key)) else {
+            return (Repaint::Nothing, false);
         };
         properties_write(win, window_id, reads, act, then)
     }

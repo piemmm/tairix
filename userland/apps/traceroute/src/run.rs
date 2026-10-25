@@ -19,7 +19,6 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
     use core::net::IpAddr;
     use core::num::NonZeroU8;
@@ -30,7 +29,7 @@ mod program {
     use tairix_resolver::{RtDnsTransport, TargetFailure};
     use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_rt::net::EchoSocket;
-    use tairix_traceroute::{parse, run, Answer, TraceIo, USAGE};
+    use tairix_traceroute::{parse, run, Answer, TraceIo};
 
     /// The production [`TraceIo`]: one resolver transport for the target and
     /// every hop name, and the echo socket once the target resolved.
@@ -96,19 +95,17 @@ mod program {
     }
 
     /// Program entry point. Exit codes: `0` once the trace ran (whether or not
-    /// it reached the host), and `2` on a usage error or a failure that ended
-    /// the run.
+    /// it reached the host), `1` when the command line was not understood,
+    /// and `2` on a failure that ended the run.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("traceroute") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("traceroute: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("traceroute", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -120,7 +117,7 @@ mod program {
         match run(command, locale, &mut io, &help, &Stdout) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("traceroute: {err}"));
+                write_stderr_line(format_args!("traceroute: {err}"));
                 2
             }
         }

@@ -59,9 +59,8 @@ dominio del collegamento è `local`.
 
 - `0` — il comando è arrivato in fondo (o l'aiuto breve è stato scritto).
 - `1` — il servizio di rilevamento ha rifiutato la richiesta o non è in
-  esecuzione.
-- `2` — la riga di comando non è stata compresa, o l'output non è stato
-  scritto.
+  esecuzione. Anche una riga di comando non compresa termina con `1`.
+- `2` — l'output non è stato scritto.
 
 ## ENVIRONMENT
 

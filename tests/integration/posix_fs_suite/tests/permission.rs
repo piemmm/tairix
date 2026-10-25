@@ -10,98 +10,69 @@
 
 use tairix_test_posix_fs_suite::*;
 
-const OWNER_UID: u32 = 1000;
-const OWNER_GID: u32 = 1000;
-const OTHER_UID: u32 = 2000;
-const SHARED_GID: u32 = 42;
-
 /// Create `name` at the volume root as the installer (uid 0) and write
-/// `body`, then re-stamp its stored record with `sec`. Returns once
-/// the new record is durable.
-fn planted_file(vfs: &Vfs, fs: &mut LiveFs, name: &str, body: &[u8], sec: NodeSecurity) {
-    let caps = CapabilitySet::empty();
-    let admin = cred(ROOT_UID, ROOT_GID, &caps);
-    vfs.create_via_secured(&admin, &vfs.cover(&vol_path(name)), fs)
+/// `body`, then re-stamp its stored record with `sec`.
+fn planted_file(vol: &Volume, name: &str, body: &[u8], sec: NodeSecurity) {
+    let admin = ROOT.caller();
+    vol.create(admin, &vol_path(name), new_file())
         .expect("create as installer");
-    vfs.write_via_secured(&admin, &vfs.cover(&vol_path(name)), fs, 0, body)
+    vol.write(admin, &vol_path(name), 0, body)
         .expect("write as installer");
-    let node = root_node_id(fs, name.as_bytes());
-    fs.set_security(node, sec)
+    let node = vol.root_node(name.as_bytes());
+    vol.driver()
+        .set_security(node, sec)
         .expect("re-stamp security record");
+}
+
+/// A capability set holding `CAP_AUDIT_READ`.
+fn auditing() -> CapabilitySet {
+    let mut caps = CapabilitySet::empty();
+    caps.insert(CapabilityId::AUDIT_READ);
+    caps
 }
 
 #[test]
 fn owner_can_read_a_private_file_but_a_stranger_cannot() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
+    let vol = arxfs_volume(false);
     planted_file(
-        &vfs,
-        &mut fs,
+        &vol,
         "secret",
         b"top secret",
-        NodeSecurity::new(0o600, OWNER_UID, OWNER_GID),
+        NodeSecurity::new(0o600, OWNER.uid, OWNER.gid),
     );
 
-    let caps = CapabilitySet::empty();
     let mut buf = [0u8; 16];
-
-    let owner = cred(OWNER_UID, OWNER_GID, &caps);
-    let read = vfs
-        .read_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("secret")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
+    let read = vol
+        .read(OWNER.caller(), &vol_path("secret"), 0, &mut buf)
         .expect("owner reads its own 0600 file");
     assert_eq!(&buf[..read], b"top secret");
 
-    let stranger = cred(OTHER_UID, OTHER_UID, &caps);
     assert_eq!(
-        vfs.read_via_secured(
-            &stranger,
-            &vfs.cover(&vol_path("secret")),
-            &mut fs,
-            0,
-            &mut buf
-        ),
-        Err(VfsError::PermissionDenied)
+        vol.read(STRANGER.caller(), &vol_path("secret"), 0, &mut buf),
+        Err(Errno::PermissionDenied)
     );
 }
 
 #[test]
 fn capability_gate_blocks_read_even_at_mode_0644() {
-    // PLAN.md Stage 5 /: a file marked with a required
-    // capability is unreadable without it, even though mode 0644 would
-    // otherwise grant the read.
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let mut sec = NodeSecurity::new(0o644, OWNER_UID, OWNER_GID);
+    // PLAN.md Stage 5: a file marked with a required capability is
+    // unreadable without it, even though mode 0644 would otherwise grant the
+    // read.
+    let vol = arxfs_volume(false);
+    let mut sec = NodeSecurity::new(0o644, OWNER.uid, OWNER.gid);
     sec.required_cap = Some(CapabilityId::AUDIT_READ);
-    planted_file(&vfs, &mut fs, "audit.log", b"audit trail", sec);
+    planted_file(&vol, "audit.log", b"audit trail", sec);
 
     let mut buf = [0u8; 16];
-
-    let without = CapabilitySet::empty();
-    let denied = cred(OTHER_UID, OTHER_UID, &without);
     assert_eq!(
-        vfs.read_via_secured(
-            &denied,
-            &vfs.cover(&vol_path("audit.log")),
-            &mut fs,
-            0,
-            &mut buf
-        ),
-        Err(VfsError::PermissionDenied)
+        vol.read(STRANGER.caller(), &vol_path("audit.log"), 0, &mut buf),
+        Err(Errno::PermissionDenied)
     );
 
-    let mut with = CapabilitySet::empty();
-    with.insert(CapabilityId::AUDIT_READ);
-    let allowed = cred(OTHER_UID, OTHER_UID, &with);
-    let read = vfs
-        .read_via_secured(
-            &allowed,
-            &vfs.cover(&vol_path("audit.log")),
-            &mut fs,
+    let read = vol
+        .read(
+            STRANGER.holding(auditing()),
+            &vol_path("audit.log"),
             0,
             &mut buf,
         )
@@ -111,114 +82,75 @@ fn capability_gate_blocks_read_even_at_mode_0644() {
 
 #[test]
 fn acl_grant_allows_a_read_the_mode_bits_would_deny() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let mut sec = NodeSecurity::new(0o600, OWNER_UID, OWNER_GID);
+    let vol = arxfs_volume(false);
+    let mut sec = NodeSecurity::new(0o600, OWNER.uid, OWNER.gid);
     sec.push_acl(SecurityAcl {
         subject: SecuritySubject::Group(SHARED_GID),
         perms: 0b100,
     })
     .expect("room for one ACL entry");
-    planted_file(&vfs, &mut fs, "shared", b"shared bytes", sec);
+    planted_file(&vol, "shared", b"shared bytes", sec);
 
-    let caps = CapabilitySet::empty();
     let mut buf = [0u8; 16];
 
     // A member of the granted group reads despite the 0600 mode bits.
-    let groups = [GroupId(SHARED_GID)];
-    let member = cred_with_groups(OTHER_UID, OTHER_UID, &groups, &caps);
-    let read = vfs
-        .read_via_secured(
-            &member,
-            &vfs.cover(&vol_path("shared")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
+    let read = vol
+        .read(MEMBER.caller(), &vol_path("shared"), 0, &mut buf)
         .expect("ACL grant admits the group member");
     assert_eq!(&buf[..read], b"shared bytes");
 
     // A user outside the group still falls through to the denying mode.
-    let outsider = cred(OTHER_UID, OTHER_UID, &caps);
     assert_eq!(
-        vfs.read_via_secured(
-            &outsider,
-            &vfs.cover(&vol_path("shared")),
-            &mut fs,
-            0,
-            &mut buf
-        ),
-        Err(VfsError::PermissionDenied)
+        vol.read(STRANGER.caller(), &vol_path("shared"), 0, &mut buf),
+        Err(Errno::PermissionDenied)
     );
 }
 
 #[test]
 fn directory_without_search_permission_blocks_traversal() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let admin = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let admin = ROOT.caller();
 
-    vfs.mkdir_via_secured(&admin, &vfs.cover(&vol_path("priv")), &mut fs)
+    vol.mkdir(admin, &vol_path("priv"), new_dir())
         .expect("mkdir priv");
-    vfs.create_via_secured(&admin, &vfs.cover(&vol_path("priv/inside")), &mut fs)
+    vol.create(admin, &vol_path("priv/inside"), new_file())
         .expect("create inside");
-    vfs.write_via_secured(
-        &admin,
-        &vfs.cover(&vol_path("priv/inside")),
-        &mut fs,
-        0,
-        b"hidden",
-    )
-    .expect("write inside");
+    vol.write(admin, &vol_path("priv/inside"), 0, b"hidden")
+        .expect("write inside");
 
     // Restrict the directory to its owner with no access for others.
-    let dir = root_node_id(&mut fs, b"priv");
-    fs.set_security(dir, NodeSecurity::new(0o700, OWNER_UID, OWNER_GID))
+    let dir = vol.root_node(b"priv");
+    vol.driver()
+        .set_security(dir, NodeSecurity::new(0o700, OWNER.uid, OWNER.gid))
         .expect("restrict directory");
 
     let mut buf = [0u8; 16];
-
-    let stranger = cred(OTHER_UID, OTHER_UID, &caps);
     assert_eq!(
-        vfs.read_via_secured(
-            &stranger,
-            &vfs.cover(&vol_path("priv/inside")),
-            &mut fs,
-            0,
-            &mut buf
-        ),
-        Err(VfsError::PermissionDenied)
+        vol.read(STRANGER.caller(), &vol_path("priv/inside"), 0, &mut buf),
+        Err(Errno::PermissionDenied)
     );
 
     // The directory's owner has search permission and reaches the file.
-    let owner = cred(OWNER_UID, OWNER_GID, &caps);
-    let read = vfs
-        .read_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("priv/inside")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
+    let read = vol
+        .read(OWNER.caller(), &vol_path("priv/inside"), 0, &mut buf)
         .expect("owner traverses its own directory");
     assert_eq!(&buf[..read], b"hidden");
 }
 
 #[test]
 fn write_into_a_read_only_directory_is_denied() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let admin = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
 
-    vfs.mkdir_via_secured(&admin, &vfs.cover(&vol_path("ro")), &mut fs)
+    vol.mkdir(ROOT.caller(), &vol_path("ro"), new_dir())
         .expect("mkdir ro");
-    let dir = root_node_id(&mut fs, b"ro");
+    let dir = vol.root_node(b"ro");
     // r-x for the owner: search is allowed, but creating an entry is not.
-    fs.set_security(dir, NodeSecurity::new(0o500, OWNER_UID, OWNER_GID))
+    vol.driver()
+        .set_security(dir, NodeSecurity::new(0o500, OWNER.uid, OWNER.gid))
         .expect("make directory non-writable");
 
-    let owner = cred(OWNER_UID, OWNER_GID, &caps);
     assert_eq!(
-        vfs.create_via_secured(&owner, &vfs.cover(&vol_path("ro/new")), &mut fs),
-        Err(VfsError::PermissionDenied)
+        vol.create(OWNER.caller(), &vol_path("ro/new"), new_file()),
+        Err(Errno::PermissionDenied)
     );
 }

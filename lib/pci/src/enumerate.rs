@@ -868,12 +868,12 @@ impl<C: ConfigSpace> Pci<C> {
     /// PCIe-bus window `[window_base, window_base + window_size)`.
     ///
     /// Firmware normally programs a function's BARs, but when the OS
-    /// resets and re-enumerates the root complex (the BCM2711 PCIe
-    /// bring-up) a downstream function's BAR address bits read zero: the
+    /// resets and re-enumerates the root complex a downstream function's
+    /// BAR address bits read zero: the
     /// BAR is sized and typed but carries no base, so a map of it would
     /// target physical address 0 and be refused. Assigning resources
-    /// from the host bridge's outbound window is the PCI core's job,
-    /// mirroring Linux's PCI resource assignment. This probes the BAR's
+    /// from the host bridge's outbound window is the PCI core's job.
+    /// This probes the BAR's
     /// size and type, and:
     ///
     /// * if the BAR already carries a non-zero base, leaves it untouched
@@ -1155,13 +1155,12 @@ impl<C: ConfigSpace> Pci<C> {
     /// `message`, force a single vector, and enable it.
     ///
     /// The MSI interrupt-routing hand-off for a function that advertises
-    /// the legacy MSI capability rather than MSI-X (the Pi 4's VL805 xHCI
-    /// host): the kernel's interrupt controller mints the
-    /// [`MsiMessage`] (the doorbell address + the data word that selects
-    /// the vector — on the BCM2711 PCIe RC, the internal MSI controller's
-    /// doorbell), and this writes it into the capability's Message Address
-    /// and Message Data registers, then sets MSI Enable with Multiple
-    /// Message Enable cleared (exactly one vector).
+    /// the legacy MSI capability rather than MSI-X: the kernel's interrupt
+    /// controller mints the [`MsiMessage`] (the doorbell address + the data
+    /// word that selects the vector — a root complex's internal MSI
+    /// controller's doorbell, say), and this writes it into the capability's
+    /// Message Address and Message Data registers, then sets MSI Enable with
+    /// Multiple Message Enable cleared (exactly one vector).
     ///
     /// Unlike [`route_msix`](Self::route_msix) this needs no `MmioMapper`:
     /// the MSI capability lives entirely in configuration space, reached

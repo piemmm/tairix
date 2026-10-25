@@ -1,9 +1,10 @@
 use super::{
     decode_status, encode_status, FanFault, FanLines, FanMode, FanPolicy, ThermalRequest,
-    ThermalStatus, THERMAL_MAX_REPLY, THERMAL_REQUEST_LEN,
+    ThermalStatus, THERMAL_ENDPOINT, THERMAL_MAX_REPLY, THERMAL_REQUEST_LEN,
 };
 use crate::driver::gpio::{HeaderLines, Polarity};
 use crate::driver::thermal::Millicelsius;
+use crate::ipc::{is_reserved_endpoint, is_seat_scoped_endpoint};
 use crate::Errno;
 
 fn policy() -> FanPolicy {
@@ -18,6 +19,14 @@ fn round_trip(status: &ThermalStatus) -> Result<ThermalStatus, Errno> {
     let mut out = [0u8; THERMAL_MAX_REPLY];
     let len = encode_status(&mut out, Ok(status)).unwrap();
     decode_status(&out[..len])
+}
+
+/// A squatter holding the rendezvous would feed every reader forged
+/// temperatures and fan states.
+#[test]
+fn the_status_rendezvous_is_reserved_but_not_seat_scoped() {
+    assert!(is_reserved_endpoint(THERMAL_ENDPOINT));
+    assert!(!is_seat_scoped_endpoint(THERMAL_ENDPOINT));
 }
 
 #[test]

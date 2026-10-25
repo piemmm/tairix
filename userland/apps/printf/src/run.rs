@@ -27,9 +27,6 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_help::BundleHelp;
     use tairix_printf::{parse, run, PrintfError, USAGE};
@@ -51,7 +48,7 @@ mod program {
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("printf: {err}"));
+                write_stderr_line(format_args!("printf: {err}"));
                 write_stderr_line(USAGE);
                 return 1;
             }
@@ -75,7 +72,7 @@ mod program {
                 // A fatal template failure (invalid conversion
                 // specification, malformed escape), GNU's way: diagnose
                 // and exit 1; anything already rendered was written.
-                write_stderr_line(&format!("printf: {err}"));
+                write_stderr_line(format_args!("printf: {err}"));
                 1
             }
         }

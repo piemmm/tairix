@@ -9,8 +9,7 @@
 //! a per-zone linked list: the header link and each free fragment's id
 //! field hold the bit distance to the next free fragment.
 //!
-//! Reference: the RISC OS PRM `FileCore` formats chapter and the Linux
-//! `fs/adfs/map.c` reference implementation.
+//! Reference: the RISC OS PRM `FileCore` formats chapter.
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;

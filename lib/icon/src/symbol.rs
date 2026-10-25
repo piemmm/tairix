@@ -348,7 +348,7 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::About => ABOUT,
         IconKind::Startup => STARTUP,
         IconKind::Caching => CHIP,
-        IconKind::RaspberryPi => BOARD,
+        IconKind::BoardFan => BOARD,
         IconKind::DateTime => CLOCK,
         IconKind::Ethernet => PLUG,
         IconKind::WiFi => WIFI,

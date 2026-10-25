@@ -47,7 +47,9 @@ use tairix_abi::driver::rtc::{
     bcd_to_bin, bin_to_bcd, hour_from_twelve, resolve_two_digit_year, Rtc, RtcStatus,
 };
 use tairix_abi::time::{CivilTime, Duration64, Time64};
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 use tairix_i2c::Device;
 
 #[cfg(test)]
@@ -86,18 +88,9 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(DS3231_COMPATIBLE)),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(DS1307_COMPATIBLE)),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(DS3231_COMPATIBLE)),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(DS1307_COMPATIBLE)),
 ];
-
-/// Build a bind key at compile time, so a too-long literal is a const-eval
-/// error rather than a runtime panic.
-const fn compatible_key(compatible: &[u8]) -> HwMatchKey {
-    match HwMatchKey::compatible(compatible) {
-        Ok(key) => key,
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    }
-}
 
 /// First register of the calendar block.
 const REG_SECONDS: u8 = 0x00;

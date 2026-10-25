@@ -12,6 +12,7 @@
 //!
 //! ```text
 //! ulimit [-a] [-H | -S] [<resource> [<value>]]
+//! ulimit [-H | -S] -n [<value>]
 //! ```
 //!
 //! * `ulimit` or `ulimit -a` — report every resource's soft bound (with
@@ -22,9 +23,11 @@
 //!   `-S` both bounds are set (POSIX); `-S` sets only the soft bound and
 //!   `-H` only the hard bound. `<value>` is a decimal byte/count or the word
 //!   `unlimited`.
+//! * `-n` names the `open-files` resource, as bash spells it.
 //!
 //! `<resource>` is one of the canonical [`LimitKind`] names
-//! ([`LimitKind::name`]); `ulimit -a` lists every one.
+//! ([`LimitKind::name`]); `ulimit -a` lists every one. Flags may be run
+//! together, as in `ulimit -Sn 256`.
 //!
 //! Lowering a bound is always permitted; *raising* a hard bound above the
 //! inherited ceiling is gated kernel-side on
@@ -37,7 +40,7 @@ use alloc::string::{String, ToString};
 use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
 use crate::builtin::BuiltinContext;
-use tairix_util::quote::quote_if_needed;
+use tairix_util::quote::quote_subject;
 
 /// Status returned on success.
 const OK: i32 = 0;
@@ -59,34 +62,43 @@ enum Bound {
     Both,
 }
 
+impl Bound {
+    /// The bounds named once `other` is named beside these.
+    fn and(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::Both
+        }
+    }
+}
+
 /// Parsed leading flags of a `ulimit` invocation.
 struct Flags {
     /// `-a`: operate over every resource.
     all: bool,
-    /// `-S` was given.
-    soft: bool,
-    /// `-H` was given.
-    hard: bool,
+    /// The bounds `-S` and `-H` named; `None` when neither was given.
+    named: Option<Bound>,
+    /// `-n`: the resource is `open-files`.
+    open_files: bool,
 }
 
 impl Flags {
     /// The bound to *report*: soft unless `-H` was given.
     fn report_bound(&self) -> Bound {
-        if self.hard {
-            Bound::Hard
-        } else {
-            Bound::Soft
+        match self.named {
+            Some(Bound::Hard | Bound::Both) => Bound::Hard,
+            Some(Bound::Soft) | None => Bound::Soft,
         }
     }
 
     /// The bound(s) to *set*: whichever flags were given, else both (POSIX).
     fn set_bound(&self) -> Bound {
-        match (self.soft, self.hard) {
-            (true, false) => Bound::Soft,
-            (false, true) => Bound::Hard,
-            // Neither flag (or, defensively, both) means both bounds.
-            _ => Bound::Both,
-        }
+        self.named.unwrap_or(Bound::Both)
+    }
+
+    fn name(&mut self, bound: Bound) {
+        self.named = Some(self.named.map_or(bound, |named| named.and(bound)));
     }
 }
 
@@ -95,40 +107,47 @@ pub(crate) fn ulimit(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
     let (flags, rest) = match parse_flags(args) {
         Ok(parsed) => parsed,
         Err(flag) => {
-            ctx.console
-                .write_stderr(&format!("ulimit: {flag}: invalid option\n"));
+            ctx.console.write_stderr(&format!(
+                "ulimit: {flag}: invalid option\n",
+                flag = quote_subject(&flag)
+            ));
             return USAGE_ERROR;
         }
     };
 
-    // A resource name, then an optional value. More than two operands is a
-    // usage error rather than a silently-ignored tail.
-    match rest {
-        [] => report_all(ctx, flags.report_bound()),
-        [name] if flags.all => {
+    // A resource name — the one `-n` names, else the first operand — then an
+    // optional value. A third operand is a usage error rather than a
+    // silently-ignored tail.
+    let named = flags.open_files.then(|| LimitKind::OpenFiles.name());
+    let mut operands = named.into_iter().chain(rest.iter().map(String::as_str));
+    let (name, value) = (operands.next(), operands.next());
+    if operands.next().is_some() {
+        ctx.console.write_stderr("ulimit: too many arguments\n");
+        return USAGE_ERROR;
+    }
+    match (name, value) {
+        (None, _) => report_all(ctx, flags.report_bound()),
+        (Some(name), None) if flags.all => {
             ctx.console.write_stderr(&format!(
                 "ulimit: {name}: -a takes no resource\n",
-                name = quote_if_needed(name)
+                name = quote_subject(name)
             ));
             USAGE_ERROR
         }
-        [name] => report_one(ctx, name, flags.report_bound()),
-        [name, _value] if flags.all => {
+        (Some(name), None) => report_one(ctx, name, flags.report_bound()),
+        (Some(name), Some(_)) if flags.all => {
             ctx.console.write_stderr(&format!(
                 "ulimit: {name}: -a cannot set a limit\n",
-                name = quote_if_needed(name)
+                name = quote_subject(name)
             ));
             USAGE_ERROR
         }
-        [name, value] => set_one(ctx, name, value, flags.set_bound()),
-        _ => {
-            ctx.console.write_stderr("ulimit: too many arguments\n");
-            USAGE_ERROR
-        }
+        (Some(name), Some(value)) => set_one(ctx, name, value, flags.set_bound()),
     }
 }
 
-/// Split leading `-a` / `-H` / `-S` flags from the operands.
+/// Split leading `-a` / `-H` / `-S` / `-n` flags, alone or run together as in
+/// `-Sn`, from the operands.
 ///
 /// Returns the parsed [`Flags`] and the remaining operands, or the offending
 /// token on an unknown option. A bare `-` is treated as an operand, not a
@@ -136,21 +155,22 @@ pub(crate) fn ulimit(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
 fn parse_flags(args: &[String]) -> Result<(Flags, &[String]), String> {
     let mut flags = Flags {
         all: false,
-        soft: false,
-        hard: false,
+        named: None,
+        open_files: false,
     };
     let mut index = 0;
     for arg in args {
-        if arg == "-a" {
-            flags.all = true;
-        } else if arg == "-H" {
-            flags.hard = true;
-        } else if arg == "-S" {
-            flags.soft = true;
-        } else if arg.starts_with('-') && arg.len() > 1 {
-            return Err(arg.clone());
-        } else {
+        let Some(letters) = arg.strip_prefix('-').filter(|letters| !letters.is_empty()) else {
             break;
+        };
+        for letter in letters.chars() {
+            match letter {
+                'a' => flags.all = true,
+                'H' => flags.name(Bound::Hard),
+                'S' => flags.name(Bound::Soft),
+                'n' => flags.open_files = true,
+                _ => return Err(arg.clone()),
+            }
         }
         index += 1;
     }
@@ -190,7 +210,7 @@ fn report_one(ctx: &mut BuiltinContext<'_>, name: &str, bound: Bound) -> i32 {
     let Some(kind) = LimitKind::from_name(name) else {
         ctx.console.write_stderr(&format!(
             "ulimit: {name}: unknown resource\n",
-            name = quote_if_needed(name)
+            name = quote_subject(name)
         ));
         return USAGE_ERROR;
     };
@@ -202,10 +222,8 @@ fn report_one(ctx: &mut BuiltinContext<'_>, name: &str, bound: Bound) -> i32 {
             OK
         }
         Err(err) => {
-            ctx.console.write_stderr(&format!(
-                "ulimit: {name}: {err}\n",
-                name = quote_if_needed(name)
-            ));
+            ctx.console
+                .write_stderr(&format!("ulimit: {}: {err}\n", kind.name()));
             USAGE_ERROR
         }
     }
@@ -216,14 +234,14 @@ fn set_one(ctx: &mut BuiltinContext<'_>, name: &str, value: &str, bound: Bound) 
     let Some(kind) = LimitKind::from_name(name) else {
         ctx.console.write_stderr(&format!(
             "ulimit: {name}: unknown resource\n",
-            name = quote_if_needed(name)
+            name = quote_subject(name)
         ));
         return USAGE_ERROR;
     };
     let Some(parsed) = parse_value(value) else {
         ctx.console.write_stderr(&format!(
             "ulimit: {value}: invalid limit value\n",
-            value = quote_if_needed(value)
+            value = quote_subject(value)
         ));
         return USAGE_ERROR;
     };
@@ -232,10 +250,8 @@ fn set_one(ctx: &mut BuiltinContext<'_>, name: &str, value: &str, bound: Bound) 
     let current = match ctx.limits.get(kind) {
         Ok(limit) => limit,
         Err(err) => {
-            ctx.console.write_stderr(&format!(
-                "ulimit: {name}: {err}\n",
-                name = quote_if_needed(name)
-            ));
+            ctx.console
+                .write_stderr(&format!("ulimit: {}: {err}\n", kind.name()));
             return USAGE_ERROR;
         }
     };
@@ -248,8 +264,8 @@ fn set_one(ctx: &mut BuiltinContext<'_>, name: &str, value: &str, bound: Bound) 
         // `soft > hard`: a soft bound above its hard ceiling. POSIX rejects
         // it rather than guessing which the user meant.
         ctx.console.write_stderr(&format!(
-            "ulimit: {name}: soft limit exceeds hard limit\n",
-            name = quote_if_needed(name)
+            "ulimit: {}: soft limit exceeds hard limit\n",
+            kind.name()
         ));
         return USAGE_ERROR;
     };
@@ -257,16 +273,14 @@ fn set_one(ctx: &mut BuiltinContext<'_>, name: &str, value: &str, bound: Bound) 
         Ok(()) => OK,
         Err(Errno::PermissionDenied) => {
             ctx.console.write_stderr(&format!(
-                "ulimit: {name}: cannot raise hard limit (requires CAP_RLIMIT_RAISE)\n",
-                name = quote_if_needed(name)
+                "ulimit: {}: cannot raise hard limit (requires CAP_RLIMIT_RAISE)\n",
+                kind.name()
             ));
             DENIED_STATUS
         }
         Err(err) => {
-            ctx.console.write_stderr(&format!(
-                "ulimit: {name}: {err}\n",
-                name = quote_if_needed(name)
-            ));
+            ctx.console
+                .write_stderr(&format!("ulimit: {}: {err}\n", kind.name()));
             USAGE_ERROR
         }
     }
@@ -383,11 +397,11 @@ mod tests {
     fn setting_soft_keeps_the_hard_bound() {
         let mut fx = Fixture::new();
         fx.limits.put(
-            LimitKind::OpenStreams,
+            LimitKind::OpenFiles,
             ResourceLimit::new(32, 128).expect("well-formed"),
         );
-        assert_eq!(fx.run(&["-S", "open-streams", "8"]), 0);
-        let stored = fx.limits.snapshot(LimitKind::OpenStreams);
+        assert_eq!(fx.run(&["-S", "open-files", "8"]), 0);
+        let stored = fx.limits.snapshot(LimitKind::OpenFiles);
         assert_eq!(stored.soft, 8);
         assert_eq!(stored.hard, 128);
     }
@@ -396,13 +410,89 @@ mod tests {
     fn setting_hard_keeps_the_soft_bound() {
         let mut fx = Fixture::new();
         fx.limits.put(
-            LimitKind::OpenStreams,
+            LimitKind::OpenFiles,
             ResourceLimit::new(32, 128).expect("well-formed"),
         );
-        assert_eq!(fx.run(&["-H", "open-streams", "64"]), 0);
-        let stored = fx.limits.snapshot(LimitKind::OpenStreams);
+        assert_eq!(fx.run(&["-H", "open-files", "64"]), 0);
+        let stored = fx.limits.snapshot(LimitKind::OpenFiles);
         assert_eq!(stored.soft, 32);
         assert_eq!(stored.hard, 64);
+    }
+
+    /// `-S` beside `-H` names both bounds: a set changes both, and a report
+    /// shows the hard one.
+    #[test]
+    fn soft_and_hard_together_name_both_bounds() {
+        let mut fx = Fixture::new();
+        fx.limits.put(
+            LimitKind::OpenFiles,
+            ResourceLimit::new(32, 128).expect("well-formed"),
+        );
+        assert_eq!(fx.run(&["-SH", "open-files", "64"]), 0);
+        assert_eq!(
+            fx.limits.snapshot(LimitKind::OpenFiles),
+            ResourceLimit::new(64, 64).expect("well-formed")
+        );
+        fx.limits.put(
+            LimitKind::OpenFiles,
+            ResourceLimit::new(16, 96).expect("well-formed"),
+        );
+        assert_eq!(fx.run(&["-H", "-S", "open-files"]), 0);
+        assert_eq!(fx.console.stdout(), "96\n");
+    }
+
+    /// `-n` is bash's spelling of the descriptor limit, alone or run together
+    /// with the bound it reports.
+    #[test]
+    fn dash_n_reports_the_open_file_limit() {
+        let mut fx = Fixture::new();
+        fx.limits.put(
+            LimitKind::OpenFiles,
+            ResourceLimit::new(1024, 4096).expect("well-formed"),
+        );
+        assert_eq!(fx.run(&["-n"]), 0);
+        assert_eq!(fx.console.stdout(), "1024\n");
+        fx.console.clear();
+        assert_eq!(fx.run(&["-H", "-n"]), 0);
+        assert_eq!(fx.console.stdout(), "4096\n");
+        fx.console.clear();
+        assert_eq!(fx.run(&["-Hn"]), 0);
+        assert_eq!(fx.console.stdout(), "4096\n");
+    }
+
+    #[test]
+    fn dash_n_sets_the_open_file_limit() {
+        let mut fx = Fixture::new();
+        assert_eq!(fx.run(&["-n", "256"]), 0);
+        assert_eq!(
+            fx.limits.snapshot(LimitKind::OpenFiles),
+            ResourceLimit::new(256, 256).expect("well-formed")
+        );
+        assert_eq!(fx.run(&["-Sn", "128"]), 0);
+        assert_eq!(
+            fx.limits.snapshot(LimitKind::OpenFiles),
+            ResourceLimit::new(128, 256).expect("well-formed")
+        );
+    }
+
+    /// `-n` names the resource itself, so a further resource operand is one
+    /// too many, and `-a` refuses it as it refuses any one resource.
+    #[test]
+    fn dash_n_takes_no_resource_operand() {
+        let mut fx = Fixture::new();
+        assert_eq!(fx.run(&["-n", "open-files", "8"]), 1);
+        assert_eq!(fx.console.stderr(), "ulimit: too many arguments\n");
+        fx.console.clear();
+        assert_eq!(fx.run(&["-an"]), 1);
+        assert_eq!(
+            fx.console.stderr(),
+            "ulimit: open-files: -a takes no resource\n"
+        );
+        assert_eq!(
+            fx.limits.snapshot(LimitKind::OpenFiles),
+            ResourceLimit::UNLIMITED,
+            "nothing was set"
+        );
     }
 
     #[test]
@@ -483,5 +573,26 @@ mod tests {
         let mut fx = Fixture::new();
         assert_eq!(fx.run(&["-a", "processes"]), 1);
         assert!(fx.console.stderr().contains("-a takes no resource"));
+    }
+
+    /// An operand that needs quoting is quoted wherever a diagnostic names it.
+    #[test]
+    fn diagnostics_quote_an_operand_that_needs_it() {
+        let cases: [(&[&str], &str); 6] = [
+            (&["-a", "a b"], "ulimit: 'a b': -a takes no resource\n"),
+            (
+                &["-a", "a b", "1"],
+                "ulimit: 'a b': -a cannot set a limit\n",
+            ),
+            (&["a b"], "ulimit: 'a b': unknown resource\n"),
+            (&["a b", "1"], "ulimit: 'a b': unknown resource\n"),
+            (&["threads", "x y"], "ulimit: 'x y': invalid limit value\n"),
+            (&["-x y"], "ulimit: '-x y': invalid option\n"),
+        ];
+        for (words, expected) in cases {
+            let mut fx = Fixture::new();
+            assert_eq!(fx.run(words), 1, "{words:?}");
+            assert_eq!(fx.console.stderr(), expected, "{words:?}");
+        }
     }
 }

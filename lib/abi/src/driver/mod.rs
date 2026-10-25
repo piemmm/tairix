@@ -76,6 +76,7 @@ pub mod pci;
 pub mod port_io;
 pub mod register;
 pub mod rtc;
+pub mod supply;
 pub mod thermal;
 pub mod timing;
 pub mod virtio;
@@ -858,13 +859,19 @@ impl DriverBindKey {
         }
     }
 
-    /// Encode `self` into its little-endian wire representation.
+    /// Encode `self` into its little-endian wire representation; `const`, so
+    /// a bind table can be checked against its encoding at build time.
     #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+    pub const fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u16(&mut out, 0, self.priority);
         put_u16(&mut out, 2, self.reserved0);
-        out[4..].copy_from_slice(&self.key.to_le_bytes());
+        let key = self.key.to_le_bytes();
+        let mut at = 0;
+        while at < HwMatchKey::WIRE_LEN {
+            out[4 + at] = key[at];
+            at += 1;
+        }
         out
     }
 
@@ -1246,7 +1253,7 @@ pub trait DriverHost {
     /// Returns the per-driver MMIO-map facility, if the driver host
     /// has minted one for this driver module.
     ///
-    /// Bus drivers (`drivers/bus/pcie_brcm`, `drivers/bus/mmio`) call this
+    /// Bus drivers (a PCIe root-complex driver, `drivers/bus/mmio`) call this
     /// once they have discovered a device's register block and need
     /// a [`RegisterWindow`] over it. The returned [`MmioMapper`]
     /// enforces [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP)
@@ -1308,14 +1315,13 @@ pub trait DriverHost {
     /// Returns the per-driver firmware property-mailbox channel, if the
     /// driver host has wired one for this driver module.
     ///
-    /// A bus driver whose bring-up needs the platform firmware — for example
-    /// the BCM2711 `VideoCore` reload of the VL805 USB controller's firmware —
-    /// obtains a board-neutral [`MailboxChannel`] here and marshals encoded
-    /// property messages through it. The doorbell window, the DMA-backed
-    /// property buffer, and the bus-address translation are owned by the
-    /// host; the board specifics stay behind the device's own crate
-    /// (`lib/vcmailbox`), so the generic framework above it
-    /// never names a board.
+    /// A bus driver whose bring-up needs the platform firmware — a
+    /// controller whose firmware the platform reloads before bring-up, say —
+    /// obtains a [`MailboxChannel`] here and marshals encoded property
+    /// messages through it. The doorbell window, the DMA-backed property
+    /// buffer, and the bus-address translation are owned by the host; the
+    /// platform specifics stay behind the mailbox device's own crate, so the
+    /// generic framework above it never names a board.
     ///
     /// The default implementation returns `None`, the correct shape for every
     /// platform with no firmware mailbox (QEMU `virt`, x86_64, riscv64) and
@@ -1375,8 +1381,8 @@ pub trait DriverHost {
     /// the kernel minted — the virtual interrupt line plus the doorbell
     /// `(address, data)` to program into the function's MSI capability.
     ///
-    /// A PCI bus driver wiring a function for MSI (the BCM2711 PCIe driver
-    /// arming the VL805 xHCI) calls this, programs the function's MSI
+    /// A PCI bus driver wiring a function for MSI (a root-complex driver
+    /// arming an xHCI behind it) calls this, programs the function's MSI
     /// capability with the returned doorbell (`PciBus`-side), and forwards
     /// [`MsiAllocation::resource`] on the child node it publishes through
     /// [`Self::emit_node`], so the downstream driver binds the line with
@@ -1950,7 +1956,7 @@ mod tests {
     }
 
     fn sample_bind_key() -> DriverBindKey {
-        let Ok(key) = HwMatchKey::compatible(b"brcm,bcm2711-emmc2") else {
+        let Ok(key) = HwMatchKey::compatible(b"vendor,sd-host") else {
             unreachable!("compatible string fits HW_COMPATIBLE_MAX")
         };
         DriverBindKey::new(10, key)

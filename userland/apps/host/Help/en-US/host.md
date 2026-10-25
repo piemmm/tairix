@@ -45,9 +45,8 @@ server can be reached, `host` reports a timeout on standard error.
 
 - `0` — at least one address was found (or the short help was written).
 - `1` — the name resolved to no address (a negative answer, a timeout, or a
-  resolver failure).
-- `2` — the command line was not understood, or the output could not be
-  written.
+  resolver failure). A command line that was not understood exits `1` too.
+- `2` — no DNS socket could be opened, or the output could not be written.
 
 ## ENVIRONMENT
 

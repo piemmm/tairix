@@ -36,8 +36,8 @@ Rolle, die `/` auf POSIX-Systemen spielt.
 ## EXIT STATUS
 
 - `0` — die Ergebnisse (oder die Kurzhilfe) wurden geschrieben.
-- `1` — die Ausgabe konnte nicht zugestellt werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — die Ausgabe konnte nicht zugestellt werden. Eine nicht
+  verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

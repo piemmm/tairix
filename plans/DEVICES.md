@@ -500,7 +500,7 @@ volume-policy service.
   threaded `BootInfo::with_volumes` → dispatch hook → syscall handlers
   exactly like the other late-installed seams (fail-closed
   `NULL_VOLUME_FOREST` default), and read by the single kernel
-  path-resolution entry point (`resolve_against_cwd`), so an
+  path-resolution entry point (`copy_path_in`), so an
   `id::`-rooted path resolves to the `/`-view location the published
   volume's root backs and is then authorised by the secured VFS exactly
   as the equivalent view path — never a policy bypass. A nil or

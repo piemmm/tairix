@@ -21,8 +21,8 @@ y luego `a`. La raíz desnuda de una ruta (`/` o una raíz de alias como
 
 Con `--ignore-fail-on-non-empty` un rechazo «directorio no vacío» no
 es un error: el operando (o el ascenso de `-p`) simplemente se detiene
-ahí. Ningún otro rechazo se tolera. El primer fallo real detiene la
-ejecución antes de cualquier operando posterior. `--` termina el
+ahí. Ningún otro rechazo se tolera. Un operando que no puede eliminarse
+se notifica y el siguiente se elimina de todos modos. `--` termina el
 análisis de opciones: cada argumento posterior es una ruta.
 
 ## OPTIONS
@@ -48,8 +48,8 @@ análisis de opciones: cada argumento posterior es una ruta.
 - `0` — todas las eliminaciones tuvieron éxito (un rechazo tolerado
   por `--ignore-fail-on-non-empty` no es un fallo).
 - `1` — un fallo del sistema de ficheros o de la salida; la razón se
-  imprime en la salida de error.
-- `2` — la línea de órdenes no se entendió.
+  imprime en la salida de error. Una línea de órdenes no entendida
+  también termina con `1`.
 
 ## ENVIRONMENT
 

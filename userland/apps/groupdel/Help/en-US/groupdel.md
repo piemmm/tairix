@@ -25,8 +25,7 @@ The registry is the authority on what may be removed. It refuses the deletion of
 ## EXIT STATUS
 
 - `0` — the group was deleted.
-- `1` — the registry refused or failed the deletion (for example a missing capability, an unknown group, or a group an account still references); the reason is printed on standard error.
-- `2` — the command line was not understood.
+- `1` — the registry refused or failed the deletion (for example a missing capability, an unknown group, or a group an account still references); the reason is printed on standard error. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

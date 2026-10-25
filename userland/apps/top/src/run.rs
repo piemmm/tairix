@@ -43,7 +43,6 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
 
     use core::time::Duration;
 
@@ -64,21 +63,18 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on a clean quit (or served short help), `1` on a
-    /// service or terminal failure, `2` on a usage error (a malformed
-    /// argument vector or an unrecognised option).
+    /// service or terminal failure or on a command line that was not
+    /// understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("top") else {
+            return tairix_help::MISUSE;
         };
         let delay_tenths = match parse(&arguments) {
             Ok(Command::Run { delay_tenths }) => delay_tenths,
             Ok(Command::Help) => return tairix_help::print_own_short_help("top", Some(USAGE)),
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
+            Err(err) => {
+                tairix_help::report_misuse("top", &err);
+                return tairix_help::MISUSE;
             }
         };
 
@@ -134,7 +130,7 @@ mod program {
         // the message is not torn down with the alternate screen. A silent
         // abnormal exit tells the user nothing.
         if let Err(err) = &result {
-            write_stderr_line(&alloc::format!("top: {err}"));
+            write_stderr_line(format_args!("top: {err}"));
         } else if entered.is_err() || left.is_err() {
             write_stderr_line("top: terminal error: the screen could not be switched");
         }

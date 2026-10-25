@@ -32,15 +32,12 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::{Errno, OpenFlags};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_useradd::db::{AdminChannel, Entropy, UsersAdminDb};
-    use tairix_useradd::{parse, run, USAGE};
+    use tairix_useradd::{parse, run};
 
     /// The production [`AdminChannel`]: the `users_admin` syscall. It adds
     /// no authority — the capability check and every record rule stay
@@ -73,29 +70,23 @@ mod program {
         }
     }
 
-    /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
-    /// own trailing newline), best-effort on the already-failing path.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a database, entropy, or output
-    /// failure (including a refused creation), `2` on a usage error (a
-    /// malformed argument vector, an unrecognised option, a bad id, or a
-    /// bad name).
+    /// failure (including a refused creation) or a command line that was not
+    /// understood (a malformed argument vector, an unrecognised option, a
+    /// bad id, or a bad name).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("useradd") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("useradd", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         let db = UsersAdminDb::new(&RtChannel, &RtEntropy);
@@ -104,7 +95,7 @@ mod program {
         match run(command, locale, &db, &BundleHelp::new("useradd"), &Stdout) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("useradd: {err}"));
+                write_stderr_line(format_args!("useradd: {err}"));
                 1
             }
         }

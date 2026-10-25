@@ -86,7 +86,7 @@ an HDMI driver states a floor no higher than that rate and holds its gate open
 while its block is up. Opening or closing one gate leaves every other bit of
 the register as it was, and a gate the firmware left open is never closed
 unasked. The block's HDMI resets are not served: an HDMI block is brought up by
-programming it, and Linux's reset of it through this block does nothing.
+programming it, and the HDMI driver asks for no reset.
 
 ## Raspberry Pi firmware clocks (`drivers/clock/rpi_firmware`)
 

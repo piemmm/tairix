@@ -38,8 +38,7 @@ processus a tourné en dernier (`CPU`), et le nom de la commande
 
 - `0` — la liste a été écrite.
 - `1` — le service a refusé ou échoué, ou la liste n'a pas pu être
-  délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+  délivrée. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

@@ -14,19 +14,21 @@
 //!
 //! Every wait is an event: the reply wakes the agent, the composer's endpoint
 //! being torn down cancels the call and wakes it too, and the only timed wait
-//! is the paced re-offer when no composer is listening yet. Nothing here polls
-//! the rendezvous and nothing polls the disk.
+//! is the paced re-offer when no composer is listening yet. The rendezvous's
+//! replies are observed only while a membership is outstanding, so the paced
+//! wait is the timer's alone. Nothing here polls the rendezvous and nothing
+//! polls the disk.
 
 use tairix_abi::hwtree::HwResourceKind;
 use tairix_abi::raid_ipc::{MemberOffer, MembershipEnd, RAID_REGISTRY_ENDPOINT};
 use tairix_abi::reply::STATUS_REPLY_LEN;
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::Errno;
 use tairix_drv_storage_raid_member::{AgentStep, MemberAgent, Transport};
 use tairix_drvrt::exit::{end, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
-use tairix_rt::LogSink;
+use tairix_rt::{LogSink, WaitSet};
 use tairix_util::fmt::format_hex_u64;
 
 /// Diagnostic event id: the device was offered to the composer and the
@@ -77,53 +79,6 @@ fn resolve_transport<S: tairix_drvrt::GrantSyscalls>(host: &RtDriverHost<S>) -> 
     Some(Transport { endpoint, window })
 }
 
-/// The agent's wait-set, holding the one `CallReply` member it parks on.
-///
-/// The member can only be added once the rendezvous exists, so it is added
-/// lazily after the first offer the composer actually accepted; before that
-/// there is nothing to observe and the set simply times the paced re-offer.
-struct Waits {
-    set: u64,
-    observing: bool,
-}
-
-impl Waits {
-    /// Mint the wait-set. The kernel reclaims it when this process exits.
-    fn create() -> Result<Self, Errno> {
-        let raw = tairix_rt::waitset_create();
-        let Ok(set) = u64::try_from(raw) else {
-            return Err(Errno::from_syscall(raw));
-        };
-        Ok(Self {
-            set,
-            observing: false,
-        })
-    }
-
-    /// Observe the rendezvous's replies, once. Adding the member needs the
-    /// send authority the post already exercised, so this follows a delivered
-    /// offer rather than preceding it.
-    fn observe_replies(&mut self) {
-        if self.observing {
-            return;
-        }
-        let ctl = tairix_rt::waitset_ctl(
-            self.set,
-            WaitSetOp::Add,
-            WaitSourceKind::CallReply,
-            RAID_REGISTRY_ENDPOINT,
-            0,
-        );
-        self.observing = ctl >= 0;
-    }
-
-    /// Park until `timeout_ns` from now, or until a member becomes ready.
-    fn park(&self, timeout_ns: u64) {
-        let mut token = 0u64;
-        let _ = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
-    }
-}
-
 /// Delegate the device's transport to the rendezvous and post one offer,
 /// returning the membership ticket.
 ///
@@ -149,18 +104,25 @@ fn offer(transport: &Transport, node: u32) -> Result<u64, Errno> {
         .map_err(Errno::from_syscall)
 }
 
-/// Claim the membership's outcome, parking until it is known.
-fn await_end(waits: &Waits, ticket: u64) -> MembershipEnd {
+/// Claim the membership's outcome, parking until it is known on a set that
+/// observes the rendezvous's replies for this membership alone: kept past it,
+/// a member whose endpoint ended would stay ready and wake every later park.
+fn await_end(ticket: u64) -> MembershipEnd {
+    let watched = WaitSet::create().and_then(|set| {
+        set.add(WaitSourceKind::CallReply, RAID_REGISTRY_ENDPOINT, 0)?;
+        Ok(set)
+    });
+    let Ok(set) = watched else {
+        // A membership whose end could never be heard is withdrawn.
+        let _ = tairix_rt::call_cancel(RAID_REGISTRY_ENDPOINT, ticket);
+        return MembershipEnd::ComposerGone;
+    };
     let mut reply = [0u8; STATUS_REPLY_LEN];
-    loop {
-        match tairix_rt::call_reap(RAID_REGISTRY_ENDPOINT, ticket, &mut reply) {
-            Ok(len) => return MembershipEnd::from_reply(Some(&reply[..len.min(reply.len())])),
-            Err(neg) if Errno::from_syscall(neg) == Errno::WouldBlock => waits.park(u64::MAX),
-            // Anything else retires the ticket: the endpoint was torn down
-            // (the composer went away), or the reply could not be claimed.
-            // Either way this membership is over and the agent re-offers.
-            Err(_) => return MembershipEnd::ComposerGone,
-        }
+    match tairix_rt::call_await(set.handle(), RAID_REGISTRY_ENDPOINT, ticket, &mut reply) {
+        Ok(len) => MembershipEnd::from_reply(Some(&reply[..len])),
+        // Anything else retires the ticket: the composer went away, or the
+        // reply could not be claimed, and the agent re-offers.
+        Err(_) => MembershipEnd::ComposerGone,
     }
 }
 
@@ -174,9 +136,6 @@ fn main() -> i32 {
     };
     let Some(transport) = resolve_transport(&host) else {
         return end(DriverExit::NoResources, &[]);
-    };
-    let Ok(mut waits) = Waits::create() else {
-        return end(DriverExit::NoService, &[]);
     };
     // The agent's own node, so the composer can name this member in its audit
     // trail. Kernel-resolved from the calling task, never claimed; a node the
@@ -194,7 +153,6 @@ fn main() -> i32 {
                 Ok(minted) => {
                     ticket = Some(minted);
                     agent.note_offered(true, now);
-                    waits.observe_replies();
                     log_hex_event(
                         RAID_MEMBER_OFFERED,
                         Level::Info,
@@ -219,13 +177,13 @@ fn main() -> i32 {
                 // as far as this agent can tell; re-offering is the only way
                 // back and is what `ComposerGone` asks for.
                 let end = match ticket.take() {
-                    Some(held) => await_end(&waits, held),
+                    Some(held) => await_end(held),
                     None => MembershipEnd::ComposerGone,
                 };
                 agent.note_end(end, tairix_rt::clock_get());
                 log_membership_end(end, transport.endpoint);
             }
-            AgentStep::Retry { deadline_ns } => waits.park(deadline_ns.saturating_sub(now)),
+            AgentStep::Retry { deadline_ns } => tairix_rt::park_ns(deadline_ns.saturating_sub(now)),
             // The composer read this device and will not compose it. Exiting
             // is the honest end: the verdict came from the device's own
             // metadata, and `devmgr` will start a fresh agent if the device —

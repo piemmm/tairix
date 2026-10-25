@@ -1631,3 +1631,82 @@ fn a_held_bar_arrow_repeats_and_ends_wherever_it_is_let_go() {
     });
     assert_eq!(harness.view.scroll_repeat_deadline(due), None, "let go");
 }
+
+/// A byte put into the hex view moves every byte after it, so every row below
+/// repaints, though no line feed came or went.
+#[test]
+fn a_byte_put_into_the_hex_view_repaints_every_row_after_it() {
+    let mut bytes = alloc::vec![0u8; 4096];
+    for at in (15..bytes.len()).step_by(16) {
+        bytes[at] = b'\n';
+    }
+    let mut harness = Harness::new(&bytes, Format::PlainText);
+    assert_eq!(harness.view.editor().mode(), Mode::Hex);
+    harness.press(Key::Named(NamedKey::Insert));
+    let (_, damage) = harness.key(Key::Char('a'), Modifiers::default());
+    assert_eq!(
+        harness.view.editor().document().len(),
+        4097,
+        "a byte went in"
+    );
+    let last = harness.layout.rows() - 1;
+    assert!(
+        touches(&damage, harness.layout.row_rect(last)),
+        "row {last} shows moved bytes"
+    );
+}
+
+/// A line growing past a row's width takes a second row, moving every row
+/// below it, though no line feed came or went.
+#[test]
+fn a_line_taking_another_row_repaints_every_row_below_it() {
+    let mut text = alloc::vec![b'a'; MAX_ROW_BYTES];
+    text.extend_from_slice(b"\nnext\nlast\n");
+    let mut harness = Harness::new(&text, Format::PlainText);
+    harness.click(0, 0);
+    let (_, damage) = harness.key(Key::Char('b'), Modifiers::default());
+    for row in 0..4 {
+        assert!(touches(&damage, harness.layout.row_rect(row)), "row {row}");
+    }
+}
+
+/// Dragging a selection past the grid scrolls the view, so every row
+/// repaints, not only the selection's.
+#[test]
+fn a_drag_that_scrolls_the_view_repaints_the_rows_it_moved() {
+    let mut text = Vec::new();
+    for line in 0..500 {
+        text.extend_from_slice(alloc::format!("line {line}\n").as_bytes());
+    }
+    let mut harness = Harness::new(&text, Format::PlainText);
+    let grid = harness.layout.grid();
+    harness.pointer(InputEvent::PointerMoved { to: grid.center() });
+    harness.pointer(InputEvent::PointerScrolled { dx: 0, dy: 1200 });
+    let top = harness.view.scroll().0.line;
+    assert!(top > 0, "the wheel moved the view");
+    let cell_h = i32::try_from(harness.layout.cell().1).expect("small");
+    let x = grid.left() + 4;
+    harness.pointer(InputEvent::PointerMoved {
+        to: Point::new(x, grid.top() + 3 * cell_h + 1),
+    });
+    harness.pointer(InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    });
+    let mut damage = Region::new();
+    harness.view.on_pointer(
+        &InputEvent::PointerMoved {
+            to: Point::new(x, grid.top() - 4),
+        },
+        harness.now,
+        &harness.layout,
+        Scale::ONE,
+        harness.registry.active(),
+        &mut damage,
+    );
+    assert_eq!(harness.view.scroll().0.line, top - 1, "a row scrolled in");
+    let last = harness.layout.rows() - 1;
+    assert!(
+        touches(&damage, harness.layout.row_rect(last)),
+        "row {last} moved"
+    );
+}

@@ -64,6 +64,5 @@ republish this device's transport and nothing else.
   hostile or corrupt medium can never be mutated by probing it.
 
 Host tests cover the blkio client, the probe plan, and the naming policy
-over scripted devices and synthetic disk images; the live path is Pi 4
-metal acceptance (QEMU models no Pi USB), following the `usb_msd`
-precedent.
+over scripted devices and synthetic disk images; the live path is metal
+acceptance, following the `usb_msd` precedent.

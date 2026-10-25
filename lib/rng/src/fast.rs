@@ -4,8 +4,9 @@
 //! This is the generator to reach for whenever output should be
 //! unpredictable but is not long-lived key material: the task-id draw, a
 //! network payload, the kernel's userland-facing output reserve. It is
-//! Bernstein's fast-key-erasure construction — the same shape as OpenBSD's
-//! `arc4random` and Linux's `get_random_u64` — over `lib/crypto`'s audited
+//! Bernstein's fast-key-erasure construction ("Fast-key-erasure
+//! random-number generators", 2017), the shape of OpenBSD's `arc4random`,
+//! over `lib/crypto`'s audited
 //! `ChaCha12`, so no cryptographic primitive is written here.
 //!
 //! # The construction

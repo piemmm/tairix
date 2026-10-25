@@ -1,73 +1,161 @@
-//! Resolving a value-taking option's value from a command line.
+//! Word arguments: an option's value named by one of a set of words
+//! (`--total=auto`), resolved and refused as GNU resolves them.
 //!
-//! Every GNU-shaped command app accepts an option's value attached
-//! (`-u0`, `--uid=0`) or as the following argument (`-u 0`, `--uid 0`).
-//! The rule is one line of logic and identical in each tool, so it is
-//! defined here and imported rather than copied into each parser — a
-//! private copy per tool is how two of them end up disagreeing about
-//! whether `--uid` at the end of a line is a usage error.
-//!
-//! The caller owns its own error type, so the resolver reports the
-//! *absence* and lets the parser name it.
+//! A word is a choice spelled exactly or the only one it prefixes: the one
+//! prefix rule, which the [`getopt`](crate::getopt) scanner reads an
+//! abbreviated long option by too.
 
-/// The value of a value-taking option: the attached `inline` text when the
-/// argument carried one, otherwise the following argument.
-///
-/// `index` is the parser's cursor, already advanced past the option
-/// itself; taking the following argument advances it again. `None` is an
-/// option at the end of the line with no value, which every caller reports
-/// as its own usage error.
-#[must_use]
-pub fn option_value<'a>(
-    inline: Option<&'a str>,
-    args: &[&'a str],
-    index: &mut usize,
-) -> Option<&'a str> {
-    if inline.is_some() {
-        return inline;
+use crate::quote::quote;
+
+/// Why a word argument (`--total=auto`) named no one choice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WordMiss {
+    /// It is a prefix of more than one choice, the empty word included.
+    Ambiguous,
+    /// It is no choice and no prefix of one.
+    Unknown,
+}
+
+/// The one candidate `prefixed` holds, or the one they all are by `same`: the
+/// rule GNU reads a prefix by, for a word argument and an abbreviated long
+/// option alike, so a prefix two synonyms share is either.
+pub(crate) fn resolve<C>(
+    mut prefixed: impl Iterator<Item = C>,
+    same: impl Fn(&C, &C) -> bool,
+) -> Result<C, WordMiss> {
+    let Some(first) = prefixed.next() else {
+        return Err(WordMiss::Unknown);
+    };
+    if prefixed.all(|other| same(&first, &other)) {
+        Ok(first)
+    } else {
+        Err(WordMiss::Ambiguous)
     }
-    let value = args.get(*index).copied()?;
-    *index += 1;
-    Some(value)
+}
+
+/// The choice `word` names among `choices`: one spelled exactly so, or else
+/// the only one it is a prefix of, as GNU resolves a word argument (`au`
+/// names `auto` among `auto` and `always`; `a` names neither).
+///
+/// # Errors
+///
+/// [`WordMiss`] when `word` names none or several.
+pub fn choose<T: Copy + PartialEq>(choices: &[(&str, T)], word: &str) -> Result<T, WordMiss> {
+    if let Some(&(_, exact)) = choices.iter().find(|(name, _)| *name == word) {
+        return Ok(exact);
+    }
+    resolve(
+        choices
+            .iter()
+            .filter(|(name, _)| name.starts_with(word))
+            .map(|&(_, choice)| choice),
+        |a, b| a == b,
+    )
+}
+
+/// GNU's refusal of a word argument: `invalid argument 'x' for '--total'` or
+/// `ambiguous argument 'a' for '--total'`, then `Valid arguments are:` with
+/// each choice on a line of its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BadWord<'a, T> {
+    /// How the word failed.
+    pub miss: WordMiss,
+    /// The word given.
+    pub word: &'a str,
+    /// The option it was given to, spelled `--name`.
+    pub option: &'a str,
+    /// Every choice by its word, in the order the tool lists them — the
+    /// table [`choose`] read.
+    pub choices: &'a [(&'a str, T)],
+}
+
+impl<T> core::fmt::Display for BadWord<'_, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let miss = match self.miss {
+            WordMiss::Ambiguous => "ambiguous",
+            WordMiss::Unknown => "invalid",
+        };
+        write!(
+            f,
+            "{miss} argument {} for {}\nValid arguments are:",
+            quote(self.word),
+            quote(self.option)
+        )?;
+        for (choice, _) in self.choices {
+            write!(f, "\n  - {}", quote(choice))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::option_value;
+    use super::{choose, BadWord, WordMiss};
+    use alloc::string::ToString;
 
     #[test]
-    fn an_attached_value_wins_and_leaves_the_cursor_alone() {
-        let args = ["--uid=7", "operand"];
-        let mut index = 1;
-        assert_eq!(option_value(Some("7"), &args, &mut index), Some("7"));
-        assert_eq!(index, 1);
+    fn a_word_names_the_choice_it_spells_or_alone_prefixes() {
+        const MODES: [(&str, u8); 4] = [
+            ("warn", 1),
+            ("warn-nopipe", 2),
+            ("exit", 3),
+            ("exit-nopipe", 4),
+        ];
+        assert_eq!(
+            choose(&MODES, "warn"),
+            Ok(1),
+            "exact, though it prefixes another"
+        );
+        assert_eq!(choose(&MODES, "warn-"), Ok(2));
+        assert_eq!(choose(&MODES, "exit-n"), Ok(4));
+        assert_eq!(choose(&MODES, "w"), Err(WordMiss::Ambiguous));
+        assert_eq!(choose(&MODES, "e"), Err(WordMiss::Ambiguous));
+        assert_eq!(choose(&MODES, ""), Err(WordMiss::Ambiguous));
+        assert_eq!(choose(&MODES, "bogus"), Err(WordMiss::Unknown));
+        assert_eq!(choose(&MODES, "warnings"), Err(WordMiss::Unknown));
+        assert_eq!(
+            choose(&[("only", 7)], ""),
+            Ok(7),
+            "the empty word prefixes the one choice"
+        );
     }
 
     #[test]
-    fn a_detached_value_is_taken_from_the_line_and_consumed() {
-        let args = ["-u", "7", "operand"];
-        let mut index = 1;
-        assert_eq!(option_value(None, &args, &mut index), Some("7"));
-        assert_eq!(index, 2);
-        // The operand that follows is still the parser's to read.
-        assert_eq!(args.get(index).copied(), Some("operand"));
+    fn a_word_two_synonyms_share_is_either() {
+        assert_eq!(
+            choose(&[("always", 1), ("ever", 1), ("never", 2)], "a"),
+            Ok(1)
+        );
+        assert_eq!(
+            choose(&[("always", 1), ("ever", 1), ("never", 2)], "e"),
+            Ok(1),
+            "`ever` alone, as `never` does not begin with it"
+        );
+        assert_eq!(
+            choose(&[("north", 1), ("nowhere", 2)], "no"),
+            Err(WordMiss::Ambiguous)
+        );
     }
 
     #[test]
-    fn an_option_at_the_end_of_the_line_has_no_value() {
-        let args = ["-u"];
-        let mut index = 1;
-        assert_eq!(option_value(None, &args, &mut index), None);
-        assert_eq!(index, 1);
-    }
-
-    #[test]
-    fn an_attached_empty_value_is_a_value() {
-        // `--comment=` clears the comment; it is not a missing value, and
-        // must not silently swallow the next argument.
-        let args = ["--comment=", "operand"];
-        let mut index = 1;
-        assert_eq!(option_value(Some(""), &args, &mut index), Some(""));
-        assert_eq!(index, 1);
+    fn a_refused_word_is_reported_with_the_valid_ones() {
+        let bad = BadWord {
+            miss: WordMiss::Ambiguous,
+            word: "a",
+            option: "--total",
+            choices: &[("auto", ()), ("always", ())],
+        };
+        assert_eq!(
+            bad.to_string(),
+            "ambiguous argument 'a' for '--total'\nValid arguments are:\n  - 'auto'\n  - 'always'"
+        );
+        let bad = BadWord {
+            miss: WordMiss::Unknown,
+            word: "x",
+            ..bad
+        };
+        assert!(bad
+            .to_string()
+            .starts_with("invalid argument 'x' for '--total'\n"));
     }
 }

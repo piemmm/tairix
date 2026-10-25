@@ -1,13 +1,15 @@
-//! Absolute-path parsing and the top-level layout names.
+//! Path spellings and the top-level layout names.
 //!
-//! A [`Path`] is an *absolute*, already-normalised sequence of name
-//! components. Parsing rejects relative paths, empty components, and the
-//! `.`/`..` traversal tokens outright: the VFS never resolves a path that
-//! could escape the tree, so there is no traversal logic to get wrong.
+//! A [`Path`] is an *absolute*, normalised sequence of names: a mount point,
+//! a boot-layout node, or what a one-driver reader asks for. A caller's own
+//! spelling instead becomes steps (`parse_caller_path`) with every `..`
+//! kept for the walk to apply to the directory it reaches, and a link's
+//! stored target its own looser steps ([`parse_link_target`]).
 //!
 //! The top-level names are [`tairix_abi::ROOT_VIEW`]: data, not control
 //! flow.
 
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -93,7 +95,11 @@ impl Path {
             if components.len() == MAX_PATH_COMPONENTS {
                 return Err(VfsError::InvalidPath);
             }
-            components.push(raw.to_string());
+            let name = owned_name(raw)?;
+            components
+                .try_reserve(1)
+                .map_err(|_| VfsError::OutOfMemory)?;
+            components.push(name);
         }
         Ok(Self { components })
     }
@@ -102,6 +108,28 @@ impl Path {
     #[must_use]
     pub fn components(&self) -> &[String] {
         &self.components
+    }
+
+    /// The path's components, root-first, owned.
+    #[must_use]
+    pub fn into_components(self) -> Vec<String> {
+        self.components
+    }
+
+    /// A copy of the path's components, root-first.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when they cannot be held.
+    pub fn owned_components(&self) -> Result<Vec<String>, VfsError> {
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(self.components.len())
+            .map_err(|_| VfsError::OutOfMemory)?;
+        for name in &self.components {
+            owned.push(owned_name(name)?);
+        }
+        Ok(owned)
     }
 
     /// `true` if this is the root path (`/`).
@@ -183,33 +211,109 @@ fn validate_name(name: &str) -> Result<(), VfsError> {
     Ok(())
 }
 
-/// One step of a symbolic link's target.
+/// One step of a path: a caller's or a symbolic link's target's.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetStep {
     /// Descend into the named child.
     Name(String),
-    /// Ascend to the parent. Resolution clamps this at the filesystem root,
-    /// so no chain of them can escape the tree.
+    /// Ascend from the directory the walk stands in.
     Up,
+}
+
+/// One step of a resolution and who supplied it: a caller's `..` may leave
+/// a projection, a link's never does.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Step {
+    /// The step.
+    pub(crate) kind: TargetStep,
+    /// Whether a symbolic link's stored target supplied it.
+    pub(crate) from_link: bool,
+}
+
+/// A caller's path as the walk takes it: whether it starts at the view root,
+/// and its steps, each the caller's own.
+pub(crate) struct CallerPath {
+    /// Whether the path starts at the view root rather than where the caller
+    /// stands.
+    pub(crate) absolute: bool,
+    /// The steps, in order.
+    pub(crate) steps: VecDeque<Step>,
+}
+
+/// Parse a caller's `/`-view or relative path through the one shared
+/// grammar: `.` dropped, `..` kept for the walk to apply to the directory it
+/// reaches rather than to the text before it.
+///
+/// # Errors
+///
+/// [`VfsError::InvalidPath`] for a spelling the grammar refuses, for more
+/// than [`MAX_PATH_COMPONENTS`] steps, or for an alias or `id::` spelling,
+/// which the syscall layer turns into the view location it names before a
+/// path reaches the VFS; [`VfsError::OutOfMemory`] when the steps cannot be
+/// held.
+pub(crate) fn parse_caller_path(text: &str) -> Result<CallerPath, VfsError> {
+    let (root, spelled) = tairix_path::steps(text).map_err(|_| VfsError::InvalidPath)?;
+    let absolute = match root {
+        tairix_path::Root::View => true,
+        tairix_path::Root::Relative => false,
+        tairix_path::Root::Alias(_) | tairix_path::Root::VolumeId(_) => {
+            return Err(VfsError::InvalidPath)
+        }
+    };
+    let mut steps = VecDeque::new();
+    for step in spelled {
+        if steps.len() == MAX_PATH_COMPONENTS {
+            return Err(VfsError::InvalidPath);
+        }
+        let kind = match step.map_err(|_| VfsError::InvalidPath)? {
+            tairix_path::Step::Up => TargetStep::Up,
+            tairix_path::Step::Name(name) => TargetStep::Name(owned_name(name)?),
+        };
+        steps.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
+        steps.push_back(Step {
+            kind,
+            from_link: false,
+        });
+    }
+    Ok(CallerPath { absolute, steps })
+}
+
+/// `name`, owned.
+///
+/// # Errors
+///
+/// [`VfsError::OutOfMemory`] when it cannot be held.
+pub(crate) fn owned_name(name: &str) -> Result<String, VfsError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(name.len())
+        .map_err(|_| VfsError::OutOfMemory)?;
+    owned.push_str(name);
+    Ok(owned)
 }
 
 /// Spell a normalised `/`-view path from its components: `/` for the root,
 /// otherwise the `/`-joined component names.
 ///
-/// The inverse of [`Path::parse`], and the one spelling both the
-/// cwd-relative resolver and the canonicalising walk answer with — so a
-/// path the kernel *reports* is spelled exactly as a path it *accepts*.
-#[must_use]
-pub fn spell(components: &[String]) -> String {
+/// The inverse of [`Path::parse`], and the one spelling every path the
+/// kernel reports takes, so it is spelled exactly as a path it accepts.
+///
+/// # Errors
+///
+/// [`VfsError::OutOfMemory`] when the spelling cannot be held.
+pub fn spell(components: &[String]) -> Result<String, VfsError> {
+    let len = components.iter().map(|c| c.len() + 1).sum::<usize>();
+    let mut out = String::new();
+    out.try_reserve_exact(len.max(1))
+        .map_err(|_| VfsError::OutOfMemory)?;
     if components.is_empty() {
-        return String::from("/");
+        out.push('/');
     }
-    let mut out = String::with_capacity(components.iter().map(|c| c.len() + 1).sum());
     for component in components {
         out.push('/');
         out.push_str(component);
     }
-    out
+    Ok(out)
 }
 
 /// A parsed symbolic-link target.
@@ -233,16 +337,17 @@ pub struct LinkTarget {
 }
 
 impl LinkTarget {
-    /// Whether the target restarts from the filesystem root.
+    /// Whether the target restarts from the floor of the link's own
+    /// projection.
     #[must_use]
     pub fn is_absolute(&self) -> bool {
         self.absolute
     }
 
-    /// The target's steps, in order.
+    /// The target's steps, in order, owned.
     #[must_use]
-    pub fn steps(&self) -> &[TargetStep] {
-        &self.steps
+    pub fn into_steps(self) -> Vec<TargetStep> {
+        self.steps
     }
 }
 
@@ -356,8 +461,8 @@ mod tests {
         let t = parse_link_target("a/./b/../c").expect("legal target");
         assert!(!t.is_absolute());
         assert_eq!(
-            t.steps(),
-            &[
+            t.into_steps(),
+            [
                 TargetStep::Name("a".into()),
                 TargetStep::Name("b".into()),
                 TargetStep::Up,
@@ -372,7 +477,7 @@ mod tests {
         assert!(!parse_link_target("System/x").expect("legal").is_absolute());
         // `/` alone is the root and is legal; a bare relative nothing is not.
         let root = parse_link_target("/").expect("root is a legal target");
-        assert!(root.is_absolute() && root.steps().is_empty());
+        assert!(root.is_absolute() && root.into_steps().is_empty());
         assert_eq!(parse_link_target(""), Err(VfsError::InvalidPath));
         assert_eq!(parse_link_target("."), Err(VfsError::InvalidPath));
     }
@@ -399,6 +504,47 @@ mod tests {
         assert_eq!(Path::parse("/a/../b"), Err(VfsError::InvalidPath));
         assert_eq!(Path::parse("/a/./b"), Err(VfsError::InvalidPath));
         assert_eq!(Path::parse("a/b"), Err(VfsError::InvalidPath));
+    }
+
+    #[test]
+    fn a_callers_path_keeps_each_dot_dot_as_a_step() {
+        let path = parse_caller_path("/a/./b/../c").expect("parses");
+        assert!(path.absolute);
+        let steps: Vec<_> = path
+            .steps
+            .iter()
+            .map(|step| (step.kind.clone(), step.from_link))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                (TargetStep::Name("a".into()), false),
+                (TargetStep::Name("b".into()), false),
+                (TargetStep::Up, false),
+                (TargetStep::Name("c".into()), false),
+            ]
+        );
+        assert!(!parse_caller_path("../x").expect("relative").absolute);
+        assert!(parse_caller_path(".").expect("here").steps.is_empty());
+        for refused in [
+            "System:/x",
+            "alias::System/x",
+            "id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/x",
+            "a//b",
+            "",
+            "a/b:c",
+        ] {
+            assert_eq!(
+                parse_caller_path(refused).map(|_| ()),
+                Err(VfsError::InvalidPath),
+                "{refused}"
+            );
+        }
+        let deep = "a/".repeat(MAX_PATH_COMPONENTS + 1);
+        assert_eq!(
+            parse_caller_path(&deep).map(|_| ()),
+            Err(VfsError::InvalidPath)
+        );
     }
 
     #[test]

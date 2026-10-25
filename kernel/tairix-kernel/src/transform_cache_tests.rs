@@ -12,7 +12,7 @@ use alloc::vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_reclaim::{FreeMemorySource, PressureBand};
@@ -516,15 +516,20 @@ fn compressible_cluster(len: usize) -> alloc::vec::Vec<u8> {
 fn the_production_cache_serves_and_invalidates_inside_a_real_volume() {
     let (source, _pressure, counts, mut fs) = cached_volume();
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let node = fs
+        .create(
+            root,
+            b"c",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     // A compression cluster on a 512-byte-block volume is 16 blocks of
     // content capacity (strictly under 8 KiB), so 16 KiB of compressible
     // text is guaranteed to cover at least one whole aligned cluster.
     let generous = compressible_cluster(16 * 1024);
-    assert_eq!(fs.write_at(root, b"c", 0, &generous), Ok(generous.len()));
+    assert_eq!(fs.write_at(node, 0, &generous), Ok(generous.len()));
 
-    let node = fs.lookup(root, b"c").expect("lookup");
     let mut out = vec![0u8; generous.len()];
     // First pass populates; second pass must be served from the cache.
     for _ in 0..2 {
@@ -551,7 +556,7 @@ fn the_production_cache_serves_and_invalidates_inside_a_real_volume() {
     for byte in &mut second {
         *byte = byte.wrapping_add(1);
     }
-    assert_eq!(fs.write_at(root, b"c", 0, &second), Ok(second.len()));
+    assert_eq!(fs.write_at(node, 0, &second), Ok(second.len()));
     assert!(
         counts.invalidations_or_purges.load(Ordering::Relaxed) > 0,
         "the mutation reached the cache"
@@ -587,10 +592,16 @@ fn both_cache_layers_share_one_gauge_and_drain_before_the_ramzip_handoff() {
     // transform cache, both governed by the one boot gauge.
     let (source, pressure, counts, mut fs) = cached_volume();
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            b"c",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     let generous = compressible_cluster(16 * 1024);
-    assert_eq!(fs.write_at(root, b"c", 0, &generous), Ok(generous.len()));
+    assert_eq!(fs.write_at(file, 0, &generous), Ok(generous.len()));
 
     let mut cached = tairix_kernel_core::CachedFs::new(
         fs,
@@ -695,14 +706,16 @@ fn mounts_sharing_a_cache_decompress_a_cluster_once() {
     )
     .expect("format");
     let root = writer.root();
-    writer
-        .create(root, b"bundle", NodeKind::RegularFile)
+    let bundle = writer
+        .create(
+            root,
+            b"bundle",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     let payload = compressible_cluster(16 * 1024);
-    assert_eq!(
-        writer.write_at(root, b"bundle", 0, &payload),
-        Ok(payload.len())
-    );
+    assert_eq!(writer.write_at(bundle, 0, &payload), Ok(payload.len()));
     let device = writer.into_block().expect("committed");
     let twin = VecBlock {
         store: device.store.clone(),

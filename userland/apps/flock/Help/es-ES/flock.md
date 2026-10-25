@@ -67,8 +67,8 @@ ejecutarlo sin el bloqueo que pedía.
   no se ejecutó.
 - `1` — el bloqueo no pudo tomarse por una razón que esperar no arreglaría,
   o la orden no pudo ejecutarse; la razón se imprime en la salida de error.
-- `2` — no se entendió la línea de órdenes; no se bloqueó ni se ejecutó
-  nada.
+  Una línea de órdenes no entendida también termina con `1`, sin bloquear
+  ni ejecutar nada.
 - `126` — la orden se encontró pero no pudo ejecutarse.
 - `127` — la orden no se encontró.
 

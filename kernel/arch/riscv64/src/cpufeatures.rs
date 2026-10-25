@@ -11,8 +11,8 @@
 //! there. The `misa` CSR reports the same base/single-letter set, but it
 //! is a **Machine-mode** CSR (address `0x301`): a `csrr misa` executed in
 //! S-mode raises an illegal-instruction exception, so this port never
-//! reads it (this is exactly how Linux discovers riscv extensions —
-//! from the device tree, not `misa`). The handle carries the set parsed
+//! reads it (the extensions come from the device tree's `riscv,isa`, as
+//! OpenSBI reads them, not from `misa`). The handle carries the set parsed
 //! from the ISA string the platform-discovery pass reads via
 //! [`tairix_fdt`].
 //!
@@ -69,8 +69,7 @@ pub fn features_from_isa_string(isa: &str) -> CpuFeatureSet {
 /// Carries the extension set parsed from the device-tree `riscv,isa`
 /// string — the only place a kernel running in S-mode can read them (the
 /// `misa` CSR is Machine-mode-only, so `csrr misa` would raise an illegal
-/// instruction at S-mode; this is exactly how Linux discovers riscv
-/// extensions). A default-constructed handle carries no extensions — the
+/// instruction at S-mode). A default-constructed handle carries no extensions — the
 /// honest state before the device tree is read.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CpuFeatureDetect {

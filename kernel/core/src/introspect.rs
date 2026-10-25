@@ -1,5 +1,5 @@
 //! The kernel-held introspection source the `sysinfo_introspect` syscall
-//! serves (`PREREQUISITES.md` P-C).
+//! serves.
 //!
 //! The live data — the process table, kernel memory accounting, the mount
 //! table, machine identity, uptime, and any task's resource limits — lives

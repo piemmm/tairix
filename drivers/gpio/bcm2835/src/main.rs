@@ -1,11 +1,10 @@
 //! The `Run` binary of the BCM2835-family GPIO controller driver, autoloaded
 //! into user space by `devmgr` for a discovered controller node.
 //!
-//! It learns the layout from the bind key its node matched, maps the window,
-//! quiesces every line, binds the bank interrupts and the node's interrupt
-//! endpoint, and — where the board leads lines to a header — binds the header
-//! endpoint and publishes its channel node, then serves them all from one
-//! loop. On the host it is an inert stub.
+//! It maps the window, quiesces every line, binds the bank interrupts and the
+//! node's interrupt endpoint, and — where the board leads lines to a header —
+//! binds the header endpoint and publishes its channel node, then serves them
+//! all from one loop. On the host it is an inert stub.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -22,12 +21,13 @@ mod program {
     use tairix_abi::hwlink::LinkRole;
     use tairix_abi::hwtree::HwResourceKind;
     use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwProperty, ProcId, PROC_ID_HEX_LEN};
-    use tairix_drv_gpio_bcm2835::block::{Block, WINDOW_LEN};
+    use tairix_drv_gpio_bcm2835::block::{Block, LINES, WINDOW_LEN};
     use tairix_drv_gpio_bcm2835::controller::{
-        Controller, HeaderPort, Record, Role, BANK_INTERRUPTS, HEADER_CALLS_PER_WAKE, LINES_MAX,
+        Controller, HeaderPort, Record, BANK_INTERRUPTS, HEADER_CALLS_PER_WAKE,
     };
-    use tairix_drv_gpio_bcm2835::{BIND_KEYS, LAYOUTS, REQUIRED_CAPABILITIES};
+    use tairix_drv_gpio_bcm2835::REQUIRED_CAPABILITIES;
     use tairix_drvrt::exit::{end, step, DriverExit};
+    use tairix_drvrt::irqline::LineRecord;
     use tairix_drvrt::serve::{
         instance_field, log_event, publish_channel, DeviceChannel, DutyNode, Endpoint, Service,
     };
@@ -42,16 +42,6 @@ mod program {
     const EVENT_UNANSWERED: EventId = EventId(24_935);
 
     fn main() -> i32 {
-        let layout = tairix_rt::hw_self_node().ok().and_then(|record| {
-            tairix_devmatch::matched_bind_key(record.match_keys(), BIND_KEYS)
-                .and_then(|matched| LAYOUTS.get(matched).copied())
-        });
-        let Some(layout) = layout else {
-            return end(
-                DriverExit::NoResources,
-                &[step("gpio: the node matches no layout")],
-            );
-        };
         let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
         let node = match DutyNode::open(caps, LinkRole::InterruptLine) {
             Ok(node) => node,
@@ -86,7 +76,7 @@ mod program {
         };
         let endpoint = node.duty().endpoint();
         let Ok(mut controller) = Controller::new(
-            Block::new(&regs, layout),
+            Block::new(&regs),
             RtSupplier::new(endpoint),
             endpoint,
             banks,
@@ -106,7 +96,7 @@ mod program {
                 id: endpoint,
                 request: &mut request,
                 max_reply: IRQLINE_MAX_REPLY,
-                capacity: LINES_MAX,
+                capacity: usize::from(LINES),
             },
             &wakes[..banks + usize::from(header_id.is_some())],
         );
@@ -226,22 +216,26 @@ mod program {
                 value: FieldValue::UnsignedInt(u64::from(line)),
             };
             match record {
-                Record::Claimed { line, holder, role } => log_event(
+                Record::Interrupt(LineRecord::Claimed { line, holder }) => log_event(
                     Level::Info,
                     EVENT_CLAIMED,
-                    match role {
-                        Role::Interrupt => "gpio: line claimed as an interrupt",
-                        Role::Output => "gpio: header line claimed as an output",
-                    },
+                    "gpio: line claimed as an interrupt",
                     &[line_field(line), instance_field("holder", holder, &mut hex)],
                 ),
-                Record::Reclaimed { line, from } => log_event(
+                Record::Claimed { line, holder } => log_event(
+                    Level::Info,
+                    EVENT_CLAIMED,
+                    "gpio: header line claimed as an output",
+                    &[line_field(line), instance_field("holder", holder, &mut hex)],
+                ),
+                Record::Interrupt(LineRecord::Reclaimed { line, from }) => log_event(
                     Level::Warn,
                     EVENT_RECLAIMED,
                     "gpio: line reclaimed from an ended consumer",
                     &[line_field(line), instance_field("from", from, &mut hex)],
                 ),
-                Record::Refused { caller, reason } => {
+                Record::Interrupt(LineRecord::Refused { caller, reason })
+                | Record::Refused { caller, reason } => {
                     let reason = Field {
                         key: "reason",
                         value: FieldValue::Error(reason),
@@ -261,13 +255,15 @@ mod program {
                         ),
                     }
                 }
-                Record::Released { line } => log_event(
-                    Level::Info,
-                    EVENT_RELEASED,
-                    "gpio: line given back",
-                    &[line_field(line)],
-                ),
-                Record::Unanswered { line } => log_event(
+                Record::Interrupt(LineRecord::Released { line }) | Record::Released { line } => {
+                    log_event(
+                        Level::Info,
+                        EVENT_RELEASED,
+                        "gpio: line given back",
+                        &[line_field(line)],
+                    );
+                }
+                Record::Interrupt(LineRecord::Unanswered { line }) => log_event(
                     Level::Warn,
                     EVENT_UNANSWERED,
                     "gpio: line fired with its consumer unreachable",

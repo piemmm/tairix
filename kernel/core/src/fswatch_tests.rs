@@ -14,6 +14,11 @@ const DIR: NodeId = NodeId::from_raw(10);
 const SUB: NodeId = NodeId::from_raw(11);
 const FILE: NodeId = NodeId::from_raw(12);
 
+/// The table published for `volume`, if one is.
+fn published(registry: &WatchRegistry, volume: [u8; 16]) -> Option<Arc<VolumeWatch>> {
+    registry.volumes.lock().as_ref()?.get(&volume).cloned()
+}
+
 /// A registry of the calling test's own, so no test shares tables, charges
 /// or the journal budget with another.
 fn registry() -> &'static WatchRegistry {
@@ -24,14 +29,14 @@ fn table(volume: u8) -> VolumeWatch {
     VolumeWatch::new([volume; 16], NameMatching::Exact, unpressured(), registry())
 }
 
-/// Arm a watcher on `node`, for a path that resolved under the epochs now.
+/// Arm a watcher on `node`, under the mount table's first epoch.
 fn arm(watch: &VolumeWatch, node: NodeId) -> u64 {
-    watch.watch(node.raw(), watch.epochs(0)).expect("arms").0
+    watch.watch(node.raw(), 0).expect("arms").0
 }
 
-/// Deliver `watcher` everything up to `upto`, under the epochs now.
+/// Deliver `watcher` everything up to `upto`, under the first epoch.
 fn commit(watch: &VolumeWatch, watcher: u64, upto: u64) {
-    watch.commit(DIR.raw(), watcher, upto, watch.epochs(0));
+    watch.commit(DIR.raw(), watcher, upto, 0);
 }
 
 /// The names a drain takes, as owned strings, with its position and `more`.
@@ -264,7 +269,6 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
         .claim(volume, NameMatching::Exact, gauge)
         .expect("claims");
     let table = claim.table();
-    let on = |node: u64| FileId { volume, node };
     let (budget, _) = table.journal_limits();
     // Directories enough to want the whole budget four times over, first come
     // first served.
@@ -273,17 +277,18 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
     // Names across ever more directories, stopping the moment every
     // journal's budget is full, if equal shares ever let it be.
     'fill: for node in (100..).take(directories) {
-        hogs.push(
+        hogs.push((
+            node,
             ArmedWatch::arm(
-                registry,
-                on(node),
+                Arc::clone(table),
+                node,
                 0,
                 &Arc::new(ResourceCharges::new()),
                 64,
                 Resolved::default(),
             )
             .expect("arms"),
-        );
+        ));
         for i in 0..NAMES {
             if registry.journal_bytes.load(Ordering::Relaxed) >= budget {
                 break 'fill;
@@ -296,8 +301,8 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
         }
     }
     let other = ArmedWatch::arm(
-        registry,
-        on(SUB.raw()),
+        Arc::clone(table),
+        SUB.raw(),
         0,
         &Arc::new(ResourceCharges::new()),
         4,
@@ -305,8 +310,8 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
     )
     .expect("arms");
     let (_, share) = table.journal_limits();
-    for hog in &hogs {
-        assert!(node_journal_bytes(table, NodeId::from_raw(hog.dir().node)) <= share);
+    for (node, _) in &hogs {
+        assert!(node_journal_bytes(table, NodeId::from_raw(*node)) <= share);
     }
     table.entries_changed(SUB, b"mine", None);
     let Ok(Some(Drain::Names { names, .. })) = other.take(usize::MAX, false) else {
@@ -419,12 +424,26 @@ fn a_drain_asked_to_rescan_takes_everything_recorded() {
 }
 
 #[test]
-fn a_relocated_directory_makes_its_watchers_rescan() {
+fn a_removed_directory_makes_its_watchers_rescan() {
     let watch = table(10);
     let w = arm(&watch, DIR);
     watch.entries_changed(DIR, b"a", None);
-    watch.node_relocated(DIR);
+    watch.node_removed(DIR);
     assert!(is_rescan(&watch.take(DIR.raw(), w, usize::MAX, false)));
+}
+
+/// A move changes where a directory is named, not what it lists, so its
+/// watchers keep every name recorded.
+#[test]
+fn a_moved_directory_keeps_its_watchers_names() {
+    let watch = table(17);
+    let w = arm(&watch, DIR);
+    let base = watch.file_member_add(DIR.raw()).expect("adds");
+    watch.entries_changed(DIR, b"a", None);
+    watch.node_changed(DIR);
+    assert!(watch.file_ready(DIR.raw(), base), "its File members see it");
+    assert_eq!(drain_all(&watch, w), ["a"]);
+    watch.file_member_remove(DIR.raw());
 }
 
 #[test]
@@ -445,7 +464,7 @@ fn a_member_is_idle_then_ready_then_held_by_its_latency() {
         let pacing = Pacing {
             watcher: w,
             observed,
-            epochs: Epochs::default(),
+            mounts: 0,
             latency_ns: latency,
             reported_at,
         };
@@ -467,17 +486,16 @@ fn a_member_is_idle_then_ready_then_held_by_its_latency() {
 }
 
 #[test]
-fn every_epoch_a_path_resolves_against_readies_its_members_paced() {
+fn a_moved_mount_table_readies_its_members_paced() {
     let watch = table(21);
     let w = arm(&watch, DIR);
-    let reported_under = |epochs| Pacing {
+    let baseline = Pacing {
         watcher: w,
         observed: watch.journal_seq(DIR.raw()),
-        epochs,
+        mounts: 0,
         latency_ns: 100,
         reported_at: Some(1_000),
     };
-    let baseline = reported_under(watch.epochs(0));
     assert_eq!(
         watch.dir_state(DIR.raw(), &baseline, 0, 2_000),
         MemberState::Idle
@@ -487,96 +505,46 @@ fn every_epoch_a_path_resolves_against_readies_its_members_paced() {
         MemberState::Due(1_100),
         "a moved mount table is a change, paced like any other"
     );
-    watch.paths_moved();
     assert_eq!(
-        watch.dir_state(DIR.raw(), &baseline, 0, 2_000),
-        MemberState::Ready
-    );
-    watch.access_moved();
-    assert_eq!(
-        watch.dir_state(DIR.raw(), &baseline, 0, 2_000),
+        watch.dir_state(DIR.raw(), &baseline, 1, 2_000),
         MemberState::Ready
     );
 }
 
-/// Until the watcher's drain re-resolves its path, the directory may no
-/// longer be its to follow, so a reported move is not followed by a report of
-/// every later change.
+/// A reported mount move is held until the watcher drains under the new
+/// epoch, so it is not followed by a report of every later change.
 #[test]
-fn a_reported_move_holds_its_member_until_the_watcher_drains() {
+fn a_reported_mount_move_holds_its_member_until_the_watcher_drains() {
     let watch = table(22);
     let w = arm(&watch, DIR);
-    let reported_under = |epochs| Pacing {
+    let reported = Pacing {
         watcher: w,
         observed: watch.journal_seq(DIR.raw()),
-        epochs,
+        mounts: 1,
         latency_ns: 0,
         reported_at: Some(1_000),
     };
-    watch.paths_moved();
-    let reported = reported_under(watch.epochs(0));
     watch.entries_changed(DIR, b"later", None);
-    watch.access_moved();
     assert_eq!(
-        watch.dir_state(DIR.raw(), &reported, 0, 2_000),
+        watch.dir_state(DIR.raw(), &reported, 1, 2_000),
         MemberState::Idle
     );
     assert!(!parked(&watch, DIR), "a held member waits on no change");
-    commit(&watch, w, 0);
+    watch.commit(DIR.raw(), w, 0, 1);
     assert_eq!(
-        watch.dir_state(DIR.raw(), &reported, 0, 2_000),
+        watch.dir_state(DIR.raw(), &reported, 1, 2_000),
         MemberState::Ready,
-        "drained under the epochs now, the change it held reports"
+        "drained under the epoch now, the change it held reports"
     );
-    drain_all(&watch, w);
-    assert_eq!(
-        watch.dir_state(DIR.raw(), &reported_under(watch.epochs(0)), 0, 2_000),
-        MemberState::Idle,
-        "a member that reported the new epochs is idle again"
-    );
-}
-
-/// A move that lands while a member is parked on the epochs it replaced wakes
-/// it, and further moves before it parks again cost nothing.
-#[test]
-fn an_epoch_move_wakes_a_parked_member_once() {
-    let watch = table(23);
-    let w = arm(&watch, DIR);
-    let at = Pacing {
-        watcher: w,
+    let caught_up = Pacing {
         observed: watch.journal_seq(DIR.raw()),
-        epochs: watch.epochs(0),
-        latency_ns: 0,
-        reported_at: None,
+        ..reported
     };
-    let epoch_parked = || *watch.registry.epoch_park.lock();
-    assert!(!epoch_parked());
-    assert_eq!(watch.dir_state(DIR.raw(), &at, 0, 0), MemberState::Idle);
-    assert!(epoch_parked(), "an idle member waits on the epochs");
-    watch.paths_moved();
-    assert!(!epoch_parked(), "the move took the park");
-    watch.paths_moved();
-    assert!(!epoch_parked());
-    assert_eq!(watch.dir_state(DIR.raw(), &at, 0, 0), MemberState::Ready);
-}
-
-/// Every epoch is the machine's, so a move on one volume reaches a watcher
-/// whose directory is on another: the moved directory may be its ancestor.
-#[test]
-fn a_move_on_another_volume_reaches_a_watcher_here() {
-    let registry = registry();
-    let here = VolumeWatch::new([24; 16], NameMatching::Exact, unpressured(), registry);
-    let there = VolumeWatch::new([25; 16], NameMatching::Exact, unpressured(), registry);
-    let w = arm(&here, DIR);
-    let at = Pacing {
-        watcher: w,
-        observed: here.journal_seq(DIR.raw()),
-        epochs: here.epochs(0),
-        latency_ns: 0,
-        reported_at: None,
-    };
-    there.access_moved();
-    assert_eq!(here.dir_state(DIR.raw(), &at, 0, 0), MemberState::Ready);
+    assert_eq!(
+        watch.dir_state(DIR.raw(), &caught_up, 1, 2_000),
+        MemberState::Idle,
+        "a member that reported the new epoch is idle again"
+    );
 }
 
 /// A retired table revalidates every journal, which its members report once;
@@ -590,11 +558,8 @@ fn a_retired_tables_members_report_once() {
         .expect("claims");
     let table = Arc::clone(old.table());
     let armed = ArmedWatch::arm(
-        registry,
-        FileId {
-            volume,
-            node: DIR.raw(),
-        },
+        Arc::clone(&table),
+        DIR.raw(),
         0,
         &Arc::new(ResourceCharges::new()),
         4,
@@ -605,15 +570,15 @@ fn a_retired_tables_members_report_once() {
     let pacing = Pacing {
         watcher: armed.watcher(),
         observed: at.at,
-        epochs: at.epochs,
+        mounts: at.mounts,
         latency_ns: 0,
         reported_at: None,
     };
     drop(old);
+    assert!(table.retired(), "its registration ended");
     let _new = registry
-        .claim(volume, NameMatching::AsciiCaseInsensitive, unpressured())
+        .claim(volume, NameMatching::Exact, unpressured())
         .expect("claims afresh");
-    assert!(table.retired());
     assert_eq!(
         table.dir_state(DIR.raw(), &pacing, 0, 0),
         MemberState::Ready
@@ -690,30 +655,34 @@ fn the_last_watcher_releases_the_journal_and_node() {
     assert!(watch.nodes.lock().get(&DIR.raw()).is_none());
 }
 
-fn dir_on(volume: u8) -> FileId {
-    FileId {
-        volume: [volume; 16],
-        node: DIR.raw(),
-    }
+/// Arm a watch on `DIR` through `table`.
+fn arm_on(
+    table: &Arc<VolumeWatch>,
+    charges: &Arc<ResourceCharges>,
+    limit: u64,
+) -> Result<ArmedWatch, Errno> {
+    ArmedWatch::arm(
+        Arc::clone(table),
+        DIR.raw(),
+        0,
+        charges,
+        limit,
+        Resolved::default(),
+    )
 }
 
 #[test]
-fn arming_needs_a_claimed_table_and_counts_against_the_limit() {
+fn arming_counts_against_the_limit() {
     let registry = registry();
     let charges = Arc::new(ResourceCharges::new());
-    let at = Resolved::default();
-    assert_eq!(
-        ArmedWatch::arm(registry, dir_on(0xE0), 0, &charges, 8, at).map(|_| ()),
-        Err(Errno::NotImplemented)
-    );
     let claim = registry
         .claim([0xE1; 16], NameMatching::Exact, unpressured())
         .expect("claims");
-    let first = ArmedWatch::arm(registry, dir_on(0xE1), 0, &charges, 2, at).expect("first");
-    let second = ArmedWatch::arm(registry, dir_on(0xE1), 0, &charges, 2, at).expect("second");
+    let first = arm_on(claim.table(), &charges, 2).expect("first");
+    let second = arm_on(claim.table(), &charges, 2).expect("second");
     assert_eq!(charges.held(LimitKind::DirWatches), 2);
     assert_eq!(
-        ArmedWatch::arm(registry, dir_on(0xE1), 0, &charges, 2, at).map(|_| ()),
+        arm_on(claim.table(), &charges, 2).map(|_| ()),
         Err(Errno::LimitExceeded)
     );
     drop(first);
@@ -730,11 +699,10 @@ fn arming_needs_a_claimed_table_and_counts_against_the_limit() {
 fn a_spent_watch_stops_reporting_but_stays_charged() {
     let registry = registry();
     let charges = Arc::new(ResourceCharges::new());
-    let _claim = registry
+    let claim = registry
         .claim([0xE2; 16], NameMatching::Exact, unpressured())
         .expect("claims");
-    let armed =
-        ArmedWatch::arm(registry, dir_on(0xE2), 0, &charges, 4, Resolved::default()).expect("arms");
+    let armed = arm_on(claim.table(), &charges, 4).expect("arms");
     assert!(armed.position().is_some());
     armed.spend();
     assert!(matches!(armed.take(usize::MAX, false), Ok(None)));
@@ -744,25 +712,23 @@ fn a_spent_watch_stops_reporting_but_stays_charged() {
     assert_eq!(charges.held(LimitKind::DirWatches), 0);
 }
 
+/// A pinned id names nothing in the volume's next registration, so a volume
+/// that returns is watched through a fresh table and the old one's watchers
+/// hear nothing of it.
 #[test]
-fn a_returning_volume_is_watched_through_the_table_it_left() {
+fn a_returning_volume_is_watched_through_a_fresh_table() {
     let registry = registry();
     let charges = Arc::new(ResourceCharges::new());
     let claim = registry
         .claim([0xE3; 16], NameMatching::Exact, unpressured())
         .expect("claims");
     let table = Arc::clone(claim.table());
-    let armed =
-        ArmedWatch::arm(registry, dir_on(0xE3), 0, &charges, 4, Resolved::default()).expect("arms");
+    let armed = arm_on(&table, &charges, 4).expect("arms");
     let file = FILE.raw();
-    let (_, baseline) = registry
-        .file_member_add(FileId {
-            volume: [0xE3; 16],
-            node: file,
-        })
-        .expect("adds");
-    // The volume leaves: everything watching it hears so.
+    let baseline = table.file_member_add(file).expect("adds");
+    // The registration ends: everything watching it hears so.
     claim.reference().release();
+    assert!(table.retired(), "its table can never report again");
     let Ok(Some(drain)) = armed.take(usize::MAX, false) else {
         panic!("the watch is armed");
     };
@@ -773,14 +739,16 @@ fn a_returning_volume_is_watched_through_the_table_it_left() {
         "a File member sees the departure"
     );
     drop(claim);
-    // ... and returns, through the same table, so the watch carries on.
     let back = registry
         .claim([0xE3; 16], NameMatching::Exact, unpressured())
         .expect("reclaims");
-    assert!(Arc::ptr_eq(back.table(), &table));
+    assert!(!Arc::ptr_eq(back.table(), &table));
     back.table().entries_changed(DIR, b"after", None);
     let (names, _, _) = names_of(armed.take(usize::MAX, false));
-    assert_eq!(names, ["after"]);
+    assert!(
+        names.is_empty(),
+        "the old watch hears nothing of the new one"
+    );
     table.file_member_remove(file);
 }
 
@@ -796,9 +764,7 @@ fn a_second_volume_with_the_same_id_gets_no_table() {
             .is_none(),
         "a duplicate must not report into the first volume's watchers"
     );
-    assert!(registry
-        .volume([0xE4; 16])
-        .is_some_and(|t| Arc::ptr_eq(&t, first.table())));
+    assert!(published(registry, [0xE4; 16]).is_some_and(|t| Arc::ptr_eq(&t, first.table())));
     drop(first);
     assert!(registry
         .claim([0xE4; 16], NameMatching::Exact, unpressured())
@@ -806,7 +772,7 @@ fn a_second_volume_with_the_same_id_gets_no_table() {
 }
 
 #[test]
-fn a_volume_whose_names_now_match_differently_retires_its_old_table() {
+fn a_reclaimed_volume_retires_its_old_table() {
     let registry = registry();
     let old = registry
         .claim([0xE5; 16], NameMatching::Exact, unpressured())
@@ -814,11 +780,7 @@ fn a_volume_whose_names_now_match_differently_retires_its_old_table() {
     let old_table = Arc::clone(old.table());
     drop(old);
     let new = registry
-        .claim(
-            [0xE5; 16],
-            NameMatching::AsciiCaseInsensitive,
-            unpressured(),
-        )
+        .claim([0xE5; 16], NameMatching::Exact, unpressured())
         .expect("claims afresh");
     assert!(!Arc::ptr_eq(new.table(), &old_table));
     assert!(old_table.retired());
@@ -833,12 +795,12 @@ fn a_table_nothing_holds_is_dropped_from_the_registry() {
             .claim([0xE6; 16], NameMatching::Exact, unpressured())
             .expect("claims"),
     );
-    assert!(registry.volume([0xE6; 16]).is_some());
+    assert!(published(registry, [0xE6; 16]).is_some());
     let _other = registry
         .claim([0xE7; 16], NameMatching::Exact, unpressured())
         .expect("claims");
     assert!(
-        registry.volume([0xE6; 16]).is_none(),
+        published(registry, [0xE6; 16]).is_none(),
         "an unclaimed, unwatched table is swept"
     );
 }

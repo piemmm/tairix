@@ -17,9 +17,10 @@ mod program {
     use tairix_abi::hwlink::LinkRole;
     use tairix_abi::hwtree::HwResourceKind;
     use tairix_abi::PROC_ID_HEX_LEN;
-    use tairix_drv_irq_brcmstb_l2::controller::{Controller, Record, LINES};
+    use tairix_drv_irq_brcmstb_l2::controller::{Controller, LINES};
     use tairix_drv_irq_brcmstb_l2::{BIND_KEYS, LAYOUTS, REQUIRED_CAPABILITIES};
     use tairix_drvrt::exit::{end, step, DriverExit};
+    use tairix_drvrt::irqline::LineRecord;
     use tairix_drvrt::serve::{instance_field, log_event, DutyNode, Endpoint, Service};
     use tairix_drvrt::{Recorder, RtSupplier};
     use tairix_log::{EventId, Field, FieldValue, Level};
@@ -111,27 +112,27 @@ mod program {
     /// The system log, as the controller records to it.
     struct Log;
 
-    impl Recorder<Record> for Log {
-        fn record(&mut self, record: Record) {
+    impl Recorder<LineRecord> for Log {
+        fn record(&mut self, record: LineRecord) {
             let mut hex = [0u8; PROC_ID_HEX_LEN];
             let line_field = |line: u8| Field {
                 key: "line",
                 value: FieldValue::UnsignedInt(u64::from(line)),
             };
             match record {
-                Record::Claimed { line, owner } => log_event(
+                LineRecord::Claimed { line, holder } => log_event(
                     Level::Info,
                     EVENT_CLAIMED,
                     "l2-intc: line claimed",
-                    &[line_field(line), instance_field("owner", owner, &mut hex)],
+                    &[line_field(line), instance_field("owner", holder, &mut hex)],
                 ),
-                Record::Reclaimed { line, from } => log_event(
+                LineRecord::Reclaimed { line, from } => log_event(
                     Level::Warn,
                     EVENT_RECLAIMED,
                     "l2-intc: line reclaimed from an ended consumer",
                     &[line_field(line), instance_field("from", from, &mut hex)],
                 ),
-                Record::Refused { caller, reason } => {
+                LineRecord::Refused { caller, reason } => {
                     let reason = Field {
                         key: "reason",
                         value: FieldValue::Error(reason),
@@ -151,13 +152,13 @@ mod program {
                         ),
                     }
                 }
-                Record::Abandoned { line } => log_event(
+                LineRecord::Released { line } => log_event(
                     Level::Info,
                     EVENT_ABANDONED,
                     "l2-intc: line released with its ended consumer",
                     &[line_field(line)],
                 ),
-                Record::Unanswered { line } => log_event(
+                LineRecord::Unanswered { line } => log_event(
                     Level::Warn,
                     EVENT_UNANSWERED,
                     "l2-intc: line fired with its consumer unreachable; left masked",

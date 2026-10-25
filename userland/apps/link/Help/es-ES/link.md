@@ -56,8 +56,8 @@ de uso y no se crea ningún enlace. `--` termina el análisis de opciones.
 
 - `0` — el enlace se creó (o se escribió la ayuda breve).
 - `1` — el sistema de archivos rechazó el enlace, o la salida falló; la
-  razón se imprime en la salida de error estándar.
-- `2` — no se entendió la línea de órdenes.
+  razón se imprime en la salida de error estándar. Una línea de órdenes
+  no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

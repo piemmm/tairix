@@ -14,6 +14,38 @@ say — the standing task direction supersedes that language. Changing a
 `lib/abi` type today is allowed; it requires regenerating the C header
 (`cargo xtask c-header --write`), which the drift guard enforces.
 
+## Ledger
+
+| Item | What it is | Status |
+|---|---|---|
+| W0 | The Arch HAL conformance harness every port runs | done |
+| W1 | Early-boot platform discovery (`PlatformDiscovery`) and the aarch64 FDT reader | done |
+| W2 | Per-CPU storage (`PerCpu`) | done |
+| W3-A | Interrupt controller and entry/exit (`IrqController`, `InterruptEntry`) on every port | done |
+| W3-B | The aarch64 device-IRQ QEMU vertical | done |
+| W4 | Timer programming (`Timer`) | done |
+| W5a | Context switch (`ContextSwitch`) | done |
+| W5b-1 | The MMU/page-table trait (`AddressSpace`) and its per-port migration | done |
+| W5b-2 | `kernel/mem` on the HAL, and per-page TLB shootdown | done |
+| W5b-3 | Allocator-backed port page tables (`PageTableFrames`) | done |
+| W5b-4 | The coherent-DMA page attribute (`PageFlags::DMA_COHERENT`) | done |
+| W6 | aarch64 SMP secondary-core bring-up and real IPI | done |
+| W7 | The live `kernel/sched` task switch on every port | done |
+| W8 | wasm32 multi-worker SMP and the live cooperative scheduler | done |
+| W9 | Side-channel and memory-tagging completeness | done |
+| W10 | Heterogeneous `core_class` discovery on aarch64 | done |
+| W11-A | The aarch64 virtio blk MMIO vertical | done |
+| W11-B | The aarch64 display and input verticals | done |
+| W11-C | The riscv64 input vertical | done |
+| W12 | One device-tree parser (`lib/fdt` node API) | done |
+| W13 | Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`) | done |
+| W14 | SMP secondary-CPU bring-up (`SecondaryBringup`) | done |
+| W15 | The bare-metal and wasm SMP verticals on the HAL | done |
+| W16 | The wasm32 framebuffer display vertical | done |
+| W17 | One trimmed aarch64 `virt` DTB embed | done |
+| W18 | The optional message-interrupt multiplexer (`MsiMultiplexer`): a root complex's chained MSI controller behind the HAL, its lines and `msi_alloc` in `kernel/core` | done |
+| W18M | W18 on metal: a USB keyboard served over `msi_alloc` on a Raspberry Pi 4 | blocked: the operator's Pi 4 run (QEMU models no Pi PCIe) |
+
 ---
 
 ## 0. Scope and decisions (binding for this plan)
@@ -95,7 +127,7 @@ the burn-down is complete.
 | Interrupt controller + entry/exit |   ✓    |    ✓    |    ✓    |  n/a   |
 | **SMP secondary-CPU bring-up**    |   ✓    |    ✓    |    ✓    | ✓ worker |
 | **IPI delivery (real cores)**     |   ✓    |    ✓    |    ✓    | ✓ MsgChan |
-| **Early-boot platform discovery** | ✓ ACPI | **✗** FDT| ✓ FDT  |  ~ JS  |
+| **Early-boot platform discovery** | ✓ ACPI | ✓ FDT  | ✓ FDT  |  ✓ JS  |
 | Per-CPU storage HAL               |   ✓    |    ✓    |    ✓    |   ✓    |
 | Syscall entry                     |   ✓    |    ✓    |    ✓    |   ✓    |
 | User entry (`EnterUser`)          |   ✓    |    ✓    |    ✓    | **✗**  |
@@ -109,6 +141,7 @@ the burn-down is complete.
 | Fatal report names the active root | ✓ `CR3` | ✓ `TTBR0` | ✓ `satp` | ✓ unsup |
 | Non-faulting translation probe | ✓ unsup | ✓ `AT` | ✓ unsup | ✓ unsup |
 | Machine takeover (`MachineTakeover`, optional) | ✓ | ✓ | ✓ | n/a |
+| Message-interrupt multiplexer (`MsiMultiplexer`, optional) | n/a | ✓ discovered | n/a | n/a |
 | **Arch HAL conformance suite**    |   ✓    |    ✓    |    ✓    |   ✓    |
 
 **Stopping the other cores on a fatal report is not a HAL slice**, and a
@@ -153,6 +186,17 @@ builds a minimal identity page table in the swept arena for the stub, testing
 reset). `wasm32` is `n/a` (a sandbox owns no physical RAM to take over). Per-port
 impls are staged with the Supervisor `memtest` command, not part of the
 §17.2 parity guarantee.
+
+`MsiMultiplexer` (`kernel/arch/api/src/msimux.rs`) is the second optional
+slice: a root complex that captures endpoint messages and raises one parent
+line for a bank of vectors, which only the kernel can demultiplex. The HAL
+holds only the silicon — the bank's shape, enabling it, a vector's message,
+draining the pending vectors — and `kernel/core::msimux::MsiMuxLines` lays the
+vectors out on lines, hands them out through `msi_alloc` and fans the parent
+out, so a port with such a root complex reuses it unchanged. aarch64
+implements it over the root complex its tree describes; x86_64 messages are
+LAPIC-vectored, riscv64's land in IMSIC files and wasm32 has no PCI, so each is
+`n/a` and `msi_alloc` fails closed there (W18).
 
 **QEMU vertical parity** (`tests/integration/*`):
 
@@ -231,15 +275,18 @@ docs + §17.2 of `AGENTS.md` when each lands):
 - `ContextSwitch` — the `TaskCtx` + `switch` primitive.
 - `AddressSpace` / `Mmu` + `TlbShootdown` — page-table primitives wired
   into `kernel/mem` (map/translate/unmap + per-page local invalidation —
-  ✅ W5b-2); allocator-backed port tables via the `PageTableFrames`
-  frame-source seam (✅ W5b-3); cross-CPU TLB invalidation via the
-  `CrossCpuTlbShootdown` slice (✅ W13); address-space tags via the
-  `AddressTags` slice (✅), so a switch between user spaces discards no
+  W5b-2); allocator-backed port tables via the `PageTableFrames`
+  frame-source seam (W5b-3); cross-CPU TLB invalidation via the
+  `CrossCpuTlbShootdown` slice (W13); address-space tags via the
+  `AddressTags` slice, so a switch between user spaces discards no
   other space's entries — the tag is chosen in `kernel/mem::tags`.
 - `SecondaryBringup` — secondary-CPU start (INIT-SIPI-SIPI / PSCI
   `CPU_ON` / SBI HSM `hart_start` / Web Worker spawn); the directed IPI
   is already `SchedulerArch::send_ipi`, so this slice is start-only
-  (✅ W14). No §17.2 primitive remains ad-hoc.
+  (W14). No §17.2 primitive remains ad-hoc.
+- `MsiMultiplexer` (optional) — a root complex's chained MSI controller:
+  its bank's shape, enabling it, a vector's message, draining the pending
+  vectors (W18). Allocation and the line layout are the kernel's, once.
 
 Each trait keeps its pure bit/encoding/layout math host-testable and
 gates only the register/assembly operation to the freestanding target,
@@ -253,7 +300,7 @@ Stages are ordered so each unblocks the next; within a stage the per-arch
 items are independent and can land separately. Every stage's "Definition
 of done" is §4 below, run over the **whole project**.
 
-### Stage W0 — Arch HAL conformance harness (all ports) — ✅ landed
+### Stage W0 — Arch HAL conformance harness (all ports)
 
 The gate everything else is measured against.
 
@@ -272,7 +319,7 @@ The gate everything else is measured against.
   port's host tests run it over their handle. Document the suite in
   `docs/src/architecture/modularity.md`.
 
-### Stage W1 — Early-boot platform discovery HAL + aarch64 FDT — ✅ landed
+### Stage W1 — Early-boot platform discovery HAL + aarch64 FDT
 
 **Landed:** `lib/abi::hwtree` (the §18.1 hardware-tree ABI: `HwDeviceClass`,
 `HwMatchKey`, `HwResource` as capability-grant requests, `HwNode`; pinned
@@ -298,7 +345,7 @@ drives a real discovery handle.
   HAL trait; aarch64 `fdt` host unit tests + the conformance vertical
   pass. Docs: `docs/src/platform/{aarch64,riscv64,x86_64}.md`, §18 pages.
 
-### Stage W2 — Per-CPU storage HAL — ✅ landed
+### Stage W2 — Per-CPU storage HAL
 
 **Landed:** `kernel/arch/api::percpu` defines `PerCpu`
 (`read_self_base` / `unsafe write_self_base` over an opaque,
@@ -329,7 +376,7 @@ Docs: `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`,
 Split into two landings to keep the host-gated trait work separate from
 the larger aarch64 QEMU-device work.
 
-#### Stage W3-A — traits + per-port migration — ✅ landed
+#### Stage W3-A — traits + per-port migration
 
 **Landed:** `kernel/arch/api::irq` defines `IrqController` (`mask` /
 `unmask`, fail-closed `IrqControlError::OutOfRange`) and `InterruptEntry`
@@ -351,7 +398,7 @@ its real controller on a mock MMIO. Docs:
 `docs/src/architecture/modularity.md`, `docs/src/security/irq.md`,
 platform pages, `AGENTS.md` §17.2, `PLAN.md`.
 
-#### Stage W3-B — aarch64 device-IRQ QEMU vertical — ✅ landed
+#### Stage W3-B — aarch64 device-IRQ QEMU vertical
 
 **Landed:** `tests/integration/irq_qemu_aarch64` is the EL1/SPI analogue
 of `irq_qemu_x86_64`. It binds the PL031 RTC's GICv2 SPI (INTID 34) in a
@@ -373,7 +420,7 @@ Enrolled in `tools/xtask/src/commands/qemu_tests.rs` (60 s, single CPU)
 and QEMU-green. Docs: `docs/src/security/irq.md`,
 `docs/src/platform/aarch64.md`.
 
-### Stage W4 — Timer-programming HAL — ✅ landed
+### Stage W4 — Timer-programming HAL
 
 **Landed:** `kernel/arch/api::timer` defines `Timer`
 (`set_tick_callback` / `tick_callback` / `dispatch_tick`) over the
@@ -403,7 +450,7 @@ constructed per port and reaches a port-private callback slot. Docs:
 
 ### Stage W5 — Context switch + MMU/paging + TLB shootdown HAL
 
-#### Stage W5a — Context-switch HAL — ✅ landed
+#### Stage W5a — Context-switch HAL
 
 **Landed:** `kernel/arch/api::context` defines the architecture-neutral
 `TaskContext` save area (a single `#[repr(C)]` `u64`, layout-identical to
@@ -435,7 +482,7 @@ mask after migration. Docs:
 `docs/src/architecture/modularity.md`,
 `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `PLAN.md`.
 
-#### Stage W5b-1 — MMU/page-table HAL trait + per-port migration — ✅ landed
+#### Stage W5b-1 — MMU/page-table HAL trait + per-port migration
 
 **Landed:** `kernel/arch/api::mmu` defines the neutral `PageFlags`
 permission set (`READ`/`WRITE`/`EXEC`/`USER`/`DEVICE`, W^X-aware), the
@@ -472,7 +519,7 @@ HAL *modules* compile). Docs:
 `docs/src/architecture/modularity.md` (MMU/page-table),
 `docs/src/platform/{x86_64,aarch64,riscv64,wasm32}.md`, `PLAN.md`.
 
-#### Stage W5b-2 — `kernel/mem` on the HAL + TLB shootdown — ✅ landed
+#### Stage W5b-2 — `kernel/mem` on the HAL + TLB shootdown
 
 - Extended the MMU HAL trait (`kernel/arch/api::mmu::AddressSpace`) with
   `translate` (read-only walk → physical page + `PageFlags`, or `None`)
@@ -512,7 +559,7 @@ HAL *modules* compile). Docs:
   `kernel/arch/*` depending on `kernel/mem`); it lands as its own
   fully-gated increment.
 
-#### Stage W5b-3 — allocator-backed per-port page tables — ✅ landed
+#### Stage W5b-3 — allocator-backed per-port page tables
 
 - Added the **`PageTableFrames`** HAL frame-source slice
   (`kernel/arch/api::frames`): `alloc_table` hands back a `TableFrame`
@@ -573,7 +620,7 @@ Normal-WB / Device / Normal-NC). Host-proven by the aarch64 `paging_tests`
 `page_flags_round_trip_through_the_dma_coherent_leaf`); the live USB-keyboard
 DMA path that needs it is metal-only (§0.4).
 
-### Stage W6 — aarch64 SMP secondary-core bring-up + real IPI — ✅ landed
+### Stage W6 — aarch64 SMP secondary-core bring-up + real IPI
 
 The single largest aarch64 gap, closed by mirroring the riscv64 port-side
 `smp` module (no new HAL trait — riscv64 keeps SMP port-side too; an
@@ -624,7 +671,7 @@ The single largest aarch64 gap, closed by mirroring the riscv64 port-side
   new SMP vertical is QEMU-green and enrolled. Docs:
   `docs/src/platform/aarch64.md`, `PLAN.md`, this file.
 
-### Stage W7 — Live `kernel/sched` task switch per arch — ✅ landed
+### Stage W7 — Live `kernel/sched` task switch per arch
 
 **Landed:** the aarch64 `preempt` (generic timer + GICv2 IPI) and
 `context` primitives now drive the architecture-neutral `kernel/sched`
@@ -655,7 +702,7 @@ W6 SMP/IPI primitives are reused.
 - **Deliverable met.** Docs: `docs/src/platform/aarch64.md`, `PLAN.md`,
   this file.
 
-### Stage W8 — wasm32 multi-worker SMP + live cooperative scheduler — ✅ landed
+### Stage W8 — wasm32 multi-worker SMP + live cooperative scheduler
 
 **Landed:** wasm32 now boots multi-worker, routes real `MessageChannel`
 IPIs between live module instances, and drives the *live* `kernel/sched`
@@ -697,7 +744,7 @@ slice remains a future §17.2 decision for all three.
 - **Carried forward (still tracked):** cross-CPU TLB shootdown (from
   W5b-2/W6); the `lib/fdt` runtime parse of the full ARM `virt` tree.
 
-### Stage W9 — Side-channel + memory-tagging completeness (§19.1 / §19.10) — ✅ landed
+### Stage W9 — Side-channel + memory-tagging completeness (§19.1 / §19.10)
 
 **Landed:** the §19.1 `SideChannelMitigation` and §19.10 `MemoryTagging`
 HAL trait sets live in `kernel/arch/api` (`sidechannel.rs` / `memtag.rs`),
@@ -747,7 +794,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   user/kernel boundary they waited on has landed; the software slab
   tag-check remains the UAF floor until MTE is enabled.
 
-### Stage W10 — Heterogeneous `core_class` discovery (aarch64) ✅ LANDED
+### Stage W10 — Heterogeneous `core_class` discovery (aarch64)
 
 - aarch64 now overrides `SchedulerArch::core_class` with `big.LITTLE`
   classification discovered from the device tree's per-core
@@ -779,7 +826,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
 
 ### Stage W11 — QEMU vertical parity sweep (drivers on aarch64)
 
-#### Stage W11-A — virtio blk MMIO vertical (aarch64) — ✅ landed
+#### Stage W11-A — virtio blk MMIO vertical (aarch64)
 
 - aarch64 runs the virtio-blk `virt`-board MMIO vertical, the EL1/GICv2
   analogue of the riscv64 one:
@@ -811,7 +858,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
 - **Verified:** the vertical exits `0` under `qemu-system-aarch64 -M virt`
   (the `cargo xtask test --qemu` enrolment path).
 
-#### Stage W11-B — display + input verticals (aarch64) — ✅ landed
+#### Stage W11-B — display + input verticals (aarch64)
 
 - **Display (landed).** aarch64 now runs the `ramfb`/framebuffer display
   vertical, the EL1/GICv2 analogue of `framebuffer_display_qemu_riscv64`:
@@ -863,7 +910,7 @@ stricter `is_release_ready` gate rejects any `Pending`.
   `docs/src/drivers/input.md`, the framebuffer + virtio-input driver
   `README.md`s, `PLAN.md`, this file.
 
-#### Stage W11-C — input vertical (riscv64) — ✅ landed
+#### Stage W11-C — input vertical (riscv64)
 
 The last riscv64 §1 QEMU-matrix gap. riscv64 now runs the
 **virtio-input** MMIO vertical — the `virt`-board sibling of the aarch64
@@ -896,7 +943,7 @@ is now full.
   `docs/src/platform/riscv64.md`, `docs/src/drivers/input.md`, the
   virtio-input driver `README.md`, `PLAN.md`, this file.
 
-#### Stage W12 — one device-tree parser (`lib/fdt` node API) — ✅ landed
+#### Stage W12 — one device-tree parser (`lib/fdt` node API)
 
 The workspace carried **two** flattened-device-tree parsers: the shared
 `lib/fdt` reader (header + path-property + memory/timebase/`each_cpu`
@@ -937,7 +984,7 @@ is deleted.
   active). Docs: `docs/src/drivers/bus.md`, `lib/util` crate docs, `PLAN.md`,
   this file. No `lib/abi` change, so no ABI / C-header drift.
 
-#### Stage W13 — cross-CPU TLB-shootdown HAL slice — ✅ landed
+#### Stage W13 — cross-CPU TLB-shootdown HAL slice
 
 The last ad-hoc per-port memory primitive becomes a HAL trait. Local
 per-page invalidation was already the `TlbShootdown` slice (W5b-2); on an
@@ -993,7 +1040,7 @@ once per port.
   `docs/src/architecture/modularity.md`, `docs/src/platform/{x86_64,
   aarch64,riscv64,wasm32}.md`, `AGENTS.md` §17.2, `PLAN.md`, this file.
 
-#### Stage W14 — SMP secondary-CPU bring-up HAL slice — ✅ landed
+#### Stage W14 — SMP secondary-CPU bring-up HAL slice
 
 The last enumerated §17.2 primitive becomes a HAL trait. Secondary
 bring-up was implemented port-side (W6 PSCI, W8 Web Worker, the riscv64
@@ -1041,7 +1088,7 @@ interface creep).
   `docs/src/architecture/modularity.md`, `docs/src/platform/{x86_64,
   aarch64,riscv64,wasm32}.md`, `AGENTS.md` §17.2, `PLAN.md`, this file.
 
-#### Stage W15 — fold the bare-metal/wasm SMP verticals onto the HAL — ✅ landed
+#### Stage W15 — fold the bare-metal/wasm SMP verticals onto the HAL
 
 W14 routed the x86_64 SMP verticals (`scheduler_stress_qemu`,
 `cross_cpu_tlb_shootdown_qemu_x86_64`) through
@@ -1074,7 +1121,7 @@ the bring-up surface the tests exercise matches the one the kernel uses.
   `docs/src/architecture/modularity.md`, `docs/src/platform/{aarch64,
   riscv64,wasm32}.md`, `PLAN.md`, this file.
 
-#### Stage W16 — wasm32 framebuffer display vertical (browser canvas) — ✅ landed
+#### Stage W16 — wasm32 framebuffer display vertical (browser canvas)
 
 The last `display`-row parity gap. wasm32 had no `display` vertical; W16
 adds the browser analogue of `framebuffer_display_qemu_{riscv64,aarch64}`
@@ -1118,7 +1165,7 @@ lifecycle end-to-end against a real display surface.
   `docs/src/platform/wasm32.md`, `docs/src/drivers/display.md`,
   `PLAN.md`, this file.
 
-#### Stage W17 — one trimmed aarch64 `virt` DTB embed (§2.2) + close the lib/fdt-runtime-parse note — ✅ landed
+#### Stage W17 — one trimmed aarch64 `virt` DTB embed (§2.2) + close the lib/fdt-runtime-parse note
 
 Resolves the long-standing "`lib/fdt` runtime parse of the full ARM
 `virt` tree" carry-forward (W6/W7) and the §2.2 duplication the
@@ -1168,6 +1215,44 @@ DTB-embedding device verticals had grown.
   and `tools/ci/soak.sh both --secs 10` are all green. No `lib/abi`
   change → no ABI / C-header drift. Docs:
   `docs/src/platform/aarch64.md`, `PLAN.md`, this file.
+
+#### Stage W18 — the optional message-interrupt multiplexer (`MsiMultiplexer`)
+
+A root complex that captures an endpoint's message write and raises one wired
+parent line for a bank of vectors needs a chained handler only the kernel can
+be. The slice keeps the part in its port and lets the kernel binary compose it
+without naming it.
+
+- **HAL** (`kernel/arch/api::msimux`): `MsiMultiplexer`, an `IrqController`
+  over the bank's vectors, plus `shape` (vectors and parent line, `None` where
+  discovery found none), `enable` (idempotent), `message`, and `drain` (one pending
+  snapshot, lowest first, each vector fired and then acknowledged).
+  `msimux::conformance::{run_discovered, run_undiscovered}` are driven per
+  port; `tests/conformance.rs` runs them over a double.
+- **aarch64** (`brcm_msi`, private): `BrcmMsiController`, reached only through
+  `msimux::configure_from_fdt`, which refuses a register window outside the
+  Device-typed identity gigapages; mask, unmask and drain touch nothing
+  before the block is enabled. Nothing yet ties enabling to the bus driver
+  having released the block from reset (D1451). Enabling opens every vector, so a message raised
+  before its driver waits fires, is masked by that fire, and is acknowledged.
+- **Kernel** (`kernel/core::msimux::MsiMuxLines`): the vectors on lines from a
+  first line the port picks; bring-up on the first allocation (a refusal is
+  for good);
+  the lowest free vector from a claim map sized from the bank; the fan-out of a
+  parent fire, each vector masked by its fire before it is acknowledged. The
+  aarch64 binary lays the vectors out from `MSI_LINE_BASE` and the LPIs after
+  them, from 1020 on a board without one; the IRQ table's bound is the last
+  line laid out.
+- **`lib/sync::claims`**: the lowest-free claim and release this and x86_64's
+  `VectorPool` share, with a loom model.
+- **n/a elsewhere**: x86_64 messages are LAPIC-vectored, riscv64's land in
+  IMSIC files, and wasm32 has no PCI, so `msi_alloc` keeps failing closed with
+  `NotImplemented` there.
+- **Proof**: host tests in each layer and the board-check regression
+  `the_msi_wiring_names_no_board`; on QEMU the GICv3 DMA-translation vertical
+  runs the moved LPI base and a GICv2 production vertical the absent
+  multiplexer. QEMU models no Pi PCIe, so the multiplexer itself is proven only
+  on metal (W18M).
 
 ---
 

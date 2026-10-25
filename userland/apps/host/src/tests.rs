@@ -14,6 +14,7 @@ use tairix_help::{HelpSource, SourceError};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::dns::{AddrList, Answer, LookupType, Name, Resolution, ResolveStatus};
 use tairix_resolver::ResolveError;
+use tairix_util::getopt::Refusal;
 
 use super::{parse, run, Command, Lookup, Output, ParseError, Resolver, USAGE};
 
@@ -214,13 +215,55 @@ fn parse_errors_are_precise() {
     assert_eq!(parse(&["a.com", "b.com"]), Err(ParseError::TooManyOperands));
     assert_eq!(
         parse(&["-z", "a.com"]),
-        Err(ParseError::UnknownOption("-z".to_string()))
+        Err(ParseError::Option(Refusal::UnknownShort('z')))
     );
     assert_eq!(
         parse(&["-t", "MX", "a.com"]),
         Err(ParseError::UnknownType("MX".to_string()))
     );
-    assert_eq!(parse(&["-t"]), Err(ParseError::MissingTypeValue));
+    assert_eq!(
+        parse(&["-t"]),
+        Err(ParseError::Option(Refusal::MissingShortValue('t')))
+    );
+}
+
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-z", "a.com"]), "invalid option -- 'z'");
+    assert_eq!(refused(&["-hz", "a.com"]), "invalid option -- 'z'");
+    assert_eq!(
+        refused(&["--frob", "a.com"]),
+        "unrecognized option '--frob'"
+    );
+    assert_eq!(
+        refused(&["a.com", "-t"]),
+        "option requires an argument -- 't'"
+    );
+    assert_eq!(
+        refused(&["a.com", "--type"]),
+        "option '--type' requires an argument"
+    );
+    assert_eq!(
+        refused(&["--help=1", "a.com"]),
+        "option '--help' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(
+        parse(&["--ty=AAAA", "example.com"]),
+        Ok(Command::Lookup(Lookup {
+            name: "example.com".to_string(),
+            types: alloc::vec![LookupType::Aaaa],
+        }))
+    );
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
 // -- run -----------------------------------------------------------------

@@ -77,8 +77,8 @@ keine besondere Autorität.
   wurde angezeigt.
 - `1` — die genannte Datei konnte nicht geladen werden (kein Text, zu
   groß oder abgewiesen), oder das Terminal versagte; der Grund wird
-  auf der Standardfehlerausgabe ausgegeben.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  auf der Standardfehlerausgabe ausgegeben. Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

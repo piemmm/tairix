@@ -1,7 +1,9 @@
 //! How long a controller waits on its bus before giving a transaction up.
 
 /// The longest a target may hold the bus still before its controller gives
-/// the transaction up: the Linux I²C core's default adapter timeout.
+/// the transaction up. UM10204 §3.1.9 puts no bound on a stretch; one second
+/// is nearly thirty times `SMBus` 3.1's longest (`tTIMEOUT`, 35 ms), so only a
+/// wedged target outlasts it.
 pub const STALL_ALLOWANCE_NS: u64 = 1_000_000_000;
 
 /// Bit periods one byte costs on the wire: eight data bits and the

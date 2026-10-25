@@ -37,8 +37,8 @@ aussieht.
 
 - `0` — die angeforderte Kurzhilfe wurde geliefert.
 - `1` — die Ausgabe nimmt keine Bytes mehr an (die einzige
-  Abbruchbedingung des Werkzeugs).
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Abbruchbedingung des Werkzeugs). Eine nicht verstandene Befehlszeile
+  endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

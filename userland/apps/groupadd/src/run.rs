@@ -29,15 +29,12 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::Errno;
     use tairix_groupadd::db::{AdminChannel, GroupsAdminDb};
-    use tairix_groupadd::{parse, run, USAGE};
+    use tairix_groupadd::{parse, run};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
 
     /// The production [`AdminChannel`]: the `users_admin` syscall. It adds
     /// no authority — the capability check and every record rule stay
@@ -51,28 +48,23 @@ mod program {
         }
     }
 
-    /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
-    /// own trailing newline), best-effort on the already-failing path.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a registry or output failure
-    /// (including a refused creation), `2` on a usage error (a malformed
-    /// argument vector, an unrecognised option, a bad id, or a bad name).
+    /// (including a refused creation) or a command line that was not
+    /// understood (a malformed argument vector, an unrecognised option, a
+    /// bad id, or a bad name).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("groupadd") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("groupadd", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         let db = GroupsAdminDb::new(&RtChannel);
@@ -81,7 +73,7 @@ mod program {
         match run(command, locale, &db, &BundleHelp::new("groupadd"), &Stdout) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("groupadd: {err}"));
+                write_stderr_line(format_args!("groupadd: {err}"));
                 1
             }
         }

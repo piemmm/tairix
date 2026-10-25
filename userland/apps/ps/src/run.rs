@@ -31,31 +31,27 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
-    use tairix_ps::{parse, run, USAGE};
-    use tairix_rt::args;
+    use tairix_ps::{parse, run};
     use tairix_rt::io::{write_stderr_line, Stdout};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` on a service or output failure, `2` on
-    /// a usage error (a malformed argument vector or an unrecognised option).
+    /// Exit codes: `0` on success, `1` on a service or output failure or on
+    /// a command line that was not understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("ps") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            write_stderr_line(USAGE);
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("ps", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         let transport = IpcTransport;
@@ -65,7 +61,7 @@ mod program {
         match run(command, locale, &transport, &BundleHelp::new("ps"), &out) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("ps: {err}"));
+                write_stderr_line(format_args!("ps: {err}"));
                 1
             }
         }

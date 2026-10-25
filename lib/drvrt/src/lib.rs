@@ -53,6 +53,7 @@
 
 pub mod exit;
 mod host;
+pub mod irqline;
 mod supplier;
 mod syscalls;
 
@@ -66,6 +67,8 @@ pub mod serve;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;
 
+#[cfg(test)]
+mod irqline_tests;
 #[cfg(test)]
 mod testkit_tests;
 #[cfg(test)]

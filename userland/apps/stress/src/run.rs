@@ -40,19 +40,18 @@ mod controller_main;
 mod program {
     extern crate alloc;
 
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{Stdout, Write};
     use tairix_stress::{parse, Command, USAGE};
 
     /// Program entry point.
     ///
     /// Exit codes: `0` on a clean run (or served help/version), `1` on a
-    /// failed run or terminal failure, `2` on a usage error, `130`/`143`
-    /// when a signal ended the run, and — in a worker —
-    /// [`tairix_stress::REFUSED_EXIT`] for a typed resource refusal.
+    /// failed run, a terminal failure, or a command line that was not
+    /// understood, `130`/`143` when a signal ended the run, and — in a
+    /// worker — [`tairix_stress::REFUSED_EXIT`] for a typed resource refusal.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("stress") else {
+            return tairix_help::MISUSE;
         };
         match parse(&arguments) {
             Ok(Command::Help) => tairix_help::print_own_short_help("stress", Some(USAGE)),
@@ -65,9 +64,9 @@ mod program {
             }
             Ok(Command::Worker(spec)) => crate::worker_main::run(&spec),
             Ok(Command::Run(spec)) => crate::controller_main::run(&spec),
-            Err(_) => {
-                write_stderr_line(USAGE);
-                2
+            Err(err) => {
+                tairix_help::report_misuse("stress", &err);
+                tairix_help::MISUSE
             }
         }
     }

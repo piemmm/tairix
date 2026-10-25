@@ -3,14 +3,14 @@
 //!
 //! Where the [`selection`](crate::select) is the *per-listing* set of marked
 //! entries, the [`Clipboard`] is the *cross-directory* set the management verbs
-//! act on: it captures the absolute paths of the items being moved or copied at
-//! the moment of cut / copy, so it stays valid after the user navigates to the
+//! act on: it captures the items being moved or copied at the moment of cut /
+//! copy, each as [`Listed`], so it stays valid after the user navigates to the
 //! directory they want to paste into. It is the one pure, host-provable model
 //! behind Move / Copy / Paste — the engine names *what* would move where and
-//! *why a paste is refused*; the app performs the capability-checked
-//! `fs_rename` / streamed copy under the user's own identity in its own tail.
-//! Composing this model grants nothing, so the read-only picker never builds a
-//! clipboard.
+//! *why a paste is refused*; the app carries each item out as an operation of
+//! the shared engine (`lib/fscopy`) under the user's own identity, refused
+//! where the name has come to hold another node. Composing this model grants
+//! nothing, so the read-only picker never builds a clipboard.
 //!
 //! Paths are root-first component lists — the same
 //! [`components`](crate::Browser::components) vocabulary the whole engine uses —
@@ -28,6 +28,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::fs::FileId;
+
+use crate::entry::Listed;
+
 /// Whether a clipboard's items are being *moved* (removed from the source once
 /// pasted) or *copied* (left in place).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -40,26 +44,24 @@ pub enum ClipboardOp {
 
 /// The set of items cut or copied, ready to be pasted into another directory.
 ///
-/// Each item is a non-empty root-first component list — the absolute path of a
-/// source entry. The filesystem root (an empty component list) can never be an
-/// item, so [`new`](Self::new) refuses one.
+/// The filesystem root (an empty component list) can never be an item, so
+/// [`new`](Self::new) refuses one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Clipboard {
     op: ClipboardOp,
-    items: Vec<Vec<String>>,
+    items: Vec<Listed>,
 }
 
 impl Clipboard {
-    /// Build a clipboard for `op` over `items` (each a root-first component
-    /// path), or `None` when there is nothing to hold — an empty item list, or
-    /// any item that names the root (an empty component list).
+    /// Build a clipboard for `op` over `items`, or `None` when there is
+    /// nothing to hold — an empty item list, or any item that names the root.
     ///
     /// Refusing an empty clipboard here means [`plan_paste`] never has to plan
     /// from nothing, and a "paste" with an empty clipboard is simply
     /// unavailable rather than a silent no-op.
     #[must_use]
-    pub fn new(op: ClipboardOp, items: Vec<Vec<String>>) -> Option<Self> {
-        if items.is_empty() || items.iter().any(Vec::is_empty) {
+    pub fn new(op: ClipboardOp, items: Vec<Listed>) -> Option<Self> {
+        if items.is_empty() || items.iter().any(|item| item.path.is_empty()) {
             return None;
         }
         Some(Self { op, items })
@@ -71,9 +73,9 @@ impl Clipboard {
         self.op
     }
 
-    /// The source items, each a root-first component path.
+    /// The source items.
     #[must_use]
-    pub fn items(&self) -> &[Vec<String>] {
+    pub fn items(&self) -> &[Listed] {
         &self.items
     }
 
@@ -116,11 +118,11 @@ impl core::fmt::Display for PasteError {
     }
 }
 
-/// One resolved move/copy: the source path and the path it would take in the
+/// One resolved move/copy: the source and the path it would take in the
 /// target directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PasteItem {
-    source: Vec<String>,
+    source: Listed,
     dest: Vec<String>,
     overwrites_source: bool,
 }
@@ -129,7 +131,13 @@ impl PasteItem {
     /// The source entry's root-first component path.
     #[must_use]
     pub fn source(&self) -> &[String] {
-        &self.source
+        &self.source.path
+    }
+
+    /// The node the source was listed as ([`Listed::id`]).
+    #[must_use]
+    pub const fn source_id(&self) -> FileId {
+        self.source.id
     }
 
     /// The root-first component path the item would take in the target
@@ -191,10 +199,10 @@ impl PastePlan {
 pub fn plan_paste(clipboard: &Clipboard, target: &[String]) -> Result<PastePlan, PasteError> {
     let mut items = Vec::with_capacity(clipboard.items.len());
     for source in &clipboard.items {
-        if is_within(target, source) {
+        if is_within(target, &source.path) {
             return Err(PasteError::WouldRecurse);
         }
-        let leaf = match source.last() {
+        let leaf = match source.path.last() {
             Some(leaf) => leaf.clone(),
             // A constructed clipboard never holds an empty (root) item, so a
             // source always has a leaf; refuse rather than fabricate one.
@@ -202,7 +210,7 @@ pub fn plan_paste(clipboard: &Clipboard, target: &[String]) -> Result<PastePlan,
         };
         let mut dest = target.to_vec();
         dest.push(leaf);
-        let overwrites_source = dest == *source;
+        let overwrites_source = dest == source.path;
         items.push(PasteItem {
             source: source.clone(),
             dest,
@@ -222,17 +230,14 @@ pub fn plan_paste(clipboard: &Clipboard, target: &[String]) -> Result<PastePlan,
 /// The one policy every drop of a drag decides through, so a window and the
 /// desktop can never disagree about what a drop means.
 #[must_use]
-pub fn drop_operation(
-    items: &[Vec<String>],
-    target: &[String],
-    shift: bool,
-) -> Option<ClipboardOp> {
+pub fn drop_operation(items: &[Listed], target: &[String], shift: bool) -> Option<ClipboardOp> {
     let mut moves_one = false;
     for item in items {
-        if is_within(target, item) {
+        if is_within(target, &item.path) {
             return None;
         }
         moves_one |= item
+            .path
             .split_last()
             .is_some_and(|(_, parent)| parent != target);
     }

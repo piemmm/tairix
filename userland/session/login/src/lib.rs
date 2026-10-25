@@ -114,9 +114,10 @@ pub use elevate::{
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};
 pub use session::{
-    configured_session_kind, effective_session_kind, elevated_attach, session_attach,
+    configured_session_kind, effective_session_kind, elevated_attach, home_refusal, session_attach,
     session_environment, session_program, AuthenticatedUser, Authenticator, ConfigStore,
     Credentials, Gid, LoginView, SessionKind, SessionLauncher, SessionOutcome, Uid,
+    SESSION_FALLBACK_DIRECTORY,
 };
 pub use supervise::{supervise, DbLoad};
 pub use table::{

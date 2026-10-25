@@ -48,7 +48,7 @@
 //! (`build.rs`, a single CPU node) and its address handed to the boot
 //! pipeline, exactly as the ESC boot-screen vertical does. The takeover never
 //! resets the board itself (the harness does), so it needs no reset conduit —
-//! and it is available on a real spin-table Pi 4 whose tree has no `/psci`
+//! and it is available on a real spin-table board whose tree has no `/psci`
 //! node at all.
 //!
 //! ## How it differs from a production kernel

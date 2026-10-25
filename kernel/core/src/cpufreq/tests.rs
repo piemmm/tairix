@@ -19,8 +19,8 @@ use super::governor::{MAX_HOLD_NS, RESPONSE_WINDOW_NS, UTIL_ONE};
 use super::{estimate, note_active, note_idle};
 use crate::cpu_state;
 
-/// A Pi 4B's range: 600 MHz to 1.5 GHz in 100 MHz steps.
-fn pi4() -> CpuFreqLimits {
+/// A 600 MHz to 1.5 GHz range in 100 MHz steps.
+fn stepped_range() -> CpuFreqLimits {
     CpuFreqLimits::new(600_000_000, 1_500_000_000, 100_000_000).expect("a real range")
 }
 
@@ -109,9 +109,9 @@ fn governed_cpus_idle(now_ns: u64) {
 
 #[test]
 fn a_second_mechanism_is_refused_rather_than_arbitrated() {
-    with_mechanism(pi4(), 1_000, |_handle| {
+    with_mechanism(stepped_range(), 1_000, |_handle| {
         assert_eq!(
-            domain::bind(ProcessId(0x0C_A0), pi4(), 1_000),
+            domain::bind(ProcessId(0x0C_A0), stepped_range(), 1_000),
             Err(Errno::AlreadyExists),
             "two drivers on one clock is worse than one"
         );
@@ -120,9 +120,9 @@ fn a_second_mechanism_is_refused_rather_than_arbitrated() {
 
 #[test]
 fn a_dead_driver_frees_the_role_for_its_replacement() {
-    let first = with_mechanism(pi4(), 1_000, |handle| handle);
+    let first = with_mechanism(stepped_range(), 1_000, |handle| handle);
     // `with_mechanism` released it, exactly as the task-reclaim path does.
-    let second = with_mechanism(pi4(), 2_000, |handle| handle);
+    let second = with_mechanism(stepped_range(), 2_000, |handle| handle);
     assert_ne!(
         first, second,
         "a handle held over from the dead binding must not name the new one"
@@ -131,7 +131,7 @@ fn a_dead_driver_frees_the_role_for_its_replacement() {
 
 #[test]
 fn releasing_another_processs_binding_does_nothing() {
-    with_mechanism(pi4(), 1_000, |handle| {
+    with_mechanism(stepped_range(), 1_000, |handle| {
         assert!(
             !domain::release_process(ProcessId(0x0C_A1)),
             "a process that never bound cannot release the role"
@@ -144,7 +144,7 @@ fn releasing_another_processs_binding_does_nothing() {
 
 #[test]
 fn a_wait_on_a_foreign_or_forged_handle_fails_closed() {
-    with_mechanism(pi4(), 1_000, |handle| {
+    with_mechanism(stepped_range(), 1_000, |handle| {
         let waiter = ScriptedWaiter::at(1_000);
         assert_eq!(
             domain::wait(DRIVER, handle.wrapping_add(1), 0, &waiter),
@@ -172,7 +172,7 @@ fn a_wait_with_no_mechanism_bound_fails_closed() {
 
 #[test]
 fn a_terminated_mechanism_unwinds_its_wait() {
-    with_mechanism(pi4(), 1_000, |handle| {
+    with_mechanism(stepped_range(), 1_000, |handle| {
         // The first wait answers immediately (the bind boost is a change), so
         // observe that sequence and then wait again on a machine that has
         // nothing new to say.
@@ -193,7 +193,7 @@ fn the_first_target_after_bind_is_full_speed_not_the_minimum() {
     // — it was just launched — would otherwise find every filter dated time
     // zero, read the whole boot as idle, and ask the firmware for the
     // *minimum*. The bind boost is what makes the first move the right one.
-    let limits = pi4();
+    let limits = stepped_range();
     with_mechanism(limits, 1_000_000, |handle| {
         let waiter = ScriptedWaiter::at(1_000_000);
         let target = domain::wait(DRIVER, handle, 0, &waiter).expect("a first target");
@@ -244,7 +244,7 @@ fn settle(handle: u64, waiter: &ScriptedWaiter, limits: &CpuFreqLimits) -> (u64,
 
 #[test]
 fn a_quiet_machine_settles_at_the_minimum_and_then_stops_waking() {
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         governed_cpus_idle(start);
@@ -265,7 +265,7 @@ fn a_quiet_machine_settles_at_the_minimum_and_then_stops_waking() {
 /// not this test's load: its quiet machine still settles at the minimum.
 #[test]
 fn a_concurrent_test_s_busy_cpu_is_not_counted() {
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     let _ = crate::test_boot::claim_cpu();
     with_mechanism(limits, start, |handle| {
@@ -297,7 +297,7 @@ fn sustained_work_climbs_to_full_speed() {
     // has to rise from the waiter looking again on its own cadence. It must
     // reach the ceiling, and get there within about the window the filter
     // measures over.
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         governed_cpus_idle(start);
@@ -377,7 +377,7 @@ fn work_that_resumes_inside_the_attention_span_is_still_noticed() {
     // a CPU that resumed just after a survey found the machine quiet would
     // have no edge left to announce it — and a machine that then stayed busy
     // would sit at the floor for ever.
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         governed_cpus_idle(start);
@@ -409,7 +409,7 @@ fn a_machine_past_half_busy_is_given_the_whole_range() {
     // The proportional rate with its headroom only reaches the ceiling at
     // four fifths of a core, which leaves a genuinely busy machine climbing
     // through rates it will not stay at.
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         governed_cpus_idle(start);
@@ -444,7 +444,7 @@ fn the_ceiling_is_held_before_it_is_given_up() {
     // rate actually changes, so the waiter's clock at the first reduction is
     // when the reduction happened. Its park advances that clock to whatever
     // deadline the governor chose, so nothing here invents a cadence.
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         let waiter = ScriptedWaiter::at(start);
@@ -474,7 +474,7 @@ fn the_hold_never_delays_a_rise() {
     // The hold exists to stop the rate flapping off the top, not to slow it
     // reaching the top: a machine that gets busy while a hold stands on a
     // *lower* rate must not be made to wait.
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         governed_cpus_idle(start);
@@ -503,7 +503,7 @@ fn a_low_duty_wake_pattern_does_not_pin_the_ceiling() {
     // ceiling for ever: every wake re-extended a boost that granted the
     // maximum outright, so the measured utilisation never got a say. Leaving
     // idle now grants no rate at all.
-    let limits = pi4();
+    let limits = stepped_range();
     let mut now = 1_000_000;
     with_mechanism(limits, now, |handle| {
         governed_cpus_idle(now);
@@ -528,7 +528,7 @@ fn a_low_duty_wake_pattern_does_not_pin_the_ceiling() {
 fn a_program_launch_is_served_at_full_speed_from_an_idle_machine() {
     // A launch spends most of its time waiting on the volume, so every CPU
     // can be idle throughout and utilisation would never notice it.
-    let limits = pi4();
+    let limits = stepped_range();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         governed_cpus_idle(start);
@@ -553,7 +553,7 @@ fn sustained_partial_load_settles_below_full_speed() {
     let cpu = crate::test_boot::claim_cpu();
     // The proportional half: a CPU busy a fifth of the time must not hold the
     // whole machine at its ceiling once the boost has lapsed.
-    let limits = pi4();
+    let limits = stepped_range();
     let mut now = 1_000_000;
     with_mechanism(limits, now, |handle| {
         governed_cpus_idle(now);
@@ -623,7 +623,7 @@ fn back_to_back_dispatches_are_one_busy_span() {
     // arbitrary slices and hand the filter's non-composability a workload it
     // was never meant to measure.
     let cpu = crate::test_boot::claim_cpu();
-    with_mechanism(pi4(), 1_000, |_handle| {
+    with_mechanism(stepped_range(), 1_000, |_handle| {
         let state = cpu_state::get(cpu).expect("a test CPU");
         note_active(cpu, 1_000);
         let stamped = state.cpu_active_since.load(Ordering::Relaxed);
@@ -643,7 +643,7 @@ fn back_to_back_dispatches_are_one_busy_span() {
 
 #[test]
 fn an_out_of_range_cpu_is_dropped_rather_than_indexed() {
-    with_mechanism(pi4(), 1_000, |_handle| {
+    with_mechanism(stepped_range(), 1_000, |_handle| {
         // The hooks take a CPU id from the dispatch loop; one outside the
         // installed set fails closed rather than reaching past the slots.
         note_active(u32::MAX, 2_000);

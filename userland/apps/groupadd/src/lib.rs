@@ -45,8 +45,9 @@
 //!
 //! # Fail closed
 //!
-//! An unknown option or anything other than exactly one name operand is a
-//! [`GroupaddError::Usage`] that creates nothing; a group name that is not a
+//! An option `getopt` refuses is a [`GroupaddError::Option`] and anything
+//! other than exactly one name operand a [`GroupaddError::Usage`], neither
+//! creating anything; a group name that is not a
 //! valid `[a-z_][a-z0-9_-]*` (within the length bound) is a
 //! [`GroupaddError::BadName`]; a `-g` value that is not a decimal id is a
 //! [`GroupaddError::BadId`]; a name already present is a

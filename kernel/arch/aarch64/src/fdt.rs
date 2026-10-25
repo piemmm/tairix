@@ -27,7 +27,7 @@ use tairix_fdt::{read_cells, scan_translated, translated_reg, BusLevel, Node};
 pub use tairix_fdt::{Fdt, FdtError};
 
 /// The `compatible` string identifying a per-PE external-debug component
-/// in the device tree (the Linux `arm,coresight-cpu-debug` binding).
+/// in the device tree (the `arm,coresight-cpu-debug` binding).
 ///
 /// A node bearing it exposes that CPU's memory-mapped external-debug
 /// registers (`EDPCSR`, …) at its `reg` window and names the CPU it
@@ -179,7 +179,7 @@ fn node_is_psci(node: &tairix_fdt::Node<'_>) -> bool {
 ///
 /// `clock-frequency` is the standard `arm,armv?-timer` override the
 /// device tree carries when firmware leaves `CNTFRQ_EL0` mis-programmed
-/// (the Linux binding honours it ahead of the register). The canonical
+/// (FreeBSD's BSD-3-Clause `generic_timer.c` likewise prefers it). The canonical
 /// source is still the `CNTFRQ_EL0` register (`kernel_arch::read_cntfrq`);
 /// this surfaces only the optional tree override so the boot path can
 /// prefer it. Returns `None` when the node omits the property or the
@@ -222,9 +222,9 @@ pub const fn effective_timer_hz(tree_clock_frequency: Option<u32>, cntfrq: u64) 
 
 /// First cell of a GIC `interrupts` specifier: the interrupt *type*.
 ///
-/// The Arm GIC device-tree binding (Linux
-/// `Documentation/devicetree/bindings/interrupt-controller/arm,gic.yaml`)
-/// encodes each interrupt as a three-cell tuple `<type number flags>`.
+/// The Arm GIC device-tree binding encodes each interrupt as a three-cell
+/// tuple `<type number flags>` (as FreeBSD's BSD-3-Clause `gic.c` decodes
+/// it).
 /// `type` is [`GIC_TYPE_SPI`] (shared peripheral) or [`GIC_TYPE_PPI`]
 /// (private peripheral); any other value is not a GICv2 interrupt this
 /// port understands and is refused (fail closed).
@@ -296,7 +296,8 @@ mod tests {
         psci_method, timer_clock_frequency, Fdt, PsciMethod, GIC_TYPE_PPI, GIC_TYPE_SPI,
     };
     use crate::gic::{MAX_INTID, MIN_SPI_INTID};
-    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm};
+    use crate::raspi_fixture::raspi_like_arm;
+    use tairix_fdt::fixture::virt_like_arm;
     use tairix_fdt::write::FdtWriter;
 
     /// Build a tree with two CPUs and, optionally, a per-CPU

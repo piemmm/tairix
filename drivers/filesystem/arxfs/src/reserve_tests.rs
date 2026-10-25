@@ -20,15 +20,12 @@ fn fill(fs: &mut ARXFS<MemBlock>) {
     for file in 0.. {
         assert!(file < 100_000, "the volume never filled");
         let name = alloc::format!("fill{file}");
-        if fs
-            .create(root, name.as_bytes(), NodeKind::RegularFile)
-            .is_err()
-        {
+        let Ok(node) = fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD) else {
             return;
-        }
-        if fs.write_at(root, name.as_bytes(), 0, &body).is_err() {
+        };
+        if fs.write_at(node, 0, &body).is_err() {
             let mut at = 0;
-            while fs.write_at(root, name.as_bytes(), at, &[1]).is_ok() {
+            while fs.write_at(node, at, &[1]).is_ok() {
                 at += step;
             }
             return;
@@ -58,7 +55,7 @@ fn an_ordinary_writer_stops_at_the_reserve_and_leaves_it_whole() {
     assert_eq!(reserve_held(&fs), reserve, "and still held whole");
     let root = fs.root();
     assert_eq!(
-        fs.create(root, b"more", NodeKind::RegularFile),
+        fs.create(root, b"more", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::NoSpace)
     );
 }
@@ -70,15 +67,15 @@ fn the_system_writes_into_the_reserve_once_users_have_filled_the_volume() {
     let root = fs.root();
 
     fs.set_allocation_class(AllocationClass::System);
-    fs.create(root, b"settings", NodeKind::RegularFile)
+    let settings = fs
+        .create(root, b"settings", NodeKind::RegularFile, &FILE_RECORD)
         .expect("a system file is created on a full volume");
-    fs.write_at(root, b"settings", 0, &[7u8; 8192])
-        .expect("and written");
+    fs.write_at(settings, 0, &[7u8; 8192]).expect("and written");
     fs.flush().expect("and its work commits");
     fs.set_allocation_class(AllocationClass::Ordinary);
 
     assert_eq!(
-        fs.create(root, b"user", NodeKind::RegularFile),
+        fs.create(root, b"user", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::NoSpace),
         "a user is still refused"
     );
@@ -104,9 +101,10 @@ fn a_delete_on_a_full_volume_frees_space_for_the_next_write() {
         fs.reserve_blocks(),
         "the delete drew nothing it kept"
     );
-    fs.create(root, b"after", NodeKind::RegularFile)
+    let after = fs
+        .create(root, b"after", NodeKind::RegularFile, &FILE_RECORD)
         .expect("an ordinary create succeeds again");
-    fs.write_at(root, b"after", 0, &[3u8; 1024])
+    fs.write_at(after, 0, &[3u8; 1024])
         .expect("and an ordinary write");
 }
 
@@ -148,10 +146,10 @@ fn a_release_that_holds_more_than_it_frees_is_refused() {
 fn a_release_that_frees_what_it_takes_is_admitted() {
     let mut fs = fmt(512, 1 << 12, 64);
     let root = fs.root();
-    fs.create(root, b"victim", NodeKind::RegularFile)
+    let victim = fs
+        .create(root, b"victim", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"victim", 0, &[9u8; 4096])
-        .expect("write");
+    fs.write_at(victim, 0, &[9u8; 4096]).expect("write");
     fs.flush().expect("publish");
     let ino = file_ino(&mut fs, b"victim");
     let extent_root = fs.read_inode(ino).expect("inode").extent_root;
@@ -288,7 +286,7 @@ fn batched_unlink_behind(mut fs: ARXFS<MemBlock>, large: &[&[u8]]) -> ARXFS<MemB
             .expect("detach a large node's name");
         fs.flush().expect("publish it pending");
     }
-    fs.create(root, b"small", NodeKind::RegularFile)
+    fs.create(root, b"small", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fs.flush().expect("publish");
     let host = TestVolumeHost::leaked(0);
@@ -349,7 +347,7 @@ fn a_reclaim_that_fails_after_publishing_a_batched_unlink_leaves_it_standing() {
     let fixture = || {
         let mut fs = spanning_delete_volume();
         let root = fs.root();
-        fs.create(root, b"frag2", NodeKind::RegularFile)
+        fs.create(root, b"frag2", NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         fragment(&mut fs, b"frag2", 2 * SPANNING_EXTENTS);
         fs.flush().expect("publish");
@@ -358,17 +356,14 @@ fn a_reclaim_that_fails_after_publishing_a_batched_unlink_leaves_it_standing() {
     // Measure, on a twin, the writes the drain's first step takes, so the
     // device can refuse exactly the ones after it.
     let mut twin = fixture();
-    let first = twin
-        .next_pending_delete(0)
-        .expect("read the set")
-        .expect("a node is pending");
+    let first = first_pending(&mut twin).expect("a node is pending");
     let generation = twin.generation;
     let before = twin.block_mut().writes;
     twin.reclaim_step(first).expect("the first step");
     assert_ne!(twin.generation, generation, "which publishes the batch");
     let first_step = twin.block_mut().writes - before;
     let mut later_publishes = false;
-    while let Some(ino) = twin.next_pending_delete(0).expect("read the set") {
+    while let Some(ino) = first_pending(&mut twin) {
         let generation = twin.generation;
         twin.reclaim_step(ino).expect("a later step");
         if twin.generation != generation {
@@ -382,7 +377,7 @@ fn a_reclaim_that_fails_after_publishing_a_batched_unlink_leaves_it_standing() {
     );
 
     let mut fs = fixture();
-    assert_eq!(fs.next_pending_delete(0), Ok(Some(first)));
+    assert_eq!(first_pending(&mut fs), Some(first));
     let writes = fs.block_mut().writes;
     fs.block_mut().write_fault_after = Some(writes + first_step);
     let aborts = fs.aborts;
@@ -428,7 +423,8 @@ fn a_volume_below_its_reserve_publishes_a_release_transaction_at_a_time() {
     let threshold = fs.release_commit_blocks();
     let root = fs.root();
     fs.set_allocation_class(AllocationClass::System);
-    fs.create(root, b"journal", NodeKind::RegularFile)
+    let journal = fs
+        .create(root, b"journal", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let bytes = threshold * fs.data_capacity();
     // Incompressible and unrepeated, so every block is stored as written.
@@ -444,7 +440,7 @@ fn a_volume_below_its_reserve_publishes_a_release_transaction_at_a_time() {
     let mut at = 0;
     while at < body.len() {
         at += fs
-            .write_at(root, b"journal", at as u64, &body[at..])
+            .write_at(journal, at as u64, &body[at..])
             .expect("the system writes a release transaction's worth");
     }
     fs.set_allocation_class(AllocationClass::Ordinary);
@@ -471,7 +467,7 @@ fn the_reserve_is_chosen_again_on_every_mount() {
     );
     let root = fs.root();
     fs.set_allocation_class(AllocationClass::System);
-    fs.create(root, b"log", NodeKind::RegularFile)
+    fs.create(root, b"log", NodeKind::RegularFile, &FILE_RECORD)
         .expect("the system still writes after a remount");
 }
 
@@ -488,7 +484,7 @@ fn a_volume_holding_the_system_reserve_holds_it_over_its_write_set() {
     let stats = fs.stats().expect("stats");
     assert_eq!(stats.avail_blocks, stats.free_blocks - target);
     let root = fs.root();
-    fs.create(root, b"user", NodeKind::RegularFile)
+    fs.create(root, b"user", NodeKind::RegularFile, &FILE_RECORD)
         .expect("ordinary space remains");
 }
 
@@ -548,9 +544,10 @@ fn the_system_reserve_follows_its_size_policy() {
 fn only_a_truncate_that_drops_data_draws_as_a_release() {
     let mut fs = fmt(512, 1 << 12, 64);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"file", 0, &[2u8; 2048]).expect("write");
+    fs.write_at(file, 0, &[2u8; 2048]).expect("write");
     let ino = file_ino(&mut fs, b"file");
     for (size, draw) in [(1 << 20, Draw::Ordinary), (0, Draw::Release)] {
         fs.draw = Draw::Release;
@@ -567,7 +564,7 @@ fn only_a_truncate_that_drops_data_draws_as_a_release() {
 fn only_the_last_unlink_draws_as_a_release() {
     let mut fs = fmt(512, 1 << 12, 64);
     let root = fs.root();
-    fs.create(root, b"one", NodeKind::RegularFile)
+    fs.create(root, b"one", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"one").expect("lookup");
     fs.link(root, b"two", node).expect("a second name");

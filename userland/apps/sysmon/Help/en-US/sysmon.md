@@ -308,8 +308,8 @@ storage is ungated.
 ## EXIT STATUS
 
 - `0` — the session ended with `q`, or the short help was shown.
-- `1` — the terminal failed; the reason is printed on standard error.
-- `2` — the command line was not understood.
+- `1` — the terminal failed; the reason is printed on standard error. A
+  command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

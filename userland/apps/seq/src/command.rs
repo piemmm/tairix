@@ -3,8 +3,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::SeqError;
-use crate::format::{parse_format, Format};
+use crate::format::Format;
 
 /// One parsed `seq` job: what to print and how.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,108 +33,63 @@ pub enum Command {
     Help,
 }
 
-/// True when `arg` looks like a negative number (`-5`, `-.3`), which GNU
-/// `seq` treats as an operand rather than an option cluster.
-fn looks_like_negative_number(arg: &str) -> bool {
-    let bytes = arg.as_bytes();
-    bytes.first() == Some(&b'-') && matches!(bytes.get(1), Some(b'.' | b'0'..=b'9'))
+/// What each of `seq`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Format,
+    Separator,
+    EqualWidth,
+    Help,
 }
+
+/// `seq`'s options, as GNU's `seq` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('f', &["format"], Flag::Format),
+    Opt::valued('s', &["separator"], Flag::Separator),
+    Opt::flag('w', &["equal-width"], Flag::EqualWidth),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The scan mirrors GNU `seq`: options are **not** permuted (the first
-/// operand ends option parsing, as does `--`), a token that looks like a
-/// negative number is an operand, and `-f`/`-s` take their value attached
-/// or as the next argument. After the scan: one to three operands are
-/// required, the `-f` format must validate, and `-f` may not be combined
-/// with `-w` — diagnosed in exactly that order, as in the GNU tool.
+/// Read as GNU's `getopt_long` reads `seq`'s line ([`Scan`]): clustered, a
+/// long option by any unambiguous prefix, a value attached or following, but
+/// not permuted — the first operand ends the options, as does `--` — and an
+/// argument that looks like a negative number (`-5`, `-.3`) is an operand.
+/// The help switches (`-h`, `-?`, `--help`) answer at once. After the scan:
+/// one to three operands are required, the `-f` format must validate, and
+/// `-f` may not be combined with `-w` — diagnosed in exactly that order, as
+/// in the GNU tool.
 ///
 /// # Errors
 ///
-/// The [`SeqError`] usage variants, mirroring the GNU diagnostics.
+/// * [`SeqError::Option`] — an option `getopt` refuses, in its words.
+/// * [`SeqError::MissingOperand`] / [`SeqError::ExtraOperand`] — no operand,
+///   or more than three.
+/// * [`SeqError::FormatNoDirective`], [`SeqError::FormatEndsInPercent`],
+///   [`SeqError::FormatUnknownDirective`],
+///   [`SeqError::FormatTooManyDirectives`] — a `-f` format that does not
+///   validate.
+/// * [`SeqError::FormatWithEqualWidth`] — `-f` with `-w`.
 pub fn parse(args: &[&str]) -> Result<Command, SeqError> {
     let mut format_str: Option<&str> = None;
     let mut separator: Option<&str> = None;
     let mut equal_width = false;
+    let mut operands: Vec<String> = Vec::new();
 
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        if looks_like_negative_number(arg) || arg == "-" || !arg.starts_with('-') {
-            break;
+    for arg in Scan::new(OPTIONS, args, Order::OperandsEnd).numbers_are_operands() {
+        match arg.map_err(SeqError::Option)? {
+            Arg::Operand(operand) => operands.push(String::from(operand)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Format, value) => format_str = value,
+            Arg::Opt(Flag::Separator, value) => separator = value,
+            Arg::Opt(Flag::EqualWidth, _) => equal_width = true,
         }
-        match arg {
-            "--" => {
-                index += 1;
-                break;
-            }
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "--equal-width" => equal_width = true,
-            "--format" | "--separator" => {
-                index += 1;
-                let Some(&value) = args.get(index) else {
-                    return Err(SeqError::MissingValue(if arg == "--format" {
-                        "--format"
-                    } else {
-                        "--separator"
-                    }));
-                };
-                if arg == "--format" {
-                    format_str = Some(value);
-                } else {
-                    separator = Some(value);
-                }
-            }
-            _ if arg.starts_with("--format=") => {
-                format_str = Some(&arg["--format=".len()..]);
-            }
-            _ if arg.starts_with("--separator=") => {
-                separator = Some(&arg["--separator=".len()..]);
-            }
-            _ if arg.starts_with("--") => {
-                return Err(SeqError::UnknownLong(String::from(arg)));
-            }
-            _ => {
-                // A short-option cluster (`-wf%g`, `-s,`, …): `w` is a
-                // flag; `f`/`s` consume the rest of the token or the next
-                // argument as their value.
-                let mut rest = &arg[1..];
-                while let Some(flag) = rest.chars().next() {
-                    rest = &rest[flag.len_utf8()..];
-                    match flag {
-                        'w' => equal_width = true,
-                        'h' | '?' => return Ok(Command::Help),
-                        'f' | 's' => {
-                            let value = if rest.is_empty() {
-                                index += 1;
-                                let Some(&next) = args.get(index) else {
-                                    return Err(SeqError::MissingValue(if flag == 'f' {
-                                        "-f"
-                                    } else {
-                                        "-s"
-                                    }));
-                                };
-                                next
-                            } else {
-                                rest
-                            };
-                            if flag == 'f' {
-                                format_str = Some(value);
-                            } else {
-                                separator = Some(value);
-                            }
-                            rest = "";
-                        }
-                        other => return Err(SeqError::UnknownShort(other)),
-                    }
-                }
-            }
-        }
-        index += 1;
     }
 
-    let operands: Vec<String> = args[index..].iter().map(|&s| String::from(s)).collect();
     if operands.is_empty() {
         return Err(SeqError::MissingOperand);
     }
@@ -141,7 +98,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SeqError> {
     }
 
     let format = match format_str {
-        Some(text) => Some(parse_format(text)?),
+        Some(text) => Some(Format::parse(text)?),
         None => None,
     };
     if format.is_some() && equal_width {
@@ -158,12 +115,12 @@ pub fn parse(args: &[&str]) -> Result<Command, SeqError> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
 
     use super::{parse, Command, Job};
     use crate::error::SeqError;
-    use crate::format::parse_format;
+    use crate::format::Format;
 
     fn print_job(command: Command) -> Job {
         match command {
@@ -238,7 +195,7 @@ mod tests {
 
     #[test]
     fn format_forms() {
-        let expected = parse_format("%.2f").expect("validates");
+        let expected = Format::parse("%.2f").expect("validates");
         for args in [
             ["-f", "%.2f", "5"].as_slice(),
             ["-f%.2f", "5"].as_slice(),
@@ -270,28 +227,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_options_are_diagnosed() {
-        assert_eq!(
-            parse(&["--frob", "5"]),
-            Err(SeqError::UnknownLong(String::from("--frob")))
-        );
-        assert_eq!(parse(&["-x", "5"]), Err(SeqError::UnknownShort('x')));
-        assert_eq!(parse(&["-w5"]), Err(SeqError::UnknownShort('5')));
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn missing_values_are_diagnosed() {
-        assert_eq!(parse(&["-f"]), Err(SeqError::MissingValue("-f")));
-        assert_eq!(parse(&["-s"]), Err(SeqError::MissingValue("-s")));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["--frob", "5"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-x", "5"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-w5"]), "invalid option -- '5'");
+        assert_eq!(refused(&["-f"]), "option requires an argument -- 'f'");
+        assert_eq!(refused(&["-s"]), "option requires an argument -- 's'");
         assert_eq!(
-            parse(&["--format"]),
-            Err(SeqError::MissingValue("--format"))
+            refused(&["--format"]),
+            "option '--format' requires an argument"
         );
         assert_eq!(
-            parse(&["--separator"]),
-            Err(SeqError::MissingValue("--separator"))
+            refused(&["--separator"]),
+            "option '--separator' requires an argument"
         );
+        assert_eq!(
+            refused(&["--equal-width=x", "5"]),
+            "option '--equal-width' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `seq --eq --sep=, 5` as `seq --equal-width --separator=, 5`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        let job = print_job(parse(&["--eq", "--sep=,", "5"]).expect("parses"));
+        assert!(job.equal_width);
+        assert_eq!(job.separator, ",");
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

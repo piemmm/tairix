@@ -1,5 +1,5 @@
 //! The production [`FilesystemService`]: the `fs_*` syscalls served against
-//! a mounted volume (`PREREQUISITES.md` P-A).
+//! a mounted volume.
 //!
 //! The hollow [`NULL_FILESYSTEM`](super::service::NULL_FILESYSTEM) default
 //! fails every `fs_*` syscall closed. This module is the real producer the
@@ -17,7 +17,7 @@
 //! filesystem driver needs `&mut self` per operation and may **park** across a
 //! block-device completion IRQ ([`tairix_abi::driver::block::Block::read_blocks`]
 //! parks the caller), so the per-mount lock is a scheduler-blocking
-//! [`SleepLock`] held across that park — never a `lib/sync` spin lock, which a
+//! [`SleepLock`](crate::sleeplock::SleepLock) held across that park — never a `lib/sync` spin lock, which a
 //! second contender would busy-spin on while the holder sleeps
 //! (`docs/src/architecture/sync.md`). This is the architecture a future
 //! async/multi-queue `Block` overlaps operations *within* a device on, with no
@@ -25,27 +25,41 @@
 //!
 //! # Identity is kernel-attested, never caller-supplied
 //!
-//! The syscall handler supplies the caller's owning `uid` and effective
-//! capability set, both read from the task's
-//! [`tairix_kernel_sec::TaskCapabilities`] — never anything the caller passed.
-//! This service resolves the caller's primary and supplementary **groups**
-//! from the authoritative [`IdentityTable`] keyed by that uid (a frozen,
-//! credential-free index — it carries no password material), then runs
-//! `Vfs::*_via_secured` so every per-inode owner/mode/ACL/`required_cap` and
+//! The syscall handler supplies an owning `uid` and effective capability set,
+//! both read from a task's [`tairix_kernel_sec::TaskCapabilities`] — never
+//! anything the caller passed. This service resolves that uid's primary and
+//! supplementary **groups** from the authoritative [`IdentityTable`] (a
+//! frozen, credential-free index — it carries no password material), then
+//! resolves every path through the VFS's one resolver, judging each node by
+//! its own record, so every per-inode owner/mode/ACL/`required_cap` and
 //! mount-flag check stays kernel-side and fails closed. A principal with no
 //! account, or a call made before the identity table or the mount is
 //! installed, is denied rather than served.
+//!
+//! # Descriptors hold pinned nodes
+//!
+//! A walk holds one projection's driver at a time, and an operation acts on
+//! what it reached under the hold of the driver it ended on: an open creates
+//! what it was asked to and pins the node, a removal unlinks the name. A
+//! rename or link pins both directories it names, then changes them under
+//! one hold. A byte operation runs on a pin under the driver's lock, after
+//! checking that the node's projection is still in the mount table and its
+//! registration is current. A driver's lock may be held while the mount
+//! table's guard or the registry's lock is taken, never the other way round:
+//! what either holds is copied out before the driver is locked.
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tairix_abi::driver::filesystem::{
-    DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeInfo, NodeKind as DriverNodeKind, NodeTimes, VolumeHost, VolumeStats,
+    DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
+    FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind as DriverNodeKind, NodeTimes,
+    VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
+use tairix_abi::fs::{Access as Wanted, NodeExpect};
 use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord, VolumeIoHealthRecord,
     VolumeIoQueueRecord, VolumeIoStatsRecord,
@@ -56,6 +70,7 @@ use tairix_abi::{
     RenameFlags, SeekRegion, UnlinkFlags, FS_MODE_MASK,
 };
 use tairix_caps::CapabilitySet;
+use tairix_collections::RadixTree;
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
 use tairix_sync::{OnceCell, RwLock, SpinLock};
 use tairix_util::fallible::collected;
@@ -64,19 +79,37 @@ use tairix_log::{Field, FieldValue, Level, Sink};
 
 use crate::audit::{self, AuditEvent};
 use crate::fswatch::ClaimRef;
-use crate::sleeplock::SleepLock;
 use crate::wallclock::WallClockSource;
 
 use super::blkmeter::VolumeIoSource;
 
-use super::delegate::{DelegatedEntry, DelegatedRef, FinalLink};
-use super::listing::{ListEnd, Listing, ListingRegistry};
-use super::mount::{CoveredPair, CoveredPath, MountPoint, MountTable};
-use super::path::{spell, Path};
-use super::perm::{Access, Credentials, Metadata};
-use super::service::{FilesystemService, LookedUp, ReaddirEntry};
+use super::delegate::{
+    map_driver_error, DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, Expect, FinalLink,
+    HeldNode, Links, MissingSteps, Walk,
+};
+use super::listing::{ListEnd, Listing};
+use super::mount::{ChildMounts, Projection};
+use super::node::{
+    Acting, At, Authority, Cwd, DriverLock, NodeHandle, NodeRef, Start, VolumeNodes,
+};
+use super::path::{parse_link_target, spell, Path};
+use super::perm::{Access, CreateMode, Credentials, Judged, Metadata};
+use super::service::{FilesystemService, LookedUp, Opened, ReaddirEntry};
+use super::vfs::{
+    canonical_answer, canonicalising, spell_canonical, vacancy, CatalogEnd, Drivers, Kept, Landing,
+    MountUse, Posture, Resolution, Serve, Spelling,
+};
 use super::writeback::WritebackDue;
 use super::{Vfs, VfsError};
+
+/// The entry of the registration numbered `instance` in `drivers`, which the
+/// registry keeps in instance order.
+fn registration<F: 'static>(drivers: &[DriverEntry<F>], instance: u64) -> Option<&DriverEntry<F>> {
+    drivers
+        .binary_search_by_key(&instance, |e| e.nodes.instance())
+        .ok()
+        .map(|at| &drivers[at])
+}
 
 /// One backing filesystem driver registered in a [`LateFilesystem`],
 /// addressed by the [`DriverHandle`] its mount carries in the VFS mount
@@ -84,7 +117,7 @@ use super::{Vfs, VfsError};
 ///
 /// The driver needs `&mut self` per operation and may **park** across a
 /// block-device completion IRQ, so it is serialised by a sleeping
-/// [`SleepLock`] (never a spin lock — a second contender would busy-spin
+/// [`SleepLock`](crate::sleeplock::SleepLock) (never a spin lock — a second contender would busy-spin
 /// while the holder sleeps). The lock is shared by [`Arc`] so the hot path
 /// clones the handle out of the registry without holding the registry
 /// lock across the (possibly parking) operation — and so a runtime
@@ -94,7 +127,7 @@ use super::{Vfs, VfsError};
 /// use-after-free.
 struct DriverEntry<F: 'static> {
     handle: u64,
-    driver: Arc<SleepLock<F>>,
+    driver: Arc<DriverLock<F>>,
     /// The backing volume's name (partition label / volume identity), as the
     /// mount snapshot reports it. Registration-time facts, not driver state:
     /// the registrar names what it mounted.
@@ -141,6 +174,8 @@ struct DriverEntry<F: 'static> {
     /// The space figures the volume last reported, for a listing taken
     /// while it is busy.
     usage: Arc<SpinLock<VolumeStats>>,
+    /// The registration the volume's descriptors pin through.
+    nodes: Arc<VolumeNodes>,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entries`]
@@ -150,7 +185,7 @@ struct SnapshotEntry<F: 'static> {
     handle: u64,
     source: String,
     fstype: String,
-    driver: Arc<SleepLock<F>>,
+    driver: Arc<DriverLock<F>>,
     volume_id: [u8; 16],
     availability: MountAvailability,
     usage: Arc<SpinLock<VolumeStats>>,
@@ -186,30 +221,30 @@ fn overlaid_availability(
 ///
 /// The syscall layer is built before any disk is mounted, so the handlers
 /// hold a `&'static LateFilesystem` from boot; until the VFS is published and
-/// the covering mount's driver is registered, every operation fails closed
-/// with [`Errno::NotImplemented`] — identical to the hollow
+/// the driver of each projection a walk reaches is registered, the operation
+/// fails closed with [`Errno::NotImplemented`] — identical to the hollow
 /// [`NULL_FILESYSTEM`](super::service::NULL_FILESYSTEM).
 ///
 /// One VFS owns the whole mount table; **several** backing volumes can be
 /// registered (e.g. the read-only `/System` volume and the writable
-/// `/System/Logs` subtree of the root volume). Each `fs_*`
-/// operation resolves its path's covering mount, reads that mount's
-/// [`DriverHandle`], and runs against the matching driver — so operations on
-/// *different* volumes proceed in parallel (each behind its own
-/// [`SleepLock`]) and a slow device never stalls an unrelated one.
+/// `/System/Logs` subtree of the root volume). A walk reads the
+/// [`DriverHandle`] of each projection it crosses and runs against the
+/// matching driver — so operations on *different* volumes proceed in
+/// parallel (each behind its own [`DriverLock`]) and a slow device never
+/// stalls an unrelated one.
 ///
 /// `Sync` (through [`OnceCell`], [`SpinLock`], and the per-driver
-/// [`SleepLock`]) so the single `&'static` instance is shared by the per-CPU
+/// [`DriverLock`]) so the single `&'static` instance is shared by the per-CPU
 /// syscall handlers.
 pub struct LateFilesystem<F: 'static> {
     /// The shared policy layer: absolute-path resolution, the mount table,
     /// and the per-inode permission model, set once when the layout is known.
     vfs: OnceCell<Vfs>,
-    /// The backing drivers, keyed by mount [`DriverHandle`]. Appended to at
-    /// boot as each volume comes online (rare); read on every `fs_*` call.
-    /// The spin lock is held only for the tiny lookup/append, never across a
-    /// filesystem operation (the `&'static SleepLock` reference is copied
-    /// out first), so it never spins on a parked holder.
+    /// The backing drivers, in registration-instance order so a lookup by
+    /// registration is a binary search. Added to as each volume comes online
+    /// (rare); read on every `fs_*` call. The spin lock is held only for the
+    /// tiny lookup/insert, never across a filesystem operation (the driver's
+    /// lock is cloned out first), so it never spins on a parked holder.
     drivers: SpinLock<Vec<DriverEntry<F>>>,
     /// The host every registered driver is handed, once the boot path has one
     /// to give ([`Self::install_volume_host`]). Until then a driver is
@@ -226,9 +261,8 @@ pub struct LateFilesystem<F: 'static> {
     /// clock, so every driver publishes at each operation: the batching window
     /// exists only once something can fire it.
     writeback_armed: AtomicBool,
-    /// The directories open listings are bound to, invalidated as each is
-    /// removed.
-    listings: ListingRegistry,
+    /// The number the next registration is given; never reused.
+    instances: AtomicU64,
 }
 
 /// An install/registration was refused because the target is already set.
@@ -239,6 +273,15 @@ pub struct LateFilesystem<F: 'static> {
 /// replaced by a later code path.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct FilesystemAlreadyInstalled;
+
+/// Why a volume's driver could not be registered.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RegisterError {
+    /// The handle is registered under another registration.
+    AlreadyRegistered,
+    /// The heap could not hold the registration.
+    OutOfMemory,
+}
 
 impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// Construct an empty cell. `const` so a boot path can place it in a
@@ -252,7 +295,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             audit: OnceCell::new(),
             wall_clock: OnceCell::new(),
             writeback_armed: AtomicBool::new(false),
-            listings: ListingRegistry::new(),
+            instances: AtomicU64::new(1),
         }
     }
 
@@ -272,9 +315,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
 
     /// Register the live driver backing the mount addressed by `handle`,
     /// naming the backing volume (`source`) and the driver's filesystem type
-    /// (`fstype`) for the mount snapshot.
+    /// (`fstype`) for the mount snapshot, under a fresh registration.
     ///
-    /// The driver is wrapped in a [`SleepLock`] behind an [`Arc`], so the
+    /// The driver is wrapped in a [`DriverLock`] behind an [`Arc`], so the
     /// hot path can clone the handle out of the registry without holding
     /// the registry lock across a parking operation, and a runtime
     /// [`unregister`](Self::unregister) can drop the registry's reference
@@ -289,9 +332,10 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     ///
     /// # Errors
     ///
-    /// [`FilesystemAlreadyInstalled`] if `handle` is already registered — a
-    /// driver is bound to its handle exactly once while registered (fail
-    /// closed; never a silent re-bind). A handle freed by
+    /// [`RegisterError::AlreadyRegistered`] if `handle` is already registered
+    /// — a driver is bound to its handle exactly once while registered (fail
+    /// closed; never a silent re-bind) — and [`RegisterError::OutOfMemory`]
+    /// when the heap cannot hold the registration. A handle freed by
     /// [`unregister`](Self::unregister) may be reused by a later attach.
     pub fn register(
         &self,
@@ -301,34 +345,94 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         fstype: &str,
         volume_id: [u8; 16],
         watch: Option<ClaimRef>,
-    ) -> Result<Arc<SleepLock<F>>, FilesystemAlreadyInstalled> {
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let instance = self.instances.fetch_add(1, Ordering::Relaxed);
+        let nodes =
+            Arc::try_new(VolumeNodes::new(instance)).map_err(|_| RegisterError::OutOfMemory)?;
+        self.register_with_nodes(handle, driver, source, fstype, volume_id, watch, nodes)
+    }
+
+    /// [`register`](Self::register) `driver` under the existing registration
+    /// `nodes`: the stand-in for a volume that vanished with work unpublished
+    /// takes over the registration `handle` serves, so the descriptors opened
+    /// through it answer the stand-in while the volume is away. With `handle`
+    /// registered under `nodes`, its driver is replaced in place, so no
+    /// operation finds the handle unregistered in between.
+    ///
+    /// # Errors
+    ///
+    /// As [`register`](Self::register): [`RegisterError::AlreadyRegistered`]
+    /// if `handle` is registered under another registration.
+    // What `register` names the volume by, and the registration it is filed
+    // under.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_with_nodes(
+        &self,
+        handle: DriverHandle,
+        driver: F,
+        source: &str,
+        fstype: &str,
+        volume_id: [u8; 16],
+        watch: Option<ClaimRef>,
+        nodes: Arc<VolumeNodes>,
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
         let raw = handle.as_u64();
-        let shared = {
-            let mut drivers = self.drivers.lock();
-            if drivers.iter().any(|e| e.handle == raw) {
-                return Err(FilesystemAlreadyInstalled);
-            }
-            let shared = Arc::new(SleepLock::new(driver));
-            drivers.push(DriverEntry {
-                handle: raw,
-                driver: Arc::clone(&shared),
-                source: String::from(source),
-                fstype: String::from(fstype),
-                volume_id,
-                availability: MountAvailability::Available,
-                io: None,
-                writeback: WritebackDue::empty(),
-                watch,
-                usage: Arc::new(SpinLock::new(VolumeStats::default())),
-            });
-            shared
+        let oom = |_| RegisterError::OutOfMemory;
+        // Everything the entry holds is allocated before the registry's lock
+        // is taken, so a heap that refuses leaves the registry as it was.
+        let shared = Arc::try_new(DriverLock::new(driver, Arc::clone(&nodes))).map_err(oom)?;
+        let usage = Arc::try_new(SpinLock::new(VolumeStats::default())).map_err(oom)?;
+        let owned = |text: &str| {
+            let mut owned = String::new();
+            owned
+                .try_reserve_exact(text.len())
+                .map_err(|_| RegisterError::OutOfMemory)?;
+            owned.push_str(text);
+            Ok::<_, RegisterError>(owned)
         };
+        let entry = DriverEntry {
+            handle: raw,
+            driver: Arc::clone(&shared),
+            source: owned(source)?,
+            fstype: owned(fstype)?,
+            volume_id,
+            availability: MountAvailability::Available,
+            io: None,
+            writeback: WritebackDue::empty(),
+            watch,
+            usage,
+            nodes,
+        };
+        let replaced = {
+            let mut drivers = self.drivers.lock();
+            let at = drivers.iter().position(|e| e.handle == raw);
+            if at.is_some_and(|at| !Arc::ptr_eq(&drivers[at].nodes, &entry.nodes)) {
+                return Err(RegisterError::AlreadyRegistered);
+            }
+            if let Some(at) = at {
+                Some(core::mem::replace(&mut drivers[at], entry))
+            } else {
+                drivers
+                    .try_reserve(1)
+                    .map_err(|_| RegisterError::OutOfMemory)?;
+                let instance = entry.nodes.instance();
+                let at = drivers.partition_point(|e| e.nodes.instance() < instance);
+                drivers.insert(at, entry);
+                None
+            }
+        };
+        // The replaced driver's watchers learn it left, as an unregister's do,
+        // and it goes outside the registry's lock.
+        if let Some(watch) = replaced.as_ref().and_then(|old| old.watch.as_ref()) {
+            watch.release();
+        }
+        drop(replaced);
         // The entry is in place before the driver learns of the timer, so a
         // driver that reports a deadline from inside this call has a slot to
         // report it into. This acquire cannot park and cannot spin: the lock
         // was created above and its handle has not left this function, so the
         // fast path takes it — which matters because the surprise-removal path
-        // re-registers a stand-in from a context that must not park, and
+        // registers a stand-in from a context that must not park, and
         // because the registry's own spin lock is released first either way.
         if let Ok(Some(host)) = self.volume_host.get() {
             shared.lock().set_volume_host(handle, *host);
@@ -338,6 +442,100 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         // not: an unlocked root is exactly this.
         crate::notice::mounts_changed();
         Ok(shared)
+    }
+
+    /// The registration the volume registered for `handle` pins through.
+    #[must_use]
+    pub fn nodes(&self, handle: DriverHandle) -> Option<Arc<VolumeNodes>> {
+        let raw = handle.as_u64();
+        self.drivers
+            .lock()
+            .iter()
+            .find(|e| e.handle == raw)
+            .map(|e| Arc::clone(&e.nodes))
+    }
+
+    /// The driver and published identity of the volume whose registration is
+    /// numbered `instance`, while it is registered.
+    fn registered(&self, instance: u64) -> Option<(Arc<DriverLock<F>>, [u8; 16])> {
+        let drivers = self.drivers.lock();
+        registration(&drivers, instance).map(|e| (Arc::clone(&e.driver), e.volume_id))
+    }
+
+    /// The watch table the registration numbered `instance` claimed, while it
+    /// is registered.
+    fn watch_table(&self, instance: u64) -> Option<Arc<crate::fswatch::VolumeWatch>> {
+        let drivers = self.drivers.lock();
+        registration(&drivers, instance)
+            .and_then(|e| e.watch.as_ref())
+            .map(|claim| Arc::clone(claim.table()))
+    }
+
+    /// What serves a backed projection of `handle`: its driver, its
+    /// registration, and its published identity, read under one hold of the
+    /// registry's lock.
+    fn serving(&self, handle: DriverHandle) -> Result<ServedVolume<F>, Errno> {
+        let raw = handle.as_u64();
+        self.drivers
+            .lock()
+            .iter()
+            .find(|e| e.handle == raw)
+            .map(|e| ServedVolume {
+                driver: Arc::clone(&e.driver),
+                nodes: Arc::clone(&e.nodes),
+                volume_id: e.volume_id,
+            })
+            .ok_or(Errno::NotImplemented)
+    }
+
+    /// Tell `volume`'s driver about the pins its descriptors released, if the
+    /// driver's lock is free this instant: a close never waits behind a long
+    /// operation, and the write-back flusher reaps what this leaves. The
+    /// releases of a registration no longer registered go with it.
+    pub fn reap(&self, volume: &VolumeNodes)
+    where
+        F: FilesystemRead,
+    {
+        if let Some((driver, _)) = self.registered(volume.instance()) {
+            if let Some(mut fs) = driver.try_lock() {
+                if volume.take_reap_due() {
+                    volume.reap(&mut *fs);
+                }
+            }
+        }
+    }
+
+    /// Reap every registration a release left due whose driver is free: the
+    /// write-back flusher's pass. Registrations are visited in instance order
+    /// and one is taken from the registry at a time, so the pass allocates
+    /// nothing and one registered or withdrawn beneath it moves none of the
+    /// others. A volume busy elsewhere stays due, and the hold that frees it
+    /// wakes the flusher again.
+    pub(super) fn reap_due(&self)
+    where
+        F: FilesystemRead,
+    {
+        let mut after = None;
+        while let Some((driver, nodes)) = self.next_reap_due(after) {
+            after = Some(nodes.instance());
+            if let Some(mut fs) = driver.try_lock() {
+                if nodes.take_reap_due() {
+                    nodes.reap(&mut *fs);
+                }
+            }
+        }
+    }
+
+    /// The due registration with the lowest instance number above `after`.
+    fn next_reap_due(&self, after: Option<u64>) -> Option<(Arc<DriverLock<F>>, Arc<VolumeNodes>)> {
+        let drivers = self.drivers.lock();
+        let from = after.map_or(0, |after| {
+            drivers.partition_point(|e| e.nodes.instance() <= after)
+        });
+        drivers[from..]
+            .iter()
+            .find(|e| e.nodes.is_reap_due())
+            .map(|e| (Arc::clone(&e.driver), Arc::clone(&e.nodes)))
     }
 
     /// Publish the host every driver registered from now on is handed, so a
@@ -437,8 +635,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// re-arming the timer in the past. The drivers are returned as shared
     /// handles so the caller flushes them with the registry lock released
     /// (the flush parks on device I/O).
-    pub fn take_writeback_due(&self, now_ns: u64) -> Vec<(DriverHandle, Arc<SleepLock<F>>)> {
-        let mut due: Vec<(u64, u64, Arc<SleepLock<F>>)> = self
+    pub fn take_writeback_due(&self, now_ns: u64) -> Vec<(DriverHandle, Arc<DriverLock<F>>)> {
+        let mut due: Vec<(u64, u64, Arc<DriverLock<F>>)> = self
             .drivers
             .lock()
             .iter()
@@ -621,20 +819,23 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     }
 
     /// Withdraw the driver registered for `handle` (a runtime volume
-    /// detach), returning the registry's shared handle so the caller can
-    /// flush and drop it.
+    /// detach), retiring its registration and returning the registry's
+    /// shared handle so the caller can flush and drop it.
     ///
     /// Operations already in flight hold their own [`Arc`] clones and
     /// finish safely; every later resolution of `handle` fails closed
     /// [`Errno::NotImplemented`] exactly as before the driver was
-    /// registered. Fails closed: an unknown handle removes nothing.
-    pub fn unregister(&self, handle: DriverHandle) -> Option<Arc<SleepLock<F>>> {
+    /// registered, and every descriptor opened through the registration
+    /// answers [`Errno::Stale`]. Fails closed: an unknown handle removes
+    /// nothing.
+    pub fn unregister(&self, handle: DriverHandle) -> Option<Arc<DriverLock<F>>> {
         let handle = handle.as_u64();
         let entry = {
             let mut drivers = self.drivers.lock();
             let pos = drivers.iter().position(|e| e.handle == handle)?;
             drivers.remove(pos)
         };
+        entry.nodes.retire();
         // The volume's watchers learn it left now, not when its last operation
         // in flight lets the driver go.
         if let Some(watch) = &entry.watch {
@@ -667,7 +868,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// or has no driver, serves no operation, never a silent fallback).
     /// Public for the runtime volume detach path, which flushes exactly the
     /// departing volume before retracting it.
-    pub fn driver(&self, handle: DriverHandle) -> Result<Arc<SleepLock<F>>, Errno> {
+    pub fn driver(&self, handle: DriverHandle) -> Result<Arc<DriverLock<F>>, Errno> {
         let handle = handle.as_u64();
         let drivers = self.drivers.lock();
         drivers
@@ -677,21 +878,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             .ok_or(Errno::NotImplemented)
     }
 
-    /// The stable published volume identity registered for `handle`, or the
-    /// all-zero id when the handle names no registered volume (or one
-    /// registered without a published id). The volume half of a node's
-    /// system-wide [`tairix_abi::FileId`].
-    pub fn volume_id(&self, handle: DriverHandle) -> [u8; 16] {
-        let handle = handle.as_u64();
-        self.drivers
-            .lock()
-            .iter()
-            .find(|e| e.handle == handle)
-            .map_or([0u8; 16], |e| e.volume_id)
-    }
-
     /// Every registered driver, for a whole-system `sync`.
-    fn all_drivers(&self) -> Vec<Arc<SleepLock<F>>> {
+    fn all_drivers(&self) -> Vec<Arc<DriverLock<F>>> {
         self.drivers
             .lock()
             .iter()
@@ -807,15 +995,27 @@ impl<F: FilesystemWrite + Send + 'static> VolumeHost for LateFilesystem<F> {
 /// changes the table afterwards is [`replace`](Self::replace), called
 /// exclusively by the `CAP_USER_ADMIN` admin engine after it has
 /// validated, re-verified, and persisted an edited account database
-/// (`plans/CAPABILITY_USE.md` CU4) — an edit binds at the next
-/// resolution/spawn; running tasks keep the credentials they were
-/// admitted with.
+/// (`plans/CAPABILITY_USE.md` CU4). Filesystem checks read groups from the
+/// table in force, so an edit binds them at a principal's next operation;
+/// what a spawn snapshots onto a task binds at the next spawn or login.
 ///
 /// Until [`install`](Self::install), resolving a uid fails closed with
 /// [`Errno::NotImplemented`]; an attested uid with no account is denied with
 /// [`Errno::PermissionDenied`]. Neither path ever invents a principal.
 pub struct LateIdentity {
     table: RwLock<Option<IdentityTable>>,
+    /// Moves with every install and replacement, under the table's write
+    /// lock, so what was resolved from one table is never taken for
+    /// another's.
+    generation: AtomicU64,
+}
+
+/// A principal's primary and supplementary groups, as one resolution read
+/// them.
+#[derive(Clone, Debug)]
+struct Groups {
+    primary: GroupId,
+    supplementary: Arc<Vec<GroupId>>,
 }
 
 /// An identity-table install was refused because one is already installed.
@@ -829,6 +1029,7 @@ impl LateIdentity {
     pub const fn new() -> Self {
         Self {
             table: RwLock::new(None),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -846,6 +1047,7 @@ impl LateIdentity {
             return Err(IdentityAlreadyInstalled);
         }
         *held = Some(table);
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -854,9 +1056,7 @@ impl LateIdentity {
     ///
     /// Called exclusively by the `CAP_USER_ADMIN` admin engine after the
     /// edited databases passed the same verifying build as the boot load;
-    /// never a user-reachable install path. An edit binds at the next
-    /// resolution (the next spawn/login); running tasks keep the
-    /// credentials they were admitted with.
+    /// never a user-reachable install path.
     ///
     /// # Errors
     ///
@@ -868,7 +1068,13 @@ impl LateIdentity {
             return Err(Errno::NotImplemented);
         }
         *held = Some(table);
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(())
+    }
+
+    /// How many times a table was installed or replaced.
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Whether an identity table has been installed.
@@ -877,10 +1083,11 @@ impl LateIdentity {
         self.table.read().is_some()
     }
 
-    /// Resolve the attested `uid`'s group credential as an owned snapshot
-    /// (primary gid, supplementary gids).
+    /// Resolve the attested `uid`'s group credential as a shared snapshot
+    /// (primary gid, supplementary gids), with the generation of the table
+    /// it was read from.
     ///
-    /// Owned rather than borrowed so no read borrow is held across a
+    /// Shared rather than borrowed so no read borrow is held across a
     /// filesystem operation (which may park on device completion) while
     /// the table stays replaceable underneath.
     ///
@@ -906,16 +1113,29 @@ impl LateIdentity {
     ///   non-zero `uid` — an unknown principal is denied, never granted a
     ///   guessed identity, and the refusal does not distinguish "unknown
     ///   uid" so it cannot be used to probe for valid ids.
-    fn resolve_groups(&self, uid: u32) -> Result<(GroupId, Vec<GroupId>), Errno> {
-        match &*self.table.read() {
+    /// * [`Errno::OutOfMemory`] when the list cannot be copied.
+    fn resolve_groups(&self, uid: u32) -> Result<(Groups, u64), Errno> {
+        let table = self.table.read();
+        // Bumped only under the write lock, so this is the read table's.
+        let generation = self.generation.load(Ordering::Relaxed);
+        let (primary, supplementary): (GroupId, &[GroupId]) = match &*table {
             Some(table) => match table.user(UserId(uid)) {
-                Ok(record) => Ok((record.primary_gid, record.supplementary_gids.clone())),
-                Err(_) if uid == 0 => Ok((GroupId(0), Vec::new())),
-                Err(_) => Err(Errno::PermissionDenied),
+                Ok(record) => (record.primary_gid, &record.supplementary_gids),
+                Err(_) if uid == 0 => (GroupId(0), &[]),
+                Err(_) => return Err(Errno::PermissionDenied),
             },
-            None if uid == 0 => Ok((GroupId(0), Vec::new())),
-            None => Err(Errno::NotImplemented),
-        }
+            None if uid == 0 => (GroupId(0), &[]),
+            None => return Err(Errno::NotImplemented),
+        };
+        let mut list = Vec::new();
+        list.try_reserve_exact(supplementary.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        list.extend_from_slice(supplementary);
+        let groups = Groups {
+            primary,
+            supplementary: Arc::try_new(list).map_err(|_| Errno::OutOfMemory)?,
+        };
+        Ok((groups, generation))
     }
 
     /// Resolve the attested credential — primary group, supplementary
@@ -968,23 +1188,70 @@ impl Default for LateIdentity {
 /// late-installed mount, resolving caller groups from a late-installed
 /// authoritative identity table.
 ///
-/// Holds only two `&'static` borrows — the mount cell and the identity cell —
-/// and adds no authority of its own; every check stays kernel-side in the
-/// secured VFS and fails closed. The trait signature is unchanged from the
-/// landed handlers, so the handler logic and its mock-backed tests stand
-/// as-is — only this production impl and its boot wiring are new.
+/// Holds the mount cell, the identity cell and the groups it resolved from
+/// the second, and adds no authority of its own; every check stays
+/// kernel-side in the secured VFS and fails closed.
 pub struct MountedFilesystemService<F: 'static> {
     /// The mounted volume the operations run against.
     mount: &'static LateFilesystem<F>,
     /// The authoritative identity table caller groups are resolved against.
     identity: &'static LateIdentity,
+    /// The groups each principal acted as, so an operation's common case
+    /// resolves and allocates nothing. A leaf: only the kernel heap's own
+    /// lock is taken beneath it, by an insertion.
+    groups: SpinLock<GroupsCache>,
+}
+
+/// The groups of each principal the service acted as, all from the identity
+/// table of one generation.
+struct GroupsCache {
+    generation: u64,
+    by_uid: RadixTree<Groups>,
 }
 
 impl<F: 'static> MountedFilesystemService<F> {
     /// Build the service over the boot-installed mount and identity cells.
     #[must_use]
     pub const fn new(mount: &'static LateFilesystem<F>, identity: &'static LateIdentity) -> Self {
-        Self { mount, identity }
+        Self {
+            mount,
+            identity,
+            groups: SpinLock::new(GroupsCache {
+                generation: 0,
+                by_uid: RadixTree::new(),
+            }),
+        }
+    }
+
+    /// The attested `uid`'s groups from the table in force: kept from the
+    /// last resolution under it, else resolved outside the cache's lock and
+    /// kept. A cache that cannot grow resolves again next time.
+    ///
+    /// # Errors
+    ///
+    /// As [`LateIdentity::resolve_groups`].
+    fn groups_of(&self, uid: u32) -> Result<Groups, Errno> {
+        let generation = self.identity.generation();
+        let stale = {
+            let mut cache = self.groups.lock();
+            if cache.generation == generation {
+                if let Some(groups) = cache.by_uid.get(u64::from(uid)) {
+                    return Ok(groups.clone());
+                }
+                None
+            } else {
+                cache.generation = generation;
+                Some(core::mem::replace(&mut cache.by_uid, RadixTree::new()))
+            }
+        };
+        // What another table resolved is freed outside the lock.
+        drop(stale);
+        let (groups, resolved_at) = self.identity.resolve_groups(uid)?;
+        let mut cache = self.groups.lock();
+        if cache.generation == resolved_at {
+            let _ = cache.by_uid.try_insert(u64::from(uid), groups.clone());
+        }
+        Ok(groups)
     }
 }
 
@@ -992,370 +1259,464 @@ impl<F> MountedFilesystemService<F>
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
 {
-    /// Resolve the mount and the caller's record, parse `path`, and run `op`
-    /// against the secured VFS under the per-mount lock.
-    ///
-    /// The caller's full [`Credentials`] are built here from the
-    /// kernel-attested `uid`/`caps` and the authoritative identity table, so
-    /// an operation never sees a caller-supplied identity. The lock is held
-    /// for the whole operation, including any device-completion park.
-    fn with_secured<R>(
-        &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
-        intent: Intent,
-        op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &CoveredPath) -> Result<R, VfsError>,
-    ) -> Result<R, Errno> {
-        self.with_secured_at(uid, caps, path, intent, |vfs, fs, cred, path, _| {
-            op(vfs, fs, cred, path)
-        })
+    /// The VFS, and the groups `uid` acts in from the identity table in
+    /// force.
+    fn acting_in(&self, uid: u32) -> Result<(&Vfs, Groups), Errno> {
+        Ok((self.mount.vfs()?, self.groups_of(uid)?))
     }
 
-    /// As [`Self::with_secured`], also naming the driver the path resolved
-    /// to: the volume an identity is reported on and a listing is bound
-    /// through, resolved once per call rather than per entry.
-    fn with_secured_at<R>(
+    /// Resolve `way` as `uid` holding `caps`, and run `on_volume` on what it
+    /// reached — once `purpose` passes the flags of the projection it ended
+    /// in — under the hold of the driver serving that projection, or
+    /// `on_catalog` where it ended in a projection no volume backs.
+    ///
+    /// The caller's [`Credentials`] are built here from the kernel-attested
+    /// `uid`/`caps` and the authoritative identity table, so an operation
+    /// never sees a caller-supplied identity.
+    fn resolved<T>(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
-        intent: Intent,
-        op: impl FnOnce(
-            &Vfs,
-            &mut F,
-            &Credentials<'_>,
-            &CoveredPath,
-            DriverHandle,
-        ) -> Result<R, VfsError>,
-    ) -> Result<R, Errno> {
-        let view = self.view(uid, caps, path)?;
-        let cred = view.cred();
-        match &view.served {
-            Served::Volume(handle, driver) => {
-                let mut fs = driver.lock();
-                op(view.vfs, &mut fs, &cred, &view.covered, *handle).map_err(VfsError::to_errno)
-            }
-            Served::Catalog => Err(intent.refusal(&view.covered).to_errno()),
+        way: Way<'_>,
+        purpose: MountUse,
+        on_volume: impl FnOnce(&Vfs, &mut F, &Served, &Credentials<'_>, Landing) -> Result<T, VfsError>,
+        on_catalog: impl FnOnce(&Vfs, &Credentials<'_>, CatalogEnd) -> Result<T, VfsError>,
+    ) -> Result<T, Errno> {
+        let (vfs, groups) = self.acting_in(uid)?;
+        let cred = credentials(uid, &groups, caps);
+        let resolution =
+            Resolution::new(vfs, way.at, way.posture, way.spelling).map_err(VfsError::to_errno)?;
+        vfs.resolve::<_, T>(
+            &cred,
+            &mut Registry { mount: self.mount },
+            resolution,
+            |fs, served, landing| {
+                purpose.admitted_by(&landing.projection)?;
+                on_volume(vfs, fs, served, &cred, landing)
+            },
+            |end| on_catalog(vfs, &cred, end),
+        )
+        .map_err(VfsError::to_errno)
+    }
+
+    /// The names of the directory `handle` holds, from the view root down:
+    /// its label while resolving the label by physical names alone reaches
+    /// the very node `handle` holds, else the names found climbing from it
+    /// to its projection's floor, each in its parent's listing.
+    fn canonical_names(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        handle: &NodeHandle,
+    ) -> Result<Vec<String>, Errno> {
+        if let Some(names) = self.labelled(uid, caps, handle) {
+            return Ok(names);
         }
+        let groups = self.groups_of(uid)?;
+        let below = self.with_live(handle, |fs, _| {
+            let cred = credentials(uid, &groups, caps);
+            DelegatedFs::bind(fs, &handle.projection)
+                .names_down_to(&cred, handle.node.pinned())
+                .map_err(VfsError::to_errno)
+        })?;
+        let mut names = handle
+            .projection
+            .path()
+            .owned_components()
+            .map_err(VfsError::to_errno)?;
+        names
+            .try_reserve(below.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        names.extend(below);
+        Ok(names)
     }
 
-    /// The caller's credentials and what serves `path`, resolved once.
-    fn view<'a>(
-        &'a self,
+    /// `handle`'s label as its names, when walking the label without
+    /// following a link reaches the very node `handle` holds.
+    fn labelled(
+        &self,
         uid: u32,
-        caps: &'a dyn CapabilityQuery,
-        path: &str,
-    ) -> Result<View<'a, F>, Errno> {
-        let path = Path::parse(path).map_err(VfsError::to_errno)?;
-        self.view_of(uid, caps, |mounts| mounts.cover(path), CoveredPath::mount)
-    }
-
-    /// The caller's credentials, and what `cover` reads of the mount table
-    /// with the driver behind its `serving` mount, both under one guard: the
-    /// guard every attach and detach writes under, so the driver is the one
-    /// behind the very mount the operation is judged against.
-    ///
-    /// The credentials are built from the kernel-attested `uid`/`caps` and an
-    /// owned snapshot of the identity table, so no table borrow is held across
-    /// an operation that may park on device completion.
-    fn view_of<'a, C>(
-        &'a self,
-        uid: u32,
-        caps: &'a dyn CapabilityQuery,
-        cover: impl FnOnce(&MountTable) -> C,
-        serving: fn(&C) -> &MountPoint,
-    ) -> Result<View<'a, F, C>, Errno> {
-        let vfs = self.mount.vfs()?;
-        let (gid, groups) = self.identity.resolve_groups(uid)?;
-        let (covered, served) = {
-            let mounts = vfs.mounts();
-            let covered = cover(&mounts);
-            let served = self.served_by(serving(&covered))?;
-            (covered, served)
+        caps: &dyn CapabilityQuery,
+        handle: &NodeHandle,
+    ) -> Option<Vec<String>> {
+        let way = Way {
+            at: At {
+                start: Start::Root,
+                path: &handle.opened_as,
+            },
+            posture: Posture {
+                final_link: FinalLink::Follow,
+                missing: MissingSteps::Refused,
+                links: Links::Refuse,
+            },
+            spelling: Spelling::Unkept,
         };
-        Ok(View {
-            vfs,
+        let reaches = self.resolved(
             uid,
-            gid,
-            groups,
             caps,
-            covered,
-            served,
+            way,
+            MountUse::Read,
+            |_, _, served, _, landing| {
+                let reached = landing.walk.reached()?;
+                Ok(reached.node == handle.node.pinned()
+                    && *landing.projection == *handle.projection
+                    && served.nodes.instance() == handle.node.instance())
+            },
+            |_, _, _| Ok(false),
+        );
+        if reaches != Ok(true) {
+            return None;
+        }
+        Path::parse(&handle.opened_as)
+            .ok()
+            .map(Path::into_components)
+    }
+
+    /// Run `op` on the driver of `handle`'s volume, locked, once the node's
+    /// projection is still in the mount table and its registration current:
+    /// a descriptor of a volume detached, replaced or retracted answers
+    /// [`Errno::Stale`], and never reaches whatever is attached there since.
+    fn with_live<R>(
+        &self,
+        handle: &NodeHandle,
+        op: impl FnOnce(&mut F, [u8; 16]) -> Result<R, Errno>,
+    ) -> Result<R, Errno> {
+        let (driver, volume) = self
+            .mount
+            .registered(handle.node.instance())
+            .ok_or(Errno::Stale)?;
+        let mut fs = driver.lock();
+        if !handle.projection.is_live() || handle.node.volume().is_retired() {
+            return Err(Errno::Stale);
+        }
+        op(&mut fs, volume)
+    }
+
+    /// As [`Self::with_live`], with the pinned node held for `op` and the
+    /// credentials of `who` built from the identity table.
+    fn with_node<R>(
+        &self,
+        handle: &NodeHandle,
+        who: &Acting<'_>,
+        op: impl FnOnce(HeldNode<'_, F>, &Credentials<'_>, [u8; 16]) -> Result<R, VfsError>,
+    ) -> Result<R, Errno> {
+        let groups = self.groups_of(who.uid)?;
+        self.with_live(handle, |fs, volume| {
+            let cred = credentials(who.uid, &groups, who.caps);
+            let held = HeldNode::of(fs, handle.node.pinned(), &handle.projection)
+                .map_err(VfsError::to_errno)?;
+            op(held, &cred, volume).map_err(VfsError::to_errno)
         })
     }
+}
 
-    /// As [`Self::with_secured_at`], for an operation naming **two** paths.
-    ///
-    /// Both are resolved under one driver lock rather than two: a two-path
-    /// mutation requires both to lie under the same mount (the delegating
-    /// VFS call refuses a pair that crosses one), so the first path's
-    /// covering-mount driver serves the whole operation.
-    fn with_secured_pair<R>(
+impl<F> MountedFilesystemService<F>
+where
+    F: FilesystemRead
+        + FilesystemWrite
+        + FilesystemSecurity
+        + FilesystemStats
+        + FilesystemAttrsProvider
+        + Send
+        + 'static,
+{
+    /// As [`Self::with_node`], over the volume's attribute store, `op` told
+    /// whether the owner may pass the mode: never through a grant. A volume
+    /// whose format stores no attributes answers [`Errno::NotSupported`].
+    fn with_attrs<R>(
         &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        first: &str,
-        second: &str,
-        op: impl FnOnce(
-            &Vfs,
-            &mut F,
+        handle: &NodeHandle,
+        who: &Acting<'_>,
+        op: impl for<'a> FnOnce(
+            &mut HeldNode<'a, dyn FilesystemAttrsFs + 'a>,
             &Credentials<'_>,
-            &CoveredPair,
-            DriverHandle,
+            bool,
         ) -> Result<R, VfsError>,
     ) -> Result<R, Errno> {
-        let first = Path::parse(first).map_err(VfsError::to_errno)?;
-        let second = Path::parse(second).map_err(VfsError::to_errno)?;
-        let view = self.view_of(
-            uid,
-            caps,
-            |mounts| mounts.cover_pair(first, second),
-            |pair| pair.first().mount(),
-        )?;
-        let cred = view.cred();
-        match &view.served {
-            Served::Volume(handle, driver) => {
-                let mut fs = driver.lock();
-                op(view.vfs, &mut fs, &cred, &view.covered, *handle).map_err(VfsError::to_errno)
-            }
-            Served::Catalog => Err(Intent::Write.refusal(view.covered.first()).to_errno()),
-        }
-    }
-
-    /// What serves a path `mount` covers: the driver backing it, with its
-    /// handle, locked by the caller, or — for a mount with no backing — the
-    /// `Storage:` catalog at its point.
-    ///
-    /// Called with the mount table still read-locked, so the driver is the one
-    /// registered behind `mount` at that reading: a volume is attached before
-    /// its driver registers and unregisters only after it detaches. A backed
-    /// mount whose driver is not yet registered is [`Errno::NotImplemented`]:
-    /// it fails closed, never against a guessed volume.
-    fn served_by(&self, mount: &MountPoint) -> Result<Served<F>, Errno> {
-        match mount.backing() {
-            Some(handle) => Ok(Served::Volume(handle, self.mount.driver(handle)?)),
-            None => Ok(Served::Catalog),
-        }
-    }
-}
-
-/// What a path resolves to: a volume's driver, or the catalog of attached
-/// volumes that a mount with no backing presents.
-enum Served<F: ?Sized> {
-    Volume(DriverHandle, Arc<SleepLock<F>>),
-    Catalog,
-}
-
-/// A caller and what it named — one path or a pair — resolved for one
-/// operation.
-struct View<'a, F: ?Sized, C = CoveredPath> {
-    vfs: &'a Vfs,
-    uid: u32,
-    gid: GroupId,
-    groups: Vec<GroupId>,
-    caps: &'a dyn CapabilityQuery,
-    covered: C,
-    served: Served<F>,
-}
-
-impl<F: ?Sized, C> View<'_, F, C> {
-    fn cred(&self) -> Credentials<'_> {
-        Credentials {
-            uid: UserId(self.uid),
-            gid: self.gid,
-            supplementary_gids: &self.groups,
-            caps: self.caps,
-        }
-    }
-}
-
-/// Whether an operation reads or mutates, so the catalog of attached volumes
-/// answers each in kind: a read finds nothing stored in it, and a mutation
-/// of it or of a name in it is refused as of any read-only directory.
-#[derive(Copy, Clone)]
-enum Intent {
-    /// A read, answering `on_catalog` when the path names the catalog itself.
-    Read(VfsError),
-    /// A mutation.
-    Write,
-}
-
-impl Intent {
-    /// The refusal of this operation on `covered`, which the catalog covers
-    /// and no attached volume serves.
-    fn refusal(self, covered: &CoveredPath) -> VfsError {
-        let (path, point) = (covered.path(), covered.mount().path());
-        let names_the_catalog = path == point;
-        match self {
-            Self::Read(on_catalog) if names_the_catalog => on_catalog,
-            Self::Write if names_the_catalog || path.parent().as_ref() == Some(point) => {
-                VfsError::ReadOnly
-            }
-            Self::Read(_) | Self::Write => VfsError::NotFound,
-        }
-    }
-}
-
-/// Open `path` on the volume `fs` serves: refuse a handle of the wrong kind,
-/// and create or truncate as `flags` asks.
-fn open_on_volume<F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized>(
-    vfs: &Vfs,
-    fs: &mut F,
-    cred: &Credentials<'_>,
-    covered: &CoveredPath,
-    flags: OpenFlags,
-) -> Result<(), VfsError> {
-    // `NO_FOLLOW` makes the open name the final component itself, so the
-    // resolution that decides the handle's kind keeps a link rather than
-    // reporting what it points at. The same posture rides on the handle
-    // and is re-derived by every later operation it serves, so an open
-    // and a later stat can never disagree.
-    let final_link = FinalLink::for_open(flags);
-    match vfs.stat_via_secured(cred, covered, fs, final_link) {
-        Ok(info) => {
-            // An exclusive create demands the path not already exist.
-            if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
-                return Err(VfsError::AlreadyExists);
-            }
-            // A link stores a path, not bytes, so asking for byte
-            // access to one is refused; the resolve-only handle is
-            // what `lstat` and `readlink` hold. Only reachable under
-            // `NO_FOLLOW` — otherwise the link was already resolved
-            // through.
-            if info.kind == DriverNodeKind::Symlink && (flags.is_read() || flags.is_write()) {
-                return Err(VfsError::LinkLoop);
-            }
-            // A directory open must name a directory; a byte-access
-            // open must not name one.
-            if flags.contains(OpenFlags::DIRECTORY) {
-                if info.kind != DriverNodeKind::Directory {
-                    return Err(VfsError::NotADirectory);
-                }
-            } else if info.kind == DriverNodeKind::Directory
-                && (flags.is_read() || flags.is_write())
-            {
-                return Err(VfsError::IsADirectory);
-            }
-            // Byte access is the node's to grant, so it is asked here as
-            // every later read and write asks it again.
-            let access: &[Access] = match (flags.is_read(), flags.is_write()) {
-                (true, true) => &[Access::Read, Access::Write],
-                (true, false) => &[Access::Read],
-                (false, true) => &[Access::Write],
-                (false, false) => &[],
+        let groups = self.groups_of(who.uid)?;
+        self.with_live(handle, |fs, _| {
+            let Some(attrs) = fs.attrs_fs() else {
+                return Err(Errno::NotSupported);
             };
-            if !access.is_empty() {
-                vfs.authorize_via_secured(cred, covered, fs, final_link, access)?;
-            }
-            // Truncate-on-open zeroes the file; it requires write
-            // access (enforced at `OpenFlags::from_bits`) and is
-            // authorised by the secured truncate.
-            if flags.contains(OpenFlags::TRUNCATE) {
-                vfs.truncate_via_secured(cred, covered, fs, 0)?;
-            }
-            Ok(())
-        }
-        // A missing path is created only when asked, and `open` only
-        // ever creates a regular file (directories are made by
-        // `mkdir`); a directory-typed create is a contradiction and
-        // fails closed.
-        Err(VfsError::NotFound) if flags.contains(OpenFlags::CREATE) => {
-            if flags.contains(OpenFlags::DIRECTORY) {
-                return Err(VfsError::NotADirectory);
-            }
-            vfs.create_via_secured(cred, covered, fs)
-        }
-        Err(err) => Err(err),
+            let cred = credentials(who.uid, &groups, who.caps);
+            let mut held = HeldNode::of(attrs, handle.node.pinned(), &handle.projection)
+                .map_err(VfsError::to_errno)?;
+            op(&mut held, &cred, !who.granted).map_err(VfsError::to_errno)
+        })
     }
 }
 
-/// Open the catalog of attached volumes at `point`, or a name in it no
-/// attached volume serves: the catalog opens as the directory it is, and
-/// nothing in it can be created.
-fn open_catalog(
-    vfs: &Vfs,
-    cred: &Credentials<'_>,
-    covered: &CoveredPath,
-    flags: OpenFlags,
-) -> Result<(), VfsError> {
-    if covered.path() != covered.mount().path() {
-        let intent = if flags.contains(OpenFlags::CREATE) {
-            Intent::Write
-        } else {
-            Intent::Read(VfsError::NotFound)
-        };
-        return Err(intent.refusal(covered));
+/// What an operation resolves: a path and where it starts, how links and
+/// missing names are treated, and what is kept of the path.
+struct Way<'a> {
+    at: At<'a>,
+    posture: Posture,
+    spelling: Spelling,
+}
+
+impl<'a> Way<'a> {
+    /// `at`, a final link treated as `final_link`, nothing kept.
+    fn to(at: At<'a>, final_link: FinalLink) -> Self {
+        Self {
+            at,
+            posture: Posture::of(final_link),
+            spelling: Spelling::Unkept,
+        }
     }
-    vfs.metadata(cred, covered.path())?;
+}
+
+/// The registered drivers, held one projection at a time.
+struct Registry<'m, F: 'static> {
+    mount: &'m LateFilesystem<F>,
+}
+
+/// What an operation on a registered volume learns of it beside its driver.
+struct Served {
+    /// The registration its pins are taken on.
+    nodes: Arc<VolumeNodes>,
+    /// Its published identity.
+    volume_id: [u8; 16],
+}
+
+impl<F> Drivers for Registry<'_, F>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send + 'static,
+{
+    type Fs = F;
+    type Facts = Served;
+
+    fn hold<T>(
+        &mut self,
+        serve: Serve<'_>,
+        op: impl FnOnce(&mut Self::Fs, &Self::Facts) -> Result<T, VfsError>,
+    ) -> Result<T, VfsError> {
+        // A held node answers for its own registration, which only it may
+        // reach; a walk that merely crossed into a projection that has since
+        // gone finds nothing there.
+        let (driver, served, gone) = if let Some(pin) = serve.pin {
+            let (driver, volume_id) = self
+                .mount
+                .registered(pin.instance())
+                .ok_or(VfsError::Stale)?;
+            let nodes = Arc::clone(pin.volume());
+            (driver, Served { nodes, volume_id }, VfsError::Stale)
+        } else {
+            let handle = serve.projection.backing().ok_or(VfsError::NotFound)?;
+            let volume = self.mount.serving(handle).map_err(|_| VfsError::Unserved)?;
+            let served = Served {
+                nodes: volume.nodes,
+                volume_id: volume.volume_id,
+            };
+            (volume.driver, served, VfsError::NotFound)
+        };
+        let mut fs = driver.lock();
+        if !serve.projection.is_live() || served.nodes.is_retired() {
+            return Err(gone);
+        }
+        op(&mut fs, &served)
+    }
+
+    fn keep(
+        fs: &mut Self::Fs,
+        served: &Self::Facts,
+        node: NodeId,
+        kind: DriverNodeKind,
+    ) -> Result<Kept, VfsError> {
+        let slot = served.nodes.admit()?;
+        let pinned = fs.pin(node).map_err(map_driver_error)?;
+        NodeRef::new(slot, pinned, kind).map(Kept::Pinned)
+    }
+
+    fn volume(served: &Self::Facts) -> [u8; 16] {
+        served.volume_id
+    }
+}
+
+/// A volume serving a projection: its driver, its registration, and its
+/// published identity.
+struct ServedVolume<F: ?Sized> {
+    driver: Arc<DriverLock<F>>,
+    nodes: Arc<VolumeNodes>,
+    volume_id: [u8; 16],
+}
+
+/// What `uid`, in `groups` and holding `caps`, acts as.
+fn credentials<'a>(uid: u32, groups: &'a Groups, caps: &'a dyn CapabilityQuery) -> Credentials<'a> {
+    Credentials {
+        uid: UserId(uid),
+        gid: groups.primary,
+        supplementary_gids: &groups.supplementary,
+        caps,
+    }
+}
+
+/// What an unlink under `flags` expects of the node its name holds.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for an expectation the flags do not name, flags
+/// naming one with none given, or an expectation of the node alone that
+/// carries another field.
+fn unlink_expecting(
+    flags: UnlinkFlags,
+    expect: Option<&NodeExpect>,
+) -> Result<Option<Expect<'_>>, Errno> {
+    let node = flags.contains(UnlinkFlags::EXPECT_NODE);
+    let unchanged = flags.contains(UnlinkFlags::EXPECT_UNCHANGED);
+    match (node, unchanged, expect) {
+        (false, false, None) => Ok(None),
+        (true, false, Some(expect)) => node_alone(expect).map(Some),
+        (false, true, Some(expect)) => Ok(Some(Expect::Unchanged(expect))),
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// What a rename under `flags` expects of the node it moves.
+///
+/// # Errors
+///
+/// As [`unlink_expecting`].
+fn rename_expecting(
+    flags: RenameFlags,
+    expect: Option<&NodeExpect>,
+) -> Result<Option<Expect<'_>>, Errno> {
+    match (flags.expects(), expect) {
+        (false, None) => Ok(None),
+        (true, Some(expect)) => node_alone(expect).map(Some),
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// The expectation of the node `expect` names, which asks nothing else of
+/// it.
+fn node_alone(expect: &NodeExpect) -> Result<Expect<'static>, Errno> {
+    if expect.names_only_the_node() {
+        Ok(Expect::Node(expect.id))
+    } else {
+        Err(Errno::OutOfRange)
+    }
+}
+
+/// The label a node a walk ended on is opened as.
+fn label(spelled: Option<Vec<String>>) -> Result<Arc<String>, VfsError> {
+    let spelled = spelled.ok_or(VfsError::Io)?;
+    Arc::try_new(spell(&spelled)?).map_err(|_| VfsError::OutOfMemory)
+}
+
+/// The record of the catalog a resolution ended at; a name in it no
+/// projection is shown under answers `missing`.
+fn catalog_record<'v>(
+    vfs: &'v Vfs,
+    end: &'v CatalogEnd,
+    missing: VfsError,
+) -> Result<&'v Metadata, VfsError> {
+    if !end.absent.is_empty() {
+        return Err(missing);
+    }
+    vfs.template_of(&end.catalog)
+}
+
+/// Whether `meta` lets `cred` have each access `want` asks for.
+fn admits_each(meta: &Metadata, cred: &Credentials<'_>, want: Wanted) -> Result<(), VfsError> {
+    Access::asked_by(want).try_for_each(|asked| meta.authorize(cred, asked))
+}
+
+/// Open the catalog a resolution ended at, which opens as the directory it
+/// is: a name in it no projection is shown under opens nothing, and nothing
+/// can be made in one.
+fn open_catalog(end: CatalogEnd, flags: OpenFlags) -> Result<Opened, VfsError> {
+    if !end.absent.is_empty() {
+        return Err(if flags.contains(OpenFlags::CREATE) {
+            VfsError::ReadOnly
+        } else {
+            VfsError::NotFound
+        });
+    }
     if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
         return Err(VfsError::AlreadyExists);
     }
     if !flags.contains(OpenFlags::DIRECTORY) && (flags.is_read() || flags.is_write()) {
         return Err(VfsError::IsADirectory);
     }
-    Ok(())
+    Ok(Opened::Catalog(end.catalog))
 }
 
-/// Where one directory listing reads on a volume, and what its entries are
-/// reported against.
-struct VolumeListing {
+/// What `stat` reports of the catalog a resolution ended at.
+fn catalog_stat(vfs: &Vfs, end: &CatalogEnd) -> Result<FileStat, VfsError> {
+    let meta = catalog_record(vfs, end, VfsError::NotFound)?;
+    Ok(FileStat {
+        kind: FileKind::Directory,
+        nlink: NodeInfo::SINGLE_NAME,
+        size: 0,
+        allocated: 0,
+        mode: u32::from(meta.mode.bits()),
+        uid: meta.owner.0,
+        gid: meta.group.0,
+        id: FileId::NONE,
+        times: NodeTimes::default(),
+        content_gen: NodeInfo::NO_CONTENT_GEN,
+    })
+}
+
+/// Where a directory's listing is reported: the volume its entries live on,
+/// and, for a projection's floor, that projection's path, whose children the
+/// listing shows.
+#[derive(Copy, Clone)]
+struct Shown<'a> {
     volume: [u8; 16],
-    driver: DriverHandle,
-    listings: &'static ListingRegistry,
-    final_link: FinalLink,
+    floor: Option<&'a Path>,
 }
 
-/// The listing of the directory at `path` on the volume `fs` serves: its own
-/// entries, then the covered mount points beneath it.
-fn list_volume<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+/// The listing of the directory `held`, as `shown`: its own entries, then,
+/// for a projection's floor, the projections attached beneath it that the
+/// volume holds no node of.
+fn list_held<F: FilesystemRead + ?Sized>(
     vfs: &Vfs,
-    fs: &mut F,
+    held: &mut HeldNode<'_, F>,
     cred: &Credentials<'_>,
-    covered: &CoveredPath,
-    on: &VolumeListing,
+    owner_exempt: bool,
+    shown: Shown<'_>,
     at: &mut Listing,
     each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
 ) -> Result<(), VfsError> {
-    // Each entry's kind and sizes come from the listing driver
-    // itself, never from a per-child path re-resolution: a child
-    // path can be covered by a *different* mount (the read-only
-    // `/System` volume's own `Logs`/`Settings` beneath the writable
-    // exceptions), and re-resolving it here would judge it against
-    // the wrong volume.
-    let volume = on.volume;
-    at.on_volume(volume)?;
-    at.hold(on.listings, on.driver.as_u64())?;
+    // Each entry's kind and sizes come from the listing driver itself, never
+    // from a per-child path re-resolution: a child path can be covered by a
+    // *different* mount, and re-resolving it here would judge it against the
+    // wrong volume.
     if let Some(entries) = at.entries() {
-        let end =
-            vfs.list_via_secured(cred, covered, fs, on.final_link, entries, &mut |entry| {
-                each(&wire_entry(volume, entry))
-            })?;
-        at.hold(on.listings, on.driver.as_u64())?;
+        let end = held.list_from(cred, owner_exempt, entries, &mut |entry| {
+            each(&wire_entry(shown.volume, entry))
+        })?;
         if end == ListEnd::Stopped {
             return Ok(());
         }
         at.finish_entries();
     }
-    // A covered mount point is part of its parent's listing even when the
-    // parent volume holds no node of that name. They follow the entries in
-    // name order, so a batch resumes after the last one handed over, and one
-    // the volume holds a node of was listed with the entries.
+    // A floor no name reaches any more lists nothing, the projections that
+    // were attached beneath its name included.
+    let floor = match shown.floor {
+        Some(floor) if !held.is_removed() => floor,
+        _ => {
+            at.finish();
+            return Ok(());
+        }
+    };
+    // A projection attached beneath is part of its parent's listing even when
+    // the parent volume holds no node of that name. They follow the entries
+    // in name order, so a batch resumes after the last one handed over, and
+    // one the volume holds a node of was listed with the entries.
     let Some(after) = at.mounts().map(|after| after.clone()) else {
         return Ok(());
     };
-    let mount_points = covered_after(vfs, covered.path(), after.get())?;
+    let mount_points = covered_after(vfs, floor, after.get())?;
     let mut names: Vec<&[u8]> = Vec::new();
     names
         .try_reserve_exact(mount_points.len())
         .map_err(|_| VfsError::OutOfMemory)?;
     names.extend(mount_points.iter().map(String::as_bytes));
-    let (dir, held) = vfs.lookup_entries_via_secured(cred, covered, fs, on.final_link, &names)?;
-    if at.bound_dir() != Some(dir.raw()) {
-        return Err(VfsError::Stale);
-    }
-    for (name, held) in mount_points.iter().zip(held) {
-        if held.is_some() {
+    let held_names = held.lookup_entries(cred, owner_exempt, &names)?;
+    for (name, found) in mount_points.iter().zip(held_names) {
+        if found.is_some() {
             continue;
         }
         if each(&mount_point_wire(name)) == DirVisit::Stop {
@@ -1369,42 +1730,48 @@ fn list_volume<F: FilesystemRead + FilesystemSecurity + ?Sized>(
     Ok(())
 }
 
-/// The catalog covering `covered` as the directory it is, given the reach the
-/// caller needs into it, refusing a name in it no attached volume serves.
-fn catalog_node<'v>(
-    vfs: &'v Vfs,
+/// What a listing of the directory `held`, as `shown`, reports for each of
+/// `names`, merged, for a projection's floor, with the projections attached
+/// beneath it.
+fn looked_up<F: FilesystemRead + ?Sized>(
+    vfs: &Vfs,
+    held: &mut HeldNode<'_, F>,
     cred: &Credentials<'_>,
-    covered: &CoveredPath,
-    access: Option<Access>,
-) -> Result<&'v Metadata, VfsError> {
-    if covered.path() != covered.mount().path() {
-        return Err(VfsError::NotFound);
+    owner_exempt: bool,
+    shown: Shown<'_>,
+    names: &[&[u8]],
+) -> Result<LookedUp, VfsError> {
+    let found = held.lookup_entries(cred, owner_exempt, names)?;
+    let dir = node_identity(shown.volume, held.ino());
+    let found = found
+        .into_iter()
+        .map(|entry| entry.map(|entry| readdir_entry(shown.volume, entry)));
+    match shown.floor {
+        Some(path) => with_mount_points(vfs, path, names, dir, found),
+        None => Ok(LookedUp {
+            dir,
+            entries: collected(names.len(), found).ok_or(VfsError::OutOfMemory)?,
+            children: ChildMounts::default(),
+        }),
     }
-    let meta = vfs.metadata(cred, covered.path())?;
-    if let Some(access) = access {
-        meta.authorize(cred, access)?;
-    }
-    Ok(meta)
 }
 
-/// The listing of the catalog covering `covered`: the volumes attached beneath
-/// it, in name order, resumed after the last one a batch handed over.
+/// The listing of the catalog at `point`, which the caller may read: the
+/// volumes attached beneath it, in name order, resumed after the last one a
+/// batch handed over.
 fn list_catalog(
     vfs: &Vfs,
-    cred: &Credentials<'_>,
-    covered: &CoveredPath,
+    point: &Path,
     at: &mut Listing,
     each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
 ) -> Result<(), VfsError> {
-    catalog_node(vfs, cred, covered, Some(Access::Read))?;
-    at.on_volume(FileId::NONE.volume)?;
     if at.entries().is_some() {
         at.finish_entries();
     }
     let Some(after) = at.mounts().map(|after| after.clone()) else {
         return Ok(());
     };
-    for name in covered_after(vfs, covered.path(), after.get())? {
+    for name in covered_after(vfs, point, after.get())? {
         if each(&mount_point_wire(&name)) == DirVisit::Stop {
             return Ok(());
         }
@@ -1455,38 +1822,30 @@ fn with_mount_points(
     })
 }
 
-/// The canonical spelling of `covered` in the catalog covering it: the
-/// catalog itself, or — where `mode` lets a component be missing — a name in
-/// it no attached volume serves, which holds no link to resolve.
-fn realpath_in_catalog(
-    vfs: &Vfs,
-    cred: &Credentials<'_>,
-    covered: &CoveredPath,
-    mode: RealpathMode,
-) -> Result<String, VfsError> {
-    let (path, point) = (covered.path(), covered.mount().path());
-    let catalog = vfs.metadata(cred, point)?;
-    if path != point {
-        let reached = match mode {
-            RealpathMode::Existing => false,
-            RealpathMode::Final => path.parent().as_ref() == Some(point),
-            RealpathMode::Missing => true,
-        };
-        if !reached {
-            return Err(VfsError::NotFound);
-        }
-        catalog.authorize(cred, Access::Execute)?;
-    }
-    Ok(spell(path.components()))
-}
-
-/// A node's system-wide identity: the driver's node number paired with the
-/// id of the volume it lives on.
+/// A node's system-wide identity: its number as the format gives it
+/// ([`NodeInfo::ino`]) paired with the id of the volume it lives on.
 ///
 /// The one place that pair is assembled, so a `stat` and a listing of the
 /// same node can never report different identities.
-const fn node_identity(volume: [u8; 16], node: u64) -> FileId {
-    FileId { volume, node }
+const fn node_identity(volume: [u8; 16], ino: u64) -> FileId {
+    FileId { volume, node: ino }
+}
+
+/// What `stat` reports of a node of `volume` described by `info`, however it
+/// was reached.
+fn file_stat(info: &DelegatedInfo, volume: [u8; 16]) -> FileStat {
+    FileStat {
+        kind: file_kind(info.kind),
+        nlink: info.nlink,
+        size: info.size,
+        allocated: info.allocated,
+        mode: u32::from(info.meta.mode.bits()),
+        uid: info.meta.owner.0,
+        gid: info.meta.group.0,
+        id: node_identity(volume, info.ino),
+        times: info.times,
+        content_gen: info.content_gen,
+    }
 }
 
 /// The streamed record of a listed entry on `volume`.
@@ -1498,7 +1857,7 @@ fn wire_entry<'a>(volume: [u8; 16], entry: &DelegatedRef<'a>) -> DirEntry<'a> {
         // The readdir stream carries the cheap common-case modification
         // stamp; a consumer wanting other times stats the entry.
         modified: entry.info.times.modified,
-        id: node_identity(volume, entry.node),
+        id: node_identity(volume, entry.info.ino),
         nlink: entry.info.nlink,
         content_gen: entry.info.content_gen,
         name: entry.name.as_bytes(),
@@ -1509,7 +1868,6 @@ fn wire_entry<'a>(volume: [u8; 16], entry: &DelegatedRef<'a>) -> DirEntry<'a> {
 fn readdir_entry(volume: [u8; 16], mut entry: DelegatedEntry) -> ReaddirEntry {
     let name = core::mem::take(&mut entry.name);
     let listed = DelegatedRef {
-        node: entry.node,
         info: entry.info,
         name: "",
     };
@@ -1562,6 +1920,13 @@ fn covered_after(vfs: &Vfs, path: &Path, after: &[u8]) -> Result<Vec<String>, Vf
     Ok(names)
 }
 
+/// Flush `driver`'s buffered writes to its device. `abi-v1` has no dedicated
+/// I/O errno, so a device fault collapses onto the code the VFS gives a driver
+/// fault.
+fn flush<F: FilesystemWrite>(driver: &DriverLock<F>) -> Result<(), Errno> {
+    driver.lock().flush().map_err(|_| VfsError::Io.to_errno())
+}
+
 /// Map a driver structural node kind to the userland [`FileKind`] the
 /// `fs_*` contract exposes.
 fn file_kind(kind: DriverNodeKind) -> FileKind {
@@ -1586,129 +1951,165 @@ where
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         flags: OpenFlags,
-    ) -> Result<(), Errno> {
-        let view = self.view(uid, caps, path)?;
-        let cred = view.cred();
-        let opened = match &view.served {
-            Served::Volume(_, driver) => {
-                open_on_volume(view.vfs, &mut *driver.lock(), &cred, &view.covered, flags)
-            }
-            Served::Catalog => open_catalog(view.vfs, &cred, &view.covered, flags),
+        mode: CreateMode,
+    ) -> Result<Opened, Errno> {
+        let purpose = if flags.is_write() {
+            MountUse::Write
+        } else {
+            MountUse::Read
         };
-        opened.map_err(VfsError::to_errno)
-    }
-
-    fn read(
-        &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, Errno> {
-        let intent = Intent::Read(VfsError::IsADirectory);
-        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
-            vfs.read_via_secured(cred, path, fs, offset, buf)
-        })
+        let way = Way {
+            at,
+            posture: Posture::of(FinalLink::for_open(flags)),
+            spelling: Spelling::Label,
+        };
+        self.resolved(
+            uid,
+            caps,
+            way,
+            purpose,
+            |_, fs, served, cred, landing| {
+                let Landing {
+                    projection,
+                    walk,
+                    spelled,
+                } = landing;
+                let (node, at_floor) = DelegatedFs::bind(fs, &projection).open_at(
+                    cred,
+                    walk,
+                    flags,
+                    &served.nodes,
+                    mode,
+                )?;
+                Ok(Opened::Node {
+                    kind: node.kind(),
+                    node,
+                    opened_as: label(spelled)?,
+                    projection,
+                    at_floor,
+                })
+            },
+            |_, _, end| open_catalog(end, flags),
+        )
     }
 
     fn read_program(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
-        let intent = Intent::Read(VfsError::IsADirectory);
-        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
-            vfs.read_program_via_secured(cred, path, fs, offset, buf)
-        })
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, FinalLink::Follow),
+            MountUse::Run,
+            |_, fs, _, cred, landing| {
+                let mut delegated = DelegatedFs::bind(fs, &landing.projection);
+                delegated
+                    .held(landing.walk)?
+                    .0
+                    .read(cred, false, offset, buf)
+            },
+            |vfs, _, end| {
+                catalog_record(vfs, &end, VfsError::NotFound)?;
+                Err(VfsError::IsADirectory)
+            },
+        )
     }
 
-    fn write(
+    fn readdir_bounded(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
-        offset: u64,
-        append: bool,
-        data: &[u8],
-    ) -> Result<usize, Errno> {
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            // An append write ignores the supplied offset and writes at the
-            // current end of file (the journal-append posture), resolved under
-            // the same lock so the size cannot change before the write.
-            let offset = if append {
-                vfs.stat_via_secured(cred, path, fs, FinalLink::Follow)?
-                    .size
-            } else {
-                offset
-            };
-            vfs.write_via_secured(cred, path, fs, offset, data)
-        })
-    }
-
-    fn readdir(
-        &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         final_link: FinalLink,
-        at: &mut Listing,
-        each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
-    ) -> Result<(), Errno> {
-        let view = self.view(uid, caps, path)?;
-        let cred = view.cred();
-        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
-        let listed = match &view.served {
-            Served::Catalog => list_catalog(vfs, cred, covered, at, each),
-            Served::Volume(driver, fs) => {
-                let on = VolumeListing {
-                    volume: self.mount.volume_id(*driver),
-                    driver: *driver,
-                    listings: &self.mount.listings,
-                    final_link,
-                };
-                list_volume(vfs, &mut *fs.lock(), cred, covered, &on, at, each)
+        limit: usize,
+    ) -> Result<Vec<ReaddirEntry>, Errno> {
+        let mut entries = Vec::new();
+        let mut failed = None;
+        let mut each = |entry: &DirEntry<'_>| {
+            if entries.len() == limit {
+                failed = Some(Errno::LimitExceeded);
+                return DirVisit::Stop;
+            }
+            match entries
+                .try_reserve(1)
+                .map_err(|_| Errno::OutOfMemory)
+                .and_then(|()| ReaddirEntry::from_wire(entry))
+            {
+                Ok(owned) => {
+                    entries.push(owned);
+                    DirVisit::Take
+                }
+                Err(err) => {
+                    failed = Some(err);
+                    DirVisit::Stop
+                }
             }
         };
-        listed.map_err(VfsError::to_errno)
+        let mut at_entry = Listing::default();
+        // The catalog is listed once the walk has let its driver go.
+        let catalog = self.resolved(
+            uid,
+            caps,
+            Way::to(at, final_link),
+            MountUse::Read,
+            |vfs, fs, served, cred, landing| {
+                let mut delegated = DelegatedFs::bind(fs, &landing.projection);
+                let (mut held, at_floor) = delegated.held(landing.walk)?;
+                let shown = Shown {
+                    volume: served.volume_id,
+                    floor: at_floor.then_some(landing.projection.path()),
+                };
+                list_held(vfs, &mut held, cred, false, shown, &mut at_entry, &mut each)?;
+                Ok(None)
+            },
+            |vfs, cred, end| {
+                catalog_record(vfs, &end, VfsError::NotFound)?.authorize(cred, Access::Read)?;
+                Ok(Some(end.catalog))
+            },
+        )?;
+        if let Some(catalog) = catalog {
+            let vfs = self.mount.vfs()?;
+            list_catalog(vfs, catalog.path(), &mut at_entry, &mut each)
+                .map_err(VfsError::to_errno)?;
+        }
+        failed.map_or(Ok(entries), Err)
     }
 
     fn lookup_entries(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         final_link: FinalLink,
         names: &[&[u8]],
     ) -> Result<LookedUp, Errno> {
-        let view = self.view(uid, caps, path)?;
-        let cred = view.cred();
-        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
-        let path = covered.path();
-        let looked = match &view.served {
-            Served::Volume(driver, fs) => {
-                let volume = self.mount.volume_id(*driver);
-                let mut fs = fs.lock();
-                vfs.lookup_entries_via_secured(cred, covered, &mut *fs, final_link, names)
-                    .and_then(|(dir, found)| {
-                        let found = found
-                            .into_iter()
-                            .map(|entry| entry.map(|entry| readdir_entry(volume, entry)));
-                        with_mount_points(vfs, path, names, node_identity(volume, dir.raw()), found)
-                    })
-            }
-            Served::Catalog => {
-                catalog_node(vfs, cred, covered, Some(Access::Read)).and_then(|_| {
-                    with_mount_points(vfs, path, names, FileId::NONE, names.iter().map(|_| None))
-                })
-            }
-        };
-        looked.map_err(VfsError::to_errno)
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, final_link),
+            MountUse::Read,
+            |vfs, fs, served, cred, landing| {
+                let mut delegated = DelegatedFs::bind(fs, &landing.projection);
+                let (mut held, at_floor) = delegated.held(landing.walk)?;
+                let shown = Shown {
+                    volume: served.volume_id,
+                    floor: at_floor.then_some(landing.projection.path()),
+                };
+                looked_up(vfs, &mut held, cred, false, shown, names)
+            },
+            |vfs, cred, end| {
+                catalog_record(vfs, &end, VfsError::NotFound)?.authorize(cred, Access::Read)?;
+                let path = end.catalog.path();
+                with_mount_points(vfs, path, names, FileId::NONE, names.iter().map(|_| None))
+            },
+        )
     }
 
     fn mount_epoch(&self) -> u64 {
@@ -1719,123 +2120,81 @@ where
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         final_link: FinalLink,
     ) -> Result<FileStat, Errno> {
-        let view = self.view(uid, caps, path)?;
-        let cred = view.cred();
-        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
-        let stat = match &view.served {
-            Served::Volume(driver, fs) => vfs
-                .stat_via_secured(cred, covered, &mut *fs.lock(), final_link)
-                .map(|info| FileStat {
-                    kind: file_kind(info.kind),
-                    nlink: info.nlink,
-                    size: info.size,
-                    allocated: info.allocated,
-                    mode: u32::from(info.meta.mode.bits()),
-                    uid: info.meta.owner.0,
-                    gid: info.meta.group.0,
-                    id: node_identity(self.mount.volume_id(*driver), info.node),
-                    times: info.times,
-                    content_gen: info.content_gen,
-                }),
-            Served::Catalog => catalog_node(vfs, cred, covered, None).map(|meta| FileStat {
-                kind: FileKind::Directory,
-                nlink: NodeInfo::SINGLE_NAME,
-                size: 0,
-                allocated: 0,
-                mode: u32::from(meta.mode.bits()),
-                uid: meta.owner.0,
-                gid: meta.group.0,
-                id: FileId::NONE,
-                times: NodeTimes::default(),
-                content_gen: NodeInfo::NO_CONTENT_GEN,
-            }),
-        };
-        stat.map_err(VfsError::to_errno)
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, final_link),
+            MountUse::Read,
+            |_, _, served, _, landing| {
+                let reached = landing.walk.reached()?;
+                let info = DelegatedInfo::of(&reached.info, reached.meta);
+                Ok(file_stat(&info, served.volume_id))
+            },
+            |vfs, _, end| catalog_stat(vfs, &end),
+        )
     }
 
-    fn truncate(
-        &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
-        size: u64,
-    ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            vfs.truncate_via_secured(cred, path, fs, size)
-        })
-    }
-
-    fn seek_region(
-        &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
-        offset: u64,
-        region: SeekRegion,
-    ) -> Result<u64, Errno> {
-        let intent = Intent::Read(VfsError::IsADirectory);
-        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
-            vfs.seek_region_via_secured(cred, path, fs, offset, region)?
-                .ok_or(VfsError::NoData)
-        })
-    }
-
-    fn punch(
-        &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
-        offset: u64,
-        len: u64,
-    ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            vfs.punch_via_secured(cred, path, fs, offset, len)
-        })
-    }
-
-    fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
-        // Flush *every* mounted volume's buffered writes to its backing
-        // device. `sync` carries no per-inode (or per-volume) target, so it
-        // is whole-system; gated by `CAP_FS_ACCESS` at dispatch. A
-        // read-through driver flushes as a no-op. Fail closed before any
-        // volume is online (no VFS yet), and on the first device fault.
+    fn sync_all(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
         self.mount.vfs()?;
+        // Every volume is flushed whatever another answered; the first refusal
+        // is the one reported.
+        let mut outcome = Ok(());
         for driver in self.mount.all_drivers() {
-            // `abi-v1` has no dedicated I/O errno; a device fault collapses
-            // onto the same code the VFS uses for a driver fault.
-            driver.lock().flush().map_err(|_| VfsError::Io.to_errno())?;
+            outcome = outcome.and(flush(&driver));
         }
-        Ok(())
+        outcome
     }
 
-    fn mkdir(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            vfs.mkdir_via_secured(cred, path, fs)
-        })
+    fn mkdir(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        at: At<'_>,
+        mode: CreateMode,
+    ) -> Result<(), Errno> {
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, FinalLink::Keep),
+            MountUse::Write,
+            |_, fs, _, cred, landing| {
+                DelegatedFs::bind(fs, &landing.projection).create_at(
+                    cred,
+                    landing.walk,
+                    DriverNodeKind::Directory,
+                    mode,
+                )
+            },
+            |_, _, _| Err(VfsError::ReadOnly),
+        )
     }
 
     fn unlink(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         flags: UnlinkFlags,
+        expect: Option<&NodeExpect>,
     ) -> Result<(), Errno> {
-        self.with_secured_at(
+        let expect = unlink_expecting(flags, expect)?;
+        self.resolved(
             uid,
             caps,
-            path,
-            Intent::Write,
-            |vfs, fs, cred, path, driver| {
-                let removed = vfs.remove_via_secured(cred, path, fs, flags.is_directory_only())?;
-                if let Some(dir) = removed {
-                    self.mount.listings.removed(driver.as_u64(), dir.raw());
-                }
-                Ok(())
+            Way::to(at, FinalLink::Keep),
+            MountUse::Write,
+            |_, fs, served, cred, landing| {
+                DelegatedFs::bind(fs, &landing.projection).remove_at(
+                    cred,
+                    landing.walk,
+                    flags.is_directory_only(),
+                    expect.map(|expect| expect.on(served.volume_id)),
+                )
             },
+            |_, _, _| Err(VfsError::ReadOnly),
         )
     }
 
@@ -1844,168 +2203,456 @@ where
         uid: u32,
         caps: &dyn CapabilityQuery,
         target: &str,
-        path: &str,
+        at: At<'_>,
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            vfs.symlink_via_secured(cred, path, fs, target)
-        })
+        // Caller-supplied bytes, checked before anything is looked at.
+        parse_link_target(target).map_err(VfsError::to_errno)?;
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, FinalLink::Keep),
+            MountUse::Write,
+            |_, fs, _, cred, landing| {
+                DelegatedFs::bind(fs, &landing.projection).create_link_at(
+                    cred,
+                    landing.walk,
+                    target,
+                )
+            },
+            |_, _, _| Err(VfsError::ReadOnly),
+        )
     }
 
-    fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno> {
-        let intent = Intent::Read(VfsError::InvalidPath);
-        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
-            vfs.readlink_via_secured(cred, path, fs)
-        })
+    fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, at: At<'_>) -> Result<String, Errno> {
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, FinalLink::Keep),
+            MountUse::Read,
+            |_, fs, _, _, landing| {
+                DelegatedFs::bind(fs, &landing.projection).read_link_at(landing.walk)
+            },
+            |vfs, _, end| {
+                catalog_record(vfs, &end, VfsError::NotFound)?;
+                Err(VfsError::InvalidPath)
+            },
+        )
     }
 
     fn realpath(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         mode: RealpathMode,
     ) -> Result<String, Errno> {
-        let view = self.view(uid, caps, path)?;
-        let cred = view.cred();
-        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
-        let real = match &view.served {
-            Served::Volume(_, fs) => vfs.realpath_via_secured(cred, covered, &mut *fs.lock(), mode),
-            Served::Catalog => realpath_in_catalog(vfs, cred, covered, mode),
+        // A path from a held directory is spelled from where that directory
+        // stands now, not where it was opened.
+        let start = match at.start {
+            Start::Dir(handle) if tairix_path::is_relative_spelling(at.path) => {
+                self.canonical_names(uid, caps, handle)?
+            }
+            Start::Root | Start::Dir(_) | Start::Catalog(_) => Vec::new(),
         };
-        real.map_err(VfsError::to_errno)
+        let way = Way {
+            at,
+            posture: canonicalising(mode),
+            spelling: Spelling::Exact(start),
+        };
+        self.resolved(
+            uid,
+            caps,
+            way,
+            MountUse::Read,
+            |_, _, _, _, landing| canonical_answer(vacancy(&landing.walk), mode, landing.spelled),
+            |_, _, end| canonical_answer(end.absent.len(), mode, end.spelled),
+        )
     }
 
     fn rename(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        src: &str,
-        dst: &str,
+        src: At<'_>,
+        dst: At<'_>,
         flags: RenameFlags,
+        expect: Option<&NodeExpect>,
     ) -> Result<(), Errno> {
-        self.with_secured_pair(uid, caps, src, dst, |vfs, fs, cred, pair, driver| {
-            let replaced = vfs.rename_via_secured(cred, pair, fs, flags)?;
-            if let Some(dir) = replaced {
-                self.mount.listings.removed(driver.as_u64(), dir.raw());
-            }
-            Ok(())
-        })
+        let expect = rename_expecting(flags, expect)?;
+        let (vfs, groups) = self.acting_in(uid)?;
+        let cred = credentials(uid, &groups, caps);
+        let keep = Posture::of(FinalLink::Keep);
+        let from = Resolution::new(vfs, src, keep, Spelling::Unkept).map_err(VfsError::to_errno)?;
+        let to = Resolution::new(vfs, dst, keep, Spelling::Unkept).map_err(VfsError::to_errno)?;
+        let mut drivers = Registry { mount: self.mount };
+        vfs.rename_between(&cred, &mut drivers, from, to, flags, expect)
+            .map_err(VfsError::to_errno)
     }
 
     fn link(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        existing: &str,
-        link: &str,
+        existing: At<'_>,
+        new: At<'_>,
         existing_link: FinalLink,
     ) -> Result<(), Errno> {
-        self.with_secured_pair(uid, caps, existing, link, |vfs, fs, cred, pair, _| {
-            vfs.link_via_secured(cred, pair, fs, existing_link)
-        })
+        let (vfs, groups) = self.acting_in(uid)?;
+        let cred = credentials(uid, &groups, caps);
+        let existing = Resolution::new(vfs, existing, Posture::of(existing_link), Spelling::Unkept)
+            .map_err(VfsError::to_errno)?;
+        let new = Resolution::new(vfs, new, Posture::of(FinalLink::Keep), Spelling::Unkept)
+            .map_err(VfsError::to_errno)?;
+        let mut drivers = Registry { mount: self.mount };
+        vfs.link_between(&cred, &mut drivers, existing, new)
+            .map_err(VfsError::to_errno)
     }
 
     fn set_mode(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         mode: u32,
+        final_link: FinalLink,
     ) -> Result<(), Errno> {
-        // Defence in depth behind the dispatcher's own mask check: a mode
-        // word carrying a bit above the permission mask is refused here too,
-        // so no in-kernel caller can write a corrupt record through this
-        // seam.
+        // Defence in depth behind the dispatcher's own mask check, so no
+        // in-kernel caller can write a corrupt record through this seam.
         if mode & !FS_MODE_MASK != 0 {
             return Err(Errno::OutOfRange);
         }
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            vfs.set_mode_via_secured(cred, path, fs, mode)
-        })
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, final_link),
+            MountUse::Write,
+            |_, fs, _, cred, landing| {
+                let mut delegated = DelegatedFs::bind(fs, &landing.projection);
+                delegated.held(landing.walk)?.0.set_mode(cred, false, mode)
+            },
+            |_, _, _| Err(VfsError::ReadOnly),
+        )
     }
 
     fn set_owner(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
+        owner: u32,
+        group: u32,
+        final_link: FinalLink,
+    ) -> Result<(), Errno> {
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, final_link),
+            MountUse::Write,
+            |_, fs, _, cred, landing| {
+                let mut delegated = DelegatedFs::bind(fs, &landing.projection);
+                delegated
+                    .held(landing.walk)?
+                    .0
+                    .set_owner(cred, false, owner, group)
+            },
+            |_, _, _| Err(VfsError::ReadOnly),
+        )
+    }
+
+    fn access(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        at: At<'_>,
+        want: Wanted,
+        final_link: FinalLink,
+    ) -> Result<(), Errno> {
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, final_link),
+            MountUse::Read,
+            |_, _, _, cred, landing| {
+                let reached = landing.walk.reached()?;
+                admits_each(&reached.meta, cred, want)?;
+                landing.projection.admits(reached.info.kind, want)
+            },
+            |vfs, cred, end| {
+                admits_each(catalog_record(vfs, &end, VfsError::NotFound)?, cred, want)?;
+                end.catalog.admits(DriverNodeKind::Directory, want)
+            },
+        )
+    }
+
+    fn chdir(&self, uid: u32, caps: &dyn CapabilityQuery, at: At<'_>) -> Result<Cwd, Errno> {
+        let way = Way {
+            at,
+            posture: Posture::of(FinalLink::Follow),
+            spelling: Spelling::Label,
+        };
+        self.resolved(
+            uid,
+            caps,
+            way,
+            MountUse::Read,
+            |_, fs, served, cred, landing| {
+                let Landing {
+                    projection,
+                    walk,
+                    spelled,
+                } = landing;
+                // The view root is `Cwd::Root` whatever backs it, so it pins
+                // nothing.
+                if projection.path().is_root()
+                    && matches!(walk, Walk::Bottom { at_floor: true, .. })
+                {
+                    walk.reached()?.meta.authorize(cred, Access::Execute)?;
+                    return Ok(Cwd::Root);
+                }
+                let (node, at_floor) =
+                    DelegatedFs::bind(fs, &projection).chdir_at(cred, walk, &served.nodes)?;
+                Ok(Cwd::Dir(NodeHandle {
+                    node,
+                    opened_as: label(spelled)?,
+                    projection,
+                    authority: Authority::Holder,
+                    at_floor,
+                }))
+            },
+            |vfs, cred, end| {
+                catalog_record(vfs, &end, VfsError::NotFound)?.authorize(cred, Access::Execute)?;
+                Ok(if end.catalog.path().is_root() {
+                    Cwd::Root
+                } else {
+                    Cwd::Catalog(end.catalog)
+                })
+            },
+        )
+    }
+
+    fn canonical_of(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        start: Start<'_>,
+    ) -> Result<String, Errno> {
+        match start {
+            Start::Root => spell(&[]).map_err(VfsError::to_errno),
+            Start::Catalog(catalog) => {
+                if self.mount.vfs()?.mounts().live(catalog).is_none() {
+                    return Err(Errno::Stale);
+                }
+                spell(catalog.path().components()).map_err(VfsError::to_errno)
+            }
+            Start::Dir(handle) => {
+                let names = self.canonical_names(uid, caps, handle)?;
+                spell_canonical(&names).map_err(VfsError::to_errno)
+            }
+        }
+    }
+
+    fn read_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Errno> {
+        self.with_node(node, who, |mut held, cred, _| {
+            held.read(cred, !who.granted, offset, buf)
+        })
+    }
+
+    fn write_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        offset: u64,
+        append: bool,
+        data: &[u8],
+    ) -> Result<usize, Errno> {
+        self.with_node(node, who, |mut held, cred, _| {
+            held.write(cred, !who.granted, offset, append, data)
+        })
+    }
+
+    fn truncate_node(&self, node: &NodeHandle, who: &Acting<'_>, size: u64) -> Result<(), Errno> {
+        self.with_node(node, who, |mut held, cred, _| {
+            held.truncate(cred, !who.granted, size)
+        })
+    }
+
+    fn punch_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        offset: u64,
+        len: u64,
+    ) -> Result<(), Errno> {
+        self.with_node(node, who, |mut held, cred, _| {
+            held.punch(cred, !who.granted, offset, len)
+        })
+    }
+
+    fn seek_region_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        offset: u64,
+        region: SeekRegion,
+    ) -> Result<u64, Errno> {
+        self.with_node(node, who, |mut held, cred, _| {
+            held.seek_region(cred, !who.granted, offset, region)?
+                .ok_or(VfsError::NoData)
+        })
+    }
+
+    fn stat_node(&self, node: &NodeHandle, who: &Acting<'_>) -> Result<FileStat, Errno> {
+        self.with_node(node, who, |held, _, volume| {
+            Ok(file_stat(&held.into_info(), volume))
+        })
+    }
+
+    fn readdir_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        at: &mut Listing,
+        each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
+    ) -> Result<(), Errno> {
+        let vfs = self.mount.vfs()?;
+        let floor = node.at_floor.then(|| node.projection.path());
+        self.with_node(node, who, |mut held, cred, volume| {
+            let shown = Shown { volume, floor };
+            list_held(vfs, &mut held, cred, !who.granted, shown, at, each)
+        })
+    }
+
+    fn lookup_entries_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        names: &[&[u8]],
+    ) -> Result<LookedUp, Errno> {
+        let vfs = self.mount.vfs()?;
+        let floor = node.at_floor.then(|| node.projection.path());
+        self.with_node(node, who, |mut held, cred, volume| {
+            let shown = Shown { volume, floor };
+            looked_up(vfs, &mut held, cred, !who.granted, shown, names)
+        })
+    }
+
+    fn sync_node(&self, node: &NodeHandle, _who: &Acting<'_>) -> Result<(), Errno> {
+        self.with_live(node, |fs, _| {
+            fs.flush().map_err(|_| VfsError::Io.to_errno())
+        })
+    }
+
+    fn set_mode_node(&self, node: &NodeHandle, who: &Acting<'_>, mode: u32) -> Result<(), Errno> {
+        if mode & !FS_MODE_MASK != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        self.with_node(node, who, |mut held, cred, _| {
+            held.set_mode(cred, who.granted, mode)
+        })
+    }
+
+    fn set_owner_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
         owner: u32,
         group: u32,
     ) -> Result<(), Errno> {
-        // The whole authority rule (privileged reassignment vs. the
-        // unprivileged owner-only group change, the set-*id* strip) lives in
-        // the secured VFS under the caller's kernel-attested credential; this
-        // seam only resolves the covering mount and delegates.
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            vfs.set_owner_via_secured(cred, path, fs, owner, group)
+        self.with_node(node, who, |mut held, cred, _| {
+            held.set_owner(cred, who.granted, owner, group)
         })
     }
 
-    fn attr_get(
+    fn attr_get_node(
         &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
+        node: &NodeHandle,
+        who: &Acting<'_>,
         key: &[u8],
         value_out: &mut [u8],
     ) -> Result<usize, Errno> {
-        // A mount whose format stores no attributes answers with the typed
-        // refusal, decided per driver through the attribute facet; every
-        // permission decision stays in the secured VFS.
-        let intent = Intent::Read(VfsError::NotSupported);
-        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
-            let Some(fs) = fs.attrs_fs() else {
-                return Err(VfsError::NotSupported);
-            };
-            vfs.get_attr_via_secured(cred, path, fs, key, value_out)
+        self.with_attrs(node, who, |held, cred, owner_exempt| {
+            held.get_attr(cred, owner_exempt, key, value_out)
         })
     }
 
-    fn attr_set(
+    fn attr_set_node(
         &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
+        node: &NodeHandle,
+        who: &Acting<'_>,
         key: &[u8],
         value: &[u8],
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            let Some(fs) = fs.attrs_fs() else {
-                return Err(VfsError::NotSupported);
-            };
-            vfs.set_attr_via_secured(cred, path, fs, key, value)
+        self.with_attrs(node, who, |held, cred, owner_exempt| {
+            held.set_attr(cred, owner_exempt, key, value)
         })
     }
 
-    fn attr_list(
+    fn attr_list_node(
         &self,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
+        node: &NodeHandle,
+        who: &Acting<'_>,
         index: u64,
         key_out: &mut [u8],
     ) -> Result<Option<usize>, Errno> {
-        let intent = Intent::Read(VfsError::NotSupported);
-        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
-            let Some(fs) = fs.attrs_fs() else {
-                return Err(VfsError::NotSupported);
-            };
-            vfs.list_attr_via_secured(cred, path, fs, index, key_out)
+        self.with_attrs(node, who, |held, cred, owner_exempt| {
+            held.list_attr(cred, owner_exempt, index, key_out)
         })
     }
 
-    fn attr_remove(
+    fn attr_remove_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        key: &[u8],
+    ) -> Result<(), Errno> {
+        self.with_attrs(node, who, |held, cred, owner_exempt| {
+            held.remove_attr(cred, owner_exempt, key)
+        })
+    }
+
+    fn readdir_catalog(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
-        path: &str,
-        key: &[u8],
+        catalog: &Projection,
+        at: &mut Listing,
+        each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
-            let Some(fs) = fs.attrs_fs() else {
-                return Err(VfsError::NotSupported);
-            };
-            vfs.remove_attr_via_secured(cred, path, fs, key)
+        if !catalog.is_live() {
+            return Err(Errno::Stale);
+        }
+        let (vfs, groups) = self.acting_in(uid)?;
+        let cred = credentials(uid, &groups, caps);
+        vfs.template_of(catalog)
+            .and_then(|meta| meta.authorize(&cred, Access::Read))
+            .and_then(|()| list_catalog(vfs, catalog.path(), at, each))
+            .map_err(VfsError::to_errno)
+    }
+
+    fn reap(&self, volume: &VolumeNodes) {
+        self.mount.reap(volume);
+    }
+
+    fn watch_table(&self, node: &NodeHandle) -> Option<Arc<crate::fswatch::VolumeWatch>> {
+        self.mount.watch_table(node.node.instance())
+    }
+
+    fn access_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        want: Access,
+        judged: Judged,
+    ) -> Result<(), Errno> {
+        let owner_exempt = judged == Judged::AsOperation && !who.granted;
+        self.with_node(node, who, |held, cred, _| {
+            held.admits(cred, want, owner_exempt)
         })
     }
 
@@ -2037,7 +2684,10 @@ where
                     }
                     None => *entry.usage.lock(),
                 };
-                let target = shown_at.map_or_else(String::new, |at| spell(at.components()));
+                let target = match shown_at {
+                    Some(at) => spell(at.components()).ok()?,
+                    None => String::new(),
+                };
                 // `MountRecord::new` fails only on an over-long field or an
                 // inconsistent usage report; such a volume is left out rather
                 // than misreported.
@@ -2074,12 +2724,12 @@ where
                 let (subtree, volume_id) = match mount.backing() {
                     None => (String::new(), [0u8; 16]),
                     Some(driver) => (
-                        spell(mount.backing_subtree()),
+                        spell(mount.backing_subtree()).ok()?,
                         online_entry(&online, driver)?.volume_id,
                     ),
                 };
                 ViewBindingRecord::new(
-                    spell(mount.path().components()).as_bytes(),
+                    spell(mount.path().components()).ok()?.as_bytes(),
                     subtree.as_bytes(),
                     mount.flags(),
                     volume_id,

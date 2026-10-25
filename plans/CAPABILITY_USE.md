@@ -216,8 +216,10 @@ Every account that may start an interactive session is granted at least:
 |---|---|
 | `CAP_FS_ACCESS` | "May use the filesystem at all." Real reach stays per-inode (§5.3): home is writable, `/System` is not. |
 | `CAP_PROC_SPAWN` | "May run programs at all." What runs is bounded by the program registry / bundle store; the child is bounded by its own manifest ∩ this same ceiling. |
+| `CAP_SANDBOX_SPAWN` | Start a kernel-branded, capability-empty parser child and nothing else, so a program decoding an untrusted file asks for this rather than general spawn. |
 | `CAP_CONSOLE_READ`, `CAP_CONSOLE_WRITE` | An interactive session's streams are console-backed; the fine authority stays the inherited descriptor table. |
 | `CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM` | The graphical-session class (§4.6, `plans/DISPLAY.md` D7): acquiring a seat's exclusive revocable lease, draining the *owned* seat's input, and creating/granting the zero-copy frame region. A graphical login is an ordinary session; the kernel still owner-gates every acquire, drain, and present against the live lease, and every region against its owner. |
+| `CAP_DESKTOP_LAYER` | A desktop companion's surface outside a window of its own (`plans/CINDER.md`); only a bundle whose signed manifest asks for it obtains one, and the session contains it. |
 | `CAP_NET` | Ordinary transport use: datagram sockets and originating/receiving traffic through the `netstack` socket surface (`plans/NETWORK.md` §0). The coarser `CAP_NET_ADMIN` (reconfiguring interfaces) and `CAP_NET_RAW` (unmediated frames) stay administrative. |
 | `CAP_LOG_EMIT` | One bounded, kernel-validated record on the **diagnostic** sink, attributed by the kernel — never the caller — to the calling task. It does *not* reach the hash-chained audit log, which stays kernel-only, so no user program can forge, alter, or truncate an audit entry. Baseline because a session legitimately reports its own operational state, and a program built to log that structurally cannot is a program that fails silently. Accepted cost: any program a logged-in user runs may write to the machine-wide diagnostic log, so noise and provenance confusion are possible, and a debug build's captured serial line is user-writable. |
 
@@ -239,6 +241,7 @@ top of the session baseline:
 | Capability | Administrative power |
 |---|---|
 | `CAP_USER_ADMIN` | Create/modify/delete/lock accounts and edit grants (CU4). |
+| `CAP_FS_CHOWN` | Reassign the owning user of any filesystem node (`chown`'s privilege). |
 | `CAP_FS_MOUNT` | Mount/unmount volumes; relax per-mount flags is its own gate. |
 | `CAP_RLIMIT_RAISE` | Raise hard resource limits above an inherited ceiling. |
 | `CAP_AUDIT_READ` | Read the hash-chained security audit log. |
@@ -246,21 +249,31 @@ top of the session baseline:
 | `CAP_TIME_SET` | Adjust the wall clock. |
 | `CAP_TIME_HIRES` | Full-resolution monotonic clock (diagnostics/profiling). |
 | `CAP_MEM_PIN` | Exempt a process's anonymous memory from the swap tiers (`mem_pin`, bounded by the `pinned-memory-bytes` limit; `plans/STRESSTEST.md` ST2). |
+| `CAP_NET_ADMIN` | Interface, address and route changes through the network stack's admin surface (`plans/NETWORK.md` §3). |
+| `CAP_NET_BIND_PRIVILEGED` | Listen on a well-known port, for a program whose manifest requests it. |
+| `CAP_NET_RAW` | Raw frames and the ICMP echo socket `ping` opens; ordinary transport stays baseline `CAP_NET`. |
+| `CAP_PROC_CONTROL` | Signal another principal's process (`plans/NEW-TASKBAR.md` T11). |
+| `CAP_SYSTEM_POWER` | Power the machine off or restart it (`plans/NEW-TASKBAR.md` T13). |
+| `CAP_STORAGE_ADMIN` | Compose raw storage: create a RAID array, admit or retire a member, stop one (`plans/FIX-IO.md` `IO6f`). |
+| `CAP_SERVICE_CONTROL` | Drive the service managers' lifecycles (`servicectl`). |
+| `CAP_NET_DISCOVER_ALL` | Browse the link for every service type and list the types (`plans/ZEROCONF.md` Z4). |
 | `CAP_SETTINGS_WRITE` | Change the machine's settings, and read its network addressing, through the settings service (`docs/src/userland/settingsd.md`); the service is the documents' one writer and enforces the capability, which it never holds itself. |
-| `CAP_GPIO` | Drive the lines a board's header lends to system services: claim one as an output and switch it (`plans/COOLING.md` CL2). Service-class: the cooling service is its one holder, and a GPIO controller's driver binds its header endpoint requiring it. |
 
 The **debug image's root account** is seeded with exactly the session
 baseline plus this administrative set — the "administrative capability
 ceiling a bring-up session needs" its rustdoc already promises. Driver-class
 (`CAP_MEM_DMA`, `CAP_IRQ_BIND`, `CAP_MMIO_MAP`, `CAP_HW_EMIT`, …) and
 service-class (`CAP_SPAWN_AS_USER`, `CAP_USERS_READ`,
-`CAP_SYSINFO_INTROSPECT`, `CAP_INPUT_INJECT`, `CAP_SANDBOX_SPAWN`, …)
+`CAP_SYSINFO_INTROSPECT`, `CAP_INPUT_INJECT`, `CAP_SANDBOX_SPAWN`,
+`CAP_GPIO`, …)
 capabilities are **never**
 part of an *interactive* account ceiling: they belong to the specific system
 program whose manifest requests them — and, through that service's own
 no-login account (`plans/USERS.md`), to its dedicated per-service ceiling
-(`tairix_users::{DEVMGR_CEILING, SYSINFOD_CEILING, SEATMGR_CEILING,
-LOGIN_CEILING, NETSTACK_CEILING}`), which holds exactly that one service's needs so the
+(`tairix_users::{DEVMGR_CEILING, SYSINFOD_CEILING, NETSTACK_CEILING,
+SEATMGR_CEILING, FONTD_CEILING, CONFD_CEILING, TIMED_CEILING,
+SETTINGSD_CEILING, THERMALD_CEILING, DISCOVERYD_CEILING, AUDIOD_CEILING,
+SOUNDD_CEILING, GREETER_CEILING, LOGIN_CEILING}`), which holds exactly that one service's needs so the
 ceiling∩manifest intersection does real work. An administrator administers
 the system; they do not impersonate its services.
 
@@ -769,16 +782,17 @@ what it wants first is recorded in `plans/VIEW.md`.**
   opens the chosen file under **its own** identity (its manifest gained
   `CAP_FS_ACCESS` for exactly this), and the kernel's `fd_grant` mints a
   one-shot, recipient-bound delegation the app redeems with
-  the unprivileged `fd_redeem` — every later operation is re-authorised
-  under the *grantor's* captured uid + effective set, the grant is audited,
-  and an exited recipient's pending grants are reclaimed.
+  the unprivileged `fd_redeem` — a new descriptor on the same node, every
+  later operation re-authorised as the *grantor's* frozen uid + effective set
+  with no owner exemption, so the grantor's chmod revokes it; the grant is
+  audited, and an exited recipient's pending grants are reclaimed.
 
   **A delegation may be handed on, unchanged.** A holder re-granting one
-  mints a record that is the one it holds — the first grantor's path, uid,
-  effective set, and extent ceiling, copied rather than re-captured, with the
-  ceiling attenuated by `min` if the caller states a smaller one. So a relay
-  can never widen what it was handed and no chain forms for a reader to
-  follow: exactly one identity is ever exercised. That is what lets the
+  mints a record that is the one it holds — the same node, the first
+  grantor's uid, effective set, and extent ceiling, copied rather than
+  re-captured, with the ceiling attenuated by `min` if the caller states a
+  smaller one. So a relay can never widen what it was handed and no chain
+  forms for a reader to follow: exactly one identity is ever exercised. That is what lets the
   desktop hand one application's chosen document to a live instance of
   another — the file manager opens it under its own authority, the session
   redeems and hands the same authority on, and the viewer reads it as the file
@@ -792,8 +806,9 @@ what it wants first is recorded in `plans/VIEW.md`.**
   **Where a descriptor points may be told without passing it on.** A holder
   that may not delegate — an editor holding no filesystem capability, handed
   one document — can still mint one live instance a *location*
-  (`fd_grant_location`): the descriptor's absolute path and the user it reaches
-  it as, and no access at all. The recipient learns the path through
+  (`fd_grant_location`): the absolute path the descriptor was opened as (which
+  a later rename can leave stale) and the user it reaches it as, and no access
+  at all. The recipient learns the path through
   `fd_redeem_location`, which needs `CAP_FS_ACCESS` and refuses a reader of
   another user, so a path is told only to a principal that could have named it.
   Locations share the delegations' handle space, bound and duplicate

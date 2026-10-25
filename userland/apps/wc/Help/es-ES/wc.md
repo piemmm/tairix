@@ -33,6 +33,15 @@ con operandos `file`.
 Una entrada ilegible se informa en la salida de error y la ejecución
 continúa con la entrada siguiente.
 
+En un terminal, cada nombre que muestra la salida se entrecomilla donde
+un shell lo necesitaría, y cualquier carácter de control u otro carácter
+invisible que haya en él se escribe como secuencia de escape, de modo
+que un nombre no puede controlar ni reordenar la pantalla; GNU lo
+muestra sin cambios. Una tubería o un fichero recibe el nombre byte a
+byte. Un nombre que contiene un salto de línea se entrecomilla también
+en una tubería, como hace GNU `wc`, para que cada recuento quede en una
+sola línea.
+
 ## OPTIONS
 
 - `-c, --bytes` — imprimir el número de bytes.
@@ -62,7 +71,7 @@ continúa con la entrada siguiente.
 
 - `0` — se contó cada entrada (o se escribió la ayuda breve).
 - `1` — no se pudo leer una entrada, o no se pudo entregar la salida.
-- `2` — no se entendió la línea de órdenes.
+  Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

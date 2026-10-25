@@ -33,6 +33,8 @@ tairix-crc32c = { path = "../crc32c", version = "=0.0.0" }
 # What may not stand in a name a person reads (`utf8::is_hidden`): a region
 # or place that could hide or reorder its text is refused with the store.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The one rule for a hidden character.
+tairix-visible = { path = "../visible", version = "=0.0.0" }
 # For the `rt` loader only: the bounded whole-file read under the caller's
 # own identity.
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }

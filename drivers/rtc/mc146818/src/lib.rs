@@ -50,7 +50,9 @@ use tairix_abi::driver::rtc::{
     RtcStatus,
 };
 use tairix_abi::time::{CivilTime, Duration64, Time64};
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 
 #[cfg(test)]
 mod tests;
@@ -61,9 +63,9 @@ mod tests;
 /// signal that the load-time gate cleared. The bytes spell `"CMOS"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x434D_4F53_0000_0001;
 
-/// Device-tree `compatible` string this driver binds to — the Linux
-/// devicetree binding name for the part, so a discovery source that already
-/// speaks that vocabulary needs no translation.
+/// Device-tree `compatible` string this driver binds to — the name device
+/// trees give the part, so a discovery source that already speaks that
+/// vocabulary needs no translation.
 pub const MC146818_COMPATIBLE: &[u8] = b"motorola,mc146818";
 
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
@@ -84,13 +86,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// match data can never drift from the driver.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(MC146818_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(MC146818_COMPATIBLE),
 )];
 
 /// Ports of I/O space the chip's index/data pair occupies. A granted range

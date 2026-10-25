@@ -60,8 +60,8 @@ accettato e ignorato.
   stata mostrata la guida breve richiesta); un guasto dello standard
   output tollerato da una modalità `-nopipe` non lo cambia.
 - `1` — un'uscita è fallita in un modo che la modalità scelta conta,
-  oppure l'input non è stato leggibile.
-- `2` — la riga di comando non è stata compresa.
+  oppure l'input non è stato leggibile. Anche una riga di comando non
+  compresa termina con `1`.
 
 ## ENVIRONMENT
 

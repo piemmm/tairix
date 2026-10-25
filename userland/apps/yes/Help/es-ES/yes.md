@@ -36,8 +36,8 @@ opción.
 
 - `0` — se sirvió la ayuda breve solicitada.
 - `1` — la salida dejó de aceptar bytes (la única condición de parada
-  de la herramienta).
-- `2` — la línea de órdenes no se entendió.
+  de la herramienta). Una línea de órdenes no entendida también
+  termina con `1`.
 
 ## ENVIRONMENT
 

@@ -11,11 +11,11 @@
 //! rows. Short help is the reserved `-?`/`--help` pair (plans/APPS.md
 //! §4); `-h` keeps its GNU meaning (human-readable), exactly as `ls`.
 
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 use tairix_util::size::{parse_block_size, SizeScale};
 
@@ -62,6 +62,19 @@ pub struct Options {
     pub count_links: bool,
     /// End each row with NUL instead of newline (`-0`).
     pub null_terminated: bool,
+    /// Which symbolic links the walk follows (`-P`, `-H`/`-D`, `-L`).
+    pub dereference: Dereference,
+}
+
+/// Which symbolic links `du` follows; the last option given wins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Dereference {
+    /// None: a link counts as itself (`-P`, `--no-dereference`, the default).
+    Never,
+    /// Those named on the command line (`-H`, `-D`, `--dereference-args`).
+    Operands,
+    /// Every one met (`-L`, `--dereference`).
+    Always,
 }
 
 impl Default for Options {
@@ -77,6 +90,7 @@ impl Default for Options {
             separate_dirs: false,
             count_links: false,
             null_terminated: false,
+            dereference: Dereference::Never,
         }
     }
 }
@@ -84,10 +98,8 @@ impl Default for Options {
 /// Why an argument vector was not a valid `du` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// An option that is not part of the surface.
-    UnknownOption(String),
-    /// An option that requires a value reached the end of the arguments.
-    MissingValue(&'static str),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A `--block-size`/`-B` value that is not a valid GNU size.
     BadBlockSize(String),
     /// A `--max-depth`/`-d` value that is not a non-negative integer.
@@ -101,10 +113,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
-            Self::MissingValue(opt) => {
-                write!(f, "option {opt} requires an argument", opt = quote(opt))
-            }
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::BadBlockSize(value) => write!(
                 f,
                 "invalid --block-size argument {value}",
@@ -123,37 +132,75 @@ impl fmt::Display for ParseError {
     }
 }
 
+/// What each of `du`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    All,
+    ApparentSize,
+    BlockSize,
+    Bytes,
+    CountLinks,
+    Dereference,
+    DereferenceArgs,
+    HumanReadable,
+    Si,
+    MaxDepth,
+    Null,
+    NoDereference,
+    SeparateDirs,
+    Summarize,
+    Total,
+    Kibibytes,
+    Mebibytes,
+    Help,
+}
+
+/// `du`'s options, as GNU's `du` spells them, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('a', &["all"], Flag::All),
+    Opt::long(&["apparent-size"], Takes::Nothing, Flag::ApparentSize),
+    Opt::valued('B', &["block-size"], Flag::BlockSize),
+    Opt::flag('b', &["bytes"], Flag::Bytes),
+    Opt::flag('l', &["count-links"], Flag::CountLinks),
+    Opt::flag('L', &["dereference"], Flag::Dereference),
+    Opt::flag('D', &["dereference-args"], Flag::DereferenceArgs),
+    Opt::letter('H', Takes::Nothing, Flag::DereferenceArgs),
+    Opt::flag('h', &["human-readable"], Flag::HumanReadable),
+    Opt::long(&["si"], Takes::Nothing, Flag::Si),
+    Opt::valued('d', &["max-depth"], Flag::MaxDepth),
+    Opt::flag('0', &["null"], Flag::Null),
+    Opt::flag('P', &["no-dereference"], Flag::NoDereference),
+    Opt::flag('S', &["separate-dirs"], Flag::SeparateDirs),
+    Opt::flag('s', &["summarize"], Flag::Summarize),
+    Opt::flag('c', &["total"], Flag::Total),
+    Opt::letter('k', Takes::Nothing, Flag::Kibibytes),
+    Opt::letter('m', Takes::Nothing, Flag::Mebibytes),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse an argument vector (without the program name).
 ///
-/// Options and operands may interleave; `--` ends option parsing. Later
-/// unit selections override earlier ones, exactly as in the GNU tool.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, clustered, a value attached (`-B1M`, `--max-depth=2`) or
+/// the next argument, a long option by any unambiguous prefix, `--` ending
+/// them. The help switches (`-?`, `--help`) answer at once. The later unit
+/// selection, and the later link option, wins, exactly as in the GNU tool.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] naming the offending argument; the caller reports it
-/// with the usage banner and exits `2`.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::BadBlockSize`] — a `-B` value that is not a GNU size.
+/// * [`ParseError::BadMaxDepth`] — a `-d` value that is not a non-negative
+///   integer.
+/// * [`ParseError::SummarizeConflictsWithAll`] — `-s` with `-a`.
+/// * [`ParseError::SummarizeConflictsWithDepth`] — `-s` with `-d`.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut options = Options::default();
-    let mut index = 0;
-    let mut options_ended = false;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if options_ended || arg == "-" || !arg.starts_with('-') {
-            options.paths.push(arg.to_string());
-            continue;
-        }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        let applied = if arg.starts_with("--") {
-            apply_long(arg, args, &mut index, &mut options)?
-        } else {
-            apply_short_cluster(arg, args, &mut index, &mut options)?
-        };
-        if matches!(applied, Applied::Help) {
-            return Ok(Command::Help);
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(path) => options.paths.push(path.to_string()),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(flag, value) => options.set(flag, value.unwrap_or_default())?,
         }
     }
     if options.summarize && options.all {
@@ -170,147 +217,82 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     Ok(Command::Report(options))
 }
 
-/// What one option argument asked for.
-enum Applied {
-    /// A short-help switch: nothing else on the command line matters.
-    Help,
-    /// The option was recorded in the caller's [`Options`].
-    Recorded,
-}
-
-/// Apply one `--name[=value]` argument. `arg` carries its `--` prefix so a
-/// refusal names the option exactly as the caller spelled it.
-fn apply_long(
-    arg: &str,
-    args: &[&str],
-    index: &mut usize,
-    options: &mut Options,
-) -> Result<Applied, ParseError> {
-    let (name, attached) = match arg[2..].split_once('=') {
-        Some((name, value)) => (name, Some(value)),
-        None => (&arg[2..], None),
-    };
-    match name {
-        "help" => return Ok(Applied::Help),
-        "all" => options.all = true,
-        "summarize" => options.summarize = true,
-        "total" => options.grand_total = true,
-        "apparent-size" => options.apparent_size = true,
-        "human-readable" => options.scale = SizeScale::HumanBinary,
-        "si" => options.scale = SizeScale::HumanDecimal,
-        "separate-dirs" => options.separate_dirs = true,
-        "count-links" => options.count_links = true,
-        "null" => options.null_terminated = true,
-        "bytes" => {
-            options.apparent_size = true;
-            options.scale = SizeScale::Blocks(1);
-        }
-        "block-size" => {
-            let value = take_value(attached, args, index, "--block-size")?;
-            options.scale = parse_block_size(value)
-                .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
-        }
-        "max-depth" => {
-            let value = take_value(attached, args, index, "--max-depth")?;
-            options.max_depth = Some(
-                value
-                    .parse()
-                    .map_err(|_| ParseError::BadMaxDepth(value.to_string()))?,
-            );
-        }
-        _ => return Err(ParseError::UnknownOption(arg.to_string())),
-    }
-    Ok(Applied::Recorded)
-}
-
-/// Apply one short-option cluster (`arg` carries its leading `-`).
-///
-/// `-B` and `-d` take a value, consuming the rest of the cluster (`-B1M`) or
-/// the next argument (`-B 1M`), so they end the cluster.
-fn apply_short_cluster(
-    arg: &str,
-    args: &[&str],
-    index: &mut usize,
-    options: &mut Options,
-) -> Result<Applied, ParseError> {
-    let mut cluster = arg[1..].chars();
-    while let Some(flag) = cluster.next() {
+impl Options {
+    /// Apply the option `flag` names, with the value it took.
+    fn set(&mut self, flag: Flag, value: &str) -> Result<(), ParseError> {
         match flag {
-            '?' => return Ok(Applied::Help),
-            'a' => options.all = true,
-            's' => options.summarize = true,
-            'c' => options.grand_total = true,
-            'S' => options.separate_dirs = true,
-            'l' => options.count_links = true,
-            '0' => options.null_terminated = true,
-            'h' => options.scale = SizeScale::HumanBinary,
-            'k' => options.scale = SizeScale::Blocks(1024),
-            'm' => options.scale = SizeScale::Blocks(1024 * 1024),
-            'b' => {
-                options.apparent_size = true;
-                options.scale = SizeScale::Blocks(1);
-            }
-            'B' => {
-                let value = take_cluster_value(cluster.as_str(), args, index, "-B")?;
-                options.scale = parse_block_size(value)
+            Flag::All => self.all = true,
+            Flag::ApparentSize => self.apparent_size = true,
+            Flag::BlockSize => {
+                self.scale = parse_block_size(value)
                     .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
-                break;
             }
-            'd' => {
-                let value = take_cluster_value(cluster.as_str(), args, index, "-d")?;
-                options.max_depth = Some(
+            Flag::Bytes => {
+                self.apparent_size = true;
+                self.scale = SizeScale::Blocks(1);
+            }
+            Flag::CountLinks => self.count_links = true,
+            Flag::Dereference => self.dereference = Dereference::Always,
+            Flag::DereferenceArgs => self.dereference = Dereference::Operands,
+            Flag::HumanReadable => self.scale = SizeScale::HumanBinary,
+            Flag::Si => self.scale = SizeScale::HumanDecimal,
+            Flag::MaxDepth => {
+                self.max_depth = Some(
                     value
                         .parse()
                         .map_err(|_| ParseError::BadMaxDepth(value.to_string()))?,
                 );
-                break;
             }
-            other => return Err(ParseError::UnknownOption(format!("-{other}"))),
+            Flag::Null => self.null_terminated = true,
+            Flag::NoDereference => self.dereference = Dereference::Never,
+            Flag::SeparateDirs => self.separate_dirs = true,
+            Flag::Summarize => self.summarize = true,
+            Flag::Total => self.grand_total = true,
+            Flag::Kibibytes => self.scale = SizeScale::Blocks(1024),
+            Flag::Mebibytes => self.scale = SizeScale::Blocks(1024 * 1024),
+            Flag::Help => {}
         }
+        Ok(())
     }
-    Ok(Applied::Recorded)
-}
-
-/// The value of a `--name value` / `--name=value` long option.
-fn take_value<'a>(
-    attached: Option<&'a str>,
-    args: &[&'a str],
-    index: &mut usize,
-    option: &'static str,
-) -> Result<&'a str, ParseError> {
-    if let Some(value) = attached {
-        return Ok(value);
-    }
-    let Some(value) = args.get(*index) else {
-        return Err(ParseError::MissingValue(option));
-    };
-    *index += 1;
-    Ok(value)
-}
-
-/// The value of a short option: the rest of its cluster (`-B1M`) or the
-/// next argument (`-B 1M`).
-fn take_cluster_value<'a>(
-    rest: &'a str,
-    args: &[&'a str],
-    index: &mut usize,
-    option: &'static str,
-) -> Result<&'a str, ParseError> {
-    if !rest.is_empty() {
-        return Ok(rest);
-    }
-    let Some(value) = args.get(*index) else {
-        return Err(ParseError::MissingValue(option));
-    };
-    *index += 1;
-    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command, Options, ParseError, SizeScale};
-    use alloc::string::ToString;
+    use super::{parse, Command, Dereference, Options, ParseError, SizeScale};
+    use alloc::string::{String, ToString};
     use alloc::vec;
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-Q"]), "invalid option -- 'Q'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-d"]), "option requires an argument -- 'd'");
+        assert_eq!(
+            refused(&["--max-depth"]),
+            "option '--max-depth' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--summarize=x"]),
+            "option '--summarize' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `du --summ --apparent` as
+    /// `du --summarize --apparent-size`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        let options = report(&["--summ", "--apparent", "docs"]);
+        assert!(options.summarize && options.apparent_size);
+        assert_eq!(
+            refused(&["--deref"]),
+            "option '--deref' is ambiguous; possibilities: '--dereference' '--dereference-args'"
+        );
+    }
 
     fn report(args: &[&str]) -> Options {
         match parse(args) {
@@ -362,6 +344,23 @@ mod tests {
     }
 
     #[test]
+    fn link_options_choose_the_links_followed_and_the_last_wins() {
+        assert_eq!(report(&[]).dereference, Dereference::Never);
+        for (args, wanted) in [
+            (&["-L"][..], Dereference::Always),
+            (&["--dereference"][..], Dereference::Always),
+            (&["-H"][..], Dereference::Operands),
+            (&["-D"][..], Dereference::Operands),
+            (&["--dereference-args"][..], Dereference::Operands),
+            (&["-L", "-P"][..], Dereference::Never),
+            (&["-P", "--no-dereference", "-H"][..], Dereference::Operands),
+            (&["-aL"][..], Dereference::Always),
+        ] {
+            assert_eq!(report(args).dereference, wanted, "{args:?}");
+        }
+    }
+
+    #[test]
     fn unit_selections_apply_the_last_one() {
         assert_eq!(report(&["-k", "-m"]).scale, SizeScale::Blocks(1024 * 1024));
         assert_eq!(report(&["-h", "-k"]).scale, SizeScale::Blocks(1024));
@@ -407,23 +406,17 @@ mod tests {
             parse(&["-B", "banana"]),
             Err(ParseError::BadBlockSize("banana".to_string()))
         );
-        assert_eq!(parse(&["-B"]), Err(ParseError::MissingValue("-B")));
+        assert_eq!(refused(&["-B"]), "option requires an argument -- 'B'");
         assert_eq!(
-            parse(&["--block-size"]),
-            Err(ParseError::MissingValue("--block-size"))
+            refused(&["--block-size"]),
+            "option '--block-size' requires an argument"
         );
         assert_eq!(
             parse(&["-d", "-1"]),
             Err(ParseError::BadMaxDepth("-1".to_string()))
         );
-        assert_eq!(
-            parse(&["--nonsense"]),
-            Err(ParseError::UnknownOption("--nonsense".to_string()))
-        );
-        assert_eq!(
-            parse(&["-x"]),
-            Err(ParseError::UnknownOption("-x".to_string()))
-        );
+        assert_eq!(refused(&["--nonsense"]), "unrecognized option '--nonsense'");
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
     }
 
     #[test]

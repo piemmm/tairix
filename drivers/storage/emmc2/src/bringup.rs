@@ -44,11 +44,11 @@ const OP_COND_ROUNDS: u32 = 100;
 const OP_COND_INTERVAL_US: u32 = 10_000;
 
 /// After `CMD11`'s response, how long the card is given to pull its data
-/// lines low: Linux's 1 ms.
+/// lines low: 1 ms.
 const SWITCH_CARD_BUSY_US: u32 = 1_000;
 
 /// How long the SD clock stays gated across the switch to 1.8 V: the
-/// specification's 5 ms, doubled as Linux does for cards that need longer.
+/// specification's 5 ms, doubled for cards that need longer.
 const SWITCH_CLOCK_GATE_US: u32 = 10_000;
 
 /// How long the card's power stays off in a power cycle: the SD
@@ -57,7 +57,7 @@ const SWITCH_CLOCK_GATE_US: u32 = 10_000;
 const POWER_OFF_HOLD_US: u32 = 10_000;
 
 /// How long the card's power is given to ramp before the controller drives
-/// it: Linux's power-up delay for a supply that declares none.
+/// it: 10 ms, for a supply that declares no delay of its own.
 const POWER_ON_SETTLE_US: u32 = 10_000;
 
 /// The fixed facts and board a bring-up works with.

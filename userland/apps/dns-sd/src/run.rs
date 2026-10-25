@@ -14,14 +14,11 @@
 
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::discovery_ipc::{Entry, Query};
 
     use tairix_discovery::{DiscoveryError, RtDiscovery, Waited};
-    use tairix_dns_sd::{parse, run, Command, Discovery, USAGE};
+    use tairix_dns_sd::{parse, run, Command, Discovery};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
@@ -55,19 +52,17 @@ mod program {
 
     /// Program entry point. Exit codes: `0` when the command ran its course
     /// or its help was written, `1` when the discovery service refused the
-    /// request or is not running, and `2` on a usage error or an output
-    /// failure.
+    /// request or is not running or the command line was not understood,
+    /// and `2` on an output failure.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("dns-sd") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("dns-sd: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("dns-sd", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -78,7 +73,7 @@ mod program {
             Ok(status) => status,
             Err(err) => {
                 if asks {
-                    write_stderr_line(&format!("dns-sd: cannot write output: {err}"));
+                    write_stderr_line(format_args!("dns-sd: cannot write output: {err}"));
                 }
                 2
             }

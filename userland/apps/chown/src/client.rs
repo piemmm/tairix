@@ -1,566 +1,519 @@
-//! The owner-changing engine: stat each operand to learn its kind, apply the
-//! new owner, and — with `-R` — descend into directories applying the same
-//! owner.
+//! The ownership-changing engine: each operand opened as the options say, a
+//! tree walked through the directories it holds, and every change made
+//! through the descriptor of the node its old owner was read from.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::vec::Vec;
+use alloc::string::String;
 
-use crate::command::{Command, Options, Owner, Verbosity};
-use crate::error::ChownError;
-use crate::io::{Entry, EntryKind, FileSystem, Output};
-use tairix_path::join;
+use tairix_abi::fs::{FileKind, FileStat, FS_OWNER_UNCHANGED};
+use tairix_abi::Errno;
+use tairix_fscopy::tree::{
+    open_operand, untouched_link, walk, Dir, Entry, Kind, Node, Operand, Roots, Step, Unopened,
+    ViewRoot, Visitor,
+};
+use tairix_help::{own_short_help, HelpSource};
+use tairix_util::output::{report_failure, Carried};
 use tairix_util::quote::quote;
 
-/// The usage banner printed by [`Command::Help`].
+use crate::command::{Command, Links, Options, Target, Traverse, Verbosity};
+use crate::error::ChownError;
+use crate::io::{Accounts, Output};
+use crate::owner::{resolve, Owner};
+
+/// The usage banner the short-help switches print when `chown`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
-usage: chown [-cfRv] [--] OWNER[:GROUP] file...
+usage: chown [OPTION]... [OWNER][:[GROUP]] file...
+       chown [OPTION]... --reference=RFILE file...
 
-  -R, --recursive       change files and directories recursively
-  -c, --changes         report only files whose ownership actually changed
-  -v, --verbose         report every file processed
-  -f, --silent, --quiet suppress most error messages
-  -h, --help            show this message
+  -c, --changes          report only files whose ownership actually changed
+  -f, --silent, --quiet  suppress most error messages
+  -v, --verbose          report every file processed
+      --dereference      change what a symbolic link names (without -R, the
+                         default)
+  -h, --no-dereference   change a symbolic link itself
+      --no-preserve-root treat '/' like any other directory (the default)
+      --preserve-root    with -R, refuse to change '/'
+      --from=CURRENT_OWNER:CURRENT_GROUP
+                         change only a file owned as this says
+      --reference=RFILE  use RFILE's owner and group
+  -R, --recursive        change files and directories recursively
+  -H                     with -R, follow a link operand that names a directory
+  -L                     with -R, follow every link (refused)
+  -P                     with -R, follow no link (the default)
+  -?, --help             show this message
+      --version          show the version
 
-OWNER and GROUP are decimal ids. Forms: OWNER (user only), OWNER:GROUP (both),
-or :GROUP (group only). `--` ends option parsing: every later argument is an
-operand.
+OWNER and GROUP are names or numbers, a leading + making one a number;
+OWNER: also sets the owner's login group. `--` ends option parsing: every
+later argument is an operand.
 ";
 
-/// Run one [`Command`], changing the owner of its files through `fs`.
+/// `chown`'s own command word.
+const OWN_WORD: &str = "chown";
+
+/// Run one [`Command`], changing owners through `roots` and reading names
+/// through `accounts`; `locale` is the user's `LANG`, if set, and `help` the
+/// tool's own `Help/` tree.
 ///
-/// Each file is inspected to learn its kind, the new owner is applied, and
-/// with `-R` a directory is changed and then its contents are changed
-/// recursively. `-v` reports every file processed on `out` and `-c` only
-/// those whose ownership actually changed; otherwise `chown` writes nothing
-/// on success beyond the [`Command::Help`] banner.
-///
-/// The first failure stops the run before any later operand (fail closed) —
-/// except under `-f`, which suppresses each failing operand's diagnostic,
-/// continues with the remaining operands, and fails the whole run afterwards
-/// as the message-less [`ChownError::Silenced`].
+/// Every change is made through the descriptor its node's current owner was
+/// read from, and `-R` walks a directory through the directories it holds,
+/// changing it after its contents. A node that cannot be reached, listed or
+/// changed is reported on `err` (silently under `-f`) and the rest are still
+/// changed, answering `Ok(false)`; nothing failing answers `Ok(true)`. `-v`
+/// and `-c` report on `out`.
 ///
 /// # Errors
 ///
-/// * [`ChownError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](tairix_abi::Errno).
-/// * [`ChownError::Apply`] — applying the new owner failed.
-/// * [`ChownError::Read`] — a directory's entries could not be read during a
-///   recursive descent.
-/// * [`ChownError::Silenced`] — one or more operands failed under `-f`.
-/// * [`ChownError::Output`] — writing the usage banner or a report failed.
-pub fn run(command: Command, fs: &dyn FileSystem, out: &dyn Output) -> Result<(), ChownError> {
-    match command {
-        Command::Help => out.write_all(USAGE.as_bytes()).map_err(ChownError::Output),
+/// An owner, group or reference that cannot be read, before
+/// anything changes, or [`ChownError::Output`] when a stream refuses a write.
+pub fn run<R: Roots>(
+    command: Command,
+    locale: Option<&str>,
+    roots: &R,
+    accounts: &dyn Accounts,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+    err: &dyn Output,
+) -> Result<bool, ChownError> {
+    let (options, target, from, files) = match command {
+        Command::Help => return short_help(locale, help, out).map(|()| true),
+        Command::Version => {
+            let line = format!("{OWN_WORD} (TAIRiX) {}\n", env!("CARGO_PKG_VERSION"));
+            return out
+                .write_all(line.as_bytes())
+                .map(|()| true)
+                .map_err(ChownError::Output);
+        }
         Command::Change {
             options,
-            owner,
+            target,
+            from,
             files,
-        } => {
-            let mut silenced = false;
-            for file in &files {
-                match change(file, None, &owner, options, fs, out) {
-                    Ok(()) => {}
-                    // A report that cannot be written is never suppressed:
-                    // `-f` silences filesystem failures, not a dead terminal.
-                    Err(ChownError::Output(errno)) => return Err(ChownError::Output(errno)),
-                    Err(_) if options.quiet => silenced = true,
-                    Err(err) => return Err(err),
+        } => (options, target, from, files),
+    };
+    let from = from
+        .as_deref()
+        .map(|spec| read_owner(spec, accounts, err))
+        .transpose()?;
+    let owner = match &target {
+        Target::Spec(spec) => read_owner(spec, accounts, err)?,
+        Target::Reference(path) => reference(roots, path)?,
+    };
+    let mut change = Change {
+        owner,
+        from,
+        options,
+        out,
+        carried: Carried::new(err, OWN_WORD).silenced(options.quiet),
+        names: Names {
+            accounts,
+            users: BTreeMap::new(),
+            groups: BTreeMap::new(),
+        },
+        view_root: ViewRoot::default(),
+    };
+    for file in &files {
+        change.operand(roots, file)?;
+    }
+    Ok(change.carried.clean())
+}
+
+/// `chown`'s own short help from its own Help tree, or the usage banner when
+/// no document can be served.
+fn short_help(
+    locale: Option<&str>,
+    help: &dyn HelpSource,
+    out: &dyn Output,
+) -> Result<(), ChownError> {
+    let bytes = own_short_help(help, locale, OWN_WORD).unwrap_or_else(|| USAGE.as_bytes().to_vec());
+    out.write_all(&bytes).map_err(ChownError::Output)
+}
+
+/// Resolve an owner operand, warning as GNU does of the older `.` separator.
+fn read_owner(spec: &str, accounts: &dyn Accounts, err: &dyn Output) -> Result<Owner, ChownError> {
+    let read = resolve(spec, accounts)?;
+    if read.dotted {
+        report_failure(err, OWN_WORD, "warning: '.' should be ':'").map_err(ChownError::Output)?;
+    }
+    Ok(read.owner)
+}
+
+/// The owner and group of what `path` names, read through a final link as
+/// GNU's `--reference` reads them.
+fn reference<R: Roots>(roots: &R, path: &str) -> Result<Owner, ChownError> {
+    let stat = roots
+        .open_node(path, true)
+        .and_then(|node| node.stat())
+        .and_then(|stat| {
+            // Asked of the system, the word that leaves an id alone would
+            // change nothing.
+            if stat.uid == FS_OWNER_UNCHANGED || stat.gid == FS_OWNER_UNCHANGED {
+                Err(Errno::OutOfRange)
+            } else {
+                Ok(stat)
+            }
+        })
+        .map_err(|errno| ChownError::Reference {
+            path: String::from(path),
+            errno,
+        })?;
+    Ok(Owner {
+        uid: Some(stat.uid),
+        gid: Some(stat.gid),
+    })
+}
+
+/// One run's change, carried across its operands and walks.
+struct Change<'a> {
+    owner: Owner,
+    from: Option<Owner>,
+    options: Options,
+    out: &'a dyn Output,
+    carried: Carried<'a>,
+    names: Names<'a>,
+    view_root: ViewRoot,
+}
+
+/// The names a report spells ids by, read once each: GNU names an owner or
+/// a group by name where the directory lists one, by number otherwise.
+struct Names<'a> {
+    accounts: &'a dyn Accounts,
+    users: BTreeMap<u32, String>,
+    groups: BTreeMap<u32, String>,
+}
+
+impl Names<'_> {
+    /// `owner` as a report spells it.
+    fn spelled(&mut self, owner: Owner) -> String {
+        match (owner.uid, owner.gid) {
+            (Some(uid), Some(gid)) => format!("{}:{}", self.user(uid), self.group(gid)),
+            (Some(uid), None) => self.user(uid),
+            (None, Some(gid)) => self.group(gid),
+            (None, None) => String::new(),
+        }
+    }
+
+    fn user(&mut self, uid: u32) -> String {
+        let accounts = self.accounts;
+        named(&mut self.users, uid, |uid| accounts.user_name(uid))
+    }
+
+    fn group(&mut self, gid: u32) -> String {
+        let accounts = self.accounts;
+        named(&mut self.groups, gid, |gid| accounts.group_name(gid))
+    }
+}
+
+/// The name `id` has in `known`, else what `find` reads, else the number: a
+/// directory that cannot be read leaves the report its number, as GNU's does.
+fn named(
+    known: &mut BTreeMap<u32, String>,
+    id: u32,
+    find: impl FnOnce(u32) -> Result<Option<String>, Errno>,
+) -> String {
+    known
+        .entry(id)
+        .or_insert_with(|| find(id).ok().flatten().unwrap_or_else(|| format!("{id}")))
+        .clone()
+}
+
+/// What became of a node the change reached.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Outcome {
+    /// Its owner was set.
+    Applied,
+    /// Setting it was refused.
+    Refused,
+    /// Nothing was asked of it: `--from` declined it, or the operand names
+    /// no id.
+    Kept,
+}
+
+impl Change<'_> {
+    /// Change the operand `path`, opened as `-h`, `--dereference`, `-R`, `-H`
+    /// and `-P` say.
+    fn operand<R: Roots>(&mut self, roots: &R, path: &str) -> Result<(), ChownError> {
+        let links = self.options.links();
+        if !self.options.recursive {
+            return match links {
+                Links::Referent => self.referent(roots, path),
+                Links::Itself => self.named(roots.open_node(path, false), path),
+            };
+        }
+        if self.options.traverse == Traverse::Operands {
+            return match open_operand(roots, path) {
+                Ok(Operand::Directory(dir)) => self.tree(roots, &dir, path),
+                Ok(Operand::Node(node)) if links == Links::Referent => self.node(&node, path),
+                Err(Unopened::Dangling) if links == Links::Referent => self.dangling(path),
+                Err(Unopened::Refused(errno)) => self.unreachable(stat_failure(path, errno), path),
+                Ok(Operand::Node(_)) | Err(Unopened::Dangling) => {
+                    self.named(roots.open_node(path, false), path)
                 }
-            }
-            if silenced {
-                return Err(ChownError::Silenced);
-            }
-            Ok(())
+            };
         }
+        // Only a directory reached through no link is walked under `-P`.
+        match roots.open_dir(path, false) {
+            Ok(dir) => self.tree(roots, &dir, path),
+            Err(Errno::NotADirectory | Errno::NotFound) if links == Links::Referent => {
+                self.referent(roots, path)
+            }
+            Err(Errno::NotADirectory | Errno::NotFound) => {
+                self.named(roots.open_node(path, false), path)
+            }
+            Err(errno) => self.unlisted(roots.open_node(path, false), path, errno),
+        }
+    }
+
+    /// What the operand `path` names through a final link, changed and never
+    /// walked.
+    fn referent<R: Roots>(&mut self, roots: &R, path: &str) -> Result<(), ChownError> {
+        match open_operand(roots, path) {
+            Ok(Operand::Directory(dir)) => self.node(&dir, path),
+            Ok(Operand::Node(node)) => self.node(&node, path),
+            Err(Unopened::Dangling) => self.dangling(path),
+            Err(Unopened::Refused(errno)) => self.unreachable(stat_failure(path, errno), path),
+        }
+    }
+
+    /// Walk the directory `dir`, then change it: giving a directory away
+    /// grants no reach into it, so changing it first could shut the walk out.
+    fn tree<R: Roots>(&mut self, roots: &R, dir: &R::Dir, path: &str) -> Result<(), ChownError> {
+        if self.options.preserve_root {
+            let refusal = if ViewRoot::spelled(path) {
+                Some(ChownError::PreserveRoot(String::from(path)))
+            } else {
+                match self.view_root.holds(roots, dir) {
+                    Ok(false) => None,
+                    Ok(true) => Some(ChownError::PreserveRoot(String::from(path))),
+                    Err(errno) => Some(stat_failure(path, errno)),
+                }
+            };
+            if let Some(refusal) = refusal {
+                return self.carried.carry(refusal);
+            }
+        }
+        walk(dir, path, self)?;
+        self.node(dir, path)
+    }
+
+    /// What `opened` reached, a directory `errno` kept the walk out of: GNU
+    /// still changes one it cannot list, and says why it could not.
+    fn unlisted<N: Node>(
+        &mut self,
+        opened: Result<N, Errno>,
+        path: &str,
+        errno: Errno,
+    ) -> Result<(), ChownError> {
+        let Some((node, stat)) = self.read(opened, path)? else {
+            return Ok(());
+        };
+        if stat.kind != FileKind::Directory {
+            return self.met(&node, &stat, path);
+        }
+        self.carried.carry(ChownError::Read {
+            path: String::from(path),
+            errno,
+        })?;
+        self.apply(&node, &stat, path)
+    }
+
+    /// Change what `opened` reached, a failure to open it reported as an
+    /// unreachable node.
+    fn named<N: Node>(&mut self, opened: Result<N, Errno>, path: &str) -> Result<(), ChownError> {
+        if let Some((node, stat)) = self.read(opened, path)? {
+            self.apply(&node, &stat, path)?;
+        }
+        Ok(())
+    }
+
+    /// Change the node `node` holds.
+    fn node<N: Node>(&mut self, node: &N, path: &str) -> Result<(), ChownError> {
+        match node.stat() {
+            Ok(stat) => self.apply(node, &stat, path),
+            Err(errno) => self.unreachable(stat_failure(path, errno), path),
+        }
+    }
+
+    /// `opened` with its status, or [`None`] once its failure is reported.
+    fn read<N: Node>(
+        &mut self,
+        opened: Result<N, Errno>,
+        path: &str,
+    ) -> Result<Option<(N, FileStat)>, ChownError> {
+        match opened.and_then(|node| node.stat().map(|stat| (node, stat))) {
+            Ok(read) => Ok(Some(read)),
+            Err(errno) => self
+                .unreachable(stat_failure(path, errno), path)
+                .map(|()| None),
+        }
+    }
+
+    /// A node the walk met and does not descend: a link is changed itself,
+    /// or under `--dereference` left alone with what it names.
+    fn met<N: Node>(&mut self, node: &N, stat: &FileStat, path: &str) -> Result<(), ChownError> {
+        if stat.kind == FileKind::Symlink && self.options.links() == Links::Referent {
+            return self.leave_link(path);
+        }
+        self.apply(node, stat, path)
+    }
+
+    /// Change `node`, read as `stat`, unless `--from` declines it.
+    fn apply<N: Node>(&mut self, node: &N, stat: &FileStat, path: &str) -> Result<(), ChownError> {
+        let before = (stat.uid, stat.gid);
+        let declined = self.from.is_some_and(|from| !from.matches(before));
+        if declined || self.owner.is_empty() {
+            return self.report(path, Some(before), Outcome::Kept);
+        }
+        let group = self.owner.uid.is_none();
+        let set = node
+            .set_owner(
+                self.owner.uid.unwrap_or(FS_OWNER_UNCHANGED),
+                self.owner.gid.unwrap_or(FS_OWNER_UNCHANGED),
+            )
+            .map_err(|errno| ChownError::Apply {
+                path: String::from(path),
+                errno,
+                group,
+            });
+        let outcome = if self.carried.absorb(set)?.is_some() {
+            Outcome::Applied
+        } else {
+            Outcome::Refused
+        };
+        self.report(path, Some(before), outcome)
+    }
+
+    /// Report an operand that is a link naming nothing.
+    fn dangling(&mut self, path: &str) -> Result<(), ChownError> {
+        self.unreachable(ChownError::Dangling(String::from(path)), path)
+    }
+
+    /// Report a node that could not be reached, then name it under `-v`.
+    fn unreachable(&mut self, failure: ChownError, path: &str) -> Result<(), ChownError> {
+        self.carried.carry(failure)?;
+        self.report(path, None, Outcome::Refused)
+    }
+
+    /// Report one node as GNU's `-c` and `-v` do, `before` its `(uid, gid)`
+    /// or [`None`] when it could not be reached.
+    fn report(
+        &mut self,
+        path: &str,
+        before: Option<(u32, u32)>,
+        outcome: Outcome,
+    ) -> Result<(), ChownError> {
+        let wanted = match self.options.verbosity {
+            Verbosity::None => false,
+            Verbosity::Changes => {
+                outcome == Outcome::Applied && before.is_some_and(|ids| !self.owner.matches(ids))
+            }
+            Verbosity::All => true,
+        };
+        if !wanted {
+            return Ok(());
+        }
+        let line = describe(self.owner, path, before, outcome, &mut self.names);
+        self.out
+            .write_all(line.as_bytes())
+            .map_err(ChownError::Output)
+    }
+
+    /// Say under `-v` that a link the walk met, and what it names, were left
+    /// alone.
+    fn leave_link(&self, path: &str) -> Result<(), ChownError> {
+        if self.options.verbosity != Verbosity::All {
+            return Ok(());
+        }
+        self.out
+            .write_all(untouched_link(path).as_bytes())
+            .map_err(ChownError::Output)
     }
 }
 
-/// Apply `owner` to `path`, then — when `-R` and `path` is a directory — to
-/// each of its entries in turn, changing the directory before its contents.
-///
-/// `kind_hint` is the kind the parent's directory entry already reported;
-/// it is trusted only when no report is wanted, because the `-c`/`-v`
-/// reports also need the node's current ownership from a fresh stat.
-fn change(
+impl<D: Dir> Visitor<D> for Change<'_> {
+    type Error = ChownError;
+
+    fn enter(&mut self, dir: &D, entry: &Entry, path: &str) -> Result<Step<D>, ChownError> {
+        if entry.kind == Kind::Directory {
+            return Ok(Step::Descend);
+        }
+        if let Some((node, stat)) = self.read(dir.open_node(&entry.name), path)? {
+            self.met(&node, &stat, path)?;
+        }
+        Ok(Step::Skip)
+    }
+
+    fn leave(&mut self, _dir: &D, _entry: &Entry, path: &str, held: &D) -> Result<(), ChownError> {
+        self.node(held, path)
+    }
+
+    fn refused(
+        &mut self,
+        dir: &D,
+        entry: &Entry,
+        path: &str,
+        errno: Errno,
+    ) -> Result<(), ChownError> {
+        self.unlisted(dir.open_node(&entry.name), path, errno)
+    }
+
+    fn unlisted_root(&mut self, path: &str, errno: Errno) -> Result<(), ChownError> {
+        self.carried.carry(ChownError::Read {
+            path: String::from(path),
+            errno,
+        })
+    }
+}
+
+/// The failure to reach `path`.
+fn stat_failure(path: &str, errno: Errno) -> ChownError {
+    ChownError::Stat {
+        path: String::from(path),
+        errno,
+    }
+}
+
+/// GNU's report line for `path` — changed, retained, or failed — with its
+/// ids in the shape `owner` names them.
+fn describe(
+    owner: Owner,
     path: &str,
-    kind_hint: Option<EntryKind>,
-    owner: &Owner,
-    options: Options,
-    fs: &dyn FileSystem,
-    out: &dyn Output,
-) -> Result<(), ChownError> {
-    let (kind, old) = if let (Some(kind), Verbosity::None) = (kind_hint, options.verbosity) {
-        (kind, None)
+    before: Option<(u32, u32)>,
+    outcome: Outcome,
+    names: &mut Names<'_>,
+) -> String {
+    let path = quote(path);
+    if owner.is_empty() {
+        return if before.is_some() {
+            format!("ownership of {path} retained\n")
+        } else {
+            format!("failed to change ownership of {path}\n")
+        };
+    }
+    let what = if owner.uid.is_some() {
+        "ownership"
     } else {
-        let meta = fs.stat(path).map_err(ChownError::Stat)?;
-        (meta.kind, Some((meta.uid, meta.gid)))
+        "group"
     };
-    fs.set_owner(path, owner.uid, owner.gid)
-        .map_err(ChownError::Apply)?;
-    if let Some((user_before, group_before)) = old {
-        report(path, user_before, group_before, owner, options, out)?;
-    }
-    if options.recursive && kind == EntryKind::Directory {
-        for entry in read_children(path, fs)? {
-            let child = join(path, &entry.name);
-            change(&child, Some(entry.kind), owner, options, fs, out)?;
-        }
-    }
-    Ok(())
-}
-
-/// Report one processed file in the GNU wording, per the verbosity policy:
-/// `-v` reports every file, `-c` only an actual change. The spelling
-/// follows the owner spec's shape — a group-only spec reports the group, a
-/// user-only spec the user, and a full spec `uid:gid`.
-fn report(
-    path: &str,
-    user_before: u32,
-    group_before: u32,
-    owner: &Owner,
-    options: Options,
-    out: &dyn Output,
-) -> Result<(), ChownError> {
-    let changed = owner.uid.is_some_and(|uid| uid != user_before)
-        || owner.gid.is_some_and(|gid| gid != group_before);
-    let wanted = match options.verbosity {
-        Verbosity::None => false,
-        Verbosity::Changes => changed,
-        Verbosity::All => true,
+    let to = names.spelled(owner);
+    let Some((uid, gid)) = before else {
+        return format!("failed to change {what} of {path} to {to}\n");
     };
-    if !wanted {
-        return Ok(());
+    let from = names.spelled(Owner {
+        uid: owner.uid.map(|_| uid),
+        gid: owner.gid.map(|_| gid),
+    });
+    match outcome {
+        Outcome::Refused => format!("failed to change {what} of {path} from {from} to {to}\n"),
+        Outcome::Applied if !owner.matches((uid, gid)) => {
+            format!("changed {what} of {path} from {from} to {to}\n")
+        }
+        Outcome::Applied | Outcome::Kept => format!("{what} of {path} retained as {from}\n"),
     }
-    let line = match (owner.uid, owner.gid) {
-        (Some(uid), Some(gid)) => {
-            if changed {
-                format!(
-                    "changed ownership of {path} from {user_before}:{group_before} to {uid}:{gid}\n", path = quote(path)
-                )
-            } else {
-                format!(
-                    "ownership of {path} retained as {user_before}:{group_before}\n",
-                    path = quote(path)
-                )
-            }
-        }
-        (Some(uid), None) => {
-            if changed {
-                format!(
-                    "changed ownership of {path} from {user_before} to {uid}\n",
-                    path = quote(path)
-                )
-            } else {
-                format!(
-                    "ownership of {path} retained as {user_before}\n",
-                    path = quote(path)
-                )
-            }
-        }
-        (None, Some(gid)) => {
-            if changed {
-                format!(
-                    "changed group of {path} from {group_before} to {gid}\n",
-                    path = quote(path)
-                )
-            } else {
-                format!(
-                    "group of {path} retained as {group_before}\n",
-                    path = quote(path)
-                )
-            }
-        }
-        // At least one field is always set in a parsed owner spec.
-        (None, None) => return Ok(()),
-    };
-    out.write_all(line.as_bytes()).map_err(ChownError::Output)
-}
-
-/// Read all entries of the directory `path` into a vector, so the recursive
-/// descent does not depend on entry indices staying stable as ownership
-/// changes.
-fn read_children(path: &str, fs: &dyn FileSystem) -> Result<Vec<Entry>, ChownError> {
-    let mut entries = Vec::new();
-    let mut index: u64 = 0;
-    while let Some(entry) = fs.read_dir(path, index).map_err(ChownError::Read)? {
-        index = index.saturating_add(1);
-        entries.push(entry);
-    }
-    Ok(entries)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{run, USAGE};
-    use crate::command::parse;
-    use crate::error::ChownError;
-    use crate::io::{Entry, EntryKind, FileSystem, Metadata, Output};
-    use alloc::string::{String, ToString};
-    use alloc::vec::Vec;
-    use core::cell::RefCell;
-    use tairix_abi::Errno;
-
-    /// An in-memory tree. Each node carries its kind and current owner; a
-    /// directory's children are derived by parent path. Failure injection
-    /// covers the stat/apply/read fail-closed paths.
-    struct MemFs {
-        state: RefCell<State>,
-    }
-
-    struct State {
-        nodes: Vec<Node>,
-        stat_fail: Option<(String, Errno)>,
-        set_fail: Option<(String, Errno)>,
-        read_fail: Option<(String, Errno)>,
-        applied: Vec<(String, Option<u32>, Option<u32>)>,
-    }
-
-    struct Node {
-        path: String,
-        kind: EntryKind,
-        uid: u32,
-        gid: u32,
-    }
-
-    impl MemFs {
-        fn new() -> Self {
-            Self {
-                state: RefCell::new(State {
-                    nodes: Vec::new(),
-                    stat_fail: None,
-                    set_fail: None,
-                    read_fail: None,
-                    applied: Vec::new(),
-                }),
-            }
-        }
-
-        fn node(self, path: &str, kind: EntryKind, uid: u32, gid: u32) -> Self {
-            self.state.borrow_mut().nodes.push(Node {
-                path: path.to_string(),
-                kind,
-                uid,
-                gid,
-            });
-            self
-        }
-
-        fn file(self, path: &str, uid: u32, gid: u32) -> Self {
-            self.node(path, EntryKind::File, uid, gid)
-        }
-
-        fn dir(self, path: &str, uid: u32, gid: u32) -> Self {
-            self.node(path, EntryKind::Directory, uid, gid)
-        }
-
-        fn stat_fails(self, path: &str, errno: Errno) -> Self {
-            self.state.borrow_mut().stat_fail = Some((path.to_string(), errno));
-            self
-        }
-
-        fn set_fails(self, path: &str, errno: Errno) -> Self {
-            self.state.borrow_mut().set_fail = Some((path.to_string(), errno));
-            self
-        }
-
-        fn read_fails(self, path: &str, errno: Errno) -> Self {
-            self.state.borrow_mut().read_fail = Some((path.to_string(), errno));
-            self
-        }
-
-        fn owner_of(&self, path: &str) -> Option<(u32, u32)> {
-            self.state
-                .borrow()
-                .nodes
-                .iter()
-                .find(|n| n.path == path)
-                .map(|n| (n.uid, n.gid))
-        }
-
-        fn applied(&self) -> Vec<(String, Option<u32>, Option<u32>)> {
-            self.state.borrow().applied.clone()
-        }
-    }
-
-    /// The immediate parent of an absolute path: `/a/b` maps to `/a`, and a
-    /// top-level `/a` maps to the empty string (its children sit at the root).
-    fn parent_of(path: &str) -> &str {
-        match path.rfind('/') {
-            Some(slash) => &path[..slash],
-            None => "",
-        }
-    }
-
-    /// The final component of a path.
-    fn name_of(path: &str) -> &str {
-        match path.rfind('/') {
-            Some(slash) => &path[slash + 1..],
-            None => path,
-        }
-    }
-
-    impl FileSystem for MemFs {
-        fn stat(&self, path: &str) -> Result<Metadata, Errno> {
-            let state = self.state.borrow();
-            if let Some((p, errno)) = &state.stat_fail {
-                if p == path {
-                    return Err(*errno);
-                }
-            }
-            state
-                .nodes
-                .iter()
-                .find(|n| n.path == path)
-                .map(|n| Metadata {
-                    kind: n.kind,
-                    uid: n.uid,
-                    gid: n.gid,
-                })
-                .ok_or(Errno::NotFound)
-        }
-
-        fn set_owner(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> Result<(), Errno> {
-            let mut state = self.state.borrow_mut();
-            if let Some((p, errno)) = &state.set_fail {
-                if p == path {
-                    return Err(*errno);
-                }
-            }
-            match state.nodes.iter_mut().find(|n| n.path == path) {
-                Some(node) => {
-                    if let Some(uid) = uid {
-                        node.uid = uid;
-                    }
-                    if let Some(gid) = gid {
-                        node.gid = gid;
-                    }
-                }
-                None => return Err(Errno::NotFound),
-            }
-            state.applied.push((path.to_string(), uid, gid));
-            Ok(())
-        }
-
-        fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno> {
-            let state = self.state.borrow();
-            if let Some((p, errno)) = &state.read_fail {
-                if p == path {
-                    return Err(*errno);
-                }
-            }
-            let mut children: Vec<Entry> = state
-                .nodes
-                .iter()
-                .filter(|n| parent_of(&n.path) == path && n.path.as_str() != path)
-                .map(|n| Entry {
-                    name: name_of(&n.path).to_string(),
-                    kind: n.kind,
-                })
-                .collect();
-            children.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(children
-                .into_iter()
-                .nth(usize::try_from(index).unwrap_or(usize::MAX)))
-        }
-    }
-
-    /// A terminal that records every byte written to it.
-    struct Recorder {
-        bytes: RefCell<Vec<u8>>,
-    }
-
-    impl Recorder {
-        fn new() -> Self {
-            Self {
-                bytes: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn written(&self) -> Vec<u8> {
-            self.bytes.borrow().clone()
-        }
-    }
-
-    impl Output for Recorder {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            self.bytes.borrow_mut().extend_from_slice(bytes);
-            Ok(())
-        }
-    }
-
-    fn run_args(args: &[&str], fs: &MemFs, out: &Recorder) -> Result<(), ChownError> {
-        run(parse(args).expect("valid command"), fs, out)
-    }
-
-    #[test]
-    fn help_prints_the_usage_banner() {
-        let fs = MemFs::new();
-        let out = Recorder::new();
-        assert_eq!(run_args(&["--help"], &fs, &out), Ok(()));
-        assert_eq!(out.written(), USAGE.as_bytes());
-    }
-
-    #[test]
-    fn an_owner_only_spec_changes_the_user_and_leaves_the_group() {
-        let fs = MemFs::new().file("/f", 1, 2);
-        let out = Recorder::new();
-        assert_eq!(run_args(&["1000", "/f"], &fs, &out), Ok(()));
-        assert_eq!(fs.owner_of("/f"), Some((1000, 2)));
-        assert_eq!(fs.applied(), [("/f".to_string(), Some(1000), None)]);
-        assert!(out.written().is_empty());
-    }
-
-    #[test]
-    fn an_owner_group_pair_changes_both() {
-        let fs = MemFs::new().file("/f", 1, 2);
-        let out = Recorder::new();
-        assert_eq!(run_args(&["1000:100", "/f"], &fs, &out), Ok(()));
-        assert_eq!(fs.owner_of("/f"), Some((1000, 100)));
-    }
-
-    #[test]
-    fn a_group_only_spec_leaves_the_user() {
-        let fs = MemFs::new().file("/f", 7, 2);
-        let out = Recorder::new();
-        assert_eq!(run_args(&[":100", "/f"], &fs, &out), Ok(()));
-        assert_eq!(fs.owner_of("/f"), Some((7, 100)));
-    }
-
-    #[test]
-    fn several_files_are_all_changed() {
-        let fs = MemFs::new()
-            .file("/a", 0, 0)
-            .file("/b", 0, 0)
-            .file("/c", 0, 0);
-        let out = Recorder::new();
-        assert_eq!(run_args(&["5:6", "/a", "/b", "/c"], &fs, &out), Ok(()));
-        assert_eq!(fs.owner_of("/a"), Some((5, 6)));
-        assert_eq!(fs.owner_of("/b"), Some((5, 6)));
-        assert_eq!(fs.owner_of("/c"), Some((5, 6)));
-    }
-
-    #[test]
-    fn without_recursive_only_the_named_directory_changes() {
-        let fs = MemFs::new().dir("/d", 0, 0).file("/d/f", 1, 1);
-        let out = Recorder::new();
-        assert_eq!(run_args(&["9:9", "/d"], &fs, &out), Ok(()));
-        assert_eq!(fs.owner_of("/d"), Some((9, 9)));
-        // The child is untouched.
-        assert_eq!(fs.owner_of("/d/f"), Some((1, 1)));
-    }
-
-    #[test]
-    fn recursive_changes_the_directory_then_its_contents() {
-        let fs = MemFs::new()
-            .dir("/d", 0, 0)
-            .file("/d/f", 1, 1)
-            .dir("/d/sub", 0, 0)
-            .file("/d/sub/g", 2, 2);
-        let out = Recorder::new();
-        assert_eq!(run_args(&["-R", "100:100", "/d"], &fs, &out), Ok(()));
-        assert_eq!(fs.owner_of("/d"), Some((100, 100)));
-        assert_eq!(fs.owner_of("/d/f"), Some((100, 100)));
-        assert_eq!(fs.owner_of("/d/sub"), Some((100, 100)));
-        assert_eq!(fs.owner_of("/d/sub/g"), Some((100, 100)));
-        // The directory itself is changed before its contents.
-        let applied = fs.applied();
-        assert_eq!(applied[0].0, "/d");
-    }
-
-    #[test]
-    fn a_missing_operand_is_stat_and_stops_the_run() {
-        let fs = MemFs::new().file("/b", 0, 0);
-        let out = Recorder::new();
-        // `/a` does not exist: the run fails before reaching `/b`.
-        assert_eq!(
-            run_args(&["5:5", "/a", "/b"], &fs, &out),
-            Err(ChownError::Stat(Errno::NotFound))
-        );
-        assert_eq!(fs.owner_of("/b"), Some((0, 0)));
-    }
-
-    #[test]
-    fn a_stat_permission_error_surfaces() {
-        let fs = MemFs::new()
-            .file("/f", 0, 0)
-            .stat_fails("/f", Errno::PermissionDenied);
-        let out = Recorder::new();
-        assert_eq!(
-            run_args(&["5", "/f"], &fs, &out),
-            Err(ChownError::Stat(Errno::PermissionDenied))
-        );
-    }
-
-    #[test]
-    fn an_apply_error_surfaces() {
-        let fs = MemFs::new()
-            .file("/f", 0, 0)
-            .set_fails("/f", Errno::PermissionDenied);
-        let out = Recorder::new();
-        assert_eq!(
-            run_args(&["5", "/f"], &fs, &out),
-            Err(ChownError::Apply(Errno::PermissionDenied))
-        );
-        // The owner is unchanged.
-        assert_eq!(fs.owner_of("/f"), Some((0, 0)));
-    }
-
-    #[test]
-    fn a_read_dir_error_during_recursion_surfaces() {
-        let fs = MemFs::new()
-            .dir("/d", 0, 0)
-            .file("/d/f", 0, 0)
-            .read_fails("/d", Errno::PermissionDenied);
-        let out = Recorder::new();
-        assert_eq!(
-            run_args(&["-R", "5:5", "/d"], &fs, &out),
-            Err(ChownError::Read(Errno::PermissionDenied))
-        );
-        // The directory itself was changed before the read failed.
-        assert_eq!(fs.owner_of("/d"), Some((5, 5)));
-    }
-
-    #[test]
-    fn verbose_reports_changed_and_retained_in_gnu_wording() {
-        let fs = MemFs::new().file("/f", 1000, 100);
-        let out = Recorder::new();
-        assert_eq!(run_args(&["-v", "0:0", "/f"], &fs, &out), Ok(()));
-        assert_eq!(
-            out.written(),
-            b"changed ownership of '/f' from 1000:100 to 0:0\n"
-        );
-        let out = Recorder::new();
-        assert_eq!(run_args(&["-v", "0:0", "/f"], &fs, &out), Ok(()));
-        assert_eq!(out.written(), b"ownership of '/f' retained as 0:0\n");
-    }
-
-    #[test]
-    fn changes_reports_only_an_actual_change_per_spec_shape() {
-        let fs = MemFs::new().file("/f", 1000, 100);
-        let out = Recorder::new();
-        // The owner is already 1000: a user-only `-c` reports nothing.
-        assert_eq!(run_args(&["-c", "1000", "/f"], &fs, &out), Ok(()));
-        assert!(out.written().is_empty());
-        let out = Recorder::new();
-        assert_eq!(run_args(&["-c", "0", "/f"], &fs, &out), Ok(()));
-        assert_eq!(out.written(), b"changed ownership of '/f' from 1000 to 0\n");
-        // A group-only spec reports the group in the GNU wording.
-        let out = Recorder::new();
-        assert_eq!(run_args(&["-v", ":100", "/f"], &fs, &out), Ok(()));
-        assert_eq!(out.written(), b"group of '/f' retained as 100\n");
-    }
-
-    #[test]
-    fn quiet_suppresses_the_failure_but_still_fails_the_run() {
-        let fs = MemFs::new().file("/b", 1000, 100);
-        let out = Recorder::new();
-        // `/a` is missing: `-f` keeps going (so `/b` is still changed) and
-        // the run fails afterwards with the message-less error.
-        assert_eq!(
-            run_args(&["-f", "0:0", "/a", "/b"], &fs, &out),
-            Err(ChownError::Silenced)
-        );
-        assert_eq!(fs.owner_of("/b"), Some((0, 0)));
-        assert!(out.written().is_empty());
-    }
-}
+#[path = "client_tests.rs"]
+mod tests;

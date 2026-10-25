@@ -60,8 +60,8 @@ cnewyllyn hwnnw yn hytrach na chael ei dderbyn a'i anwybyddu.
   cyflwynwyd cymorth byr y gofynnwyd amdano); nid yw methiant allbwn
   safonol a oddefir gan fodd `-nopipe` yn newid hyn.
 - `1` — methodd allbwn mewn ffordd y mae'r modd a ddewiswyd yn ei
-  chyfrif, neu ni ellid darllen y mewnbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  chyfrif, neu ni ellid darllen y mewnbwn. Mae llinell orchymyn na
+  ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

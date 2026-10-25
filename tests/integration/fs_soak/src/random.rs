@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
 use tairix_abi::DriverError;
 
-use crate::check::{ck, list_names, want_err};
+use crate::check::{ck, list_names, want_err, DIR_RECORD, FILE_RECORD};
 use crate::{RamBlock, SoakFs};
 use tairix_fuzzseed::Prng;
 
@@ -228,7 +228,7 @@ fn op_create_file<F: SoakFs>(
     };
     let node = resolve_dir(fs, &dir, seed)?;
     ck(
-        fs.create(node, name.as_bytes(), NodeKind::RegularFile),
+        fs.create(node, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD),
         "create file",
         seed,
     )?;
@@ -255,7 +255,7 @@ fn op_create_dir<F: SoakFs>(
     };
     let node = resolve_dir(fs, &dir, seed)?;
     ck(
-        fs.create(node, name.as_bytes(), NodeKind::Directory),
+        fs.create(node, name.as_bytes(), NodeKind::Directory, &DIR_RECORD),
         "create dir",
         seed,
     )?;
@@ -292,11 +292,8 @@ fn op_write<F: SoakFs>(
 
     let (dir, name) = split_parent(&path);
     let node = resolve_dir(fs, dir, seed)?;
-    let n = ck(
-        fs.write_at(node, name.as_bytes(), offset as u64, &data),
-        "write_at",
-        seed,
-    )?;
+    let file = ck(fs.lookup(node, name.as_bytes()), "lookup write", seed)?;
+    let n = ck(fs.write_at(file, offset as u64, &data), "write_at", seed)?;
     if n != data_len {
         return Err(format!(
             "seed {seed:#x}: write_at short write: {n} of {data_len}"
@@ -333,11 +330,8 @@ fn op_truncate<F: SoakFs>(
 
     let (dir, name) = split_parent(&path);
     let node = resolve_dir(fs, dir, seed)?;
-    ck(
-        fs.truncate(node, name.as_bytes(), new_size as u64),
-        "truncate",
-        seed,
-    )?;
+    let file = ck(fs.lookup(node, name.as_bytes()), "lookup truncate", seed)?;
+    ck(fs.truncate(file, new_size as u64), "truncate", seed)?;
     if let Some(content) = model.files.get_mut(&path) {
         content.resize(new_size, 0);
     }
@@ -430,17 +424,18 @@ fn op_move<F: SoakFs>(
     }
 
     let dst_parent_node = resolve_dir(fs, &dst_dir, seed)?;
-    ck(
-        fs.create(dst_parent_node, dst_name.as_bytes(), NodeKind::RegularFile),
+    let dst_node = ck(
+        fs.create(
+            dst_parent_node,
+            dst_name.as_bytes(),
+            NodeKind::RegularFile,
+            &FILE_RECORD,
+        ),
         "create move dst",
         seed,
     )?;
     if !bytes.is_empty() {
-        let n = ck(
-            fs.write_at(dst_parent_node, dst_name.as_bytes(), 0, &bytes),
-            "write move dst",
-            seed,
-        )?;
+        let n = ck(fs.write_at(dst_node, 0, &bytes), "write move dst", seed)?;
         if n != bytes.len() {
             return Err(format!(
                 "seed {seed:#x}: move dst short write: {n} of {}",
@@ -507,7 +502,7 @@ fn op_negative<F: SoakFs>(
             let (dir, name) = split_parent(&path);
             let node = resolve_dir(fs, dir, seed)?;
             want_err(
-                fs.create(node, name.as_bytes(), NodeKind::RegularFile)
+                fs.create(node, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
                     .err(),
                 DriverError::AlreadyExists,
                 "duplicate create",
@@ -515,7 +510,8 @@ fn op_negative<F: SoakFs>(
             )
         }
         1 => want_err(
-            fs.create(root, b"", NodeKind::RegularFile).err(),
+            fs.create(root, b"", NodeKind::RegularFile, &FILE_RECORD)
+                .err(),
             DriverError::LengthOutOfRange,
             "empty name",
             seed,
@@ -524,7 +520,8 @@ fn op_negative<F: SoakFs>(
             // 256 bytes — one past the 255-byte component limit.
             let oversize = vec![b'x'; 256];
             want_err(
-                fs.create(root, &oversize, NodeKind::RegularFile).err(),
+                fs.create(root, &oversize, NodeKind::RegularFile, &FILE_RECORD)
+                    .err(),
                 DriverError::LengthOutOfRange,
                 "oversize name",
                 seed,

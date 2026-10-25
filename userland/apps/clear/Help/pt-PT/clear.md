@@ -32,7 +32,7 @@ aceite por compatibilidade de scripts e não muda nada.
 
 - `0` — a sequência de limpeza foi escrita.
 - `1` — o terminal não sabe limpar, ou a saída não pôde ser entregue.
-- `2` — a linha de comandos não foi compreendida.
+  Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

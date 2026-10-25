@@ -15,9 +15,11 @@ use crate::env::Environment;
 use crate::error::ParseError;
 use crate::lexer::{tokenize, Token, Word};
 use crate::options::{ShellOption, ShellOptions};
-use crate::pathexp::GlobFs;
+use crate::pathexp::{GlobFs, Ignore};
 use crate::shell::Shell;
 use crate::test_support::{MemFs, RecordingConsole, ScriptedHost};
+use tairix_fuzzseed::meter::{metered, refusing_above};
+use tairix_glob::{Options, Pattern};
 
 /// bash's probe tree: two plain directories, a nested one, a hidden
 /// directory and file, files of both cases, a name with a space, a link to a
@@ -57,7 +59,8 @@ fn expand_with(
     env: &Environment,
     line: &str,
 ) -> Result<Vec<String>, ExpandError> {
-    Expander::new(env, &options, fs).fields(&words(line), &mut Budget::new(MAX_EXPANSION_BYTES))
+    Expander::new(env, &options, fs, &Ignore::default())
+        .fields(&words(line), &mut Budget::new(MAX_EXPANSION_BYTES))
 }
 
 fn expand(options: ShellOptions, line: &str) -> Vec<String> {
@@ -172,6 +175,33 @@ fn the_word_s_own_spelling_of_its_prefix_is_kept() {
         )
         .expect("expands"),
         ["Home:/d/e", "Home:/d/x"]
+    );
+}
+
+/// Every root spelling the grammar has is generated over and kept as
+/// written: the expanded alias and the volume identity as well as `Name:/`.
+#[test]
+fn every_root_spelling_is_generated_over() {
+    const VOLUME: &str = "b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001";
+    let fs = tree().alias("Home", "/work").volume(VOLUME, "/work");
+    let env = Environment::new();
+    let fields =
+        |line: &str| expand_with(&fs, ShellOptions::default(), &env, line).expect("expands");
+    assert_eq!(
+        fields("alias::Home/d/*"),
+        ["alias::Home/d/e", "alias::Home/d/x"]
+    );
+    let id = alloc::format!("id::{VOLUME}");
+    assert_eq!(
+        fields(&alloc::format!("{id}/d/*")),
+        [alloc::format!("{id}/d/e"), alloc::format!("{id}/d/x")]
+    );
+    assert_eq!(
+        fields(&alloc::format!("{id}/[[:upper:]]*")),
+        [
+            alloc::format!("{id}/A.txt"),
+            alloc::format!("{id}/Makefile")
+        ]
     );
 }
 
@@ -311,12 +341,21 @@ impl GlobFs for Endless {
 
 #[test]
 fn a_walk_ends_where_a_path_could_no_longer_be_spelled() {
-    for line in ["**", "**/", "**/*", "**/n"] {
-        let paths = Expander::new(&Environment::new(), &GLOBSTAR, &Endless)
+    let walk = |line| {
+        Expander::new(&Environment::new(), &GLOBSTAR, &Endless, &Ignore::default())
             .fields(&words(line), &mut Budget::new(MAX_EXPANSION_BYTES))
-            .expect("expands");
-        assert_eq!(paths.len(), tairix_path::MAX_COMPONENTS, "{line}");
+            .expect("expands")
+    };
+    for line in ["**", "**/", "**/*", "**/n"] {
+        assert_eq!(walk(line).len(), tairix_path::MAX_COMPONENTS, "{line}");
     }
+    // The bound is the path's, wherever the walk begins.
+    let paths = walk("n/n/**");
+    assert_eq!(paths.len(), tairix_path::MAX_COMPONENTS - 1);
+    assert!(paths.iter().all(
+        |path| path.split('/').filter(|part| !part.is_empty()).count()
+            <= tairix_path::MAX_COMPONENTS
+    ));
 }
 
 #[test]
@@ -381,6 +420,33 @@ fn extended_patterns() {
     assert_eq!(expand(EXTGLOB, "!(*)"), ["!(*)"]);
 }
 
+/// A `/` inside a group belongs to it, as bash 5.2 reads it: the group is one
+/// component, and an alternative holding a `/` matches no name.
+#[test]
+fn a_slash_inside_a_group_keeps_the_group_one_component() {
+    assert_eq!(expand(EXTGLOB, "@(a|d/x)"), ["a"]);
+    assert_eq!(expand(EXTGLOB, "!(d/x)"), default("*"));
+    assert_eq!(expand(EXTGLOB, "@(a|d/x)/*"), ["a/z"]);
+    assert_eq!(expand(EXTGLOB, "@(d/x)"), ["@(d/x)"]);
+}
+
+/// Deliberately unlike bash: an entry is compared a component at a time, so
+/// one whose group holds a `/`, which bash lets reach across one, is refused
+/// rather than left hiding less than it names.
+#[test]
+fn a_globignore_group_holding_a_slash_is_refused() {
+    let mut env = Environment::new();
+    env.set("GLOBIGNORE", "@(b.txt|d/x)");
+    let err = expand_with(&tree(), EXTGLOB, &env, "b*").expect_err("refused");
+    assert_eq!(err.error, ParseError::PatternGroupHoldsSlash);
+    assert_eq!(err.subject.as_deref(), Some("GLOBIGNORE"));
+    env.set("GLOBIGNORE", "@(b.txt|d)/x");
+    assert_eq!(
+        expand_with(&tree(), EXTGLOB, &env, "d/*").expect("expands"),
+        ["d/e"]
+    );
+}
+
 #[test]
 fn globignore_removes_what_it_names_and_shows_dotfiles() {
     let mut env = Environment::new();
@@ -417,6 +483,18 @@ fn globignore_removes_what_it_names_and_shows_dotfiles() {
         expand_with(&tree(), ShellOptions::default(), &env, "echo *.nomatch").expect("expands"),
         ["echo", "*.nomatch"]
     );
+}
+
+/// A match the heap cannot hold fails its line, never the shell.
+#[test]
+fn a_match_the_heap_cannot_hold_fails_only_its_line() {
+    let fs = MemFs::new("/work").file(&"a".repeat(255));
+    let line = "@(a)".repeat(16);
+    let err = refusing_above(32 * 1024, || {
+        expand_with(&fs, EXTGLOB, &Environment::new(), &line)
+    })
+    .expect_err("the match needs more than the heap gives");
+    assert_eq!(err.error, ParseError::OutOfMemory);
 }
 
 #[test]
@@ -479,6 +557,18 @@ fn a_listing_that_fails_part_way_is_never_taken_as_whole() {
         .expect_err("a partial listing");
     assert_eq!(err.error, ParseError::UnreadableDirectory(Errno::NotFound));
     assert_eq!(err.subject.as_deref(), Some("d"));
+}
+
+/// A probe that fails other than as an absence is reported as the lookup it
+/// was, never as a directory that could not be read.
+#[test]
+fn a_failing_probe_names_the_path_it_looked_up() {
+    let fs = tree().unresolvable("d/x", Errno::DeviceFault);
+    let err = expand_with(&fs, ShellOptions::default(), &Environment::new(), "[d]/x")
+        .expect_err("a failing probe");
+    assert_eq!(err.error, ParseError::UnresolvablePath(Errno::DeviceFault));
+    assert_eq!(err.subject.as_deref(), Some("d/x"));
+    assert!(alloc::format!("{}", err.error).starts_with("cannot look up path: "));
 }
 
 #[test]
@@ -651,7 +741,8 @@ fn a_command_that_expands_to_nothing() {
     // Its assignments then bind in the shell, as bash's do.
     let (_, console, _) = shell_run(&fs, &["X=1 $EMPTY", "echo $X"]);
     assert_eq!(console.stdout(), "1\n");
-    // Redirections and pipelines need a command to apply to.
+    // bash runs both and returns 0; the host cannot apply a redirection or
+    // join a pipeline without a program, so the shell refuses them.
     for line in ["$EMPTY > out", "$EMPTY | cat"] {
         let (host, console, status) = shell_run(&fs, &[line]);
         assert_eq!(status, 1, "{line}");
@@ -714,6 +805,47 @@ fn globignore_reads_a_listed_name_as_bash_spells_it() {
     );
 }
 
+/// `GLOBIGNORE` is compiled once for each value it takes, charged to the line
+/// that first needs it at what it holds, rather than once per command.
+#[test]
+fn globignore_is_compiled_once_for_each_value_and_charged() {
+    let fs = tree();
+    let ignore = Ignore::default();
+    let spent = |value: &str| {
+        let mut env = Environment::new();
+        env.set("GLOBIGNORE", value);
+        let mut budget = Budget::new(MAX_EXPANSION_BYTES);
+        let fields = Expander::new(&env, &ShellOptions::default(), &fs, &ignore)
+            .fields(&words("*.txt"), &mut budget)
+            .expect("expands");
+        (fields, MAX_EXPANSION_BYTES - budget.remaining())
+    };
+    for (value, kept) in [("b.*", ["A.txt"]), ("A.*", ["b.txt"])] {
+        let (fields, compiling) = spent(value);
+        assert_eq!(fields, kept, "{value}");
+        let (_, compiled) = spent(value);
+        let held = Pattern::with_options(value, Options::PATHNAME)
+            .expect("compiles")
+            .heap_bytes();
+        // The value's copy, its one pattern, and that pattern's slot.
+        assert_eq!(
+            compiling - compiled,
+            value.len() + held + core::mem::size_of::<Pattern>(),
+            "{value}"
+        );
+    }
+    let (host, _, _) = shell_run(
+        &fs,
+        &[
+            "GLOBIGNORE='b.*'",
+            "ls *.txt",
+            "GLOBIGNORE='A.*'",
+            "ls *.txt",
+        ],
+    );
+    assert_eq!(launched_argv(&host), [["ls", "A.txt"], ["ls", "b.txt"]]);
+}
+
 #[test]
 fn a_command_is_handed_the_listed_name_never_the_alias() {
     let fs = stick();
@@ -755,4 +887,78 @@ fn assignments_on_one_line_share_the_bound() {
     let (host, _, status) = shell_run(&fs, &[seed.as_str(), doubling.as_str(), "cmd $x"]);
     assert_eq!(status, 0);
     assert_eq!(launched_argv(&host)[0][1].len(), 1024 << 13);
+}
+
+/// What an expansion holds is what it is charged — the braced words made on
+/// the way and the fields kept — never bookkeeping per character.
+#[test]
+fn an_expansion_holds_no_more_than_it_is_charged() {
+    let fs = tree();
+    let mut env = Environment::new();
+    env.set("x", "y".repeat(1 << 20));
+    let options = ShellOptions::default();
+    let ignore = Ignore::default();
+    for line in [
+        alloc::format!("cmd x{{1..4000}}{}", "y".repeat(1000)),
+        String::from("{1..100000}"),
+        String::from("cmd $x$x"),
+    ] {
+        let words = words(&line);
+        let mut budget = Budget::new(MAX_EXPANSION_BYTES);
+        let (fields, metering) =
+            metered(|| Expander::new(&env, &options, &fs, &ignore).fields(&words, &mut budget));
+        assert!(fields.is_ok(), "{line}");
+        let charged = MAX_EXPANSION_BYTES - budget.remaining();
+        assert!(
+            metering.peak <= charged + (64 << 10),
+            "{line}: {} held for {charged} charged",
+            metering.peak
+        );
+    }
+}
+
+/// The line once refused only after holding eight times the bound is
+/// refused holding no more than the bound.
+#[test]
+fn a_line_past_the_bound_is_refused_holding_no_more_than_it() {
+    let fs = tree();
+    let line = alloc::format!("cmd x{{1..4000}}{}", "y".repeat(4070));
+    let host = ScriptedHost::new();
+    let console = RecordingConsole::new();
+    let mut shell = Shell::new(&host, &console).with_filesystem(&fs);
+    let (refused, metering) = metered(|| shell.run_line(&line));
+    assert_eq!(refused, Err(ParseError::ExpansionTooLarge));
+    assert!(
+        metering.peak <= MAX_EXPANSION_BYTES + (1 << 20),
+        "{} bytes held",
+        metering.peak
+    );
+    assert!(host.launches().is_empty());
+}
+
+/// Memory refused part way through an expansion fails the line, and the
+/// session goes on.
+#[test]
+fn memory_refused_mid_expansion_fails_only_the_line() {
+    let fs = tree();
+    let host = ScriptedHost::new();
+    let console = RecordingConsole::new();
+    let mut shell = Shell::new(&host, &console).with_filesystem(&fs);
+    shell
+        .run_line(&alloc::format!("y={}", "y".repeat(1 << 20)))
+        .expect("assigns");
+    for line in ["x=$y$y", "cmd x{1..4000}"] {
+        assert_eq!(
+            refusing_above(64 << 10, || shell.run_line(line)),
+            Err(ParseError::OutOfMemory),
+            "{line}"
+        );
+        assert_eq!(shell.environment().last_status(), 1, "{line}");
+    }
+    assert_eq!(shell.environment().get("x"), None);
+    assert!(host.launches().is_empty());
+    shell
+        .run_line("x=$y$y")
+        .expect("assigns once memory allows it");
+    assert_eq!(shell.environment().get("x").map(str::len), Some(2 << 20));
 }

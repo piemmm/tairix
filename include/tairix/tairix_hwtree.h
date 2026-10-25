@@ -106,6 +106,8 @@
 #define TAIRIX_HW_PROPERTY_GPIO_HEADER_LINES ((uint32_t)10u)
 #define TAIRIX_HW_PROPERTY_THERMAL_CALIBRATION ((uint32_t)11u)
 #define TAIRIX_HW_PROPERTY_THERMAL_ZONE ((uint32_t)12u)
+#define TAIRIX_HW_PROPERTY_IO_RAIL ((uint32_t)13u)
+#define TAIRIX_HW_PROPERTY_POWER_RAIL ((uint32_t)14u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is TAIRIX_HW_MATCH_KEY_WIRE_LEN. */

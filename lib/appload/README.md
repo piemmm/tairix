@@ -94,7 +94,8 @@ Reserved `EventId` range `11000..12000`:
 - `11004 APP_INTERFACE_MISMATCH` — syscall-hash mismatch (Warn).
 - `11005 APP_SIGNATURE_INVALID` — signature did not verify (Warn).
 - `11006 APP_CONTENT_MISMATCH` — contents differ from the signed hash (Warn).
-- `11007 APP_STORE_ERROR` — the bundle could not be read (Warn).
+- `11007 APP_STORE_ERROR` — the bundle could not be read (Warn); its `errno`
+  field is the store's refusal.
 - `11008 LIBRARY_RESOLVED` — a library reference resolved within policy (Info).
 - `11009 LIBRARY_REFUSED` — a library reference violated the §16.4 policy (Warn).
 - `11010 APP_RUN_IMAGE_INVALID` — the `Run` binary is not a valid `rxe` image

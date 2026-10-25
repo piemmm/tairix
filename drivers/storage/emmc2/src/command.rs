@@ -207,8 +207,8 @@ pub const fn op_cond_argument(signalling_1v8: bool, max_performance: bool) -> u3
 
 /// R1 card-status bits that report a command, or the transfer it started,
 /// as failed: out of range, address, block length, write protection, the
-/// card's ECC, its controller, and the general error — the set Linux fails a
-/// block request on (`CMD_ERRORS`).
+/// card's ECC, its controller, and the general error (SD Physical Layer
+/// Simplified Specification §4.10.1, card status).
 pub(crate) const R1_ERRORS: u32 =
     (1 << 31) | (1 << 30) | (1 << 29) | (1 << 26) | (1 << 21) | (1 << 20) | (1 << 19);
 

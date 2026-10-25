@@ -273,7 +273,8 @@ fn apply_pl011_init(base: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm};
+    use crate::raspi_fixture::raspi_like_arm;
+    use tairix_fdt::fixture::virt_like_arm;
 
     #[test]
     fn fsel1_routes_only_pins_14_and_15_to_alt0() {

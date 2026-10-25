@@ -46,9 +46,9 @@ Zeichenkette, daher hat er — anders als GNU `sleep` — keine Option
 
 - `0` — das Intervall ist abgelaufen, oder eine angeforderte Kurzhilfe
   wurde geschrieben.
-- `1` — das Schreiben der Kurzhilfe ist fehlgeschlagen.
-- `2` — die Befehlszeile wurde nicht verstanden (unbekannte Option,
-  fehlender Operand oder ungültiges Zeitintervall).
+- `1` — das Schreiben der Kurzhilfe ist fehlgeschlagen. Eine nicht
+  verstandene Befehlszeile (unbekannte Option, fehlender Operand oder
+  ungültiges Zeitintervall) endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

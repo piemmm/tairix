@@ -2,8 +2,9 @@
 //!
 //! These fixtures let every unit and integration test drive the real shell
 //! logic without a kernel: the [`RecordingConsole`] captures output, the
-//! [`ScriptedHost`] answers `launch`/`wait`/`signal`/`change_directory` from a
-//! programmable script while recording what it was asked to do, and the
+//! [`ScriptedHost`] answers `launch`/`wait`/`signal`/`umask` from a
+//! programmable script and its working-directory calls from an in-memory
+//! tree, recording what it was asked to do, and the
 //! [`Fixture`] bundles them behind a real [`BuiltinContext`] dispatch — the
 //! one scaffolding every builtin's test module shares.
 
@@ -12,7 +13,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::{Errno, FileKind, LimitKind, ResourceLimit};
+use tairix_abi::{Errno, FileId, FileKind, LimitKind, ResourceLimit};
 
 use crate::builtin::{dispatch, BuiltinContext};
 use crate::complete::{DirEntryInfo, DirLister};
@@ -24,6 +25,11 @@ use crate::host::{
 use crate::job::{JobTable, Pid, Signal, WaitOutcome};
 use crate::options::ShellOptions;
 use crate::pathexp::GlobFs;
+
+/// Every request the test binary makes, metered and refusable per thread, so
+/// a test can measure what a line holds or stand in for an exhausted heap.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 /// A [`Console`] that accumulates everything written to each stream.
 #[derive(Default)]
@@ -87,8 +93,13 @@ pub(crate) struct ScriptedHost {
     waits: RefCell<BTreeMap<u64, WaitOutcome>>,
     refuse_signals: RefCell<bool>,
     job_control: RefCell<Vec<JobControl>>,
-    directories: RefCell<Vec<String>>,
+    /// The tree the working directory moves through.
+    tree: RefCell<MemFs>,
+    /// Why the working directory's own path cannot be learned, when it
+    /// cannot.
+    unnamed: RefCell<Option<Errno>>,
     poll_queue: RefCell<Vec<(Pid, WaitOutcome)>>,
+    umask: RefCell<u32>,
 }
 
 impl ScriptedHost {
@@ -101,9 +112,21 @@ impl ScriptedHost {
             waits: RefCell::new(BTreeMap::new()),
             refuse_signals: RefCell::new(false),
             job_control: RefCell::new(Vec::new()),
-            directories: RefCell::new(Vec::new()),
+            tree: RefCell::new(MemFs::new("/")),
+            unnamed: RefCell::new(None),
             poll_queue: RefCell::new(Vec::new()),
+            umask: RefCell::new(tairix_abi::fs::FS_INITIAL_UMASK),
         }
+    }
+
+    /// The mask the shell last set, or the one it started with.
+    pub(crate) fn umask_now(&self) -> u32 {
+        *self.umask.borrow()
+    }
+
+    /// Start the shell under `mask` (test setup).
+    pub(crate) fn set_umask_to(&self, mask: u32) {
+        *self.umask.borrow_mut() = mask;
     }
 
     /// Make the next `launch` whose `argv[0]` equals `name` fail with
@@ -130,9 +153,26 @@ impl ScriptedHost {
         self.waits.borrow_mut().insert(pid.as_u64(), outcome);
     }
 
-    /// Mark a directory the host will accept in `change_directory`.
+    /// Add the directory `path` (and its parents) to the tree.
     pub(crate) fn set_directory(&self, path: &str) {
-        self.directories.borrow_mut().push(path.to_string());
+        self.tree.borrow_mut().put(path, MemNode::Dir);
+    }
+
+    /// Add the link `path` holding `target` to the tree.
+    pub(crate) fn set_link(&self, path: &str, target: &str) {
+        self.tree
+            .borrow_mut()
+            .put(path, MemNode::Link(target.to_string()));
+    }
+
+    /// Make learning the working directory's own path fail with `errno`.
+    pub(crate) fn refuse_working_directory(&self, errno: Errno) {
+        *self.unnamed.borrow_mut() = Some(errno);
+    }
+
+    /// The directory the host holds as the working directory.
+    pub(crate) fn working(&self) -> String {
+        self.tree.borrow().cwd.clone()
     }
 
     /// Queue a background state change for `poll` to report.
@@ -214,12 +254,46 @@ impl ProcessHost for ScriptedHost {
         }
     }
 
-    fn change_directory(&self, path: &str) -> Result<String, Errno> {
-        if self.directories.borrow().iter().any(|d| d == path) {
-            Ok(path.to_string())
-        } else {
-            Err(Errno::NotFound)
+    fn change_directory(&self, path: &str) -> Result<(), Errno> {
+        let mut tree = self.tree.borrow_mut();
+        let (key, node) = tree.lookup(path, true)?;
+        if !matches!(node, MemNode::Dir) {
+            return Err(Errno::NotADirectory);
         }
+        tree.cwd = key;
+        Ok(())
+    }
+
+    fn working_directory(&self) -> Result<String, Errno> {
+        match *self.unnamed.borrow() {
+            Some(errno) => Err(errno),
+            None => Ok(self.working()),
+        }
+    }
+
+    fn directory_identity(&self, path: &str) -> Result<FileId, Errno> {
+        let tree = self.tree.borrow();
+        let (key, node) = tree.lookup(path, true)?;
+        if !matches!(node, MemNode::Dir) {
+            return Err(Errno::NotADirectory);
+        }
+        let index = tree
+            .nodes
+            .keys()
+            .position(|held| *held == key)
+            .ok_or(Errno::NotFound)?;
+        Ok(FileId {
+            volume: [1; 16],
+            node: u64::try_from(index).map_err(|_| Errno::OutOfRange)?,
+        })
+    }
+
+    fn umask(&self) -> u32 {
+        self.umask_now()
+    }
+
+    fn set_umask(&self, mask: u32) {
+        self.set_umask_to(mask);
     }
 }
 
@@ -376,15 +450,17 @@ enum MemNode {
 
 /// An in-memory file tree for filename-generation tests: directories,
 /// files and links, reached through the same spellings the shell builds —
-/// relative to a working directory, from `/`, or from an alias root. A
-/// listing comes back in reverse name order, so a test only passes if the
-/// shell sorts.
+/// relative to a working directory, from `/`, or from an alias or volume
+/// root. A listing comes back in reverse name order, so a test only passes
+/// if the shell sorts.
 pub(crate) struct MemFs {
     cwd: String,
     aliases: Vec<(String, String)>,
+    volumes: Vec<(String, String)>,
     nodes: BTreeMap<String, MemNode>,
     failing: Vec<(String, Errno)>,
     interrupted: Vec<(String, Errno)>,
+    unresolvable: Vec<(String, Errno)>,
     listings: RefCell<usize>,
 }
 
@@ -397,9 +473,11 @@ impl MemFs {
         let mut fs = Self {
             cwd: cwd.to_string(),
             aliases: Vec::new(),
+            volumes: Vec::new(),
             nodes: BTreeMap::new(),
             failing: Vec::new(),
             interrupted: Vec::new(),
+            unresolvable: Vec::new(),
             listings: RefCell::new(0),
         };
         fs.nodes.insert("/".to_string(), MemNode::Dir);
@@ -429,10 +507,15 @@ impl MemFs {
     }
 
     fn insert(mut self, path: &str, node: MemNode) -> Self {
+        self.put(path, node);
+        self
+    }
+
+    /// Place `node` at `path`, its parents made as directories.
+    fn put(&mut self, path: &str, node: MemNode) {
         let key = self.key(path);
         self.make_parents(&key);
         self.nodes.insert(key, node);
-        self
     }
 
     /// Add a directory (and its parents).
@@ -450,9 +533,16 @@ impl MemFs {
         self.insert(path, MemNode::Link(target.to_string()))
     }
 
-    /// Spell the directory `path` as the alias root `name:/`.
+    /// Spell the directory `path` as the alias root `name:/` and
+    /// `alias::name/`.
     pub(crate) fn alias(mut self, name: &str, path: &str) -> Self {
         self.aliases.push((name.to_string(), path.to_string()));
+        self
+    }
+
+    /// Spell the directory `path` as the volume root `id::<id>/`.
+    pub(crate) fn volume(mut self, id: &str, path: &str) -> Self {
+        self.volumes.push((id.to_string(), path.to_string()));
         self
     }
 
@@ -471,6 +561,13 @@ impl MemFs {
         self
     }
 
+    /// Make learning what `path` names fail with `errno`.
+    pub(crate) fn unresolvable(mut self, path: &str, errno: Errno) -> Self {
+        let key = self.key(path);
+        self.unresolvable.push((key, errno));
+        self
+    }
+
     /// How many directories have been listed.
     pub(crate) fn listings(&self) -> usize {
         *self.listings.borrow()
@@ -485,14 +582,9 @@ impl MemFs {
         } else if tairix_path::is_relative_spelling(path) {
             (self.cwd.clone(), path)
         } else {
-            let len = tairix_path::alias_root_len(path).ok_or(Errno::NotFound)?;
-            let name = &path[..len - ":/".len()];
-            let (_, target) = self
-                .aliases
-                .iter()
-                .find(|(alias, _)| alias == name)
-                .ok_or(Errno::NotFound)?;
-            (target.clone(), &path[len..])
+            let len = tairix_path::root_len(path).map_err(|_| Errno::NotFound)?;
+            let root = tairix_path::parse(&path[..len]).map_err(|_| Errno::NotFound)?;
+            (self.root_dir(&root).ok_or(Errno::NotFound)?, &path[len..])
         };
         let mut parts: Vec<String> = base
             .split('/')
@@ -512,6 +604,21 @@ impl MemFs {
             parts.push((*piece).to_string());
         }
         Ok(parts)
+    }
+
+    /// The directory an alias or volume root stands for.
+    fn root_dir(&self, root: &tairix_path::Path) -> Option<String> {
+        let named = |table: &[(String, String)], name: &str| {
+            table
+                .iter()
+                .find(|(root, _)| root == name)
+                .map(|(_, dir)| dir.clone())
+        };
+        match (root.alias(), root.volume_id()) {
+            (Some(name), _) => named(&self.aliases, name),
+            (None, Some(id)) => named(&self.volumes, &id.to_string()),
+            (None, None) => None,
+        }
     }
 
     /// Resolve `path`, links in the way followed and a final one followed
@@ -618,6 +725,14 @@ impl GlobFs for MemFs {
     }
 
     fn kind(&self, path: &str, follow: bool) -> Result<FileKind, Errno> {
+        let key = self.key(path);
+        if let Some((_, errno)) = self
+            .unresolvable
+            .iter()
+            .find(|(failing, _)| *failing == key)
+        {
+            return Err(*errno);
+        }
         let (_, node) = self.lookup(path, follow)?;
         Ok(match node {
             MemNode::Dir => FileKind::Directory,

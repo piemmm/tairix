@@ -1,6 +1,5 @@
-//! The BCM2711 HDMI blocks' registers, window by window, as Linux's
-//! `vc4_hdmi_regs.h` places them for `vc5_hdmi_hdmi0_fields` and
-//! `vc5_hdmi_hdmi1_fields`.
+//! The BCM2711 HDMI blocks' registers, window by window. No public document
+//! describes them; the metal run confirms each (`plans/SOUND.md` `SND19q`).
 
 /// A `width`-bit field holding `value` at `shift`.
 pub(crate) const fn field(value: u32, shift: u32, width: u32) -> u32 {

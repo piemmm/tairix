@@ -9,7 +9,7 @@
 //! salt + iteration count the bootstrap reads *before* anything is decrypted,
 //! to turn the operator passphrase into the root's volume key.
 
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_drv_fs_fat32::Fat32;
 
 use crate::device::MemBlock;
@@ -131,6 +131,13 @@ pub fn build_boot_partition(
     Ok(fs.into_block().into_bytes())
 }
 
+/// The record a boot-partition directory is created with, which FAT, keeping
+/// no owners, does not store.
+const BOOT_DIR: NodeSecurity = NodeSecurity::created(NodeKind::Directory, 0, 0);
+
+/// The record a boot-partition file is created with, stored nowhere either.
+const BOOT_FILE: NodeSecurity = NodeSecurity::created(NodeKind::RegularFile, 0, 0);
+
 /// Write one boot-partition file at the slash-separated path `name`,
 /// creating (or reusing) each intermediate directory — the firmware's
 /// fixed `overlays/` directory holds the device-tree overlays the
@@ -143,14 +150,15 @@ fn plant(fs: &mut Fat32<MemBlock>, name: &str, bytes: &[u8]) -> Result<(), Mkima
             dir = match fs.lookup(dir, part.as_bytes()) {
                 Ok(existing) => existing,
                 Err(_) => fs
-                    .create(dir, part.as_bytes(), NodeKind::Directory)
+                    .create(dir, part.as_bytes(), NodeKind::Directory, &BOOT_DIR)
                     .map_err(MkimageError::BootPartition)?,
             };
         } else {
-            fs.create(dir, part.as_bytes(), NodeKind::RegularFile)
+            let file = fs
+                .create(dir, part.as_bytes(), NodeKind::RegularFile, &BOOT_FILE)
                 .map_err(MkimageError::BootPartition)?;
             let written = fs
-                .write_at(dir, part.as_bytes(), 0, bytes)
+                .write_at(file, 0, bytes)
                 .map_err(MkimageError::BootPartition)?;
             if written != bytes.len() {
                 return Err(MkimageError::BootPartition(

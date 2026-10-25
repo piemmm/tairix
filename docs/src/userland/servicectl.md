@@ -13,8 +13,8 @@ servicectl disable SERVICE  unenrol it, so no boot brings it up, and stop it now
 servicectl -h | -?          this tool's own short help
 ```
 
-Exit status is the coreutils shape: `0` applied, `1` refused or the endpoint
-unreachable, `2` a command line that was not understood. Nothing is sent when
+Exit status is the coreutils shape: `0` applied, `1` refused, the endpoint
+unreachable, or a command line that was not understood. Nothing is sent when
 the line does not parse.
 
 ## The authority is the endpoint, not the tool

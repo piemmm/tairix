@@ -260,31 +260,48 @@ fn no_mode_is_refused() {
     assert_eq!(p(&["node:1"]), Err(ParseError::NoMode));
 }
 
-#[test]
-fn unknown_options_are_refused() {
-    assert_eq!(
-        p(&["--frobnicate"]),
-        Err(ParseError::UnknownOption(String::from("--frobnicate")))
-    );
-    assert_eq!(
-        p(&["-Z"]),
-        Err(ParseError::UnknownOption(String::from("-Z")))
-    );
-    assert_eq!(
-        p(&["--create=now"]),
-        Err(ParseError::UnknownOption(String::from("--create=now")))
-    );
+/// `getopt`'s words for each refusal.
+fn refused(args: &[&str]) -> String {
+    p(args).expect_err("refused").to_string()
 }
 
 #[test]
-fn a_value_option_without_a_value_is_refused() {
+fn a_refused_option_is_worded_as_getopt_words_it() {
     assert_eq!(
-        p(&["--create", "--level"]),
-        Err(ParseError::MissingValue("--level"))
+        refused(&["--frobnicate"]),
+        "unrecognized option '--frobnicate'"
+    );
+    assert_eq!(refused(&["-Z"]), "invalid option -- 'Z'");
+    // A bundle with one bad letter is refused whole.
+    assert_eq!(refused(&["-CZ"]), "invalid option -- 'Z'");
+    assert_eq!(
+        refused(&["--create=now"]),
+        "option '--create' doesn't allow an argument"
     );
     assert_eq!(
-        p(&["-C", "-n"]),
-        Err(ParseError::MissingValue("--raid-devices"))
+        refused(&["--create", "--level"]),
+        "option '--level' requires an argument"
+    );
+    assert_eq!(refused(&["-C", "-n"]), "option requires an argument -- 'n'");
+}
+
+/// `getopt_long` reads `--cr --lev 1 --raid=2` as the whole names, and refuses
+/// a prefix two long names share.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(
+        p(&["--cr", "--lev", "1", "--raid=2", "node:1", "node:2"]),
+        Ok(Command::Create(CreateArgs {
+            level: RaidLevel::Mirror,
+            raid_devices: 2,
+            chunk_blocks: None,
+            devices: devices(&["node:1", "node:2"]),
+        }))
+    );
+    assert_eq!(p(&["--det"]), Ok(Command::Detail { array: None }));
+    assert_eq!(
+        refused(&["--r", "3f2a", "node:5"]),
+        "option '--r' is ambiguous; possibilities: '--remove' '--raid-devices'"
     );
 }
 

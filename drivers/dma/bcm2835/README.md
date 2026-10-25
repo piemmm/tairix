@@ -10,7 +10,7 @@ Stability tier: `experimental`.
 - `compatible = "brcm,bcm2835-dma"`: the BCM2835, BCM2837 and BCM2711 legacy
   engines, full and LITE channels alike, 32-bit addresses.
 - `compatible = "brcm,bcm2711-dma"`: the BCM2711's DMA4 engines, 40-bit
-  addresses within a 36-bit interface.
+  addresses within the 35-bit address bus.
 
 It binds only through the discovery match (`BIND_KEYS`), names no board and no
 address, and learns which engines its node holds from the bind key the node
@@ -76,5 +76,5 @@ acceptance is `plans/PI.md` P13.
 ## References
 
 - BCM2711 ARM Peripherals, chapter 4 (DMA Controller).
-- The Raspberry Pi kernel's `bcm2835-dma` driver, for the DMA4 engines.
+
 - `plans/SOUND.md` SND5, SND19c — the staged design this driver lands.

@@ -18,10 +18,9 @@
 //!
 //! * the user-space device manager (`userland/system/devmgr`), the
 //!   autoload owner; and
-//! * the kernel's interim in-kernel driver-candidate catalogue
-//!   (`kernel/tairix-kernel`), which brings the Pi 4 USB chain up by the
-//!   same data-driven match until the user-space driver-host-over-IPC path
-//!   lands (PLAN Stage 4.HW item 5).
+//! * the kernel's bootstrap-floor driver catalogue
+//!   (`kernel/tairix-kernel`), which binds the storage path below the
+//!   driver store by the same data-driven match.
 //!
 //! The kernel may not depend on a `userland/*` crate, so the policy
 //! lives here in `lib/*` as the single definition both reach — never
@@ -151,29 +150,22 @@ pub fn resolve(node_keys: &[HwMatchKey], candidates: &[DriverCandidate<'_>]) -> 
 mod tests {
     use super::*;
 
-    fn compat(s: &[u8]) -> HwMatchKey {
-        match HwMatchKey::compatible(s) {
-            Ok(key) => key,
-            Err(_) => unreachable!("test compatible strings fit HW_COMPATIBLE_MAX"),
-        }
-    }
-
     #[test]
     fn the_matched_key_is_the_one_the_node_names_among_a_familys_bindings() {
         let table = [
-            DriverBindKey::new(10, compat(b"brcm,bcm2835-dma")),
-            DriverBindKey::new(10, compat(b"brcm,bcm2711-dma")),
+            DriverBindKey::new(10, tairix_abi::compatible_key!(b"vendor,dma-v1")),
+            DriverBindKey::new(10, tairix_abi::compatible_key!(b"vendor,dma-v2")),
         ];
         assert_eq!(
-            matched_bind_key(&[compat(b"brcm,bcm2711-dma")], &table),
+            matched_bind_key(&[tairix_abi::compatible_key!(b"vendor,dma-v2")], &table),
             Some(1)
         );
         assert_eq!(
-            matched_bind_key(&[compat(b"brcm,bcm2835-dma")], &table),
+            matched_bind_key(&[tairix_abi::compatible_key!(b"vendor,dma-v1")], &table),
             Some(0)
         );
         assert_eq!(
-            matched_bind_key(&[compat(b"brcm,bcm2712-dma")], &table),
+            matched_bind_key(&[tairix_abi::compatible_key!(b"vendor,dma-v3")], &table),
             None
         );
     }
@@ -181,24 +173,30 @@ mod tests {
     #[test]
     fn a_tie_goes_to_the_nodes_most_specific_key_and_priority_comes_first() {
         let generic_first = [
-            DriverBindKey::new(10, compat(b"brcm,l2-intc")),
-            DriverBindKey::new(10, compat(b"brcm,bcm2711-l2-intc")),
+            DriverBindKey::new(10, tairix_abi::compatible_key!(b"vendor,l2-intc")),
+            DriverBindKey::new(10, tairix_abi::compatible_key!(b"vendor,soc-l2-intc")),
         ];
-        let node = [compat(b"brcm,bcm2711-l2-intc"), compat(b"brcm,l2-intc")];
+        let node = [
+            tairix_abi::compatible_key!(b"vendor,soc-l2-intc"),
+            tairix_abi::compatible_key!(b"vendor,l2-intc"),
+        ];
         assert_eq!(matched_bind_key(&node, &generic_first), Some(1));
         let generic_preferred = [
-            DriverBindKey::new(20, compat(b"brcm,l2-intc")),
-            DriverBindKey::new(10, compat(b"brcm,bcm2711-l2-intc")),
+            DriverBindKey::new(20, tairix_abi::compatible_key!(b"vendor,l2-intc")),
+            DriverBindKey::new(10, tairix_abi::compatible_key!(b"vendor,soc-l2-intc")),
         ];
         assert_eq!(matched_bind_key(&node, &generic_preferred), Some(0));
     }
 
     #[test]
     fn exact_compatible_match_wins() {
-        let node = [compat(b"brcm,bcm2711-emmc2")];
-        let table = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
+        let node = [tairix_abi::compatible_key!(b"vendor,sd-host")];
+        let table = [DriverBindKey::new(
+            5,
+            tairix_abi::compatible_key!(b"vendor,sd-host"),
+        )];
         let candidates = [DriverCandidate {
-            path: "/d/emmc2",
+            path: "/d/sd",
             bind_keys: &table,
         }];
         assert_eq!(
@@ -243,17 +241,17 @@ mod tests {
     #[test]
     fn class_wildcard_candidate_binds_a_concrete_device() {
         // A generic xHCI driver declares a class-wildcard bind key
-        // (vendor/device 0); a concrete VL805 node (vendor 0x1106, device
-        // 0x3483, class 0x0C0330) binds it, while a different-class node
+        // (vendor/device 0); a concrete xHCI node (vendor 0xABCD, device
+        // 0x1234, class 0x0C0330) binds it, while a different-class node
         // (an AHCI controller, class 0x010601) does not.
         let xhci = [DriverBindKey::new(3, HwMatchKey::pci(0, 0, 0x0C_0330))];
         let candidates = [DriverCandidate {
             path: "/System/Drivers/bus_usb.rxe",
             bind_keys: &xhci,
         }];
-        let vl805 = [HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330)];
+        let controller = [HwMatchKey::pci(0xABCD, 0x1234, 0x0C_0330)];
         assert_eq!(
-            resolve(&vl805, &candidates),
+            resolve(&controller, &candidates),
             MatchResolution::Winner {
                 candidate: 0,
                 priority: 3
@@ -278,9 +276,15 @@ mod tests {
 
     #[test]
     fn higher_priority_candidate_wins() {
-        let node = [compat(b"ns16550a")];
-        let low = [DriverBindKey::new(1, compat(b"ns16550a"))];
-        let high = [DriverBindKey::new(9, compat(b"ns16550a"))];
+        let node = [tairix_abi::compatible_key!(b"ns16550a")];
+        let low = [DriverBindKey::new(
+            1,
+            tairix_abi::compatible_key!(b"ns16550a"),
+        )];
+        let high = [DriverBindKey::new(
+            9,
+            tairix_abi::compatible_key!(b"ns16550a"),
+        )];
         let candidates = [
             DriverCandidate {
                 path: "/d/generic",
@@ -372,10 +376,13 @@ mod tests {
     fn intra_candidate_tie_is_not_a_tie() {
         // The same driver matching twice at the same priority is not a
         // packaging defect — the same driver binds either way.
-        let node = [compat(b"arm,pl011"), compat(b"arm,primecell")];
+        let node = [
+            tairix_abi::compatible_key!(b"arm,pl011"),
+            tairix_abi::compatible_key!(b"arm,primecell"),
+        ];
         let table = [
-            DriverBindKey::new(6, compat(b"arm,pl011")),
-            DriverBindKey::new(6, compat(b"arm,primecell")),
+            DriverBindKey::new(6, tairix_abi::compatible_key!(b"arm,pl011")),
+            DriverBindKey::new(6, tairix_abi::compatible_key!(b"arm,primecell")),
         ];
         let candidates = [DriverCandidate {
             path: "/d/uart",
@@ -392,11 +399,14 @@ mod tests {
 
     #[test]
     fn best_bind_priority_reports_the_maximum() {
-        let node = [compat(b"a"), compat(b"b")];
+        let node = [
+            tairix_abi::compatible_key!(b"a"),
+            tairix_abi::compatible_key!(b"b"),
+        ];
         let table = [
-            DriverBindKey::new(1, compat(b"a")),
-            DriverBindKey::new(8, compat(b"b")),
-            DriverBindKey::new(3, compat(b"a")),
+            DriverBindKey::new(1, tairix_abi::compatible_key!(b"a")),
+            DriverBindKey::new(8, tairix_abi::compatible_key!(b"b")),
+            DriverBindKey::new(3, tairix_abi::compatible_key!(b"a")),
         ];
         assert_eq!(best_bind_priority(&node, &table), Some(8));
         assert_eq!(best_bind_priority(&[], &table), None);

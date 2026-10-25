@@ -274,7 +274,7 @@ volúmenes montados no está restringido.
 
 - `0` — la sesión terminó con `q`, o se mostró la ayuda breve.
 - `1` — el terminal falló; la razón se escribe en la salida de error.
-- `2` — la línea de órdenes no se entendió.
+  Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

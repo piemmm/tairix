@@ -38,11 +38,10 @@ sequence is host-testable against the `lib/vcmailbox` mock; QEMU models no
 
 Policy is kernel-side because it must answer inside the idle transition it is
 reacting to; an IPC round trip in front of every wake is the latency the
-subsystem exists to remove. It is what Linux's `schedutil` is, with the
-mechanism moved out to user space.
+subsystem exists to remove. The mechanism lives in user space.
 
 * `governor.rs` — pure, host-tested policy: the utilisation filter (`fold`), a
-  25% headroom over the measured rate (`schedutil`'s ratio), quantisation up
+  25% headroom over the measured rate, quantisation up
   to the mechanism's step, and the clamp.
 * `domain.rs` — the one binding, the published `{ seq, target_hz }`, and the
   publish-and-park loop.

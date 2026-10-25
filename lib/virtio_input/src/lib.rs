@@ -26,7 +26,7 @@
 //!
 //! Each event is the 8-byte little-endian record
 //! `{ __le16 type; __le16 code; __le32 value; }` (virtio 1.1 §5.8.6).
-//! The `type`/`code` namespaces are the Linux `evdev` ones, so the
+//! The `type`/`code` namespaces are evdev's (virtio 1.2 §5.8), so the
 //! decode below maps `EV_KEY` to [`InputEventKind::Key`] and `EV_REL`
 //! pointer axes to [`InputEventKind::Pointer`], discarding the `EV_SYN`
 //! frame markers and any namespace this `abi-v1` surface does not model.
@@ -40,8 +40,8 @@
 //! at 120 units a detent. QEMU's HID pointers send the `BTN_GEAR_*` presses
 //! instead, one detent each.
 //!
-//! A device that reports slotted contacts (`ABS_MT_*`, the Linux
-//! multi-touch protocol B) on two axes it states a range for is a touch
+//! A device that reports slotted contacts (`ABS_MT_*`, evdev's slot
+//! protocol) on two axes it states a range for is a touch
 //! surface: its contacts are framed by `SYN_REPORT` into the seat's
 //! [`TouchFrame`]s, read through [`VirtioInput::poll_reports`], and its input
 //! properties say whether it is a touchscreen, a touchpad or a clickpad.
@@ -77,8 +77,8 @@ use tairix_virtio::{
 /// driver crate's `BIND_KEYS` both depend on.
 pub const VIRTIO_INPUT_DEVICE_ID: u32 = 18;
 
-/// Virtio-input wire-protocol constants (virtio 1.1 §5.8 + the Linux
-/// `evdev` `type`/`code` namespaces the device reports in).
+/// Virtio-input wire-protocol constants (virtio 1.1 §5.8, with the evdev
+/// `type`/`code` values as FreeBSD's `input-event-codes.h` defines them).
 mod wire {
     /// Event virtqueue index (device → driver), virtio 1.1 §5.8.2.
     pub const EVENT_QUEUE: u16 = 0;
@@ -101,7 +101,7 @@ mod wire {
     /// (lint-free) for slice/allocation sizes.
     pub const EVENT_LEN: u32 = 8;
 
-    /// `EV_SYN` — event-frame separator (Linux `evdev`). Carries no
+    /// `EV_SYN` — event-frame separator (evdev). Carries no
     /// surfaced event.
     pub const EV_SYN: u16 = 0x00;
     /// `EV_KEY` — key / button press or release.
@@ -336,9 +336,9 @@ fn event_bits<T: Transport>(
     answered
 }
 
-/// Whether the device reports a keyboard's key — a code below the buttons —
-/// as Linux's keyboard handler tells a keyboard from a pointer that has
-/// buttons (`drivers/tty/vt/keyboard.c`, `kbd_match`).
+/// Whether the device reports a keyboard's key — a code below the buttons
+/// (`BTN_MISC`), where the event-code space keeps every key — which tells a
+/// keyboard from a pointer that has buttons.
 fn reports_keyboard_keys<T: Transport>(transport: &mut T) -> bool {
     let mut bitmap = [0u8; wire::CFG_ANSWER_LEN];
     let answered = event_bits(transport, wire::EV_KEY, &mut bitmap);

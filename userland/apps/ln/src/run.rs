@@ -1,5 +1,5 @@
 //! The `Run` entry-point binary of the `ln` tool — the program a shell
-//! spawns to create a symbolic link.
+//! spawns to create a link.
 //!
 //! This is a **pure-Rust** program: TAIRiX is Rust-only, so it links the Rust
 //! userland runtime `tairix-rt` — never the C ABI, which exists solely for
@@ -34,12 +34,11 @@ mod program {
     use alloc::format;
     use alloc::string::String;
 
-    use tairix_abi::fs::OpenFlags;
-    use tairix_abi::{Errno, FileKind, LinkFlags, RealpathMode, UnlinkFlags};
+    use tairix_abi::{Errno, LinkFlags, RealpathMode};
     use tairix_help::BundleHelp;
-    use tairix_ln::{parse, run, FileSystem, Occupant, Prompt, USAGE};
+    use tairix_ln::{parse, run, FileSystem, FinalLink, Node, Prompt};
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
-    use tairix_rt::File;
+    use tairix_rt::{File, NewLink};
 
     /// Longest interactive reply chunk read per syscall; the reply is only
     /// ever judged by its first byte, so the bound caps work, not meaning.
@@ -53,38 +52,24 @@ mod program {
     struct RtFileSystem;
 
     impl FileSystem for RtFileSystem {
-        fn occupant(&self, path: &str) -> Result<Occupant, Errno> {
-            // The name as typed: a resolve-only, `NO_FOLLOW` open, so a
-            // final link describes *itself* and a dangling one is still
-            // visible. Following here would let a link already at the
-            // destination decide what a later replacement acts on.
-            let kind = match File::open(path.as_bytes(), OpenFlags::NO_FOLLOW) {
-                Ok(file) => file.stat().map_err(Errno::from_syscall)?.kind,
-                Err(ret) => {
-                    return match Errno::from_syscall(ret) {
-                        Errno::NotFound => Ok(Occupant::Vacant),
-                        other => Err(other),
-                    };
-                }
-            };
-            match kind {
-                FileKind::Directory => Ok(Occupant::Directory),
-                FileKind::Regular => Ok(Occupant::File),
-                // A link is resolved just far enough to say whether it names
-                // a directory — the one thing the destination reading and
-                // `-n` turn on. A dangling link, or one the caller may not
-                // follow, is simply not a directory.
-                FileKind::Symlink => {
-                    let resolved = File::open(path.as_bytes(), OpenFlags::empty())
-                        .ok()
-                        .and_then(|file| file.stat().ok())
-                        .map(|stat| stat.kind);
-                    Ok(if resolved == Some(FileKind::Directory) {
-                        Occupant::LinkToDirectory
-                    } else {
-                        Occupant::Link
+        fn node(&self, path: &str, link: FinalLink) -> Result<Option<Node>, Errno> {
+            // A resolve-only open, so its stat needs no read access to the
+            // node, and a final link kept describes *itself*.
+            match File::open(path.as_bytes(), link.resolve_only()) {
+                Ok(file) => file
+                    .stat()
+                    .map(|stat| {
+                        Some(Node {
+                            kind: stat.kind,
+                            id: stat.id,
+                            links: stat.nlink,
+                        })
                     })
-                }
+                    .map_err(Errno::from_syscall),
+                Err(ret) => match Errno::from_syscall(ret) {
+                    Errno::NotFound => Ok(None),
+                    other => Err(other),
+                },
             }
         }
 
@@ -96,43 +81,52 @@ mod program {
             tairix_rt::realpath(path, mode)
         }
 
-        fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
-            // Target first, then the link — the `symlink(2)` argument order.
+        fn symlink(&self, target: &str, link: &str, replace: bool) -> Result<(), Errno> {
             // The kernel checks the target's grammar and the caller's right
             // to create a name in the link's own parent; the target itself
             // is stored verbatim and never resolved.
-            let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
+            if replace {
+                return tairix_rt::replace_with_link(link, NewLink::Symbolic(target));
             }
-            Ok(())
+            refusal(tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes()))
         }
 
-        fn link(&self, target: &str, link: &str, dereference: bool) -> Result<(), Errno> {
-            // Existing name first, then the new one — the `link(2)` argument
-            // order. `-L` selects the `linkat(AT_SYMLINK_FOLLOW)` posture;
-            // without it neither final component is followed, so the inode
-            // that gains a name is the one the operand spelled.
+        fn link(
+            &self,
+            target: &str,
+            link: &str,
+            dereference: bool,
+            replace: bool,
+        ) -> Result<(), Errno> {
+            // `-L` selects the `linkat(AT_SYMLINK_FOLLOW)` posture; without
+            // it neither final component is followed, so the inode that gains
+            // a name is the one the operand spelled.
+            if replace {
+                let new = NewLink::Hard {
+                    existing: target,
+                    follow: dereference,
+                };
+                return tairix_rt::replace_with_link(link, new);
+            }
             let flags = if dereference {
                 LinkFlags::FOLLOW
             } else {
                 LinkFlags::empty()
             };
-            let ret = tairix_rt::fs_link(target.as_bytes(), link.as_bytes(), flags);
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
+            refusal(tairix_rt::fs_link(
+                target.as_bytes(),
+                link.as_bytes(),
+                flags,
+            ))
         }
+    }
 
-        fn remove(&self, path: &str) -> Result<(), Errno> {
-            // `fs_unlink` keeps the name as typed, so removing a link
-            // removes the link and never what it names.
-            let ret = tairix_rt::fs_unlink(path.as_bytes(), UnlinkFlags::empty());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
+    /// A syscall's result as its refusal.
+    fn refusal(ret: i64) -> Result<(), Errno> {
+        if ret == 0 {
             Ok(())
+        } else {
+            Err(Errno::from_syscall(ret))
         }
     }
 
@@ -168,32 +162,22 @@ mod program {
         }
     }
 
-    /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
-    /// own trailing newline), best-effort on the already-failing path.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when every link was made (or the short help was
     /// written), `1` otherwise — the GNU `ln` shape, which has no separate
     /// usage status. Every failure states its reason on fd 2, and a usage
-    /// failure adds the banner.
+    /// failure adds where the help is.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 1;
+        let Some(arguments) = tairix_help::arguments("ln") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("ln: {err}"));
-                report_usage();
-                return 1;
+                tairix_help::report_misuse("ln", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -206,10 +190,12 @@ mod program {
             &RtPrompt,
             &BundleHelp::new("ln"),
             &Stdout,
+            &Stderr,
         ) {
-            Ok(()) => 0,
+            Ok(true) => 0,
+            Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("ln: {err}"));
+                write_stderr_line(format_args!("ln: {err}"));
                 1
             }
         }

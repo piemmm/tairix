@@ -1288,8 +1288,8 @@ pub(crate) fn invalidate_range_local(start_vaddr: u64, pages: usize) {
     }
 }
 
-/// Past this many pages one whole-space `sfence.vma` is cheaper than one a
-/// page: Linux's `tlb_flush_all_threshold` (`arch/riscv/mm/tlbflush.c`). It
+/// Past this many pages one whole-space `sfence.vma` is taken to be cheaper
+/// than one a page; any ceiling is correct, only the cost moves. It
 /// also bounds a sparse unmap's span, which would otherwise cost a fence per
 /// page of its gaps, on this hart and, through RFENCE, on the others.
 const RANGE_FENCE_CEILING: usize = 64;

@@ -36,8 +36,8 @@ por última vez (`CPU`), y el nombre del comando (`NAME`).
 ## EXIT STATUS
 
 - `0` — la lista fue escrita.
-- `1` — el servicio rechazó o falló, o la lista no pudo entregarse.
-- `2` — la línea de comandos no fue comprendida.
+- `1` — el servicio rechazó o falló, o la lista no pudo entregarse. Una
+  línea de comandos no comprendida también termina con `1`.
 
 ## ENVIRONMENT
 

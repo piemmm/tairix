@@ -45,6 +45,13 @@ collegamenti da sé. Una seconda copia dell'algoritmo che divergesse per
 una regola stamperebbe un percorso che il filesystem risolve
 diversamente.
 
+Su un terminale, ogni percorso che compare nell'output viene messo tra
+virgolette dove una shell ne avrebbe bisogno, e ogni carattere di
+controllo o altro carattere invisibile al suo interno viene scritto in
+forma di escape, così che un percorso non possa comandare né riordinare
+lo schermo; GNU lo mostra invariato. Una pipe, un file o l'output con
+`-z` riceve il percorso byte per byte.
+
 ## OPTIONS
 
 - `-f, --canonicalize` — stampare il percorso canonico; ogni componente
@@ -79,7 +86,7 @@ diversamente.
 - `0` — il bersaglio di ogni operando è stato stampato (o è stata scritta
   la guida breve).
 - `1` — almeno una lettura è stata rifiutata, o l'output è fallito.
-- `2` — la riga di comando non è stata compresa.
+  Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

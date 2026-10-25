@@ -83,9 +83,10 @@ die Antwort eintraf, als `ttl=`-Feld, wie `iputils`.
 ## EXIT STATUS
 
 - `0` — mindestens eine Antwort empfangen (oder Kurzhilfe ausgegeben).
-- `1` — keine Anfrage wurde beantwortet.
-- `2` — Befehlszeile nicht verstanden, Ziel nicht aufgelöst, oder Socket
-  nicht zu öffnen.
+- `1` — keine Anfrage wurde beantwortet. Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
+- `2` — Ziel nicht aufgelöst, Socket nicht zu öffnen, oder eine Antwort
+  nicht zu empfangen oder zu schreiben.
 
 ## ENVIRONMENT
 

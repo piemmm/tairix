@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 use core::num::NonZeroU8;
 use core::ops::Range;
 
-/// Longest report descriptor parsed (Linux's `HID_MAX_DESCRIPTOR_SIZE`).
+/// Longest report descriptor parsed: a fixed input bound, well inside the
+/// 16-bit `wDescriptorLength` (HID 1.11 §6.2.1).
 pub const MAX_DESCRIPTOR: usize = 4096;
 
 const REPORT_BYTES: u16 = 4096;
@@ -24,7 +25,7 @@ const MAX_COLLECTIONS: usize = 128;
 const MAX_USAGE_ENTRIES: usize = 1024;
 const MAX_DEPTH: usize = 16;
 const MAX_GLOBAL_STACK: usize = 8;
-/// Widest element an item may declare (Linux's bound); reads are 32-bit.
+/// Widest element an item may declare: a fixed input bound; reads are 32-bit.
 const MAX_ELEMENT_BITS: u32 = 256;
 const MAX_REPORT_BITS: u32 = REPORT_BYTES as u32 * 8;
 const REPORT_ID_BITS: u32 = 8;
@@ -800,8 +801,8 @@ impl Parser {
             GLOBAL_LOGICAL_MAX => globals.logical_max.set(item),
             GLOBAL_PHYSICAL_MIN => globals.physical_min.set(item),
             GLOBAL_PHYSICAL_MAX => globals.physical_max.set(item),
-            // A nibble, as HID 1.11 states, or a whole signed byte, as many
-            // devices write it (Linux accepts both).
+            // A nibble, as HID 1.11 §6.2.2.7 states, or a whole signed byte,
+            // as many devices write it.
             GLOBAL_UNIT_EXPONENT => {
                 let exponent = if item.data <= 0xF {
                     i64::from(sign_extend(item.data, 4))

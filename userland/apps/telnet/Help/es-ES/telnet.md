@@ -82,8 +82,8 @@ que la respuesta no se descarta como hace la herramienta histórica.
 - `0` — la sesión se produjo (como quiera que el anfitrión la terminase), o se
   escribió la ayuda breve.
 - `1` — no pudo haber sesión: el anfitrión no se resolvió, el socket fue
-  rechazado, o el terminal no pudo pasar a modo directo.
-- `2` — la línea de órdenes no se entendió.
+  rechazado, o el terminal no pudo pasar a modo directo. Una línea de órdenes
+  no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

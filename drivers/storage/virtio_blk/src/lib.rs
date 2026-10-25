@@ -99,6 +99,10 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID),
 )];
 
+/// The path the kernel's bootstrap floor names this driver by: a class and a
+/// leaf under the driver store, as an installed driver is named.
+pub const FLOOR_PATH: &str = "/System/Drivers/storage/virtio_blk";
+
 /// Driver entry point.
 ///
 /// # Errors
@@ -603,8 +607,8 @@ impl<T: Transport> Drop for VirtioBlk<'_, T> {
 ///   error lets a consumer (a RAID member, the kernel block client)
 ///   recover around the bad block and repair it from a good copy rather
 ///   than dropping the entire device (which a [`DriverError::DeviceFault`]
-///   would force). Matches Linux's `BLK_STS_IOERR` — a hard I/O error,
-///   not a retryable one.
+///   would force). It is a hard error, not a retryable one: virtio 1.2
+///   §5.2.6 reports it for a device or driver error.
 /// * `VIRTIO_BLK_S_UNSUPP` → [`DriverError::Unsupported`]: a request-level
 ///   refusal (the device does not implement this request type), distinct
 ///   from a device fault.

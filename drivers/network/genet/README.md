@@ -100,12 +100,10 @@ header checksum has no engine on this MAC and is never claimed.
   out with its checksum silently disabled. The controller consumes the block;
   it never reaches the wire. Offsets the frame does not bear out are refused
   and the frame is dropped — a partial checksum must never be transmitted.
-- **Segmentation.** The GENET has **no** segmentation engine (the reference
-  driver advertises `NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM` and no
-  `NETIF_F_TSO`), so the driver splits a `FrameOffload::TxSegment` super-frame
+- **Segmentation.** The GENET is driven with no segmentation engine, so the
+  driver splits a `FrameOffload::TxSegment` super-frame
   itself through the shared `tairix_net::txoffload::TcpSegmenter` and hands
-  each wire segment to the transmit checksum engine — the same shape Linux's
-  `net/core/tso.c` gives `mvneta`, `mvpp2`, and `fec`. The win is the
+  each wire segment to the transmit checksum engine. The win is the
   offload's real one: one ring slot and one stack transmit pass for tens of
   wire packets, with each segment's TCP checksum still done in hardware. A
   super-frame the ring cannot absorb in one doorbell stays staged and resumes
@@ -113,8 +111,8 @@ header checksum has no engine on this MAC and is never claimed.
   ring defers segments rather than dropping them, and no later frame overtakes
   the stream being split.
 
-The register programming is the published Broadcom map as carried by the
-Linux `bcmgenet` driver; the split itself is device-independent arithmetic
+The register programming is Broadcom's map as NetBSD's and FreeBSD's
+BSD-2-Clause headers carry it; the split itself is device-independent arithmetic
 proven host-side in `lib/net`. What still needs metal is the measurement, not
 the correctness: `plans/PI.md` carries the on-metal acceptance item.
 

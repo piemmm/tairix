@@ -30,15 +30,12 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
     use tairix_rt::io::{write_stderr_line, Stdout};
-    use tairix_whoami::{parse, run, Identity, USAGE};
+    use tairix_whoami::{parse, run, Identity};
 
     /// The production [`Identity`]: the caller's own kernel-attested origin
     /// record, read through the ungated `self_origin` syscall.
@@ -57,21 +54,17 @@ mod program {
     ///
     /// Exit codes: `0` when the name (or a requested short help) was
     /// written; `1` when the identity read, the directory lookup, or the
-    /// output failed; `2` on a usage error (a malformed argument vector, an
-    /// unrecognised option, or an extra operand).
+    /// output failed, or the command line was not understood (a malformed
+    /// argument vector, an unrecognised option, or an extra operand).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("whoami") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("whoami: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("whoami", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -87,7 +80,7 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("whoami: {err}"));
+                write_stderr_line(format_args!("whoami: {err}"));
                 1
             }
         }

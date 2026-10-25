@@ -3,6 +3,7 @@
 use core::fmt;
 
 use tairix_curses::CursesError;
+use tairix_util::getopt::Refusal;
 
 /// Why an `edit` session ended other than by the user leaving the editor.
 ///
@@ -10,11 +11,12 @@ use tairix_curses::CursesError;
 /// on the status line and the user keeps their buffer. Only a broken
 /// terminal — the session's one irreplaceable channel — or a command line
 /// the tool does not understand is fatal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EditError {
-    /// The command line carried an unrecognised option or too many
-    /// operands. The caller should print [`crate::USAGE`]. The editor
-    /// never starts.
+    /// An option `getopt` refuses, worded as it words it. The editor never
+    /// starts.
+    Option(Refusal),
+    /// The command line named a second file. The editor never starts.
     Usage,
     /// Drawing to or reading from the terminal failed.
     Terminal(CursesError),
@@ -29,6 +31,7 @@ impl From<CursesError> for EditError {
 impl fmt::Display for EditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::Terminal(err) => write!(f, "terminal error: {err:?}"),
         }

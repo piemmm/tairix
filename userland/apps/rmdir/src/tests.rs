@@ -92,14 +92,27 @@ fn remove(options: Options, paths: &[&str]) -> Command {
     }
 }
 
-fn run_remove(fs: &MockFs, options: Options, paths: &[&str]) -> Result<(), RmdirError> {
-    run(
+/// The engine over `fs`, answering what it reported when it did not run
+/// clean: a refused operand is reported and the next still removed.
+fn run_remove(fs: &MockFs, options: Options, paths: &[&str]) -> Result<(), String> {
+    let err = MockOut::default();
+    match run(
         remove(options, paths),
         None,
         fs,
         &NoHelp,
         &MockOut::default(),
-    )
+        &err,
+    ) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(err.text.borrow().clone()),
+        Err(fatal) => Err(format!("rmdir: {fatal}\n")),
+    }
+}
+
+/// `failure` as the tool reports it.
+fn shown(failure: &RmdirError) -> Result<(), String> {
+    Err(format!("rmdir: {failure}\n"))
 }
 
 // --- parse ---------------------------------------------------------------
@@ -144,9 +157,41 @@ fn help_spellings_parse() {
 }
 
 #[test]
-fn unknown_switches_are_usage() {
-    assert_eq!(parse(&["-r", "d"]), Err(RmdirError::Usage));
-    assert_eq!(parse(&["--recursive", "d"]), Err(RmdirError::Usage));
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-r", "d"]), "invalid option -- 'r'");
+    assert_eq!(
+        refused(&["--recursive", "d"]),
+        "unrecognized option '--recursive'"
+    );
+    assert_eq!(refused(&["-px", "d"]), "invalid option -- 'x'");
+    assert_eq!(
+        refused(&["--verbose=1", "d"]),
+        "option '--verbose' doesn't allow an argument"
+    );
+}
+
+/// GNU 9.4's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+/// GNU 9.4 reads `rmdir --par --ign d` as
+/// `rmdir --parents --ignore-fail-on-non-empty d`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let options = Options {
+        parents: true,
+        ignore_non_empty: true,
+        ..Options::default()
+    };
+    assert_eq!(
+        parse(&["--par", "--ign", "d"]),
+        Ok(Command::Remove {
+            options,
+            paths: alloc::vec![String::from("d")],
+        })
+    );
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
 #[test]
@@ -172,7 +217,7 @@ fn the_kernel_refusals_surface_with_their_path() {
     let fs = MockFs::new(&[]).refusing("/plain", Errno::NotADirectory);
     assert_eq!(
         run_remove(&fs, Options::default(), &["/plain"]),
-        Err(RmdirError::Remove {
+        shown(&RmdirError::Remove {
             path: "/plain".to_string(),
             errno: Errno::NotADirectory,
         })
@@ -180,24 +225,26 @@ fn the_kernel_refusals_surface_with_their_path() {
     let fs = MockFs::new(&[]);
     assert_eq!(
         run_remove(&fs, Options::default(), &["/missing"]),
-        Err(RmdirError::Remove {
+        shown(&RmdirError::Remove {
             path: "/missing".to_string(),
             errno: Errno::NotFound,
         })
     );
 }
 
+/// GNU 9.4: `rmdir missing r` names the missing one, still removes `r` and
+/// exits 1.
 #[test]
-fn the_first_failure_stops_the_run() {
+fn a_refused_operand_is_reported_and_the_next_still_removed() {
     let fs = MockFs::new(&["/a", "/c"]).refusing("/b", Errno::PermissionDenied);
     assert_eq!(
         run_remove(&fs, Options::default(), &["/a", "/b", "/c"]),
-        Err(RmdirError::Remove {
+        shown(&RmdirError::Remove {
             path: "/b".to_string(),
             errno: Errno::PermissionDenied,
         })
     );
-    assert_eq!(fs.removed(), ["/a"]);
+    assert_eq!(fs.removed(), ["/a", "/c"]);
 }
 
 #[test]
@@ -257,7 +304,7 @@ fn a_non_empty_ancestor_fails_the_parents_walk() {
             },
             &["/a/b"],
         ),
-        Err(RmdirError::Remove {
+        shown(&RmdirError::Remove {
             path: "/a".to_string(),
             errno: Errno::NotEmpty,
         })
@@ -302,7 +349,7 @@ fn ignore_fail_on_non_empty_tolerates_exactly_that_refusal() {
             },
             &["/plain"],
         ),
-        Err(RmdirError::Remove {
+        shown(&RmdirError::Remove {
             path: "/plain".to_string(),
             errno: Errno::NotADirectory,
         })
@@ -326,11 +373,47 @@ fn verbose_reports_each_attempt_in_gnu_wording() {
         &fs,
         &NoHelp,
         &out,
+        &MockOut::default(),
     )
     .expect("remove chain");
     assert_eq!(
         out.text.borrow().as_str(),
         "rmdir: removing directory, '/a/b'\nrmdir: removing directory, '/a'\n"
+    );
+}
+
+/// A name's control bytes are escaped where GNU escapes them, never written
+/// raw to the terminal.
+#[test]
+fn a_name_holding_a_control_byte_is_escaped_in_every_message() {
+    let fs = MockFs::new(&["/d\u{1b}"]);
+    let out = MockOut::default();
+    run(
+        remove(
+            Options {
+                verbose: true,
+                ..Options::default()
+            },
+            &["/d\u{1b}"],
+        ),
+        None,
+        &fs,
+        &NoHelp,
+        &out,
+        &MockOut::default(),
+    )
+    .expect("remove");
+    assert_eq!(
+        out.text.borrow().as_str(),
+        "rmdir: removing directory, '/d'$'\\033'\n"
+    );
+    let refused = RmdirError::Remove {
+        path: "/a\u{1b}[2J".to_string(),
+        errno: Errno::NotEmpty,
+    };
+    assert_eq!(
+        refused.to_string(),
+        format!("failed to remove '/a'$'\\033''[2J': {}", Errno::NotEmpty)
     );
 }
 
@@ -354,6 +437,7 @@ fn a_failed_verbose_write_is_an_output_error() {
             &fs,
             &NoHelp,
             &out,
+            &MockOut::default(),
         ),
         Err(RmdirError::Output(Errno::NotImplemented))
     );
@@ -364,7 +448,15 @@ fn a_failed_verbose_write_is_an_output_error() {
 #[test]
 fn help_falls_back_to_the_usage_banner() {
     let out = MockOut::default();
-    run(Command::Help, None, &MockFs::new(&[]), &NoHelp, &out).expect("help");
+    run(
+        Command::Help,
+        None,
+        &MockFs::new(&[]),
+        &NoHelp,
+        &out,
+        &MockOut::default(),
+    )
+    .expect("help");
     assert_eq!(out.text.borrow().as_str(), USAGE);
 }
 

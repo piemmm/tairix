@@ -1,40 +1,25 @@
 //! Whether a tree copy would land on or inside the directory it copies, so
 //! no copy ever reproduces itself.
 //!
-//! [`landing`] answers before anything is written, by the path the kernel
-//! resolves the target to and the identity of each directory on it, so
-//! neither a link, a `..` nor a second spelling of a volume hides the source.
-//! [`Descent`] holds the walk to it while the copy runs: a directory renamed
-//! into the source meanwhile, or reached again through a link, is refused
-//! when the walk meets it.
+//! [`landing`] answers before anything is written, from the directories the
+//! copy holds: it climbs from where the copy would write through `..`,
+//! comparing each directory's identity with the source's, so neither a link,
+//! a `..` nor a second spelling of a volume hides the source. [`Descent`]
+//! holds the walk to it while the copy runs: a directory renamed into the
+//! source meanwhile, or reached again through a link, is refused when the
+//! walk meets it.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FileId};
-use tairix_path::{parse, Path};
 
-/// What the containment check reads from the filesystem.
-pub trait Ancestry {
-    /// `path` as the kernel resolves it — each link followed and each `..`
-    /// applied to the directories walked — its last component allowed to be
-    /// absent.
-    ///
-    /// # Errors
-    ///
-    /// The resolution's refusal: [`Errno::NotFound`] for a missing directory
-    /// on the way, [`Errno::LinkLoop`] for a cycle of links.
-    fn canonical(&self, path: &str) -> Result<String, Errno>;
+use crate::tree::Dir;
 
-    /// The identity of the node `path` names, a final link not followed.
-    ///
-    /// # Errors
-    ///
-    /// The probe's refusal.
-    fn identity(&self, path: &str) -> Result<FileId, Errno>;
-}
+/// Directories a climb passes before it gives up: past this depth a
+/// directory has no path the kernel would take.
+const CLIMB_MAX: usize = tairix_abi::FS_PATH_MAX / 2;
 
-/// Where a copy's target stands to the directory it copies.
+/// Where a directory stands to the directory a copy copies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Landing {
     /// Outside it: the copy may go ahead.
@@ -45,57 +30,71 @@ pub enum Landing {
     Within,
 }
 
-/// Where `target` stands to the directory `source`, whose identity is
-/// `source_id` as the copy found it ([`FileId::NONE`] when its volume offers
-/// none, so only the resolved paths are compared).
+/// Which of a [`landing`] check's two directories failed it, and how.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Unresolved {
+    /// The directory being copied.
+    Source(Errno),
+    /// The directory the copy would write in, or one above it.
+    Target(Errno),
+}
+
+impl Unresolved {
+    /// Of `source` and `target`, the path that failed, and its refusal.
+    #[must_use]
+    pub fn at<'a>(self, source: &'a str, target: &'a str) -> (&'a str, Errno) {
+        match self {
+            Self::Source(errno) => (source, errno),
+            Self::Target(errno) => (target, errno),
+        }
+    }
+}
+
+/// Where the held directory `dir` stands to the held directory `source`:
+/// the same directory, beneath it at any depth, or apart. A source whose
+/// volume offers no identity ([`FileId::NONE`]) is apart from everything.
 ///
 /// # Errors
 ///
-/// Either path's resolution failing, an answer the kernel gave that is not a
-/// path ([`Errno::OutOfRange`]), or a directory on the target's path that
-/// cannot be identified.
-pub fn landing(
-    fs: &dyn Ancestry,
-    source: &str,
-    source_id: FileId,
-    target: &str,
-) -> Result<Landing, Errno> {
-    let target = resolved(fs, target)?;
-    let source = resolved(fs, source)?;
-    if target.root() == source.root() && target.components().starts_with(source.components()) {
-        return Ok(if target.components().len() == source.components().len() {
-            Landing::Same
-        } else {
-            Landing::Within
-        });
-    }
-    if source_id.is_none() {
+/// [`Unresolved::Source`] when the source cannot be identified;
+/// [`Unresolved::Target`] when `dir` or a directory above it cannot be, or
+/// opened, or the climb passes a depth no path reaches
+/// ([`Errno::LengthOutOfRange`]).
+pub fn landing<D: Dir>(source: &D, dir: &D) -> Result<Landing, Unresolved> {
+    let wanted = source.stat().map_err(Unresolved::Source)?.id;
+    if wanted.is_none() {
         return Ok(Landing::Apart);
     }
-    let depth = target.components().len();
-    for len in (0..=depth).rev() {
-        let Some(ancestor) = target.prefix(len) else {
-            continue;
-        };
-        let identity = match fs.identity(&ancestor) {
-            // The target's own name may be vacant; a vacant name is not the
-            // source.
-            Err(Errno::NotFound) if len == depth => continue,
-            other => other?,
-        };
-        if identity == source_id {
-            return Ok(if len == depth {
+    let mut above: Option<D> = None;
+    let mut below = FileId::NONE;
+    for depth in 0..CLIMB_MAX {
+        let at = above.as_ref().unwrap_or(dir);
+        let id = at.stat().map_err(Unresolved::Target)?.id;
+        if id == wanted {
+            return Ok(if depth == 0 {
                 Landing::Same
             } else {
                 Landing::Within
             });
         }
+        // The root is its own `..`; one with no identity shows as two in a
+        // row.
+        if depth > 0 && id == below && (!id.is_none() || depth > 1) {
+            return Ok(Landing::Apart);
+        }
+        below = id;
+        above = Some(at.open_dir("..").map_err(Unresolved::Target)?);
     }
-    Ok(Landing::Apart)
+    Err(Unresolved::Target(Errno::LengthOutOfRange))
 }
 
-fn resolved(fs: &dyn Ancestry, path: &str) -> Result<Path, Errno> {
-    parse(&fs.canonical(path)?).map_err(|_| Errno::OutOfRange)
+/// Whether the directory `name` of `dir` holds `into`, at any depth: why a
+/// rename of it to `into` would be refused.
+pub fn lands_inside<D: Dir>(dir: &D, name: &str, into: &D) -> bool {
+    dir.open_dir(name)
+        .ok()
+        .and_then(|held| landing(&held, into).ok())
+        .is_some_and(|landed| landed != Landing::Apart)
 }
 
 /// The directories a tree copy is inside, so its walk enters none of them
@@ -138,6 +137,6 @@ impl Descent {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 #[path = "within_tests.rs"]
 mod tests;

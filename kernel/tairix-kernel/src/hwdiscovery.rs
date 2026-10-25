@@ -422,9 +422,9 @@ pub fn observe_virtio_pci_block_devices(
 ///
 /// Driver-agnostic: it reaches the bus only through the frozen
 /// [`VirtioMmioBus`] / [`Bus`] ABI seams, so the boot path never names a
-/// concrete `drivers/bus/*` type. The Raspberry Pi 4 firmware tree describes
-/// no `virtio,mmio` node, so this is a no-op there — it is the QEMU
-/// `virt`-board path, additive and metal-neutral.
+/// concrete `drivers/bus/*` type. A tree that describes no `virtio,mmio`
+/// node makes this a no-op — it is the QEMU `virt`-board path, additive and
+/// metal-neutral.
 ///
 /// A slot whose window extent cannot be resolved (a malformed `reg`), or a
 /// fresh node that cannot hold its match key and both resources, is

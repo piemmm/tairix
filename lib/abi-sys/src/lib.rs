@@ -198,6 +198,8 @@ const NUM_FS_STAT: u64 = SyscallNumber::FS_STAT.as_u16() as u64;
 const NUM_FS_TRUNCATE: u64 = SyscallNumber::FS_TRUNCATE.as_u16() as u64;
 const NUM_FS_SEEK_REGION: u64 = SyscallNumber::FS_SEEK_REGION.as_u16() as u64;
 const NUM_FS_PUNCH: u64 = SyscallNumber::FS_PUNCH.as_u16() as u64;
+const NUM_FS_UMASK: u64 = SyscallNumber::FS_UMASK.as_u16() as u64;
+const NUM_FS_ACCESS: u64 = SyscallNumber::FS_ACCESS.as_u16() as u64;
 const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
 const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
@@ -1633,8 +1635,8 @@ pub extern "C" fn sys_boot_session_get() -> u64 {
 /// Returns the base address of the new region.
 ///
 /// No page is read at call time: the kernel backs each page on first
-/// access under the mapping-time identity, so a mapping may exceed RAM by
-/// orders of magnitude. Touching a page wholly at/past end-of-file
+/// access, checked as a read through `fd` would be, so a mapping may exceed
+/// RAM by orders of magnitude. Touching a page wholly at/past end-of-file
 /// terminates the process (the `SIGBUS` analogue); bound accesses by the
 /// file size. The mapping is never writable and never executable. An
 /// error is reported as a `TAIRIX_E_*` code reinterpreted into the result.
@@ -2852,24 +2854,40 @@ pub extern "C" fn sys_waitset_wait(set: u64, timeout_ns: u64, token_out: *mut c_
     }
 }
 
-/// `fs_open`: open the file or directory at the absolute path
-/// `(path, path_len)` (`SyscallNumber::FS_OPEN`). Returns a new per-process
-/// file descriptor (at or above `TAIRIX_STD_STREAM_COUNT`), or a `TAIRIX_E_*` code
-/// reinterpreted into the result.
+/// `fs_open`: open the file or directory at `(path, path_len)`
+/// (`SyscallNumber::FS_OPEN`). Returns a new per-process file descriptor (at
+/// or above `TAIRIX_STD_STREAM_COUNT`), or a `TAIRIX_E_*` code reinterpreted
+/// into the result.
 ///
-/// `flags` is the `TAIRIX_OPEN_*` bit set ([`tairix_abi::OpenFlags`]). Requires
-/// `TAIRIX_CAP_FS_ACCESS`; the kernel validates the capability and the
-/// `(path, path_len)` pair against the caller's address space, then resolves
-/// the path under the caller's real credentials so every per-inode and
-/// mount-flag check stays kernel-side.
+/// A relative path resolves from `dirfd`, a directory descriptor of the
+/// caller's or `TAIRIX_FD_CWD` for its working directory; an absolute one
+/// ignores it. `flags` is the `TAIRIX_OPEN_FLAG_*` bit set
+/// ([`tairix_abi::OpenFlags`]), and `mode` the permission bits a create asks
+/// for: at most `TAIRIX_FS_MODE_MASK`, `0` unless `flags` carries
+/// `TAIRIX_OPEN_FLAG_CREATE`, and the file is born with them less the
+/// caller's umask. Requires `TAIRIX_CAP_FS_ACCESS`; every per-inode and
+/// mount-flag check stays kernel-side, under the caller's real credentials.
 #[must_use]
 #[export_name = "tairix_sys_fs_open"]
-pub extern "C" fn sys_fs_open(path: *mut c_void, path_len: usize, flags: u32) -> u64 {
+pub extern "C" fn sys_fs_open(
+    dirfd: u32,
+    path: *mut c_void,
+    path_len: usize,
+    flags: u32,
+    mode: u32,
+) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
     unsafe {
         raw_syscall(
             NUM_FS_OPEN,
-            [ptr_arg(path), path_len as u64, u64::from(flags), 0, 0, 0],
+            [
+                u64::from(dirfd),
+                ptr_arg(path),
+                path_len as u64,
+                u64::from(flags),
+                u64::from(mode),
+                0,
+            ],
         )
     }
 }
@@ -2907,7 +2925,7 @@ pub extern "C" fn sys_fs_read(fd: u32, offset: u64, buf: *mut c_void, len: usize
 /// `offset` (`SyscallNumber::FS_WRITE`). Returns the number of bytes written,
 /// or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
-/// When the handle was opened `TAIRIX_OPEN_APPEND` the kernel ignores `offset`
+/// When the handle was opened `TAIRIX_OPEN_FLAG_APPEND` the kernel ignores `offset`
 /// and writes at the current end of file. The kernel validates `(buf, len)`
 /// and re-authorises the write through the secured VFS.
 #[must_use]
@@ -3056,81 +3074,75 @@ pub extern "C" fn sys_fs_sync(fd: u32) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_FS_SYNC, [u64::from(fd), 0, 0, 0, 0, 0])) }
 }
 
-/// `fs_mkdir`: create a directory at the absolute path `(path, path_len)`
-/// (`SyscallNumber::FS_MKDIR`). Returns a `TAIRIX_E_*` code.
+/// `fs_mkdir`: create a directory at `(path, path_len)`, resolved from
+/// `dirfd` as `tairix_sys_fs_open` resolves it (`SyscallNumber::FS_MKDIR`),
+/// asking the permission bits `mode`, at most `TAIRIX_FS_MODE_MASK`, which it
+/// is born with less the caller's umask. Returns a `TAIRIX_E_*` code.
 ///
-/// Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/mount-flag
-/// model match `tairix_sys_fs_open`. The kernel validates `(path, path_len)`
-/// against the caller's address space before reading it.
+/// Requires `TAIRIX_CAP_FS_ACCESS`; the permission/mount-flag model matches
+/// `tairix_sys_fs_open`. The kernel validates `(path, path_len)` against the
+/// caller's address space before reading it.
 #[must_use]
 #[export_name = "tairix_sys_fs_mkdir"]
-pub extern "C" fn sys_fs_mkdir(path: *mut c_void, path_len: usize) -> i32 {
+pub extern "C" fn sys_fs_mkdir(dirfd: u32, path: *mut c_void, path_len: usize, mode: u32) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
     unsafe {
         ret_i32(raw_syscall(
             NUM_FS_MKDIR,
-            [ptr_arg(path), path_len as u64, 0, 0, 0, 0],
+            [
+                u64::from(dirfd),
+                ptr_arg(path),
+                path_len as u64,
+                u64::from(mode),
+                0,
+                0,
+            ],
         ))
     }
 }
 
-/// `fs_unlink`: remove the file or empty directory at the absolute path
-/// `(path, path_len)` (`SyscallNumber::FS_UNLINK`). Returns a `TAIRIX_E_*` code.
-///
-/// `flags` is the validated `TAIRIX_UNLINK_FLAG_*` word: `0` removes the named
-/// file or (empty) directory; `TAIRIX_UNLINK_FLAG_DIRECTORY` restricts the
-/// removal to an (empty) directory (the atomic `rmdir` posture — a
-/// non-directory is refused with `TAIRIX_E_NOT_A_DIRECTORY`). A reserved bit
-/// fails closed.
-///
-/// Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/mount-flag
-/// model match `tairix_sys_fs_open`. A non-empty directory fails closed. The
-/// kernel validates `(path, path_len)` against the caller's address space
-/// before reading it.
+/// `fs_umask`: set the calling process's file mode creation mask to `mask`
+/// (at most `TAIRIX_FS_UMASK_BITS`), or read it unchanged with
+/// `TAIRIX_FS_UMASK_QUERY` (`SyscallNumber::FS_UMASK`). Returns the mask held
+/// before, or a `TAIRIX_E_*` code reinterpreted into the result.
 #[must_use]
-#[export_name = "tairix_sys_fs_unlink"]
-pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize, flags: u32) -> i32 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
-    // and rejects any reserved `flags` bit.
-    unsafe {
-        ret_i32(raw_syscall(
-            NUM_FS_UNLINK,
-            [ptr_arg(path), path_len as u64, u64::from(flags), 0, 0, 0],
-        ))
-    }
+#[export_name = "tairix_sys_fs_umask"]
+pub extern "C" fn sys_fs_umask(mask: u32) -> u64 {
+    // SAFETY: see `sys_yield`; the call takes no memory operand.
+    unsafe { raw_syscall(NUM_FS_UMASK, [u64::from(mask), 0, 0, 0, 0, 0]) }
 }
 
-/// `fs_rename`: move the file or directory at the absolute path
-/// `(src, src_len)` to the absolute path `(dst, dst_len)`
-/// (`SyscallNumber::FS_RENAME`). Returns a `TAIRIX_E_*` code.
+/// `fs_access`: ask whether the caller may have every access `want` names of
+/// the node at `(path, path_len)`, resolved from `dirfd` as
+/// `tairix_sys_fs_open` resolves it (`SyscallNumber::FS_ACCESS`, the
+/// `faccessat(2)` shape). Returns `0`, or a `TAIRIX_E_*` code reinterpreted
+/// into the result.
 ///
-/// Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/mount-flag
-/// model match `tairix_sys_fs_open`. Both paths must resolve under the same
-/// mounted volume; a non-empty directory destination, a
-/// directory-into-its-own-subtree move, or a cross-mount move fails closed.
-/// `flags` is `0` (an existing destination is replaced) or
-/// `TAIRIX_RENAME_FLAG_NO_REPLACE` (it refuses the move with
-/// `TAIRIX_E_ALREADY_EXISTS`); a reserved bit fails closed. The kernel
-/// validates both `(ptr, len)` pairs against the caller's address space
-/// before reading them.
+/// `want` combines `TAIRIX_ACCESS_READ`, `TAIRIX_ACCESS_WRITE` and
+/// `TAIRIX_ACCESS_EXEC` (POSIX's values); `0` asks only that the node exists.
+/// `flags` is a `TAIRIX_AT_FLAG_*` word: `NO_FOLLOW` asks about a final link
+/// itself, and `EMPTY_PATH`, with `path` NULL and `path_len` `0`, about the
+/// node `dirfd` holds.
+/// Requires `TAIRIX_CAP_FS_ACCESS`.
 #[must_use]
-#[export_name = "tairix_sys_fs_rename"]
-pub extern "C" fn sys_fs_rename(
-    src: *mut c_void,
-    src_len: usize,
-    dst: *mut c_void,
-    dst_len: usize,
+#[export_name = "tairix_sys_fs_access"]
+pub extern "C" fn sys_fs_access(
+    dirfd: u32,
+    path: *mut c_void,
+    path_len: usize,
+    want: u32,
     flags: u32,
 ) -> i32 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
+    // and refuses any undefined `want` or `flags` bit.
     unsafe {
         ret_i32(raw_syscall(
-            NUM_FS_RENAME,
+            NUM_FS_ACCESS,
             [
-                ptr_arg(src),
-                src_len as u64,
-                ptr_arg(dst),
-                dst_len as u64,
+                u64::from(dirfd),
+                ptr_arg(path),
+                path_len as u64,
+                u64::from(want),
                 u64::from(flags),
                 0,
             ],
@@ -3138,9 +3150,89 @@ pub extern "C" fn sys_fs_rename(
     }
 }
 
-/// `fs_symlink`: create a symbolic link at the absolute path
-/// `(link, link_len)` whose stored target is `(target, target_len)`
-/// (`SyscallNumber::FS_SYMLINK`). Returns a `TAIRIX_E_*` code.
+/// `fs_unlink`: remove the file or empty directory at `(path, path_len)`,
+/// resolved from `dirfd` as `tairix_sys_fs_open` resolves it
+/// (`SyscallNumber::FS_UNLINK`). Returns a `TAIRIX_E_*` code.
+///
+/// `flags` is the validated `TAIRIX_UNLINK_FLAG_*` word: `0` removes the named
+/// file or (empty) directory; `TAIRIX_UNLINK_FLAG_DIRECTORY` restricts the
+/// removal to an (empty) directory (the atomic `rmdir` posture — a
+/// non-directory is refused with `TAIRIX_E_NOT_A_DIRECTORY`). With
+/// `TAIRIX_UNLINK_FLAG_EXPECT_NODE` or `TAIRIX_UNLINK_FLAG_EXPECT_UNCHANGED`,
+/// `expect` is the address of a `tairix_node_expect_t` the name must still
+/// meet, or the call answers `TAIRIX_E_STALE` and removes nothing; without
+/// either it must be NULL. A reserved bit fails closed.
+///
+/// Requires `TAIRIX_CAP_FS_ACCESS`; the permission/mount-flag model matches
+/// `tairix_sys_fs_open`. A non-empty directory fails closed.
+#[must_use]
+#[export_name = "tairix_sys_fs_unlink"]
+pub extern "C" fn sys_fs_unlink(
+    dirfd: u32,
+    path: *mut c_void,
+    path_len: usize,
+    flags: u32,
+    expect: *mut c_void,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
+    // and the expectation, and rejects any reserved `flags` bit.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_UNLINK,
+            [
+                u64::from(dirfd),
+                ptr_arg(path),
+                path_len as u64,
+                u64::from(flags),
+                ptr_arg(expect),
+                0,
+            ],
+        ))
+    }
+}
+
+/// `fs_rename`: move the file or directory the `tairix_path_at_t` at `from`
+/// names to the name the one at `to` names (`SyscallNumber::FS_RENAME`).
+/// Returns a `TAIRIX_E_*` code.
+///
+/// Requires `TAIRIX_CAP_FS_ACCESS`; each name resolves as `tairix_sys_fs_open`
+/// resolves a path, and the permission/mount-flag model matches it. Both
+/// names must resolve through one projection; a non-empty directory
+/// destination, a directory-into-its-own-subtree move, or a cross-projection
+/// move fails closed. `flags` combines `TAIRIX_RENAME_FLAG_NO_REPLACE` (an
+/// existing destination refuses the move with `TAIRIX_E_ALREADY_EXISTS`) and
+/// `TAIRIX_RENAME_FLAG_EXPECT_NODE`, with which `expect` is the address of a
+/// `tairix_node_expect_t` the source must still meet; without it `expect` must
+/// be NULL. A reserved bit fails closed.
+#[must_use]
+#[export_name = "tairix_sys_fs_rename"]
+pub extern "C" fn sys_fs_rename(
+    from: *mut c_void,
+    to: *mut c_void,
+    flags: u32,
+    expect: *mut c_void,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both records, the
+    // paths they name and the expectation.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_RENAME,
+            [
+                ptr_arg(from),
+                ptr_arg(to),
+                u64::from(flags),
+                ptr_arg(expect),
+                0,
+                0,
+            ],
+        ))
+    }
+}
+
+/// `fs_symlink`: create a symbolic link at `(link, link_len)`, resolved from
+/// `dirfd` as `tairix_sys_fs_open` resolves it, whose stored target is
+/// `(target, target_len)` (`SyscallNumber::FS_SYMLINK`). Returns a
+/// `TAIRIX_E_*` code.
 ///
 /// Requires `TAIRIX_CAP_FS_ACCESS`. The target is stored verbatim and is
 /// never resolved by this call, so it may legitimately dangle and creating
@@ -3153,6 +3245,7 @@ pub extern "C" fn sys_fs_rename(
 pub extern "C" fn sys_fs_symlink(
     target: *mut c_void,
     target_len: usize,
+    dirfd: u32,
     link: *mut c_void,
     link_len: usize,
 ) -> i32 {
@@ -3163,56 +3256,44 @@ pub extern "C" fn sys_fs_symlink(
             [
                 ptr_arg(target),
                 target_len as u64,
+                u64::from(dirfd),
                 ptr_arg(link),
                 link_len as u64,
-                0,
                 0,
             ],
         ))
     }
 }
 
-/// `fs_link`: add the absolute path `(link, link_len)` as a second name for
-/// the node the absolute path `(existing, existing_len)` already names — a
-/// hard link (`SyscallNumber::FS_LINK`). Returns a `TAIRIX_E_*` code.
+/// `fs_link`: add the name the `tairix_path_at_t` at `new` names as a second
+/// name for the node the one at `existing` already names — a hard link
+/// (`SyscallNumber::FS_LINK`). Returns a `TAIRIX_E_*` code.
 ///
-/// Requires `TAIRIX_CAP_FS_ACCESS`. With `flags` zero neither path's final
+/// Requires `TAIRIX_CAP_FS_ACCESS`. With `flags` zero neither name's final
 /// component is followed, so the node that gains a name is the one spelled
 /// rather than one a symbolic link redirects to (POSIX `link()`);
-/// `TAIRIX_LINK_FOLLOW` is the `linkat(AT_SYMLINK_FOLLOW)` posture and
-/// resolves the existing name's final link. Both names must resolve under
-/// one mounted volume, a directory is refused, and the new name confers no
-/// authority the caller did not already hold over the node. The kernel
-/// validates both `(ptr, len)` pairs against the caller's address space
-/// before reading them, and rejects any reserved `flags` bit.
+/// `TAIRIX_LINK_FLAG_FOLLOW` is the `linkat(AT_SYMLINK_FOLLOW)` posture and
+/// resolves the existing name's final link. Both names must resolve through
+/// one projection, a directory is refused, and the new name confers no
+/// authority the caller did not already hold over the node. A reserved
+/// `flags` bit fails closed.
 #[must_use]
 #[export_name = "tairix_sys_fs_link"]
-pub extern "C" fn sys_fs_link(
-    existing: *mut c_void,
-    existing_len: usize,
-    link: *mut c_void,
-    link_len: usize,
-    flags: u32,
-) -> i32 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
+pub extern "C" fn sys_fs_link(existing: *mut c_void, new: *mut c_void, flags: u32) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both records and the
+    // paths they name.
     unsafe {
         ret_i32(raw_syscall(
             NUM_FS_LINK,
-            [
-                ptr_arg(existing),
-                existing_len as u64,
-                ptr_arg(link),
-                link_len as u64,
-                u64::from(flags),
-                0,
-            ],
+            [ptr_arg(existing), ptr_arg(new), u64::from(flags), 0, 0, 0],
         ))
     }
 }
 
-/// `fs_readlink`: read the target of the symbolic link at the absolute path
-/// `(path, path_len)` into `(out, out_len)` (`SyscallNumber::FS_READLINK`).
-/// Returns the target's length in bytes, or a negated `TAIRIX_E_*` code.
+/// `fs_readlink`: read the target of the symbolic link at `(path,
+/// path_len)`, resolved from `dirfd` as `tairix_sys_fs_open` resolves it, into
+/// `(out, out_len)` (`SyscallNumber::FS_READLINK`). Returns the target's
+/// length in bytes, or a negated `TAIRIX_E_*` code.
 ///
 /// Requires `TAIRIX_CAP_FS_ACCESS`. The **final** component is never
 /// followed — that is the point of the call — while earlier components
@@ -3223,6 +3304,7 @@ pub extern "C" fn sys_fs_link(
 #[must_use]
 #[export_name = "tairix_sys_fs_readlink"]
 pub extern "C" fn sys_fs_readlink(
+    dirfd: u32,
     path: *mut c_void,
     path_len: usize,
     out: *mut c_void,
@@ -3233,20 +3315,21 @@ pub extern "C" fn sys_fs_readlink(
         raw_syscall(
             NUM_FS_READLINK,
             [
+                u64::from(dirfd),
                 ptr_arg(path),
                 path_len as u64,
                 ptr_arg(out),
                 out_len as u64,
-                0,
                 0,
             ],
         )
     }
 }
 
-/// `fs_realpath`: canonicalise the absolute path `(path, path_len)` into
-/// `(out, out_len)` (`SyscallNumber::FS_REALPATH`). Returns the canonical
-/// path's length in bytes, or a negated `TAIRIX_E_*` code.
+/// `fs_realpath`: canonicalise `(path, path_len)`, resolved from `dirfd` as
+/// `tairix_sys_fs_open` resolves it, into `(out, out_len)`
+/// (`SyscallNumber::FS_REALPATH`). Returns the canonical path's length in
+/// bytes, or a negated `TAIRIX_E_*` code.
 ///
 /// Requires `TAIRIX_CAP_FS_ACCESS`. Every symbolic link and every `..` is
 /// resolved by the kernel's own resolution — `..` names the directory the
@@ -3260,6 +3343,7 @@ pub extern "C" fn sys_fs_readlink(
 #[must_use]
 #[export_name = "tairix_sys_fs_realpath"]
 pub extern "C" fn sys_fs_realpath(
+    dirfd: u32,
     path: *mut c_void,
     path_len: usize,
     out: *mut c_void,
@@ -3271,90 +3355,111 @@ pub extern "C" fn sys_fs_realpath(
         raw_syscall(
             NUM_FS_REALPATH,
             [
+                u64::from(dirfd),
                 ptr_arg(path),
                 path_len as u64,
                 ptr_arg(out),
                 out_len as u64,
                 u64::from(mode),
-                0,
             ],
         )
     }
 }
 
-/// `fs_set_mode`: set the permission bits of the file or directory at the
-/// absolute path `(path, path_len)` to `mode` (`SyscallNumber::FS_SET_MODE`,
-/// the `chmod(2)` shape). Returns a `TAIRIX_E_*` code.
+/// `fs_set_mode`: set the permission bits of the file or directory at
+/// `(path, path_len)`, resolved from `dirfd` as `tairix_sys_fs_open` resolves
+/// it, to `mode` (`SyscallNumber::FS_SET_MODE`, the `fchmodat(2)` shape).
+/// Returns a `TAIRIX_E_*` code.
 ///
-/// `mode` carries at most `TAIRIX_FS_MODE_MASK` (the `rwx` triads plus the
-/// setuid/setgid/sticky bits); any higher bit fails closed with
-/// `TAIRIX_E_OUT_OF_RANGE` — never masked to a mode the caller did not ask
-/// for. Requires `TAIRIX_CAP_FS_ACCESS`; resolution and the permission/
-/// mount-flag model match `tairix_sys_fs_open`, and only the inode's owner may
-/// change its mode. The kernel validates `(path, path_len)` against the
-/// caller's address space before reading it.
+/// `mode` carries at most `TAIRIX_FS_MODE_MASK`; any higher bit fails closed
+/// with `TAIRIX_E_OUT_OF_RANGE` — never masked to a mode the caller did not
+/// ask for. `flags` is a `TAIRIX_AT_FLAG_*` word: `NO_FOLLOW` changes a final
+/// link itself, and `EMPTY_PATH`, with `path` NULL and `path_len` `0`, the
+/// node `dirfd` holds, as the caller.
+/// Requires `TAIRIX_CAP_FS_ACCESS`, and only the inode's owner may change its
+/// mode.
 #[must_use]
 #[export_name = "tairix_sys_fs_set_mode"]
-pub extern "C" fn sys_fs_set_mode(path: *mut c_void, path_len: usize, mode: u32) -> i32 {
+pub extern "C" fn sys_fs_set_mode(
+    dirfd: u32,
+    path: *mut c_void,
+    path_len: usize,
+    mode: u32,
+    flags: u32,
+) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
     // and rejects any `mode` bit above the permission mask.
     unsafe {
         ret_i32(raw_syscall(
             NUM_FS_SET_MODE,
-            [ptr_arg(path), path_len as u64, u64::from(mode), 0, 0, 0],
+            [
+                u64::from(dirfd),
+                ptr_arg(path),
+                path_len as u64,
+                u64::from(mode),
+                u64::from(flags),
+                0,
+            ],
         ))
     }
 }
 
 /// `fs_set_owner`: set the owning user and/or group of the file or
-/// directory at the absolute path `(path, path_len)` to `uid` / `gid`
-/// (`SyscallNumber::FS_SET_OWNER`, the `chown(2)` / `chgrp(2)` shape).
-/// Returns a `TAIRIX_E_*` code.
+/// directory at `(path, path_len)`, resolved from `dirfd` as
+/// `tairix_sys_fs_open` resolves it, to `uid` / `gid`
+/// (`SyscallNumber::FS_SET_OWNER`, the `fchownat(2)` shape). Returns a
+/// `TAIRIX_E_*` code.
 ///
 /// Pass `TAIRIX_FS_OWNER_UNCHANGED` for either field to leave it unchanged.
+/// `flags` is a `TAIRIX_AT_FLAG_*` word, as for `tairix_sys_fs_set_mode`.
 /// Requires `TAIRIX_CAP_FS_ACCESS`; reassigning the **uid**, or setting a
 /// **gid** the caller is not a member of, additionally requires
 /// `TAIRIX_CAP_FS_CHOWN` — otherwise only the node's owner may change the
 /// group, and only to a group they belong to. Any successful change clears
 /// the setuid bit (and the setgid bit of a group-executable node) and the
-/// covering mount must be writable. The kernel validates `(path, path_len)`
-/// against the caller's address space before reading it.
+/// projection must be writable.
 #[must_use]
 #[export_name = "tairix_sys_fs_set_owner"]
-pub extern "C" fn sys_fs_set_owner(path: *mut c_void, path_len: usize, uid: u32, gid: u32) -> i32 {
+pub extern "C" fn sys_fs_set_owner(
+    dirfd: u32,
+    path: *mut c_void,
+    path_len: usize,
+    uid: u32,
+    gid: u32,
+    flags: u32,
+) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
     // The whole authority rule is enforced kernel-side by the secured VFS.
     unsafe {
         ret_i32(raw_syscall(
             NUM_FS_SET_OWNER,
             [
+                u64::from(dirfd),
                 ptr_arg(path),
                 path_len as u64,
                 u64::from(uid),
                 u64::from(gid),
-                0,
-                0,
+                u64::from(flags),
             ],
         ))
     }
 }
 
-/// `fs_attr_get`: read the extended attribute `(key, key_len)` of the file
-/// or directory at the absolute path `(path, path_len)` into
-/// `(value_out, value_out_len)` (`SyscallNumber::FS_ATTR_GET`, the
-/// `getxattr(2)` shape). Returns the value's byte count, or a negative
-/// `TAIRIX_E_*` code encoded in the `u64` (the `tairix_sys_spawn` convention):
-/// `TAIRIX_E_NO_DATA` when no such attribute is stored, `TAIRIX_E_BUFFER_TOO_SMALL`
-/// when the value does not fit (never truncated), `TAIRIX_E_NOT_SUPPORTED` on a
-/// mount whose format stores no attributes. Requires `TAIRIX_CAP_FS_ACCESS`;
-/// the key is a `namespace.rest` key of at most `TAIRIX_FS_ATTR_KEY_MAX` bytes,
-/// the privileged namespaces are refused, and the caller needs read
-/// permission on the node.
+/// `fs_attr_get`: read the extended attribute `(key, key_len)` of the node the
+/// open descriptor `fd` holds into `(value_out, value_out_len)`
+/// (`SyscallNumber::FS_ATTR_GET`, the `fgetxattr(2)` shape). Returns the
+/// value's byte count, or a negative `TAIRIX_E_*` code encoded in the `u64`
+/// (the `tairix_sys_spawn` convention): `TAIRIX_E_NO_DATA` when no such
+/// attribute is stored, `TAIRIX_E_BUFFER_TOO_SMALL` when the value does not fit
+/// (never truncated), `TAIRIX_E_NOT_SUPPORTED` on a volume whose format stores
+/// no attributes. Requires `TAIRIX_CAP_FS_ACCESS`; the key is a
+/// `namespace.rest` key of at most `TAIRIX_FS_ATTR_KEY_MAX` bytes, the
+/// privileged namespaces are refused, and the caller needs read permission on
+/// the node.
 #[must_use]
 #[export_name = "tairix_sys_fs_attr_get"]
 pub extern "C" fn sys_fs_attr_get(
-    path: *mut c_void,
-    path_len: usize,
+    fd: u32,
     key: *mut c_void,
     key_len: usize,
     value_out: *mut c_void,
@@ -3366,31 +3471,30 @@ pub extern "C" fn sys_fs_attr_get(
         raw_syscall(
             NUM_FS_ATTR_GET,
             [
-                ptr_arg(path),
-                path_len as u64,
+                u64::from(fd),
                 ptr_arg(key),
                 key_len as u64,
                 ptr_arg(value_out),
                 value_out_len as u64,
+                0,
             ],
         )
     }
 }
 
-/// `fs_attr_set`: set the extended attribute `(key, key_len)` of the file
-/// or directory at the absolute path `(path, path_len)` to the opaque
-/// bytes `(value, value_len)` (`SyscallNumber::FS_ATTR_SET`, the
-/// `setxattr(2)` shape). Returns a `TAIRIX_E_*` code.
+/// `fs_attr_set`: set the extended attribute `(key, key_len)` of the node the
+/// open descriptor `fd` holds to the opaque bytes `(value, value_len)`
+/// (`SyscallNumber::FS_ATTR_SET`, the `fsetxattr(2)` shape). Returns a
+/// `TAIRIX_E_*` code.
 ///
 /// The value carries at most `TAIRIX_FS_ATTR_VALUE_MAX` bytes; a larger
 /// payload fails closed with `TAIRIX_E_LENGTH_OUT_OF_RANGE`. Requires
 /// `TAIRIX_CAP_FS_ACCESS`, write permission on the node, and a writable
-/// mount; the privileged namespaces are refused.
+/// projection; the privileged namespaces are refused.
 #[must_use]
 #[export_name = "tairix_sys_fs_attr_set"]
 pub extern "C" fn sys_fs_attr_set(
-    path: *mut c_void,
-    path_len: usize,
+    fd: u32,
     key: *mut c_void,
     key_len: usize,
     value: *mut c_void,
@@ -3402,78 +3506,64 @@ pub extern "C" fn sys_fs_attr_set(
         ret_i32(raw_syscall(
             NUM_FS_ATTR_SET,
             [
-                ptr_arg(path),
-                path_len as u64,
+                u64::from(fd),
                 ptr_arg(key),
                 key_len as u64,
                 ptr_arg(value),
                 value_len as u64,
+                0,
             ],
         ))
     }
 }
 
-/// `fs_attr_list`: yield the `index`-th visible extended-attribute key of
-/// the file or directory at the absolute path `(path, path_len)` into
-/// `(key_out, key_out_len)` (`SyscallNumber::FS_ATTR_LIST`). Returns the
-/// key's byte count, `0` once `index` is past the last visible attribute,
-/// or a negative `TAIRIX_E_*` code encoded in the `u64`. Keys the caller may
-/// not read are omitted, never revealed. Requires `TAIRIX_CAP_FS_ACCESS` and
-/// read permission on the node.
+/// `fs_attr_list`: yield the `index`-th visible extended-attribute key of the
+/// node the open descriptor `fd` holds into `(key_out, key_out_len)`
+/// (`SyscallNumber::FS_ATTR_LIST`). Returns the key's byte count, `0` once
+/// `index` is past the last visible attribute, or a negative `TAIRIX_E_*` code
+/// encoded in the `u64`. Keys the caller may not read are omitted, never
+/// revealed. Requires `TAIRIX_CAP_FS_ACCESS` and read permission on the node.
 #[must_use]
 #[export_name = "tairix_sys_fs_attr_list"]
 pub extern "C" fn sys_fs_attr_list(
-    path: *mut c_void,
-    path_len: usize,
+    fd: u32,
     index: u64,
     key_out: *mut c_void,
     key_out_len: usize,
 ) -> u64 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`
-    // pairs against the caller's address space before touching them.
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `(ptr, len)` pair
+    // against the caller's address space before touching it.
     unsafe {
         raw_syscall(
             NUM_FS_ATTR_LIST,
             [
-                ptr_arg(path),
-                path_len as u64,
+                u64::from(fd),
                 index,
                 ptr_arg(key_out),
                 key_out_len as u64,
+                0,
                 0,
             ],
         )
     }
 }
 
-/// `fs_attr_remove`: remove the extended attribute `(key, key_len)` from
-/// the file or directory at the absolute path `(path, path_len)`
-/// (`SyscallNumber::FS_ATTR_REMOVE`, the `removexattr(2)` shape). Returns
-/// a `TAIRIX_E_*` code: `TAIRIX_E_NO_DATA` when no such attribute is stored,
-/// `TAIRIX_E_NOT_SUPPORTED` on a mount whose format stores no attributes.
-/// Requires `TAIRIX_CAP_FS_ACCESS`, write permission on the node, and a
-/// writable mount; the privileged namespaces are refused.
+/// `fs_attr_remove`: remove the extended attribute `(key, key_len)` from the
+/// node the open descriptor `fd` holds (`SyscallNumber::FS_ATTR_REMOVE`, the
+/// `fremovexattr(2)` shape). Returns a `TAIRIX_E_*` code: `TAIRIX_E_NO_DATA`
+/// when no such attribute is stored, `TAIRIX_E_NOT_SUPPORTED` on a volume whose
+/// format stores no attributes. Requires `TAIRIX_CAP_FS_ACCESS`, write
+/// permission on the node, and a writable projection; the privileged
+/// namespaces are refused.
 #[must_use]
 #[export_name = "tairix_sys_fs_attr_remove"]
-pub extern "C" fn sys_fs_attr_remove(
-    path: *mut c_void,
-    path_len: usize,
-    key: *mut c_void,
-    key_len: usize,
-) -> i32 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`
-    // pairs and the key bound before touching anything.
+pub extern "C" fn sys_fs_attr_remove(fd: u32, key: *mut c_void, key_len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `(ptr, len)` pair
+    // and the key bound before touching anything.
     unsafe {
         ret_i32(raw_syscall(
             NUM_FS_ATTR_REMOVE,
-            [
-                ptr_arg(path),
-                path_len as u64,
-                ptr_arg(key),
-                key_len as u64,
-                0,
-                0,
-            ],
+            [u64::from(fd), ptr_arg(key), key_len as u64, 0, 0, 0],
         ))
     }
 }
@@ -3563,23 +3653,31 @@ pub extern "C" fn sys_foreground_held(fd: u32) -> u64 {
 }
 
 /// `fs_chdir`: change the calling process's working directory to the
-/// (absolute or cwd-relative) path `(path, path_len)`
-/// (`SyscallNumber::FS_CHDIR`). Returns a `TAIRIX_E_*` code.
+/// directory at `(path, path_len)`, resolved from `dirfd` as
+/// `tairix_sys_fs_open` resolves it (`SyscallNumber::FS_CHDIR`). Returns a
+/// `TAIRIX_E_*` code.
 ///
-/// Requires `TAIRIX_CAP_FS_ACCESS`; the kernel validates `(path, path_len)`
-/// against the caller's address space, resolves it (relative to the caller's
-/// current working directory when it is not absolute), and re-authorises it
-/// as a searchable directory under the caller's real credentials before it
-/// becomes the new working directory. A path that is not a searchable
-/// directory fails closed and leaves the working directory unchanged.
+/// `flags` is a `TAIRIX_AT_FLAG_*` word: `EMPTY_PATH`, with `path` NULL and
+/// `path_len` `0`, changes to the directory `dirfd` holds (`fchdir`), and
+/// `NO_FOLLOW` is refused with `TAIRIX_E_OUT_OF_RANGE`. Requires `TAIRIX_CAP_FS_ACCESS`; the
+/// target must be a directory the caller may search, and the working directory
+/// then holds that node, not its name. A refusal leaves the working directory
+/// unchanged.
 #[must_use]
 #[export_name = "tairix_sys_fs_chdir"]
-pub extern "C" fn sys_fs_chdir(path: *mut c_void, path_len: usize) -> i32 {
+pub extern "C" fn sys_fs_chdir(dirfd: u32, path: *mut c_void, path_len: usize, flags: u32) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
     unsafe {
         ret_i32(raw_syscall(
             NUM_FS_CHDIR,
-            [ptr_arg(path), path_len as u64, 0, 0, 0, 0],
+            [
+                u64::from(dirfd),
+                ptr_arg(path),
+                path_len as u64,
+                u64::from(flags),
+                0,
+                0,
+            ],
         ))
     }
 }
@@ -3607,7 +3705,7 @@ pub extern "C" fn sys_fs_getcwd(buf: *mut c_void, buf_len: usize) -> u64 {
 ///
 /// A resource reference (e.g. `"sys:random"`) names a typed non-filesystem
 /// resource; there is no `/dev`, `/proc`, or `/sys`. `flags` is the
-/// `TAIRIX_OPEN_*` bit set ([`tairix_abi::OpenFlags`]). Authorisation is per
+/// `TAIRIX_OPEN_FLAG_*` bit set ([`tairix_abi::OpenFlags`]). Authorisation is per
 /// namespace inside the kernel resolver (an unprivileged resource needs no
 /// capability); the kernel validates the `(reference, reference_len)` pair
 /// against the caller's address space. The returned descriptor is read and
@@ -3902,7 +4000,7 @@ mod tests {
         (NUM_WAITSET_CREATE, "waitset_create", 0),
         (NUM_WAITSET_CTL, "waitset_ctl", 5),
         (NUM_WAITSET_WAIT, "waitset_wait", 3),
-        (NUM_FS_OPEN, "fs_open", 3),
+        (NUM_FS_OPEN, "fs_open", 5),
         (NUM_FS_CLOSE, "fs_close", 1),
         (NUM_FS_READ, "fs_read", 4),
         (NUM_FS_WRITE, "fs_write", 4),
@@ -3912,13 +4010,13 @@ mod tests {
         (NUM_FS_STAT, "fs_stat", 3),
         (NUM_FS_TRUNCATE, "fs_truncate", 2),
         (NUM_FS_SYNC, "fs_sync", 1),
-        (NUM_FS_MKDIR, "fs_mkdir", 2),
-        (NUM_FS_UNLINK, "fs_unlink", 3),
-        (NUM_FS_RENAME, "fs_rename", 5),
-        (NUM_FS_SYMLINK, "fs_symlink", 4),
-        (NUM_FS_READLINK, "fs_readlink", 4),
-        (NUM_FS_LINK, "fs_link", 5),
-        (NUM_FS_REALPATH, "fs_realpath", 5),
+        (NUM_FS_MKDIR, "fs_mkdir", 4),
+        (NUM_FS_UNLINK, "fs_unlink", 5),
+        (NUM_FS_RENAME, "fs_rename", 4),
+        (NUM_FS_SYMLINK, "fs_symlink", 5),
+        (NUM_FS_READLINK, "fs_readlink", 5),
+        (NUM_FS_LINK, "fs_link", 3),
+        (NUM_FS_REALPATH, "fs_realpath", 6),
         (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
         (NUM_WALL_TIME_SET, "wall_time_set", 3),
@@ -3927,19 +4025,19 @@ mod tests {
         (NUM_SYSINFO_INTROSPECT, "sysinfo_introspect", 4),
         (NUM_TERMINAL_SIZE, "terminal_size", 3),
         (NUM_SIGNAL, "signal", 2),
-        (NUM_FS_CHDIR, "fs_chdir", 2),
+        (NUM_FS_CHDIR, "fs_chdir", 4),
         (NUM_FS_GETCWD, "fs_getcwd", 2),
         (NUM_RESOURCE_OPEN, "resource_open", 3),
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_PTY_CREATE, "pty_create", 3),
         (NUM_PTY_SET_SIZE, "pty_set_size", 3),
-        (NUM_FS_SET_MODE, "fs_set_mode", 3),
-        (NUM_FS_SET_OWNER, "fs_set_owner", 4),
-        (NUM_FS_ATTR_GET, "fs_attr_get", 6),
-        (NUM_FS_ATTR_SET, "fs_attr_set", 6),
-        (NUM_FS_ATTR_LIST, "fs_attr_list", 5),
-        (NUM_FS_ATTR_REMOVE, "fs_attr_remove", 4),
+        (NUM_FS_SET_MODE, "fs_set_mode", 5),
+        (NUM_FS_SET_OWNER, "fs_set_owner", 6),
+        (NUM_FS_ATTR_GET, "fs_attr_get", 5),
+        (NUM_FS_ATTR_SET, "fs_attr_set", 5),
+        (NUM_FS_ATTR_LIST, "fs_attr_list", 4),
+        (NUM_FS_ATTR_REMOVE, "fs_attr_remove", 3),
         (NUM_PORT_BIND, "port_bind", 3),
         (NUM_PORT_ADMIT, "port_admit", 2),
         (NUM_PORT_UNBIND, "port_unbind", 1),
@@ -3980,6 +4078,8 @@ mod tests {
         (NUM_NOTICE_PUBLISH, "notice_publish", 3),
         (NUM_FS_SEEK_REGION, "fs_seek_region", 3),
         (NUM_FS_PUNCH, "fs_punch", 3),
+        (NUM_FS_UMASK, "fs_umask", 1),
+        (NUM_FS_ACCESS, "fs_access", 5),
     ];
 
     #[test]
@@ -5224,17 +5324,22 @@ mod tests {
     }
 
     #[test]
-    fn fs_open_marshals_path_len_and_flags() {
+    fn fs_open_marshals_dirfd_path_len_flags_and_mode() {
         let mut path = *b"/System/Logs";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0x100, || {
-            assert_eq!(sys_fs_open(ptr, path.len(), 0x3), 0x100);
+            assert_eq!(
+                sys_fs_open(tairix_abi::FD_CWD, ptr, path.len(), 0x6, 0o640),
+                0x100
+            );
         });
         assert_eq!(number, NUM_FS_OPEN);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], 0x3);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[0], u64::from(tairix_abi::FD_CWD));
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], 0x6);
+        assert_eq!(args[4], 0o640);
+        assert_eq!(args[5], 0);
     }
 
     #[test]
@@ -5362,107 +5467,157 @@ mod tests {
     }
 
     #[test]
-    fn fs_mkdir_marshals_path_and_len() {
-        let mut path = *b"/Storage/new";
+    fn fs_mkdir_marshals_dirfd_path_len_and_mode() {
+        let mut path = *b"new";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
-            assert_eq!(sys_fs_mkdir(ptr, path.len()), 0);
+            assert_eq!(sys_fs_mkdir(5, ptr, path.len(), 0o2775), 0);
         });
         assert_eq!(number, NUM_FS_MKDIR);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn fs_unlink_marshals_path_len_and_flags() {
-        let mut path = *b"/Storage/old";
-        let ptr = path.as_mut_ptr().cast::<c_void>();
-        let (number, args) = capture(0, || {
-            assert_eq!(sys_fs_unlink(ptr, path.len(), 0), 0);
-        });
-        assert_eq!(number, NUM_FS_UNLINK);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
-        // The directory-only bit travels in the flags register.
-        let dir_bit = u64::from(tairix_abi::UnlinkFlags::DIRECTORY.bits());
-        let (number, args) = capture(0, || {
-            assert_eq!(
-                sys_fs_unlink(ptr, path.len(), tairix_abi::UnlinkFlags::DIRECTORY.bits()),
-                0
-            );
-        });
-        assert_eq!(number, NUM_FS_UNLINK);
-        assert_eq!(args[2], dir_bit);
-    }
-
-    #[test]
-    fn fs_set_mode_marshals_path_len_and_mode() {
-        let mut path = *b"/Storage/file";
-        let ptr = path.as_mut_ptr().cast::<c_void>();
-        let (number, args) = capture(0, || {
-            assert_eq!(sys_fs_set_mode(ptr, path.len(), 0o640), 0);
-        });
-        assert_eq!(number, NUM_FS_SET_MODE);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], 0o640);
-        assert_eq!(&args[3..], &[0, 0, 0]);
-    }
-
-    #[test]
-    fn fs_set_owner_marshals_path_len_uid_and_gid() {
-        let mut path = *b"/Storage/file";
-        let ptr = path.as_mut_ptr().cast::<c_void>();
-        let (number, args) = capture(0, || {
-            assert_eq!(
-                sys_fs_set_owner(ptr, path.len(), tairix_abi::FS_OWNER_UNCHANGED, 42),
-                0
-            );
-        });
-        assert_eq!(number, NUM_FS_SET_OWNER);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], u64::from(tairix_abi::FS_OWNER_UNCHANGED));
-        assert_eq!(args[3], 42);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], 0o2775);
         assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
-    fn fs_attr_stubs_marshal_path_key_and_buffers() {
-        let mut path = *b"/Storage/file";
-        let mut key = *b"user.comment";
-        let mut value = *b"hi";
-        let mut out = [0u8; 16];
-        let path_ptr = path.as_mut_ptr().cast::<c_void>();
-        let key_ptr = key.as_mut_ptr().cast::<c_void>();
+    fn fs_umask_marshals_the_mask() {
+        let (number, args) = capture(0o022, || {
+            assert_eq!(sys_fs_umask(0o077), 0o022);
+        });
+        assert_eq!(number, NUM_FS_UMASK);
+        assert_eq!(args, [0o077, 0, 0, 0, 0, 0]);
+    }
 
+    #[test]
+    fn fs_unlink_marshals_dirfd_path_len_flags_and_expectation() {
+        let mut path = *b"/Storage/old";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
             assert_eq!(
-                sys_fs_attr_get(
-                    path_ptr,
+                sys_fs_unlink(
+                    tairix_abi::FD_CWD,
+                    ptr,
                     path.len(),
-                    key_ptr,
-                    key.len(),
-                    out.as_mut_ptr().cast(),
-                    out.len()
+                    0,
+                    core::ptr::null_mut()
                 ),
                 0
             );
         });
+        assert_eq!(number, NUM_FS_UNLINK);
+        assert_eq!(args[0], u64::from(tairix_abi::FD_CWD));
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+        // The flags and the expectation's address travel in their registers.
+        let mut expect = [0u8; tairix_abi::NodeExpect::WIRE_LEN];
+        let expect_ptr = expect.as_mut_ptr().cast::<c_void>();
+        let flags =
+            tairix_abi::UnlinkFlags::DIRECTORY.bits() | tairix_abi::UnlinkFlags::EXPECT_NODE.bits();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_unlink(4, ptr, path.len(), flags, expect_ptr), 0);
+        });
+        assert_eq!(number, NUM_FS_UNLINK);
+        assert_eq!(args[3], u64::from(flags));
+        assert_eq!(args[4], expect_ptr as usize as u64);
+    }
+
+    #[test]
+    fn fs_access_marshals_dirfd_path_len_want_and_flags() {
+        let mut path = *b"notes";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let want = tairix_abi::Access::READ.bits() | tairix_abi::Access::WRITE.bits();
+        let flags = tairix_abi::AtFlags::NO_FOLLOW.bits();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_access(4, ptr, path.len(), want, flags), 0);
+        });
+        assert_eq!(number, NUM_FS_ACCESS);
+        assert_eq!(args[0], 4);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], u64::from(want));
+        assert_eq!(args[4], u64::from(flags));
+        assert_eq!(args[5], 0);
+    }
+
+    #[test]
+    fn fs_set_mode_marshals_dirfd_path_len_mode_and_flags() {
+        let mut path = *b"/Storage/file";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_set_mode(6, ptr, path.len(), 0o640, 0), 0);
+        });
+        assert_eq!(number, NUM_FS_SET_MODE);
+        assert_eq!(args[0], 6);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], 0o640);
+        assert_eq!(&args[4..], &[0, 0]);
+        // `EMPTY_PATH` names no path: a null pointer and a zero length.
+        let flags = tairix_abi::AtFlags::EMPTY_PATH.bits();
+        let (_, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_set_mode(6, core::ptr::null_mut(), 0, 0o640, flags),
+                0
+            );
+        });
+        assert_eq!(&args[1..3], &[0, 0]);
+        assert_eq!(args[4], u64::from(flags));
+    }
+
+    #[test]
+    fn fs_set_owner_marshals_dirfd_path_len_uid_gid_and_flags() {
+        let mut path = *b"/Storage/file";
+        let ptr = path.as_mut_ptr().cast::<c_void>();
+        let flags = tairix_abi::AtFlags::NO_FOLLOW.bits();
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_set_owner(
+                    tairix_abi::FD_CWD,
+                    ptr,
+                    path.len(),
+                    tairix_abi::FS_OWNER_UNCHANGED,
+                    42,
+                    flags
+                ),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_SET_OWNER);
+        assert_eq!(args[0], u64::from(tairix_abi::FD_CWD));
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], u64::from(tairix_abi::FS_OWNER_UNCHANGED));
+        assert_eq!(args[4], 42);
+        assert_eq!(args[5], u64::from(flags));
+    }
+
+    #[test]
+    fn fs_attr_stubs_marshal_the_descriptor_key_and_buffers() {
+        let mut key = *b"user.comment";
+        let mut value = *b"hi";
+        let mut out = [0u8; 16];
+        let key_ptr = key.as_mut_ptr().cast::<c_void>();
+
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_attr_get(7, key_ptr, key.len(), out.as_mut_ptr().cast(), out.len()),
+                0
+            );
+        });
         assert_eq!(number, NUM_FS_ATTR_GET);
-        assert_eq!(args[0], path_ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], key_ptr as usize as u64);
-        assert_eq!(args[3], key.len() as u64);
-        assert_eq!(args[5], out.len() as u64);
+        assert_eq!(args[0], 7);
+        assert_eq!(args[1], key_ptr as usize as u64);
+        assert_eq!(args[2], key.len() as u64);
+        assert_eq!(args[4], out.len() as u64);
+        assert_eq!(args[5], 0);
 
         let (number, args) = capture(0, || {
             assert_eq!(
                 sys_fs_attr_set(
-                    path_ptr,
-                    path.len(),
+                    7,
                     key_ptr,
                     key.len(),
                     value.as_mut_ptr().cast(),
@@ -5472,29 +5627,27 @@ mod tests {
             );
         });
         assert_eq!(number, NUM_FS_ATTR_SET);
-        assert_eq!(args[5], value.len() as u64);
-
-        let (number, args) = capture(0, || {
-            assert_eq!(
-                sys_fs_attr_list(path_ptr, path.len(), 2, out.as_mut_ptr().cast(), out.len()),
-                0
-            );
-        });
-        assert_eq!(number, NUM_FS_ATTR_LIST);
-        assert_eq!(args[2], 2);
-        assert_eq!(args[4], out.len() as u64);
+        assert_eq!(args[4], value.len() as u64);
         assert_eq!(args[5], 0);
 
         let (number, args) = capture(0, || {
             assert_eq!(
-                sys_fs_attr_remove(path_ptr, path.len(), key_ptr, key.len()),
+                sys_fs_attr_list(7, 2, out.as_mut_ptr().cast(), out.len()),
                 0
             );
         });
-        assert_eq!(number, NUM_FS_ATTR_REMOVE);
-        assert_eq!(args[2], key_ptr as usize as u64);
-        assert_eq!(args[3], key.len() as u64);
+        assert_eq!(number, NUM_FS_ATTR_LIST);
+        assert_eq!(args[1], 2);
+        assert_eq!(args[3], out.len() as u64);
         assert_eq!(&args[4..], &[0, 0]);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_attr_remove(7, key_ptr, key.len()), 0);
+        });
+        assert_eq!(number, NUM_FS_ATTR_REMOVE);
+        assert_eq!(args[1], key_ptr as usize as u64);
+        assert_eq!(args[2], key.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
@@ -5520,45 +5673,38 @@ mod tests {
         let link_ptr = link.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
             assert_eq!(
-                sys_fs_symlink(target_ptr, target.len(), link_ptr, link.len()),
+                sys_fs_symlink(target_ptr, target.len(), 4, link_ptr, link.len()),
                 0
             );
         });
         assert_eq!(number, NUM_FS_SYMLINK);
         assert_eq!(args[0], target_ptr as usize as u64);
         assert_eq!(args[1], target.len() as u64);
-        assert_eq!(args[2], link_ptr as usize as u64);
-        assert_eq!(args[3], link.len() as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(args[2], 4);
+        assert_eq!(args[3], link_ptr as usize as u64);
+        assert_eq!(args[4], link.len() as u64);
+        assert_eq!(args[5], 0);
     }
 
     #[test]
     fn fs_link_marshals_the_existing_name_then_the_new_one() {
         // Existing-name-first, matching the syscall spec: a transposition
         // here would try to give the node that does not exist yet a name.
-        let mut existing = *b"/Users/me/notes";
-        let mut link = *b"/Users/me/notes.alias";
+        let mut existing = [0u8; tairix_abi::PathAt::WIRE_LEN];
+        let mut new = [0u8; tairix_abi::PathAt::WIRE_LEN];
         let existing_ptr = existing.as_mut_ptr().cast::<c_void>();
-        let link_ptr = link.as_mut_ptr().cast::<c_void>();
+        let new_ptr = new.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
             assert_eq!(
-                sys_fs_link(
-                    existing_ptr,
-                    existing.len(),
-                    link_ptr,
-                    link.len(),
-                    tairix_abi::LinkFlags::FOLLOW.bits()
-                ),
+                sys_fs_link(existing_ptr, new_ptr, tairix_abi::LinkFlags::FOLLOW.bits()),
                 0
             );
         });
         assert_eq!(number, NUM_FS_LINK);
         assert_eq!(args[0], existing_ptr as usize as u64);
-        assert_eq!(args[1], existing.len() as u64);
-        assert_eq!(args[2], link_ptr as usize as u64);
-        assert_eq!(args[3], link.len() as u64);
-        assert_eq!(args[4], u64::from(tairix_abi::LinkFlags::FOLLOW.bits()));
-        assert_eq!(args[5], 0);
+        assert_eq!(args[1], new_ptr as usize as u64);
+        assert_eq!(args[2], u64::from(tairix_abi::LinkFlags::FOLLOW.bits()));
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
@@ -5570,46 +5716,78 @@ mod tests {
         // The raw return is the target length, not an errno.
         let (number, args) = capture(14, || {
             assert_eq!(
-                sys_fs_readlink(path_ptr, path.len(), out_ptr, out.len()),
+                sys_fs_readlink(tairix_abi::FD_CWD, path_ptr, path.len(), out_ptr, out.len()),
                 14
             );
         });
         assert_eq!(number, NUM_FS_READLINK);
-        assert_eq!(args[0], path_ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(args[2], out_ptr as usize as u64);
-        assert_eq!(args[3], out.len() as u64);
+        assert_eq!(args[0], u64::from(tairix_abi::FD_CWD));
+        assert_eq!(args[1], path_ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], out_ptr as usize as u64);
+        assert_eq!(args[4], out.len() as u64);
+        assert_eq!(args[5], 0);
+    }
+
+    #[test]
+    fn fs_realpath_marshals_dirfd_path_buffer_and_mode() {
+        let mut path = *b"notes/../todo";
+        let mut out = [0u8; 64];
+        let path_ptr = path.as_mut_ptr().cast::<c_void>();
+        let out_ptr = out.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(20, || {
+            assert_eq!(
+                sys_fs_realpath(9, path_ptr, path.len(), out_ptr, out.len(), 2),
+                20
+            );
+        });
+        assert_eq!(number, NUM_FS_REALPATH);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], path_ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(args[3], out_ptr as usize as u64);
+        assert_eq!(args[4], out.len() as u64);
+        assert_eq!(args[5], 2);
+    }
+
+    #[test]
+    fn fs_rename_marshals_both_names_flags_and_expectation() {
+        let mut from = [0u8; tairix_abi::PathAt::WIRE_LEN];
+        let mut to = [0u8; tairix_abi::PathAt::WIRE_LEN];
+        let mut expect = [0u8; tairix_abi::NodeExpect::WIRE_LEN];
+        let from_ptr = from.as_mut_ptr().cast::<c_void>();
+        let to_ptr = to.as_mut_ptr().cast::<c_void>();
+        let expect_ptr = expect.as_mut_ptr().cast::<c_void>();
+        let flags = tairix_abi::RenameFlags::EXPECT_NODE.bits();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_rename(from_ptr, to_ptr, flags, expect_ptr), 0);
+        });
+        assert_eq!(number, NUM_FS_RENAME);
+        assert_eq!(args[0], from_ptr as usize as u64);
+        assert_eq!(args[1], to_ptr as usize as u64);
+        assert_eq!(args[2], u64::from(flags));
+        assert_eq!(args[3], expect_ptr as usize as u64);
         assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
-    fn fs_rename_marshals_both_paths_and_lens() {
-        let mut src = *b"/Storage/old";
-        let mut dst = *b"/Storage/new";
-        let src_ptr = src.as_mut_ptr().cast::<c_void>();
-        let dst_ptr = dst.as_mut_ptr().cast::<c_void>();
-        let (number, args) = capture(0, || {
-            assert_eq!(sys_fs_rename(src_ptr, src.len(), dst_ptr, dst.len(), 1), 0);
-        });
-        assert_eq!(number, NUM_FS_RENAME);
-        assert_eq!(args[0], src_ptr as usize as u64);
-        assert_eq!(args[1], src.len() as u64);
-        assert_eq!(args[2], dst_ptr as usize as u64);
-        assert_eq!(args[3], dst.len() as u64);
-        assert_eq!(&args[4..], &[1, 0]);
-    }
-
-    #[test]
-    fn fs_chdir_marshals_path_and_len() {
+    fn fs_chdir_marshals_dirfd_path_len_and_flags() {
         let mut path = *b"/Users/bob";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
-            assert_eq!(sys_fs_chdir(ptr, path.len()), 0);
+            assert_eq!(sys_fs_chdir(tairix_abi::FD_CWD, ptr, path.len(), 0), 0);
         });
         assert_eq!(number, NUM_FS_CHDIR);
-        assert_eq!(args[0], ptr as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[0], u64::from(tairix_abi::FD_CWD));
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], path.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+        // `fchdir`: the directory a descriptor holds, named by no path.
+        let flags = tairix_abi::AtFlags::EMPTY_PATH.bits();
+        let (_, args) = capture(0, || {
+            assert_eq!(sys_fs_chdir(3, core::ptr::null_mut(), 0, flags), 0);
+        });
+        assert_eq!(&args[..4], &[3, 0, 0, u64::from(flags)]);
     }
 
     #[test]

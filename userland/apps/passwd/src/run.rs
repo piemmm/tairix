@@ -30,13 +30,12 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::vec::Vec;
 
     use tairix_abi::{Errno, InputMode, OpenFlags};
     use tairix_help::BundleHelp;
-    use tairix_passwd::{parse, run, SaltSource, Terminal, USAGE};
-    use tairix_rt::io::{write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
+    use tairix_passwd::{parse, run, SaltSource, Terminal};
+    use tairix_rt::io::{write_stderr_line, Read, Stdin, Stdout, Write};
     use tairix_useradmin::AdminChannel;
     use tairix_users::{Salt, SALT_LEN};
 
@@ -102,16 +101,18 @@ mod program {
 
     /// Program entry point.
     ///
-    /// Exit codes: `0` on success, `1` on a refused or failed
-    /// replacement, `2` on a usage error.
+    /// Exit codes: `0` on success, `1` on a refused or failed replacement
+    /// or a command line that was not understood.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            let _ = Stderr.write_all(USAGE.as_bytes());
-            return 2;
+        let Some(arguments) = tairix_help::arguments("passwd") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            let _ = Stderr.write_all(USAGE.as_bytes());
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("passwd", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         match run(
@@ -125,7 +126,7 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("passwd: {err}"));
+                write_stderr_line(format_args!("passwd: {err}"));
                 1
             }
         }

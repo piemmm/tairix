@@ -330,7 +330,7 @@ impl DmaSlab {
     /// Attach a [`SlabCoherencyFn`] for a **non-coherent** DMA master.
     ///
     /// On an interconnect where the device does not snoop the CPU caches
-    /// (e.g. the BCM2711 PCIe root complex), the host wires the arch cache
+    /// (a non-snooping PCIe root complex, say), the host wires the arch cache
     /// clean/invalidate primitive here so [`Self::sync_range`] can bracket
     /// every CPU-side publish/consume. Without it [`Self::sync_range`] is a
     /// no-op, the correct behaviour for a coherent interconnect or the

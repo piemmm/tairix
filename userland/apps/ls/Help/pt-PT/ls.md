@@ -48,6 +48,19 @@ resolvido, que é o que a ligação contém. Uma ligação pendente lista-se
 portanto normalmente; só uma postura que a resolva (`-L`, ou `-H` para um
 operando) comunica um alvo inalcançável.
 
+Os nomes são postos entre aspas para que os carateres incómodos fiquem
+visíveis e possam ser colados de volta numa shell em segurança: num
+terminal, a predefinição é `shell-escape` (um nome com espaços ou
+metacarateres é posto entre aspas, e os carateres de controlo aparecem
+como escapes `$'…'`), e nos outros casos é `literal` (os nomes tal como
+são). `-N`, `-Q`, `-b` e `--quoting-style` escolhem o estilo, e `-q`
+mostra os carateres de controlo como `?`. Com `-F` e `--file-type`, um
+nome que contenha `*`, `=`, `>`, `@` ou `|` é posto entre aspas pelos
+estilos de shell e tem esse caráter escapado por `-Q` e `-b`, pelo que
+não pode passar por um sufixo indicador. O `-F` do GNU deixa um `*` sem
+marca, de modo que aí um nome que termine nesse caráter parece um
+executável.
+
 ## OPTIONS
 
 - `-t` — ordenar pela data mostrada, a mais recente primeiro.
@@ -190,9 +203,12 @@ operando) comunica um alvo inalcançável.
 ## EXIT STATUS
 
 - `0` — todos os operandos foram listados.
-- `1` — um operando não pôde ser inspecionado, um diretório não pôde
-  ser lido, ou a saída não pôde ser entregue.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — um problema menor: uma entrada ou um subdiretório dentro de uma
+  listagem não pôde ser inspecionado ou lido.
+- `2` — um problema grave: a linha de comandos não foi compreendida, um
+  operando não pôde ser inspecionado ou lido, `-R` voltou a alcançar um
+  diretório através de uma ligação, a memória esgotou-se, ou a saída não
+  pôde ser entregue.
 
 ## ENVIRONMENT
 

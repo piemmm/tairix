@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemWrite, NodeId, NodeKind, VolumeHost,
+    FilesystemRead, FilesystemWrite, NodeId, NodeKind, NodeSecurity, VolumeHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -366,49 +366,62 @@ impl Workload {
     }
 
     /// Bring the volume to the state the measured window starts from, outside
-    /// that window.
-    fn prepare(self, fs: &mut ARXFS<LedgerBlock>) {
+    /// that window, and return the file the window writes.
+    fn prepare(self, fs: &mut ARXFS<LedgerBlock>) -> Option<NodeId> {
         if matches!(self, Self::CreateFile) {
-            return;
+            return None;
         }
         let root = fs.root();
-        fs.create(root, FILE, NodeKind::RegularFile)
+        let file = fs
+            .create(
+                root,
+                FILE,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create");
         if matches!(self, Self::SmallAppend) {
             let head = &payload(2 * APPEND_BYTES)[..APPEND_BYTES];
-            assert_eq!(fs.write_at(root, FILE, 0, head), Ok(APPEND_BYTES));
+            assert_eq!(fs.write_at(file, 0, head), Ok(APPEND_BYTES));
         }
+        Some(file)
     }
 
-    /// The measured work itself.
-    fn run(self, fs: &mut ARXFS<LedgerBlock>) {
-        let root = fs.root();
-        match self {
-            Self::OneCall => {
+    /// The measured work itself, on the file [`Self::prepare`] returned.
+    fn run(self, fs: &mut ARXFS<LedgerBlock>, file: Option<NodeId>) {
+        match (self, file) {
+            (Self::OneCall, Some(file)) => {
                 let body = payload(PAYLOAD_BYTES);
-                assert_eq!(fs.write_at(root, FILE, 0, &body), Ok(PAYLOAD_BYTES));
+                assert_eq!(fs.write_at(file, 0, &body), Ok(PAYLOAD_BYTES));
             }
-            Self::Chunked => {
+            (Self::Chunked, Some(file)) => {
                 let body = payload(PAYLOAD_BYTES);
                 for (call, chunk) in body.chunks(CHUNK_BYTES).enumerate() {
                     let at = u64::try_from(call * CHUNK_BYTES).expect("an offset fits a u64");
-                    assert_eq!(fs.write_at(root, FILE, at, chunk), Ok(chunk.len()));
+                    assert_eq!(fs.write_at(file, at, chunk), Ok(chunk.len()));
                 }
             }
-            Self::SmallAppend => {
+            (Self::SmallAppend, Some(file)) => {
                 // Bytes the head does not already hold, so the append cannot
                 // dedupe against it and the window prices a real store.
                 let body = payload(2 * APPEND_BYTES);
                 let at = u64::try_from(APPEND_BYTES).expect("an offset fits a u64");
                 assert_eq!(
-                    fs.write_at(root, FILE, at, &body[APPEND_BYTES..]),
+                    fs.write_at(file, at, &body[APPEND_BYTES..]),
                     Ok(APPEND_BYTES)
                 );
             }
-            Self::CreateFile => {
-                fs.create(root, FILE, NodeKind::RegularFile)
-                    .expect("create");
+            (Self::CreateFile, None) => {
+                let root = fs.root();
+                fs.create(
+                    root,
+                    FILE,
+                    NodeKind::RegularFile,
+                    &NodeSecurity::new(0o644, 0, 0),
+                )
+                .expect("create");
             }
+            (workload, file) => panic!("{workload:?} was prepared with {file:?}"),
         }
     }
 
@@ -425,13 +438,13 @@ impl Workload {
         publish: Publish,
     ) -> (Cost, BTreeMap<u64, usize>) {
         let (mut fs, ledger) = volume(block_size, device_bytes, publish);
-        self.prepare(&mut fs);
+        let file = self.prepare(&mut fs);
         if publish == Publish::Batched {
             fs.flush()
                 .expect("the fixture starts from a published volume");
         }
         ledger.borrow_mut().arm();
-        self.run(&mut fs);
+        self.run(&mut fs, file);
         if publish == Publish::Batched {
             fs.into_block()
                 .expect("handing the volume on publishes the batch");
@@ -712,9 +725,9 @@ fn a_transaction_writes_each_block_it_touches_exactly_once() {
     const DATA_BLOCKS: u64 = 148;
 
     let (mut fs, ledger) = volume(512, DEVICE_BYTES, Publish::PerOperation);
-    Workload::OneCall.prepare(&mut fs);
+    let file = Workload::OneCall.prepare(&mut fs);
     ledger.borrow_mut().arm();
-    Workload::OneCall.run(&mut fs);
+    Workload::OneCall.run(&mut fs, file);
     let cost = Cost::of(&ledger.borrow(), 512);
 
     let node = fs.lookup(fs.root(), FILE).expect("look the file up");
@@ -757,9 +770,9 @@ fn a_transaction_writes_each_block_it_touches_exactly_once() {
 fn a_commit_barriers_once_with_only_the_publishing_slot_after_it() {
     for row in BASELINE {
         let (mut fs, ledger) = volume(row.block_size, DEVICE_BYTES, Publish::PerOperation);
-        row.workload.prepare(&mut fs);
+        let file = row.workload.prepare(&mut fs);
         ledger.borrow_mut().arm();
-        row.workload.run(&mut fs);
+        row.workload.run(&mut fs, file);
         let held = ledger.borrow();
         let barriers: Vec<usize> = held
             .commands
@@ -873,11 +886,21 @@ fn refusal_fixture(dirs: usize) -> (ARXFS<LedgerBlock>, NodeId, Rc<RefCell<Ledge
     let root = fs.root();
     for index in 0..dirs {
         let name = format!("d{index:05}");
-        fs.create(root, name.as_bytes(), NodeKind::Directory)
-            .expect("fixture directory");
+        fs.create(
+            root,
+            name.as_bytes(),
+            NodeKind::Directory,
+            &NodeSecurity::new(0o755, 0, 0),
+        )
+        .expect("fixture directory");
     }
     let work = fs
-        .create(root, b"work", NodeKind::Directory)
+        .create(
+            root,
+            b"work",
+            NodeKind::Directory,
+            &NodeSecurity::new(0o755, 0, 0),
+        )
         .expect("working directory");
     (fs, work, ledger)
 }
@@ -898,25 +921,45 @@ fn a_refused_operation_leaves_the_next_one_costing_what_it_always_did() {
     for dirs in REFUSAL_FIXTURE_SIZES {
         let (mut fs, work, ledger) = refusal_fixture(dirs);
         let taken = b"already-here";
-        fs.create(work, taken, NodeKind::RegularFile)
-            .expect("the name under test");
+        fs.create(
+            work,
+            taken,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
+        .expect("the name under test");
 
         ledger.borrow_mut().arm();
-        fs.create(work, b"clean", NodeKind::RegularFile)
-            .expect("create with no refusal before it");
+        fs.create(
+            work,
+            b"clean",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
+        .expect("create with no refusal before it");
         let clean = ledger.borrow().read_blocks;
 
         ledger.borrow_mut().arm();
         assert_eq!(
-            fs.create(work, taken, NodeKind::RegularFile),
+            fs.create(
+                work,
+                taken,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0)
+            ),
             Err(DriverError::AlreadyExists),
             "the fixture's taken name must be refused"
         );
         let refusal = ledger.borrow().read_blocks;
 
         ledger.borrow_mut().arm();
-        fs.create(work, b"after", NodeKind::RegularFile)
-            .expect("create after a refusal");
+        fs.create(
+            work,
+            b"after",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
+        .expect("create after a refusal");
         let after = ledger.borrow().read_blocks;
 
         assert_eq!(
@@ -1116,25 +1159,20 @@ const FLOOR_MACHINE_BYTES: usize = 16 * RUN_BYTES;
 /// Payload that comfortably outruns [`SMALL_MACHINE_BYTES`]'s ceiling.
 const OUTRUN_BYTES: usize = 24 * RUN_BYTES;
 
-/// Write `data` whole, looping over the short counts the bound produces, and
-/// report how many calls it took.
+/// Write `data` whole into `file`, looping over the short counts the bound
+/// produces, and report how many calls it took.
 ///
 /// The peak the set pinned is read from the ledger's own high-water mark
 /// rather than sampled between calls: a call that fills the ceiling publishes
 /// before it returns, so anything measured from outside would see the residue
 /// and never the peak.
-fn write_whole_bounded(
-    fs: &mut ARXFS<LedgerBlock>,
-    dir: NodeId,
-    name: &[u8],
-    data: &[u8],
-) -> usize {
+fn write_whole_bounded(fs: &mut ARXFS<LedgerBlock>, file: NodeId, data: &[u8]) -> usize {
     let mut done = 0usize;
     let mut calls = 0usize;
     while done < data.len() {
         let at = u64::try_from(done).expect("an offset fits a u64");
         let written = fs
-            .write_at(dir, name, at, &data[done..])
+            .write_at(file, at, &data[done..])
             .expect("a bounded write still stores bytes");
         assert!(written > 0, "the bound must never stall a writer");
         done += written;
@@ -1152,13 +1190,19 @@ fn a_writer_that_outruns_the_device_is_throttled_rather_than_allowed_to_grow() {
     let (mut fs, pinned, ledger) =
         bounded_volume(512, DEVICE_BYTES, SMALL_MACHINE_BYTES, PressureBand::Normal);
     let root = fs.root();
-    fs.create(root, FILE, NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            FILE,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     fs.flush().expect("start from a published volume");
 
     let body = payload(OUTRUN_BYTES);
     ledger.borrow_mut().arm();
-    let calls = write_whole_bounded(&mut fs, root, FILE, &body);
+    let calls = write_whole_bounded(&mut fs, file, &body);
     let peak = pinned.peak_bytes();
     let ceiling = SMALL_MACHINE_BYTES / 16;
 
@@ -1223,9 +1267,15 @@ fn rising_pressure_publishes_more_often_for_the_same_payload() {
     for band in [PressureBand::Normal, PressureBand::Critical] {
         let (mut fs, pinned, _) = bounded_volume(512, DEVICE_BYTES, SMALL_MACHINE_BYTES, band);
         let root = fs.root();
-        fs.create(root, FILE, NodeKind::RegularFile)
+        let file = fs
+            .create(
+                root,
+                FILE,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create");
-        write_whole_bounded(&mut fs, root, FILE, &body);
+        write_whole_bounded(&mut fs, file, &body);
         fs.flush().expect("publish the tail");
         released.push((band, pinned.released(), pinned.peak_bytes()));
     }
@@ -1255,10 +1305,16 @@ fn the_floor_lets_a_transaction_complete_on_the_smallest_supported_machine() {
         PressureBand::Critical,
     );
     let root = fs.root();
-    fs.create(root, FILE, NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            FILE,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     let body = payload(OUTRUN_BYTES);
-    write_whole_bounded(&mut fs, root, FILE, &body);
+    write_whole_bounded(&mut fs, file, &body);
     fs.flush().expect("publish");
     let peak = pinned.peak_bytes();
     assert!(
@@ -1286,10 +1342,16 @@ fn a_small_machine_bounds_its_dirty_set_on_a_hundred_tebibyte_volume() {
             PressureBand::Moderate,
         );
         let root = fs.root();
-        fs.create(root, FILE, NodeKind::RegularFile)
+        let file = fs
+            .create(
+                root,
+                FILE,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create");
         let body = payload(OUTRUN_BYTES);
-        write_whole_bounded(&mut fs, root, FILE, &body);
+        write_whole_bounded(&mut fs, file, &body);
         fs.flush().expect("publish");
         let peak = pinned.peak_bytes();
         assert!(
@@ -1312,8 +1374,13 @@ fn the_ledger_reports_a_volumes_unwritten_bytes() {
     let (mut fs, pinned, _) =
         bounded_volume(512, DEVICE_BYTES, SMALL_MACHINE_BYTES, PressureBand::Normal);
     let root = fs.root();
-    fs.create(root, FILE, NodeKind::RegularFile)
-        .expect("create");
+    fs.create(
+        root,
+        FILE,
+        NodeKind::RegularFile,
+        &NodeSecurity::new(0o644, 0, 0),
+    )
+    .expect("create");
     assert!(
         pinned.bytes() > 0,
         "an open transaction's blocks are pinned and reported"
@@ -1341,7 +1408,13 @@ fn a_read_only_mount_pins_nothing() {
     let (fs, _) = volume(512, DEVICE_BYTES, Publish::Batched);
     let root = fs.root();
     let mut fs = fs;
-    fs.create(root, FILE, NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            FILE,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
     fs.flush().expect("publish");
     let device = fs.into_block().expect("hand the volume on");
@@ -1353,7 +1426,7 @@ fn a_read_only_mount_pins_nothing() {
         .expect("the volume mounts read-only")
         .with_writeback_bound(SMALL_MACHINE_BYTES, gauge, Arc::clone(&pinned))
         .expect("a read-only mount is bounded like any other");
-    assert_eq!(fs.write_at(root, FILE, 0, b"x"), Err(DriverError::ReadOnly));
+    assert_eq!(fs.write_at(file, 0, b"x"), Err(DriverError::ReadOnly));
     assert_eq!(fs.writeback_pinned_bytes(), 0);
     assert_eq!((pinned.bytes(), pinned.entries()), (0, 0));
 }
@@ -1424,24 +1497,29 @@ fn several_hundred_tebibyte_volumes_share_one_machines_dirty_total() {
                 .with_writeback_bound(machine_bytes, gauge, Arc::clone(slot))
                 .expect("the machine bounds every volume it mounts");
             let root = fs.root();
-            fs.create(root, FILE, NodeKind::RegularFile)
+            let file = fs
+                .create(
+                    root,
+                    FILE,
+                    NodeKind::RegularFile,
+                    &NodeSecurity::new(0o644, 0, 0),
+                )
                 .expect("create");
-            mounted.push(fs);
+            mounted.push((fs, file));
         }
 
         let body = payload(OUTRUN_BYTES);
         let mut done = [0usize; FLOOR_VOLUMES];
         while done.iter().any(|written| *written < body.len()) {
-            for (index, fs) in mounted.iter_mut().enumerate() {
+            for (index, (fs, file)) in mounted.iter_mut().enumerate() {
                 let from = done[index];
                 if from >= body.len() {
                     continue;
                 }
                 let slice = &body[from..body.len().min(from + CHUNK_BYTES)];
-                let root = fs.root();
                 let at = u64::try_from(from).expect("an offset fits a u64");
                 let written = fs
-                    .write_at(root, FILE, at, slice)
+                    .write_at(*file, at, slice)
                     .expect("a bounded write still stores bytes");
                 assert!(written > 0, "the bound must never stall a writer");
                 done[index] += written;
@@ -1465,7 +1543,7 @@ fn several_hundred_tebibyte_volumes_share_one_machines_dirty_total() {
             "the shared bound bit on every volume and forced it to write out"
         );
 
-        for (index, fs) in mounted.iter_mut().enumerate() {
+        for (index, (fs, _)) in mounted.iter_mut().enumerate() {
             fs.flush().expect("publish the tail");
             let file = fs.lookup(fs.root(), FILE).expect("the file");
             let mut read = vec![0u8; body.len()];

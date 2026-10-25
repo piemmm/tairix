@@ -7,7 +7,7 @@
 //! `plans/PI.md` P10). A `devmgr`/host composition maps that window and
 //! calls [`open_discovered`] to reset the root complex and train its
 //! link; once it returns, the same register window is handed to
-//! `tairix_pci::mechanism_brcm` to enumerate the VL805 xHCI
+//! `tairix_pci::mechanism_supplied` to enumerate the VL805 xHCI
 //! controller behind the bridge.
 //!
 //! This is the only seam that maps memory: [`open_discovered`] checks
@@ -27,11 +27,12 @@ use tairix_abi::{
     MmioMapper, MsiMessage, PciBus, RegisterWindow,
 };
 use tairix_pci::{
-    assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, mechanism_brcm,
+    assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, mechanism_supplied,
     USB_CONTROLLER_CLASS,
 };
 use tairix_usb::XHCI_BAR_INDEX;
 
+use crate::config_window::BrcmConfigSpace;
 use crate::{regs, BrcmPcieRc, Delay, PcieWindows};
 
 /// The discovered inputs the PCIe root-complex bring-up needs, all read
@@ -168,7 +169,7 @@ where
 /// compiled-in board constant — then maps the
 /// window and trains the link over it ([`open_discovered`]). On success
 /// the returned [`BrcmPcieRc`] owns the mapped window with the link up,
-/// ready for `tairix_pci::mechanism_brcm` to enumerate behind the
+/// ready for `tairix_pci::mechanism_supplied` to enumerate behind the
 /// bridge.
 ///
 /// # Errors
@@ -206,7 +207,7 @@ pub fn bring_up_from_node(
 /// On success the returned [`BrcmPcieRc`] owns the mapped window with the
 /// link up; the caller recovers the window with
 /// [`BrcmPcieRc::into_regs`] and builds the windowed configuration
-/// accessor (`tairix_pci::mechanism_brcm`) over it.
+/// accessor (`tairix_pci::mechanism_supplied`) over it.
 ///
 /// # Errors
 ///
@@ -284,7 +285,7 @@ pub fn emit_vl805_node(
     // The windowed configuration accessor over the trained register window:
     // it forwards config only to the single device on the secondary bus, so a
     // scan never TLPs an absent target (which would CPU-abort on the SoC bus).
-    let bus = mechanism_brcm(rc.into_regs(), regs::RC_SECONDARY_BUS);
+    let bus = mechanism_supplied(BrcmConfigSpace::new(rc.into_regs(), regs::RC_SECONDARY_BUS));
     publish_usb_function(host, &bus, &bringup.windows)
 }
 

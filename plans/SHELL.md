@@ -308,11 +308,14 @@ path grammar:
    root (`tairix_path::is_relative_spelling`).
 4. Matches are sorted bytewise — the C collation every listing on the system
    uses — and deduplicated, then `GLOBIGNORE`'s `:`-separated patterns remove
-   the paths they match whole, along with any path ending in `.` or `..`. A
-   non-empty `GLOBIGNORE` implies `dotglob` without setting the option, so
-   unsetting it never clears a `dotglob` the session set. An entry that is no
-   valid pattern fails a line whose pattern matched anything (bash's hides
-   nothing), so a typo can never expose what it was meant to hide.
+   the paths they match whole, along with any path ending in `.` or `..`; the
+   patterns are compiled once for each value, charged to the line that first
+   needs them at what they hold. A non-empty `GLOBIGNORE` implies `dotglob`
+   without setting the option, so unsetting it never clears a `dotglob` the
+   session set. An entry that is no valid pattern fails a line whose pattern
+   matched anything (bash's hides nothing), so a typo can never expose what it
+   was meant to hide; so does one whose group holds a `/`, which compared a
+   component at a time would hide less than it names.
 5. A pattern matching nothing is left as written, removed under `nullglob`,
    or, under `failglob`, an error that aborts the line with `$?` 1.
 6. A redirection target is expanded the same way and must yield exactly one
@@ -334,8 +337,9 @@ option `noglob`.
   `**` stands for what one does. The level `**` adds nothing to is spelled
   with the separator before it (`dir/**` yields `dir/`), one way everywhere.
   Each directory is read once: a wildcard after `**` is matched against the
-  listing the walk reads anyway, and the walk ends at `MAX_COMPONENTS` levels,
-  where a path could no longer be spelled.
+  listing the walk reads anyway, and the walk ends where a path would pass
+  `MAX_COMPONENTS` components and could no longer be spelled, wherever the
+  walk began.
 - **`extglob`.** `?(…)`, `*(…)`, `+(…)`, `@(…)` and `!(…)` over
   `|`-separated alternatives. The lexer always reads such a group as one word,
   its `|`, blanks and nested parentheses included; while `extglob` is off, a
@@ -345,13 +349,18 @@ option `noglob`.
 An expansion is bounded: everything one line expands — every pipeline
 member's words, redirection targets, here-strings, here-documents and
 assignment values — may hold no more than the largest argument block a
-program can be handed (`PROCESS_START_MAX_TOTAL_LEN`, each word charged its
-bookkeeping too), and a word is refused before a value would carry it past
-what the line has left, so a short line can never demand unbounded memory. A
+program can be handed (`PROCESS_START_MAX_TOTAL_LEN`), charged before it is
+allocated at what it holds: every byte of text, the words brace expansion
+makes on the way, and each list's room for words as it grows. A word is
+refused before a value would carry it past what the line has left, and memory
+the heap refuses on the way, there or in a pattern's match, fails the line as
+`out of memory`, never the session, so a short line can never demand
+unbounded memory. A
 directory that is absent, is no directory that can be listed, lies past what
 a path can reach, or is not the session's to list contributes nothing, as in
 bash; any other failure, and any failure once a listing has begun, aborts the
-line naming the directory rather than leaving a silently partial result. Filename generation
+line naming the directory it could not read, or the path it could not look
+up, rather than leaving a silently partial result. Filename generation
 reaches the filesystem only through the injected read-only `GlobFs` seam
 (listing and a resolve-only probe), so every permission check stays
 kernel-side.
@@ -1311,6 +1320,13 @@ cd /Users/ian/Documents      # synthetic view path
 cd ../src                    # relative to current root
 ```
 
+`cd` is logical by default (`-L`), as POSIX's is: a relative operand, `..`
+included, is applied to `PWD` while it still names the working directory (the
+directory's own path otherwise) and the result entered, so `cd link; cd ..`
+returns to where the link was named, and `/..` is `/`. `cd -P` enters physically and sets `PWD`
+from the working directory's own path; `pwd -L` prints `PWD` while it still
+names the working directory and `pwd -P` the directory's own path.
+
 A malformed selector such as `cd Home:Documents` (alias without `:/`) or
 `cd C:Users` (drive-letter style) MUST fail closed, not guess. There is no
 per-drive current directory: the shell has exactly **one** current directory,
@@ -1984,8 +2000,10 @@ attach block wires only the standard fd 0–3.
 - **Here-documents** (`<<`, `<<-`). The
   command line names only the delimiter (quote removal, never expansion; any
   quoted part — including a double-quoted run, tracked by the lexer's
-  `Segment::QuotedExpandable` — makes the body literal, else the body gets
-  the same `$` expansion as a word). The body is collected afterwards in
+  `Segment::QuotedExpandable` — makes the body literal, else the body is
+  double-quoted text in which only `\$`, `` \` `` and `\\` escape,
+  `lexer::here_doc_word`, and a line ending in an unescaped `\` joins the
+  next before the delimiter comparison, as POSIX reads it). The body is collected afterwards in
   source order (`CommandList::pending_here_doc` / `feed_here_doc_line`),
   driven by the REPL under a `> ` continuation prompt; `<<-` strips leading
   tabs from body and terminator lines. A complete body lowers to the same
@@ -2026,9 +2044,11 @@ attach block wires only the standard fd 0–3.
   mixing directions (or the bidirectional `<>`) fails the line closed. The
   host contract is fail-closed: open every target or apply nothing. A
   `{var}` glued to any `<`/`>` operator allocates a fresh descriptor (≥ 10,
-  never fd 0–3) and binds its number to `$var`; `{var}>&-` closes the number
-  read back from `$var` and fails closed (`BadDynamicFd`) when the variable
-  does not hold an allocated descriptor.
+  never fd 0–3) and binds its number to `$var` once its target has expanded,
+  as bash orders it; a pipeline that never launches — a target that fails to
+  expand, a launch the host refuses — leaves `$var` as it was. `{var}>&-`
+  closes the number read back from `$var` and fails closed (`BadDynamicFd`)
+  when the variable does not hold an allocated descriptor.
 - **Command resolution** (`plans/APPS.md` §8–§9, the owning spec). The pure candidate policy
   (`tairix_cmdres::resolution_candidates`, the `lib/cmdres` definition the
   `man` command's bundle lookup also imports) computes the ordered program-path
@@ -2055,8 +2075,12 @@ attach block wires only the standard fd 0–3.
   (`§24.1`).
 - **Forms refused closed**: process substitution — `<(…)`/`>(…)` await the
   pipe/launch plumbing and `=(…)` is permanently unsupported (no scratch
-  filesystem, §16.1) — and the compound commands `( list )` / `{ list; }`. Each aborts the line with a parse error
-  (`UnsupportedProcessSubstitution` / `UnsupportedCompound`), so a
+  filesystem, §16.1) — the compound commands `( list )` / `{ list; }`, and
+  command substitution and arithmetic expansion (`$(…)`, `` `…` ``, `$((…))`,
+  SH9) in a word, inside double quotes and in a here-document body. Each
+  aborts the line with a parse error (`UnsupportedProcessSubstitution` /
+  `UnsupportedCompound` / `UnsupportedSubstitution`), and an unquoted `(` or
+  `)` inside a word is the `UnexpectedToken` bash reports there, so a
   parenthesised command is never misread as a filename and `{`/`(` never runs
   as a program name. A redirection on a *builtin* also fails closed (status
   1): builtins write through the `Console` seam, and silently sending a
@@ -2068,8 +2092,8 @@ attach block wires only the standard fd 0–3.
 
 - **Expansion.** `src/brace.rs` (brace expansion over the lexer's quoted
   segments, sequences generated lazily against the budget), `src/env.rs`
-  (parameter expansion keeping each character's quoting as a `lib/glob`
-  `Mark`, values marked literal), `src/pathexp.rs` (the component walk over
+  (parameter expansion keeping which of its text was typed unquoted, values
+  standing for themselves), `src/pathexp.rs` (the component walk over
   `GlobFs`) and `src/expand.rs` (the pipeline, the empty-word rule, the
   `export` operand rule, and the bound). Each command's words are expanded
   exactly once, before the builtin-or-launch decision, so a pattern's

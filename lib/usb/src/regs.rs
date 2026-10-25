@@ -20,7 +20,7 @@ pub const HCSPARAMS1: usize = 0x04;
 
 /// `HCSPARAMS2` — structural parameters 2 (§5.3.4). Carries the
 /// Max Scratchpad Buffers field the controller requires software to
-/// reserve before it can run (the VL805 reports 31).
+/// reserve before it can run.
 pub const HCSPARAMS2: usize = 0x08;
 
 /// `HCCPARAMS1` — capability parameters 1 (§5.3.6).
@@ -89,8 +89,8 @@ pub const USBCMD_RUN: u32 = 1 << 0;
 pub const USBCMD_HCRST: u32 = 1 << 1;
 
 /// `USBCMD` Interrupter Enable (INTE, §5.4.1): the global gate that lets
-/// the controller assert an interrupt (the MSI write, on a PCIe controller
-/// such as the VL805) when an enabled interrupter has a pending event. With
+/// the controller assert an interrupt (the MSI write, on a PCIe controller)
+/// when an enabled interrupter has a pending event. With
 /// it clear the controller only posts events to the ring and software must
 /// poll; with it set, plus a per-interrupter [`IMAN_IE`], a posted event
 /// raises the device's interrupt.
@@ -277,8 +277,7 @@ pub const MFINDEX_MASK: u32 = 0x3FFF;
 /// `HCSPARAMS2` Max Scratchpad Buffers (§5.3.4): the count of
 /// page-sized scratchpad buffers software must reserve for the
 /// controller's private state, split across a high field (bits 25:21)
-/// and a low field (bits 31:27). The VL805 reports 31; a controller
-/// reporting `0` needs none.
+/// and a low field (bits 31:27). A controller reporting `0` needs none.
 #[must_use]
 pub const fn hcsparams2_max_scratchpad(raw: u32) -> u32 {
     let hi = (raw >> 21) & 0x1F;

@@ -83,8 +83,8 @@ portent :
 - `0` — la session s'est terminée par `q`, ou l'aide courte a été
   affichée.
 - `1` — le service ou le terminal a échoué ; la raison est imprimée
-  sur la sortie d'erreur standard.
-- `2` — la ligne de commande n'a pas été comprise.
+  sur la sortie d'erreur standard. Une ligne de commande non comprise
+  sort aussi avec `1`.
 
 ## ENVIRONMENT
 

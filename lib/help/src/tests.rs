@@ -664,3 +664,15 @@ fn colour_styling_wraps_headings_and_plain_styling_does_not() {
     ));
     assert!(mono.contains(&0x1b), "monochrome keeps attribute escapes");
 }
+
+/// GNU 9.4's words: `cp --frob` ends `Try 'cp --help' for more information.`
+#[test]
+fn a_refused_command_line_points_at_the_commands_own_help() {
+    use alloc::string::ToString;
+
+    assert_eq!(
+        crate::TryHelp("cp").to_string(),
+        "Try 'cp --help' for more information."
+    );
+    assert_eq!(crate::MISUSE, 1);
+}

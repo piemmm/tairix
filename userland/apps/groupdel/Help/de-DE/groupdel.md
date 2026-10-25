@@ -25,8 +25,7 @@ Das Verzeichnis entscheidet, was entfernt werden darf. Es verweigert das Lösche
 ## EXIT STATUS
 
 - `0` — die Gruppe wurde gelöscht.
-- `1` — das Verzeichnis hat das Löschen verweigert oder es ist fehlgeschlagen (etwa eine fehlende Fähigkeit, eine unbekannte Gruppe oder eine noch referenzierte Gruppe); der Grund erscheint auf der Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — das Verzeichnis hat das Löschen verweigert oder es ist fehlgeschlagen (etwa eine fehlende Fähigkeit, eine unbekannte Gruppe oder eine noch referenzierte Gruppe); der Grund erscheint auf der Standardfehlerausgabe. Eine nicht verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

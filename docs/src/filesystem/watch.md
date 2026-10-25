@@ -29,14 +29,18 @@ seen. A mutation the driver refuses records nothing.
   not. Names are decrypted user data, so each copy the watch path holds is
   wiped before it is freed.
 - **Subfolders report on their own entry.** A change inside a subfolder is
-  recorded against the subfolder's entry in its parent, attributed through a
-  short trail of the volume's recent lookups, so a parent listing's folder
-  stays current. A metadata change is attributed to the name it was made
-  through, and a new hard link reports both its own name and the one it was
-  made from, whose link count moved. The trail holds the sixteen bindings
-  resolved most recently, so a folder reached through more distinct
-  components than that since its own was resolved loses only that one report
-  of its entry in its parent; the folder's own listing never depends on it.
+  recorded against the subfolder's entry in its parent, so a parent listing's
+  folder stays current. A write or a metadata change, which the driver surface
+  keys by node, is reported against the name it was made through, and a new
+  hard link reports both its own name and the one it was made from, whose link
+  count moved. A node a descriptor holds is known by its place for the whole
+  hold: the name the open's walk reached it by, moved by a rename and dropped
+  by a removal, so a descriptor open for a day reports every write it makes
+  under the name the node bears now. Any other node is known through a short
+  trail of the volume's recent lookups, the sixteen bindings resolved most
+  recently, so a folder reached through more distinct components than that
+  since its own was resolved loses only that one report of its entry in its
+  parent; the folder's own listing never depends on it.
 - **A file's other names are not reported.** A change made through one name
   of a file with several hard links reports that name alone; its other names,
   in this directory or another, show their old size and stamp until listed
@@ -54,15 +58,18 @@ seen. A mutation the driver refuses records nothing.
 
 ### What a drain answers
 
-Each drain resolves the descriptor's path again under the drainer's authority:
+A watch is on the directory its descriptor holds, not on a path to it:
+renaming the directory, or any directory above it, ends nothing. Each drain
+checks only that directory, under the drainer's authority:
 
-- **gone** — the path no longer reaches the watched directory, names no
-  directory, or may no longer be listed, or the volume's table was retired.
-  The watch is spent: it reports nothing more, refuses to join a wait-set, and
-  counts against the limit until its descriptor closes.
-- **rescan** — the journal could not keep up (above), a directory's mode,
-  owner or ACL changed since the last drain (the journal may hold names the
-  drainer could not have listed), a mount appeared or left beneath the
+- **gone** — the directory was removed, may no longer be listed, or is no
+  longer reached at all: its projection left the mount table, its volume's
+  registration was retired, or the volume's table was. The watch is spent: it
+  reports nothing more, refuses to join a wait-set, and counts against the
+  limit until its descriptor closes.
+- **rescan** — the journal could not keep up (above), the directory's own
+  mode, owner or ACL changed since the last drain (the journal may hold names
+  the drainer could not have listed), a mount appeared or left beneath the
   directory, or reading an entry faulted.
 - **changes** — otherwise: each name with what it now lists as, or absent.
 
@@ -90,24 +97,18 @@ Both are gated on `CAP_FS_ACCESS` and unaudited, like `fs_readdir`.
   bytes. A batch is committed only once it has been copied out, so a faulting
   buffer loses nothing.
 - **The `DirWatch` wait-set member** (kind 13; `id` is the descriptor) is how
-  a consumer waits. It is readied by the journal advancing, by the table
-  retiring, and by any epoch the path last resolved against moving: the mount
-  table's, the path epoch (any directory or symbolic link renamed, removed or
-  replaced) and the access epoch (any directory's mode, owner or ACL changed).
-  Those two are the whole machine's, because a path's ancestors need not be on
-  its directory's volume; a directory's first owner, given to it as it is made,
-  is no change of anyone's access and moves neither. Both are read before the
-  path resolves, at arming and at every drain, so a move while it resolves
-  readies the member at once. A reported move is reported once and the member
-  then holds until its watcher drains, since until that drain re-resolves the
-  path the directory may not be the watcher's to follow; a watcher that stops
-  draining learns nothing more about it. It is edge-triggered and paced in the
-  kernel: an isolated change reports at once, and a storm at most once per
-  `latency_ns`, the trailing report armed as the wait's one-shot deadline
-  rather than a timer tick. A change no member waits on wakes no one, and a
-  run of moves wakes a parked member once. Pacing is the member's own, so a
-  description joined to several wait-sets is paced in each, while the journal
-  it drains is the description's: whichever drains first takes the batch.
+  a consumer waits. It is readied by the journal advancing — the directory's
+  removal and its own security changing among what advances it — by the table
+  retiring, and by the mount table's epoch moving, since a mount may have
+  appeared or left beneath the directory. The epoch is read at arming and at
+  every drain, so a mount change while either runs readies the member at
+  once. It is edge-triggered and paced in the kernel: an isolated change
+  reports at once, and a storm at most once per `latency_ns`, the trailing
+  report armed as the wait's one-shot deadline rather than a timer tick. A
+  change no member waits on wakes no one, and a run of mount changes wakes a
+  parked member once. Pacing is the member's own, so a description joined to
+  several wait-sets is paced in each, while the journal it drains is the
+  description's: whichever drains first takes the batch.
 
 ### Arm, then list
 
@@ -161,10 +162,11 @@ once on `stderr`.
 
 ## Compared with inotify and FSEvents
 
-A watch is a property of an open description, so it cannot outlive or be
-confused with the directory it was armed on. Its journal coalesces by name
-and degrades to a rescan by design instead of overflowing a queue, storms are
-paced in the kernel rather than delivered event by event, and the state of
-each changed name is answered under the reader's own authority at the moment
-it reads — a watcher that loses the right to list the directory learns it is
-gone rather than reading on.
+A watch is a property of an open description holding its directory, so it
+cannot outlive or be confused with the directory it was armed on, and follows
+it wherever it is moved. Its journal coalesces by name and degrades to a
+rescan by design instead of overflowing a queue, storms are paced in the
+kernel rather than delivered event by event, and the state of each changed
+name is answered under the reader's own authority at the moment it reads —
+a watcher that loses the right to list the directory learns it is gone
+rather than reading on.

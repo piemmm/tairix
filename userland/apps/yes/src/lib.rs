@@ -24,10 +24,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); its only dependency is the shared `lib/help`
-//! engine used by the `Run` binary. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths; nothing writes to fd 3
-//! (`stdinfo`).
+//! `no_std` (with `alloc`); it depends only on the shared `lib/help` engine
+//! the `Run` binary uses and `lib/util`'s output seam and command-line
+//! scanner. No `unsafe`, and no `unwrap`/`expect`/`panic!` in production
+//! paths; nothing writes to fd 3 (`stdinfo`).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -37,9 +37,12 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `yes`'s own Help tree is unavailable.
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+
+/// The usage banner the short-help switches print when `yes`'s own Help tree
+/// is unavailable.
 pub const USAGE: &str = "usage: yes [string...]";
 
 /// The output-block size [`block`] fills, in bytes.
@@ -60,50 +63,64 @@ pub enum Command {
 }
 
 /// The failures the `yes` tool reports.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum YesError {
-    /// The command line was not understood (an unrecognised option).
-    Usage,
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// The output stopped accepting bytes (a closed pipe, a write error).
     Output,
 }
 
+impl fmt::Display for YesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::Output => f.write_str("write error"),
+        }
+    }
+}
+
 pub use tairix_util::output::Output;
+
+/// What each of `yes`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `yes`'s options: the reserved help switches alone.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is the GNU `yes` surface, `yes [string...]`:
+/// The grammar is the GNU `yes` surface, `yes [string...]`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]) with the first operand ending the
+/// options, so `yes a -x` prints `a -x`:
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md §4; they win immediately).
 /// * `--` — end option parsing; every later argument is an operand, so
 ///   `yes -- -x` prints `-x`.
-/// * any other option-shaped token before the first operand — a
-///   [`YesError::Usage`] error, exactly as GNU `yes` rejects `-x`.
-/// * the first operand ends option scanning: `yes a -x` prints `a -x`.
 ///
-/// A lone `-` is an operand, not an option. Because every recognised
-/// option terminates the scan (`--` starts the operands, a help switch
-/// answers immediately), only the first token can be an option at all —
-/// the decision is a single look at `args[0]`.
+/// A lone `-` is an operand, not an option.
 ///
 /// # Errors
 ///
-/// [`YesError::Usage`] for an unrecognised option before the operands.
+/// [`YesError::Option`] for an option `getopt` refuses before the operands,
+/// in its words, exactly as GNU `yes` rejects `-x`.
 pub fn parse(args: &[&str]) -> Result<Command, YesError> {
-    match args.first() {
-        None => Ok(repeat(&[])),
-        Some(&"--") => Ok(repeat(&args[1..])),
-        Some(&"-h" | &"-?" | &"--help") => Ok(Command::Help),
-        Some(&arg) if arg.len() > 1 && arg.starts_with('-') => Err(YesError::Usage),
-        Some(_) => Ok(repeat(args)),
+    let mut operands = Vec::new();
+    for arg in Scan::new(OPTIONS, args, Order::OperandsEnd) {
+        match arg.map_err(YesError::Option)? {
+            Arg::Operand(operand) => operands.push(String::from(operand)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+        }
     }
-}
-
-/// The [`Command::Repeat`] for `operands`, owning its strings.
-fn repeat(operands: &[&str]) -> Command {
-    Command::Repeat(operands.iter().map(|&s| String::from(s)).collect())
+    Ok(Command::Repeat(operands))
 }
 
 /// The output block for `operands`: the line they name (operands joined by
@@ -156,7 +173,7 @@ pub fn pump(block: &[u8], out: &dyn Output) -> YesError {
 mod tests {
     extern crate std;
 
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::Cell;
@@ -203,12 +220,27 @@ mod tests {
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
+    fn a_refused_option_is_worded_as_getopt_words_it() {
         // GNU `yes` rejects unrecognised options; `yes -- -x` is the
         // spelling that prints them.
-        assert_eq!(parse(&["-x"]), Err(YesError::Usage));
-        assert_eq!(parse(&["--frob", "a"]), Err(YesError::Usage));
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob", "a"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--help=x"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `yes --he` as `yes --help`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

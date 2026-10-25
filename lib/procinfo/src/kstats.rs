@@ -632,7 +632,7 @@ mod tests {
                         tairix_abi::HW_NODE_ROOT,
                         tairix_abi::HwDeviceClass::Root,
                     );
-                    let key = tairix_abi::HwMatchKey::compatible(b"raspberrypi,400")?;
+                    let key = tairix_abi::HwMatchKey::compatible(b"vendor,board")?;
                     root.push_match_key(key)?;
                     let mut out = alloc::vec![0u8; PlatformCompatible::WIRE_MAX];
                     let len = PlatformCompatible::of(&root).encode(&mut out)?;
@@ -811,7 +811,7 @@ mod tests {
     fn the_board_is_read_through_its_ungated_query_and_a_torn_answer_is_refused() {
         let mut fixture = Fixture::new();
         let board = platform_compatible(&fixture).expect("read");
-        assert!(board.strings().eq([&b"raspberrypi,400"[..]]));
+        assert!(board.strings().eq([&b"vendor,board"[..]]));
         fixture.malformed = Some(SysinfoQueryId::PLATFORM_COMPATIBLE);
         assert_eq!(
             platform_compatible(&fixture),

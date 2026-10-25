@@ -156,4 +156,8 @@ the writable-state subtree (`/System/Logs`, `/System/Settings`,
 Until the root volume is mounted, the writable root driver is not yet
 registered and every operation on `/` and its writable subtrees fails
 closed (`Errno::NotImplemented`), never a silent fallback to the
-read-only `/System`.
+read-only `/System`. A walk still passes through `/` into a projection
+shown beneath it, by that projection's exact name, so `/System` — where
+every boot service is loaded from — is reached before the unlock. The
+search permission it is checked against meanwhile is the boot layout's
+record of `/`; once the volume is served, its own root directory's is.

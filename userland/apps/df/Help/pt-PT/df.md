@@ -75,8 +75,8 @@ estão disponíveis.
 - `0` — o relatório cobriu tudo o que foi pedido (ou a ajuda curta
   foi escrita).
 - `1` — um operando não pôde ser reportado, os filtros não deixaram
-  nada, ou a consulta ou a saída falharam.
-- `2` — a linha de comandos não foi compreendida.
+  nada, ou a consulta ou a saída falharam. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

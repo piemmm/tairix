@@ -1,5 +1,5 @@
 //! `plans/NETWORK.md` N4e-riscv64 (first stage) QEMU integration test: boot
-//! the production riscv64 (QEMU `virt` / SiFive) `tairix-kernel` pipeline with
+//! the production riscv64 (QEMU `virt`) `tairix-kernel` pipeline with
 //! a planted whole-disk encrypted-root image that carries the **kernel-signed
 //! virtio-input keyboard driver bundle** in its always-readable `/System`
 //! store, plus an attached `virtio-keyboard-device`, and prove the full

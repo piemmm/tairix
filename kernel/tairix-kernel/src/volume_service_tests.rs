@@ -16,7 +16,9 @@
 //! re-insert, sibling-extent, and unknown-medium paths, and to the link
 //! round trip over an attached ARXFS volume — the one place both link
 //! kinds are driven through the real service and therefore through the
-//! production wrapper chain, which every other link test bypasses.
+//! production wrapper chain, which every other link test bypasses — and to
+//! descriptors held across renames, unlinks, detaches and removals on real
+//! formats, which no in-memory driver can stand in for.
 
 extern crate std;
 
@@ -38,12 +40,18 @@ use tairix_abi::blkio::{
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::NameMatching;
 use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind, NodeSecurity,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeKind, NodeSecurity,
+    Unpinned, VolumeStats,
 };
-use tairix_abi::fs::{OpenFlags, FS_OWNER_UNCHANGED};
+use tairix_abi::fs::{
+    OpenFlags, FS_INITIAL_UMASK, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE, FS_OWNER_UNCHANGED,
+};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
-use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno};
+use tairix_abi::{
+    CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno, FileStat, LockRange,
+    RenameFlags, UnlinkFlags,
+};
 use tairix_caps::CapabilitySet;
 use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
 use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
@@ -51,8 +59,13 @@ use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_drv_fs_iso9660::Iso9660;
 use tairix_drv_fs_udf::{FormatOptions, Udf};
+use tairix_hash::{HashSeed, SipHash13};
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
-use tairix_kernel_core::fs::{FilesystemService, FinalLink};
+use tairix_kernel_core::filelock::{self, LockedNode, Request};
+use tairix_kernel_core::fs::{
+    Acting, At, Authority, CreateMode, FilesystemService, FinalLink, FrozenAuthority, Grant,
+    NodeHandle, Opened, Start,
+};
 use tairix_kernel_core::fswatch::WatchRegistry;
 use tairix_kernel_core::{sharedreg, Path, Vfs};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
@@ -67,15 +80,17 @@ use crate::root_mount::LATE_IDENTITY;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::test_support::{RamBlock, BLOCK_SIZE};
 use crate::volume_policy::LATE_STORAGE_GID;
-use crate::volume_service::{RuntimeVolumeService, VOLUME_SERVICE};
+use crate::volume_service::{RuntimeVolumeService, UnavailableFs, VOLUME_SERVICE};
 use tairix_kernel_core::callreg::EndpointVanishObserver as _;
 use tairix_kernel_core::VolumeService as _;
 
-/// One audited decision: its event id, the volume it names, and its cause.
+/// One audited decision: its event id, the volume it names, its cause, and
+/// the counts it carries.
 struct Audit {
     id: u32,
     volume: Option<String>,
     cause: Option<String>,
+    counts: Vec<(String, u64)>,
 }
 
 /// Records every event the service audits, so a scenario can assert what it
@@ -94,10 +109,19 @@ impl Sink for Recorded {
                     _ => None,
                 })
         };
+        let counts = event
+            .fields
+            .iter()
+            .filter_map(|field| match field.value {
+                FieldValue::UnsignedInt(count) => Some((String::from(field.key), count)),
+                _ => None,
+            })
+            .collect();
         let audit = Audit {
             id: event.id.0,
             volume: field("volume"),
             cause: field("cause"),
+            counts,
         };
         self.0.lock().unwrap().push(audit);
     }
@@ -116,11 +140,30 @@ fn audited(id: u32, volume: &str) -> Vec<Option<String>> {
         .collect()
 }
 
+/// The `key` count of every `id` event audited for `volume`, in order.
+fn audited_count(id: u32, volume: &str, key: &str) -> Vec<Option<u64>> {
+    SINK.0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|audit| audit.id == id && audit.volume.as_deref() == Some(volume))
+        .map(|audit| {
+            audit
+                .counts
+                .iter()
+                .find(|(named, _)| named == key)
+                .map(|&(_, count)| count)
+        })
+        .collect()
+}
+
 /// The service's own event ids, as the volume manager and an operator read
 /// them back.
 const ATTACH_REFUSED: u32 = 4173;
+const DETACH_REFUSED: u32 = 4175;
 const SURPRISE_REMOVED_CLEAN: u32 = 4176;
 const SURPRISE_REMOVED_LOST: u32 = 4178;
+const FORCE_UNMOUNTED: u32 = 4179;
 const ATTACHED_READ_ONLY: u32 = 4180;
 const NAME_TAKEN: u32 = 4181;
 
@@ -175,6 +218,141 @@ impl CapabilityQuery for Chown {
     fn holds(&self, cap: CapabilityId) -> bool {
         cap == CapabilityId::FS_CHOWN
     }
+}
+
+/// A descriptor of what an open through the production service pinned,
+/// acting as its opener; dropped, it lets the pin go as a close does.
+struct Descriptor {
+    handle: Option<NodeHandle>,
+    uid: u32,
+    granted: bool,
+}
+
+/// What a creator that names no mode asks of a new file under the initial
+/// umask, when `flags` may create: born `0o644`.
+fn creating(flags: OpenFlags) -> CreateMode {
+    if flags.contains(OpenFlags::CREATE) {
+        CreateMode::new(FS_NEW_FILE_MODE, FS_INITIAL_UMASK)
+            .expect("a creator's default is in range")
+    } else {
+        CreateMode::NONE
+    }
+}
+
+/// `path`, an absolute one, as the filesystem service takes it.
+fn root(path: &str) -> At<'_> {
+    At {
+        start: Start::Root,
+        path,
+    }
+}
+
+/// What a creator that names no mode asks of a new directory under the
+/// initial umask: born `0o755`.
+fn new_dir() -> CreateMode {
+    CreateMode::new(FS_NEW_DIR_MODE, FS_INITIAL_UMASK).expect("a creator's default is in range")
+}
+
+impl Descriptor {
+    /// The opener's own descriptor of `path`, opened as `uid` under `flags`.
+    fn open(uid: u32, path: &str, flags: OpenFlags) -> Result<Self, Errno> {
+        match FS_SERVICE.open(uid, &NoCaps, root(path), flags, creating(flags))? {
+            Opened::Node {
+                node,
+                projection,
+                opened_as,
+                at_floor,
+                ..
+            } => Ok(Self {
+                handle: Some(NodeHandle {
+                    node,
+                    projection,
+                    authority: Authority::Holder,
+                    opened_as,
+                    at_floor,
+                }),
+                uid,
+                granted: false,
+            }),
+            Opened::Catalog(_) => Err(Errno::IsADirectory),
+        }
+    }
+
+    /// What an `fd_grant` of this descriptor hands on: the same node, under
+    /// its opener's identity frozen with a grant.
+    fn granted(&self) -> Self {
+        let authority = Authority::Frozen(FrozenAuthority {
+            uid: self.uid,
+            caps: CapabilitySet::empty(),
+            grant: Some(Grant {
+                write_ceiling: None,
+            }),
+        });
+        Self {
+            handle: Some(NodeHandle {
+                authority,
+                ..self.handle().clone()
+            }),
+            uid: self.uid,
+            granted: true,
+        }
+    }
+
+    fn handle(&self) -> &NodeHandle {
+        self.handle.as_ref().expect("held until dropped")
+    }
+
+    fn acting(&self) -> Acting<'static> {
+        Acting {
+            uid: self.uid,
+            caps: &NoCaps,
+            granted: self.granted,
+        }
+    }
+
+    fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        FS_SERVICE.read_node(self.handle(), &self.acting(), offset, buf)
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<usize, Errno> {
+        FS_SERVICE.write_node(self.handle(), &self.acting(), offset, false, data)
+    }
+
+    fn stat(&self) -> Result<FileStat, Errno> {
+        FS_SERVICE.stat_node(self.handle(), &self.acting())
+    }
+
+    /// The key a lock taken through this descriptor is filed under.
+    fn key(&self) -> LockedNode {
+        LockedNode::of(&self.handle().node)
+    }
+}
+
+impl Drop for Descriptor {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let volume = StdArc::clone(handle.node.volume());
+            drop(handle);
+            FS_SERVICE.reap(&volume);
+        }
+    }
+}
+
+/// Read `path` at `offset` as `uid` through a descriptor of its own.
+fn read_as(uid: u32, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+    Descriptor::open(uid, path, OpenFlags::READ)?.read(offset, buf)
+}
+
+/// Write `data` to `path` at `offset` as `uid` through a descriptor of its
+/// own.
+fn write_as(uid: u32, path: &str, offset: u64, data: &[u8]) -> Result<usize, Errno> {
+    Descriptor::open(uid, path, OpenFlags::WRITE)?.write(offset, data)
+}
+
+/// Open `path` as `uid` under `flags` and close it again: what an open alone
+/// does.
+fn open_as(uid: u32, path: &str, flags: OpenFlags) -> Result<(), Errno> {
+    Descriptor::open(uid, path, flags).map(drop)
 }
 
 /// 64 MiB — comfortably past the FAT32 minimum cluster count.
@@ -447,6 +625,31 @@ fn a_recovered_volume_is_served_only_under_its_recovered_posture() {
     assert!(served);
 }
 
+/// The stand-in answers a climb and a byte write with the transient device
+/// fault a vanished disk is, never a refusal that would read as a format
+/// limit.
+#[test]
+fn the_unavailable_stand_in_faults_a_climb_and_every_byte_write() {
+    let mut fs = UnavailableFs;
+    let root = fs.root();
+    assert_eq!(fs.parent(root), Err(DriverError::DeviceFault));
+    assert_eq!(fs.write_at(root, 0, b"x"), Err(DriverError::DeviceFault));
+    assert_eq!(fs.write_all(root, 0, b"x"), Err(DriverError::DeviceFault));
+    assert_eq!(fs.truncate(root, 0), Err(DriverError::DeviceFault));
+    assert_eq!(fs.punch(root, 0, 1), Err(DriverError::DeviceFault));
+}
+
+/// The stand-in refuses a new hold with the device fault, and every release
+/// of one taken on the driver it replaced succeeds: that hold went with it.
+#[test]
+fn the_unavailable_stand_in_refuses_a_hold_and_settles_every_release() {
+    let mut fs = UnavailableFs;
+    let root = fs.root();
+    assert_eq!(fs.pin(root), Err(DriverError::DeviceFault));
+    assert_eq!(fs.unpin(root), Ok(Unpinned::Released));
+    assert_eq!(fs.release_pins(), Ok(()));
+}
+
 #[test]
 fn an_unwired_service_fails_closed() {
     let service = RuntimeVolumeService::new();
@@ -497,9 +700,15 @@ fn identity_with_storage_member() -> tairix_kernel_sec::IdentityTable {
 fn fat32_image(serial: u32, payload: &[u8]) -> (RamBlock, [u8; 16]) {
     let mut fs = Fat32::format(RamBlock::new(SECTORS_64MIB), serial).expect("format");
     let root = fs.root();
-    fs.create(root, b"hello.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            b"hello.txt",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
-    fs.write_at(root, b"hello.txt", 0, payload).expect("write");
+    fs.write_at(file, 0, payload).expect("write");
     let image = fs.into_block();
     let identity = Fat32::open(RamBlock {
         data: image.data.clone(),
@@ -529,7 +738,7 @@ fn assert_identity_mapped_access() {
         .stat(
             MEMBER_UID,
             &NoCaps,
-            "/Storage/usb1/hello.txt",
+            root("/Storage/usb1/hello.txt"),
             FinalLink::Follow,
         )
         .expect("member stats the file");
@@ -538,42 +747,16 @@ fn assert_identity_mapped_access() {
         (0o664, 0, STORAGE_GID),
         "the identity map presents system ownership under the storage group"
     );
-    let n = FS_SERVICE
-        .read(MEMBER_UID, &NoCaps, "/Storage/usb1/hello.txt", 0, &mut buf)
-        .expect("member reads");
+    let n = read_as(MEMBER_UID, "/Storage/usb1/hello.txt", 0, &mut buf).expect("member reads");
     assert_eq!(&buf[..n], b"runtime volume payload");
-    FS_SERVICE
-        .write(
-            MEMBER_UID,
-            &NoCaps,
-            "/Storage/usb1/hello.txt",
-            0,
-            false,
-            b"R",
-        )
+    write_as(MEMBER_UID, "/Storage/usb1/hello.txt", 0, b"R")
         .expect("member writes through the group grant");
     assert_eq!(
-        FS_SERVICE
-            .write(
-                OUTSIDER_UID,
-                &NoCaps,
-                "/Storage/usb1/hello.txt",
-                0,
-                false,
-                b"X"
-            )
-            .err(),
+        write_as(OUTSIDER_UID, "/Storage/usb1/hello.txt", 0, b"X").err(),
         Some(Errno::PermissionDenied),
         "a non-member's write is refused"
     );
-    let n = FS_SERVICE
-        .read(
-            OUTSIDER_UID,
-            &NoCaps,
-            "/Storage/usb1/hello.txt",
-            0,
-            &mut buf,
-        )
+    let n = read_as(OUTSIDER_UID, "/Storage/usb1/hello.txt", 0, &mut buf)
         .expect("a non-member still reads (other class)");
     assert_eq!(&buf[..1], b"R", "the member's write landed");
     assert!(n >= 1);
@@ -587,20 +770,14 @@ fn assert_a_member_creates_on_the_volume() {
     let create = OpenFlags::WRITE
         .union(OpenFlags::CREATE)
         .union(OpenFlags::EXCLUSIVE);
-    FS_SERVICE
-        .open(MEMBER_UID, &NoCaps, made, create)
-        .expect("a member creates a file on the medium");
-    let wrote = FS_SERVICE
-        .write(MEMBER_UID, &NoCaps, made, 0, false, b"copied")
-        .expect("and fills it");
+    open_as(MEMBER_UID, made, create).expect("a member creates a file on the medium");
+    let wrote = write_as(MEMBER_UID, made, 0, b"copied").expect("and fills it");
     assert_eq!(wrote, 6);
     let mut buf = [0u8; 16];
-    let n = FS_SERVICE
-        .read(MEMBER_UID, &NoCaps, made, 0, &mut buf)
-        .expect("and reads it back");
+    let n = read_as(MEMBER_UID, made, 0, &mut buf).expect("and reads it back");
     assert_eq!(&buf[..n], b"copied");
     let stat = FS_SERVICE
-        .stat(MEMBER_UID, &NoCaps, made, FinalLink::Follow)
+        .stat(MEMBER_UID, &NoCaps, root(made), FinalLink::Follow)
         .expect("stat");
     assert_eq!(
         (stat.mode, stat.uid, stat.gid),
@@ -608,24 +785,26 @@ fn assert_a_member_creates_on_the_volume() {
         "a new file is owned as every file of the volume is"
     );
     FS_SERVICE
-        .mkdir(MEMBER_UID, &NoCaps, "/Storage/usb1/folder")
+        .mkdir(MEMBER_UID, &NoCaps, root("/Storage/usb1/folder"), new_dir())
         .expect("a member makes a folder");
-    FS_SERVICE
-        .open(
-            MEMBER_UID,
-            &NoCaps,
-            "/Storage/usb1/folder/inner.txt",
-            create,
-        )
-        .expect("and a file inside it");
+    open_as(MEMBER_UID, "/Storage/usb1/folder/inner.txt", create).expect("and a file inside it");
     assert_eq!(
-        FS_SERVICE.set_mode(0, &NoCaps, made, 0o600).err(),
+        FS_SERVICE
+            .set_mode(0, &NoCaps, root(made), 0o600, FinalLink::Follow)
+            .err(),
         Some(Errno::NotSupported),
         "the format stores no mode of its own"
     );
     assert_eq!(
         FS_SERVICE
-            .set_owner(0, &Chown, made, OUTSIDER_UID, FS_OWNER_UNCHANGED)
+            .set_owner(
+                0,
+                &Chown,
+                root(made),
+                OUTSIDER_UID,
+                FS_OWNER_UNCHANGED,
+                FinalLink::Follow
+            )
             .err(),
         Some(Errno::NotSupported),
         "nor any owner"
@@ -723,8 +902,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         "the volume's durable root is published under the catalog"
     );
     assert!(
-        booted.watches.volume(expected_identity).is_some()
-            && !table_free(&booted, expected_identity),
+        !table_free(&booted, expected_identity),
         "the attached volume feeds its change table, and no other volume may"
     );
     // A second attach of the same volume under another name is refused as
@@ -739,8 +917,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     // --- Use: the mounted volume serves reads through the production
     // `fs_*` service under the system principal. ---
     let mut buf = [0u8; 64];
-    let n = FS_SERVICE
-        .read(0, &NoCaps, "/Storage/usb1/hello.txt", 0, &mut buf)
+    let n = read_as(0, "/Storage/usb1/hello.txt", 0, &mut buf)
         .expect("read through the mounted volume");
     assert_eq!(&buf[..n], b"runtime volume payload");
 
@@ -760,11 +937,16 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     assert_identity_mapped_access();
     assert_a_member_creates_on_the_volume();
 
-    // An operation that resolved the volume before it detached and reaches
-    // its driver only after.
+    // An operation that resolved its file before the volume detached and
+    // reaches the driver only after.
     let in_flight = LATE_FILESYSTEM
         .driver(served_handle("usb1"))
         .expect("served");
+    let file = {
+        let mut fs = in_flight.lock();
+        let root = fs.root();
+        fs.lookup(root, b"hello.txt").expect("resolves")
+    };
 
     // --- Detach. ---
     let detach = VolumeDetachRequest {
@@ -772,15 +954,11 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         force: false,
     };
     VOLUME_SERVICE.detach(&detach).expect("detach");
-    {
-        let mut fs = in_flight.lock();
-        let root = fs.root();
-        assert_eq!(
-            fs.write_at(root, b"hello.txt", 0, b"lost"),
-            Err(DriverError::DeviceFault),
-            "a write reaching a volume that has left is refused, not acknowledged and dropped"
-        );
-    }
+    assert_eq!(
+        in_flight.lock().write_at(file, 0, b"lost"),
+        Err(DriverError::DeviceFault),
+        "a write reaching a volume that has left is refused, not acknowledged and dropped"
+    );
     drop(in_flight);
     assert_eq!(
         VOLUME_FOREST.resolve(&expected_identity),
@@ -788,9 +966,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         "the withdrawn identity no longer resolves"
     );
     assert_eq!(
-        FS_SERVICE
-            .read(0, &NoCaps, "/Storage/usb1/hello.txt", 0, &mut buf)
-            .err(),
+        read_as(0, "/Storage/usb1/hello.txt", 0, &mut buf).err(),
         Some(Errno::NotFound),
         "the retracted mount fails closed"
     );
@@ -836,6 +1012,9 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(window_ptr, facility);
     a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(window_ptr, facility);
     an_attach_naming_a_retracted_publication_is_refused_scenario();
+    a_held_descriptor_holds_its_volume_attached_scenario(window_ptr, facility);
+    a_descriptor_stays_with_its_node_scenario(window_ptr, facility);
+    a_fat_files_lock_follows_it_through_writes_and_renames_scenario(window_ptr, facility);
 }
 
 /// A drive whose medium changes retracts the node it published the first
@@ -891,9 +1070,7 @@ fn a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(
     );
     let mut buf = [0u8; 8];
     assert_eq!(
-        FS_SERVICE
-            .read(0, &NoCaps, "/Storage/disc1/hello.txt", 0, &mut buf)
-            .err(),
+        read_as(0, "/Storage/disc1/hello.txt", 0, &mut buf).err(),
         Some(Errno::NotFound),
         "the first disc's mount is gone, not left refusing"
     );
@@ -970,9 +1147,7 @@ fn a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(
     );
     let mut buf = [0u8; 8];
     assert_eq!(
-        FS_SERVICE
-            .read(0, &NoCaps, "/Storage/gone1/hello.txt", 0, &mut buf)
-            .err(),
+        read_as(0, "/Storage/gone1/hello.txt", 0, &mut buf).err(),
         Some(Errno::NotFound),
         "nor mounted"
     );
@@ -1019,9 +1194,7 @@ fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
     };
     let (_va, first) = sharedreg::create(facility, ProcessId(0x70_0061), 8).expect("region");
     attach(first).expect("attach the card");
-    FS_SERVICE
-        .write(0, &NoCaps, "/Storage/card1/hello.txt", 0, false, b"D")
-        .expect("write dirties the journal");
+    write_as(0, "/Storage/card1/hello.txt", 0, b"D").expect("write dirties the journal");
     {
         let mut reader = device.lock().unwrap();
         reader.block = RamBlock { data: pristine };
@@ -1130,12 +1303,13 @@ enum Unflushed {
 
 /// One served, attached FAT32 volume for the surprise-removal scenarios,
 /// yanked by tearing its endpoint's owner down. Returns the volume's
-/// identity after the server thread has ended.
+/// identity after the server thread has ended, and a descriptor of its
+/// `hello.txt` held across the removal.
 fn attach_then_yank(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
     scenario: &YankScenario,
-) -> [u8; 16] {
+) -> ([u8; 16], Descriptor) {
     let endpoint = register_endpoint(scenario.endpoint_id, scenario.owner);
     let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
@@ -1160,14 +1334,12 @@ fn attach_then_yank(
         })
         .expect("attach scenario volume");
     let name = core::str::from_utf8(scenario.name).expect("ascii name");
+    let path = std::format!("/Storage/{name}/hello.txt");
     match scenario.unflushed {
         Unflushed::Nothing => {}
+        // Dirty the volume's journal through the production write path.
         Unflushed::DeviceWrite => {
-            // Dirty the volume's journal through the production write path.
-            let path = std::format!("/Storage/{name}/hello.txt");
-            FS_SERVICE
-                .write(0, &NoCaps, &path, 0, false, b"D")
-                .expect("write dirties the journal");
+            write_as(0, &path, 0, b"D").expect("write dirties the journal");
         }
         // What a driver deferring its commit reports, far enough out that
         // nothing publishes it first.
@@ -1175,19 +1347,20 @@ fn attach_then_yank(
             LATE_FILESYSTEM.note_writeback_due(served_handle(name), Some(u64::MAX - 1));
         }
     }
+    let held = Descriptor::open(0, &path, OpenFlags::READ).expect("a descriptor of the volume");
     // Yank the stick: the serving driver dies and the kernel tears its
     // endpoint down, which drives the vanish observer synchronously.
     tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &ASPACES, &SINK);
     stop.store(true, Ordering::Relaxed);
     server.join().expect("scenario server thread");
-    identity
+    (identity, held)
 }
 
 /// Surprise removal with uncommitted writes (`plans/DEVICES.md` D4a): the
 /// volume becomes unavailable-dirty — root visible, every operation
 /// failing closed, plain detach refused.
 fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
-    let identity = attach_then_yank(
+    let (identity, held) = attach_then_yank(
         window_ptr,
         facility,
         &YankScenario {
@@ -1201,54 +1374,21 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     );
     let mut buf = [0u8; 32];
     assert_eq!(
+        held.read(0, &mut buf),
+        Err(Errno::DeviceFault),
+        "a descriptor held across the removal answers the device fault while it is away"
+    );
+    assert_links_and_attributes_fault_on_a_vanished_usb2(&held);
+    drop(held);
+    assert_eq!(
         VOLUME_FOREST.resolve(&identity),
         Some(vec![String::from("Storage"), String::from("usb2")]),
         "an unavailable-dirty volume's durable root stays visible"
     );
     assert_eq!(
-        FS_SERVICE
-            .read(0, &NoCaps, "/Storage/usb2/hello.txt", 0, &mut buf)
-            .err(),
+        read_as(0, "/Storage/usb2/hello.txt", 0, &mut buf).err(),
         Some(Errno::DeviceFault),
         "new I/O on an unavailable-dirty volume fails closed, cache included"
-    );
-    // The link and attribute surfaces fault like every other operation.
-    // Left at their ABI defaults the stub would answer `NotSupported`,
-    // reporting a yanked disk as a format that never had links or
-    // attributes — a permanent claim about a transient condition.
-    assert_eq!(
-        FS_SERVICE
-            .readlink(0, &NoCaps, "/Storage/usb2/hello.txt")
-            .err(),
-        Some(Errno::DeviceFault),
-        "readlink on a vanished volume is a device fault, not a format limit"
-    );
-    assert_eq!(
-        FS_SERVICE
-            .symlink(0, &NoCaps, "hello.txt", "/Storage/usb2/link")
-            .err(),
-        Some(Errno::DeviceFault),
-        "symlink on a vanished volume is a device fault, not a format limit"
-    );
-    assert_eq!(
-        FS_SERVICE
-            .link(
-                0,
-                &NoCaps,
-                "/Storage/usb2/hello.txt",
-                "/Storage/usb2/second",
-                FinalLink::Keep,
-            )
-            .err(),
-        Some(Errno::DeviceFault),
-        "link on a vanished volume is a device fault, not a format limit"
-    );
-    assert_eq!(
-        FS_SERVICE
-            .attr_get(0, &NoCaps, "/Storage/usb2/hello.txt", b"user.k", &mut buf)
-            .err(),
-        Some(Errno::DeviceFault),
-        "an attribute read on a vanished volume is a device fault, not a format limit"
     );
     assert_eq!(
         VOLUME_SERVICE.detach(&VolumeDetachRequest {
@@ -1281,9 +1421,7 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         "the force-unmounted identity no longer resolves"
     );
     assert_eq!(
-        FS_SERVICE
-            .read(0, &NoCaps, "/Storage/usb2/hello.txt", 0, &mut buf)
-            .err(),
+        read_as(0, "/Storage/usb2/hello.txt", 0, &mut buf).err(),
         Some(Errno::NotFound),
         "the force-retracted mount fails closed"
     );
@@ -1295,6 +1433,49 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         "the force-unmounted volume leaves the mount snapshot"
     );
     assert_every_attached_volume_is_served();
+}
+
+/// The link and attribute surfaces of the vanished `usb2` fault like every
+/// other operation, attributes reached through `held`, a descriptor kept
+/// across the removal. Left at their ABI defaults the stand-in would answer
+/// `NotSupported`, reporting a yanked disk as a format that never had links
+/// or attributes — a permanent claim about a transient condition.
+fn assert_links_and_attributes_fault_on_a_vanished_usb2(held: &Descriptor) {
+    let mut buf = [0u8; 32];
+    assert_eq!(
+        FS_SERVICE
+            .readlink(0, &NoCaps, root("/Storage/usb2/hello.txt"))
+            .err(),
+        Some(Errno::DeviceFault),
+        "readlink on a vanished volume is a device fault, not a format limit"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .symlink(0, &NoCaps, "hello.txt", root("/Storage/usb2/link"))
+            .err(),
+        Some(Errno::DeviceFault),
+        "symlink on a vanished volume is a device fault, not a format limit"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .link(
+                0,
+                &NoCaps,
+                root("/Storage/usb2/hello.txt"),
+                root("/Storage/usb2/second"),
+                FinalLink::Keep,
+            )
+            .err(),
+        Some(Errno::DeviceFault),
+        "link on a vanished volume is a device fault, not a format limit"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .attr_get_node(held.handle(), &held.acting(), b"user.k", &mut buf)
+            .err(),
+        Some(Errno::DeviceFault),
+        "an attribute read on a vanished volume is a device fault, not a format limit"
+    );
 }
 
 /// A volume that leaves leaves the namespace, not only the driver registry:
@@ -1312,7 +1493,7 @@ fn assert_every_attached_volume_is_served() {
 /// Surprise removal with nothing uncommitted: the volume is simply
 /// retracted — no drama.
 fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
-    let identity = attach_then_yank(
+    let (identity, held) = attach_then_yank(
         window_ptr,
         facility,
         &YankScenario {
@@ -1326,14 +1507,18 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     );
     let mut buf = [0u8; 32];
     assert_eq!(
+        held.read(0, &mut buf),
+        Err(Errno::Stale),
+        "a descriptor held across a clean removal reaches nothing"
+    );
+    drop(held);
+    assert_eq!(
         VOLUME_FOREST.resolve(&identity),
         None,
         "a clean surprise removal retracts the durable root"
     );
     assert_eq!(
-        FS_SERVICE
-            .read(0, &NoCaps, "/Storage/usb3/hello.txt", 0, &mut buf)
-            .err(),
+        read_as(0, "/Storage/usb3/hello.txt", 0, &mut buf).err(),
         Some(Errno::NotFound),
         "the retracted mount fails closed"
     );
@@ -1398,7 +1583,7 @@ fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
         assert_eq!(VOLUME_FOREST.resolve(&identity), None, "{path} retracts");
         let mut buf = [0u8; 8];
         assert_eq!(
-            FS_SERVICE.read(0, &NoCaps, path, 0, &mut buf).err(),
+            read_as(0, path, 0, &mut buf).err(),
             Some(Errno::NotFound),
             "{path} fails closed"
         );
@@ -1431,7 +1616,7 @@ fn an_unpublished_transaction_is_recorded_lost_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
 ) {
-    let identity = attach_then_yank(
+    let (identity, held) = attach_then_yank(
         window_ptr,
         facility,
         &YankScenario {
@@ -1456,12 +1641,23 @@ fn an_unpublished_transaction_is_recorded_lost_scenario(
         audited(SURPRISE_REMOVED_LOST, "usb9"),
         vec![Some(String::from("unpublished_writes"))]
     );
+    let mut buf = [0u8; 8];
+    assert_eq!(held.read(0, &mut buf), Err(Errno::DeviceFault));
     VOLUME_SERVICE
         .detach(&VolumeDetachRequest {
             volume_id: identity,
             force: true,
         })
         .expect("the audited force retracts it");
+    assert_eq!(
+        held.read(0, &mut buf),
+        Err(Errno::Stale),
+        "the force revoked the descriptor held across the removal"
+    );
+    assert_eq!(
+        audited_count(FORCE_UNMOUNTED, "usb9", "revoked_nodes"),
+        [Some(1)]
+    );
     assert_every_attached_volume_is_served();
 }
 
@@ -1470,11 +1666,13 @@ fn an_unpublished_transaction_is_recorded_lost_scenario(
 /// journal through the production write path, and yank the serving
 /// driver. Returns the volume identity, the image bytes as they stood
 /// **before** the dirty write (the state a device that lost its cache
-/// presents), and the image bytes at yank time.
+/// presents), the image bytes at yank time, and a descriptor of `hello.txt`
+/// held across the removal.
 struct YankedRound {
     identity: [u8; 16],
     pristine: Vec<u8>,
     at_yank: Vec<u8>,
+    held: Descriptor,
 }
 
 fn dirty_yank_round(
@@ -1515,9 +1713,8 @@ fn dirty_yank_round(
         "/Storage/{}/hello.txt",
         core::str::from_utf8(scenario.name).expect("ascii name")
     );
-    FS_SERVICE
-        .write(0, &NoCaps, &path, 0, false, b"D")
-        .expect("write dirties the journal");
+    write_as(0, &path, 0, b"D").expect("write dirties the journal");
+    let held = Descriptor::open(0, &path, OpenFlags::READ).expect("a descriptor of the volume");
     tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &ASPACES, &SINK);
     stop.store(true, Ordering::Relaxed);
     server.join().expect("re-insert round server thread");
@@ -1526,6 +1723,7 @@ fn dirty_yank_round(
         identity,
         pristine,
         at_yank,
+        held,
     }
 }
 
@@ -1634,8 +1832,7 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
         "the durable root survived the whole unplug/re-insert cycle"
     );
     let mut buf = [0u8; 32];
-    let n = FS_SERVICE
-        .read(0, &NoCaps, "/Storage/usb5/hello.txt", 0, &mut buf)
+    let n = read_as(0, "/Storage/usb5/hello.txt", 0, &mut buf)
         .expect("the recovered volume serves reads");
     assert_eq!(
         &buf[..1],
@@ -1643,10 +1840,13 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
         "the retained dirty write was replayed onto the medium"
     );
     assert!(n >= 1);
+    assert_eq!(
+        round.held.read(0, &mut buf),
+        Err(Errno::Stale),
+        "the volume returned under a fresh registration a held descriptor never reaches"
+    );
     // The recovered volume is writable again.
-    FS_SERVICE
-        .write(0, &NoCaps, "/Storage/usb5/hello.txt", 0, false, b"E")
-        .expect("the recovered volume accepts writes");
+    write_as(0, "/Storage/usb5/hello.txt", 0, b"E").expect("the recovered volume accepts writes");
 
     // A clean detach ends the round: the replay left nothing uncommitted
     // that a flush cannot commit.
@@ -1711,13 +1911,10 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
         .expect("the conflicted volume appears in the mount snapshot");
     assert_eq!(record.availability(), MountAvailability::RecoveryConflict);
     let mut buf = [0u8; 32];
-    FS_SERVICE
-        .read(0, &NoCaps, "/Storage/usb6/hello.txt", 0, &mut buf)
-        .expect("the conflicted volume serves reads");
+    read_as(0, "/Storage/usb6/hello.txt", 0, &mut buf).expect("the conflicted volume serves reads");
+    assert_eq!(round.held.read(0, &mut buf), Err(Errno::Stale));
     assert_eq!(
-        FS_SERVICE
-            .write(0, &NoCaps, "/Storage/usb6/hello.txt", 0, false, b"X")
-            .err(),
+        write_as(0, "/Storage/usb6/hello.txt", 0, b"X").err(),
         Some(Errno::ReadOnly),
         "the conflicted volume is read-only until acknowledged"
     );
@@ -1776,9 +1973,7 @@ fn forced_unmount_of_a_healthy_volume_scenario(
         })
         .expect("attach healthy volume");
     // Dirty the journal so a discard would be observable, then force.
-    FS_SERVICE
-        .write(0, &NoCaps, "/Storage/usb4/hello.txt", 0, false, b"F")
-        .expect("write dirties the journal");
+    write_as(0, "/Storage/usb4/hello.txt", 0, b"F").expect("write dirties the journal");
     VOLUME_SERVICE
         .detach(&VolumeDetachRequest {
             volume_id: identity,
@@ -1801,9 +1996,7 @@ fn forced_unmount_of_a_healthy_volume_scenario(
 /// Assert the file on the mounted volume at `path` holds exactly `expected`.
 fn assert_volume_reads(path: &str, expected: &[u8]) {
     let mut buf = [0u8; 64];
-    let n = FS_SERVICE
-        .read(0, &NoCaps, path, 0, &mut buf)
-        .unwrap_or_else(|err| std::panic!("read {path}: {err:?}"));
+    let n = read_as(0, path, 0, &mut buf).unwrap_or_else(|err| std::panic!("read {path}: {err:?}"));
     assert_eq!(&buf[..n], expected, "{path}");
 }
 
@@ -1815,12 +2008,8 @@ fn assert_each_sibling_serves_its_own_extent() {
     assert_volume_reads("/Storage/part2/hello.txt", b"second partition payload");
 
     // Interleaved writes through both mounts stay on their own extents.
-    FS_SERVICE
-        .write(0, &NoCaps, "/Storage/part1/hello.txt", 0, false, b"1")
-        .expect("write the first partition");
-    FS_SERVICE
-        .write(0, &NoCaps, "/Storage/part2/hello.txt", 0, false, b"2")
-        .expect("write the second partition");
+    write_as(0, "/Storage/part1/hello.txt", 0, b"1").expect("write the first partition");
+    write_as(0, "/Storage/part2/hello.txt", 0, b"2").expect("write the second partition");
     assert_volume_reads("/Storage/part1/hello.txt", b"1irst partition payload");
     assert_volume_reads("/Storage/part2/hello.txt", b"2econd partition payload");
 }
@@ -2119,15 +2308,20 @@ fn arxfs_image(payload: &[u8]) -> (RamBlock, [u8; 16]) {
     )
     .expect("format the fixture volume");
     let root = fs.root();
-    fs.create(root, b"target.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            b"target.txt",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
-    fs.write_at(root, b"target.txt", 0, payload).expect("write");
+    fs.write_at(file, 0, payload).expect("write");
     // The volume root must admit the system principal the service calls as,
     // because ARXFS carries its own per-inode records rather than taking a
     // mount template.
     fs.set_security(root, NodeSecurity::new(0o755, 0, 0))
         .expect("root security");
-    let file = fs.lookup(root, b"target.txt").expect("resolves");
     fs.set_security(file, NodeSecurity::new(0o644, 0, 0))
         .expect("file security");
     fs.flush().expect("commit the fixture");
@@ -2178,11 +2372,11 @@ fn link_round_trip_through_the_real_service_scenario(
 
     // A symbolic link: created, then read back verbatim.
     FS_SERVICE
-        .symlink(0, &NoCaps, "target.txt", "/Storage/arx1/alias")
+        .symlink(0, &NoCaps, "target.txt", root("/Storage/arx1/alias"))
         .expect("symlink through the production service");
     assert_eq!(
         FS_SERVICE
-            .readlink(0, &NoCaps, "/Storage/arx1/alias")
+            .readlink(0, &NoCaps, root("/Storage/arx1/alias"))
             .expect("readlink through the production service"),
         String::from("target.txt"),
         "the stored target comes back verbatim through the wrapper chain"
@@ -2190,9 +2384,7 @@ fn link_round_trip_through_the_real_service_scenario(
     // Following it reaches the target's bytes, so the link resolves rather
     // than merely existing.
     let mut buf = [0u8; 64];
-    let read = FS_SERVICE
-        .read(0, &NoCaps, "/Storage/arx1/alias", 0, &mut buf)
-        .expect("read through the link");
+    let read = read_as(0, "/Storage/arx1/alias", 0, &mut buf).expect("read through the link");
     assert_eq!(&buf[..read], b"link target payload");
 
     // A hard link: a second name reaching the same node, with the count
@@ -2201,16 +2393,21 @@ fn link_round_trip_through_the_real_service_scenario(
         .link(
             0,
             &NoCaps,
-            "/Storage/arx1/target.txt",
-            "/Storage/arx1/second",
+            root("/Storage/arx1/target.txt"),
+            root("/Storage/arx1/second"),
             FinalLink::Keep,
         )
         .expect("link through the production service");
     let original = FS_SERVICE
-        .stat(0, &NoCaps, "/Storage/arx1/target.txt", FinalLink::Keep)
+        .stat(
+            0,
+            &NoCaps,
+            root("/Storage/arx1/target.txt"),
+            FinalLink::Keep,
+        )
         .expect("stat the first name");
     let second = FS_SERVICE
-        .stat(0, &NoCaps, "/Storage/arx1/second", FinalLink::Keep)
+        .stat(0, &NoCaps, root("/Storage/arx1/second"), FinalLink::Keep)
         .expect("stat the second name");
     assert_eq!(original.id, second.id, "both names reach one node");
     assert_eq!(original.nlink, 2, "the format's own count is carried up");
@@ -2237,10 +2434,15 @@ const EXT4_SUPERBLOCK_LBA: u64 = (1024 / BLOCK_SIZE) as u64;
 fn ext4_image(uuid: [u8; 16]) -> RamBlock {
     let mut fs = Ext4::format(RamBlock::new(SECTORS_8MIB), 128, uuid).expect("format");
     let root = fs.root();
-    fs.create(root, b"hello.txt", NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            b"hello.txt",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
-    fs.write_at(root, b"hello.txt", 0, b"ext4 payload")
-        .expect("write");
+    fs.write_at(file, 0, b"ext4 payload").expect("write");
     fs.into_block().expect("the volume closes")
 }
 
@@ -2316,9 +2518,8 @@ fn a_taken_catalog_name_is_answered_as_taken_scenario(
         "a taken name is not a refused volume"
     );
     let mut buf = [0u8; 8];
-    let n = FS_SERVICE
-        .read(0, &NoCaps, "/Storage/usb8/hello.txt", 0, &mut buf)
-        .expect("the first volume still serves");
+    let n =
+        read_as(0, "/Storage/usb8/hello.txt", 0, &mut buf).expect("the first volume still serves");
     assert_eq!(&buf[..n], b"first");
     retire(identity, false, first);
     second.stop.store(true, Ordering::Relaxed);
@@ -2353,14 +2554,11 @@ fn a_volume_its_driver_refuses_to_write_mounts_read_only_scenario(
         [Some(String::from("errors_recorded"))]
     );
     let mut buf = [0u8; 16];
-    let n = FS_SERVICE
-        .read(0, &NoCaps, "/Storage/ext4ro/hello.txt", 0, &mut buf)
+    let n = read_as(0, "/Storage/ext4ro/hello.txt", 0, &mut buf)
         .expect("a read-only volume serves reads");
     assert_eq!(&buf[..n], b"ext4 payload");
     assert_eq!(
-        FS_SERVICE
-            .write(0, &NoCaps, "/Storage/ext4ro/hello.txt", 0, false, b"X")
-            .err(),
+        write_as(0, "/Storage/ext4ro/hello.txt", 0, b"X").err(),
         Some(Errno::ReadOnly)
     );
     retire(identity, false, round);
@@ -2452,7 +2650,7 @@ fn an_ext_volume_keeps_its_on_disk_ownership_scenario(
 /// The `(uid, gid, mode)` the node at `path` presents to `uid`.
 fn owned(uid: u32, path: &str) -> (u32, u32, u32) {
     let stat = FS_SERVICE
-        .stat(uid, &NoCaps, path, FinalLink::Follow)
+        .stat(uid, &NoCaps, root(path), FinalLink::Follow)
         .expect("stat");
     (stat.uid, stat.gid, stat.mode)
 }
@@ -2471,51 +2669,47 @@ fn assert_the_volume_presents_its_records() {
         .union(OpenFlags::EXCLUSIVE);
     assert_eq!(
         FS_SERVICE
-            .mkdir(MEMBER_UID, &NoCaps, "/Storage/extown/mine")
+            .mkdir(MEMBER_UID, &NoCaps, root("/Storage/extown/mine"), new_dir())
             .err(),
         Some(Errno::PermissionDenied),
         "the volume's owner refuses a folder at its top level"
     );
     assert_eq!(
-        FS_SERVICE
-            .open(MEMBER_UID, &NoCaps, "/Storage/extown/mine.txt", create)
-            .err(),
+        open_as(MEMBER_UID, "/Storage/extown/mine.txt", create).err(),
         Some(Errno::PermissionDenied),
         "and a file"
     );
     let mut buf = [0u8; 8];
-    FS_SERVICE
-        .read(GROUP_PEER_UID, &NoCaps, "/Storage/extown/f", 0, &mut buf)
-        .expect("the owning group reads");
+    read_as(GROUP_PEER_UID, "/Storage/extown/f", 0, &mut buf).expect("the owning group reads");
     assert_eq!(
-        FS_SERVICE
-            .write(GROUP_PEER_UID, &NoCaps, "/Storage/extown/f", 0, false, b"X")
-            .err(),
+        write_as(GROUP_PEER_UID, "/Storage/extown/f", 0, b"X").err(),
         Some(Errno::PermissionDenied),
         "the ACL's owning-group entry decides, not the mode's group triad"
     );
-    FS_SERVICE
-        .write(MEMBER_UID, &NoCaps, "/Storage/extown/f", 0, false, b"X")
-        .expect("the owner writes");
+    write_as(MEMBER_UID, "/Storage/extown/f", 0, b"X").expect("the owner writes");
 }
 
 /// A node made on the volume carries its creator, and `chmod` and `chown`
 /// follow the owner and capability rules of any volume.
 fn assert_ownership_rules_govern_what_is_made() {
     FS_SERVICE
-        .mkdir(0, &NoCaps, "/Storage/extown/shared")
+        .mkdir(0, &NoCaps, root("/Storage/extown/shared"), new_dir())
         .expect("the root's owner makes a folder");
     assert_eq!(owned(0, "/Storage/extown/shared").0, 0);
     FS_SERVICE
-        .set_mode(0, &NoCaps, "/Storage/extown/shared", 0o777)
+        .set_mode(
+            0,
+            &NoCaps,
+            root("/Storage/extown/shared"),
+            0o777,
+            FinalLink::Follow,
+        )
         .expect("its owner opens it to everyone");
     let mine = "/Storage/extown/shared/mine.txt";
     let create = OpenFlags::WRITE
         .union(OpenFlags::CREATE)
         .union(OpenFlags::EXCLUSIVE);
-    FS_SERVICE
-        .open(MEMBER_UID, &NoCaps, mine, create)
-        .expect("a member makes a file there");
+    open_as(MEMBER_UID, mine, create).expect("a member makes a file there");
     let (uid, gid, _) = owned(MEMBER_UID, mine);
     assert_eq!(
         (uid, gid),
@@ -2524,24 +2718,38 @@ fn assert_ownership_rules_govern_what_is_made() {
     );
     assert_eq!(
         FS_SERVICE
-            .set_mode(OUTSIDER_UID, &NoCaps, mine, 0o666)
+            .set_mode(OUTSIDER_UID, &NoCaps, root(mine), 0o666, FinalLink::Follow)
             .err(),
         Some(Errno::PermissionDenied),
         "only the owner changes its mode"
     );
     FS_SERVICE
-        .set_mode(MEMBER_UID, &NoCaps, mine, 0o600)
+        .set_mode(MEMBER_UID, &NoCaps, root(mine), 0o600, FinalLink::Follow)
         .expect("its owner does");
     assert_eq!(owned(MEMBER_UID, mine).2, 0o600);
     assert_eq!(
         FS_SERVICE
-            .set_owner(MEMBER_UID, &NoCaps, mine, OUTSIDER_UID, FS_OWNER_UNCHANGED)
+            .set_owner(
+                MEMBER_UID,
+                &NoCaps,
+                root(mine),
+                OUTSIDER_UID,
+                FS_OWNER_UNCHANGED,
+                FinalLink::Follow,
+            )
             .err(),
         Some(Errno::PermissionDenied),
         "giving a node away needs the chown authority"
     );
     FS_SERVICE
-        .set_owner(MEMBER_UID, &Chown, mine, OUTSIDER_UID, FS_OWNER_UNCHANGED)
+        .set_owner(
+            MEMBER_UID,
+            &Chown,
+            root(mine),
+            OUTSIDER_UID,
+            FS_OWNER_UNCHANGED,
+            FinalLink::Follow,
+        )
         .expect("which grants it");
     assert_eq!(owned(OUTSIDER_UID, mine).0, OUTSIDER_UID);
 }
@@ -2574,9 +2782,7 @@ fn a_stick_pulled_mid_commit_returns_read_only_scenario(
         "a clean volume attaches writable"
     );
     assert!(
-        FS_SERVICE
-            .write(0, &NoCaps, "/Storage/ext4pull/hello.txt", 0, false, b"D")
-            .is_err(),
+        write_as(0, "/Storage/ext4pull/hello.txt", 0, b"D").is_err(),
         "the pull interrupts the commit"
     );
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
@@ -2602,9 +2808,7 @@ fn a_stick_pulled_mid_commit_returns_read_only_scenario(
         [Some(String::from("needs_check"))]
     );
     assert_eq!(
-        FS_SERVICE
-            .write(0, &NoCaps, "/Storage/ext4pull/hello.txt", 0, false, b"X")
-            .err(),
+        write_as(0, "/Storage/ext4pull/hello.txt", 0, b"X").err(),
         Some(Errno::ReadOnly)
     );
     retire(identity, false, back);
@@ -2643,9 +2847,7 @@ fn a_disc_image_attaches_read_only_scenario(window_ptr: *mut u8, facility: &'sta
     assert_eq!(mount_record(b"disc").fstype_bytes(), b"iso9660");
     assert_volume_reads("/Storage/disc/README.TXT", b"hello\n");
     assert_eq!(
-        FS_SERVICE
-            .write(0, &NoCaps, "/Storage/disc/README.TXT", 0, false, b"X")
-            .err(),
+        write_as(0, "/Storage/disc/README.TXT", 0, b"X").err(),
         Some(Errno::ReadOnly)
     );
     retire(identity, false, round);
@@ -2676,24 +2878,9 @@ fn a_udf_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'stat
     );
     round.outcome.expect("the volume attaches");
     assert!(audited(ATTACHED_READ_ONLY, "exchange").is_empty());
-    FS_SERVICE
-        .open(
-            0,
-            &NoCaps,
-            "/Storage/exchange/note.txt",
-            OpenFlags::WRITE.union(OpenFlags::CREATE),
-        )
-        .expect("a file is made");
-    FS_SERVICE
-        .write(
-            0,
-            &NoCaps,
-            "/Storage/exchange/note.txt",
-            0,
-            false,
-            b"udf payload",
-        )
-        .expect("and written");
+    let create = OpenFlags::WRITE.union(OpenFlags::CREATE);
+    open_as(0, "/Storage/exchange/note.txt", create).expect("a file is made");
+    write_as(0, "/Storage/exchange/note.txt", 0, b"udf payload").expect("and written");
     assert_volume_reads("/Storage/exchange/note.txt", b"udf payload");
     retire(identity, false, round);
 }
@@ -2715,18 +2902,332 @@ fn an_adfs_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'st
         ServedDevice::new(adfs.into_device()),
     );
     round.outcome.expect("the volume attaches");
+    let create = OpenFlags::WRITE.union(OpenFlags::CREATE);
+    open_as(0, "/Storage/acorn/ReadMe", create).expect("a file is made");
+    write_as(0, "/Storage/acorn/ReadMe", 0, b"filecore").expect("and written");
+    assert_volume_reads("/Storage/acorn/ReadMe", b"filecore");
+    retire(identity, false, round);
+}
+
+/// What the volume shown at `/Storage/<name>` reports of its space once
+/// what it holds is committed.
+fn space(name: &str) -> VolumeStats {
+    let driver = LATE_FILESYSTEM.driver(served_handle(name)).expect("served");
+    let mut fs = driver.lock();
+    fs.flush().expect("commits");
+    fs.stats().expect("its space")
+}
+
+/// A plain detach is refused while a descriptor holds one of the volume's
+/// nodes, and changes nothing; a force revokes the descriptor, which then
+/// answers stale, never reaching a volume attached under its name since.
+fn a_held_descriptor_holds_its_volume_attached_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C070, b"held payload");
+    let first = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0070,
+            owner: 0x70_1070,
+            region_task: 0x70_0070,
+            name: b"held1",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    first.outcome.expect("the volume attaches");
+    let held = Descriptor::open(0, "/Storage/held1/hello.txt", OpenFlags::READ).expect("opens");
+    let plain = VolumeDetachRequest {
+        volume_id: identity,
+        force: false,
+    };
+    assert_eq!(VOLUME_SERVICE.detach(&plain), Err(Errno::Busy));
+    assert_eq!(
+        audited(DETACH_REFUSED, "held1"),
+        [Some(String::from("nodes_open"))]
+    );
+    assert_eq!(
+        audited_count(DETACH_REFUSED, "held1", "open_nodes"),
+        [Some(1)]
+    );
+    let mut buf = [0u8; 16];
+    let n = held.read(0, &mut buf).expect("the refusal changed nothing");
+    assert_eq!(&buf[..n], b"held payload");
+
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: true,
+        })
+        .expect("a force detach revokes what is held");
+    assert_eq!(held.read(0, &mut buf), Err(Errno::Stale));
+    assert_eq!(
+        audited(FORCE_UNMOUNTED, "held1"),
+        [Some(String::from("nodes_open"))]
+    );
+    assert_eq!(
+        audited_count(FORCE_UNMOUNTED, "held1", "revoked_nodes"),
+        [Some(1)]
+    );
+    first.stop.store(true, Ordering::Relaxed);
+    first.server.join().expect("server thread");
+
+    let (image, other) = fat32_image(0x0D15_C071, b"other payload");
+    let second = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0071,
+            owner: 0x70_1071,
+            region_task: 0x70_0071,
+            name: b"held1",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    second
+        .outcome
+        .expect("another volume attaches under the name");
+    assert_volume_reads("/Storage/held1/hello.txt", b"other payload");
+    assert_eq!(
+        held.read(0, &mut buf),
+        Err(Errno::Stale),
+        "a revoked descriptor never reaches the volume attached under its name since"
+    );
+    drop(held);
+    retire(other, false, second);
+}
+
+/// A descriptor of an ARXFS file stays with the node it opened: a rename,
+/// another file under its old name, a link planted there and an unlink move
+/// nothing, and the last close frees what the unlink left. Its opener keeps
+/// writing a file it owns whatever the mode, while a grant and another
+/// principal lose what the mode no longer gives.
+fn a_descriptor_stays_with_its_node_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let (image, identity) = arxfs_image(b"original payload");
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0074,
+            owner: 0x70_1074,
+            region_task: 0x70_0074,
+            name: b"arxn",
+            fstype: VolumeFsType::ARXFS,
+        },
+        ServedDevice::new(image),
+    );
+    round.outcome.expect("the volume attaches");
+    a_descriptor_follows_its_node_past_its_names("arxn");
+    an_unlinked_file_keeps_its_blocks_until_its_last_close("arxn");
+    a_chmod_withdraws_what_a_fresh_open_would_be_refused("arxn");
+    retire(identity, false, round);
+}
+
+/// The descriptor of `volume`'s `target.txt` reads and writes the node it
+/// opened past a rename, another file taking the name, and a link planted
+/// at the name it moved to.
+fn a_descriptor_follows_its_node_past_its_names(volume: &str) {
+    let at = |name: &str| std::format!("/Storage/{volume}/{name}");
+    let rename = |from: &str, to: &str| {
+        FS_SERVICE
+            .rename(
+                0,
+                &NoCaps,
+                root(&at(from)),
+                root(&at(to)),
+                RenameFlags::empty(),
+                None,
+            )
+            .expect("renames");
+    };
+    let create = OpenFlags::WRITE.union(OpenFlags::CREATE);
+    let mut buf = [0u8; 32];
+    let first = Descriptor::open(
+        0,
+        &at("target.txt"),
+        OpenFlags::READ.union(OpenFlags::WRITE),
+    )
+    .expect("opens");
+    rename("target.txt", "moved.txt");
+    open_as(0, &at("target.txt"), create).expect("another file takes the name");
+    write_as(0, &at("target.txt"), 0, b"replacement").expect("fills it");
+    let n = first.read(0, &mut buf).expect("reads");
+    assert_eq!(
+        &buf[..n],
+        b"original payload",
+        "it reads the node it opened"
+    );
+    first.write(0, b"O").expect("writes");
+    assert_volume_reads(&at("moved.txt"), b"Original payload");
+    assert_volume_reads(&at("target.txt"), b"replacement");
+
+    open_as(0, &at("victim.txt"), create).expect("a victim");
+    write_as(0, &at("victim.txt"), 0, b"victim payload").expect("fills it");
+    rename("moved.txt", "away.txt");
     FS_SERVICE
-        .open(
+        .symlink(0, &NoCaps, "victim.txt", root(&at("moved.txt")))
+        .expect("a link planted at the name");
+    first.write(0, b"P").expect("writes");
+    assert_volume_reads(&at("victim.txt"), b"victim payload");
+    assert_volume_reads(&at("away.txt"), b"Priginal payload");
+}
+
+/// An unlinked file of `volume` reads whole through its descriptor and keeps
+/// its blocks until that descriptor, its last, closes.
+fn an_unlinked_file_keeps_its_blocks_until_its_last_close(volume: &str) {
+    let at = |name: &str| std::format!("/Storage/{volume}/{name}");
+    // Incompressible, so the volume stores as many blocks as the file is long.
+    let body: Vec<u8> = (0..(32u64 << 10) / 8)
+        .flat_map(|word| {
+            SipHash13::hash_bytes(HashSeed::UNKEYED, &word.to_le_bytes()).to_le_bytes()
+        })
+        .collect();
+    open_as(0, &at("big.bin"), OpenFlags::WRITE.union(OpenFlags::CREATE)).expect("creates");
+    write_as(0, &at("big.bin"), 0, &body).expect("fills it");
+    let big = Descriptor::open(0, &at("big.bin"), OpenFlags::READ).expect("opens");
+    let named = space(volume);
+    let data = body.len() as u64 / u64::from(named.block_size);
+    FS_SERVICE
+        .unlink(0, &NoCaps, root(&at("big.bin")), UnlinkFlags::empty(), None)
+        .expect("unlinks");
+    let mut back = vec![0u8; body.len()];
+    assert_eq!(big.read(0, &mut back), Ok(body.len()));
+    assert_eq!(
+        back, body,
+        "an unlinked file still reads through its descriptor"
+    );
+    assert_eq!(
+        big.stat().map(|stat| stat.nlink),
+        Ok(0),
+        "no name reaches it"
+    );
+    let held = space(volume).free_blocks;
+    assert!(
+        held < named.free_blocks + data,
+        "nothing came back with the name: {held} free against {}",
+        named.free_blocks
+    );
+    drop(big);
+    let after = space(volume).free_blocks;
+    assert!(
+        after >= held + data,
+        "the last close gave its data blocks back: {after} free against {held} + {data}"
+    );
+}
+
+/// A chmod of `volume`'s files leaves their owner's open descriptors
+/// working, and withdraws from a grant and another principal what a fresh
+/// open would now be refused.
+fn a_chmod_withdraws_what_a_fresh_open_would_be_refused(volume: &str) {
+    let at = |name: &str| std::format!("/Storage/{volume}/{name}");
+    let mut buf = [0u8; 32];
+    let made = Descriptor::open(0, &at("ro.txt"), OpenFlags::WRITE.union(OpenFlags::CREATE))
+        .expect("creates");
+    FS_SERVICE
+        .set_mode(0, &NoCaps, root(&at("ro.txt")), 0o444, FinalLink::Follow)
+        .expect("its owner makes it read-only");
+    assert_eq!(
+        made.write(0, b"still mine"),
+        Ok(10),
+        "the creating descriptor writes a file its opener owns"
+    );
+    assert_eq!(
+        open_as(0, &at("ro.txt"), OpenFlags::WRITE),
+        Err(Errno::PermissionDenied),
+        "a fresh open asks the mode"
+    );
+    drop(made);
+
+    let own = Descriptor::open(0, &at("target.txt"), OpenFlags::READ).expect("its owner opens it");
+    let granted = own.granted();
+    let other =
+        Descriptor::open(MEMBER_UID, &at("target.txt"), OpenFlags::READ).expect("another opens it");
+    assert!(granted.read(0, &mut buf).is_ok() && other.read(0, &mut buf).is_ok());
+    FS_SERVICE
+        .set_mode(
             0,
             &NoCaps,
-            "/Storage/acorn/ReadMe",
-            OpenFlags::WRITE.union(OpenFlags::CREATE),
+            root(&at("target.txt")),
+            0o000,
+            FinalLink::Follow,
         )
-        .expect("a file is made");
+        .expect("its owner shuts it");
+    assert_eq!(granted.read(0, &mut buf), Err(Errno::PermissionDenied));
+    assert_eq!(other.read(0, &mut buf), Err(Errno::PermissionDenied));
+    let n = own
+        .read(0, &mut buf)
+        .expect("the owner's own descriptor keeps reading");
+    assert_eq!(&buf[..n], b"replacement");
+}
+
+/// A lock is filed under its file's pin, which a write that grows a FAT file
+/// across clusters and a rename that moves its entry leave alone: an opener
+/// of the renamed file meets the lock the first opener took.
+fn a_fat_files_lock_follows_it_through_writes_and_renames_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C075, b"lock payload");
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0075,
+            owner: 0x70_1075,
+            region_task: 0x70_0075,
+            name: b"lockfat",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    round.outcome.expect("the volume attaches");
+    let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+    let first = Descriptor::open(0, "/Storage/lockfat/hello.txt", rw).expect("opens");
+    let owner = filelock::mint_owner();
+    filelock::acquire(&Request {
+        file: first.key(),
+        owner,
+        pid: ProcessId(0x70_0075),
+        task: 0x70_0075,
+        range: LockRange::WHOLE,
+        held: filelock::Held::Exclusive,
+        limit: u64::MAX,
+        waiting: false,
+    })
+    .expect("the first opener locks the file");
+    first
+        .write(0, &[0x4Cu8; 8192])
+        .expect("a write grows the file across clusters");
     FS_SERVICE
-        .write(0, &NoCaps, "/Storage/acorn/ReadMe", 0, false, b"filecore")
-        .expect("and written");
-    assert_volume_reads("/Storage/acorn/ReadMe", b"filecore");
+        .rename(
+            0,
+            &NoCaps,
+            root("/Storage/lockfat/hello.txt"),
+            root("/Storage/lockfat/locked.txt"),
+            RenameFlags::empty(),
+            None,
+        )
+        .expect("renames");
+    let second = Descriptor::open(0, "/Storage/lockfat/locked.txt", OpenFlags::READ)
+        .expect("opens the renamed file");
+    assert_eq!(second.key(), first.key(), "both opens reach one node");
+    let conflict = filelock::query(
+        second.key(),
+        filelock::mint_owner(),
+        LockRange::WHOLE,
+        filelock::Held::Shared,
+    );
+    assert_eq!(
+        conflict.map(|held| held.owner),
+        Some(owner),
+        "the first opener's lock stands in the way"
+    );
+    let _ = filelock::release_owner(owner);
+    drop((first, second));
     retire(identity, false, round);
 }
 

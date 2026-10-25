@@ -69,14 +69,13 @@ whoever emitted the two nodes.
   driver holds it and clears the mark as the driver's process ends, so the
   device manager sees the ending in the tree rather than holding the
   consumers for the rest of the boot. One owed a restart holds them until it
-  serves again or its restarts are spent. A link that closes a cycle holds nothing either, as Linux's
-  device links relax one: its members load together, each still held by any
+  serves again or its restarts are spent. A link that closes a cycle holds nothing either:
+  its members load together, each still held by any
   supplier outside the cycle. A supplier may sit later in the tree than its
   consumer, so a pass that decided something — a supplier's driver ending
   among it — is followed by another; a supplier that vanishes takes its bound
-  consumers down before itself. This is the ordering Linux's device links and
-  deferred probe give, decided from the tree rather than by retrying a driver
-  until it succeeds.
+  consumers down before itself. The order is decided from the tree rather than
+  by retrying a driver until it succeeds.
 
 ## Authority (SL3)
 
@@ -95,7 +94,7 @@ whoever emitted the two nodes.
 
 ## Device-tree discovery (SL4)
 
-- The interrupt parent is found as Linux's `of_irq_find_parent` finds it;
+- The interrupt parent is found by the Devicetree Specification's rule (§2.4.1.2);
   `interrupts-extended` names it per specifier. A specifier on the platform's
   root interrupt controller stays an `Irq` resource; one on any other node
   marked `interrupt-controller` becomes an `InterruptLine` link to that node,

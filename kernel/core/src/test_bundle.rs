@@ -1,20 +1,23 @@
-//! Shared host-test fixtures for the on-disk application-bundle spawn path:
-//! an in-memory [`FilesystemService`] and a signed-bundle composer, used by
-//! both the `appspawn` unit tests and the `spawn` syscall-handler tests so
-//! the fake volume is defined once.
+//! Shared host-test fixtures for the filesystem seam and the on-disk
+//! application-bundle spawn path: the nodes a test service opens, an
+//! in-memory [`FilesystemService`] and a signed-bundle composer, used by the
+//! `appspawn`, `aspace` and syscall-handler tests so the fake volume is
+//! defined once.
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tairix_abi::driver::filesystem::DirVisit;
+use tairix_abi::driver::filesystem::{DirVisit, MountFlags, NodeId, NodeKind};
 use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
 use tairix_abi::ProgramKind;
 use tairix_abi::{
-    BundleFileDigest, CapabilityId, CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat,
-    NodeTimes, OpenFlags, RealpathMode, UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
+    BundleFileDigest, CapabilityId, CapabilityQuery, DirEntry, DriverHandle, Errno, FileId,
+    FileKind, FileStat, NodeExpect, NodeTimes, OpenFlags, RealpathMode, SeekRegion, UnlinkFlags,
+    ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
 use tairix_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
 use tairix_caps::CapabilitySet;
@@ -22,7 +25,11 @@ use tairix_itest_harness::app_image::{compose_signed_appinfo, AppManifestSource,
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::appspawn::{AnchorVerifier, FsBundleStore};
-use crate::fs::{FilesystemService, FinalLink, Listing, ReaddirEntry};
+use crate::aspace::OpenBacking;
+use crate::fs::{
+    Acting, At, Attachment, CreateMode, Cwd, FilesystemService, FinalLink, Listing, LookedUp,
+    MountTable, NodeHandle, NodeRef, Opened, Path, Projection, ReaddirEntry, Start, VolumeNodes,
+};
 use crate::test_sink::TestSink;
 
 extern crate std;
@@ -38,15 +45,100 @@ pub(crate) const SEED: [u8; 32] = [7u8; 32];
 /// composer emits rather than the degenerate self-published shape.
 pub(crate) const PUBLISHER_SEED: [u8; 32] = [9u8; 32];
 
+/// A volume registration of the calling test's own: every one has an
+/// instance no other test's shares, so the nodes pinned in it key locks and
+/// watches apart from every other test's.
+pub(crate) fn test_volume() -> Arc<VolumeNodes> {
+    static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+    Arc::new(VolumeNodes::new(
+        NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+    ))
+}
+
+/// The root projection of a fresh mount table, shown with `flags` and backed
+/// by a volume, as every projection a node is reached through is.
+pub(crate) fn projection_with(flags: MountFlags) -> Arc<Projection> {
+    let volume = DriverHandle::from_raw(1).expect("a non-zero handle");
+    let mut table = MountTable::new(flags);
+    table
+        .attach(Attachment::new(volume, None, MountFlags::default()))
+        .expect("a fresh table attaches the volume");
+    table.back_root(volume).expect("the volume backs the root");
+    Arc::clone(table.resolve(&Path::root()))
+}
+
+/// [`projection_with`] no flags.
+pub(crate) fn test_projection() -> Arc<Projection> {
+    projection_with(MountFlags::default())
+}
+
+/// What an `fs_open` of `path` answers when it reached the node `volume`
+/// pinned as `pinned`, of `kind`.
+pub(crate) fn opened_node(
+    volume: &Arc<VolumeNodes>,
+    pinned: u64,
+    kind: NodeKind,
+    path: &str,
+) -> Opened {
+    opened_node_in(volume, pinned, kind, path, test_projection())
+}
+
+/// As [`opened_node`], reached through `projection`.
+pub(crate) fn opened_node_in(
+    volume: &Arc<VolumeNodes>,
+    pinned: u64,
+    kind: NodeKind,
+    path: &str,
+    projection: Arc<Projection>,
+) -> Opened {
+    let slot = volume.admit().expect("the release slot is reserved");
+    Opened::Node {
+        node: NodeRef::new(slot, NodeId::from_raw(pinned), kind).expect("a pin record allocates"),
+        projection,
+        kind,
+        opened_as: Arc::new(String::from(path)),
+        at_floor: false,
+    }
+}
+
+/// The handle a descriptor on `opened` holds: its opener's own.
+pub(crate) fn node_handle(opened: Opened) -> NodeHandle {
+    match OpenBacking::opened(opened) {
+        OpenBacking::Node(handle) => handle,
+        other => panic!("a node was opened, not {other:?}"),
+    }
+}
+
+/// The path `at` names in a fixture keyed by absolute path: an absolute one
+/// as it stands, a relative one after the label of the directory it starts
+/// from, `.` being that directory itself.
+pub(crate) fn fixture_path(at: At<'_>) -> Result<String, Errno> {
+    if at.path.starts_with('/') {
+        return Ok(at.path.to_string());
+    }
+    let base = match at.start {
+        Start::Root => "/",
+        Start::Dir(handle) => &*handle.opened_as,
+        Start::Catalog(_) => return Err(Errno::NotFound),
+    };
+    if at.path == "." {
+        return Ok(base.to_string());
+    }
+    Ok(format!("{}/{}", base.trim_end_matches('/'), at.path))
+}
+
 /// An in-memory [`FilesystemService`] over a fixed file map. Read-only:
 /// every mutating operation fails closed, mirroring the read paths the
 /// bundle store actually exercises.
 ///
 /// `read_calls` counts, per path, how many times a file's bytes were read,
 /// so a test can prove a file (e.g. `Run`) is read from disk the expected
-/// number of times.
+/// number of times. A node it opens is served by the path it was opened as:
+/// nothing in the map is ever renamed, though a swapped name resolves
+/// elsewhere.
 pub(crate) struct MemFs {
     pub(crate) files: BTreeMap<String, Vec<u8>>,
+    volume: Arc<VolumeNodes>,
     read_calls: std::sync::Mutex<BTreeMap<String, usize>>,
     stat_error: Option<Errno>,
     /// Paths the fixture reports as symbolic links rather than regular
@@ -54,6 +146,32 @@ pub(crate) struct MemFs {
     links: BTreeSet<String>,
     /// Whether every file is served as a `noexec` mount serves it.
     noexec: bool,
+    /// A name and the target it names a link to once first resolved.
+    swap: Option<(String, String)>,
+    /// Whether that swap has happened.
+    swapped: AtomicBool,
+}
+
+/// A path-keyed fixture's stat of a node of `kind` and `size`: it holds no
+/// node identity and one name per entry, the answers its listing gives.
+fn fixture_stat(kind: FileKind, size: u64) -> FileStat {
+    let (mode, nlink) = if kind == FileKind::Directory {
+        (0o755, 2)
+    } else {
+        (0o644, 1)
+    };
+    FileStat {
+        kind,
+        nlink,
+        size,
+        allocated: size,
+        mode,
+        uid: 0,
+        gid: 0,
+        id: FileId::NONE,
+        times: NodeTimes::default(),
+        content_gen: 0,
+    }
 }
 
 impl MemFs {
@@ -63,10 +181,13 @@ impl MemFs {
                 .iter()
                 .map(|(path, bytes)| ((*path).to_string(), bytes.to_vec()))
                 .collect(),
+            volume: test_volume(),
             read_calls: std::sync::Mutex::new(BTreeMap::new()),
             stat_error: None,
             links: BTreeSet::new(),
             noexec: false,
+            swap: None,
+            swapped: AtomicBool::new(false),
         }
     }
 
@@ -85,14 +206,64 @@ impl MemFs {
         self
     }
 
-    /// Make [`FilesystemService::stat`] of a node that *exists* fail with
-    /// `errno` instead of resolving, modelling a bundle that is present on
-    /// the volume but the caller may not inspect (a permission denial). A
-    /// genuinely absent path still reports [`Errno::NotFound`], so the spawn
-    /// probe's absent-vs-present-but-refused distinction can be exercised.
+    /// Make [`FilesystemService::stat`] and [`FilesystemService::open`] of
+    /// a node that *exists* fail with `errno` instead of resolving, modelling
+    /// a bundle that is present on the volume but the caller may not inspect
+    /// (a permission denial). A genuinely absent path still reports
+    /// [`Errno::NotFound`], so the spawn probe's absent-vs-present-but-refused
+    /// distinction can be exercised.
     pub(crate) fn with_stat_error(mut self, errno: Errno) -> Self {
         self.stat_error = Some(errno);
         self
+    }
+
+    /// Once `name` is first resolved, have it name a link to `target`
+    /// instead, as a name swapped between two calls would; a node opened
+    /// before the swap keeps reading its own bytes.
+    pub(crate) fn with_swap(mut self, name: &str, target: &str) -> Self {
+        self.swap = Some((name.to_string(), target.to_string()));
+        self
+    }
+
+    /// The target the name `path` names a link to, once it was swapped.
+    fn swapped_to(&self, path: &str) -> Option<String> {
+        let (name, target) = self.swap.as_ref()?;
+        (name == path && self.swapped.load(Ordering::Relaxed)).then(|| target.clone())
+    }
+
+    /// `path` was resolved: a swap of that name happens now.
+    fn resolved(&self, path: &str) {
+        if self.swap.as_ref().is_some_and(|(name, _)| name == path) {
+            self.swapped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// What `path` names in the map, as a stat that follows no swap reports
+    /// it.
+    fn entry_stat(&self, path: &str) -> Result<FileStat, Errno> {
+        if let Some(body) = self.files.get(path) {
+            let kind = if self.links.contains(path) {
+                FileKind::Symlink
+            } else {
+                FileKind::Regular
+            };
+            return Ok(fixture_stat(kind, body.len() as u64));
+        }
+        if self.is_dir(path) {
+            return Ok(fixture_stat(FileKind::Directory, 0));
+        }
+        Err(Errno::NotFound)
+    }
+
+    /// What an open of the node `path` names, of `kind`, answers, through a
+    /// projection as `noexec` as the fixture is.
+    fn opened(&self, kind: NodeKind, path: &str) -> Opened {
+        let flags = if self.noexec {
+            MountFlags::NOEXEC
+        } else {
+            MountFlags::default()
+        };
+        opened_node_in(&self.volume, 1, kind, path, projection_with(flags))
     }
 
     /// How many times the bytes of `path` were read.
@@ -121,6 +292,16 @@ impl MemFs {
         let read = buf.len().min(bytes.len() - start);
         buf[..read].copy_from_slice(&bytes[start..start + read]);
         Ok(read)
+    }
+
+    /// Whether `path` is a directory: a file lives beneath it.
+    fn is_dir(&self, path: &str) -> bool {
+        let prefix = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        self.files.keys().any(|p| p.starts_with(&prefix))
     }
 
     /// The immediate children of `dir`, derived from the file paths.
@@ -164,51 +345,59 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         flags: OpenFlags,
-    ) -> Result<(), Errno> {
+        _mode: CreateMode,
+    ) -> Result<Opened, Errno> {
         // Read-only fixture: a read open of an existing file resolves, any
         // mutating open fails closed like every other mutating operation.
         if flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::CREATE) {
             return Err(Errno::NotImplemented);
         }
-        if self.files.contains_key(path) {
-            Ok(())
+        let named = fixture_path(at)?;
+        let target = self.swapped_to(&named);
+        self.resolved(&named);
+        let is_link = target.is_some() || self.links.contains(&named);
+        let path = match target {
+            Some(target) if !flags.contains(OpenFlags::NO_FOLLOW) => target,
+            _ if is_link && flags.contains(OpenFlags::NO_FOLLOW) => {
+                // A link holds no bytes; a resolve-only open names it.
+                if flags.is_read() || flags.is_write() {
+                    return Err(Errno::LinkLoop);
+                }
+                return Ok(self.opened(NodeKind::Symlink, &named));
+            }
+            // A link the fixture keeps no target for dangles.
+            _ if is_link => return Err(Errno::NotFound),
+            _ => named,
+        };
+        let kind = if self.files.contains_key(&path) {
+            NodeKind::RegularFile
+        } else if self.is_dir(&path) {
+            NodeKind::Directory
         } else {
-            Err(Errno::NotFound)
+            return Err(Errno::NotFound);
+        };
+        if let Some(err) = self.stat_error {
+            return Err(err);
         }
+        Ok(self.opened(kind, &path))
     }
 
-    fn read(
+    fn read_node(
         &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        path: &str,
+        node: &NodeHandle,
+        _who: &Acting<'_>,
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
-        self.serve(path, offset, buf)
+        self.serve(&node.opened_as, offset, buf)
     }
 
-    fn read_program(
+    fn write_node(
         &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        path: &str,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, Errno> {
-        if self.noexec {
-            return Err(Errno::PermissionDenied);
-        }
-        self.serve(path, offset, buf)
-    }
-
-    fn write(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
         _offset: u64,
         _append: bool,
         _data: &[u8],
@@ -216,16 +405,47 @@ impl FilesystemService for MemFs {
         Err(Errno::NotImplemented)
     }
 
-    fn readdir(
+    fn truncate_node(
         &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        path: &str,
-        _final_link: FinalLink,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _size: u64,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn punch_node(
+        &self,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _offset: u64,
+        _len: u64,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn seek_region_node(
+        &self,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn stat_node(&self, node: &NodeHandle, _who: &Acting<'_>) -> Result<FileStat, Errno> {
+        self.entry_stat(&node.opened_as)
+    }
+
+    fn readdir_node(
+        &self,
+        node: &NodeHandle,
+        _who: &Acting<'_>,
         at: &mut Listing,
         each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
     ) -> Result<(), Errno> {
-        let children = self.children(path);
+        let children = self.children(&node.opened_as);
         if children.is_empty() {
             return Err(Errno::NotFound);
         }
@@ -233,64 +453,102 @@ impl FilesystemService for MemFs {
         Ok(())
     }
 
+    fn lookup_entries_node(
+        &self,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _names: &[&[u8]],
+    ) -> Result<LookedUp, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn sync_node(&self, _node: &NodeHandle, _who: &Acting<'_>) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn chdir(&self, _uid: u32, _caps: &dyn CapabilityQuery, at: At<'_>) -> Result<Cwd, Errno> {
+        let path = fixture_path(at)?;
+        if !self.is_dir(&path) {
+            return Err(Errno::NotFound);
+        }
+        Ok(Cwd::Dir(node_handle(opened_node(
+            &self.volume,
+            1,
+            NodeKind::Directory,
+            &path,
+        ))))
+    }
+
+    fn canonical_of(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        start: Start<'_>,
+    ) -> Result<String, Errno> {
+        // Nothing in the map is ever renamed, so a directory's label names it.
+        fixture_path(At { start, path: "." })
+    }
+
+    fn read_program(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        at: At<'_>,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Errno> {
+        if self.noexec {
+            return Err(Errno::PermissionDenied);
+        }
+        let path = fixture_path(at)?;
+        let target = self.swapped_to(&path);
+        self.resolved(&path);
+        self.serve(target.as_deref().unwrap_or(&path), offset, buf)
+    }
+
+    fn readdir_bounded(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        at: At<'_>,
+        _final_link: FinalLink,
+        limit: usize,
+    ) -> Result<Vec<ReaddirEntry>, Errno> {
+        let children = self.children(&fixture_path(at)?);
+        if children.is_empty() {
+            return Err(Errno::NotFound);
+        }
+        if children.len() > limit {
+            return Err(Errno::LimitExceeded);
+        }
+        Ok(children)
+    }
+
     fn stat(
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        path: &str,
-        _final_link: FinalLink,
+        at: At<'_>,
+        final_link: FinalLink,
     ) -> Result<FileStat, Errno> {
-        let file = self.files.get(path);
-        // A directory iff any file lives beneath it.
-        let prefix = if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{path}/")
-        };
-        let is_dir = self.files.keys().any(|p| p.starts_with(&prefix));
+        let path = fixture_path(at)?;
+        let target = self.swapped_to(&path);
+        self.resolved(&path);
+        if let Some(target) = target {
+            return match final_link {
+                FinalLink::Keep => Ok(fixture_stat(FileKind::Symlink, target.len() as u64)),
+                FinalLink::Follow => self.entry_stat(&target),
+            };
+        }
         // A configured refusal shadows an *existing* node only: a present
         // bundle the caller may not inspect fails with the given errno, while
         // a genuinely absent path still reports absence.
         if let Some(err) = self.stat_error {
-            if file.is_some() || is_dir {
+            if self.files.contains_key(&path) || self.is_dir(&path) {
                 return Err(err);
             }
         }
-        // A regular file present in the flat map reports its real byte
-        // length, so the bundle store's `read_file` reserves exactly it.
-        if let Some(body) = file {
-            return Ok(FileStat {
-                kind: if self.links.contains(path) {
-                    FileKind::Symlink
-                } else {
-                    FileKind::Regular
-                },
-                nlink: 1,
-                size: body.len() as u64,
-                allocated: body.len() as u64,
-                mode: 0o644,
-                uid: 0,
-                gid: 0,
-                id: FileId::NONE,
-                times: NodeTimes::default(),
-                content_gen: 0,
-            });
-        }
-        if is_dir {
-            return Ok(FileStat {
-                kind: FileKind::Directory,
-                nlink: 2,
-                size: 0,
-                allocated: 0,
-                mode: 0o755,
-                uid: 0,
-                gid: 0,
-                id: FileId::NONE,
-                times: NodeTimes::default(),
-                content_gen: 0,
-            });
-        }
-        Err(Errno::NotFound)
+        self.entry_stat(&path)
     }
 
     fn symlink(
@@ -298,7 +556,7 @@ impl FilesystemService for MemFs {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _target: &str,
-        _path: &str,
+        _at: At<'_>,
     ) -> Result<(), Errno> {
         // The fixture's file map has no link object type; it refuses rather
         // than approximating one with a regular file holding a path.
@@ -309,7 +567,7 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
     ) -> Result<String, Errno> {
         Err(Errno::NotSupported)
     }
@@ -318,7 +576,7 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
         _mode: RealpathMode,
     ) -> Result<String, Errno> {
         Err(Errno::NotSupported)
@@ -328,8 +586,8 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _existing: &str,
-        _link: &str,
+        _existing: At<'_>,
+        _new: At<'_>,
         _existing_link: FinalLink,
     ) -> Result<(), Errno> {
         // The fixture's file map holds one name per entry; a second name
@@ -337,21 +595,17 @@ impl FilesystemService for MemFs {
         Err(Errno::NotSupported)
     }
 
-    fn truncate(
+    fn sync_all(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn mkdir(
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _size: u64,
+        _at: At<'_>,
+        _mode: CreateMode,
     ) -> Result<(), Errno> {
-        Err(Errno::NotImplemented)
-    }
-
-    fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
-        Err(Errno::NotImplemented)
-    }
-
-    fn mkdir(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -359,8 +613,9 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
         _flags: UnlinkFlags,
+        _expect: Option<&NodeExpect>,
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
@@ -369,9 +624,10 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _src: &str,
-        _dst: &str,
+        _src: At<'_>,
+        _dst: At<'_>,
         _flags: tairix_abi::RenameFlags,
+        _expect: Option<&NodeExpect>,
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
@@ -380,55 +636,11 @@ impl FilesystemService for MemFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
         _mode: u32,
+        _final_link: FinalLink,
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
-    }
-
-    // The fixture's flat map stores no extended attributes; every attribute
-    // operation answers the typed unsupported-backing refusal.
-    fn attr_get(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _key: &[u8],
-        _value_out: &mut [u8],
-    ) -> Result<usize, Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn attr_set(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _key: &[u8],
-        _value: &[u8],
-    ) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn attr_list(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _index: u64,
-        _key_out: &mut [u8],
-    ) -> Result<Option<usize>, Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn attr_remove(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _key: &[u8],
-    ) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 }
 

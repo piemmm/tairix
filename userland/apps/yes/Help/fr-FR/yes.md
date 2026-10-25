@@ -36,8 +36,7 @@ L'analyse des options s'arrête au premier opérande : `yes a -x` écrit
 
 - `0` — l'aide courte demandée a été servie.
 - `1` — la sortie n'accepte plus d'octets (la seule condition d'arrêt
-  de l'outil).
-- `2` — la ligne de commande n'a pas été comprise.
+  de l'outil). Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

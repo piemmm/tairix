@@ -93,8 +93,8 @@ mod program {
     use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::Duration64;
     use tairix_abi::{
-        AppIdentity, Errno, FdWire, InputMode, OpenFlags, ProcId, Reap, Time64, WaitSetOp,
-        WaitSourceKind, ORIGIN_CONSOLE_NONE,
+        AppIdentity, Errno, FdWire, InputMode, OpenFlags, ProcId, Reap, SpawnAttach, Time64,
+        WaitSetOp, WaitSourceKind, ORIGIN_CONSOLE_NONE,
     };
     use tairix_caps::CapabilitySet;
     use tairix_curses::{Screen, Size, StreamTty};
@@ -106,12 +106,13 @@ mod program {
     use tairix_login::{
         audit_launch_ended_abnormally, configured_session_kind, drain_bounded,
         effective_session_kind, elevated_attach, end_live_sessions, events, forget_ended_sessions,
-        handle_elevate_request, handle_session_request, session_attach, session_environment,
-        session_program, supervise, AttemptBudget, AuthenticatedUser, Authenticator, Authority,
-        Caller, Captured, ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad,
-        ElevateDirectory, GuessMeter, InputWait, InputWake, LiveSessions, Login, LoginConfig,
-        LoginError, LoginStatus, LoginView, ProgramRequests, SessionDirectory, SessionKind,
-        SessionLauncher, SessionOutcome, SessionWaker, StatusSource, ZoneStoreGrant,
+        handle_elevate_request, handle_session_request, home_refusal, session_attach,
+        session_environment, session_program, supervise, AttemptBudget, AuthenticatedUser,
+        Authenticator, Authority, Caller, Captured, ConfigStore, ConsoleMode, Credentials,
+        CursesView, DbAccounts, DbLoad, ElevateDirectory, GuessMeter, InputWait, InputWake,
+        LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView, ProgramRequests,
+        SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
+        ZoneStoreGrant, SESSION_FALLBACK_DIRECTORY,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -933,24 +934,72 @@ mod program {
     /// environment they hand a session and the credential it starts under
     /// cannot diverge.
     ///
-    /// Hands the program the session environment (USER, LOGNAME, HOME,
-    /// SHELL, PWD, PATH, TERM, LANG) built from the authenticated account,
-    /// so its prompt and `$USER`/`$HOME`/… reflect the real user, in a
-    /// session of its own that ends everything it starts when it ends. The env
-    /// strings are data and grant no authority (every capability stays
-    /// kernel-side). Privilege switches user only at process creation, never
+    /// The program starts in the account's home, or at
+    /// [`SESSION_FALLBACK_DIRECTORY`] when the home is refused, with the
+    /// session environment naming where it started, in a session of its own
+    /// that ends everything it starts when it ends. The environment is data
+    /// and grants no authority. Privilege switches user only at process creation, never
     /// by a running process mutating its own identity, and the kernel
     /// resolves the full credential from the authoritative identity table —
     /// login chooses *which* user but never fabricates the identity. The
     /// child stays on login's own console.
-    fn spawn_session(user: &AuthenticatedUser, kind: SessionKind) -> Result<i64, Errno> {
+    fn spawn_session(
+        user: &AuthenticatedUser,
+        kind: SessionKind,
+        broker: &Broker<'_>,
+    ) -> Result<i64, Errno> {
+        let program = session_program(user, kind).as_bytes();
+        let attach = session_attach(user.uid.0);
+        // The home is entered as the account, which may search it where login
+        // may not. A session refused it starts at the root instead; the
+        // refusal is stated only once that start succeeds, since only then is
+        // the home known to be what was refused.
+        let refused = match start_session(program, &attach, user, &user.home) {
+            Err(errno) if home_refusal(errno) => errno,
+            started => return started,
+        };
+        let pid = start_session(program, &attach, user, SESSION_FALLBACK_DIRECTORY)?;
+        let reason = alloc::format!("{refused}");
+        write_stderr_line(format_args!(
+            "login: cannot enter {}: {reason}; the session starts in {SESSION_FALLBACK_DIRECTORY}",
+            user.home
+        ));
+        log(
+            &broker.sink,
+            &Event {
+                level: Level::Warn,
+                id: events::SESSION_HOME_REFUSED,
+                message: "home could not be entered; the session starts at the root",
+                fields: &[
+                    Field {
+                        key: "user",
+                        value: FieldValue::Str(&user.username),
+                    },
+                    Field {
+                        key: "home",
+                        value: FieldValue::Str(&user.home),
+                    },
+                    Field {
+                        key: "reason",
+                        value: FieldValue::Str(&reason),
+                    },
+                ],
+            },
+        );
+        Ok(pid)
+    }
+
+    fn start_session(
+        program: &[u8],
+        attach: &SpawnAttach,
+        user: &AuthenticatedUser,
+        directory: &str,
+    ) -> Result<i64, Errno> {
         // Allocating here is safe: a successful authentication already
         // parsed the database, so the heap is live well before this launch.
-        let env_owned = session_environment(user);
+        let env_owned = session_environment(user, directory);
         let env: Vec<&[u8]> = env_owned.iter().map(String::as_bytes).collect();
-        let program = session_program(user, kind);
-        let ret =
-            tairix_rt::spawn_attached(program.as_bytes(), &session_attach(user.uid.0), &[], &env);
+        let ret = tairix_rt::spawn_attached_in(program, attach, directory.as_bytes(), &[], &env);
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
         }
@@ -1103,8 +1152,7 @@ mod program {
 
     /// Launches the authenticated record's shell of choice **as the
     /// authenticated user** through the `spawn` syscall and supervises the
-    /// session until it ends (`plans/SPAWN.md` SP3/SP6; `PREREQUISITES.md`
-    /// P-C spawn-as-user). Login authenticated the account, so it drops the
+    /// session until it ends (`plans/SPAWN.md` SP3/SP6). Login authenticated the account, so it drops the
     /// shell into that user's kernel-attested credential (uid, primary gid,
     /// supplementary groups) at spawn — privilege only ever switches
     /// user at process creation, never by a running process mutating its own
@@ -1172,7 +1220,7 @@ mod program {
             // user**: the desktop session's seat lease, input drains, and
             // frame region are that user's authority (its manifest ∩ the
             // account ceiling), never login's.
-            let pid = spawn_session(user, kind)?;
+            let pid = spawn_session(user, kind, self.broker)?;
             if let Some(server) = self.server {
                 server.cue(SoundEvent::Login);
             }
@@ -1408,7 +1456,7 @@ mod program {
             let pid = if let Some(pid) = resumed {
                 pid
             } else {
-                let Ok(pid) = spawn_session(user, SessionKind::Graphical) else {
+                let Ok(pid) = spawn_session(user, SessionKind::Graphical, self.broker) else {
                     self.audit(
                         Level::Warn,
                         events::SESSION_LAUNCH_FAILED,
@@ -1469,7 +1517,7 @@ mod program {
         /// in the log; the round then tries again, as for one that ended.
         fn greeter_refused(&self, errno: Errno) {
             let reason = alloc::format!("{errno}");
-            write_stderr_line(&alloc::format!(
+            write_stderr_line(format_args!(
                 "login: the login screen could not be started: {reason}"
             ));
             log(
@@ -1606,7 +1654,7 @@ mod program {
 
     /// Read the configuration layer at `path` into `buf`, answering its length.
     fn read_layer(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
-        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ, 0);
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
         }
@@ -1691,7 +1739,7 @@ mod program {
     /// An existence probe, not a load: it reads no bytes and keeps no
     /// descriptor, so it grants nothing and cannot leak one per round.
     fn bundle_present(path: &str) -> bool {
-        let fd = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+        let fd = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ, 0);
         if fd < 0 {
             return false;
         }

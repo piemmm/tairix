@@ -25,8 +25,7 @@ Il registro decide che cosa può essere rimosso. Rifiuta l'eliminazione di un gr
 ## EXIT STATUS
 
 - `0` — il gruppo è stato eliminato.
-- `1` — il registro ha rifiutato o non ha potuto completare l'eliminazione (per esempio una capacità mancante, un gruppo sconosciuto o un gruppo ancora referenziato); la ragione è stampata sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+- `1` — il registro ha rifiutato o non ha potuto completare l'eliminazione (per esempio una capacità mancante, un gruppo sconosciuto o un gruppo ancora referenziato); la ragione è stampata sull'errore standard. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

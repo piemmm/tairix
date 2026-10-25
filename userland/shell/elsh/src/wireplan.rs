@@ -21,7 +21,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::fs::OpenFlags;
+use tairix_abi::fs::{OpenFlags, FS_NEW_FILE_MODE};
 use tairix_abi::Errno;
 use tairix_resref::{KnownNamespace, NamespaceBacking, ResourceRef};
 
@@ -47,6 +47,9 @@ pub enum PlannedOpen {
         path: String,
         /// The open flags the redirection's mode derived.
         flags: OpenFlags,
+        /// The mode a target the open creates is born with, less the umask;
+        /// `0` for an open that creates nothing.
+        mode: u32,
     },
     /// Open a resource reference with `flags` (`resource_open`). The
     /// reference is carried in its canonical spelled form; the kernel
@@ -345,6 +348,11 @@ fn plan_open(opens: &mut Vec<PlannedOpen>, mode: OpenMode, target: &RedirTarget)
         RedirTarget::Path(path) => PlannedOpen::Path {
             path: path.clone(),
             flags,
+            mode: if flags.contains(OpenFlags::CREATE) {
+                FS_NEW_FILE_MODE
+            } else {
+                0
+            },
         },
         // `ResourceRef`'s `Display` renders the canonical spelling, which
         // re-parses to an equal reference on whichever side resolves it.
@@ -378,8 +386,9 @@ fn reads_a_value(mode: OpenMode, reference: &ResourceRef) -> bool {
 
 /// The [`OpenFlags`] each redirection [`OpenMode`] opens its target with —
 /// the one place the shell's operator vocabulary maps onto the filesystem
-/// ABI. Writing modes create the target; `>` truncates, `>>` appends, `<>`
-/// creates without truncating (the POSIX `O_RDWR|O_CREAT` shape).
+/// ABI. Writing modes create the target, `0o666` less the umask as every
+/// POSIX shell makes one; `>` truncates, `>>` appends, `<>` creates without
+/// truncating (the POSIX `O_RDWR|O_CREAT` shape).
 #[must_use]
 pub fn open_flags(mode: OpenMode) -> OpenFlags {
     match mode {
@@ -499,9 +508,30 @@ mod tests {
                 flags: OpenFlags::WRITE
                     .union(OpenFlags::CREATE)
                     .union(OpenFlags::TRUNCATE),
+                mode: 0o666,
             }]
         );
         assert_eq!(plan.members[0].wires[1], PlannedWire::Handle(OpenId(0)));
+    }
+
+    /// Every POSIX shell creates a redirection's target `0o666` less the
+    /// umask; a read creates nothing, so names no mode.
+    #[test]
+    fn a_writing_redirection_creates_its_target_read_and_writable_by_all() {
+        for (mode, created) in [
+            (OpenMode::Write { clobber: false }, 0o666),
+            (OpenMode::Append { clobber: false }, 0o666),
+            (OpenMode::ReadWrite, 0o666),
+            (OpenMode::Read, 0),
+        ] {
+            let commands = [command(&["cat"], vec![open(1, mode, "f")])];
+            let plan = spec_plan(&commands).expect("lowers");
+            assert!(
+                matches!(&plan.opens[0], PlannedOpen::Path { mode, .. } if *mode == created),
+                "{:?}",
+                plan.opens[0]
+            );
+        }
     }
 
     #[test]

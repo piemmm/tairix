@@ -255,14 +255,6 @@ struct Composer {
     members: Vec<Member>,
     arrays: Vec<LiveArray>,
     set: u64,
-    /// The wait-set every *member* block transport parks its replies on.
-    ///
-    /// Deliberately separate from `set`: `set` carries the rendezvous and the
-    /// arrays' service endpoints, which this process *serves*, while this one
-    /// carries the reply completions of the members it *drives* as a client.
-    /// One set for all of them, minted once, so reconnecting a member on every
-    /// assembly attempt costs no new kernel object.
-    member_set: u64,
     endpoint_counter: u32,
     /// An endpoint and window bound for an array whose publish did not finish,
     /// kept for the next attempt rather than stranded.
@@ -358,12 +350,7 @@ fn refusal_message(refusal: OfferRefusal) -> &'static str {
 /// The composer opens every member read/write from the one shared client
 /// definition: it both reads superblocks and, on a degraded start, re-stamps
 /// them.
-fn connect(
-    window: &MemberWindow,
-    endpoint: u64,
-    window_base: usize,
-    member_set: u64,
-) -> Option<MemberClient> {
+fn connect(window: &MemberWindow, endpoint: u64, window_base: usize) -> Option<MemberClient> {
     let lease = window.lend()?;
     // SAFETY: `window_base` maps at least `BLK_DATA_LEN` bytes for this member
     // alone: an offered window a membership already holds is refused before it
@@ -373,20 +360,14 @@ fn connect(
     // unmaps it under this process: a removed node's region is retired in
     // place, and one it must withdraw takes the process with it.
     let slice = unsafe { core::slice::from_raw_parts_mut(window_base as *mut u8, BLK_DATA_LEN) };
-    let device =
-        RemoteBlock::connect_read_write(RtBlkCall::new(endpoint, member_set), slice).ok()?;
+    let device = RemoteBlock::connect_read_write(RtBlkCall::new(endpoint), slice).ok()?;
     Some(MemberDevice::new(device, lease))
 }
 
 /// Reconnect the block client for a registered member, for assembly or for
 /// placing it into a live array.
-fn connect_member(member: &Member, member_set: u64) -> Option<MemberClient> {
-    connect(
-        &member.window,
-        member.endpoint,
-        member.window_base,
-        member_set,
-    )
+fn connect_member(member: &Member) -> Option<MemberClient> {
+    connect(&member.window, member.endpoint, member.window_base)
 }
 
 /// What reading an offered device's first block found.
@@ -416,13 +397,8 @@ enum Probed {
 /// here. The same is true of what *kind* of device it is: an agent matched to a
 /// candidate node claims the disk is blank, and this is where that claim is
 /// checked against the disk itself.
-fn probe_member(
-    window: &MemberWindow,
-    endpoint: u64,
-    window_base: usize,
-    member_set: u64,
-) -> Probed {
-    let Some(mut device) = connect(window, endpoint, window_base, member_set) else {
+fn probe_member(window: &MemberWindow, endpoint: u64, window_base: usize) -> Probed {
+    let Some(mut device) = connect(window, endpoint, window_base) else {
         return Probed::Unusable;
     };
     let Ok(geometry) = device.geometry() else {
@@ -657,7 +633,6 @@ fn log_control_decision(audit: &ControlAudit, outcome: Result<(), Errno>) {
 fn place_returning_member(
     members: &[Member],
     arrays: &mut [LiveArray],
-    member_set: u64,
     array_uuid: [u8; 16],
     member: usize,
     slot: u16,
@@ -668,25 +643,21 @@ fn place_returning_member(
     else {
         return false;
     };
-    let Some(raw) = members
-        .get(member)
-        .and_then(|held| connect_member(held, member_set))
-    else {
+    let Some(raw) = members.get(member).and_then(connect_member) else {
         return false;
     };
     live.runtime.place_member(slot, raw).is_ok()
 }
 
 impl Composer {
-    /// A composer serving on `set`, driving its members over `member_set`, and
-    /// staging its arrays' maintenance chunks through `scratch`.
-    fn new(set: u64, member_set: u64, scratch: Vec<u8>) -> Self {
+    /// A composer serving on `set`, and staging its arrays' maintenance chunks
+    /// through `scratch`.
+    fn new(set: u64, scratch: Vec<u8>) -> Self {
         Self {
             registry: MemberRegistry::new(),
             members: Vec::new(),
             arrays: Vec::new(),
             set,
-            member_set,
             endpoint_counter: 0,
             pending: None,
             scratch,
@@ -878,7 +849,7 @@ impl Composer {
             window: MemberWindow::new(),
         };
         let (superblock, device, admitted) =
-            match probe_member(&member.window, offer.endpoint, window_base, self.member_set) {
+            match probe_member(&member.window, offer.endpoint, window_base) {
                 Probed::Member(superblock, device) => (
                     Some(superblock),
                     device,
@@ -1022,10 +993,8 @@ impl Composer {
             registry,
             members,
             arrays,
-            member_set,
             ..
         } = self;
-        let member_set = *member_set;
         let mut live = Live(arrays.as_mut_slice());
         let effects = handle_control(
             registry,
@@ -1034,11 +1003,7 @@ impl Composer {
             frame,
             now_wall,
             now_ns,
-            |index| {
-                members
-                    .get(index)
-                    .and_then(|held| connect_member(held, member_set))
-            },
+            |index| members.get(index).and_then(connect_member),
             fill_random,
             remove_node_orderly,
             &mut reply,
@@ -1237,12 +1202,9 @@ impl Composer {
             self.registry.note_assembly_failed(array_uuid, now_ns);
             return None;
         };
-        let member_set = self.member_set;
         let members = &self.members;
         let outcome = assemble_array(identity, self.registry.candidates(), now_wall, |tag| {
-            members
-                .get(tag)
-                .and_then(|held| connect_member(held, member_set))
+            members.get(tag).and_then(connect_member)
         });
         let Ok(assembled) = outcome else {
             self.registry.note_assembly_failed(array_uuid, now_ns);
@@ -1370,14 +1332,8 @@ impl Composer {
     /// evidence that re-probing it now is worth doing rather than waiting out
     /// an escalated backoff.
     fn join_member(&mut self, array_uuid: [u8; 16], member: usize, slot: u16, now_ns: u64) {
-        let placed = place_returning_member(
-            &self.members,
-            &mut self.arrays,
-            self.member_set,
-            array_uuid,
-            member,
-            slot,
-        );
+        let placed =
+            place_returning_member(&self.members, &mut self.arrays, array_uuid, member, slot);
         if let Some(live) = self
             .arrays
             .iter_mut()
@@ -1556,12 +1512,6 @@ fn main() -> i32 {
     let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
         return end(DriverExit::NoService, &[]);
     };
-    // A second set, for the members this process drives as a *client*. Minted
-    // once here so opening a member transport — which happens on every
-    // assembly attempt — never mints a kernel object of its own.
-    let Ok(member_set) = u64::try_from(tairix_rt::waitset_create()) else {
-        return end(DriverExit::NoService, &[]);
-    };
     // Both served endpoints ride the one set, so a single park covers a member
     // offering itself and an administrator driving the composition; neither
     // needs a thread or a poll of its own.
@@ -1590,7 +1540,7 @@ fn main() -> i32 {
         RAID_REGISTRY_ENDPOINT,
     );
 
-    let mut composer = Composer::new(set, member_set, maintenance_scratch());
+    let mut composer = Composer::new(set, maintenance_scratch());
     // An array is composed from members offered later, never found as the
     // composer comes up, so it has nothing of its own to publish first. A
     // refused settle only leaves the device manager to wait out its bound.

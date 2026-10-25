@@ -1,6 +1,6 @@
 [package]
 name = "tairix-kernel-sched-cfq"
-description = "TAIRiX CFQ scheduler policy: a non-tickless, Linux-CFS-like Completely-Fair-Queuing dispatch with per-CPU weighted-vruntime run queues, work-stealing, and IPI-driven preemption. Implements tairix-kernel-sched-api::SchedulerPolicy. The only scheduler permitted to keep a fixed-frequency periodic tick armed for a running task (the tickless carve-out)."
+description = "TAIRiX CFQ scheduler policy: a non-tickless Completely-Fair-Queuing dispatch with per-CPU weighted-vruntime run queues, work-stealing, and IPI-driven preemption. Implements tairix-kernel-sched-api::SchedulerPolicy. The only scheduler permitted to keep a fixed-frequency periodic tick armed for a running task (the tickless carve-out)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -2,8 +2,8 @@
 //!
 //! This crate is the loadable **host-controller driver**: a user-space `Run`
 //! binary (`src/main.rs`) that binds a discovered xHCI controller — the
-//! `usb,xhci` node a bus driver publishes (the Pi 4's `VL805`, `plans/PI.md`
-//! P10) or a PCI function of the xHCI class on a host the kernel owns — owns
+//! `usb,xhci` node a bus driver publishes or a PCI function of the xHCI
+//! class on a host the kernel owns — owns
 //! the one controller, enumerates the attached device, and serves that
 //! device's transfers to an autoloaded **class** driver
 //! (`drivers/input/usb_hid`, `drivers/storage/usb_msd`, …) over the
@@ -40,7 +40,7 @@
 extern crate alloc;
 
 use tairix_abi::driver::pci::CLASS_USB_XHCI;
-use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
+use tairix_abi::{compatible_key, CapabilityId, DriverBindKey, HwMatchKey};
 use tairix_usb::XHCI_COMPATIBLE;
 
 pub mod bringup;
@@ -49,12 +49,11 @@ pub mod interfaces;
 pub mod serve;
 
 /// The priority the `compatible` key binds at, mirroring the other
-/// `compatible`-keyed drivers (`drivers/bus/pcie_brcm`,
-/// `drivers/storage/emmc2`, priority 10).
+/// `compatible`-keyed drivers (priority 10).
 const BIND_PRIORITY: u16 = 10;
 
 /// The priority the class key binds at: below any driver naming a controller
-/// exactly (`drivers/bus/usb/vl805`, priority 20), which brings its function
+/// exactly (priority 20), which brings its function
 /// up first and publishes the `usb,xhci` node this driver then binds.
 const CLASS_BIND_PRIORITY: u16 = 5;
 
@@ -75,7 +74,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 
 /// This driver's hardware bind table: the xHCI USB host controller, matched by
 /// the [`XHCI_COMPATIBLE`] `compatible` string a bus driver publishes it under
-/// (`drivers/bus/usb/vl805`'s emitted node), or by the xHCI class code of a
+/// (a bus driver's emitted node), or by the xHCI class code of a
 /// PCI function the kernel discovered on a host it owns.
 ///
 /// The HCD owns the whole controller, so it binds the controller node
@@ -85,16 +84,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// `drivers/bus/usb/xhci` signed manifest's bind table is authored from and
 /// `devmgr` resolves the controller node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[
-    DriverBindKey::new(
-        BIND_PRIORITY,
-        match HwMatchKey::compatible(XHCI_COMPATIBLE) {
-            Ok(key) => key,
-            // Unreachable: `XHCI_COMPATIBLE` is well within
-            // `HW_COMPATIBLE_MAX`. A too-long literal would be a compile-time
-            // const-eval error here, never a runtime panic.
-            Err(_) => panic!("XHCI_COMPATIBLE fits HW_COMPATIBLE_MAX"),
-        },
-    ),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(XHCI_COMPATIBLE)),
     DriverBindKey::new(CLASS_BIND_PRIORITY, HwMatchKey::pci(0, 0, CLASS_USB_XHCI)),
 ];
 

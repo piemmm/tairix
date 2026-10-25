@@ -24,11 +24,12 @@
 //! leading separator) or a file redirection with no target produces no tree,
 //! so a malformed line runs nothing.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::ParseError;
-use crate::lexer::{tokenize, FdSpec, RedirOp, Segment, Token, Word};
+use crate::lexer::{has_pattern_group, tokenize, FdSpec, RedirOp, Segment, Token, Word};
 
 /// Maximum accumulated size of one here-document body, in bytes.
 ///
@@ -134,7 +135,20 @@ pub struct HereDoc {
     strip_tabs: bool,
     delimiter: String,
     quoted: bool,
+    pattern_group: bool,
     body: BodyState,
+    /// Under an unquoted delimiter, the line a trailing backslash continues
+    /// onto the next.
+    continued: Option<Continued>,
+}
+
+/// A here-document line a trailing backslash joins to the next.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Continued {
+    /// Its text so far, the backslash removed.
+    Text(String),
+    /// Past the body's bound, so no terminator and kept from no body.
+    Overlong,
 }
 
 /// The collection state of a here-document body — a small state machine, so
@@ -159,13 +173,11 @@ impl HereDoc {
     ///
     /// The delimiter undergoes quote removal but never expansion; the body is
     /// later expanded only when no part of the delimiter was quoted, exactly
-    /// as POSIX specifies. An empty delimiter can only be written quoted
-    /// (`<<""`), so an empty word counts as quoted.
+    /// as POSIX specifies.
     fn new(fd: FdSpec, strip_tabs: bool, delimiter_word: &Word) -> Self {
-        let quoted = delimiter_word.is_empty()
-            || delimiter_word.iter().any(|segment| {
-                matches!(segment, Segment::Literal(_) | Segment::QuotedExpandable(_))
-            });
+        let quoted = delimiter_word
+            .iter()
+            .any(|segment| matches!(segment, Segment::Literal(_) | Segment::QuotedExpandable(_)));
         let mut delimiter = String::new();
         for segment in delimiter_word {
             match segment {
@@ -179,7 +191,9 @@ impl HereDoc {
             strip_tabs,
             delimiter,
             quoted,
+            pattern_group: has_pattern_group(delimiter_word),
             body: BodyState::Filling(String::new()),
+            continued: None,
         }
     }
 
@@ -211,6 +225,12 @@ impl HereDoc {
         self.quoted
     }
 
+    /// `true` when the delimiter holds an extended pattern group, which bash
+    /// reads only while `extglob` is on.
+    pub(crate) fn holds_pattern_group(&self) -> bool {
+        self.pattern_group
+    }
+
     /// The collected body (each line newline-terminated), pending expansion.
     ///
     /// # Errors
@@ -231,18 +251,37 @@ impl HereDoc {
 
     /// Consume one body line (newline already stripped by the reader).
     ///
-    /// For `<<-`, leading tabs are stripped from body and terminator lines
-    /// alike. A line equal to the delimiter completes the document; any other
-    /// line is appended to the body with its newline restored. A line that
-    /// would push the body past [`MAX_HERE_DOC_BYTES`] discards the body and
-    /// marks it over-length, but collection continues to the terminator.
+    /// Under an unquoted delimiter a line ending in an unescaped backslash
+    /// joins the next, as POSIX reads it, and the joined line is what is
+    /// compared with the delimiter. For `<<-`, leading tabs are stripped from
+    /// the start of each such line. A line equal to the delimiter completes
+    /// the document; any other line is appended to the body with its newline
+    /// restored. A line that would push the body past [`MAX_HERE_DOC_BYTES`]
+    /// discards the body and marks it over-length, but collection continues
+    /// to the terminator.
     fn feed_line(&mut self, line: &str) {
-        let stripped = if self.strip_tabs {
-            line.trim_start_matches('\t')
-        } else {
-            line
+        let logical = match self.continued.take() {
+            None if self.strip_tabs => Cow::Borrowed(line.trim_start_matches('\t')),
+            None => Cow::Borrowed(line),
+            Some(Continued::Text(mut text)) if text.len() + line.len() < MAX_HERE_DOC_BYTES => {
+                text.push_str(line);
+                Cow::Owned(text)
+            }
+            Some(_) => {
+                self.mark_over_length();
+                if continues(line) {
+                    self.continued = Some(Continued::Overlong);
+                }
+                return;
+            }
         };
-        if stripped == self.delimiter {
+        if !self.quoted && continues(&logical) {
+            let mut text = logical.into_owned();
+            text.pop();
+            self.continued = Some(Continued::Text(text));
+            return;
+        }
+        if logical == self.delimiter {
             self.body = match core::mem::replace(&mut self.body, BodyState::CompleteDiscarded) {
                 BodyState::Filling(body) => BodyState::Complete(body),
                 BodyState::FillingDiscarded | BodyState::CompleteDiscarded => {
@@ -253,11 +292,11 @@ impl HereDoc {
             return;
         }
         if let BodyState::Filling(body) = &mut self.body {
-            if body.len() + stripped.len() >= MAX_HERE_DOC_BYTES {
+            if body.len() + logical.len() >= MAX_HERE_DOC_BYTES {
                 self.mark_over_length();
                 return;
             }
-            body.push_str(stripped);
+            body.push_str(&logical);
             body.push('\n');
         }
     }
@@ -269,6 +308,20 @@ impl HereDoc {
             self.body = BodyState::FillingDiscarded;
         }
     }
+
+    /// Discard the body because an input line was lost. A line being joined
+    /// can no longer be trusted as the terminator, so it runs on to its end.
+    fn mark_lost_line(&mut self) {
+        self.mark_over_length();
+        if self.continued.is_some() {
+            self.continued = Some(Continued::Overlong);
+        }
+    }
+}
+
+/// Whether `line` ends in a backslash nothing escapes, joining the next line.
+fn continues(line: &str) -> bool {
+    line.bytes().rev().take_while(|&byte| byte == b'\\').count() % 2 == 1
 }
 
 /// One simple command: its argument words and its redirections, in source
@@ -354,7 +407,7 @@ impl CommandList {
     /// here-document is pending.
     pub fn poison_pending_here_doc(&mut self) {
         if let Some(doc) = self.here_docs_mut().find(|doc| !doc.is_complete()) {
-            doc.mark_over_length();
+            doc.mark_lost_line();
         }
     }
 
@@ -913,10 +966,23 @@ mod tests {
 
     #[test]
     fn quoted_delimiter_marks_the_body_literal() {
-        for line in ["cmd <<'EOF'", "cmd <<\"EOF\"", "cmd <<E\\OF", "cmd <<''"] {
+        for line in [
+            "cmd <<'EOF'",
+            "cmd <<\"EOF\"",
+            "cmd <<E\\OF",
+            "cmd <<''",
+            "cmd <<\"\"",
+        ] {
             let list = parse(line).unwrap();
             let doc = list.pending_here_doc().expect("pending here-doc");
             assert!(doc.is_quoted(), "line: {line}");
+        }
+        // An empty delimiter is quoted by the empty pair the lexer keeps.
+        for line in ["cmd <<''", "cmd <<\"\""] {
+            assert_eq!(
+                parse(line).unwrap().pending_here_doc().unwrap().delimiter(),
+                ""
+            );
         }
         let list = parse("cmd <<EOF").unwrap();
         assert!(!list.pending_here_doc().unwrap().is_quoted());
@@ -1047,5 +1113,60 @@ mod tests {
         // `<&` with neither a source fd nor `-`, and a numbered dup-to-file.
         assert_eq!(parse("cmd <&file"), Err(ParseError::AmbiguousRedirection));
         assert_eq!(parse("cmd 2>&file"), Err(ParseError::AmbiguousRedirection));
+    }
+
+    /// Under an unquoted delimiter a trailing backslash joins the next line,
+    /// and the joined line is what is compared with the delimiter, as POSIX
+    /// reads it; a quoted delimiter joins nothing.
+    #[test]
+    fn a_continued_here_document_line_is_joined_before_it_is_compared() {
+        let collect = |line: &str, body: &[&str]| {
+            let mut list = parse(line).unwrap();
+            for body_line in body {
+                list.feed_here_doc_line(body_line);
+            }
+            let cmd = &list.entries[0].pipeline.commands[0];
+            let Redirection::HereDoc(doc) = &cmd.redirections[0] else {
+                panic!("expected a here-doc redirection");
+            };
+            doc.body().map(String::from)
+        };
+        assert_eq!(
+            collect("cmd <<EOF", &["a\\", "EOF", "b", "EOF"]),
+            Ok("aEOF\nb\n".into())
+        );
+        assert_eq!(collect("cmd <<EOF", &["x", "EO\\", "F"]), Ok("x\n".into()));
+        assert_eq!(
+            collect("cmd <<EOF", &["x\\\\", "EOF"]),
+            Ok("x\\\\\n".into())
+        );
+        // Under `<<-` tabs are stripped from where a joined line starts only.
+        assert_eq!(
+            collect("cmd <<-EOF", &["\tx\\", "\ty", "\tEOF"]),
+            Ok("x\ty\n".into())
+        );
+        assert_eq!(collect("cmd <<'EOF'", &["a\\", "EOF"]), Ok("a\\\n".into()));
+    }
+
+    /// A joined line is bounded with the body: past the bound it is discarded
+    /// and is no terminator, and the line after it is read afresh.
+    #[test]
+    fn an_overlong_continued_line_is_discarded_but_ends() {
+        use super::MAX_HERE_DOC_BYTES;
+
+        let mut list = parse("cmd <<EOF").unwrap();
+        let chunk = alloc::format!("{}\\", "x".repeat(4095));
+        for _ in 0..=(MAX_HERE_DOC_BYTES / chunk.len()) {
+            list.feed_here_doc_line(&chunk);
+        }
+        list.feed_here_doc_line("EOF");
+        assert!(list.pending_here_doc().is_some(), "the last joined part");
+        list.feed_here_doc_line("EOF");
+        assert!(list.pending_here_doc().is_none());
+        let cmd = &list.entries[0].pipeline.commands[0];
+        let Redirection::HereDoc(doc) = &cmd.redirections[0] else {
+            panic!("expected a here-doc redirection");
+        };
+        assert_eq!(doc.body(), Err(ParseError::HereDocTooLarge));
     }
 }

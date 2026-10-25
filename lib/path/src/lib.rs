@@ -393,6 +393,100 @@ impl fmt::Display for PathError {
 /// bounds, and the fail-closed rules. This is the only fallible step; the
 /// returned [`Path`] can be displayed and inspected infallibly.
 pub fn parse(input: &str) -> Result<Path, PathError> {
+    let (root, rest) = rooted(input)?;
+    let anchored = root != Root::Relative;
+    let components = normalise(rest, anchored)?;
+    Ok(Path { root, components })
+}
+
+/// One step of a path as its author spelled it, before anything resolves it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Step<'a> {
+    /// Descend into the entry this names.
+    Name(&'a str),
+    /// A `..`: ascend from the directory the walk stands in.
+    Up,
+}
+
+/// Parse `input`'s root, and hand back its steps as spelled: `.` dropped and
+/// `..` kept, for a resolver that applies each `..` to the directory it
+/// actually reached rather than to the text before it, and holds the steps
+/// where it wants them under a bound of its own.
+///
+/// # Errors
+///
+/// The [`PathError`] [`parse`] reports for the same root.
+pub fn steps(input: &str) -> Result<(Root, Steps<'_>), PathError> {
+    let (root, rest) = rooted(input)?;
+    let mut steps = Steps::of(rest);
+    steps.read = input.len() - rest.len();
+    Ok((root, steps))
+}
+
+/// The steps of a path read one at a time ([`steps`]): every name checked as
+/// [`parse`] checks it, only a `..` differing, which is never
+/// [`PathError::EscapesRoot`] here. The first refusal ends them.
+#[derive(Clone, Debug)]
+pub struct Steps<'a> {
+    pieces: core::iter::Peekable<core::str::Split<'a, char>>,
+    refused: bool,
+    /// Bytes of the spelling read so far, the root included.
+    read: usize,
+    /// Whether a piece has been read, so the next is preceded by a `/`.
+    begun: bool,
+}
+
+impl<'a> Steps<'a> {
+    fn of(path: &'a str) -> Self {
+        Self {
+            pieces: path.split('/').peekable(),
+            refused: false,
+            read: 0,
+            begun: false,
+        }
+    }
+
+    /// The length of the spelling up to the end of the last step read: what
+    /// names the place that step reached, as its author wrote it.
+    #[must_use]
+    pub fn spelled_len(&self) -> usize {
+        self.read
+    }
+}
+
+impl<'a> Iterator for Steps<'a> {
+    type Item = Result<Step<'a>, PathError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.refused {
+            return None;
+        }
+        let step = loop {
+            let piece = self.pieces.next()?;
+            if piece.is_empty() && self.pieces.peek().is_none() {
+                // A trailing `/` is accepted and names nothing more.
+                return None;
+            }
+            self.read += piece.len() + usize::from(self.begun);
+            self.begun = true;
+            match piece {
+                // An empty interior component is a `//` and is refused.
+                "" => break Err(PathError::EmptyComponent),
+                "." => {}
+                ".." => break Ok(Step::Up),
+                name => break validate_component(name).map(|()| Step::Name(name)),
+            }
+        };
+        self.refused = step.is_err();
+        Some(step)
+    }
+}
+
+impl core::iter::FusedIterator for Steps<'_> {}
+
+/// `input`'s root and the text after it, once it is neither empty nor past
+/// [`MAX_PATH_LEN`].
+fn rooted(input: &str) -> Result<(Root, &str), PathError> {
     if input.is_empty() {
         return Err(PathError::Empty);
     }
@@ -400,9 +494,7 @@ pub fn parse(input: &str) -> Result<Path, PathError> {
         return Err(PathError::TooLong);
     }
     let (root, offset) = split_root(input)?;
-    let rooted = root != Root::Relative;
-    let components = normalise(&input[offset..], rooted)?;
-    Ok(Path { root, components })
+    Ok((root, &input[offset..]))
 }
 
 /// The byte length of the root `input` spells before its first component:
@@ -557,46 +649,29 @@ fn validate_alias(name: &str) -> Result<String, PathError> {
 /// above its root, whereas a relative path preserves leading `..` entries for
 /// the caller to resolve.
 fn normalise(path: &str, rooted: bool) -> Result<Vec<String>, PathError> {
-    if path.is_empty() {
-        return Ok(Vec::new());
-    }
-
     let mut components: Vec<String> = Vec::new();
-    let pieces: Vec<&str> = path.split('/').collect();
-    let last = pieces.len() - 1;
-
-    for (index, piece) in pieces.iter().enumerate() {
-        if piece.is_empty() {
-            // A trailing `/` (an empty final piece) is accepted and ignored;
-            // an empty interior piece is a `//` and is rejected.
-            if index == last {
-                continue;
-            }
-            return Err(PathError::EmptyComponent);
-        }
-        match *piece {
-            "." => {}
-            ".." => {
-                if let Some(top) = components.last() {
-                    if top == ".." {
-                        push_component(&mut components, "..")?;
-                    } else {
-                        components.pop();
-                    }
-                } else if rooted {
-                    return Err(PathError::EscapesRoot);
-                } else {
-                    push_component(&mut components, "..")?;
-                }
-            }
-            component => {
-                validate_component(component)?;
-                push_component(&mut components, component)?;
+    for_each_step(path, |step| match step {
+        Step::Name(name) => push_component(&mut components, name),
+        Step::Up => {
+            if components.last().is_some_and(|top| top != "..") {
+                components.pop();
+                Ok(())
+            } else if components.is_empty() && rooted {
+                Err(PathError::EscapesRoot)
+            } else {
+                push_component(&mut components, "..")
             }
         }
-    }
-
+    })?;
     Ok(components)
+}
+
+/// Hand `each` every step `path` spells, as [`Steps`] reads them.
+fn for_each_step<'a>(
+    path: &'a str,
+    mut each: impl FnMut(Step<'a>) -> Result<(), PathError>,
+) -> Result<(), PathError> {
+    Steps::of(path).try_for_each(|step| each(step?))
 }
 
 /// Push a validated component, enforcing the [`MAX_COMPONENTS`] bound.
@@ -709,6 +784,38 @@ pub fn leaf_name(path: &str) -> &str {
     }
 }
 
+/// The directory the spelling `path` puts its final component in — its
+/// POSIX *dir name*.
+///
+/// Trailing `/`s, and the `/`s before the final component, are dropped, so
+/// `a/b//` and `a//b` are both in `a`; a single relative component (or the
+/// empty spelling) is in `.`; a root is in itself. A `Name:/` alias root
+/// plays the role POSIX gives `/` ([`alias_root_len`]), so `Home:/tools` is
+/// in `Home:/` exactly as `/tools` is in `/`. Purely lexical, like
+/// [`leaf_name`], and a borrow of `path`.
+#[must_use]
+pub fn dir_name(path: &str) -> &str {
+    let root_len = alias_root_len(path).unwrap_or(0);
+    let rest = &path[root_len..];
+    let trimmed = rest.trim_end_matches('/');
+    let root = || {
+        if root_len > 0 {
+            &path[..root_len]
+        } else if rest.starts_with('/') {
+            "/"
+        } else {
+            "."
+        }
+    };
+    match trimmed.rfind('/') {
+        None => root(),
+        Some(slash) => match trimmed[..slash].trim_end_matches('/') {
+            "" => root(),
+            parent => &path[..root_len + parent.len()],
+        },
+    }
+}
+
 /// `name` appended to the directory spelling `parent`, with exactly one `/`
 /// between them.
 ///
@@ -722,11 +829,17 @@ pub fn leaf_name(path: &str) -> &str {
 pub fn join(parent: &str, name: &str) -> String {
     let mut path = String::with_capacity(parent.len() + 1 + name.len());
     path.push_str(parent);
-    if !parent.ends_with('/') {
+    push_name(&mut path, name);
+    path
+}
+
+/// [`join`] in place: `name` appended to the directory spelling `path` by the
+/// same rule, growing `path` only when it lacks the room.
+pub fn push_name(path: &mut String, name: &str) {
+    if !path.ends_with('/') {
         path.push('/');
     }
     path.push_str(name);
-    path
 }
 
 #[cfg(test)]
@@ -1196,6 +1309,42 @@ mod tests {
     }
 
     #[test]
+    fn dir_name_is_the_posix_directory_of_the_final_component() {
+        for (path, dir) in [
+            ("/usr/lib", "/usr"),
+            ("dir/file.txt", "dir"),
+            ("file", "."),
+            ("dir/", "."),
+            ("", "."),
+            ("/file", "/"),
+            ("/", "/"),
+            ("///", "/"),
+            ("//a", "/"),
+            ("a//b", "a"),
+            ("a/b//", "a"),
+            ("./f", "."),
+            ("s/./f", "s/."),
+        ] {
+            assert_eq!(dir_name(path), dir, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn dir_name_stops_at_an_alias_root_as_at_the_view_root() {
+        for (path, dir) in [
+            ("Home:/tools/x", "Home:/tools"),
+            ("Home:/tools", "Home:/"),
+            ("Home:/tools/", "Home:/"),
+            ("Home:/", "Home:/"),
+            ("Home://a", "Home:/"),
+            ("sys:random", "."),
+            ("a/b:c", "a"),
+        ] {
+            assert_eq!(dir_name(path), dir, "{path:?}");
+        }
+    }
+
+    #[test]
     fn leaf_name_takes_the_final_component() {
         assert_eq!(leaf_name("/usr/lib"), "lib");
         assert_eq!(leaf_name("dir/file.txt"), "file.txt");
@@ -1227,5 +1376,94 @@ mod tests {
         assert_eq!(join("Home:/", "b"), "Home:/b");
         // A relative parent joins the same way.
         assert_eq!(join("a", "b"), "a/b");
+    }
+
+    #[test]
+    fn push_name_joins_in_place_by_the_same_rule() {
+        for parent in ["/a", "/a/", "/", "Home:/", "a"] {
+            let mut path = String::from(parent);
+            push_name(&mut path, "b");
+            assert_eq!(path, join(parent, "b"), "{parent}");
+        }
+    }
+
+    /// `input`'s root and its steps, gathered.
+    fn spelled(input: &str) -> Result<(Root, Vec<Step<'_>>), PathError> {
+        let (root, steps) = steps(input)?;
+        Ok((root, steps.collect::<Result<_, _>>()?))
+    }
+
+    #[test]
+    fn steps_keep_each_dot_dot_for_the_resolver() {
+        let (root, steps) = spelled("/a/./b/../c/").expect("parses");
+        assert_eq!(root, Root::View);
+        assert_eq!(
+            steps,
+            vec![Step::Name("a"), Step::Name("b"), Step::Up, Step::Name("c")]
+        );
+        // What a `..` at a root climbs to is the resolver's to decide.
+        assert_eq!(spelled("/..").map(|(_, s)| s), Ok(vec![Step::Up]));
+        assert_eq!(
+            spelled("../x"),
+            Ok((Root::Relative, vec![Step::Up, Step::Name("x")]))
+        );
+        assert_eq!(spelled(".").map(|(_, s)| s.len()), Ok(0));
+        assert_eq!(
+            spelled("Home:/a/../b"),
+            Ok((
+                Root::Alias("Home".into()),
+                vec![Step::Name("a"), Step::Up, Step::Name("b")]
+            ))
+        );
+        // The bound is the resolver's: steps past `parse`'s own are read.
+        let deep = "a/".repeat(MAX_COMPONENTS + 1);
+        assert_eq!(spelled(&deep).map(|(_, s)| s.len()), Ok(MAX_COMPONENTS + 1));
+    }
+
+    #[test]
+    fn each_step_knows_the_spelling_that_reached_it() {
+        for (input, spellings) in [
+            ("/a/./b", &["/a", "/a/./b"][..]),
+            ("x//", &["x"][..]),
+            (
+                "Home:/a/../c/",
+                &["Home:/a", "Home:/a/..", "Home:/a/../c"][..],
+            ),
+            ("./p", &["./p"][..]),
+        ] {
+            let (_, mut read) = steps(input).expect("parses");
+            let mut reached = Vec::new();
+            while let Some(step) = read.next() {
+                if step.is_err() {
+                    break;
+                }
+                reached.push(&input[..read.spelled_len()]);
+            }
+            assert_eq!(reached, spellings, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_step_ends_the_steps() {
+        let (_, mut read) = steps("a//b/c").expect("a well-formed root");
+        assert_eq!(read.next(), Some(Ok(Step::Name("a"))));
+        assert_eq!(read.next(), Some(Err(PathError::EmptyComponent)));
+        assert_eq!(read.next(), None);
+    }
+
+    #[test]
+    fn steps_refuse_what_parse_refuses() {
+        for (bad, why) in [
+            ("", PathError::Empty),
+            ("a//b", PathError::EmptyComponent),
+            ("//a", PathError::EmptyComponent),
+            ("a/\u{7}b", PathError::ControlCharacter),
+            ("a/b:c", PathError::ColonInComponent),
+            ("sys:null", PathError::NotAPath),
+            ("fs::x/y", PathError::UnsupportedResolver),
+        ] {
+            assert_eq!(spelled(bad).map(|_| ()), Err(why), "{bad:?}");
+            assert_eq!(parse(bad).map(|_| ()), Err(why), "{bad:?}");
+        }
     }
 }

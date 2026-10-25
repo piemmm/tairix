@@ -1,197 +1,112 @@
 //! The seams through which `cp` touches the outside world, and the data they
 //! carry.
 //!
-//! Keeping the filesystem and the terminal behind object-safe traits is what
-//! lets the copy logic in [`crate::client`] run against in-memory fixtures
-//! with no kernel, mirroring the seam design of the other userland crates
-//! (`init`'s `Spawner`/`Reaper`, `login`'s `Prompt`, `sysinfo`'s `Transport`,
-//! `cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`).
+//! A copy reaches files through the shared tree seam (`tairix_fscopy::tree`):
+//! a tree is walked through directories held open and each entry copied by
+//! name from there, into directories the copy made or opened by name too.
+//! What `cp` needs beyond it is [`FileSystem`]: an operand read or written
+//! through its final link, as GNU's `cp` reads and writes one, a resolved
+//! spelling, and a link put in a name's place in one step. Keeping them
+//! behind traits is what lets the copy logic in [`crate::client`] run against
+//! the in-memory fixture with no kernel.
 
 use alloc::string::String;
-use tairix_abi::{Errno, FileId};
-pub use tairix_fscopy::{Ancestry, AttributeStore, PathFiles};
+use tairix_abi::{Errno, FileId, FileStat};
 
-/// What kind of object a path or directory entry is, as far as `cp` cares.
-///
-/// A directory is reproduced (with `-r`) by [`FileSystem::mkdir`] and a
-/// recursive descent; a symbolic link is a third kind because `-P`/`-d`
-/// reproduce the *link* rather than what it names, and `-s` creates one;
-/// everything else — a regular file, a device node, a link followed to its
-/// target — is copied as a stream of bytes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EntryKind {
-    /// A directory, whose entries `cp -r` reproduces under the destination.
-    Directory,
-    /// Any non-directory, non-link object, copied as a byte stream.
-    File,
-    /// A symbolic link. Only ever reported under [`Follow::Keep`]: a
-    /// following probe reports what the link names.
-    Symlink,
-}
+pub use tairix_abi::fs::FinalLink;
+pub use tairix_fscopy::tree::{Dir, Entry, Kind, Node, Roots};
+pub use tairix_util::output::Output;
 
-/// Whether a probe describes the final component as typed or what it names.
+/// What one look at a node learned: what it is, and the identity that tells
+/// a second *name* for one node from a second node.
 ///
-/// `cp`'s default follows a final symbolic link — a copy of a link to a file
-/// is a copy of the file — while `-P`/`-d` keep it, so the *link* is
-/// reproduced. One operand rather than two seam methods, so the two
-/// postures cannot drift apart.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Follow {
-    /// Resolve a final symbolic link and describe what it names.
-    Target,
-    /// Describe the final component itself, so a link reports
-    /// [`EntryKind::Symlink`].
-    Keep,
-}
-
-/// What one probe learned about a path: what it is, and the identity that
-/// tells a second *name* for one node from a second node.
-///
-/// The identity and name count ride along because the one `fs_stat` (or the
-/// one directory listing) already reported them, and `--preserve=links`
-/// needs exactly them: without the identity, two sources naming one node are
-/// indistinguishable from two files and the copy would duplicate the data.
+/// `--preserve=links` needs exactly the identity and name count: without
+/// them two sources naming one node are indistinguishable from two files and
+/// the copy would duplicate the data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Probe {
-    /// What kind of object it is.
-    pub kind: EntryKind,
+    /// What kind of node it is.
+    pub kind: Kind,
     /// Its stable system-wide identity. [`FileId::NONE`] for a backing that
     /// offers none, which is therefore never compared for equality.
     pub id: FileId,
-    /// How many directory entries name the node. A node named once cannot
-    /// be reached twice, which is what bounds `--preserve=links`' map to
-    /// the hard links a copy actually meets.
+    /// How many directory entries name it. A node named once cannot be
+    /// reached twice, which is what bounds `--preserve=links`' map to the
+    /// hard links a copy actually meets.
     pub nlink: u32,
 }
 
-/// One directory entry: a name and what a probe of it found.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Entry {
-    /// The entry's name within its directory (not a full path, and never
-    /// `.` or `..` — the seam does not surface those).
-    pub name: String,
-    /// What the listing reported for it, as a [`Follow::Keep`] probe would:
-    /// a listing describes each child itself, never what a link names.
-    pub probe: Probe,
+impl Probe {
+    /// What its directory's listing said of `entry`.
+    #[must_use]
+    pub const fn listed(entry: &Entry) -> Self {
+        Self {
+            kind: entry.kind,
+            id: entry.id,
+            nlink: entry.nlink,
+        }
+    }
+
+    /// What `stat` says of a node.
+    #[must_use]
+    pub const fn of(stat: &FileStat) -> Self {
+        Self {
+            kind: Kind::of(stat.kind),
+            id: stat.id,
+            nlink: stat.nlink,
+        }
+    }
 }
 
-/// Inspects paths, reads sources, and creates destinations.
-///
-/// The client first asks [`probe`](FileSystem::probe) what a source is. A
-/// non-directory source is copied, through the files it reaches by path
-/// ([`PathFiles`]), into a destination created with
-/// [`create`](FileSystem::create) — unless a switch replaces the byte copy with
-/// a link: `-l` calls [`link`](FileSystem::link), `-s` calls
-/// [`symlink`](FileSystem::symlink), and `-P`/`-d` reproduce a link source
-/// through [`read_link`](FileSystem::read_link) plus
-/// [`symlink`](FileSystem::symlink). A directory source is reproduced by
-/// creating the destination directory with [`mkdir`](FileSystem::mkdir) (when
-/// it does not already exist), enumerating the source with
-/// [`read_dir`](FileSystem::read_dir) — calling it with an increasing `index`
-/// until it returns [`None`] — and recursing.
-/// [`remove_file`](FileSystem::remove_file)
-/// backs `-f`: a destination that cannot be created is removed and the create
-/// retried once. Before a directory is copied, its [`Ancestry`] says whether
-/// the destination lies inside it.
-pub trait FileSystem: AttributeStore + PathFiles + Ancestry {
-    /// Describe `path` under the given follow posture.
-    ///
-    /// Under [`Follow::Target`] a final symbolic link is resolved, so a link
-    /// to a regular file reports [`EntryKind::File`]; under [`Follow::Keep`]
-    /// it reports [`EntryKind::Symlink`]. A missing path reports
-    /// [`Errno::NotFound`], which the client treats as "absent" when probing
-    /// a destination.
+/// What a copy reaches beyond the shared tree seam, each by an operand's
+/// path.
+pub trait FileSystem: Roots {
+    /// The file `path` names, opened for reading through a final link: a
+    /// source operand read as GNU's `cp` reads one.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::NotFound`] for a
-    /// missing path or [`Errno::PermissionDenied`] when the caller may not
-    /// reach it.
-    fn probe(&self, path: &str, follow: Follow) -> Result<Probe, Errno>;
+    /// The open's refusal.
+    fn open_source(&self, path: &str) -> Result<<Self::Dir as Dir>::File, Errno>;
 
-    /// The target the symbolic link at `path` stores, exactly as stored.
-    ///
-    /// Called only for a source a [`Follow::Keep`] probe reported as
-    /// [`EntryKind::Symlink`], so `-P`/`-d` can reproduce the link by
-    /// storing the same target. The target is data: it may be relative, may
-    /// carry `..`, and may name nothing, and it is reproduced verbatim
-    /// rather than resolved.
+    /// The existing file `path` names, opened for writing through a final
+    /// link and emptied: a destination a byte copy writes as GNU's writes
+    /// one, keeping its own mode.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises while reading the link.
-    fn read_link(&self, path: &str) -> Result<String, Errno>;
+    /// The open's refusal — [`Errno::PermissionDenied`] for a destination
+    /// that may not be written, which `-f` removes and creates afresh.
+    fn truncate_existing(&self, path: &str) -> Result<<Self::Dir as Dir>::File, Errno>;
 
-    /// Create the symbolic link `link` storing `target` verbatim.
-    ///
-    /// Backs `-s` (a link to each source) and the reproduction half of
-    /// `-P`/`-d` (a link storing what the source link stored).
+    /// `path` as the kernel resolves it, every link on the way and at its end
+    /// followed: what `-l` links when it follows a link.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
-    /// taken name (a create never replaces one), or [`Errno::NotSupported`]
-    /// on a format that stores no links.
-    fn symlink(&self, target: &str, link: &str) -> Result<(), Errno>;
+    /// The resolution's refusal.
+    fn canonical(&self, path: &str) -> Result<String, Errno>;
 
-    /// Add `new` as a second directory entry for the node `existing` names.
-    ///
-    /// Backs `-l` (link each source instead of copying it) and
-    /// `--preserve=links` (a second source naming one node becomes a second
-    /// name at the destination rather than a second copy). Neither name is
-    /// followed.
+    /// Create the symbolic link `link` storing `target` verbatim; with
+    /// `replace`, in place of whatever `link` holds, in one step that leaves
+    /// it as it was when the link cannot be made.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
-    /// taken name, [`Errno::CrossVolume`] when the two names are on
-    /// different volumes, or [`Errno::NotSupported`] on a format that stores
-    /// one name per node.
-    fn link(&self, existing: &str, new: &str) -> Result<(), Errno>;
+    /// [`Errno::AlreadyExists`] for a taken name without `replace`, or the
+    /// link's refusal.
+    fn symlink(&self, target: &str, link: &str, replace: bool) -> Result<(), Errno>;
 
-    /// Return the entry at position `index` in the directory `path`, or
-    /// [`None`] once `index` is past the last entry.
-    ///
-    /// The client reads a directory by calling this with `index` `0, 1, 2, …`
-    /// until it returns [`None`]. The entries `.` and `..` are never
-    /// returned.
+    /// Add `new` as a second name for the node `existing` names, neither name
+    /// followed; with `replace`, in place of whatever `new` holds, in one step
+    /// made only once the second name exists.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises while reading the directory.
-    fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno>;
-
-    /// Create the directory `path`.
-    ///
-    /// The client calls this only after observing that `path` does not exist.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`].
-    fn mkdir(&self, path: &str) -> Result<(), Errno>;
-
-    /// Create (or truncate to empty) the regular file `path`, ready to be
-    /// written from offset `0`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`]
-    /// for an unwritable destination (which `-f` recovers from by removing it
-    /// and retrying).
-    fn create(&self, path: &str) -> Result<(), Errno>;
-
-    /// Remove the non-directory object at `path` (unlink one link).
-    ///
-    /// Used to back `-f`: when [`create`](FileSystem::create) fails on an
-    /// existing destination, the client removes it and retries the create.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`].
-    fn remove_file(&self, path: &str) -> Result<(), Errno>;
+    /// [`Errno::AlreadyExists`] for a taken name without `replace`,
+    /// [`Errno::CrossVolume`] across volumes, or the link's refusal.
+    fn link(&self, existing: &str, new: &str, replace: bool) -> Result<(), Errno>;
 }
-
-pub use tairix_util::output::Output;
 
 /// Asks the interactive confirmation question (`-i`).
 ///

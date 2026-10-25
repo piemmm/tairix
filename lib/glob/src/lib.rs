@@ -20,8 +20,10 @@
 //!   `|`-separated alternatives: `?(…)` zero or one, `*(…)` zero or more,
 //!   `+(…)` one or more, `@(…)` exactly one, `!(…)` anything but one.
 //!
-//! [`Options`] also selects case-insensitive matching, the leading-period rule
-//! and pathname mode (glibc's `FNM_CASEFOLD`, `FNM_PERIOD` and `FNM_PATHNAME`).
+//! [`Options`] also selects case-insensitive matching and the leading-period
+//! rule (glibc's `FNM_CASEFOLD` and `FNM_PERIOD`), and pathname mode, which
+//! reads a `/` as POSIX's pathname expansion and bash's filename generation
+//! do ([`Options::PATHNAME`]).
 //! [`Pattern::from_marked`] compiles text whose quoted characters the caller
 //! already knows are literal, which is how the shell hands a word over
 //! without re-escaping it.
@@ -32,10 +34,14 @@
 //! [`MAX_TOKENS`], [`MAX_CLASS_ITEMS`], [`MAX_GROUPS`], [`MAX_GROUP_DEPTH`])
 //! and a malformed one is a typed [`GlobError`]. Compiling one costs time
 //! linear in its length, its bracket expressions sharing one table of where
-//! each can close. Matching never fails and
-//! never backtracks: it tracks the set of positions each step can reach. A
+//! each can close. Matching never backtracks: it tracks the set of positions
+//! each step can reach, and fails only as [`OutOfMemory`], when the heap
+//! refuses the working memory it grows. A
 //! pattern without groups matches in time linear in its tokens times the
-//! candidate's length. A group's matches are memoised per start position,
+//! candidate's length: a bracket expression tests a character by one bit
+//! lookup, or a binary search over at most [`MAX_CLASS_ITEMS`] ranges, and
+//! a check per named class it holds. A group's matches are memoised per
+//! start position,
 //! which bounds an extended pattern by the cube of the candidate's length;
 //! that is why one matches candidates of at most [`MAX_EXTENDED_LEN`]
 //! characters, the longest name a filesystem stores.
@@ -46,14 +52,14 @@
 //! use tairix_glob::{Options, Pattern};
 //!
 //! let pat = Pattern::new("img_[[:digit:]][0-9].???").expect("valid pattern");
-//! assert!(pat.matches("img_04.png"));
-//! assert!(!pat.matches("img_4.png"));
+//! assert_eq!(pat.matches("img_04.png"), Ok(true));
+//! assert_eq!(pat.matches("img_4.png"), Ok(false));
 //!
 //! let extended = Options::EXTENDED.union(Options::PERIOD);
 //! let pat = Pattern::with_options("!(*.o)", extended).expect("valid pattern");
-//! assert!(pat.matches("main.rs"));
-//! assert!(!pat.matches("main.o"));
-//! assert!(!pat.matches(".profile"));
+//! assert_eq!(pat.matches("main.rs"), Ok(true));
+//! assert_eq!(pat.matches("main.o"), Ok(false));
+//! assert_eq!(pat.matches(".profile"), Ok(false));
 //! ```
 
 #![no_std]
@@ -104,15 +110,23 @@ impl Options {
     /// Recognise the extended operators `?(…)`, `*(…)`, `+(…)`, `@(…)` and
     /// `!(…)` (bash's `extglob`). Otherwise their characters are ordinary.
     pub const EXTENDED: Self = Self(1 << 0);
-    /// Ignore case: literals and ranges compare case-folded, while classes
-    /// keep testing the character as written, as bash's `nocaseglob` does.
+    /// Ignore case: literals and ranges compare case-folded — a range's
+    /// order checked on its folded endpoints, so `[a-Z]` is `[a-z]` — while
+    /// classes keep testing the character as written, as bash's `nocaseglob`
+    /// does.
     pub const CASE_INSENSITIVE: Self = Self(1 << 1);
     /// A `.` beginning a candidate (or, in pathname mode, any component)
     /// must be matched by a literal `.`: no `*`, `?`, bracket expression or
     /// `!(…)` matches it.
     pub const PERIOD: Self = Self(1 << 2);
-    /// Split pattern and candidate at every `/` and match them component by
-    /// component, so only a `/` matches a `/`.
+    /// Split the pattern at every `/` outside a group, and the candidate at
+    /// every `/`, and match them component by component, so only a `/`
+    /// matches a `/`. A `/` inside a group belongs to its alternative, as
+    /// bash's filename generation reads it, so that alternative matches no
+    /// single component; and a bracket expression never spans a `/`, its `[`
+    /// then standing for itself, as POSIX's pathname expansion reads it (XCU
+    /// 2.13.3). glibc's `FNM_PATHNAME` instead reads `[a/b]` as a bracket that
+    /// cannot match `/`.
     pub const PATHNAME: Self = Self(1 << 3);
 
     /// No flags.
@@ -155,7 +169,8 @@ pub enum GlobError {
     TooManyTokens,
     /// The pattern ended with a `\` that escaped nothing.
     DanglingEscape,
-    /// A bracket range's endpoints were out of order (`[z-a]`).
+    /// A bracket range's endpoints were out of order (`[z-a]`), compared
+    /// case-folded when matching ignores case.
     ReversedRange,
     /// A `[:name:]` named no character class.
     UnknownClass,
@@ -184,6 +199,16 @@ impl fmt::Display for GlobError {
             Self::TooManyGroups => "glob pattern has too many groups",
             Self::TooDeep => "glob pattern groups are nested too deeply",
         })
+    }
+}
+/// Matching needed more working memory than the heap would give, so whether
+/// the candidate matches is unknown: a caller fails closed on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutOfMemory;
+
+impl fmt::Display for OutOfMemory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("glob matching ran out of memory")
     }
 }
 
@@ -259,8 +284,8 @@ impl Pattern {
         })
     }
 
-    /// The pattern's components: one, or one per `/`-separated piece in
-    /// pathname mode.
+    /// The pattern's components: one, or in pathname mode one per piece
+    /// between the `/`s outside groups.
     #[must_use]
     pub fn components(&self) -> &[Component] {
         &self.components
@@ -273,28 +298,58 @@ impl Pattern {
         self.components.iter().any(|c| c.literal.is_none())
     }
 
-    /// Whether `candidate` matches in full.
+    /// The heap the compiled pattern holds, for a caller bounding what it
+    /// keeps.
     #[must_use]
-    pub fn matches(&self, candidate: &str) -> bool {
+    pub fn heap_bytes(&self) -> usize {
+        self.components.capacity() * core::mem::size_of::<Component>()
+            + self
+                .components
+                .iter()
+                .map(Component::heap_bytes)
+                .sum::<usize>()
+    }
+
+    /// Whether `candidate` matches in full.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the heap refuses the working memory the match
+    /// grows.
+    pub fn matches(&self, candidate: &str) -> Result<bool, OutOfMemory> {
         self.matches_with(candidate, &mut Scratch::new())
     }
 
     /// [`Self::matches`] reusing `scratch`, so matching many candidates
     /// allocates once.
-    #[must_use]
-    pub fn matches_with(&self, candidate: &str, scratch: &mut Scratch) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the heap refuses the working memory the match
+    /// grows.
+    pub fn matches_with(
+        &self,
+        candidate: &str,
+        scratch: &mut Scratch,
+    ) -> Result<bool, OutOfMemory> {
         if !self.pathname {
-            return self
-                .components
-                .iter()
-                .all(|c| c.matches_with(candidate, scratch));
+            for component in &self.components {
+                if !component.matches_with(candidate, scratch)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
         }
         let mut pieces = candidate.split('/');
-        self.components.iter().all(|component| {
-            pieces
-                .next()
-                .is_some_and(|piece| component.matches_with(piece, scratch))
-        }) && pieces.next().is_none()
+        for component in &self.components {
+            let Some(piece) = pieces.next() else {
+                return Ok(false);
+            };
+            if !component.matches_with(piece, scratch)? {
+                return Ok(false);
+            }
+        }
+        Ok(pieces.next().is_none())
     }
 }
 
@@ -324,21 +379,30 @@ impl Component {
         self.double_star
     }
 
+    fn heap_bytes(&self) -> usize {
+        compile::heap_bytes(&self.nodes) + self.literal.as_ref().map_or(0, String::capacity)
+    }
+
     /// Whether the name `name` matches this component, reusing `scratch`.
-    #[must_use]
-    pub fn matches_with(&self, name: &str, scratch: &mut Scratch) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the heap refuses the working memory the match
+    /// grows.
+    pub fn matches_with(&self, name: &str, scratch: &mut Scratch) -> Result<bool, OutOfMemory> {
         match &self.literal {
             Some(literal) if self.options.contains(Options::CASE_INSENSITIVE) => {
-                literal.chars().map(fold).eq(name.chars().map(fold))
+                Ok(literal.chars().map(fold).eq(name.chars().map(fold)))
             }
-            Some(literal) => literal == name,
+            Some(literal) => Ok(literal == name),
             None => engine::matches(self, name, scratch),
         }
     }
 }
 
 /// Reusable working memory for matching, so a caller testing many candidates
-/// against one pattern allocates once.
+/// against one pattern allocates once. It grows fallibly, and a match the
+/// heap refused leaves it fit for the next.
 #[derive(Debug, Default)]
 pub struct Scratch {
     raw: Vec<char>,

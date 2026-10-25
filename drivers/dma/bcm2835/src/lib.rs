@@ -41,7 +41,9 @@ mod legacy_tests;
 mod model_memory;
 
 use tairix_abi::driver::dmaengine::DMA_MAX_CHANNELS;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 
 /// The channels every per-channel table in the driver holds.
 const CHANNEL_SLOTS: usize = DMA_MAX_CHANNELS as usize;
@@ -89,18 +91,9 @@ const BIND_PRIORITY: u16 = 10;
 /// bundle's signed manifest and the autoload match are built from — in
 /// [`Engine`] order.
 pub const BIND_KEYS: &[DriverBindKey] = &[
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(DMA_COMPATIBLE)),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(DMA4_COMPATIBLE)),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(DMA_COMPATIBLE)),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(DMA4_COMPATIBLE)),
 ];
-
-const fn compatible_key(compatible: &[u8]) -> HwMatchKey {
-    match HwMatchKey::compatible(compatible) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    }
-}
 
 /// Which engines a node holds, as its matched bind key names them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

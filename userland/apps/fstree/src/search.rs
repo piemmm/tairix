@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 
 use crate::fs::Fs;
 use crate::walk::FlatEntry;
+use tairix_util::quote::quote_subject;
 
 /// Bytes one read window covers. Small enough that a tick's budget spans
 /// several files, large enough that a big file needs few syscalls.
@@ -187,7 +188,8 @@ impl ContentScan {
                 Err(errno) => {
                     // The file is dropped from the scan; the queue shrinks,
                     // so a run of failing files still terminates the loop.
-                    self.errors.push(format!("{}: {errno:?}", scan.entry.path));
+                    self.errors
+                        .push(format!("{}: {errno}", quote_subject(&scan.entry.path)));
                     continue;
                 }
             };

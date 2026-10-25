@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the `chown` command app
+# (plans/APPS.md Stage B), discovered by the build's app-bundle composer and
+# planted on the read-only /System/Commands store. The capability list is the
+# bundle's request; the launched process holds it intersected with the
+# launching user's grants. CAP_FS_CHOWN is what the kernel asks of a change
+# giving a node to another account or to a group the caller is not in: an
+# account whose ceiling lacks it can still give a file it owns to one of its
+# own groups. The account and group directories names are read from are
+# ungated System Information queries, and `chown` never reads standard input.
+id = "os.tairix.chown"
+name = "chown"
+title = "Chown"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_FS_CHOWN"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "chown.png"

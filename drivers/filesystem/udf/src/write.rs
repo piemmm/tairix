@@ -20,9 +20,7 @@ use crate::entry::{self, AdForm, Extent, Holds, AED_FIXED, EFE_FIXED, FE_FIXED, 
 use crate::fields::{encode_timestamp, Fields};
 use crate::layout::{LbAddr, Map};
 use crate::space::{Pages, Space};
-use crate::{
-    addr_of, ea, kind_of, node_of, zeroed, zeroed_len, Mapped, Resolved, Udf, UNSPECIFIED_ID,
-};
+use crate::{addr_of, ea, kind_of, node_of, zeroed, zeroed_len, Mapped, Resolved, Udf};
 
 /// The longest extent a descriptor's 30-bit length holds, in whole blocks
 /// of the largest size.
@@ -197,6 +195,17 @@ fn mode_flags(mode: u32) -> u16 {
         }
     }
     flags
+}
+
+/// Record `record`'s owner, group and mode in the entry `block`, whose ICB
+/// flags beyond the mode's are `flags`.
+fn put_security(block: &mut [u8], record: &NodeSecurity, flags: u16) {
+    let flags = (flags & !(entry::FLAG_SETUID | entry::FLAG_SETGID | entry::FLAG_STICKY))
+        | mode_flags(record.mode);
+    block[34..36].copy_from_slice(&flags.to_le_bytes());
+    block[36..40].copy_from_slice(&record.uid.to_le_bytes());
+    block[40..44].copy_from_slice(&record.gid.to_le_bytes());
+    block[44..48].copy_from_slice(&permissions_of(record.mode).to_le_bytes());
 }
 
 impl<B: Block> Udf<B> {
@@ -409,14 +418,15 @@ impl<B: Block> Udf<B> {
         }
     }
 
-    /// A new entry of `file_type` at `addr` with unique id `unique`: an
-    /// Extended File Entry on a volume of UDF 2.00 or later, a File Entry
-    /// before, its descriptors short and none yet.
+    /// A new entry of `file_type` at `addr` with unique id `unique` and the
+    /// owner, group and mode `record` gives: an Extended File Entry on a
+    /// volume of UDF 2.00 or later, a File Entry before, its descriptors short
+    /// and none yet.
     fn new_entry(
         &self,
         addr: LbAddr,
         file_type: u8,
-        mode: u32,
+        record: &NodeSecurity,
         unique: u64,
     ) -> Result<Vec<u8>, DriverError> {
         let extended = self.volume.logical().revision >= 0x0200;
@@ -426,10 +436,7 @@ impl<B: Block> Udf<B> {
         block[20..22].copy_from_slice(&entry::STRATEGY_4.to_le_bytes());
         block[24..26].copy_from_slice(&1u16.to_le_bytes());
         block[27] = file_type;
-        block[34..36].copy_from_slice(&mode_flags(mode).to_le_bytes());
-        block[36..40].copy_from_slice(&UNSPECIFIED_ID.to_le_bytes());
-        block[40..44].copy_from_slice(&UNSPECIFIED_ID.to_le_bytes());
-        block[44..48].copy_from_slice(&permissions_of(mode).to_le_bytes());
+        put_security(&mut block, record, 0);
         block[48..50].copy_from_slice(&1u16.to_le_bytes());
         let stamp = self.now().and_then(encode_timestamp).unwrap_or([0; 12]);
         for at in [
@@ -523,12 +530,24 @@ impl<B: Block> Udf<B> {
     /// The entry `node` names, where it may be rewritten in place: an entry
     /// kept as a chain is write-once media's.
     fn rewritable(&mut self, node: NodeId) -> Result<Resolved, DriverError> {
-        let addr = addr_of(node).ok_or(DriverError::NotFound)?;
-        let resolved = self.resolve(addr)?;
-        if resolved.addr != addr || entry::Entry::strategy(&resolved.block)? != entry::STRATEGY_4 {
+        let resolved = self.node(node)?;
+        if Some(resolved.addr) != addr_of(node)
+            || entry::Entry::strategy(&resolved.block)? != entry::STRATEGY_4
+        {
             return Err(DriverError::ReadOnly);
         }
         Ok(resolved)
+    }
+
+    /// Whether the entry at `addr` lies in a block the space bitmap holds
+    /// free, as a removed node's does. Only a change removes a node, and a
+    /// change opens the bitmap before it writes, so while it is closed none
+    /// has been removed.
+    pub(crate) fn freed(&mut self, addr: LbAddr) -> Result<bool, DriverError> {
+        if self.write.space.is_none() || addr.partition != PARTITION {
+            return Ok(false);
+        }
+        self.with_space(|space, fs| space.is_free(fs, addr.block))
     }
 
     /// The directory `dir`, resolved to have its descriptors rewritten.
@@ -1049,6 +1068,19 @@ impl<B: Block> Udf<B> {
         Ok(found)
     }
 
+    /// The directory the parent descriptor of the directory `dir` names.
+    pub(crate) fn parent_addr(&mut self, dir: &Resolved) -> Result<LbAddr, DriverError> {
+        let mut parent = None;
+        self.for_each_fid(dir, &mut |_, fid| {
+            if fid.characteristics & CHAR_PARENT != 0 {
+                parent = Some(fid.node());
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        parent.ok_or(DriverError::DeviceFault)
+    }
+
     /// Hand `visit` every descriptor of `dir` with its offset, live or not,
     /// until it answers `false`.
     fn for_each_fid(
@@ -1236,16 +1268,30 @@ impl<B: Block> Udf<B> {
     }
 
     /// Drop one name from the resolved node `node`: its count falls, and at
-    /// none the node and everything it holds are freed.
+    /// none the node and everything it holds are freed — or, while the kernel
+    /// holds it, kept with a count of none until its last unpin.
     fn unlink_node(&mut self, mut node: Resolved) -> Result<(), DriverError> {
-        let links = node.entry.links.saturating_sub(1);
         let is_dir = node.entry.file_type == entry::TYPE_DIRECTORY;
-        if links > 0 && !is_dir {
+        // A directory has the one name.
+        let links = if is_dir {
+            0
+        } else {
+            node.entry.links.saturating_sub(1)
+        };
+        let id = node_of(node.addr).raw();
+        if links == 0 && !self.held.contains_key(id) {
+            self.free_entry(&node, 0)?;
+        } else {
             Self::set_links(&mut node, links);
             self.touch(&mut node, false);
-            return self.store_entry(&mut node);
+            self.store_entry(&mut node)?;
+            if links > 0 {
+                return Ok(());
+            }
+            if let Some(hold) = self.held.get_mut(id) {
+                hold.unnamed = true;
+            }
         }
-        self.free_entry(&node, 0)?;
         if is_dir {
             self.integrity.directories = self.integrity.directories.saturating_sub(1);
         } else {
@@ -1320,13 +1366,7 @@ impl<B: Block> Udf<B> {
         security: NodeSecurity,
     ) -> Result<(), DriverError> {
         let mut resolved = self.rewritable(node)?;
-        resolved.block[36..40].copy_from_slice(&security.uid.to_le_bytes());
-        resolved.block[40..44].copy_from_slice(&security.gid.to_le_bytes());
-        resolved.block[44..48].copy_from_slice(&permissions_of(security.mode).to_le_bytes());
-        let flags = (resolved.entry.flags
-            & !(entry::FLAG_SETUID | entry::FLAG_SETGID | entry::FLAG_STICKY))
-            | mode_flags(security.mode);
-        resolved.block[34..36].copy_from_slice(&flags.to_le_bytes());
+        put_security(&mut resolved.block, &security, resolved.entry.flags);
         self.touch(&mut resolved, false);
         self.store_entry(&mut resolved)
     }
@@ -1428,21 +1468,26 @@ impl<B: Block> Udf<B> {
     }
 
     /// Create a node of `file_type` called `name` — `identifier` encoded —
-    /// in `dir`: its entry written, and `fill` handed it to record what it
-    /// holds, before the name is added, so a node whose content could not be
-    /// recorded is never named.
+    /// in `dir`, with the owner, group and mode `record` gives: its entry
+    /// written, and `fill` handed it to record what it holds, before the name
+    /// is added, so a node whose content could not be recorded is never
+    /// named.
     fn make(
         &mut self,
         dir: NodeId,
         name: &[u8],
         identifier: &[u8],
         file_type: u8,
-        mode: u32,
+        record: &NodeSecurity,
         fill: impl FnOnce(&mut Self, &mut Resolved) -> Result<(), DriverError>,
     ) -> Result<LbAddr, DriverError> {
         let parent = self.node(dir)?;
         if kind_of(parent.entry.file_type) != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
+        }
+        if self.unnamed(dir) {
+            // A removed directory takes no entries.
+            return Err(DriverError::NotFound);
         }
         if self.find(&parent, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
@@ -1454,7 +1499,7 @@ impl<B: Block> Udf<B> {
             partition: PARTITION,
         };
         let written = self
-            .new_entry(addr, file_type, mode, unique)
+            .new_entry(addr, file_type, record, unique)
             .and_then(|entry| self.write_block(addr, &entry));
         if let Err(err) = written {
             self.release(block, 1)?;
@@ -1482,24 +1527,28 @@ impl<B: Block> Udf<B> {
         self.free_entry(&node, 0)
     }
 
+    /// Free the node `node`, which lost its last name while held and is held
+    /// no more: a failure, whose node stays lost until the volume is checked,
+    /// is a fault.
+    pub(crate) fn free_unnamed(&mut self, node: NodeId) -> Result<(), DriverError> {
+        let addr = addr_of(node).ok_or(DriverError::DeviceFault)?;
+        self.change(|fs| fs.discard(addr))
+            .map_err(|_| DriverError::DeviceFault)
+    }
+
     fn create_node(
         &mut self,
         dir: NodeId,
         name: &[u8],
         identifier: &[u8],
         kind: NodeKind,
+        record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         let addr = match kind {
             NodeKind::RegularFile => {
-                let addr =
-                    self.make(
-                        dir,
-                        name,
-                        identifier,
-                        entry::TYPE_FILE,
-                        0o644,
-                        |_, _| Ok(()),
-                    )?;
+                let addr = self.make(dir, name, identifier, entry::TYPE_FILE, record, |_, _| {
+                    Ok(())
+                })?;
                 self.integrity.files = self.integrity.files.saturating_add(1);
                 addr
             }
@@ -1517,7 +1566,7 @@ impl<B: Block> Udf<B> {
                     name,
                     identifier,
                     entry::TYPE_DIRECTORY,
-                    0o755,
+                    record,
                     |fs, node| {
                         fs.append_fid(
                             node,
@@ -1555,6 +1604,11 @@ impl<B: Block> Udf<B> {
         if kind_of(parent.entry.file_type) != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
         }
+        // A node that lost its last name gains no other, and a removed
+        // directory takes no entries.
+        if self.unnamed(node) || self.unnamed(dir) {
+            return Err(DriverError::NotFound);
+        }
         if self.find(&parent, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
@@ -1573,20 +1627,8 @@ impl<B: Block> Udf<B> {
         Ok(())
     }
 
-    /// The file `name` in `dir`, resolved to be written, with its extents
-    /// and continuation blocks.
-    fn writable_file(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-    ) -> Result<(Resolved, Vec<Extent>, Vec<LbAddr>), DriverError> {
-        let parent = self.node(dir)?;
-        let (_, fid) = self.find(&parent, name)?.ok_or(DriverError::NotFound)?;
-        self.writable(node_of(fid.node()), NodeKind::RegularFile)
-    }
-
-    fn truncate_file(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        let (mut node, extents, chain) = self.writable_file(dir, name)?;
+    fn truncate_file(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        let (mut node, extents, chain) = self.writable(file, NodeKind::RegularFile)?;
         let bs = u64::from(self.block_size);
         let keep = size.div_ceil(bs);
         let mut kept = Vec::new();
@@ -1643,14 +1685,8 @@ impl<B: Block> Udf<B> {
         self.store_shrunk(&mut node, &kept, chain, &freed)
     }
 
-    fn punch_file(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        len: u64,
-    ) -> Result<(), DriverError> {
-        let (mut node, extents, chain) = self.writable_file(dir, name)?;
+    fn punch_file(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
+        let (mut node, extents, chain) = self.writable(file, NodeKind::RegularFile)?;
         let end = offset
             .checked_add(len)
             .ok_or(DriverError::OutOfRange)?
@@ -1746,6 +1782,11 @@ impl<B: Block> Udf<B> {
         // Resolved to be rewritten before the name goes, so a node whose
         // count cannot be changed keeps its name.
         let target = self.rewritable(node_of(fid.node()))?;
+        // A name for a node this system has no kind for is not one, as a
+        // lookup answers.
+        if kind_of(target.entry.file_type).is_none() {
+            return Err(DriverError::NotFound);
+        }
         let is_dir = target.entry.file_type == entry::TYPE_DIRECTORY;
         if is_dir && self.has_entries(&target)? {
             return Err(DriverError::DirectoryNotEmpty);
@@ -1771,6 +1812,10 @@ impl<B: Block> Udf<B> {
         dst_name: &[u8],
         identifier: &[u8],
     ) -> Result<(), DriverError> {
+        if self.unnamed(dst_dir) {
+            // A removed directory takes no entries.
+            return Err(DriverError::NotFound);
+        }
         let source = self.node(src_dir)?;
         let (offset, fid) = self.find(&source, src_name)?.ok_or(DriverError::NotFound)?;
         let icb = fid.node();
@@ -1778,6 +1823,9 @@ impl<B: Block> Udf<B> {
             return Ok(());
         }
         let moving = self.resolve(icb)?;
+        if kind_of(moving.entry.file_type).is_none() {
+            return Err(DriverError::NotFound);
+        }
         let is_dir = moving.entry.file_type == entry::TYPE_DIRECTORY;
         if is_dir && self.is_within(dst_dir, icb)? {
             return Err(DriverError::DirectoryCycle);
@@ -1792,6 +1840,10 @@ impl<B: Block> Udf<B> {
             }
             Some((at, existing)) => {
                 let replaced = self.rewritable(node_of(existing.node()))?;
+                // No lookup shows such an occupant, so nothing judged it.
+                if kind_of(replaced.entry.file_type).is_none() {
+                    return Err(DriverError::Unsupported);
+                }
                 let replaced_dir = replaced.entry.file_type == entry::TYPE_DIRECTORY;
                 if replaced_dir != is_dir {
                     return Err(if replaced_dir {
@@ -1851,15 +1903,7 @@ impl<B: Block> Udf<B> {
                 return Ok(false);
             }
             let node = self.resolve(at)?;
-            let mut parent = None;
-            self.for_each_fid(&node, &mut |_, fid| {
-                if fid.characteristics & CHAR_PARENT != 0 {
-                    parent = Some(fid.node());
-                    return Ok(false);
-                }
-                Ok(true)
-            })?;
-            at = parent.ok_or(DriverError::DeviceFault)?;
+            at = self.parent_addr(&node)?;
         }
         Err(DriverError::DeviceFault)
     }
@@ -2102,10 +2146,19 @@ fn written_blocks(
     Ok(merged(out, block_size))
 }
 
+/// A new node keeps the owner, group and mode of the record it is created
+/// with; a file entry has no place for the record's ACL entries or
+/// capability gate.
 impl<B: Block> FilesystemWrite for Udf<B> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
         let identifier = encoded(name)?;
-        self.change(|fs| fs.create_node(dir, name, &identifier, kind))
+        self.change(|fs| fs.create_node(dir, name, &identifier, kind, record))
     }
 
     fn create_link(
@@ -2113,6 +2166,7 @@ impl<B: Block> FilesystemWrite for Udf<B> {
         dir: NodeId,
         name: &[u8],
         target: &[u8],
+        record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         let identifier = encoded(name)?;
         if target.is_empty() || target.len() > FS_SYMLINK_MAX {
@@ -2125,7 +2179,7 @@ impl<B: Block> FilesystemWrite for Udf<B> {
                 name,
                 &identifier,
                 entry::TYPE_SYMLINK,
-                0o777,
+                record,
                 |fs, node| fs.write_range(node, &[], Vec::new(), 0, &content),
             )?;
             fs.integrity.files = fs.integrity.files.saturating_add(1);
@@ -2138,32 +2192,20 @@ impl<B: Block> FilesystemWrite for Udf<B> {
         self.change(|fs| fs.link_node(dir, name, &identifier, node))
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
         self.change(|fs| {
-            let (mut node, extents, chain) = fs.writable_file(dir, name)?;
+            let (mut node, extents, chain) = fs.writable(file, NodeKind::RegularFile)?;
             fs.write_range(&mut node, &extents, chain, offset, data)?;
             Ok(data.len())
         })
     }
 
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        self.change(|fs| fs.truncate_file(dir, name, size))
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        self.change(|fs| fs.truncate_file(file, size))
     }
 
-    fn punch(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        len: u64,
-    ) -> Result<(), DriverError> {
-        self.change(|fs| fs.punch_file(dir, name, offset, len))
+    fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
+        self.change(|fs| fs.punch_file(file, offset, len))
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {

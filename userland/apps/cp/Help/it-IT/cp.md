@@ -18,23 +18,46 @@ Una sorgente directory è copiata solo con `-r`, che riproduce
 l'intero sottoalbero; senza `-r` un operando directory è rifiutato.
 Un file di destinazione esistente è sovrascritto per impostazione
 predefinita, saltato con `-n` e richiesto sul flusso di errore
-standard con `-i` (una domanda rifiutata salta quella copia senza
-errore; una risposta illeggibile non vale mai come consenso).
+standard con `-i` (una domanda rifiutata salta quella copia e fa
+fallire l'esecuzione, come in GNU; una risposta illeggibile non vale
+mai come consenso).
 Una destinazione che è il file sorgente stesso — lo stesso nome, un
 altro nome del file o un collegamento a esso — viene rifiutata in
-quanto stesso file e resta com'era.
+quanto stesso file e resta com'era, tranne con `-l`, che la considera
+già collegata. Un collegamento che `-f` mette al posto di un nome
+esistente prende quel posto in un solo passo ed è creato prima che si
+sostituisca alcunché, così uno che non si può creare lascia intatto
+il nome.
 
-Il primo fallimento ferma l'esecuzione prima di ogni operando
-successivo. `--` termina l'analisi delle opzioni: ogni argomento
+Un file che non può essere letto, creato o scritto viene segnalato e
+gli altri vengono copiati comunque, anche il resto della sua
+directory. `--` termina l'analisi delle opzioni: ogni argomento
 successivo è un percorso.
+
+Un nuovo file è creato con i bit di permesso della sorgente, senza i bit
+set-ID e sticky, al netto della umask, così la copia di un file privato
+resta privata; una destinazione che esiste già mantiene il proprio modo.
+Una nuova directory riceve alla fine i bit di permesso e sticky della
+sorgente, al netto della umask; mentre vi si copiano le voci resta
+aperta al suo proprietario, così la copia è completa anche se la
+directory sorgente è di sola lettura o se la umask toglie la scrittura
+al proprietario. Attraverso un collegamento simbolico incontrato dentro
+un albero di destinazione non si scrive mai.
+
+L'opzione `-a`/`--archive` di GNU e i valori di `--preserve` diversi da
+`--preserve=links,xattr` sono **rifiutati**, non ristretti. `-a`
+equivale a `-dR --preserve=all`, e `--preserve=all` include le marche
+temporali di un nodo, che nessuna chiamata di questo sistema può
+impostare — perciò onorare `-a` riferirebbe una conservazione mai
+avvenuta. Per il resto usate `-dR`.
 
 Ogni copia porta con sé gli attributi estesi della sorgente — un tipo di
 file RISC OS, il tipo e il creatore di un Mac — ovunque la destinazione
 possa conservarli, e mantiene come buchi i buchi di un file sparso. Gli
-attributi che una destinazione non può conservare vengono segnalati in un
-unico avviso al termine dell'esecuzione, e in un record `omission` sul
-flusso di informazioni standard; con `--preserve=xattr` una copia del genere
-fallisce invece.
+attributi che una destinazione non può conservare vengono segnalati in
+un unico avviso al termine dell'esecuzione, e in un record `omission`
+sul flusso di informazioni standard; con `--preserve=xattr` una copia
+del genere fallisce invece.
 
 Una directory non viene mai copiata dentro sé stessa: una destinazione
 dentro la sorgente — comunque sia scritta, attraverso un collegamento,
@@ -46,9 +69,12 @@ la copia dove la visita la incontra.
 
 - `-r, -R, --recursive` — copiare le directory e il loro contenuto.
 - `-f, --force` — quando un file di destinazione non può essere
-  creato, rimuoverlo e ritentare la copia una volta.
+  creato, rimuoverlo e ritentare la copia una volta; con `-l`, `-s` o
+  un collegamento che `-P` riproduce, mettere il collegamento al posto
+  di un nome esistente.
 - `-i, --interactive` — chiedere prima di sovrascrivere un file
-  esistente; acconsente solo una risposta che inizia con `y`/`Y`.
+  esistente; acconsente solo una risposta che inizia con `y`/`Y`, e
+  una domanda rifiutata salta quel file e fa fallire l'esecuzione.
 - `-n, --no-clobber` — non sovrascrivere mai un file esistente. Vince
   l'ultimo tra `-i` e `-n`.
 - `-l, --link` — dare alla destinazione un secondo nome del nodo della
@@ -72,14 +98,19 @@ la copia dove la visita la incontra.
 - `--preserve=links` — due sorgenti che nominano un solo nodo ottengono
   due nomi alla destinazione invece di due copie, così la copia non
   raddoppia in silenzio lo spazio.
-- `--preserve=xattr` — ogni attributo esteso deve essere copiato: una copia
-  la cui destinazione non può conservarne uno fallisce, indicandolo.
-  `--preserve=links,xattr` richiede entrambe le cose.
-- `--no-preserve=xattr` — non copiare alcun attributo esteso. Sono accettati
-  anche `mode`, `ownership` e `timestamps`, che già non vengono preservati.
+- `--preserve=xattr` — ogni attributo esteso deve essere copiato: una
+  copia la cui destinazione non può conservarne uno fallisce,
+  indicandolo. `--preserve=links,xattr` richiede entrambe le cose.
+- `--no-preserve=xattr` — non copiare alcun attributo esteso. Sono
+  accettati anche `ownership` e `timestamps`, che già non vengono
+  preservati.
+- `--no-preserve=mode` — creare ogni nuovo file e ogni nuova directory
+  con il modo che un nuovo oggetto assume quando nessuno ne indica uno,
+  al netto della umask, anziché con quello della sorgente. Anche
+  `--no-preserve=all` fa lo stesso.
 - `--sparse=WHEN` — come viene copiato un file sparso: `auto`, il
-  predefinito, ne mantiene i buchi; `always` lascia inoltre non scritto ogni
-  blocco di zeri che contiene; `never` scrive ogni byte.
+  predefinito, ne mantiene i buchi; `always` lascia inoltre non scritto
+  ogni blocco di zeri che contiene; `never` scrive ogni byte.
 - `-d` — `-P` e `--preserve=links` insieme, come nello strumento GNU.
 - `-v, --verbose` — riferire ogni copia come `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copiare ogni sorgente dentro
@@ -101,11 +132,11 @@ la copia dove la visita la incontra.
 
 ## EXIT STATUS
 
-- `0` — ogni copia è riuscita (un salto per `-n` e una domanda `-i`
-  rifiutata non sono fallimenti).
-- `1` — un guasto del file system, della domanda o dell'output; il
-  motivo è stampato sul flusso di errore standard.
-- `2` — la riga di comando non è stata compresa.
+- `0` — ogni copia è riuscita (un salto per `-n` non è un fallimento).
+- `1` — un file non si è potuto copiare, una domanda `-i` è stata
+  rifiutata, o la domanda o l'output non sono riusciti; il motivo di
+  ogni fallimento è stampato sul flusso di errore standard. Anche una
+  riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

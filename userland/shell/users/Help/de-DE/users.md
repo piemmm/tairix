@@ -40,8 +40,10 @@ verwaltet, die innerhalb der Sitzung eingegeben werden.
 
 ## EXIT STATUS
 
-- `0` — die Sitzung endete sauber, oder die Kurzhilfe wurde angezeigt.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `0` — die Sitzung endete sauber, die Liste wurde ausgegeben, oder die
+  Kurzhilfe wurde angezeigt.
+- `1` — die Liste konnte nicht gelesen werden. Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

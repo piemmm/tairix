@@ -68,9 +68,11 @@ added the first in-tree consumer (`userland/apps/top`).
   the terminal cursor two columns, so wide text never shifts the rest of a row,
   and a glyph that would straddle the right edge wraps whole. A cell holds a
   glyph: every character a `Window` writes — `add_char`, `put_cell`, a line or
-  a border — is U+FFFD where it is a control character, so a NUL in what an
-  application draws never passes for a `CONTINUATION` cell and the renderer's
-  idea of the cursor stays the terminal's.
+  a border — is U+FFFD where it is a hidden character (`tairix_visible::shown_char`) — a
+  control, a bidirectional override, a zero-width character — mapped before
+  its width is measured, so a NUL in what an application draws never passes
+  for a `CONTINUATION` cell, text from elsewhere never reorders a row, and the
+  renderer's idea of the cursor stays the terminal's.
 
 ## Minimal-diff rendering and colour downgrade
 

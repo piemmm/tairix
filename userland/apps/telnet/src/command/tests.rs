@@ -1,8 +1,9 @@
 //! Host tests for the `telnet` argument grammar.
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 
 use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_util::getopt::Refusal;
 
 use super::{
     parse, parse_escape, parse_port, Command, Config, ParseError, Target, DEFAULT_ESCAPE,
@@ -131,17 +132,20 @@ fn the_help_switches_win_over_any_operand() {
 fn an_unknown_option_fails_closed() {
     assert_eq!(
         parse(&["-z"]),
-        Err(ParseError::UnknownOption("-z".to_string()))
+        Err(ParseError::Option(Refusal::UnknownShort('z')))
     );
     assert_eq!(
         parse(&["--bogus"]),
-        Err(ParseError::UnknownOption("--bogus".to_string()))
+        Err(ParseError::Option(Refusal::UnknownLong("--bogus".into())))
     );
     // The switches inetutils defines for facilities TAIRiX lacks are unknown
     // rather than accepted and silently ignored.
     for absent in ["-r", "-c", "-n"] {
         assert!(
-            matches!(parse(&[absent, "h"]), Err(ParseError::UnknownOption(_))),
+            matches!(
+                parse(&[absent, "h"]),
+                Err(ParseError::Option(Refusal::UnknownShort(_)))
+            ),
             "{absent}"
         );
     }
@@ -149,13 +153,53 @@ fn an_unknown_option_fails_closed() {
 
 #[test]
 fn a_value_taking_option_with_no_value_fails_closed() {
-    for switch in ["-e", "--escape", "-l", "--user", "-b", "--bind"] {
+    for (switch, refusal) in [
+        ("-e", Refusal::MissingShortValue('e')),
+        ("--escape", Refusal::MissingLongValue("escape")),
+        ("-l", Refusal::MissingShortValue('l')),
+        ("--user", Refusal::MissingLongValue("user")),
+        ("-b", Refusal::MissingShortValue('b')),
+        ("--bind", Refusal::MissingLongValue("bind")),
+    ] {
         assert_eq!(
             parse(&[switch]),
-            Err(ParseError::MissingValue(switch.to_string())),
+            Err(ParseError::Option(refusal)),
             "{switch}"
         );
     }
+}
+
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-z", "h"]), "invalid option -- 'z'");
+    assert_eq!(refused(&["-dz", "h"]), "invalid option -- 'z'");
+    assert_eq!(refused(&["--bogus", "h"]), "unrecognized option '--bogus'");
+    assert_eq!(refused(&["h", "-e"]), "option requires an argument -- 'e'");
+    assert_eq!(
+        refused(&["h", "--user"]),
+        "option '--user' requires an argument"
+    );
+    assert_eq!(
+        refused(&["--debug=1", "h"]),
+        "option '--debug' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let config = session(&["--esc=^A", "--deb", "h"]).0;
+    assert_eq!(config.escape, Some(0x01));
+    assert!(config.debug);
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
+    assert_eq!(
+        refused(&["--bin", "h"]),
+        "option '--bin' is ambiguous; possibilities: '--binary' '--bind'"
+    );
 }
 
 #[test]

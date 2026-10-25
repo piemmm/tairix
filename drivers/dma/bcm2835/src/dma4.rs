@@ -6,8 +6,8 @@
 //! increment and the access size, and a control block is named by its address
 //! shifted right by five, the 32-byte alignment every block keeps.
 //!
-//! Reference: the BCM2711's DMA4 engines as the Raspberry Pi kernel's
-//! `bcm2835-dma` driver programs them.
+//! Reference: BCM2711 ARM Peripherals §4.6 (DMA4 Engines) and the DMA4
+//! register definitions in §4.2.
 
 use core::num::NonZeroU32;
 
@@ -78,8 +78,8 @@ const DRAIN_BUDGET: u32 = 1_000;
 const RESET_BUDGET: u32 = 1_000;
 
 /// What the engines' bus interface reaches, below the forty bits a block can
-/// name.
-pub const REACH: DmaReach = DmaReach::of::<36>();
+/// name: the full 35-bit address bus (BCM2711 ARM Peripherals §4.6).
+pub const REACH: DmaReach = DmaReach::of::<35>();
 
 /// The bits a control block's own address drops when a register or a block
 /// names it.

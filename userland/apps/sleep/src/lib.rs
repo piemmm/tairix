@@ -5,7 +5,7 @@
 //! `NUMBER[SUFFIX]` intervals and then exits. `SUFFIX` is `s` (seconds,
 //! the default), `m` (minutes), `h` (hours), or `d` (days), and `NUMBER`
 //! is any C-locale floating-point value — a decimal, a hexadecimal float,
-//! or `inf`/`infinity` — matching GNU's `xstrtod`. Several operands are
+//! or `inf`/`infinity` — as GNU `sleep` reads it. Several operands are
 //! summed (`sleep 1m 30s` pauses ninety seconds), a negative or `nan`
 //! value is an invalid interval, and `sleep inf` pauses until the process
 //! is killed.
@@ -60,10 +60,11 @@ use core::fmt;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_util::cnum::scan_double;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `sleep`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `sleep`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: sleep NUMBER[SUFFIX]...
 
@@ -100,11 +101,8 @@ pub enum Command {
 /// The failures the `sleep` tool reports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SleepError {
-    /// An unrecognised `--long` option (GNU `unrecognized option`).
-    UnknownLong(String),
-    /// An unrecognised short option (GNU `invalid option`); carries the
-    /// offending flag character.
-    UnknownShort(char),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// No operand was given; `sleep` needs at least one (GNU
     /// `missing operand`).
     MissingOperand,
@@ -119,14 +117,7 @@ pub enum SleepError {
 impl fmt::Display for SleepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => {
-                write!(f, "unrecognized option {token}", token = quote(token))
-            }
-            Self::UnknownShort(flag) => write!(
-                f,
-                "invalid option -- {}",
-                quote(flag.encode_utf8(&mut [0; 4]))
-            ),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::MissingOperand => f.write_str("missing operand"),
             Self::InvalidInterval(operand) => write!(
                 f,
@@ -152,56 +143,52 @@ pub trait Sleeper {
 
 pub use tairix_util::output::Output;
 
+/// What each of `sleep`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `sleep`'s options: the reserved help switches alone.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
 /// The grammar is the GNU `sleep` surface — one or more `NUMBER[SUFFIX]`
 /// operands, and no options beyond the reserved short-help switches
-/// (plans/APPS.md §4):
+/// (plans/APPS.md §4) — read as GNU's `getopt_long` reads it ([`Scan`]):
 ///
-/// * `-h` / `-?` / `--help` — short help; like GNU getopt's permutation, an
-///   option is honoured wherever it sits, so `sleep 1 --help` serves the
-///   help.
+/// * `-h` / `-?` / `--help` — short help, honoured wherever it sits, so
+///   `sleep 1 --help` serves the help.
 /// * `--` — end option parsing; every later argument is an operand.
-/// * any other option-shaped token — [`SleepError::UnknownLong`] /
-///   [`SleepError::UnknownShort`], diagnosed left to right exactly as GNU
-///   getopt reports the first bad option before it ever looks at operands.
 /// * each operand — a C-locale floating-point number
 ///   ([`tairix_util::cnum::scan_double`]) followed by an optional single
-///   `s`/`m`/`h`/`d` suffix; a negative value, a `nan`, trailing junk, or an
-///   unknown suffix is [`SleepError::InvalidInterval`]. The intervals are
-///   summed. No operand at all is [`SleepError::MissingOperand`].
+///   `s`/`m`/`h`/`d` suffix. The intervals are summed.
 ///
 /// # Errors
 ///
-/// The GNU diagnostics above, in getopt's order: the first bad option
-/// anywhere wins over the operand checks, then a missing operand, then the
-/// first invalid interval left to right.
+/// In getopt's order, the first refused option anywhere winning over the
+/// operand checks:
+///
+/// * [`SleepError::Option`] — an option `getopt` refuses, in its words.
+/// * [`SleepError::MissingOperand`] — no operand at all.
+/// * [`SleepError::InvalidInterval`] — the first operand, left to right, that
+///   is negative, a `nan`, or carries trailing junk or an unknown suffix.
 pub fn parse(args: &[&str]) -> Result<Command, SleepError> {
-    let mut options_ended = false;
     let mut first_operand: Option<&str> = None;
     let mut seconds = 0.0_f64;
     let mut invalid: Option<&str> = None;
 
-    for &arg in args {
-        if options_ended {
-            note_operand(arg, &mut first_operand, &mut seconds, &mut invalid);
-            continue;
-        }
-        match arg {
-            "--" => options_ended = true,
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            _ if arg.starts_with("--") => {
-                return Err(SleepError::UnknownLong(String::from(arg)));
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(SleepError::Option)? {
+            Arg::Operand(operand) => {
+                note_operand(operand, &mut first_operand, &mut seconds, &mut invalid);
             }
-            _ if arg.len() > 1 && arg.starts_with('-') => {
-                // The first flag character of the cluster, exactly as getopt
-                // reports it. `sleep` has no short options, so only the exact
-                // reserved spellings above are ever honoured.
-                let flag = arg.chars().nth(1).unwrap_or('-');
-                return Err(SleepError::UnknownShort(flag));
-            }
-            _ => note_operand(arg, &mut first_operand, &mut seconds, &mut invalid),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
     }
 
@@ -235,15 +222,14 @@ fn note_operand<'a>(
 /// Parse one `NUMBER[SUFFIX]` operand into a non-negative number of seconds,
 /// or `None` when it is not a valid time interval.
 ///
-/// Mirrors GNU `sleep`'s `xstrtod` + `apply_suffix` check exactly: the
-/// number is scanned by the shared C-locale scanner, must be non-negative
-/// (so a negative value and `nan` are rejected), and may be followed by at
-/// most one suffix character, which must be `s`, `m`, `h`, or `d`. `inf`
-/// scales to an infinite interval.
+/// The grammar GNU `sleep` accepts (coreutils 9.4 takes `0x0`, ` 0`, `0d`
+/// and `1e-9999`, and refuses `1x`, `0ss`, `0.5h0`, `0 `, `nan` and the empty
+/// string): the number is scanned by the shared C-locale scanner, must be
+/// non-negative, and may be followed by at most one suffix character, which
+/// must be `s`, `m`, `h`, or `d`. `inf` scales to an infinite interval.
 fn parse_interval(operand: &str) -> Option<f64> {
     let (value, consumed) = scan_double(operand)?;
-    // Non-negative only: a negative value and `nan` are both rejected,
-    // matching GNU's `! (0 <= s)` (a `nan` fails the `0 <= s` test).
+    // Non-negative only: a negative value and `nan` are both rejected.
     if value < 0.0 || value.is_nan() {
         return None;
     }
@@ -254,8 +240,8 @@ fn parse_interval(operand: &str) -> Option<f64> {
         [b'm'] => SECONDS_PER_MINUTE,
         [b'h'] => SECONDS_PER_HOUR,
         [b'd'] => SECONDS_PER_DAY,
-        // More than one trailing byte (GNU `*p && *(p+1)`), or an unknown
-        // single suffix, is not a valid interval.
+        // More than one trailing byte, or an unknown single suffix, is not
+        // a valid interval.
         _ => return None,
     };
     Some(value * multiplier)
@@ -313,7 +299,7 @@ mod tests {
     extern crate std;
 
     use alloc::format;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
@@ -448,7 +434,7 @@ mod tests {
             parse(&["5x"]),
             Err(SleepError::InvalidInterval(String::from("5x")))
         );
-        // More than one trailing byte after the number (GNU `*p && *(p+1)`).
+        // More than one trailing byte after the number.
         assert_eq!(
             parse(&["5sm"]),
             Err(SleepError::InvalidInterval(String::from("5sm")))
@@ -465,22 +451,43 @@ mod tests {
         );
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
     fn parse_diagnoses_options_before_operands() {
-        assert_eq!(
-            parse(&["--bogus"]),
-            Err(SleepError::UnknownLong(String::from("--bogus")))
-        );
-        assert_eq!(parse(&["-x"]), Err(SleepError::UnknownShort('x')));
-        // A cluster diagnoses its first flag.
-        assert_eq!(parse(&["-hx"]), Err(SleepError::UnknownShort('h')));
+        assert_eq!(refused(&["--bogus"]), "unrecognized option '--bogus'");
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        // A cluster is read letter by letter: the first refused letter is
+        // named, and the help switch answers at once.
+        assert_eq!(refused(&["-xh"]), "invalid option -- 'x'");
+        assert_eq!(parse(&["-hx"]), Ok(Command::Help));
         // An option token wins over operand processing wherever it sits.
-        assert_eq!(parse(&["1", "-x"]), Err(SleepError::UnknownShort('x')));
+        assert_eq!(refused(&["1", "-x"]), "invalid option -- 'x'");
         // But after `--`, a `-x` is an (invalid) operand, not an option.
         assert_eq!(
             parse(&["--", "-x"]),
             Err(SleepError::InvalidInterval(String::from("-x")))
         );
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "1"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob", "1"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--help=x"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `sleep 1 --he` as `sleep 1 --help`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["1", "--he"]), Ok(Command::Help));
+        assert_eq!(parse(&["--h"]), Ok(Command::Help));
     }
 
     #[test]
@@ -525,14 +532,6 @@ mod tests {
         assert_eq!(
             format!("{}", SleepError::InvalidInterval(String::from("x"))),
             "invalid time interval 'x'"
-        );
-        assert_eq!(
-            format!("{}", SleepError::UnknownLong(String::from("--bogus"))),
-            "unrecognized option '--bogus'"
-        );
-        assert_eq!(
-            format!("{}", SleepError::UnknownShort('x')),
-            "invalid option -- 'x'"
         );
     }
 

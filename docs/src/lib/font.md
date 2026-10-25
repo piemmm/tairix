@@ -346,7 +346,7 @@ cache is warm. Text stays always-correct and the pixels are unchanged.
 
 A scalar that draws nothing has no glyph: a control such as a line break or a
 tab, a line or paragraph separator, or a default-ignorable such as a zero-width
-joiner (`tairix_util::utf8::is_hidden`). The client answers a glyph for it
+joiner (`tairix_visible::is_hidden`). The client answers a glyph for it
 locally, empty and zero-advance, and never fetches, batches or caches one. No
 face maps such a scalar, so asking would make the service search every face it
 has; an outline run that carries one has it answered by the service, which

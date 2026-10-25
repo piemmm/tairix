@@ -30,7 +30,6 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::vec::Vec;
 
     use tairix_abi::net::{
@@ -49,7 +48,7 @@ mod program {
         await_handshake, connect_when_reachable, CloseReason, Endpoint, Handshake, IoEvent,
         TelnetIo,
     };
-    use tairix_telnet::{parse, run, Command, FALLBACK_TERM, USAGE};
+    use tairix_telnet::{parse, run, Command, FALLBACK_TERM};
     use tairix_util::quote::quote;
 
     /// Wait-set token for the stack's delivery port.
@@ -342,18 +341,17 @@ mod program {
 
     /// Program entry point. Exit codes: `0` for a session that ran, `1` for a
     /// failure that defeated it (an unresolvable host, a refused socket, a
-    /// terminal that could not be taken), and `2` for a usage error.
+    /// terminal that could not be taken) or a command line that was not
+    /// understood.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("telnet") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("telnet: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("telnet", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -371,8 +369,8 @@ mod program {
             return match run(command, locale, term, &mut NoIo, &help, &Stdout, &Stderr) {
                 Ok(()) => 0,
                 Err(err) => {
-                    write_stderr_line(&format!("telnet: {err}"));
-                    2
+                    write_stderr_line(format_args!("telnet: {err}"));
+                    1
                 }
             };
         }
@@ -396,11 +394,11 @@ mod program {
             Command::Session { config, .. } => match config.bind.as_deref() {
                 Some(text) => {
                     let Some(address) = bind_address(text) else {
-                        write_stderr_line(&format!(
-                            "telnet: {text} is not a local address",
-                            text = quote(text)
-                        ));
-                        return 2;
+                        tairix_help::report_misuse(
+                            "telnet",
+                            &format_args!("{text} is not a local address", text = quote(text)),
+                        );
+                        return tairix_help::MISUSE;
                     };
                     Some(address)
                 }
@@ -418,14 +416,16 @@ mod program {
         let keys = match KeyRelay::start() {
             Ok(keys) => keys,
             Err(errno) => {
-                write_stderr_line(&format!("telnet: cannot start the input reader: {errno}"));
+                write_stderr_line(format_args!(
+                    "telnet: cannot start the input reader: {errno}"
+                ));
                 return 1;
             }
         };
         let mut io = match RtTelnetIo::open(bind, keys) {
             Ok(io) => io,
             Err(errno) => {
-                write_stderr_line(&format!("telnet: cannot set up the session: {errno}"));
+                write_stderr_line(format_args!("telnet: cannot set up the session: {errno}"));
                 return 1;
             }
         };
@@ -433,7 +433,7 @@ mod program {
         match run(command, locale, term, &mut io, &help, &Stdout, &Stderr) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("telnet: {err}"));
+                write_stderr_line(format_args!("telnet: {err}"));
                 1
             }
         }

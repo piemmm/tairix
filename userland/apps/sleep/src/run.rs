@@ -29,15 +29,12 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::Delay;
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_rt::ClockDelay;
-    use tairix_sleep::{parse, run, SleepError, Sleeper, USAGE};
+    use tairix_sleep::{parse, run, SleepError, Sleeper};
 
     /// Microseconds in one second — the seconds → park-unit factor.
     const MICROS_PER_SECOND: f64 = 1_000_000.0;
@@ -92,23 +89,18 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when the interval elapsed (or a requested short help
-    /// was written); `1` when the short-help write failed; `2` on a usage
-    /// error (a malformed argument vector, an unrecognised option, a missing
-    /// operand, or an invalid time interval).
+    /// was written); `1` when the short-help write failed or the command
+    /// line was not understood (a malformed argument vector, an
+    /// unrecognised option, a missing operand, or an invalid time interval).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line("sleep: invalid time interval");
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("sleep") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("sleep: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("sleep", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -127,11 +119,10 @@ mod program {
                 1
             }
             // The parser produced the command, so `run` cannot raise a usage
-            // error here; the arm stays total and fails loud rather than
-            // guessing an exit code.
+            // error here; the arm stays total and reports one as such.
             Err(err) => {
-                write_stderr_line(&format!("sleep: {err}"));
-                2
+                tairix_help::report_misuse("sleep", &err);
+                tairix_help::MISUSE
             }
         }
     }

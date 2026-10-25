@@ -17,8 +17,8 @@ use crate::command::{Command, Options};
 use crate::error::LsusbError;
 use crate::Output;
 
-/// The one-line usage banner, printed on a usage error and as the
-/// fallback when the bundled help document is unavailable.
+/// The one-line usage banner, printed as the fallback when the bundled help
+/// document is unavailable.
 pub const USAGE: &str =
     "usage: lsusb [-v] [-t] [-d [<vendor>]:[<product>]] [-s [[<bus>]:][<devnum>]]";
 

@@ -58,9 +58,9 @@ domaine du lien est `local`.
 ## EXIT STATUS
 
 - `0` — la commande est allée à son terme (ou l'aide courte a été écrite).
-- `1` — le service de découverte a refusé la requête ou ne fonctionne pas.
-- `2` — la ligne de commande n'a pas été comprise, ou la sortie n'a pas pu
-  être écrite.
+- `1` — le service de découverte a refusé la requête ou ne fonctionne pas. Une
+  ligne de commande non comprise sort aussi avec `1`.
+- `2` — la sortie n'a pas pu être écrite.
 
 ## ENVIRONMENT
 

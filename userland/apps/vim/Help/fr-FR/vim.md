@@ -72,8 +72,7 @@ ultérieures ; la liste vit dans `plans/VIM.md` de l'arbre source.
 - `0` — la session s'est terminée par une commande de sortie, ou
   l'aide brève a été affichée.
 - `1` — le terminal a échoué ; la raison est imprimée sur la sortie
-  d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+  d'erreur. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

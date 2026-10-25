@@ -424,9 +424,9 @@ impl FeedbackRate {
         self.0 * 1_000_000 / Q16
     }
 
-    /// Whether `self` lies within an eighth of `nominal` — the window a real
-    /// clock's correction stays in (Linux `snd_usb_handle_sync_urb` holds the
-    /// same bound).
+    /// Whether `self` lies within an eighth of `nominal` — wide enough for any
+    /// real clock's correction, narrow enough that a value read at a
+    /// power-of-two wrong scale (at least twice or half) falls outside it.
     const fn near(self, nominal: Self) -> bool {
         let tolerance = nominal.0 / 8;
         self.0 + tolerance >= nominal.0 && self.0 <= nominal.0 + tolerance

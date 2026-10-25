@@ -27,14 +27,11 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::{Errno, UnlinkFlags};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-    use tairix_unlink::{parse, run, Filesystem, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stdout};
+    use tairix_unlink::{parse, run, Filesystem};
 
     /// The production [`Filesystem`] over `fs_unlink`.
     ///
@@ -53,28 +50,21 @@ mod program {
         }
     }
 
-    /// Report a usage error: the banner on the standard error stream,
-    /// verbatim (it already ends in a newline).
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` on a filesystem or output failure,
-    /// `2` on a usage error (a malformed argument vector, an unrecognised
-    /// option, or anything other than exactly one operand).
+    /// Exit codes: `0` on success, `1` on a filesystem or output failure or
+    /// a command line not understood, as GNU's `unlink` ends.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("unlink") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("unlink", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -88,7 +78,7 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("unlink: {err}"));
+                write_stderr_line(format_args!("unlink: {err}"));
                 1
             }
         }

@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::raid::RaidLevel;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
 /// A fully parsed `mdadm` invocation.
@@ -106,10 +107,8 @@ pub enum ParseError {
     NoMode,
     /// Two different mode flags were given.
     ConflictingModes,
-    /// An unrecognised option.
-    UnknownOption(String),
-    /// A value option that was given no value.
-    MissingValue(&'static str),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A `--level` value that names nothing.
     BadLevel(String),
     /// A level TAIRiX does not compose (e.g. RAID4).
@@ -152,8 +151,7 @@ impl fmt::Display for ParseError {
                 "no mode given: use one of --create, --detail, --examine, --add, --remove, --stop",
             ),
             Self::ConflictingModes => f.write_str("only one mode may be given"),
-            Self::UnknownOption(opt) => write!(f, "unknown option {opt}", opt = quote(opt)),
-            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::BadLevel(value) => write!(f, "{value} is not a RAID level", value = quote(value)),
             Self::LevelNotSupported(value) => {
                 write!(
@@ -196,33 +194,61 @@ impl fmt::Display for ParseError {
     }
 }
 
+/// What each of `mdadm`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Mode(Mode),
+    Level,
+    RaidDevices,
+    Chunk,
+    Help,
+    Version,
+}
+
+/// `mdadm`'s options, as Linux `mdadm` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('C', &["create"], Flag::Mode(Mode::Create)),
+    Opt::flag('D', &["detail"], Flag::Mode(Mode::Detail)),
+    Opt::flag('E', &["examine"], Flag::Mode(Mode::Examine)),
+    Opt::flag('a', &["add"], Flag::Mode(Mode::Add)),
+    Opt::flag('r', &["remove"], Flag::Mode(Mode::Remove)),
+    Opt::flag('S', &["stop"], Flag::Mode(Mode::Stop)),
+    Opt::valued('l', &["level"], Flag::Level),
+    Opt::valued('n', &["raid-devices"], Flag::RaidDevices),
+    Opt::valued('c', &["chunk"], Flag::Chunk),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+    Opt::flag('V', &["version"], Flag::Version),
+];
+
 /// Parse the argument vector (excluding `argv[0]`).
+///
+/// It is read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere
+/// among the operands, clustered (`-Cl0`), a value attached or following, a
+/// long option by any unambiguous prefix, `--` ending them. A second,
+/// different mode is refused as it is read; help and version wait for the
+/// whole line, and help wins over version and every mode.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] describing the first thing that did not parse.
-pub fn parse<S: AsRef<str>>(args: &[S]) -> Result<Command, ParseError> {
+/// A [`ParseError`] describing the first thing that did not parse; an option
+/// `getopt` refuses is a [`ParseError::Option`].
+pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut state = State::default();
-    let mut iter = args.iter().map(AsRef::as_ref);
-    let mut options_ended = false;
-
-    while let Some(arg) = iter.next() {
-        if options_ended || arg == "-" || !arg.starts_with('-') {
-            state.operands.push(arg.to_string());
-            continue;
-        }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            state.long_option(long, &mut iter)?;
-        } else {
-            // A `-xyz` cluster: `arg[1..]`.
-            state.short_cluster(&arg[1..], &mut iter)?;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(operand) => state.operands.push(String::from(operand)),
+            Arg::Opt(Flag::Mode(mode), _) => state.set_mode(mode)?,
+            Arg::Opt(Flag::Level, value) => state.set_level(value.unwrap_or_default())?,
+            Arg::Opt(Flag::RaidDevices, value) => {
+                state.set_raid_devices(value.unwrap_or_default())?;
+            }
+            Arg::Opt(Flag::Chunk, value) => state.set_chunk(value.unwrap_or_default())?,
+            Arg::Opt(Flag::Help, _) => state.saw_help = true,
+            Arg::Opt(Flag::Version, _) => state.saw_version = true,
         }
     }
-
     state.finish()
 }
 
@@ -248,91 +274,6 @@ impl State {
                 Ok(())
             }
         }
-    }
-
-    /// Handle one `--name` or `--name=value` option.
-    fn long_option<'a, I>(&mut self, long: &str, iter: &mut I) -> Result<(), ParseError>
-    where
-        I: Iterator<Item = &'a str>,
-    {
-        let (name, inline) = match long.split_once('=') {
-            Some((name, value)) => (name, Some(value)),
-            None => (long, None),
-        };
-        // Every option but the three value options rejects an `=value`.
-        match name {
-            "level" | "raid-devices" | "chunk" => {}
-            "help" | "version" | "create" | "detail" | "examine" | "add" | "remove" | "stop"
-                if inline.is_none() => {}
-            "help" | "version" | "create" | "detail" | "examine" | "add" | "remove" | "stop" => {
-                return Err(ParseError::UnknownOption(alloc::format!("--{long}")));
-            }
-            _ => return Err(ParseError::UnknownOption(alloc::format!("--{long}"))),
-        }
-        match name {
-            "help" => self.saw_help = true,
-            "version" => self.saw_version = true,
-            "create" => self.set_mode(Mode::Create)?,
-            "detail" => self.set_mode(Mode::Detail)?,
-            "examine" => self.set_mode(Mode::Examine)?,
-            "add" => self.set_mode(Mode::Add)?,
-            "remove" => self.set_mode(Mode::Remove)?,
-            "stop" => self.set_mode(Mode::Stop)?,
-            "level" => {
-                let value = value_of(inline, iter, "--level")?;
-                self.set_level(&value)?;
-            }
-            "raid-devices" => {
-                let value = value_of(inline, iter, "--raid-devices")?;
-                self.set_raid_devices(&value)?;
-            }
-            "chunk" => {
-                let value = value_of(inline, iter, "--chunk")?;
-                self.set_chunk(&value)?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle a `-xyz` short-option cluster.
-    fn short_cluster<'a, I>(&mut self, cluster: &str, iter: &mut I) -> Result<(), ParseError>
-    where
-        I: Iterator<Item = &'a str>,
-    {
-        for (offset, flag) in cluster.char_indices() {
-            match flag {
-                'C' => self.set_mode(Mode::Create)?,
-                'D' => self.set_mode(Mode::Detail)?,
-                'E' => self.set_mode(Mode::Examine)?,
-                'a' => self.set_mode(Mode::Add)?,
-                'r' => self.set_mode(Mode::Remove)?,
-                'S' => self.set_mode(Mode::Stop)?,
-                'h' | '?' => self.saw_help = true,
-                'V' => self.saw_version = true,
-                'l' | 'n' | 'c' => {
-                    // The value is the rest of the cluster, else the next arg.
-                    let rest = &cluster[offset + flag.len_utf8()..];
-                    let long = short_value_long(flag);
-                    let value = if rest.is_empty() {
-                        next_value(iter, long)?
-                    } else {
-                        rest.to_string()
-                    };
-                    match flag {
-                        'l' => self.set_level(&value)?,
-                        'n' => self.set_raid_devices(&value)?,
-                        'c' => self.set_chunk(&value)?,
-                        _ => {}
-                    }
-                    return Ok(());
-                }
-                other => {
-                    return Err(ParseError::UnknownOption(alloc::format!("-{other}")));
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Parse and record a `--level` value.
@@ -469,42 +410,6 @@ impl State {
         }
         Ok(())
     }
-}
-
-/// The long spelling a short value flag corresponds to, for diagnostics.
-const fn short_value_long(flag: char) -> &'static str {
-    match flag {
-        'l' => "--level",
-        'n' => "--raid-devices",
-        'c' => "--chunk",
-        // Only the three value flags reach here.
-        _ => "",
-    }
-}
-
-/// The value of a value option: the inline `=value`, else the next argument.
-fn value_of<'a, I>(
-    inline: Option<&str>,
-    iter: &mut I,
-    long: &'static str,
-) -> Result<String, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    match inline {
-        Some(value) => Ok(value.to_string()),
-        None => next_value(iter, long),
-    }
-}
-
-/// Consume the next argument as a value, or report the option needs one.
-fn next_value<'a, I>(iter: &mut I, long: &'static str) -> Result<String, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    iter.next()
-        .map(ToString::to_string)
-        .ok_or(ParseError::MissingValue(long))
 }
 
 /// Map a `--level` value to a [`RaidLevel`].

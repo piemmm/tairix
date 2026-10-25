@@ -201,10 +201,11 @@ impl Body {
         self.form().map_or(&[], Form::staged_accounts)
     }
 
-    /// Whether a choice list is open, which is modal: the list keeps the
-    /// pointer even where it hangs outside the pane's own column.
-    pub(crate) fn is_listing(&self) -> bool {
-        self.form().is_some_and(Form::is_listing)
+    /// Whether a row holds the pointer until it resolves, wherever the pointer
+    /// has gone: a choice list open, which hangs outside the pane's own
+    /// column, or a slider being dragged.
+    pub(crate) fn mid_gesture(&self) -> bool {
+        self.form().is_some_and(Form::mid_gesture)
     }
 
     /// The height the body itself needs in a column `width` pixels wide.

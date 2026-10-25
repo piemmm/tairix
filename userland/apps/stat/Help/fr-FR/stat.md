@@ -55,6 +55,13 @@ de périphérique, donc `%d` est cet identifiant en décimal et `%D` en
 hexadécimal ; comparer les `%d` de deux fichiers répond toujours
 exactement à « sont-ils sur un même volume ? ».
 
+Sur un terminal, chaque nom affiché est mis entre guillemets là où un
+shell en aurait besoin, et tout caractère de contrôle ou autre caractère
+invisible qu'il contient est écrit sous forme de séquence d'échappement,
+de sorte qu'un nom ne peut ni commander ni réorganiser l'écran ; GNU
+l'affiche tel quel. Un tube ou un fichier reçoit le nom octet pour
+octet.
+
 ## OPTIONS
 
 - `-L, --dereference` — décrire ce que désigne un lien symbolique, plutôt
@@ -79,9 +86,9 @@ exactement à « sont-ils sur un même volume ? ».
 ## EXIT STATUS
 
 - `0` — chaque opérande a été décrit (ou l'aide courte a été écrite).
-- `1` — au moins un opérande était illisible, ou la sortie a échoué.
-- `2` — la ligne de commande n'a pas été comprise, ou son format nommait
-  une directive que ce système ne peut servir.
+- `1` — au moins un opérande était illisible, ou la sortie a échoué. Une
+  ligne de commande non comprise, ou dont le format nommait une directive
+  que ce système ne peut servir, sort aussi avec `1`.
 
 ## ENVIRONMENT
 

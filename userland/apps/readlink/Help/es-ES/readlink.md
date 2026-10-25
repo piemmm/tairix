@@ -44,6 +44,13 @@ enlaces por su cuenta. Una segunda copia del algoritmo que discrepara en
 una regla mostraría una ruta que el sistema de archivos resuelve de otro
 modo.
 
+En un terminal, cada ruta que muestra la salida se entrecomilla donde un
+shell lo necesitaría, y cualquier carácter de control u otro carácter
+invisible que haya en ella se escribe como secuencia de escape, de modo
+que una ruta no puede controlar ni reordenar la pantalla; GNU la muestra
+sin cambios. Una tubería, un archivo o la salida con `-z` recibe la ruta
+byte a byte.
+
 ## OPTIONS
 
 - `-f, --canonicalize` — mostrar la ruta canónica; todos los
@@ -75,8 +82,8 @@ modo.
 
 - `0` — se mostró el destino de cada operando (o se escribió la ayuda
   breve).
-- `1` — al menos una lectura fue rechazada, o la salida falló.
-- `2` — no se entendió la línea de órdenes.
+- `1` — al menos una lectura fue rechazada, o la salida falló. Una línea
+  de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

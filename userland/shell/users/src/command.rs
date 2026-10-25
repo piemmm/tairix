@@ -1,13 +1,34 @@
 //! The parsed shape of a `users` command line.
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `users`'s own Help tree is unavailable.
+use alloc::string::String;
+use core::fmt;
+
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+use tairix_util::quote::quote;
+
+/// The usage banner the short-help switches print when `users`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: users [-h | -? | -l]";
 
-/// The command line was not understood (an unknown option or a stray
-/// operand). The caller should print [`USAGE`]. The session never starts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageError;
+/// A command line `users` refuses. The session never starts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UsageError {
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// An operand; the tool takes none (GNU `extra operand`).
+    ExtraOperand(String),
+}
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::ExtraOperand(operand) => {
+                write!(f, "extra operand {operand}", operand = quote(operand))
+            }
+        }
+    }
+}
 
 /// One thing the `users` tool can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,32 +50,48 @@ pub enum Command {
     Help,
 }
 
+/// What each of `users`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    List,
+    Help,
+}
+
+/// `users`'s option, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('l', &["list"], Flag::List),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `users [-h | -? | -l]`:
-///
-/// * `-h` / `-?` / `--help` — the reserved short-help switches
-///   (plans/APPS.md §4; they win immediately).
-/// * `-l` / `--list` — print the account and group listing and exit.
-/// * anything else — a [`UsageError`]. The tool takes no operands and no
-///   other options: accounts are *administered* with commands typed
-///   inside the interactive session, not command-line switches.
+/// The grammar is `users [-h | -? | -l]`, read as GNU's `getopt_long` reads
+/// it ([`Scan`]); the first argument decides. The help switches (`-h`, `-?`,
+/// `--help`) answer at once, as does `-l` / `--list`, which prints the account
+/// and group listing and exits. The tool takes no operands and no other
+/// options: accounts are *administered* with commands typed inside the
+/// interactive session, not command-line switches.
 ///
 /// # Errors
 ///
-/// [`UsageError`] for any input outside the grammar above.
+/// * [`UsageError::Option`] — an option `getopt` refuses, in its words.
+/// * [`UsageError::ExtraOperand`] — an operand.
 pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
-    match args.first() {
+    let first = Scan::new(OPTIONS, args, Order::Permute).next().transpose();
+    match first.map_err(UsageError::Option)? {
         None => Ok(Command::Session),
-        Some(&("-h" | "-?" | "--help")) => Ok(Command::Help),
-        Some(&("-l" | "--list")) => Ok(Command::List),
-        Some(_) => Err(UsageError),
+        Some(Arg::Opt(Flag::Help, _)) => Ok(Command::Help),
+        Some(Arg::Opt(Flag::List, _)) => Ok(Command::List),
+        Some(Arg::Operand(operand)) => Err(UsageError::ExtraOperand(String::from(operand))),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
+
     use super::{parse, Command, UsageError};
 
     #[test]
@@ -82,10 +119,34 @@ mod tests {
     }
 
     #[test]
-    fn any_other_argument_is_usage() {
-        assert_eq!(parse(&["-x"]), Err(UsageError));
-        assert_eq!(parse(&["--frob"]), Err(UsageError));
-        assert_eq!(parse(&["operand"]), Err(UsageError));
+    fn an_operand_is_an_extra_operand() {
+        let err = parse(&["operand"]).expect_err("an operand is refused");
+        assert_eq!(err, UsageError::ExtraOperand(String::from("operand")));
+        assert_eq!(err.to_string(), "extra operand 'operand'");
+    }
+
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        match parse(args) {
+            Err(UsageError::Option(refusal)) => refusal.to_string(),
+            other => panic!("expected a refused option, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--list=all"]),
+            "option '--list' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--li"]), Ok(Command::List));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

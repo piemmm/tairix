@@ -9,8 +9,8 @@
 //!   area is already the latest copy and the registers hold another task's.
 //! * **Resume** (`resume`, from `leave_cooperative_park`): a load is marked
 //!   pending unless this CPU's registers still hold the task's state — this
-//!   CPU's owner is the task's area *and* the area last lived on this CPU, the
-//!   rule Linux's `fpregs_state_valid` states.
+//!   CPU's owner is the task's area *and* the area last lived on this CPU:
+//!   either alone can be stale once the task or the CPU has run another.
 //! * **Return to ring 3**: `tairix_arch_x86_64_xstate_load`, called from each
 //!   stub's naked exit path after all Rust has run, so no Rust code executes
 //!   under a user's x87 or `MXCSR`.

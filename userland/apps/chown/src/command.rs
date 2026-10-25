@@ -1,407 +1,486 @@
-//! The parsed shape of a `chown` command line, including the owner spec.
+//! The parsed shape of a `chown` command line.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+
 use crate::error::ChownError;
 
-/// Which ownership changes are reported on standard output.
+/// Which nodes are reported on standard output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Verbosity {
-    /// Report nothing (the default).
+    /// None (the default).
     None,
-    /// Report only files whose ownership actually changed (`-c`).
+    /// Only a node whose ownership changed (`-c`).
     Changes,
-    /// Report every file processed (`-v`).
+    /// Every node processed (`-v`).
     All,
 }
 
-/// The full option set of one `chown` run.
+/// What a symbolic link stands for where a change meets one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Links {
+    /// What it names (`--dereference`).
+    Referent,
+    /// The link itself (`-h`, `--no-dereference`).
+    Itself,
+}
+
+/// Which link operands a recursive change follows into a directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Traverse {
+    /// None (`-P`, the default).
+    Never,
+    /// One that names a directory (`-H`).
+    Operands,
+}
+
+/// The options of one `chown` run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
-    /// Descend into directories and apply the owner to their contents
-    /// (`-R`/`--recursive`).
+    /// Change a directory's contents too (`-R`).
     pub recursive: bool,
-    /// The reporting policy (`-c` / `-v`, last one wins).
+    /// The reporting policy (`-c`, `-v`; the later wins).
     pub verbosity: Verbosity,
-    /// Suppress per-operand error diagnostics and keep going (`-f`); a
-    /// suppressed failure still fails the run as
-    /// [`ChownError::Silenced`].
+    /// Report no node's failure (`-f`); the run still fails.
     pub quiet: bool,
+    /// `--dereference` or `-h`, the later winning; [`None`] leaves GNU's
+    /// default, which [`Options::links`] answers.
+    pub dereference: Option<Links>,
+    /// `-H` or `-P`, the later winning.
+    pub traverse: Traverse,
+    /// Refuse a recursive change of the view root (`--preserve-root`); off
+    /// by default, as GNU's is.
+    pub preserve_root: bool,
 }
 
 impl Options {
-    /// The defaults of a bare `chown`.
+    /// The options of a bare `chown`.
     pub const DEFAULT: Self = Self {
         recursive: false,
         verbosity: Verbosity::None,
         quiet: false,
+        dereference: None,
+        traverse: Traverse::Never,
+        preserve_root: false,
     };
+
+    /// What a link counts as in this run: as asked, else GNU's default — what
+    /// it names, or the link itself when the change is recursive.
+    #[must_use]
+    pub const fn links(self) -> Links {
+        match self.dereference {
+            Some(links) => links,
+            None if self.recursive => Links::Itself,
+            None => Links::Referent,
+        }
+    }
+}
+
+/// What a change gives its files.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Target {
+    /// An owner operand as written, read against the directories before any
+    /// file is touched.
+    Spec(String),
+    /// The owner and group of what `--reference=RFILE` names.
+    Reference(String),
 }
 
 /// One thing the `chown` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
-    /// Apply `owner` to each of `files`, in operand order.
+    /// Give each of `files`, in order, what `target` names.
     Change {
-        /// The change options.
+        /// The options.
         options: Options,
-        /// The owner (user and/or group) to apply.
-        owner: Owner,
-        /// The files to change, in order. Always at least one.
+        /// What the files are given.
+        target: Target,
+        /// `--from`'s operand as written: only a node it matches is changed.
+        from: Option<String>,
+        /// The files, at least one.
         files: Vec<String>,
     },
-    /// Print the usage banner (`-h`/`--help`).
+    /// Print the short help (`-?`, `--help`).
     Help,
+    /// Print the tool's name and version (`--version`).
+    Version,
 }
 
-/// A parsed owner operand: an optional new user id and an optional new group
-/// id.
-///
-/// `chown` accepts three forms, all using **decimal** ids (TAIRiX has no
-/// name-to-id seam in this tool, so a name would be interface creep):
-///
-/// * `OWNER` — change the owning user, leave the group ([`uid`](Owner::uid)
-///   set, [`gid`](Owner::gid) [`None`]).
-/// * `OWNER:GROUP` — change both.
-/// * `:GROUP` — change only the group ([`uid`](Owner::uid) [`None`]).
-///
-/// At least one field is always [`Some`]: an empty spec, a bare `:`, and a
-/// trailing-colon `OWNER:` are all rejected by [`parse_owner`].
+/// What each option means.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Owner {
-    /// The new owning user id, or [`None`] to leave it unchanged.
-    pub uid: Option<u32>,
-    /// The new owning group id, or [`None`] to leave it unchanged.
-    pub gid: Option<u32>,
+enum Flag {
+    Changes,
+    Quiet,
+    From,
+    Dereference,
+    NoDereference,
+    NoPreserveRoot,
+    PreserveRoot,
+    Reference,
+    Verbose,
+    Recursive,
+    FollowOperands,
+    FollowEvery,
+    FollowNone,
+    Help,
+    Version,
 }
 
-/// Parse `args` (the tool's arguments, excluding the program name) into a
-/// [`Command`].
-///
-/// The grammar is the GNU `chown` surface,
-/// `chown [-cfRv] [--] OWNER[:GROUP] file...`:
-///
-/// * `-R` / `--recursive` — descend into directories.
-/// * `-c` / `--changes` — report only files whose ownership actually
-///   changed.
-/// * `-v` / `--verbose` — report every file processed.
-/// * `-f` / `--silent` / `--quiet` — suppress per-operand error
-///   diagnostics and keep going (the run still fails).
-/// * `-h` / `--help` — print the usage banner (wins immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * any other `-…` — a [`ChownError::Usage`] error (fail closed; never a
-///   silently ignored token).
-/// * anything else — an operand.
-///
-/// The first operand is the owner spec; the rest are files.
+/// `chown`'s options in the order GNU's manual lists them, then the help and
+/// version switches. `-h` is GNU's `--no-dereference`, so help is `-?`.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('c', &["changes"], Flag::Changes),
+    Opt::flag('f', &["silent", "quiet"], Flag::Quiet),
+    Opt::long(&["from"], Takes::Value, Flag::From),
+    Opt::long(&["dereference"], Takes::Nothing, Flag::Dereference),
+    Opt::flag('h', &["no-dereference"], Flag::NoDereference),
+    Opt::long(&["no-preserve-root"], Takes::Nothing, Flag::NoPreserveRoot),
+    Opt::long(&["preserve-root"], Takes::Nothing, Flag::PreserveRoot),
+    Opt::long(&["reference"], Takes::Value, Flag::Reference),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('R', &["recursive"], Flag::Recursive),
+    Opt::letter('H', Takes::Nothing, Flag::FollowOperands),
+    Opt::letter('L', Takes::Nothing, Flag::FollowEvery),
+    Opt::letter('P', Takes::Nothing, Flag::FollowNone),
+    Opt::long(&["help"], Takes::Nothing, Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+    Opt::long(&["version"], Takes::Nothing, Flag::Version),
+];
+
+/// Parse `args` (the arguments, the program's word excluded) as GNU's
+/// `getopt_long` reads `chown`'s: options anywhere among the operands, a long
+/// one by any unambiguous prefix, `--` ending them, and the help and version
+/// switches answering at once. The first operand is the owner unless
+/// `--reference` names one; the rest are files.
 ///
 /// # Errors
 ///
-/// [`ChownError::Usage`] for any unrecognised option before `--`, or when
-/// fewer than two operands (an owner spec and at least one file) are given.
-/// [`ChownError::BadOwner`] when the owner operand is not a valid
-/// `OWNER`/`OWNER:GROUP`/`:GROUP` spec.
+/// [`ChownError::Option`] for an option `getopt` refuses,
+/// [`ChownError::MissingOperand`] or [`ChownError::MissingFile`] for too few
+/// operands, and [`ChownError::EveryLink`] for `-L` under `-R`.
 pub fn parse(args: &[&str]) -> Result<Command, ChownError> {
     let mut options = Options::DEFAULT;
+    let mut every_link = false;
+    let mut from = None;
+    let mut reference = None;
     let mut operands = Vec::new();
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ChownError::Option)? {
+            Arg::Operand(operand) => operands.push(String::from(operand)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Version, _) => return Ok(Command::Version),
+            Arg::Opt(Flag::Changes, _) => options.verbosity = Verbosity::Changes,
+            Arg::Opt(Flag::Verbose, _) => options.verbosity = Verbosity::All,
+            Arg::Opt(Flag::Quiet, _) => options.quiet = true,
+            Arg::Opt(Flag::Recursive, _) => options.recursive = true,
+            Arg::Opt(Flag::Dereference, _) => options.dereference = Some(Links::Referent),
+            Arg::Opt(Flag::NoDereference, _) => options.dereference = Some(Links::Itself),
+            Arg::Opt(Flag::NoPreserveRoot, _) => options.preserve_root = false,
+            Arg::Opt(Flag::PreserveRoot, _) => options.preserve_root = true,
+            Arg::Opt(Flag::FollowOperands, _) => {
+                options.traverse = Traverse::Operands;
+                every_link = false;
             }
-            if let Some(name) = arg.strip_prefix("--") {
-                match name {
-                    "recursive" => options.recursive = true,
-                    "changes" => options.verbosity = Verbosity::Changes,
-                    "verbose" => options.verbosity = Verbosity::All,
-                    "silent" | "quiet" => options.quiet = true,
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(ChownError::Usage),
-                }
-                continue;
+            Arg::Opt(Flag::FollowNone, _) => {
+                options.traverse = Traverse::Never;
+                every_link = false;
             }
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in letters.chars() {
-                    match letter {
-                        'R' => options.recursive = true,
-                        'c' => options.verbosity = Verbosity::Changes,
-                        'v' => options.verbosity = Verbosity::All,
-                        'f' => options.quiet = true,
-                        'h' => return Ok(Command::Help),
-                        _ => return Err(ChownError::Usage),
-                    }
-                }
-                continue;
-            }
+            Arg::Opt(Flag::FollowEvery, _) => every_link = true,
+            Arg::Opt(Flag::From, value) => from = Some(value_of(value, "from")?),
+            Arg::Opt(Flag::Reference, value) => reference = Some(value_of(value, "reference")?),
         }
-        operands.push(String::from(arg));
     }
-    if operands.is_empty() {
-        return Err(ChownError::Usage);
+    if every_link && options.recursive {
+        return Err(ChownError::EveryLink);
     }
-    let owner_spec = operands.remove(0);
-    if operands.is_empty() {
-        return Err(ChownError::Usage);
+    let mut operands = operands.into_iter();
+    let target = match reference {
+        Some(path) => Target::Reference(path),
+        None => Target::Spec(operands.next().ok_or(ChownError::MissingOperand)?),
+    };
+    let files: Vec<String> = operands.collect();
+    if files.is_empty() {
+        return Err(match target {
+            Target::Spec(spec) => ChownError::MissingFile(spec),
+            Target::Reference(_) => ChownError::MissingOperand,
+        });
     }
-    let owner = parse_owner(&owner_spec).ok_or(ChownError::BadOwner)?;
     Ok(Command::Change {
         options,
-        owner,
-        files: operands,
+        target,
+        from,
+        files,
     })
 }
 
-/// Parse an owner operand into an [`Owner`].
-///
-/// Accepts `OWNER`, `OWNER:GROUP`, and `:GROUP`, where each present field is a
-/// decimal [`u32`]. Returns [`None`] for an empty spec, a bare `:`, a
-/// trailing-colon `OWNER:` (the field would be empty), more than one colon, or
-/// a non-decimal / overflowing id — leaving at least one field [`Some`] in
-/// every successful parse.
-#[must_use]
-pub fn parse_owner(spec: &str) -> Option<Owner> {
-    match spec.split_once(':') {
-        None => {
-            let uid = parse_id(spec)?;
-            Some(Owner {
-                uid: Some(uid),
-                gid: None,
-            })
-        }
-        Some((user, group)) => {
-            let uid = if user.is_empty() {
-                None
-            } else {
-                Some(parse_id(user)?)
-            };
-            let gid = if group.is_empty() {
-                None
-            } else {
-                Some(parse_id(group)?)
-            };
-            if uid.is_none() && gid.is_none() {
-                return None;
-            }
-            // `OWNER:` (a named user with an empty group) has no meaning
-            // without a name database to resolve the user's primary group, so
-            // it is rejected rather than guessed.
-            if uid.is_some() && gid.is_none() {
-                return None;
-            }
-            Some(Owner { uid, gid })
-        }
-    }
-}
-
-/// Parse one non-empty run of decimal digits into a [`u32`]. Returns [`None`]
-/// for an empty string, a non-digit, or a value that overflows.
-fn parse_id(text: &str) -> Option<u32> {
-    if text.is_empty() {
-        return None;
-    }
-    let mut value: u32 = 0;
-    for c in text.chars() {
-        let digit = c.to_digit(10)?;
-        value = value.checked_mul(10)?.checked_add(digit)?;
-    }
-    Some(value)
+/// The value [`Scan`] hands a valued option, refused as `getopt` refuses a
+/// missing one should it ever hand none.
+fn value_of(value: Option<&str>, name: &'static str) -> Result<String, ChownError> {
+    value
+        .map(String::from)
+        .ok_or(ChownError::Option(Refusal::MissingLongValue(name)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, parse_owner, Command, Options, Owner, Verbosity};
+    use super::{parse, Command, Links, Options, Target, Traverse, Verbosity};
     use crate::error::ChownError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
-    fn change(recursive: bool, owner: Owner, files: &[&str]) -> Command {
-        Command::Change {
-            options: Options {
-                recursive,
-                ..Options::DEFAULT
-            },
-            owner,
-            files: files.iter().map(|p| String::from(*p)).collect::<Vec<_>>(),
+    /// What `args` asks to change, or a panic naming what it parsed to.
+    fn change(args: &[&str]) -> (Options, Target, Option<String>, Vec<String>) {
+        match parse(args) {
+            Ok(Command::Change {
+                options,
+                target,
+                from,
+                files,
+            }) => (options, target, from, files),
+            other => panic!("{args:?} parsed to {other:?}"),
         }
     }
 
-    fn owner(uid: Option<u32>, gid: Option<u32>) -> Owner {
-        Owner { uid, gid }
+    fn options(args: &[&str]) -> Options {
+        change(args).0
     }
 
-    // ----- command-line parsing -------------------------------------------
+    /// The refusal `args` meets, as GNU's `chown` words it.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
 
     #[test]
-    fn changes_verbose_and_quiet_parse() {
-        assert_eq!(
-            parse(&["-c", "0:0", "f"]),
-            Ok(Command::Change {
-                options: Options {
-                    verbosity: Verbosity::Changes,
-                    ..Options::DEFAULT
-                },
-                owner: Owner {
-                    uid: Some(0),
-                    gid: Some(0),
-                },
-                files: alloc::vec![String::from("f")],
-            })
-        );
-        // The later of `-c` / `-v` wins, as in the GNU tool.
-        assert_eq!(
-            parse(&["-v", "-c", "0:0", "f"]),
-            Ok(Command::Change {
-                options: Options {
-                    verbosity: Verbosity::Changes,
-                    ..Options::DEFAULT
-                },
-                owner: Owner {
-                    uid: Some(0),
-                    gid: Some(0),
-                },
-                files: alloc::vec![String::from("f")],
-            })
-        );
-        for args in [
-            ["-f", "0:0", "f"],
-            ["--silent", "0:0", "f"],
-            ["--quiet", "0:0", "f"],
-        ] {
+    fn each_option_sets_what_gnu_s_manual_says() {
+        assert_eq!(options(&["0", "f"]), Options::DEFAULT);
+        assert_eq!(change(&["0", "f"]).1, Target::Spec(String::from("0")));
+        for flag in ["-c", "--changes"] {
             assert_eq!(
-                parse(&args),
-                Ok(Command::Change {
-                    options: Options {
-                        quiet: true,
-                        ..Options::DEFAULT
-                    },
-                    owner: Owner {
-                        uid: Some(0),
-                        gid: Some(0),
-                    },
-                    files: alloc::vec![String::from("f")],
-                })
+                options(&[flag, "0", "f"]).verbosity,
+                Verbosity::Changes,
+                "{flag}"
             );
         }
+        for flag in ["-v", "--verbose"] {
+            assert_eq!(
+                options(&[flag, "0", "f"]).verbosity,
+                Verbosity::All,
+                "{flag}"
+            );
+        }
+        for flag in ["-f", "--silent", "--quiet"] {
+            assert!(options(&[flag, "0", "f"]).quiet, "{flag}");
+        }
+        for flag in ["-R", "--recursive"] {
+            assert!(options(&[flag, "0", "f"]).recursive, "{flag}");
+        }
+        assert_eq!(
+            options(&["--dereference", "0", "f"]).dereference,
+            Some(Links::Referent)
+        );
+        for flag in ["-h", "--no-dereference"] {
+            assert_eq!(
+                options(&[flag, "0", "f"]).dereference,
+                Some(Links::Itself),
+                "{flag}"
+            );
+        }
+        assert_eq!(options(&["-H", "0", "f"]).traverse, Traverse::Operands);
+        assert_eq!(options(&["-P", "0", "f"]).traverse, Traverse::Never);
+    }
+
+    /// GNU's manual: of `-H`, `-L` and `-P` only the final one takes effect;
+    /// the later of `-c` and `-v`, and of `--dereference` and `-h`, wins too.
+    #[test]
+    fn the_later_of_each_pair_wins() {
+        assert_eq!(
+            options(&["-v", "-c", "0", "f"]).verbosity,
+            Verbosity::Changes
+        );
+        assert_eq!(options(&["-c", "-v", "0", "f"]).verbosity, Verbosity::All);
+        assert_eq!(
+            options(&["-h", "--dereference", "0", "f"]).links(),
+            Links::Referent
+        );
+        assert_eq!(
+            options(&["--dereference", "-h", "0", "f"]).links(),
+            Links::Itself
+        );
+        assert_eq!(
+            options(&["-R", "-H", "-P", "0", "f"]).traverse,
+            Traverse::Never
+        );
+        assert_eq!(
+            options(&["-R", "-L", "-H", "0", "f"]).traverse,
+            Traverse::Operands
+        );
+        assert_eq!(
+            options(&["-R", "-L", "-P", "0", "f"]).traverse,
+            Traverse::Never
+        );
+    }
+
+    /// GNU's manual: `--dereference` is the default when not operating
+    /// recursively, and `-R` changes a link it meets itself.
+    #[test]
+    fn a_link_is_what_it_names_unless_the_change_is_recursive() {
+        assert_eq!(Options::DEFAULT.links(), Links::Referent);
+        assert_eq!(options(&["-R", "0", "f"]).links(), Links::Itself);
+        assert_eq!(
+            options(&["-R", "--dereference", "0", "f"]).links(),
+            Links::Referent
+        );
+    }
+
+    /// A walk never follows a link it meets, so `-L` could only be honoured
+    /// in part; without `-R` it has no effect, as GNU's manual says.
+    #[test]
+    fn l_is_refused_under_recursive_and_ignored_without() {
+        for args in [
+            &["-R", "-L", "0", "d"][..],
+            &["-L", "-R", "0", "d"],
+            &["-RH", "-L", "0", "d"],
+        ] {
+            assert_eq!(parse(args), Err(ChownError::EveryLink), "{args:?}");
+        }
+        assert_eq!(options(&["-L", "0", "f"]), Options::DEFAULT);
+        assert!(refused(&["-RL", "0", "d"]).starts_with("-L is not available: "));
     }
 
     #[test]
-    fn an_owner_and_one_file_parses() {
+    fn from_and_reference_take_a_value_attached_or_following() {
         assert_eq!(
-            parse(&["1000", "a.txt"]),
-            Ok(change(false, owner(Some(1000), None), &["a.txt"]))
+            change(&["--from=alice:staff", "0", "f"]).2.as_deref(),
+            Some("alice:staff")
+        );
+        assert_eq!(
+            change(&["--from", ":staff", "0", "f"]).2.as_deref(),
+            Some(":staff")
+        );
+        let (_, target, from, files) = change(&["--reference=r", "f", "g"]);
+        assert_eq!(target, Target::Reference(String::from("r")));
+        assert_eq!(from, None);
+        assert_eq!(files, ["f", "g"]);
+        assert_eq!(
+            change(&["--reference", "r", "f"]).1,
+            Target::Reference(String::from("r"))
+        );
+        assert_eq!(
+            refused(&["0", "f", "--from"]),
+            "option '--from' requires an argument"
         );
     }
 
     #[test]
-    fn an_owner_group_pair_parses() {
+    fn help_and_version_answer_at_once_and_h_is_no_help() {
+        for args in [&["-?"][..], &["--help"], &["--he"], &["-R?", "0", "f"]] {
+            assert_eq!(parse(args), Ok(Command::Help), "{args:?}");
+        }
+        assert_eq!(parse(&["--version"]), Ok(Command::Version));
+        assert_eq!(parse(&["--vers"]), Ok(Command::Version));
+        assert_eq!(parse(&["-h"]), Err(ChownError::MissingOperand));
+    }
+
+    /// GNU 9.4's words for too few operands.
+    #[test]
+    fn missing_operands_are_named_as_gnu_names_them() {
+        assert_eq!(refused(&[]), "missing operand");
+        assert_eq!(refused(&["-R"]), "missing operand");
+        assert_eq!(refused(&["alice"]), "missing operand after 'alice'");
+        assert_eq!(refused(&["-R", "alice"]), "missing operand after 'alice'");
+        assert_eq!(refused(&["--reference=r"]), "missing operand");
+    }
+
+    /// GNU 9.4's words for each refusal.
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "0", "f"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-Rx", "0", "f"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-r", "0", "f"]), "invalid option -- 'r'");
         assert_eq!(
-            parse(&["1000:100", "f"]),
-            Ok(change(false, owner(Some(1000), Some(100)), &["f"]))
+            refused(&["--frob", "0", "f"]),
+            "unrecognized option '--frob'"
+        );
+        assert_eq!(
+            refused(&["--verbose=1", "0", "f"]),
+            "option '--verbose' doesn't allow an argument"
+        );
+        assert_eq!(
+            refused(&["--re", "0", "f"]),
+            "option '--re' is ambiguous; possibilities: '--reference' '--recursive'"
+        );
+        assert_eq!(
+            refused(&["--ver"]),
+            "option '--ver' is ambiguous; possibilities: '--verbose' '--version'"
         );
     }
 
     #[test]
-    fn a_group_only_spec_parses() {
+    fn a_long_option_may_be_abbreviated() {
         assert_eq!(
-            parse(&[":100", "f"]),
-            Ok(change(false, owner(None, Some(100)), &["f"]))
+            options(&["--rec", "--sil", "--deref", "0", "d"]),
+            Options {
+                recursive: true,
+                quiet: true,
+                dereference: Some(Links::Referent),
+                ..Options::DEFAULT
+            }
         );
-    }
-
-    #[test]
-    fn fewer_than_two_operands_is_usage() {
-        assert_eq!(parse(&[]), Err(ChownError::Usage));
-        assert_eq!(parse(&["1000"]), Err(ChownError::Usage));
-        assert_eq!(parse(&["-R"]), Err(ChownError::Usage));
-        assert_eq!(parse(&["-R", "1000"]), Err(ChownError::Usage));
-    }
-
-    #[test]
-    fn help_flags_win() {
-        assert_eq!(parse(&["-h"]), Ok(Command::Help));
-        assert_eq!(parse(&["--help"]), Ok(Command::Help));
-        assert_eq!(parse(&["-Rh", "1000", "f"]), Ok(Command::Help));
-    }
-
-    #[test]
-    fn recursive_flag_sets_its_field() {
+        assert_eq!(options(&["--no-d", "0", "d"]).links(), Links::Itself);
         assert_eq!(
-            parse(&["-R", "1000:100", "d"]),
-            Ok(change(true, owner(Some(1000), Some(100)), &["d"]))
+            refused(&["--no", "0", "d"]),
+            "option '--no' is ambiguous; possibilities: '--no-dereference' '--no-preserve-root'"
         );
         assert_eq!(
-            parse(&["--recursive", "1000:100", "d"]),
-            Ok(change(true, owner(Some(1000), Some(100)), &["d"]))
+            options(&["--pres", "--no-pres", "0", "d"]),
+            Options::DEFAULT
         );
-    }
-
-    #[test]
-    fn several_files_after_the_owner_are_all_collected() {
-        assert_eq!(
-            parse(&["0:0", "a", "b", "c"]),
-            Ok(change(false, owner(Some(0), Some(0)), &["a", "b", "c"]))
-        );
-    }
-
-    #[test]
-    fn lowercase_r_is_not_recursive_and_is_usage() {
-        // POSIX `chown` spells recursive `-R`; a bare `-r` is not an option.
-        assert_eq!(parse(&["-r", "1000", "f"]), Err(ChownError::Usage));
-    }
-
-    #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "1000", "f"]), Err(ChownError::Usage));
-        assert_eq!(parse(&["--frob", "1000", "f"]), Err(ChownError::Usage));
-        assert_eq!(parse(&["-Rx", "1000", "f"]), Err(ChownError::Usage));
+        assert!(options(&["--preserve-root", "0", "d"]).preserve_root);
     }
 
     #[test]
     fn double_dash_ends_options_so_a_dash_named_file_is_an_operand() {
-        assert_eq!(
-            parse(&["--", "1000", "-weird"]),
-            Ok(change(false, owner(Some(1000), None), &["-weird"]))
-        );
+        let (_, target, _, files) = change(&["--", "1000", "-weird"]);
+        assert_eq!(target, Target::Spec(String::from("1000")));
+        assert_eq!(files, ["-weird"]);
     }
 
+    /// Every locale's `OPTIONS` section documents exactly the switches this
+    /// parser accepts: the flag tokens are language-neutral, so each
+    /// translated document carries the canonical document's keys. The
+    /// documents are read from the bundle's own on-disk `Help/` tree.
     #[test]
-    fn an_unparseable_owner_is_bad_owner() {
-        assert_eq!(parse(&["", "f"]), Err(ChownError::BadOwner));
-        assert_eq!(parse(&[":", "f"]), Err(ChownError::BadOwner));
-        assert_eq!(parse(&["1000:", "f"]), Err(ChownError::BadOwner));
-        assert_eq!(parse(&["alice", "f"]), Err(ChownError::BadOwner));
-        assert_eq!(parse(&["1000:wheel", "f"]), Err(ChownError::BadOwner));
-        assert_eq!(parse(&["1000:100:5", "f"]), Err(ChownError::BadOwner));
-    }
+    fn help_documents_the_parser_switches() {
+        extern crate std;
+        use alloc::format;
+        use std::fs;
 
-    // ----- owner-spec parsing ---------------------------------------------
-
-    #[test]
-    fn owner_forms_parse_their_fields() {
-        assert_eq!(parse_owner("0"), Some(owner(Some(0), None)));
-        assert_eq!(parse_owner("4294967295"), Some(owner(Some(u32::MAX), None)));
-        assert_eq!(parse_owner("1000:100"), Some(owner(Some(1000), Some(100))));
-        assert_eq!(parse_owner(":100"), Some(owner(None, Some(100))));
-    }
-
-    #[test]
-    fn owner_rejects_empty_colon_and_trailing_colon() {
-        assert_eq!(parse_owner(""), None);
-        assert_eq!(parse_owner(":"), None);
-        assert_eq!(parse_owner("1000:"), None);
-    }
-
-    #[test]
-    fn owner_rejects_non_decimal_and_overflow() {
-        assert_eq!(parse_owner("alice"), None);
-        assert_eq!(parse_owner("0x10"), None);
-        assert_eq!(parse_owner("10:bob"), None);
-        // u32::MAX + 1 overflows.
-        assert_eq!(parse_owner("4294967296"), None);
-        // More than one colon is not a valid spec.
-        assert_eq!(parse_owner("1:2:3"), None);
+        let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
+        for locale in tairix_help::REQUIRED_LOCALES {
+            let path = format!("{help_root}/{locale}/chown.md");
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            for switch in [
+                "`-c, --changes`",
+                "`-f, --silent, --quiet`",
+                "`-v, --verbose`",
+                "`--dereference`",
+                "`-h, --no-dereference`",
+                "`--from=CURRENT_OWNER:CURRENT_GROUP`",
+                "`--reference=RFILE`",
+                "`-R, --recursive`",
+                "`-H`",
+                "`-L`",
+                "`-P`",
+                "`-?, --help`",
+                "`--version`",
+            ] {
+                assert!(
+                    text.contains(switch),
+                    "{locale}/chown.md must document {switch}"
+                );
+            }
+        }
     }
 }

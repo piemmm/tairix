@@ -33,7 +33,14 @@
 //! ADFS has no per-inode owner, mode, ACL, or capability gate; those live
 //! in the VFS metadata layer that mounts this driver. The driver therefore
 //! makes **no** permission decisions (the VFS is the policy point, this is
-//! raw structural I/O).
+//! raw structural I/O), and a create ignores the record it is given.
+//!
+//! # Pins
+//!
+//! An object the kernel pins ([`FilesystemRead::pin`]) is reported under a
+//! token until its last unpin, since its own id moves when a write relocates
+//! it and a directory's carries its parent's address. A removal deletes a
+//! pinned object's entry but keeps its fragments until then.
 //!
 //! # RISC OS metadata
 //!
@@ -63,13 +70,15 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
+    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
+use tairix_collections::{HashMap, RadixTree};
 use tairix_fsmeta::preset::acorn;
 use tairix_fsprobe::adfs::Layout;
+use tairix_hash::BuildSipHash13;
 
 mod bigdir;
 mod bytes;
@@ -125,28 +134,60 @@ const NODE_PARENT_SHIFT: u64 = 32;
 /// Bit position of the digest bits an empty object keeps past the address
 /// field.
 const NODE_DIGEST_HIGH_SHIFT: u64 = 60;
+/// `NodeId` bit marking a pin's token, whose other bits are a number the
+/// mount never gives twice; no object's own id sets it.
+const NODE_TOKEN_FLAG: u64 = 1 << 31;
+/// How many tokens a mount can give: a token's number fills the 60 bits an
+/// object's own id spends on addresses.
+const TOKEN_NUMBERS: u64 = 1 << 60;
+
+/// The token numbered `number`, of a directory or a file.
+fn token_node(number: u64, is_dir: bool) -> NodeId {
+    let kind = if is_dir { NODE_DIR_FLAG } else { 0 };
+    NodeId::from_raw(
+        NODE_VALID_FLAG
+            | NODE_TOKEN_FLAG
+            | kind
+            | number & NODE_ADDR_MASK
+            | (number >> 28) << NODE_PARENT_SHIFT,
+    )
+}
+
+/// The number of the token `node`, if it is one.
+fn token_number(node: NodeId) -> Option<u64> {
+    let raw = node.raw();
+    let tag = NODE_VALID_FLAG | NODE_TOKEN_FLAG;
+    (raw & tag == tag).then_some(raw & NODE_ADDR_MASK | (raw >> NODE_PARENT_SHIFT) << 28)
+}
 
 /// The node of `object`, an entry of the directory at `parent`.
 ///
 /// An object is its address, so its node names that and the parent whose
 /// entry holds its size, stamp and attributes: resolving it reads one
-/// directory, never the tree. Its size is not part of it, so writing a file
-/// or growing a directory leaves the node as it was. An object with no
-/// allocation is named by a digest of its name, unique within the parent.
+/// directory, never the tree. Its size is not part of it, so a write that
+/// leaves the object where it lies leaves the node as it was; one that gives
+/// it its first allocation or moves it, and a truncation to nothing, do not.
+/// An object with no allocation is named by a digest of its name, which two
+/// siblings may share.
 fn child_node(object: &Object, parent: u32) -> NodeId {
-    let mut raw = NODE_VALID_FLAG | (u64::from(parent) & NODE_ADDR_MASK) << NODE_PARENT_SHIFT;
-    if object.is_dir() {
-        raw |= NODE_DIR_FLAG;
-    }
-    if object.indaddr == 0 {
+    let named = if object.indaddr == 0 {
         let digest = name_digest(object.name());
-        raw |= NODE_EMPTY_FLAG
+        NODE_EMPTY_FLAG
             | u64::from(digest) & NODE_ADDR_MASK
-            | u64::from(digest >> 28) << NODE_DIGEST_HIGH_SHIFT;
+            | u64::from(digest >> 28) << NODE_DIGEST_HIGH_SHIFT
     } else {
-        raw |= u64::from(object.indaddr) & NODE_ADDR_MASK;
-    }
-    NodeId::from_raw(raw)
+        u64::from(object.indaddr) & NODE_ADDR_MASK
+    };
+    entry_node(parent, object.is_dir(), named)
+}
+
+/// The node of an entry of the directory at `parent`, `named` by its address
+/// or, with no allocation, by its empty flag and name digest.
+fn entry_node(parent: u32, is_dir: bool, named: u64) -> NodeId {
+    let kind = if is_dir { NODE_DIR_FLAG } else { 0 };
+    NodeId::from_raw(
+        NODE_VALID_FLAG | kind | (u64::from(parent) & NODE_ADDR_MASK) << NODE_PARENT_SHIFT | named,
+    )
 }
 
 /// The root directory's node: its address, and no parent.
@@ -156,14 +197,53 @@ fn root_node_at(indaddr: u32) -> NodeId {
 
 /// A digest of `name` as `FileCore` compares it, without regard to case.
 fn name_digest(name: &[u8]) -> u32 {
-    let mut folded = [0u8; dir::MAX_NAME_LEN];
-    let name = &name[..name.len().min(dir::MAX_NAME_LEN)];
-    for (into, &byte) in folded.iter_mut().zip(name) {
-        *into = byte.to_ascii_uppercase();
-    }
     let [a, b, c, d, ..] =
-        tairix_hash::FastHash::hash_bytes(0, &folded[..name.len()]).to_le_bytes();
+        tairix_hash::FastHash::hash_bytes(0, Folded::of(name).as_bytes()).to_le_bytes();
     u32::from_le_bytes([a, b, c, d])
+}
+
+/// A name as `FileCore` compares names: upper-cased, and no longer than any
+/// directory holds.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Folded {
+    len: u8,
+    bytes: [u8; dir::MAX_NAME_LEN],
+}
+
+impl Folded {
+    fn of(name: &[u8]) -> Self {
+        let name = &name[..name.len().min(dir::MAX_NAME_LEN)];
+        let mut bytes = [0u8; dir::MAX_NAME_LEN];
+        for (into, &byte) in bytes.iter_mut().zip(name) {
+            *into = byte.to_ascii_uppercase();
+        }
+        Self {
+            // `MAX_NAME_LEN` is 255, so the length fits.
+            len: u8::try_from(name.len()).unwrap_or(u8::MAX),
+            bytes,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
+/// A directory entry as a pin finds it again: the address of the directory
+/// holding it, and its folded name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct EntryKey {
+    parent: u32,
+    name: Folded,
+}
+
+impl EntryKey {
+    fn of(parent: u32, name: &[u8]) -> Self {
+        Self {
+            parent,
+            name: Folded::of(name),
+        }
+    }
 }
 
 /// Address (or old-map start sector) in a packed node; for an empty object,
@@ -307,10 +387,11 @@ pub struct Adfs<B: Block> {
     /// directory's entries: a listing cursor carries the generation it was
     /// minted in, so its index is trusted only while nothing has moved.
     generation: u32,
-    /// Entries recently resolved by node, so the read or stat that follows a
-    /// lookup does not read the parent again. Emptied by every directory
-    /// write, which may change any of them.
-    resolved: [Option<(NodeId, Object)>; RESOLVED_LEN],
+    /// Entries recently resolved by node, with their index in their parent,
+    /// so the read, stat or write that follows a lookup does not read the
+    /// parent again. Emptied by every directory write, which may change or
+    /// move any of them.
+    resolved: [Option<(NodeId, u32, Object)>; RESOLVED_LEN],
     /// Where the next resolution is kept, round the slots in turn.
     next_resolved: usize,
     /// The big directory last validated whole, so a listing's later batches
@@ -319,6 +400,281 @@ pub struct Adfs<B: Block> {
     validated: Option<(u32, BigHeader)>,
     /// The host the mount's stamps take their time from, once it has one.
     host: Option<&'static dyn VolumeHost>,
+    /// The kernel's holds on the mount's objects.
+    pins: Pins,
+}
+
+/// The kernel's holds on a mount's objects.
+///
+/// An object's own id moves when a write relocates it, and a directory's
+/// carries its parent's address, so every object but the root is held under
+/// a token and found again by its entry: a file by its directory and folded
+/// name, a directory by its address, which it keeps for life. Every table
+/// grows fallibly, so a hold that cannot be recorded is refused.
+struct Pins {
+    /// Each pinned object but the root, by its token's number.
+    held: RadixTree<Pin>,
+    /// The number of each pinned file's token, by the entry naming it.
+    files: HashMap<EntryKey, u64, BuildSipHash13>,
+    /// The number of each pinned directory's token, by its address.
+    dirs: RadixTree<u64>,
+    /// Holds of the root, whose own id never changes.
+    root: u32,
+    /// The number the next token takes: none the mount has given before.
+    next: u64,
+}
+
+/// A pinned object: its holds, and where it is found.
+struct Pin {
+    holds: u32,
+    kept: Kept,
+}
+
+/// Where a pinned object is found.
+#[derive(Clone, Copy)]
+enum Kept {
+    /// A file, by its entry.
+    File(EntryKey),
+    /// The directory at `addr`, an entry of the directory at `parent`.
+    Dir { addr: u32, parent: u32 },
+    /// An object a removal left with no name: its entry as it last stood in
+    /// the directory at `parent`, and whether the allocation it names is the
+    /// pin's to free.
+    Nameless {
+        parent: u32,
+        object: Object,
+        owned: bool,
+    },
+}
+
+impl Pins {
+    fn new() -> Self {
+        Self {
+            held: RadixTree::new(),
+            // Names come off the disc, so a crafted volume must not be able to
+            // file every pinned name in one bucket.
+            files: HashMap::with_hasher(BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED)),
+            dirs: RadixTree::new(),
+            root: 0,
+            next: 0,
+        }
+    }
+
+    /// One more hold of the token numbered `number`.
+    fn hold(&mut self, number: u64) -> Result<(), DriverError> {
+        let pin = self.held.get_mut(number).ok_or(DriverError::NotFound)?;
+        pin.holds = pin.holds.checked_add(1).ok_or(DriverError::OutOfMemory)?;
+        Ok(())
+    }
+
+    /// File `kept` under a new token, whose index entry is the caller's to
+    /// make.
+    fn mint(&mut self, kept: &Kept) -> Result<u64, DriverError> {
+        let number = self.next;
+        if number >= TOKEN_NUMBERS {
+            return Err(DriverError::OutOfMemory);
+        }
+        let pin = Pin {
+            holds: 1,
+            kept: *kept,
+        };
+        self.held
+            .try_insert(number, pin)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        self.next = number + 1;
+        Ok(number)
+    }
+
+    /// One more hold of `object`, an entry of the directory at `parent`.
+    fn pin_entry(&mut self, object: &Object, parent: u32) -> Result<NodeId, DriverError> {
+        if let Some(number) = self.token_of(object, parent) {
+            self.hold(number)?;
+            return Ok(token_node(number, object.is_dir()));
+        }
+        if object.is_dir() {
+            let addr = u64::from(object.indaddr);
+            self.dirs
+                .try_reserve_key(addr)
+                .map_err(|_| DriverError::OutOfMemory)?;
+            let number = self.mint(&Kept::Dir {
+                addr: object.indaddr,
+                parent,
+            })?;
+            if self.dirs.try_insert(addr, number).is_err() {
+                self.held.remove(number);
+                return Err(DriverError::OutOfMemory);
+            }
+            return Ok(token_node(number, true));
+        }
+        let key = EntryKey::of(parent, object.name());
+        self.files
+            .try_reserve(1)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        let number = self.mint(&Kept::File(key))?;
+        if self.files.try_insert(key, number).is_err() {
+            self.held.remove(number);
+            return Err(DriverError::OutOfMemory);
+        }
+        Ok(token_node(number, false))
+    }
+
+    /// The number of the token holding `object`, an entry of the directory at
+    /// `parent`, while one does.
+    fn token_of(&self, object: &Object, parent: u32) -> Option<u64> {
+        if object.is_dir() {
+            self.dirs.get(u64::from(object.indaddr)).copied()
+        } else if self.files.is_empty() {
+            None
+        } else {
+            self.files
+                .get(&EntryKey::of(parent, object.name()))
+                .copied()
+        }
+    }
+
+    /// Where the object the token numbered `number` holds is found.
+    fn kept(&self, number: u64) -> Result<Kept, DriverError> {
+        self.held
+            .get(number)
+            .map(|pin| pin.kept)
+            .ok_or(DriverError::NotFound)
+    }
+
+    /// Release one hold of the token numbered `number`: `None` while others
+    /// remain, else where the last left the object.
+    fn release(&mut self, number: u64) -> Result<Option<Kept>, DriverError> {
+        let pin = self.held.get_mut(number).ok_or(DriverError::NotFound)?;
+        if pin.holds > 1 {
+            pin.holds -= 1;
+            return Ok(None);
+        }
+        let kept = pin.kept;
+        self.held.remove(number);
+        self.unindex(&kept);
+        Ok(Some(kept))
+    }
+
+    /// Withdraw the index entry that finds what `kept` names.
+    fn unindex(&mut self, kept: &Kept) {
+        match kept {
+            Kept::File(key) => {
+                self.files.remove(key);
+            }
+            Kept::Dir { addr, .. } => {
+                self.dirs.remove(u64::from(*addr));
+            }
+            Kept::Nameless { .. } => {}
+        }
+    }
+
+    /// The object the token numbered `number` holds lost its last name, its
+    /// entry last standing as `object` in the directory at `parent`.
+    fn unname(&mut self, number: u64, parent: u32, object: &Object, owned: bool) {
+        if let Some(pin) = self.held.get_mut(number) {
+            let was = pin.kept;
+            pin.kept = Kept::Nameless {
+                parent,
+                object: *object,
+                owned,
+            };
+            self.unindex(&was);
+        }
+    }
+
+    /// The nameless object the token numbered `number` holds now stands as
+    /// `renewed`.
+    fn renew(&mut self, number: u64, renewed: &Object) {
+        if let Some(Pin {
+            kept: Kept::Nameless { object, .. },
+            ..
+        }) = self.held.get_mut(number)
+        {
+            *object = *renewed;
+        }
+    }
+
+    /// Make room for a pin of `object`, an entry of the directory at
+    /// `parent`, to follow it to another entry.
+    fn make_room(&mut self, object: &Object, parent: u32) -> Result<(), DriverError> {
+        if !object.is_dir() && self.token_of(object, parent).is_some() {
+            self.files
+                .try_reserve(1)
+                .map_err(|_| DriverError::OutOfMemory)?;
+        }
+        Ok(())
+    }
+
+    /// `object`, an entry of the directory at `from`, now stands as `name` in
+    /// the directory at `to`: its pin follows it.
+    fn moved(
+        &mut self,
+        object: &Object,
+        from: u32,
+        to: u32,
+        name: &[u8],
+    ) -> Result<(), DriverError> {
+        let Some(number) = self.token_of(object, from) else {
+            return Ok(());
+        };
+        let kept = if object.is_dir() {
+            Kept::Dir {
+                addr: object.indaddr,
+                parent: to,
+            }
+        } else {
+            let key = EntryKey::of(to, name);
+            self.files
+                .try_insert(key, number)
+                .map_err(|_| DriverError::OutOfMemory)?;
+            self.files.remove(&EntryKey::of(from, object.name()));
+            Kept::File(key)
+        };
+        if let Some(pin) = self.held.get_mut(number) {
+            pin.kept = kept;
+        }
+        Ok(())
+    }
+}
+
+/// What a pin keeps of an object losing its last name: the object as the pin
+/// holds it, and whether the allocation it names is the pin's to free.
+#[derive(Clone, Copy)]
+struct Unnamed {
+    object: Object,
+    owned: bool,
+}
+
+/// What a node names.
+#[derive(Clone, Copy)]
+enum Target {
+    /// The root directory, which no entry holds.
+    Root,
+    /// The `index`-th entry of the directory at `parent`, holding `object`.
+    Entry {
+        parent: u32,
+        index: u32,
+        object: Object,
+    },
+    /// An object no entry names, which the pin numbered `number` keeps as
+    /// `object`, its entry as it last stood in the directory at `parent`.
+    Nameless {
+        number: u64,
+        parent: u32,
+        object: Object,
+    },
+}
+
+impl Target {
+    /// The object named, and the directory whose entry holds it or last did;
+    /// `None` for the root.
+    fn object(&self) -> Option<(u32, Object)> {
+        match *self {
+            Self::Root => None,
+            Self::Entry { parent, object, .. } | Self::Nameless { parent, object, .. } => {
+                Some((parent, object))
+            }
+        }
+    }
 }
 
 impl<B: Block> Adfs<B> {
@@ -369,6 +725,7 @@ impl<B: Block> Adfs<B> {
             next_resolved: 0,
             validated: None,
             host: None,
+            pins: Pins::new(),
         };
         // The root directory must itself validate.
         let root = adfs.root_addr();
@@ -782,10 +1139,7 @@ impl<B: Block> Adfs<B> {
                 }
                 // Relocate to a fresh exclusive object (also the path a
                 // shared-fragment object takes to grow).
-                let new_indaddr = map.allocate_object(&mut self.volume, new_size)?;
-                if size != 0 {
-                    self.copy_object(indaddr, new_indaddr, u64::from(size))?;
-                }
+                let new_indaddr = self.copy_out(indaddr, size, new_size)?;
                 self.release_maybe_shared(indaddr, size, parent)?;
                 Ok(new_indaddr)
             }
@@ -833,14 +1187,36 @@ impl<B: Block> Adfs<B> {
         size: u32,
         parent: u32,
     ) -> Result<(), DriverError> {
-        if indaddr == 0 {
-            return Ok(());
+        if self.releases(indaddr, parent)? {
+            self.free(indaddr, size)
+        } else {
+            Ok(())
         }
-        let shared = matches!(&self.backing, Backing::New { .. }) && indaddr & 0xFF != 0;
-        if shared && self.fragment_shared_in(parent, indaddr)? {
-            return Ok(());
+    }
+
+    /// Whether releasing the allocation behind `indaddr`, an entry of the
+    /// directory at `parent`, frees it: a shared fragment is freed only when
+    /// nothing else uses it.
+    fn releases(&mut self, indaddr: u32, parent: u32) -> Result<bool, DriverError> {
+        Ok(indaddr != 0
+            && !(self.is_shared(indaddr) && self.fragment_shared_in(parent, indaddr)?))
+    }
+
+    /// Whether the object at `indaddr` lies in a fragment it may share.
+    fn is_shared(&self, indaddr: u32) -> bool {
+        matches!(&self.backing, Backing::New { .. }) && indaddr & 0xFF != 0
+    }
+
+    /// A fresh object of its own, `bytes` long, holding the first `size`
+    /// bytes of the object at `indaddr`.
+    fn copy_out(&mut self, indaddr: u32, size: u32, bytes: u64) -> Result<u32, DriverError> {
+        let fresh = self.allocate(bytes)?;
+        if let Err(err) = self.copy_object(indaddr, fresh, u64::from(size)) {
+            // The copy's failure is the one to report.
+            let _ = self.free(fresh, u32::try_from(bytes).unwrap_or(u32::MAX));
+            return Err(err);
         }
-        self.free(indaddr, size)
+        Ok(fresh)
     }
 
     /// Whether the directory at `parent`, or another of its entries, uses
@@ -1080,7 +1456,7 @@ impl<B: Block> Adfs<B> {
 }
 
 /// A loaded, validated directory of either shape. A fixed directory is
-/// held whole on the stack by design (the driver is allocation-free),
+/// held whole on the stack by design (no read or write path allocates),
 /// so the variant size difference is deliberate.
 #[allow(clippy::large_enum_variant)]
 enum DirHandle {
@@ -1104,48 +1480,50 @@ impl<B: Block> FilesystemRead for Adfs<B> {
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
-        if !node_is_valid(node) {
-            return Err(DriverError::NotFound);
+        match self.read_target(node)? {
+            // The root has no directory entry and so no stored stamp; every
+            // other node's lives in its parent's entry.
+            Target::Root => {
+                let root = self.root_addr();
+                let allocated = self.object_allocated(root, self.root_size())?;
+                Ok(NodeInfo {
+                    kind: NodeKind::Directory,
+                    nlink: NodeInfo::SINGLE_NAME,
+                    ino: node.raw(),
+                    size: 0,
+                    allocated,
+                    times: NodeTimes::default(),
+                    content_gen: NodeInfo::NO_CONTENT_GEN,
+                })
+            }
+            Target::Entry { parent, object, .. } => {
+                self.info_of(&object, parent, NodeInfo::SINGLE_NAME)
+            }
+            Target::Nameless { parent, object, .. } => self.info_of(&object, parent, 0),
         }
-        // The root has no directory entry and so no stored stamp; every
-        // other node's lives in its parent's entry.
-        if node == self.root_node() {
-            let root = self.root_addr();
-            let allocated = self.object_allocated(root, self.root_size())?;
-            return Ok(NodeInfo {
-                kind: NodeKind::Directory,
-                nlink: NodeInfo::SINGLE_NAME,
-                size: 0,
-                allocated,
-                times: NodeTimes::default(),
-                content_gen: NodeInfo::NO_CONTENT_GEN,
-            });
-        }
-        let object = self.resolve(node)?;
-        self.info_of(&object)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
-        let (_, object) = self.resolve_child(dir, name)?;
-        let node = child_node(&object, node_addr(dir));
-        self.keep_resolved(node, &object);
+        let dir_addr = self.entries_addr(dir)?;
+        let (index, object) = self.child(dir_addr, name)?;
+        let node = self.reported(&object, dir_addr);
+        self.keep_resolved(node, index, &object);
         Ok(node)
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
-        if !node_is_valid(file) {
-            return Err(DriverError::NotFound);
-        }
-        if node_is_dir(file) {
+        if node_is_valid(file) && node_is_dir(file) {
             return Err(DriverError::Unsupported);
         }
-        // An object with no allocation holds no bytes.
-        if node_is_empty(file) || buf.is_empty() {
-            return Ok(0);
-        }
-        let object = self.resolve(file)?;
+        let object = match self.read_target(file) {
+            Ok(target) => target.object().ok_or(DriverError::Unsupported)?.1,
+            // Every empty sibling the digest could name holds no bytes.
+            Err(DriverError::Unsupported) if node_is_empty(file) => return Ok(0),
+            Err(err) => return Err(err),
+        };
         let size = u64::from(object.size);
-        if offset >= size {
+        // An object with no allocation holds no bytes.
+        if buf.is_empty() || object.indaddr == 0 || offset >= size {
             return Ok(0);
         }
         let want = usize::try_from((size - offset).min(buf.len() as u64))
@@ -1161,10 +1539,10 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         after: &[u8],
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError> {
-        if !node_is_valid(dir) || !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
-        let indaddr = node_addr(dir);
+        // A removed directory a pin holds lists nothing.
+        let Some(indaddr) = self.dir_addr(dir)? else {
+            return Ok(());
+        };
         // One load serves the whole call, however many entries it lists.
         let handle = self.load_dir(indaddr)?;
         let start = self.resume_index(&handle, indaddr, cursor, after)?;
@@ -1173,8 +1551,8 @@ impl<B: Block> FilesystemRead for Adfs<B> {
                 break;
             };
             let entry = DirEntry {
-                node: child_node(&object, indaddr),
-                info: self.info_of(&object)?,
+                node: self.reported(&object, indaddr),
+                info: self.info_of(&object, indaddr, NodeInfo::SINGLE_NAME)?,
                 next_cursor: (u64::from(self.generation) << 32) | u64::from(index + 1),
             };
             if visit(&entry, object.name()) == DirVisit::Stop {
@@ -1183,11 +1561,105 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         }
         Ok(())
     }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        if !node_is_valid(dir) {
+            return Err(DriverError::NotFound);
+        }
+        if !node_is_dir(dir) {
+            return Err(DriverError::Unsupported);
+        }
+        let root = self.root_node();
+        if dir == root {
+            return Ok(root);
+        }
+        // Found in its parent, so a removed directory answers `NotFound`.
+        let Target::Entry { parent, .. } = self.write_target(dir)? else {
+            return Err(DriverError::NotFound);
+        };
+        if parent == self.root_addr() {
+            return Ok(root);
+        }
+        let grandparent = self.dir_parent(parent)?;
+        Ok(self.reported_dir(parent, grandparent))
+    }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        if let Some(number) = token_number(node) {
+            self.pins.hold(number)?;
+            return Ok(node);
+        }
+        if node == self.root_node() {
+            self.pins.root = self
+                .pins
+                .root
+                .checked_add(1)
+                .ok_or(DriverError::OutOfMemory)?;
+            return Ok(node);
+        }
+        // Resolved as for a change, so an empty object whose name digest a
+        // sibling shares is refused rather than held for the wrong one.
+        let Target::Entry { parent, object, .. } = self.write_target(node)? else {
+            return Err(DriverError::NotFound);
+        };
+        self.pins.pin_entry(&object, parent)
+    }
+
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        if pinned == self.root_node() {
+            let holds = self.pins.root;
+            if holds == 0 {
+                return Err(DriverError::NotFound);
+            }
+            self.pins.root = holds - 1;
+            return Ok(if holds > 1 {
+                Unpinned::Held
+            } else {
+                Unpinned::Released
+            });
+        }
+        let number = token_number(pinned).ok_or(DriverError::NotFound)?;
+        match self.pins.release(number)? {
+            None => Ok(Unpinned::Held),
+            Some(Kept::File(_) | Kept::Dir { .. }) => Ok(Unpinned::Released),
+            Some(Kept::Nameless { object, owned, .. }) => {
+                if owned {
+                    self.free(object.indaddr, object.size)?;
+                }
+                Ok(Unpinned::Freed)
+            }
+        }
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        let held = core::mem::take(&mut self.pins.held);
+        self.pins.files.clear();
+        self.pins.dirs.clear();
+        self.pins.root = 0;
+        let mut freed = Ok(());
+        for (_, pin) in &held {
+            if let Kept::Nameless {
+                object,
+                owned: true,
+                ..
+            } = pin.kept
+            {
+                freed = freed.and(self.free(object.indaddr, object.size));
+            }
+        }
+        freed
+    }
 }
 
 impl<B: Block> Adfs<B> {
-    /// The [`NodeInfo`] of `object`, from its entry alone.
-    fn info_of(&mut self, object: &Object) -> Result<NodeInfo, DriverError> {
+    /// The [`NodeInfo`] of `object`, an entry of the directory at `parent`
+    /// or the last it stood as there, which `nlink` names reach.
+    fn info_of(
+        &mut self,
+        object: &Object,
+        parent: u32,
+        nlink: u32,
+    ) -> Result<NodeInfo, DriverError> {
         let allocated = self.object_allocated(object.indaddr, object.size)?;
         let (kind, size) = if object.is_dir() {
             (NodeKind::Directory, 0)
@@ -1196,7 +1668,8 @@ impl<B: Block> Adfs<B> {
         };
         Ok(NodeInfo {
             kind,
-            nlink: NodeInfo::SINGLE_NAME,
+            nlink,
+            ino: child_node(object, parent).raw(),
             size,
             allocated,
             times: object_times(object),
@@ -1204,38 +1677,164 @@ impl<B: Block> Adfs<B> {
         })
     }
 
-    /// The entry non-root `node` names: one a lookup just made, else found
-    /// in its parent.
-    fn resolve(&mut self, node: NodeId) -> Result<Object, DriverError> {
-        if let Some((_, object)) = self
-            .resolved
-            .iter()
-            .flatten()
-            .find(|(held, _)| *held == node)
-        {
-            return Ok(*object);
+    /// What `node` names, for a read: the entry a lookup just resolved it to
+    /// stands.
+    fn read_target(&mut self, node: NodeId) -> Result<Target, DriverError> {
+        if !node_is_valid(node) {
+            return Err(DriverError::NotFound);
         }
-        let (_, _, object) = self.entry_of(node)?;
-        self.keep_resolved(node, &object);
-        Ok(object)
+        if node == self.root_node() {
+            return Ok(Target::Root);
+        }
+        if let Some(number) = token_number(node) {
+            return self.token_target(number, node);
+        }
+        if let Some((index, object)) = self.held(node) {
+            return Ok(Target::Entry {
+                parent: node_parent(node),
+                index,
+                object,
+            });
+        }
+        let (parent, index, object) = self.entry_of(node)?;
+        self.keep_resolved(node, index, &object);
+        Ok(Target::Entry {
+            parent,
+            index,
+            object,
+        })
     }
 
-    /// Remember that `node` names `object` until the next directory write.
-    fn keep_resolved(&mut self, node: NodeId, object: &Object) {
-        self.resolved[self.next_resolved] = Some((node, *object));
-        self.next_resolved = (self.next_resolved + 1) % RESOLVED_LEN;
+    /// What `node` names, for a change.
+    fn write_target(&mut self, node: NodeId) -> Result<Target, DriverError> {
+        if let Some(number) = token_number(node) {
+            return self.token_target(number, node);
+        }
+        let (parent, index, object) = self.entry_of(node)?;
+        Ok(Target::Entry {
+            parent,
+            index,
+            object,
+        })
     }
 
-    /// Resolve `name` within the directory node `dir`.
-    fn resolve_child(&mut self, dir: NodeId, name: &[u8]) -> Result<(u32, Object), DriverError> {
+    /// What `token`, the token numbered `number`, holds.
+    fn token_target(&mut self, number: u64, token: NodeId) -> Result<Target, DriverError> {
+        match self.pins.kept(number)? {
+            Kept::File(key) => {
+                if let Some((index, object)) = self.held(token) {
+                    return Ok(Target::Entry {
+                        parent: key.parent,
+                        index,
+                        object,
+                    });
+                }
+                let (index, object) = self
+                    .dir_lookup(key.parent, key.name.as_bytes())?
+                    .ok_or(DriverError::NotFound)?;
+                self.keep_resolved(token, index, &object);
+                Ok(Target::Entry {
+                    parent: key.parent,
+                    index,
+                    object,
+                })
+            }
+            Kept::Dir { addr, parent } => {
+                let own = entry_node(parent, true, u64::from(addr) & NODE_ADDR_MASK);
+                let (parent, index, object) = self.entry_of(own)?;
+                Ok(Target::Entry {
+                    parent,
+                    index,
+                    object,
+                })
+            }
+            Kept::Nameless { parent, object, .. } => Ok(Target::Nameless {
+                number,
+                parent,
+                object,
+            }),
+        }
+    }
+
+    /// Record `object` as what `target` names.
+    fn store(&mut self, target: &Target, object: &Object) -> Result<(), DriverError> {
+        match *target {
+            Target::Entry { parent, index, .. } => self.dir_update_at(parent, index, object),
+            Target::Nameless { number, .. } => {
+                self.pins.renew(number, object);
+                Ok(())
+            }
+            Target::Root => Err(DriverError::Unsupported),
+        }
+    }
+
+    /// The address of the directory `dir` names, or `None` for one a pin
+    /// keeps after a removal, which takes no entries.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `dir` names no directory.
+    /// * [`DriverError::NotFound`] for a token no pin holds.
+    fn dir_addr(&self, dir: NodeId) -> Result<Option<u32>, DriverError> {
         if !node_is_valid(dir) || !node_is_dir(dir) {
             return Err(DriverError::Unsupported);
         }
+        let Some(number) = token_number(dir) else {
+            return Ok(Some(node_addr(dir)));
+        };
+        Ok(match self.pins.kept(number)? {
+            Kept::Dir { addr, .. } => Some(addr),
+            Kept::File(_) | Kept::Nameless { .. } => None,
+        })
+    }
+
+    /// The address of the directory `dir` names, which takes entries.
+    fn entries_addr(&self, dir: NodeId) -> Result<u32, DriverError> {
+        self.dir_addr(dir)?.ok_or(DriverError::NotFound)
+    }
+
+    /// The entry named `name` in the directory at `dir_addr`, with its index.
+    fn child(&mut self, dir_addr: u32, name: &[u8]) -> Result<(u32, Object), DriverError> {
         if name.is_empty() || name.len() > dir::MAX_NAME_LEN {
             return Err(DriverError::NotFound);
         }
-        self.dir_lookup(node_addr(dir), name)?
+        self.dir_lookup(dir_addr, name)?
             .ok_or(DriverError::NotFound)
+    }
+
+    /// The id `object`, an entry of the directory at `parent`, is reported
+    /// under: its pin's token while one holds it, else its own.
+    fn reported(&self, object: &Object, parent: u32) -> NodeId {
+        match self.pins.token_of(object, parent) {
+            Some(number) => token_node(number, object.is_dir()),
+            None => child_node(object, parent),
+        }
+    }
+
+    /// The id the directory at `addr`, an entry of the directory at
+    /// `parent`, is reported under.
+    fn reported_dir(&self, addr: u32, parent: u32) -> NodeId {
+        match self.pins.dirs.get(u64::from(addr)) {
+            Some(&number) => token_node(number, true),
+            None => entry_node(parent, true, u64::from(addr) & NODE_ADDR_MASK),
+        }
+    }
+
+    /// The index and entry `node` was last resolved to, while no directory
+    /// write has intervened.
+    fn held(&self, node: NodeId) -> Option<(u32, Object)> {
+        self.resolved
+            .iter()
+            .flatten()
+            .find(|(held, ..)| *held == node)
+            .map(|&(_, index, object)| (index, object))
+    }
+
+    /// Remember that `node` names `object`, the `index`-th entry of its
+    /// parent, until the next directory write.
+    fn keep_resolved(&mut self, node: NodeId, index: u32, object: &Object) {
+        self.resolved[self.next_resolved] = Some((node, index, *object));
+        self.next_resolved = (self.next_resolved + 1) % RESOLVED_LEN;
     }
 
     /// Whether the directory at `dir_addr` has no entries.
@@ -1271,19 +1870,128 @@ impl<B: Block> Adfs<B> {
         }
         Ok(())
     }
+
+    /// Remove the `src_index`-th entry of the directory at `src_addr`,
+    /// naming `object`, and give `object` the entry of `existing`, named
+    /// `dst_name` in the directory at `dst_addr`, under that spelling. A pin
+    /// of `existing` keeps it, nameless; otherwise its allocation is released.
+    fn replace_entry(
+        &mut self,
+        src_addr: u32,
+        src_index: u32,
+        object: &Object,
+        dst_addr: u32,
+        dst_name: &[u8],
+        existing: &Object,
+    ) -> Result<(), DriverError> {
+        let pinned = match self.pins.token_of(existing, dst_addr) {
+            Some(number) => Some((number, self.unnamed(existing, dst_addr)?)),
+            None => None,
+        };
+        if let Err(err) = self.respell_over(src_addr, src_index, object, dst_addr, dst_name) {
+            if let Some((_, unnamed)) = &pinned {
+                self.forget_unnamed(unnamed, existing)?;
+            }
+            return Err(err);
+        }
+        match pinned {
+            Some((number, unnamed)) => self.keep_unnamed(number, dst_addr, existing, &unnamed),
+            None => self.release_maybe_shared(existing.indaddr, existing.size, dst_addr),
+        }
+    }
+
+    /// Remove the `src_index`-th entry of the directory at `src_addr` and
+    /// point the entry named `dst_name` in the directory at `dst_addr` at
+    /// `object` under that spelling.
+    fn respell_over(
+        &mut self,
+        src_addr: u32,
+        src_index: u32,
+        object: &Object,
+        dst_addr: u32,
+        dst_name: &[u8],
+    ) -> Result<(), DriverError> {
+        self.dir_remove_at(src_addr, src_index)?;
+        // The destination entry holds the replaced object's place in the sort
+        // order, which the name asked for shares; indices may have shifted
+        // when the source entry left the same directory, so the name is
+        // looked up afresh.
+        let Some((dst_index, _)) = self.dir_lookup(dst_addr, dst_name)? else {
+            return Err(DriverError::BadMagic);
+        };
+        self.dir_respell_at(dst_addr, dst_index, &object.renamed(dst_name)?)
+    }
+
+    /// What the pin of `object`, an entry of the directory at `parent` losing
+    /// its last name, keeps. A file sharing a fragment moves to one of its
+    /// own first, since the fragment is freed with the last entry naming it;
+    /// a directory, read no more once it has no name, keeps an allocation
+    /// only where nothing else shares it.
+    fn unnamed(&mut self, object: &Object, parent: u32) -> Result<Unnamed, DriverError> {
+        if object.is_dir() {
+            return Ok(Unnamed {
+                object: *object,
+                owned: self.releases(object.indaddr, parent)?,
+            });
+        }
+        let mut kept = *object;
+        if self.is_shared(object.indaddr) {
+            kept.indaddr = if object.size == 0 {
+                0
+            } else {
+                self.copy_out(object.indaddr, object.size, u64::from(object.size))?
+            };
+        }
+        Ok(Unnamed {
+            object: kept,
+            owned: true,
+        })
+    }
+
+    /// Give back what [`Self::unnamed`] took for `object`, which keeps its
+    /// name after all.
+    fn forget_unnamed(&mut self, unnamed: &Unnamed, object: &Object) -> Result<(), DriverError> {
+        if unnamed.object.indaddr == object.indaddr {
+            return Ok(());
+        }
+        self.free(unnamed.object.indaddr, unnamed.object.size)
+    }
+
+    /// Hand `object`, whose entry in the directory at `parent` is gone, to
+    /// the pin numbered `number` as `unnamed` keeps it; a file that moved out
+    /// of a shared fragment leaves its share to the fragment's other sharers.
+    fn keep_unnamed(
+        &mut self,
+        number: u64,
+        parent: u32,
+        object: &Object,
+        unnamed: &Unnamed,
+    ) -> Result<(), DriverError> {
+        self.pins
+            .unname(number, parent, &unnamed.object, unnamed.owned);
+        if unnamed.object.indaddr == object.indaddr {
+            return Ok(());
+        }
+        self.release_maybe_shared(object.indaddr, object.size, parent)
+    }
 }
 
 impl<B: Block> FilesystemWrite for Adfs<B> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        if !node_is_valid(dir) || !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        _record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
+        let dir_addr = self.entries_addr(dir)?;
         self.validate_new_name(name)?;
-        let dir_addr = node_addr(dir);
         if self.dir_lookup(dir_addr, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
         let mut object = typed_at(&Object::named(name)?, FILETYPE_DATA, self.now())?;
+        // ADFS keeps no owner, group or mode, so the record has nowhere to
+        // go: the access bits are RISC OS's own, set as RISC OS sets them.
         match kind {
             NodeKind::RegularFile => {
                 // Created with owner read/write, no data allocation.
@@ -1334,17 +2042,9 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         Ok(child_node(&object, dir_addr))
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        let (index, object) = self.resolve_child(dir, name)?;
-        if object.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        let target = self.file_target(file)?;
+        let (parent, object) = target.object().ok_or(DriverError::Unsupported)?;
         if data.is_empty() {
             return Ok(0);
         }
@@ -1357,9 +2057,8 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             return Err(DriverError::NoSpace);
         }
         let size = object.size;
-        let dir_addr = node_addr(dir);
         let indaddr = if end > u64::from(size) {
-            self.grow_object(object.indaddr, size, end, dir_addr)?
+            self.grow_object(object.indaddr, size, end, parent)?
         } else {
             object.indaddr
         };
@@ -1374,29 +2073,26 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         // `end` was bounded by `u32::MAX` above.
         updated.size = size.max(u32::try_from(end).unwrap_or(u32::MAX));
         if updated != object {
-            self.dir_update_at(dir_addr, index, &updated)?;
+            self.store(&target, &updated)?;
         }
         Ok(data.len())
     }
 
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        let (index, object) = self.resolve_child(dir, name)?;
-        if object.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        let target = self.file_target(file)?;
+        let (parent, object) = target.object().ok_or(DriverError::Unsupported)?;
         if size > u64::from(u32::MAX) {
             return Err(DriverError::NoSpace);
         }
         let old = u64::from(object.size);
-        let dir_addr = node_addr(dir);
         let mut updated = restamped(&object, self.now())?;
         match size.cmp(&old) {
             core::cmp::Ordering::Greater => {
-                updated.indaddr = self.grow_object(object.indaddr, object.size, size, dir_addr)?;
+                updated.indaddr = self.grow_object(object.indaddr, object.size, size, parent)?;
                 self.zero_object_range(updated.indaddr, old, size)?;
             }
             core::cmp::Ordering::Less if size == 0 => {
-                self.release_maybe_shared(object.indaddr, object.size, dir_addr)?;
+                self.release_maybe_shared(object.indaddr, object.size, parent)?;
                 updated.indaddr = 0;
             }
             core::cmp::Ordering::Less => {
@@ -1411,17 +2107,25 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         if updated == object {
             return Ok(());
         }
-        self.dir_update_at(dir_addr, index, &updated)
+        self.store(&target, &updated)
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
-        let (index, object) = self.resolve_child(dir, name)?;
+        let dir_addr = self.entries_addr(dir)?;
+        let (index, object) = self.child(dir_addr, name)?;
         if object.is_dir() && !self.dir_is_empty(object.indaddr)? {
             return Err(DriverError::DirectoryNotEmpty);
         }
-        let dir_addr = node_addr(dir);
-        self.dir_remove_at(dir_addr, index)?;
-        self.release_maybe_shared(object.indaddr, object.size, dir_addr)
+        let Some(number) = self.pins.token_of(&object, dir_addr) else {
+            self.dir_remove_at(dir_addr, index)?;
+            return self.release_maybe_shared(object.indaddr, object.size, dir_addr);
+        };
+        let unnamed = self.unnamed(&object, dir_addr)?;
+        if let Err(err) = self.dir_remove_at(dir_addr, index) {
+            self.forget_unnamed(&unnamed, &object)?;
+            return Err(err);
+        }
+        self.keep_unnamed(number, dir_addr, &object, &unnamed)
     }
 
     fn rename(
@@ -1431,12 +2135,9 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         dst_dir: NodeId,
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
-        if !node_is_valid(dst_dir) || !node_is_dir(dst_dir) {
-            return Err(DriverError::Unsupported);
-        }
-        let (src_index, object) = self.resolve_child(src_dir, src_name)?;
-        let src_addr = node_addr(src_dir);
-        let dst_addr = node_addr(dst_dir);
+        let dst_addr = self.entries_addr(dst_dir)?;
+        let src_addr = self.entries_addr(src_dir)?;
+        let (src_index, object) = self.child(src_addr, src_name)?;
         if src_addr == dst_addr && dir::name_eq(src_name, dst_name) {
             // The source's own entry, re-spelled: names sort and match
             // ignoring case, so it keeps its place and takes the spelling.
@@ -1481,19 +2182,13 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 return Err(DriverError::DirectoryNotEmpty);
             }
         }
-        self.dir_remove_at(src_addr, src_index)?;
-        if let Some((_, existing)) = &replaced {
-            // The destination entry holds the replaced object's place in
-            // the sort order, which the name asked for shares: point it at
-            // the moved object under that spelling and free the replaced
-            // one. (Indices may have shifted when the source entry left the
-            // same directory, so look the name up afresh.)
-            let Some((dst_index, _)) = self.dir_lookup(dst_addr, dst_name)? else {
-                return Err(DriverError::BadMagic);
-            };
-            self.dir_respell_at(dst_addr, dst_index, &object.renamed(dst_name)?)?;
-            self.release_maybe_shared(existing.indaddr, existing.size, dst_addr)?;
+        // A pin of the moved object follows it, so its room is made before
+        // an entry changes.
+        self.pins.make_room(&object, src_addr)?;
+        if let Some((_, existing)) = replaced {
+            self.replace_entry(src_addr, src_index, &object, dst_addr, dst_name, &existing)?;
         } else {
+            self.dir_remove_at(src_addr, src_index)?;
             let moved = object.renamed(dst_name)?;
             if let Err(err) = self.dir_insert(dst_addr, &moved) {
                 // Roll the source entry back so no entry is lost.
@@ -1501,6 +2196,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 return Err(err);
             }
         }
+        self.pins.moved(&object, src_addr, dst_addr, dst_name)?;
         // A moved directory's parent pointer follows it.
         if object.is_dir() && src_addr != dst_addr {
             match self.load_dir(object.indaddr)? {
@@ -1555,6 +2251,11 @@ impl<B: Block> Adfs<B> {
             return Err(DriverError::NotFound);
         }
         let parent = node_parent(node);
+        // An address names one entry, so the one last resolved stands; a
+        // digest may be shared, so it is checked against the whole parent.
+        if let Some((index, object)) = self.held(node).filter(|_| !node_is_empty(node)) {
+            return Ok((parent, index, object));
+        }
         let handle = self.load_dir(parent)?;
         let mut found = None;
         for index in 0..Self::dir_len(&handle) {
@@ -1574,6 +2275,20 @@ impl<B: Block> Adfs<B> {
             }
         }
         found.ok_or(DriverError::NotFound)
+    }
+
+    /// What the file `file` names, for a change.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `file` names a directory, or an
+    ///   empty file whose name digest an empty sibling shares.
+    /// * [`DriverError::NotFound`] if it names no live file and no held one.
+    fn file_target(&mut self, file: NodeId) -> Result<Target, DriverError> {
+        if node_is_valid(file) && node_is_dir(file) {
+            return Err(DriverError::Unsupported);
+        }
+        self.write_target(file)
     }
 
     /// The attribute bits this volume's directory format can store.
@@ -1596,11 +2311,10 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         if !node_is_valid(node) {
             return Err(DriverError::NotFound);
         }
-        if node == self.root_node() {
-            // The root has no directory entry to hold metadata.
+        // The root has no directory entry to hold metadata.
+        let Some((_, object)) = self.read_target(node)?.object() else {
             return Ok(None);
-        }
-        let object = self.resolve(node)?;
+        };
         let mut staging = [0u8; acorn::ATTR_VALUE_MAX];
         let Some(len) = acorn_object(&object)
             .value(key.as_bytes(), &mut staging)
@@ -1624,7 +2338,8 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             // The root has no directory entry to hold metadata.
             return Err(DriverError::Unsupported);
         }
-        let (parent, index, object) = self.entry_of(node)?;
+        let target = self.write_target(node)?;
+        let (_, object) = target.object().ok_or(DriverError::Unsupported)?;
         let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut updated = object;
         match key.as_bytes() {
@@ -1677,7 +2392,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             // namespace has nowhere to live.
             _ => return Err(DriverError::Unsupported),
         }
-        self.dir_update_at(parent, index, &updated)
+        self.store(&target, &updated)
     }
 
     fn list_attr(
@@ -1689,10 +2404,9 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         if !node_is_valid(node) {
             return Err(DriverError::NotFound);
         }
-        if node == self.root_node() {
+        let Some((_, object)) = self.read_target(node)?.object() else {
             return Ok(None);
-        }
-        let object = self.resolve(node)?;
+        };
         let Some(key) = acorn_object(&object).key(index) else {
             return Ok(None);
         };
@@ -1711,7 +2425,8 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         if node == self.root_node() {
             return Err(DriverError::NotFound);
         }
-        let (parent, index, object) = self.entry_of(node)?;
+        let target = self.write_target(node)?;
+        let (_, object) = target.object().ok_or(DriverError::NotFound)?;
         let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut updated = object;
         match key.as_bytes() {
@@ -1740,7 +2455,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             }
             _ => return Err(DriverError::NotFound),
         }
-        self.dir_update_at(parent, index, &updated)
+        self.store(&target, &updated)
     }
 }
 
@@ -1792,10 +2507,6 @@ impl<B: Block> FilesystemSecurity for Adfs<B> {
         // The format has nowhere to keep any part of the record; storing a
         // silently lossy one is refused whole.
         Err(DriverError::Unsupported)
-    }
-
-    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
-        self.node_info(node).map(|_| ())
     }
 
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {

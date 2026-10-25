@@ -76,7 +76,7 @@ cortado, y un registro `summary` al terminar.
 
 - `0` — se reprodujo cada archivo, o se detuvo la reproducción sin omitir ninguno.
 - `1` — un archivo no pudo reproducirse, o la reproducción no pudo continuar.
-- `2` — no se entendió la línea de órdenes.
+  Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

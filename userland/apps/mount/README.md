@@ -13,9 +13,10 @@ not this tool, makes that decision (`AGENTS.md` §5.4).
 
 The crate is `no_std` (with `alloc`, used only by the test fixtures), has no
 `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md`
-§2.9). Its only dependencies are the audited `tairix-abi` crate and the
-shared `tairix-procinfo` client helpers, so it never links a kernel or
-driver crate (`AGENTS.md` §17.4).
+§2.9). Its only dependencies are the audited `tairix-abi` crate, the
+shared `tairix-procinfo` client helpers, and the shared `tairix-util`
+command-line scanner, so it never links a kernel or driver crate
+(`AGENTS.md` §17.4).
 
 ## Usage
 
@@ -64,12 +65,12 @@ rendering, and routing decision is testable without a kernel.
 
 ## Fail closed
 
-An unknown option, a missing option value, or a number of operands other
-than zero or two is a `MountError::Usage`; an unknown or empty `-o`/`-t`
-value is a `MountError::BadOption`. A listing transport failure or an
-undecodable reply is `MountError::Service`; a refused or failed attach is
-`MountError::Mount`; a failed terminal write is `MountError::Output`. There
-is no panic (`AGENTS.md` §2.9).
+An option `getopt` refuses is a `MountError::Option`, worded as it words
+it; a number of operands other than zero or two is a `MountError::Usage`;
+an unknown or empty `-o`/`-t` value is a `MountError::BadOption`. A listing
+transport failure or an undecodable reply is `MountError::Service`; a
+refused or failed attach is `MountError::Mount`; a failed terminal write is
+`MountError::Output`. There is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 

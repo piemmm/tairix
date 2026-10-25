@@ -134,8 +134,8 @@ du plan de l'outil.
 
 - `0` — la session s'est terminée par le `q` de l'utilisateur.
 - `1` — le répertoire de départ n'a pas pu être listé, ou le chemin du
-  terminal a échoué.
-- `2` — les arguments n'ont pas pu être compris.
+  terminal a échoué. Une ligne de commande non comprise sort aussi avec
+  `1`.
 
 ## SEE ALSO
 

@@ -4,9 +4,10 @@
 //! It serves the ungated `thermal-v1` status, follows the machine
 //! configuration's `cooling.fan.*` keys through its directory's watch, and
 //! re-reads the hardware tree whenever its generation moves, driving
-//! [`Thermald`](tairix_thermald::Thermald) from each. It parks on one wait set throughout; the only
-//! deadline it arms there is an automatic fan's next sample, and each call to a
-//! driver carries its own. On the host it is an inert stub.
+//! [`Thermald`](tairix_thermald::Thermald) from each. Its wait set observes
+//! those and the deadline the service states; a call to a driver parks on a
+//! second set, observing only that call's reply, for at most the call's own
+//! deadline. On the host it is an inert stub.
 
 #![cfg_attr(all(freestanding, feature = "program"), no_std)]
 #![cfg_attr(all(freestanding, feature = "program"), no_main)]
@@ -26,13 +27,13 @@ mod program {
         decode_reading, encode_read, Millicelsius, SENSOR_REPLY_LEN, SENSOR_REQUEST_LEN,
     };
     use tairix_abi::driver_store::SystemConfigFile;
-    use tairix_abi::hwtree::HW_TREE_READ_START;
+    use tairix_abi::hwtree::{snapshot_nodes, HW_TREE_READ_START};
     use tairix_abi::thermal_ipc::{
         encode_status, FanPolicy, ThermalRequest, THERMAL_ENDPOINT, THERMAL_MAX_REPLY,
         THERMAL_REQUEST_LEN,
     };
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-    use tairix_abi::{Errno, FieldValue, HwNode, HwTreeHeader, NoticeTopic};
+    use tairix_abi::{Errno, FieldValue, NoticeTopic};
     use tairix_caps::CapabilitySet;
     use tairix_log::{EventId, Field, Level};
     use tairix_rt::follow::{Follow, Followed, Verdict};
@@ -53,16 +54,9 @@ mod program {
     /// flood cannot hold the fan's sample back.
     const CALLS_PER_WAKE: usize = 8;
 
-    /// How often a storm of configuration changes may report; an isolated
-    /// change reports at once.
-    const WATCH_LATENCY_NS: u64 = 1_000_000_000;
-
-    /// Change batches one wake drains before reading the configuration
-    /// anyway.
-    const WATCH_DRAIN_BATCHES: usize = 16;
-
     /// How long a sensor or the header has to answer one call: a wedged
-    /// driver costs the fan a reading, which runs it, never the service.
+    /// sensor costs the fan a reading, which runs it, and a wedged header a
+    /// call asked again later, never the service.
     const CALL_DEADLINE_NS: u64 = 250_000_000;
 
     const EVENT_READY: EventId = EventId(32_000);
@@ -90,7 +84,10 @@ mod program {
             );
             return EXIT_UNAVAILABLE;
         };
-        let mut machine = RtMachine { calls };
+        let mut machine = RtMachine {
+            calls,
+            observed: None,
+        };
         let mut journal = LogJournal;
         let mut service = Thermald::default();
         let mut tree = Vec::new();
@@ -126,7 +123,7 @@ mod program {
                     ENDPOINT_TOKEN => answer(&mut service, &mut machine),
                     WATCH_TOKEN | MOUNTS_TOKEN => {
                         let reread = match (token, &watch) {
-                            (WATCH_TOKEN, Some(followed)) => followed.drain(WATCH_DRAIN_BATCHES),
+                            (WATCH_TOKEN, Some(followed)) => followed.drain(),
                             _ => Verdict::Rewatch,
                         };
                         if reread == Verdict::Rewatch {
@@ -183,7 +180,7 @@ mod program {
             old.leave(set);
         }
         let mounts = NoticeTopic::Mounts.as_u32().into();
-        match Followed::follow(CONFIG_PATH, set, WATCH_TOKEN, WATCH_LATENCY_NS) {
+        match Followed::follow(CONFIG_PATH, set, WATCH_TOKEN) {
             Follow::Watching(followed) => {
                 // Gone already once a previous refollow left it.
                 let _ = tairix_rt::waitset_ctl(
@@ -235,34 +232,22 @@ mod program {
         let read = read_snapshot(buffer, HW_TREE_READ_START, |into| {
             tairix_rt::hw_tree_read(into).map_err(Errno::from_syscall)
         });
-        let nodes = read.and_then(|len| decode_tree(buffer.get(..len).unwrap_or_default()));
-        match nodes {
-            Ok(nodes) => Some(Inventory::of(&nodes)),
+        let held = read.and_then(|len| {
+            let nodes = snapshot_nodes(buffer.get(..len).unwrap_or_default());
+            Inventory::of(nodes.ok_or(Errno::BadMagic)?)
+        });
+        match held {
+            Ok(inventory) => Some(inventory),
             Err(err) => {
                 record(
                     EVENT_TREE_UNREAD,
                     Level::Warn,
-                    "thermald: the hardware tree could not be read; what it held stands",
+                    "thermald: the hardware tree could not be read or held; what it held stands",
                     &[error_field(err)],
                 );
                 None
             }
         }
-    }
-
-    fn decode_tree(snapshot: &[u8]) -> Result<Vec<HwNode>, Errno> {
-        let header = HwTreeHeader::from_bytes(snapshot)?;
-        let body = snapshot
-            .get(HwTreeHeader::WIRE_LEN..)
-            .ok_or(Errno::BadMagic)?;
-        let (records, trailing) = body.as_chunks::<{ HwNode::WIRE_LEN }>();
-        if !trailing.is_empty() || u64::try_from(records.len()) != Ok(header.node_count()) {
-            return Err(Errno::BadMagic);
-        }
-        records
-            .iter()
-            .map(|record| HwNode::from_bytes(record))
-            .collect()
     }
 
     /// Answer the status calls queued, at most [`CALLS_PER_WAKE`].
@@ -285,49 +270,48 @@ mod program {
 
     /// The sensors and the header, over their channels.
     struct RtMachine {
-        /// Where the one outstanding call's reply, or its deadline, wakes
-        /// the service.
+        /// Where a call's reply, or its deadline, wakes the service: a set of
+        /// its own, so a call parks on nothing but its answer.
         calls: WaitSet,
+        /// The endpoint whose replies `calls` observes: the one last called.
+        /// A member whose endpoint has ended stays ready, so the set keeps
+        /// none the service has stopped calling.
+        observed: Option<u64>,
     }
 
     impl RtMachine {
         /// Call `endpoint`, its answer in `reply` within [`CALL_DEADLINE_NS`].
-        fn call(&self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            self.calls.add(WaitSourceKind::CallReply, endpoint, 0)?;
-            let answer = self.answered(endpoint, request, reply);
-            let _ = tairix_rt::waitset_ctl(
-                self.calls.handle(),
-                WaitSetOp::Del,
-                WaitSourceKind::CallReply,
-                endpoint,
-                0,
-            );
-            answer
-        }
-
-        fn answered(
-            &self,
+        fn call(
+            &mut self,
             endpoint: u64,
             request: &[u8],
             reply: &mut [u8],
         ) -> Result<usize, Errno> {
-            let ticket = tairix_rt::call_post(endpoint, request, CALL_DEADLINE_NS)
-                .map_err(Errno::from_syscall)?;
-            loop {
-                match tairix_rt::call_reap(endpoint, ticket, reply).map_err(Errno::from_syscall) {
-                    Err(Errno::WouldBlock) => {}
-                    reaped => return reaped,
+            if self.observed != Some(endpoint) {
+                if let Some(previous) = self.observed.take() {
+                    // A member already gone has nothing left to remove.
+                    let _ = tairix_rt::waitset_ctl(
+                        self.calls.handle(),
+                        WaitSetOp::Del,
+                        WaitSourceKind::CallReply,
+                        previous,
+                        0,
+                    );
                 }
-                // The deadline readies the member too, so this wait ends.
-                if let Err(err) = self.calls.wait_until(u64::MAX) {
-                    let _ = tairix_rt::call_cancel(endpoint, ticket);
-                    return Err(err);
-                }
+                self.calls.add(WaitSourceKind::CallReply, endpoint, 0)?;
+                self.observed = Some(endpoint);
             }
+            tairix_rt::call_within(
+                self.calls.handle(),
+                endpoint,
+                request,
+                reply,
+                CALL_DEADLINE_NS,
+            )
         }
 
         fn header(
-            &self,
+            &mut self,
             endpoint: u64,
             request: HeaderRequest,
             reply: &mut [u8],
@@ -337,7 +321,7 @@ mod program {
             self.call(endpoint, &frame, reply)
         }
 
-        fn change(&self, endpoint: u64, request: HeaderRequest) -> Result<(), Errno> {
+        fn change(&mut self, endpoint: u64, request: HeaderRequest) -> Result<(), Errno> {
             let mut reply = [0u8; HEADER_MAX_REPLY];
             let len = self.header(endpoint, request, &mut reply)?;
             decode_status(reply.get(..len).unwrap_or_default())

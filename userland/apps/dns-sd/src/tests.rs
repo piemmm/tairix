@@ -1,6 +1,6 @@
 //! Host tests for `dns-sd`'s parse-and-render engine.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -79,10 +79,31 @@ fn what_multicast_dns_does_not_answer_is_refused_at_the_command_line() {
         (&["-B", "-L"][..], ParseError::NoMode),
         (&[][..], ParseError::NoMode),
         (&["-L", "only-one"][..], ParseError::Operands),
-        (&["-x"][..], ParseError::UnknownOption(String::from("-x"))),
     ] {
         assert_eq!(parse(args), Err(error), "{args:?}");
     }
+}
+
+/// GNU 9.4's words for each refusal.
+fn refusal(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refusal(&["-x"]), "invalid option -- 'x'");
+    assert_eq!(refusal(&["--frob", "-B"]), "unrecognized option '--frob'");
+    assert_eq!(refusal(&["-B", "-t"]), "option requires an argument -- 't'");
+    assert_eq!(
+        refusal(&["--help=x"]),
+        "option '--help' doesn't allow an argument"
+    );
+}
+
+/// GNU 9.4 reads `dns-sd --he` as `dns-sd --help`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
 /// A scripted service: every wait hands over the next batch, then times out.

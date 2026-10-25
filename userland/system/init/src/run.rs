@@ -332,7 +332,7 @@ mod program {
     /// Whether the writable root is mounted: before the unlock every path it
     /// backs, `/` among them, fails closed.
     fn writable_root_mounted() -> bool {
-        tairix_rt::open_dir(b"/").is_ok()
+        tairix_rt::Dir::open(b"/").is_ok()
     }
 
     /// Persist the administrator's override document, creating its directory
@@ -343,9 +343,10 @@ mod program {
     /// disabled.
     fn write_overrides(text: &str) -> Result<(), Errno> {
         tairix_rt::replace_file(
-            tairix_abi::SERVICE_OVERRIDES_PATH.as_bytes(),
+            tairix_abi::SERVICE_OVERRIDES_PATH,
             text.as_bytes(),
             tairix_rt::ParentDir::CreatedIfMissing,
+            tairix_abi::fs::FS_NEW_FILE_MODE,
         )
     }
 

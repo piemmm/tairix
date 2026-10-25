@@ -1,4 +1,4 @@
-//! riscv64 (QEMU `virt` / SiFive) PID 1 (`init`) spawn seam —
+//! riscv64 PID 1 (`init`) spawn seam —
 //! `plans/PI.md` RV-P3.
 //!
 //! [`RiscvInitSpawn`] implements the architecture-neutral

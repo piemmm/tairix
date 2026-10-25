@@ -25,8 +25,8 @@ pub trait Input {
 /// Opens and sequentially writes the file operands.
 ///
 /// Each operand is its own output, keyed by its command-line position
-/// `id`, so a file named twice gets two independent streams exactly as two
-/// GNU file descriptors would. The client opens every operand up front and
+/// `id`, so a file named twice gets two independent streams, as two separate
+/// `open`s would. The client opens every operand up front and
 /// then writes each input chunk to every still-live output in operand
 /// order.
 pub trait FileSink {

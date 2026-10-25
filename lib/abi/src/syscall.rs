@@ -643,8 +643,8 @@ impl SyscallNumber {
     /// answerable only by a kernel-resident service (the disk-owning
     /// driver-store kthread). This trio — `call_create` / `call_recv` /
     /// `call_reply` — lets an ordinary user-space process be the *callee*, so
-    /// a driver or system service (the autoloaded `vcmailbox` mailbox service)
-    /// can serve the one synchronous primitive
+    /// a driver or system service (an autoloaded mailbox service, say) can
+    /// serve the one synchronous primitive
     /// rather than a hand-rolled convention over two async ports.
     ///
     /// Arguments: `endpoint: u64` — the call-endpoint id to bind (a
@@ -985,33 +985,42 @@ impl SyscallNumber {
     /// wait-set, or a faulting `token_out`, fails closed.
     pub const WAITSET_WAIT: Self = Self(45);
 
-    /// Open a file or directory by absolute path, returning a per-process
-    /// file descriptor (`PREREQUISITES.md` P-A).
+    /// Open the file or directory at a path, returning a per-process file
+    /// descriptor.
     ///
-    /// Arguments: `path: *const u8` (user pointer to the absolute path),
-    /// `path_len: usize` (its length, at most [`crate::FS_PATH_MAX`]), and
-    /// `flags: u32` ([`crate::OpenFlags`]). Returns a new file descriptor
-    /// at or above [`crate::STD_STREAM_COUNT`] (the standard descriptors fd
-    /// 0/1/2/3 are never reused), bound to the caller's per-process
-    /// descriptor table, or `-errno`.
+    /// Arguments: `dirfd: u32`, `path: *const u8` (user pointer), `path_len:
+    /// usize` (`1..=`[`crate::FS_PATH_MAX`]), `flags: u32`
+    /// ([`crate::OpenFlags`]) and `mode: u32` (the permission bits a create
+    /// asks for, at most [`crate::FS_MODE_MASK`], and `0` unless `flags`
+    /// carries [`crate::OpenFlags::CREATE`]; any other mode is
+    /// [`Errno::OutOfRange`]). Returns a new descriptor at or above
+    /// [`crate::STD_STREAM_COUNT`], or `-errno`.
     ///
-    /// The kernel copies the path in through the validated `copy_from_user`
-    /// boundary, parses it with the shared VFS path parser, and resolves it
-    /// against the mounted secured VFS under the **caller's real
-    /// `Credentials`** (the kernel supplies identity, never the caller), so
-    /// every per-inode owner/mode/ACL/`required_cap` check and mount-flag
-    /// (`ro`/`noexec`) decision stays kernel-side. Gated by
-    /// [`crate::CapabilityId::FS_ACCESS`]; the per-path authority remains the
-    /// inode model. With [`crate::OpenFlags::CREATE`] a missing regular file
-    /// is created; [`crate::OpenFlags::EXCLUSIVE`] refuses an existing one;
-    /// [`crate::OpenFlags::TRUNCATE`] empties it. An open of neither `READ`
-    /// nor `WRITE` is a resolve-only handle for `fs_stat`/`fs_readdir`. A
-    /// build with no filesystem service wired fails closed with
-    /// [`Errno::NotImplemented`]; any resolution or permission failure fails
-    /// closed.
+    /// A relative path resolves from `dirfd`: a descriptor the caller holds on
+    /// a directory or on the catalog, or [`crate::FD_CWD`] for its working
+    /// directory. Any other descriptor is [`Errno::NotADirectory`] and an
+    /// unopened number [`Errno::NotFound`]; an absolute path ignores `dirfd`.
+    /// This is how every path-taking `fs_*` call resolves. Each component is
+    /// resolved under the caller's kernel-attested identity, search permission
+    /// checked on every directory looked in, the start included, and `..`
+    /// names the directory the walk came through, never what the text before
+    /// it spells. Gated by [`crate::CapabilityId::FS_ACCESS`].
+    ///
+    /// With [`crate::OpenFlags::CREATE`] a missing regular file is created
+    /// with `mode` less the caller's umask ([`Self::FS_UMASK`]), in a setgid
+    /// directory's group when it is made in one;
+    /// [`crate::OpenFlags::EXCLUSIVE`] refuses an existing one;
+    /// [`crate::OpenFlags::TRUNCATE`] empties it. `CREATE | DIRECTORY |
+    /// EXCLUSIVE` makes a directory as [`Self::FS_MKDIR`] does and answers it
+    /// open with no read or write access. An open of neither `READ` nor
+    /// `WRITE` is a resolve-only handle for `fs_stat`/`fs_readdir` and the
+    /// descriptor-relative calls. The descriptor is bound to the node the open
+    /// reached for its whole life: a rename, a new file at its old name, or
+    /// the loss of its last name never moves it. A process holding its
+    /// `open-files` soft limit of descriptors is refused with
+    /// [`Errno::LimitExceeded`].
     pub const FS_OPEN: Self = Self(46);
-    /// Release a file descriptor returned by [`SyscallNumber::FS_OPEN`]
-    /// (`PREREQUISITES.md` P-A).
+    /// Release a file descriptor returned by [`SyscallNumber::FS_OPEN`].
     ///
     /// Argument: `fd: u32`. Returns `0`, or `-errno`. The kernel drops the
     /// open-handle entry from the caller's per-process descriptor table; a
@@ -1019,20 +1028,19 @@ impl SyscallNumber {
     /// fails closed with [`Errno::NotFound`]. Needs
     /// [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_CLOSE: Self = Self(47);
-    /// Read up to `len` bytes from an open file at an explicit offset
-    /// (`PREREQUISITES.md` P-A).
+    /// Read up to `len` bytes from an open file at an explicit offset.
     ///
     /// Arguments: `fd: u32` (an open handle with read access), `offset: u64`
     /// (the byte offset to read from), `buf: *mut u8` (user pointer), and
     /// `len: usize` (at most [`crate::FS_IO_MAX`]). Returns the number of
     /// bytes read (`0` at end of file), or `-errno`. The kernel resolves the
     /// handle against the caller's descriptor table, re-authorises the read
-    /// through the secured VFS, and copies the bytes out through the
-    /// validated `copy_to_user` boundary. A handle without read access, or a
-    /// standard descriptor, fails closed.
+    /// against the node the handle is bound to, and copies the bytes out
+    /// through the validated `copy_to_user` boundary. A handle without read
+    /// access, or a standard descriptor, fails closed; one whose volume left
+    /// by force answers [`Errno::Stale`].
     pub const FS_READ: Self = Self(48);
-    /// Write up to `len` bytes to an open file at an explicit offset
-    /// (`PREREQUISITES.md` P-A).
+    /// Write up to `len` bytes to an open file at an explicit offset.
     ///
     /// Arguments: `fd: u32` (an open handle with write access), `offset: u64`
     /// (ignored when the handle was opened [`crate::OpenFlags::APPEND`], which
@@ -1044,7 +1052,7 @@ impl SyscallNumber {
     /// write access, or a standard descriptor fails closed.
     pub const FS_WRITE: Self = Self(49);
     /// Read the next batch of an open directory's entries into a caller
-    /// buffer (`PREREQUISITES.md` P-A).
+    /// buffer.
     ///
     /// Arguments: `fd: u32` (an open directory handle), `buf: *mut u8` (user
     /// pointer), `len: usize`, and `from: u32` (a [`crate::ReaddirFrom`]).
@@ -1054,14 +1062,14 @@ impl SyscallNumber {
     /// [`crate::READDIR_BATCH_MAX`] bytes are filled per call.
     ///
     /// [`Errno::BufferTooSmall`] means the next record alone does not fit, and
-    /// leaves the position unchanged. [`Errno::Stale`] means the path now
-    /// names a different directory from the one this listing began on;
-    /// `from = Start` restarts it. An entry present for the whole listing is
-    /// returned exactly once; one added or removed meanwhile may or may not
-    /// be. A handle that does not name a directory fails closed.
+    /// leaves the position unchanged. The listing is of the directory the
+    /// handle is bound to, however it has been renamed; a removed one lists
+    /// nothing, and [`Errno::Stale`] means the handle no longer reaches it.
+    /// An entry present for the whole listing is returned exactly once; one
+    /// added or removed meanwhile may or may not be. A handle that does not
+    /// name a directory fails closed.
     pub const FS_READDIR: Self = Self(50);
-    /// Report the structural metadata of an open file or directory
-    /// (`PREREQUISITES.md` P-A).
+    /// Report the structural metadata of an open file or directory.
     ///
     /// Arguments: `fd: u32` (any open handle, including a resolve-only one),
     /// `out: *mut u8` (user pointer), and `out_len: usize`. Returns the
@@ -1069,37 +1077,43 @@ impl SyscallNumber {
     /// ([`crate::FileStat::WIRE_LEN`] bytes). A buffer too small fails closed
     /// with [`Errno::BufferTooSmall`].
     pub const FS_STAT: Self = Self(51);
-    /// Set the length of an open file (`PREREQUISITES.md` P-A).
+    /// Set the length of an open file.
     ///
     /// Arguments: `fd: u32` (an open handle with write access) and
     /// `size: u64`. Returns `0`, or `-errno`. The kernel re-authorises the
     /// operation through the secured VFS; a read-only mount, a directory
     /// handle, or a handle without write access fails closed.
     pub const FS_TRUNCATE: Self = Self(52);
-    /// Flush an open handle's filesystem to its backing store
-    /// (`PREREQUISITES.md` P-A).
+    /// Flush an open handle's filesystem to its backing store.
     ///
     /// Argument: `fd: u32` (any open handle). Returns `0`, or `-errno`. The
     /// kernel flushes the filesystem backing the handle so prior writes are
     /// durable. A standard descriptor or an `fd` naming no open handle fails
     /// closed.
     pub const FS_SYNC: Self = Self(53);
-    /// Create a directory by absolute path (`PREREQUISITES.md` P-A).
+    /// Create a directory at a path.
     ///
-    /// Arguments: `path: *const u8` (user pointer), `path_len: usize` (at
-    /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. Resolution and
-    /// the permission/mount-flag model match [`SyscallNumber::FS_OPEN`]; a
-    /// read-only mount, an existing target, or a denied parent fails closed.
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize`, resolved
+    /// as [`Self::FS_OPEN`] resolves them, and `mode: u32` (the permission bits
+    /// the directory asks for, at most [`crate::FS_MODE_MASK`], else
+    /// [`Errno::OutOfRange`]). Returns `0`, or `-errno`. The directory is born
+    /// with `mode` less the caller's umask ([`Self::FS_UMASK`]); made in a
+    /// setgid directory it takes that directory's group and its setgid bit. A
+    /// read-only mount, an existing name, or a denied parent fails closed.
     /// Gated by [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_MKDIR: Self = Self(54);
-    /// Remove a file or empty directory by absolute path
-    /// (`PREREQUISITES.md` P-A).
+    /// Remove a file or empty directory by name.
     ///
-    /// Arguments: `path: *const u8` (user pointer), `path_len: usize` (at
-    /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. Resolution and
-    /// the permission/mount-flag model match [`SyscallNumber::FS_OPEN`]; a
-    /// non-empty directory, a read-only mount, a missing target, or a denied
-    /// parent fails closed. Gated by [`crate::CapabilityId::FS_ACCESS`].
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize`, resolved
+    /// as [`Self::FS_OPEN`] resolves them, `flags: u32`
+    /// ([`crate::UnlinkFlags`]), and `expect: u64`: the address of a
+    /// [`crate::NodeExpect`] when `flags` carries an expectation bit, and `0`
+    /// otherwise, any mismatch being [`Errno::OutOfRange`]. Returns `0`, or
+    /// `-errno`. A name that no longer meets the expectation answers
+    /// [`Errno::Stale`] and nothing is removed, decided under the volume's
+    /// lock. A non-empty directory, a read-only mount, a missing name, or a
+    /// denied parent fails closed. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_UNLINK: Self = Self(55);
     /// Release a per-process DMA buffer previously carved by
     /// [`SyscallNumber::DMA_ALLOC`] — the symmetric free for the device-DMA
@@ -1119,26 +1133,26 @@ impl SyscallNumber {
     /// so a later allocation cannot recover the buffer's bytes. Gated by
     /// [`crate::CapabilityId::MEM_DMA`].
     pub const DMA_FREE: Self = Self(56);
-    /// Move a file or directory from one absolute path to another
-    /// (`PREREQUISITES.md` P-A rename follow-up).
+    /// Move a file or directory from one name to another.
     ///
-    /// Arguments: `src: *const u8`, `src_len: usize`, `dst: *const u8`,
-    /// `dst_len: usize` (each length at most [`crate::FS_PATH_MAX`]).
-    /// Returns `0`, or `-errno`. Both paths must resolve under the same
-    /// mounted volume; the moved node keeps its identity and contents.
-    /// Resolution and the permission/mount-flag model match
-    /// [`SyscallNumber::FS_OPEN`]: search + write on both parent
-    /// directories (and write on a directory moved to a new parent) are
-    /// required, and a missing source, a non-empty directory destination, a
-    /// directory-into-its-own-subtree move, a read-only mount, or a denied
-    /// parent fails closed. A cross-mount move is refused with the
-    /// dedicated [`crate::Errno::CrossVolume`] (the `EXDEV` equivalent), so
-    /// a mover can fall back to copy-then-remove on exactly that condition.
-    /// Gated by [`crate::CapabilityId::FS_ACCESS`].
+    /// Arguments: `from: *const u8` and `to: *const u8`, each the address of a
+    /// [`crate::PathAt`] naming one end as [`Self::FS_OPEN`] resolves a path,
+    /// `flags: u32` ([`crate::RenameFlags`]), and `expect: u64`: the address of
+    /// a [`crate::NodeExpect`] the source must still meet when `flags` carries
+    /// [`crate::RenameFlags::EXPECT_NODE`], and `0` otherwise, any mismatch
+    /// being [`Errno::OutOfRange`]. Returns `0`, or `-errno`. The moved node
+    /// keeps its identity and contents. Search and write on both parents (and
+    /// write on a directory moved to a new parent) are required; a missing
+    /// source, a non-empty directory destination, a directory moved into its
+    /// own subtree, a read-only mount, or a denied parent fails closed, and a
+    /// source that no longer meets its expectation answers [`Errno::Stale`]. A
+    /// move between two projections is refused with
+    /// [`crate::Errno::CrossVolume`] (the `EXDEV` equivalent), so a mover can
+    /// fall back to copy-then-remove on exactly that condition. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_RENAME: Self = Self(57);
     /// Read the kernel-attested [`Origin`](crate::Origin) of the caller whose
-    /// in-service call this server is currently handling
-    /// (`PREREQUISITES.md` P-C).
+    /// in-service call this server is currently handling.
     ///
     /// Arguments: `endpoint: u64` (a call endpoint the calling task owns),
     /// `ticket: u64` (the in-service ticket a prior
@@ -1156,8 +1170,7 @@ impl SyscallNumber {
     /// [`crate::ORIGIN_WIRE_LEN`] fails closed. The summary it carries is the
     /// caller's capability *membership* bitmap, never any capability token.
     pub const CALL_PEER_ORIGIN: Self = Self(58);
-    /// Read the kernel's wall-clock time and its provenance state
-    /// (`PREREQUISITES.md` P-D).
+    /// Read the kernel's wall-clock time and its provenance state.
     ///
     /// Arguments: `out: *mut u8` (user buffer), `out_cap: usize` (its
     /// capacity, at least [`crate::WallClockReading::WIRE_LEN`]). On success
@@ -1173,8 +1186,7 @@ impl SyscallNumber {
     /// events never relies on this value (the monotonic clock and sequence
     /// numbers are the ordering authority).
     pub const WALL_TIME_GET: Self = Self(59);
-    /// Set the kernel's wall-clock time from a trusted source
-    /// (`PREREQUISITES.md` P-D).
+    /// Set the kernel's wall-clock time from a trusted source.
     ///
     /// Arguments: `time: *const u8` (a little-endian
     /// [`Time64`](crate::Time64), [`crate::Time64::WIRE_LEN`] bytes),
@@ -1189,8 +1201,7 @@ impl SyscallNumber {
     /// The monotonic clock is unaffected; only the wall-time offset and
     /// state change.
     pub const WALL_TIME_SET: Self = Self(60);
-    /// Read the kernel's per-boot identifier ([`crate::BootId`])
-    /// (`PREREQUISITES.md` P-E).
+    /// Read the kernel's per-boot identifier ([`crate::BootId`]).
     ///
     /// Arguments: `out: *mut u8` (user buffer), `out_cap: usize` (its
     /// capacity, at least [`crate::BOOT_ID_LEN`]). On success the 16-byte
@@ -1205,8 +1216,7 @@ impl SyscallNumber {
     /// [`Errno::EntropyNotReady`] — the kernel never returns the all-zero
     /// [`BootId::UNSET`](crate::BootId::UNSET) sentinel as if it were a real id.
     pub const BOOT_ID_GET: Self = Self(61);
-    /// Read the **unfiltered, global** kernel introspection view
-    /// (`PREREQUISITES.md` P-C).
+    /// Read the **unfiltered, global** kernel introspection view.
     ///
     /// Arguments: `domain: u32` (an [`IntrospectDomain`](crate::IntrospectDomain)
     /// discriminant), `arg: u64` (a domain-specific selector — a record
@@ -1227,7 +1237,7 @@ impl SyscallNumber {
     /// resolves against the capability table so the answer survives PID reuse.
     pub const SYSINFO_INTROSPECT: Self = Self(62);
     /// Read the character-cell geometry of the text console backing a
-    /// standard stream (`PREREQUISITES.md` P-C — the `top` terminal UI).
+    /// standard stream, as the `top` terminal UI needs.
     ///
     /// Arguments: `fd: u32` (a standard descriptor the caller owns —
     /// typically [`crate::STDOUT`]), `out: *mut u8` (user buffer), `out_cap:
@@ -1275,37 +1285,33 @@ impl SyscallNumber {
     /// and 3, allowed or denied alike) additionally records the caller, the
     /// target, the signal, and which rule decided it.
     pub const SIGNAL: Self = Self(64);
-    /// Change the calling process's working directory to `path`
-    /// (`plans/SHELL.md` P2).
+    /// Change the calling process's working directory (`plans/SHELL.md` P2).
     ///
-    /// Arguments: `path: *const u8` (user pointer) and `path_len: usize` (at
-    /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. The kernel
-    /// copies the path in through the validated `copy_from_user` boundary,
-    /// resolves it — relative to the caller's current working directory when
-    /// it is not absolute — with the shared path parser, and re-authorises it
-    /// as a *searchable directory* through the secured VFS under the caller's
-    /// real [`Credentials`](crate::capability), exactly as
-    /// [`Self::FS_OPEN`] with [`crate::OpenFlags::DIRECTORY`] would. Only on
-    /// success does the resolved, normalised absolute path become the
-    /// process's new working directory, against which later relative paths
-    /// (to [`Self::FS_OPEN`] and friends) resolve. A path that does not name
-    /// a directory, or that the caller may not search, fails closed without
-    /// changing the working directory; a build with no filesystem service
-    /// wired fails closed with [`Errno::NotImplemented`]. Gated by
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize`, resolved
+    /// as [`Self::FS_OPEN`] resolves them, and `flags: u32`
+    /// ([`crate::AtFlags`]). Returns `0`, or `-errno`. The target must be a
+    /// directory the caller may search; the working directory then holds that
+    /// node, not its name, so a rename of it or of any directory above it
+    /// moves nothing, and later relative paths resolve from it.
+    /// [`crate::AtFlags::EMPTY_PATH`] with an empty path changes to the
+    /// directory `dirfd` holds (`fchdir`). [`crate::AtFlags::NO_FOLLOW`] is
+    /// [`Errno::OutOfRange`]: a working directory is reached through its links.
+    /// A refusal leaves the working directory unchanged. Gated by
     /// [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_CHDIR: Self = Self(65);
     /// Report the calling process's working directory into a caller buffer
     /// (`plans/SHELL.md` P2).
     ///
     /// Arguments: `buf: *mut u8` (user pointer) and `buf_cap: usize` (its
-    /// capacity). Returns the number of bytes written — the working
-    /// directory as a normalised absolute path (no trailing slash except the
-    /// root `/`) — or `-errno`. A buffer too small to hold the whole path
-    /// fails closed with [`Errno::BufferTooSmall`] (the path is never
-    /// truncated); the caller grows its buffer and retries. Reading one's own
-    /// working directory grants no authority over any other principal, so —
-    /// unlike [`Self::FS_CHDIR`] — no capability is required and the call is
-    /// not audited.
+    /// capacity). Returns the number of bytes written — the path that names
+    /// the working directory now, however it has been renamed since it was
+    /// set, with no trailing slash except the root's — or `-errno`. A working
+    /// directory that has been removed answers [`Errno::NotFound`], and one
+    /// whose name the caller may no longer read [`Errno::PermissionDenied`]. A
+    /// buffer too small to hold the whole path fails closed with
+    /// [`Errno::BufferTooSmall`]; the path is never truncated. Reading one's
+    /// own working directory grants no authority over any other principal, so
+    /// no capability is required and the call is not audited.
     pub const FS_GETCWD: Self = Self(66);
     /// Resolve a typed resource reference (`plans/ALIAS.md`) and open it to a
     /// new descriptor (`plans/SHELL.md` P5).
@@ -1481,21 +1487,19 @@ impl SyscallNumber {
     /// transferring an end rides the `CAP_PROC_SPAWN`-gated spawn.
     pub const PIPE_CREATE: Self = Self(73);
 
-    /// Set the POSIX permission bits of the file or directory at an
-    /// absolute path (the `chmod(2)` shape).
+    /// Set the POSIX permission bits of a file or directory (the
+    /// `fchmodat(2)` shape).
     ///
-    /// Arguments: `path: *const u8` (a non-null user pointer),
-    /// `path_len: usize` (at most [`crate::FS_PATH_MAX`]), and
-    /// `mode: u32` — the new permission bits, at most
-    /// [`crate::FS_MODE_MASK`] (the `rwx` triads plus the
-    /// setuid/setgid/sticky bits); a raw word carrying any higher bit
-    /// fails closed with [`crate::Errno::OutOfRange`] at dispatch. The
-    /// file-type is not the caller's to change and is not part of the
-    /// word. Gated on `CAP_FS_ACCESS` like the other path-taking
-    /// filesystem calls; the per-inode rule is the secured VFS's — only
-    /// the inode's **owner** may change its mode (holding a capability
-    /// does not override ownership), the covering mount must be
-    /// writable, and ownership, ACL, and capability gate are untouched.
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize`, resolved
+    /// as [`Self::FS_OPEN`] resolves them, `mode: u32` — the new permission
+    /// bits, at most [`crate::FS_MODE_MASK`] (a word carrying any higher bit is
+    /// [`crate::Errno::OutOfRange`] at dispatch) — and `flags: u32`
+    /// ([`crate::AtFlags`]): [`crate::AtFlags::NO_FOLLOW`] changes a final
+    /// link itself, and [`crate::AtFlags::EMPTY_PATH`] with an empty path the
+    /// node `dirfd` holds (`fchmod`). Only the node's **owner** may change its
+    /// mode — holding a capability does not override ownership — and the
+    /// projection must be writable; ownership, ACL, and capability gate are
+    /// untouched. Gated on `CAP_FS_ACCESS` like the other path-taking calls.
     pub const FS_SET_MODE: Self = Self(74);
 
     /// Resolve a published port name to its live IPC endpoint id.
@@ -1526,7 +1530,7 @@ impl SyscallNumber {
     /// (the `mmap(2)` shape; see [`crate::memory`]).
     ///
     /// Arguments: `fd: u32` (a descriptor the caller opened for reading,
-    /// backed by a filesystem path), `offset: u64` (the file byte offset
+    /// bound to a filesystem node), `offset: u64` (the file byte offset
     /// the mapping starts at; must be page-aligned), and `len: u64` (the
     /// mapping length in bytes, rounded up to whole pages). Returns the
     /// page-aligned base address of the new region. No page is read or
@@ -1539,8 +1543,8 @@ impl SyscallNumber {
     /// the faulting process (the `SIGBUS` analogue, fail closed); a page
     /// straddling end-of-file is zero-filled past the end. The mapping is
     /// always read-only and never executable (W^X); it survives a later
-    /// `fs_close` of `fd` (the region carries its own authority snapshot,
-    /// exactly as an open descriptor would). Unprivileged like
+    /// `fs_close` of `fd` and an unlink of the file (the region holds the
+    /// node and its own authority snapshot). Unprivileged like
     /// [`SyscallNumber::MEM_MAP`] — the region lands only in the caller's
     /// own hardware-isolated space — but the handler requires the
     /// descriptor to be open for reading and `CAP_FS_ACCESS`, the same
@@ -1688,64 +1692,63 @@ impl SyscallNumber {
     /// present) is the service's to log.
     pub const CALL_PEER_SEAT: Self = Self(83);
 
-    /// Read one extended attribute of the file or directory at an absolute
-    /// path (the `getxattr(2)` shape).
+    /// Read one extended attribute of the node an open descriptor holds (the
+    /// `fgetxattr(2)` shape). Attributes are reached through descriptors
+    /// only: open a link with [`crate::OpenFlags::NO_FOLLOW`] to reach the
+    /// link's own.
     ///
-    /// Arguments: `path: *const u8` + `path_len: usize` (at most
-    /// [`crate::FS_PATH_MAX`]), `key: *const u8` + `key_len: usize` (a
+    /// Arguments: `fd: u32`, `key: *const u8` + `key_len: usize` (a
     /// `lib/fsmeta`-grammar `namespace.rest` key, `1..=`
     /// [`crate::FS_ATTR_KEY_MAX`] bytes), and `value_out: *mut u8` +
     /// `value_out_len: usize` (the caller's buffer). Returns the number of
-    /// value bytes written. Gated on `CAP_FS_ACCESS`; the per-inode rule is
-    /// the secured VFS's — the caller needs read permission on the node,
-    /// the `system`/`trusted` namespaces are refused outright, and a
-    /// `required_cap` gate on the node is honoured. Fails closed with
-    /// [`crate::Errno::NoData`] when the node carries no such attribute
-    /// (a value may legitimately be empty, so absence is never an empty
-    /// read), [`crate::Errno::BufferTooSmall`] when the value does not fit
-    /// (never truncated), and [`crate::Errno::NotSupported`] on a mount
+    /// value bytes written. Gated on `CAP_FS_ACCESS`; the caller needs read
+    /// permission on the node, the `system`/`trusted` namespaces are refused
+    /// outright, and a `required_cap` gate on the node is honoured. Fails
+    /// closed with [`crate::Errno::NoData`] when the node carries no such
+    /// attribute (a value may legitimately be empty, so absence is never an
+    /// empty read), [`crate::Errno::BufferTooSmall`] when the value does not
+    /// fit (never truncated), and [`crate::Errno::NotSupported`] on a volume
     /// whose format stores no attributes.
     pub const FS_ATTR_GET: Self = Self(84);
 
-    /// Set (insert or replace) one extended attribute of the file or
-    /// directory at an absolute path (the `setxattr(2)` shape).
+    /// Set (insert or replace) one extended attribute of the node an open
+    /// descriptor holds (the `fsetxattr(2)` shape).
     ///
-    /// Arguments: `path`/`path_len`, `key`/`key_len` (as
-    /// [`Self::FS_ATTR_GET`]), and `value: *const u8` + `value_len: usize`
-    /// (at most [`crate::FS_ATTR_VALUE_MAX`] bytes; the value is opaque to
-    /// the kernel). The write is one copy-on-write transaction in the
-    /// driver — fully applied or not at all. Gated on `CAP_FS_ACCESS`; the
-    /// secured VFS requires write permission on the node, a writable
-    /// mount, a valid `lib/fsmeta` key in a non-privileged namespace, and
-    /// honours a `required_cap` gate. Refusals include
-    /// [`crate::Errno::NoSpace`] (the per-inode attribute bounds) and
-    /// [`crate::Errno::NotSupported`] (a mount without attribute storage).
+    /// Arguments: `fd: u32`, `key`/`key_len` (as [`Self::FS_ATTR_GET`]), and
+    /// `value: *const u8` + `value_len: usize` (at most
+    /// [`crate::FS_ATTR_VALUE_MAX`] bytes; the value is opaque to the kernel).
+    /// The write is one copy-on-write transaction in the driver — fully
+    /// applied or not at all. Gated on `CAP_FS_ACCESS`; the caller needs write
+    /// permission on the node, a writable projection, a valid `lib/fsmeta` key
+    /// in a non-privileged namespace, and the node's `required_cap` gate.
+    /// Refusals include [`crate::Errno::NoSpace`] (the per-inode attribute
+    /// bounds) and [`crate::Errno::NotSupported`] (a volume without attribute
+    /// storage).
     pub const FS_ATTR_SET: Self = Self(85);
 
-    /// Enumerate the extended-attribute keys of the file or directory at
-    /// an absolute path, one key per call by index, rather than
-    /// `listxattr(2)`'s packed buffer.
+    /// Enumerate the extended-attribute keys of the node an open descriptor
+    /// holds, one key per call by index, rather than `flistxattr(2)`'s packed
+    /// buffer.
     ///
-    /// Arguments: `path`/`path_len`, `index: u64` (the position to yield),
-    /// and `key_out: *mut u8` + `key_out_len: usize`. Returns the key's
-    /// byte length (written into `key_out`), or `0` once `index` is past
-    /// the last visible attribute — a real key is never empty, so `0`
-    /// unambiguously means end-of-list. Keys whose namespace the caller
-    /// may not read (`system`/`trusted`) are omitted, never revealed.
-    /// Gated on `CAP_FS_ACCESS`; the secured VFS requires read permission
-    /// on the node. Iteration order is the driver's stable on-disk order.
+    /// Arguments: `fd: u32`, `index: u64` (the position to yield), and
+    /// `key_out: *mut u8` + `key_out_len: usize`. Returns the key's byte
+    /// length (written into `key_out`), or `0` once `index` is past the last
+    /// visible attribute — a real key is never empty, so `0` unambiguously
+    /// means end-of-list. Keys whose namespace the caller may not read
+    /// (`system`/`trusted`) are omitted, never revealed. Gated on
+    /// `CAP_FS_ACCESS`; the caller needs read permission on the node.
+    /// Iteration order is the driver's stable on-disk order.
     pub const FS_ATTR_LIST: Self = Self(86);
 
-    /// Remove one extended attribute of the file or directory at an
-    /// absolute path (the `removexattr(2)` shape).
+    /// Remove one extended attribute of the node an open descriptor holds
+    /// (the `fremovexattr(2)` shape).
     ///
-    /// Arguments: `path`/`path_len` and `key`/`key_len` (as
-    /// [`Self::FS_ATTR_GET`]). One copy-on-write transaction. Gated on
-    /// `CAP_FS_ACCESS`; the secured VFS requires write permission on the
-    /// node, a writable mount, and a non-privileged namespace. Fails
-    /// closed with [`crate::Errno::NoData`] when the node carries no such
-    /// attribute and [`crate::Errno::NotSupported`] on a mount without
-    /// attribute storage.
+    /// Arguments: `fd: u32` and `key`/`key_len` (as [`Self::FS_ATTR_GET`]).
+    /// One copy-on-write transaction. Gated on `CAP_FS_ACCESS`; the caller
+    /// needs write permission on the node, a writable projection, and a
+    /// non-privileged namespace. Fails closed with [`crate::Errno::NoData`]
+    /// when the node carries no such attribute and
+    /// [`crate::Errno::NotSupported`] on a volume without attribute storage.
     pub const FS_ATTR_REMOVE: Self = Self(87);
 
     /// Bind an asynchronous IPC message port owned by the calling task.
@@ -1799,8 +1802,8 @@ impl SyscallNumber {
     /// from the start of the file the recipient may write or extend to, or
     /// [`GRANT_EXTENT_INHERIT`] to pass on the caller's own reach), and the
     /// recipient's [`crate::ProcId`] (taken from a kernel-attested source
-    /// such as `call_peer_origin`). The kernel captures the *caller's*
-    /// identity and effective capability set with the descriptor's path and
+    /// such as `call_peer_origin`). The kernel freezes the *caller's*
+    /// identity and effective capability set with the descriptor's node and
     /// access, and mints the recipient an unforgeable handle that resolves
     /// only when presented by the recipient itself ([`Self::FD_REDEEM`]).
     ///
@@ -1808,8 +1811,8 @@ impl SyscallNumber {
     /// was captured, under its original grantor's identity, and its ceiling
     /// can only shrink: the new one is the lesser of the two, so a relay can
     /// never widen what it was handed. Delegation never widens authority:
-    /// the redeemed descriptor's every operation is re-authorised through
-    /// the secured VFS under the captured identity.
+    /// the redeemed descriptor's every operation is re-authorised against the
+    /// node as the frozen identity, so the owner's chmod revokes it.
     pub const FD_GRANT: Self = Self(90);
 
     /// Redeem a [`Self::FD_GRANT`] handle minted to the calling task,
@@ -1817,9 +1820,9 @@ impl SyscallNumber {
     ///
     /// Arguments: `handle` (the grant handle received in-band). The
     /// redemption is **one-shot**: the grant record is consumed only when
-    /// the descriptor allocation succeeds, so a table-full refusal leaves
-    /// the grant intact for a retry and a redeemed handle can never be
-    /// redeemed twice. A handle minted to another task resolves to nothing
+    /// the descriptor allocation succeeds, so a refusal at the caller's
+    /// `open-files` limit leaves the grant intact for a retry and a redeemed
+    /// handle can never be redeemed twice. A handle minted to another task resolves to nothing
     /// (`NotFound`), indistinguishable from a handle that never existed.
     /// The call is unprivileged: receiving user-mediated, already-checked
     /// authority is the point of the delegation, and every later operation
@@ -1920,28 +1923,26 @@ impl SyscallNumber {
     /// is low (once per driver start), so the record cannot drown the log.
     pub const SCHED_SET_REALTIME: Self = Self(95);
 
-    /// Set the owning user and/or group of the file or directory at an
-    /// absolute path (the `chown(2)` / `chgrp(2)` shape).
+    /// Set the owning user and/or group of a file or directory (the
+    /// `fchownat(2)` shape).
     ///
-    /// Arguments: `path: *const u8` (a non-null user pointer),
-    /// `path_len: usize` (at most [`crate::FS_PATH_MAX`]), `uid: u32` and
-    /// `gid: u32` — the new owning user and group. Either field may be
-    /// [`crate::FS_OWNER_UNCHANGED`] to leave that field as it is, so an
-    /// owner-only or group-only change touches only the field it names; a
-    /// call leaving *both* unchanged is a well-formed no-op.
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize`, resolved
+    /// as [`Self::FS_OPEN`] resolves them, `uid: u32` and `gid: u32` — the new
+    /// owning user and group, either of which may be
+    /// [`crate::FS_OWNER_UNCHANGED`] to leave that field — and `flags: u32`
+    /// ([`crate::AtFlags`]): [`crate::AtFlags::NO_FOLLOW`] changes a final
+    /// link itself, and [`crate::AtFlags::EMPTY_PATH`] with an empty path the
+    /// node `dirfd` holds (`fchown`). A call leaving both fields unchanged is a
+    /// well-formed no-op.
     ///
-    /// Gated on `CAP_FS_ACCESS` at dispatch like the other path-taking
-    /// filesystem calls; the per-inode rule is the secured VFS's and is
-    /// stricter than a mode change. Reassigning the **uid**, or setting a
-    /// **gid** the caller is not a member of, is the privileged
-    /// [`crate::CapabilityId::FS_CHOWN`] operation (the Unix `CAP_CHOWN`
-    /// model) and is refused without it. Absent that capability, only the
+    /// Reassigning the **uid**, or setting a **gid** the caller is not a
+    /// member of, is the privileged [`crate::CapabilityId::FS_CHOWN`]
+    /// operation and is refused without it. Absent that capability, only the
     /// node's **owner** may change the group, and only to a group the caller
-    /// already belongs to (its egid or a supplementary group) — the standard
-    /// unprivileged `chgrp`. The covering mount must be writable. Any
-    /// successful ownership change **clears the setuid and setgid bits**, so
-    /// a reassigned file can never become a setuid-to-someone-else
-    /// escalation. Fail closed: a refused change leaves the node untouched.
+    /// already belongs to. The projection must be writable. Any successful
+    /// ownership change **clears the setuid and setgid bits**, so a reassigned
+    /// file can never become a setuid-to-someone-else escalation. Gated on
+    /// `CAP_FS_ACCESS` at dispatch; a refused change leaves the node untouched.
     pub const FS_SET_OWNER: Self = Self(96);
 
     /// Create a pseudo-terminal (PTY): one kernel object joining a
@@ -2326,9 +2327,9 @@ impl SyscallNumber {
     /// Create a symbolic link.
     ///
     /// Arguments: `target: *const u8`, `target_len: usize` — the path to
-    /// store, verbatim and unresolved; `link: *const u8`,
-    /// `link_len: usize` — where the new link is created. Returns `0` or
-    /// `-errno`.
+    /// store, verbatim and unresolved; `dirfd: u32`, `link: *const u8`,
+    /// `link_len: usize` — where the new link is created, resolved as
+    /// [`Self::FS_OPEN`] resolves a path. Returns `0` or `-errno`.
     ///
     /// The target is *data*, not a path the kernel walks: it is bounded by
     /// [`crate::fs::FS_SYMLINK_MAX`] and stored as given, so a link may
@@ -2344,7 +2345,8 @@ impl SyscallNumber {
 
     /// Read a symbolic link's stored target.
     ///
-    /// Arguments: `path: *const u8`, `path_len: usize` — the link itself;
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize` — the
+    /// link itself, resolved as [`Self::FS_OPEN`] resolves a path;
     /// `out: *mut u8`, `out_len: usize` — where the target is written.
     /// Returns the target's length in bytes, or `-errno`.
     ///
@@ -2364,15 +2366,16 @@ impl SyscallNumber {
 
     /// Add a second directory entry naming an existing node — a hard link.
     ///
-    /// Arguments: `existing: *const u8`, `existing_len: usize` — the node
-    /// that gains a name; `link: *mut u8`, `link_len: usize` — the new name;
-    /// `flags: u32` — a [`crate::LinkFlags`] word. Returns `0`, or `-errno`.
+    /// Arguments: `existing: *const u8` and `new: *const u8`, each the address
+    /// of a [`crate::PathAt`] naming one end as [`Self::FS_OPEN`] resolves a
+    /// path — the node that gains a name, and the new name — and `flags: u32`,
+    /// a [`crate::LinkFlags`] word. Returns `0`, or `-errno`.
     ///
-    /// Both operands are absolute paths. With an empty `flags` **neither
-    /// final component is followed** — POSIX `link()`: the inode that gains
-    /// a name is the one the caller spelled, so a symbolic link planted on
-    /// the way cannot redirect the new name onto an object the caller never
-    /// asked for. [`LinkFlags::FOLLOW`](crate::LinkFlags::FOLLOW) is the
+    /// With an empty `flags` **neither final component is followed** — POSIX
+    /// `link()`: the inode that gains a name is the one the caller spelled, so
+    /// a symbolic link planted on the way cannot redirect the new name onto an
+    /// object the caller never asked for.
+    /// [`LinkFlags::FOLLOW`](crate::LinkFlags::FOLLOW) is the
     /// `linkat(AT_SYMLINK_FOLLOW)` posture `ln -L` asks for, resolving the
     /// existing name's final link. The **new** name is never followed under
     /// either: it is a name being created, and a create never replaces an
@@ -2385,9 +2388,9 @@ impl SyscallNumber {
     ///
     /// Refusals that are about the operation rather than the caller:
     /// [`crate::Errno::IsADirectory`] for a directory (the tree must stay a
-    /// tree), [`crate::Errno::CrossVolume`] when the two paths do not resolve
-    /// under one mounted volume (a second directory entry for one inode
-    /// cannot span two backings), [`crate::Errno::TooManyLinks`] when the
+    /// tree), [`crate::Errno::CrossVolume`] when the two names do not resolve
+    /// through one projection (a second directory entry for one inode cannot
+    /// span two backings), [`crate::Errno::TooManyLinks`] when the
     /// format's per-inode name count would overflow, and
     /// [`crate::Errno::NotSupported`] on a format with no such object.
     ///
@@ -2395,14 +2398,16 @@ impl SyscallNumber {
     /// changes what a later resolution reaches.
     pub const FS_LINK: Self = Self(115);
 
-    /// Canonicalise an absolute path: resolve every symbolic link and every
-    /// `..` and report the one path that names the result.
+    /// Canonicalise a path: resolve every symbolic link and every `..` and
+    /// report the one absolute path that names the result.
     ///
-    /// Arguments: `path: *const u8`, `path_len: usize` — the path to
-    /// canonicalise; `out: *mut u8`, `out_len: usize` — where the canonical
-    /// path is written; `mode: u32` — a [`crate::RealpathMode`] value
-    /// deciding how much of the path must exist. Returns the canonical
-    /// path's length in bytes, or `-errno`.
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize` — the
+    /// path to canonicalise, resolved as [`Self::FS_OPEN`] resolves a path, a
+    /// relative one from where `dirfd`'s directory stands now however it has
+    /// been renamed; `out: *mut u8`, `out_len: usize` — where the canonical
+    /// path is written; `mode: u32` — a [`crate::RealpathMode`] value deciding
+    /// how much of the path must exist. Returns the canonical path's length in
+    /// bytes, or `-errno`.
     ///
     /// This is the kernel's **one** canonicalisation, and the reason a tool
     /// must not write its own: `..` is applied to the nodes the walk really
@@ -2503,8 +2508,10 @@ impl SyscallNumber {
     /// closes, or when the process exits.
     ///
     /// Requires the same `CAP_FS_ACCESS` the descriptor's own open needed,
-    /// and re-authorises the file under the caller's identity: a shared lock
-    /// needs read access, an exclusive one write access.
+    /// and the descriptor's own access: a shared lock needs read access, an
+    /// exclusive one write access. The lock is on the node the descriptor is
+    /// bound to, so a rename moves nothing; a granted descriptor takes none
+    /// ([`Errno::NotSupported`]).
     ///
     /// Returns `0`, or `-errno`: [`Errno::WouldBlock`] for a
     /// [`crate::LockFlags::NONBLOCK`] request that would have waited,
@@ -2929,7 +2936,9 @@ impl SyscallNumber {
     /// filesystem descriptors points — and nothing more.
     ///
     /// Arguments: `fd` (a descriptor of the caller's own table naming a file
-    /// or folder), then a user pointer to and the length of the recipient's
+    /// or folder; what is told is the path it was opened as, which a later
+    /// rename can leave stale), then a user pointer to and the length of the
+    /// recipient's
     /// attested 16-byte [`crate::ProcId`]. Returns the minted handle, which
     /// the caller forwards in-band and only the recipient can present, to
     /// [`Self::FD_REDEEM_LOCATION`]; or `-errno`: [`Errno::NotFound`] for a
@@ -3030,6 +3039,40 @@ impl SyscallNumber {
     /// for a handle without write access, [`Errno::OutOfRange`] for a range
     /// whose end overflows. Audited.
     pub const FS_PUNCH: Self = Self(152);
+
+    /// Set the calling process's file mode creation mask, the `umask(2)`
+    /// shape: the permission bits every later create of the process
+    /// withholds from the mode it asks for.
+    ///
+    /// Argument: `mask: u32` — the new mask, at most [`crate::FS_UMASK_BITS`],
+    /// or [`crate::FS_UMASK_QUERY`] to read the mask without changing it; any
+    /// other value is [`Errno::OutOfRange`]. Returns the mask held before. A
+    /// process starts with its spawner's mask, and PID 1 with `0o022`. A
+    /// process's mask decides only what its own creates are born with, so no
+    /// capability gates it and it is not audited.
+    pub const FS_UMASK: Self = Self(153);
+
+    /// Ask whether the caller may read, write or run a node, the
+    /// `faccessat(2)` shape, without opening it.
+    ///
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize`, resolved
+    /// as [`Self::FS_OPEN`] resolves them, `want: u32` ([`crate::Access`]:
+    /// POSIX's `R_OK`, `W_OK` and `X_OK` values; `0` asks only that the node
+    /// exists, and any other bit is [`Errno::OutOfRange`]), and `flags: u32`
+    /// ([`crate::AtFlags`]). Returns `0` when every asked access would be
+    /// granted, or the `-errno` the first refused one would meet.
+    ///
+    /// The answer is the caller's own: the node's mode, ACL and capability
+    /// gate under its attested identity, then the projection's flags — `WRITE`
+    /// through a read-only projection is [`Errno::ReadOnly`], and `EXEC` of a
+    /// regular file through a `noexec` one [`Errno::PermissionDenied`].
+    /// [`crate::AtFlags::NO_FOLLOW`] asks about a final link itself, and
+    /// [`crate::AtFlags::EMPTY_PATH`] with an empty path about the node
+    /// `dirfd` holds, under the authority that descriptor's own operations run
+    /// as. The answer describes a moment, not a promise: the operation it
+    /// leads to is checked again. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`]; a pure query, not audited.
+    pub const FS_ACCESS: Self = Self(154);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -3330,6 +3373,8 @@ mod tests {
         assert_eq!(SyscallNumber::SHARE_MAP.as_u16(), 150);
         assert_eq!(SyscallNumber::FS_SEEK_REGION.as_u16(), 151);
         assert_eq!(SyscallNumber::FS_PUNCH.as_u16(), 152);
+        assert_eq!(SyscallNumber::FS_UMASK.as_u16(), 153);
+        assert_eq!(SyscallNumber::FS_ACCESS.as_u16(), 154);
     }
 
     #[test]

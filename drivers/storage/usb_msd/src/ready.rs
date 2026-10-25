@@ -14,9 +14,9 @@ use crate::scsi::Sense;
 /// How long a unit that is coming ready is left before it is tested again.
 pub const READY_POLL_NS: u64 = 1_000_000_000;
 
-/// How often a unit with no medium is tested for one being inserted: the
-/// interval Linux polls removable media at, short enough that a card shows up
-/// promptly, long enough that an empty slot costs one command in two seconds.
+/// How often a unit with no medium is tested for one being inserted: short
+/// enough that a card shows up promptly, long enough that an empty slot costs
+/// one command in two seconds.
 pub const MEDIA_POLL_NS: u64 = 2_000_000_000;
 
 /// Sense key RECOVERED ERROR.

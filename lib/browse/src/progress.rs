@@ -1,8 +1,7 @@
 //! The progress + cancel model for a long file operation
 //! (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //!
-//! A recursive delete ([`DeleteWalk`](crate::DeleteWalk)) or copy
-//! ([`CopyWalk`](crate::CopyWalk)) can touch many nodes, so the file manager
+//! A recursive delete or copy can touch many nodes, so the file manager
 //! carries it out on a worker, showing its progress in a window of its own and
 //! honouring a cancel between units. This module is that window's state: what
 //! the operation is and where it goes, what is done of what whole, the item in
@@ -30,9 +29,9 @@ use crate::format::format_size;
 /// Which long file operation a [`ProgressModel`] reports.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProgressOp {
-    /// A recursive removal (driven by [`DeleteWalk`](crate::DeleteWalk)).
+    /// A recursive removal.
     Delete,
-    /// A recursive copy (driven by [`CopyWalk`](crate::CopyWalk)).
+    /// A recursive copy.
     Copy,
     /// A move: a rename on one volume, or a copy then a removal of the source
     /// across two.

@@ -13,6 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_util::count::{parse_decimal, parse_suffixed};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
 use crate::error::HeadError;
 
@@ -76,25 +77,52 @@ pub enum Command {
 /// The default line count when no `-n`/`-c` is given, as in the GNU tool.
 const DEFAULT_LINES: u64 = 10;
 
+/// What each of `head`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Bytes,
+    Lines,
+    Quiet,
+    Verbose,
+    Zero,
+    Help,
+}
+
+/// `head`'s options, as GNU's `head` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('c', &["bytes"], Flag::Bytes),
+    Opt::valued('n', &["lines"], Flag::Lines),
+    Opt::flag('q', &["quiet", "silent"], Flag::Quiet),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('z', &["zero-terminated"], Flag::Zero),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// Options and operands may be interleaved (the GNU permutation); `--` ends
-/// option parsing; a lone `-` is the standard-input operand. The obsolete
-/// `-COUNT[bkm][lqvz]` form is honoured only as the first argument, exactly
-/// as in the GNU tool; a digit in any later option cluster is the GNU
-/// "invalid trailing option" diagnostic.
+/// The obsolete `-COUNT[bkm][lqvz]` form is honoured only as the first
+/// argument, exactly as in the GNU tool; the rest is read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// clustered, a long one by any unambiguous prefix, `--` ending them, and a
+/// lone `-` the standard-input operand. The help switches (`-h`, `-?`,
+/// `--help`) answer at once, and the last `-c`/`-n` wins.
 ///
 /// # Errors
 ///
-/// The [`HeadError`] usage variants, mirroring the GNU diagnostics.
+/// * [`HeadError::Option`] — an option `getopt` refuses, in its words.
+/// * [`HeadError::InvalidTrailing`] — a letter the obsolete form does not
+///   take, or a digit in a later option cluster, as GNU diagnoses both.
+/// * [`HeadError::InvalidLines`] / [`HeadError::InvalidBytes`] — a count that
+///   is not one.
 pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
     let mut count: Option<Count> = None;
     let mut elide = false;
     let mut zero = false;
     let mut headers = HeaderMode::MultipleFiles;
     let mut sources: Vec<Source> = Vec::new();
-    let mut options_done = false;
 
     let mut rest = args;
     if let Some(first) = args.first() {
@@ -104,62 +132,19 @@ pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
         }
     }
 
-    let mut index = 0;
-    while index < rest.len() {
-        let arg = rest[index];
-        if options_done || arg == "-" || !arg.starts_with('-') {
-            sources.push(if arg == "-" {
-                Source::Stdin
-            } else {
-                Source::Path(String::from(arg))
-            });
-        } else {
-            match arg {
-                "--" => options_done = true,
-                "-h" | "-?" | "--help" => return Ok(Command::Help),
-                "--quiet" | "--silent" => headers = HeaderMode::Never,
-                "--verbose" => headers = HeaderMode::Always,
-                "--zero-terminated" => zero = true,
-                "--bytes" | "--lines" => {
-                    let lines = arg == "--lines";
-                    index += 1;
-                    let Some(&value) = rest.get(index) else {
-                        return Err(HeadError::MissingValue(if lines {
-                            "--lines"
-                        } else {
-                            "--bytes"
-                        }));
-                    };
-                    count = Some(parse_value(value, lines, &mut elide)?);
-                }
-                _ if arg.starts_with("--bytes=") => {
-                    let value = &arg["--bytes=".len()..];
-                    count = Some(parse_value(value, false, &mut elide)?);
-                }
-                _ if arg.starts_with("--lines=") => {
-                    let value = &arg["--lines=".len()..];
-                    count = Some(parse_value(value, true, &mut elide)?);
-                }
-                _ if arg.starts_with("--") => {
-                    return Err(HeadError::UnknownLong(String::from(arg)))
-                }
-                _ => {
-                    let help = parse_cluster(
-                        arg,
-                        rest,
-                        &mut index,
-                        &mut count,
-                        &mut elide,
-                        &mut zero,
-                        &mut headers,
-                    )?;
-                    if help {
-                        return Ok(Command::Help);
-                    }
-                }
+    for arg in Scan::new(OPTIONS, rest, Order::Permute) {
+        match arg.map_err(option_error)? {
+            Arg::Operand("-") => sources.push(Source::Stdin),
+            Arg::Operand(path) => sources.push(Source::Path(String::from(path))),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Quiet, _) => headers = HeaderMode::Never,
+            Arg::Opt(Flag::Verbose, _) => headers = HeaderMode::Always,
+            Arg::Opt(Flag::Zero, _) => zero = true,
+            Arg::Opt(flag @ (Flag::Bytes | Flag::Lines), value) => {
+                let text = value.unwrap_or_default();
+                count = Some(parse_value(text, flag == Flag::Lines, &mut elide)?);
             }
         }
-        index += 1;
     }
 
     if sources.is_empty() {
@@ -174,47 +159,13 @@ pub fn parse(args: &[&str]) -> Result<Command, HeadError> {
     }))
 }
 
-/// Parse one short-option cluster (`-qn3`, `-vz`, …): `q`/`v`/`z` are
-/// flags, `-c`/`-n` consume the rest of the token (or the next argument,
-/// advancing `index`) as their value, and `?` is the reserved short-help
-/// switch. Returns `Ok(true)` when the cluster asks for help.
-fn parse_cluster(
-    arg: &str,
-    rest: &[&str],
-    index: &mut usize,
-    count: &mut Option<Count>,
-    elide: &mut bool,
-    zero: &mut bool,
-    headers: &mut HeaderMode,
-) -> Result<bool, HeadError> {
-    for (offset, flag) in arg[1..].char_indices() {
-        match flag {
-            'q' => *headers = HeaderMode::Never,
-            'v' => *headers = HeaderMode::Always,
-            'z' => *zero = true,
-            'c' | 'n' => {
-                let lines = flag == 'n';
-                let tail = &arg[1 + offset + flag.len_utf8()..];
-                let value = if tail.is_empty() {
-                    *index += 1;
-                    match rest.get(*index) {
-                        Some(&value) => value,
-                        None => {
-                            return Err(HeadError::MissingValue(if lines { "-n" } else { "-c" }))
-                        }
-                    }
-                } else {
-                    tail
-                };
-                *count = Some(parse_value(value, lines, elide)?);
-                return Ok(false);
-            }
-            '?' => return Ok(true),
-            _ if flag.is_ascii_digit() => return Err(HeadError::InvalidTrailing(flag)),
-            _ => return Err(HeadError::UnknownShort(flag)),
-        }
+/// The error `refusal` stands for: a digit in a later cluster is GNU's
+/// obsolete count out of place, its "invalid trailing option".
+fn option_error(refusal: Refusal) -> HeadError {
+    match refusal {
+        Refusal::UnknownShort(digit) if digit.is_ascii_digit() => HeadError::InvalidTrailing(digit),
+        refusal => HeadError::Option(refusal),
     }
-    Ok(false)
 }
 
 /// Parse the obsolete `-COUNT[bkm][lqvz]...` first argument, mutating the
@@ -311,7 +262,7 @@ fn invalid(text: &str, lines: bool) -> HeadError {
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
 
     use super::{parse, Command, Count, HeaderMode, Job, Source};
@@ -616,19 +567,43 @@ mod tests {
         assert_eq!(parse(&["-q?"]), Ok(Command::Help));
     }
 
-    #[test]
-    fn unknown_options_are_usage_errors() {
-        assert_eq!(
-            parse(&["--frob"]),
-            Err(HeadError::UnknownLong(String::from("--frob")))
-        );
-        assert_eq!(parse(&["-x"]), Err(HeadError::UnknownShort('x')));
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn missing_values_are_diagnosed() {
-        assert_eq!(parse(&["-n"]), Err(HeadError::MissingValue("-n")));
-        assert_eq!(parse(&["--bytes"]), Err(HeadError::MissingValue("--bytes")));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-qx"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-n"]), "option requires an argument -- 'n'");
+        assert_eq!(
+            refused(&["--bytes"]),
+            "option '--bytes' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--verbose=x"]),
+            "option '--verbose' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `head --verb --li 3 --z f` as
+    /// `head --verbose --lines 3 --zero-terminated f`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--verb", "--li", "3", "--z", "f"]),
+            Ok(job(
+                Count::Lines(3),
+                false,
+                true,
+                HeaderMode::Always,
+                &[path("f")]
+            ))
+        );
+        assert_eq!(parse(&["--si"]), parse(&["--quiet"]));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

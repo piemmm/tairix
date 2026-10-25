@@ -298,6 +298,8 @@ fn walk<F: FilesystemRead + FilesystemSecurity>(fs: &mut F) {
         if visits > 256 {
             break;
         }
+        // A fuzzed `..` may name any inode, or none.
+        let _ = fs.parent(dir);
         let mut entries = Vec::new();
         let _ = fs.read_dir(dir, 0, &[], &mut |entry, name| {
             if entries.len() >= 2048 {
@@ -326,32 +328,71 @@ fn walk<F: FilesystemRead + FilesystemSecurity>(fs: &mut F) {
 }
 
 /// What a writable mount is put through: a create, a write that grows a file,
-/// a directory made and listed, a rename, a mode change, a truncate and the
-/// removals — every refusal an answer, not a fault.
+/// a directory made and listed, a rename, a mode change, a truncate, the
+/// removals and a file held across its unlink — every refusal an answer, not a
+/// fault.
 fn write_through(fs: &mut Ext4<CowBlock>) {
     let root = fs.root();
-    let _ = fs.create(root, b"fz", NodeKind::RegularFile);
-    let _ = fs.write_at(root, b"fz", 0, &[0x5A; 6000]);
-    let _ = fs.create(root, b"fzdir", NodeKind::Directory);
+    let _ = fs.create(
+        root,
+        b"fz",
+        NodeKind::RegularFile,
+        &NodeSecurity::new(0o644, 0, 0),
+    );
+    if let Ok(file) = fs.lookup(root, b"fz") {
+        let _ = fs.write_at(file, 0, &[0x5A; 6000]);
+    }
+    let _ = fs.create(
+        root,
+        b"fzdir",
+        NodeKind::Directory,
+        &NodeSecurity::new(0o755, 0, 0),
+    );
     if let Ok(dir) = fs.lookup(root, b"fzdir") {
-        let _ = fs.create(dir, b"inner", NodeKind::RegularFile);
+        let _ = fs.create(
+            dir,
+            b"inner",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        );
         let _ = fs.rename(dir, b"inner", root, b"moved");
         let _ = fs.remove(root, b"fzdir");
     }
     if let Ok(file) = fs.lookup(root, b"fz") {
         let _ = fs.set_security(file, NodeSecurity::new(0o600, 0, 0));
+        let _ = fs.truncate(file, 100);
     }
-    let _ = fs.truncate(root, b"fz", 100);
     let _ = fs.remove(root, b"fz");
     let _ = fs.remove(root, b"moved");
-    let _ = fs.write_at(
-        root,
-        b"fragA",
-        FRAGMENT_WRITES * FRAGMENT_BYTES,
-        &[0x3C; 3000],
-    );
+    if let Ok(file) = fs.lookup(root, b"fragA") {
+        let _ = fs.write_at(file, FRAGMENT_WRITES * FRAGMENT_BYTES, &[0x3C; 3000]);
+    }
+    hold_across_unlink(fs);
+    // An id no entry names, bounded only by the image's own inode geometry.
+    let forged = NodeId::from_raw(u64::from(u32::MAX));
+    let _ = fs.write_at(forged, 0, b"x");
+    let _ = fs.parent(forged);
     let _ = fs.stats();
     let _ = fs.flush();
+}
+
+/// The pin path: a file born with a record, held, written whole and read back,
+/// unlinked while held — joining the orphan chain — and released.
+fn hold_across_unlink(fs: &mut Ext4<CowBlock>) {
+    let root = fs.root();
+    let record = NodeSecurity::new(0o600, 7, 7);
+    let Ok(file) = fs.create(root, b"pinned", NodeKind::RegularFile, &record) else {
+        return;
+    };
+    let Ok(pinned) = fs.pin(file) else {
+        return;
+    };
+    let _ = fs.write_all(pinned, 0, b"held across its unlink");
+    let mut back = [0u8; 32];
+    let _ = fs.read_at(pinned, 0, &mut back);
+    let _ = fs.remove(root, b"pinned");
+    let _ = fs.read_at(pinned, 0, &mut back);
+    let _ = fs.unpin(pinned);
 }
 
 /// One shaped input: coordinated values in a superblock or an extent header.
@@ -517,32 +558,53 @@ fn formatted() -> Base {
     };
     let mut fs = Ext4::format(block.clone(), 64, [0x3C; 16]).expect("format the fuzz volume");
     let root = fs.root();
-    fs.create(root, b"Sub", NodeKind::Directory)
-        .expect("create a directory");
+    fs.create(
+        root,
+        b"Sub",
+        NodeKind::Directory,
+        &NodeSecurity::new(0o755, 0, 0),
+    )
+    .expect("create a directory");
     let sub: NodeId = fs.lookup(root, b"Sub").expect("the directory resolves");
     for (dir, name, len) in [
         (root, &b"one"[..], 700),
         (root, b"two", 40_000),
         (sub, b"three", 1),
     ] {
-        fs.create(dir, name, NodeKind::RegularFile)
+        let file = fs
+            .create(
+                dir,
+                name,
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )
             .expect("create a file");
-        fs.write_at(dir, name, 0, &vec![0xA5; len]).expect("write");
+        fs.write_at(file, 0, &vec![0xA5; len]).expect("write");
     }
     for i in 0..40u8 {
         let name = [b'n', b'0' + i / 10, b'0' + i % 10];
-        fs.create(sub, &name, NodeKind::RegularFile)
-            .expect("fill the directory");
+        fs.create(
+            sub,
+            &name,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
+        .expect("fill the directory");
     }
     // Two files grown in turn, so neither run continues the last and each
     // maps more extents than the inode holds.
-    for name in [&b"fragA"[..], b"fragB"] {
-        fs.create(root, name, NodeKind::RegularFile)
-            .expect("create a fragmented file");
-    }
+    let fragmented = [&b"fragA"[..], b"fragB"].map(|name| {
+        fs.create(
+            root,
+            name,
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
+        .expect("create a fragmented file")
+    });
     for i in 0..FRAGMENT_WRITES {
-        for name in [&b"fragA"[..], b"fragB"] {
-            fs.write_at(root, name, i * FRAGMENT_BYTES, &[0xC3; 4096])
+        for file in fragmented {
+            fs.write_at(file, i * FRAGMENT_BYTES, &[0xC3; 4096])
                 .expect("grow a fragmented file");
         }
     }

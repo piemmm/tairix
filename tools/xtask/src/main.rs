@@ -62,6 +62,8 @@
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation
 //!   outside the architecture ports and build glue
+//! - `board-check` — rejects a board, `SoC` or board part named in
+//!   generic code
 //! - `event-ids` — every crate's event ids from its range in
 //!   `tairix_log::registry`, and no id defined by two crates
 //! - `driver-exits` — no crate built on the driver runtime declares an exit
@@ -105,7 +107,7 @@
 //!   produces a number
 //! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
 //!   so a failing PR fails fast: `fmt --check`, then the concurrent
-//!   static-gate group (`deps-check`, `cfg-check`, `event-ids`, `driver-exits`, `help-lint`,
+//!   static-gate group (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `help-lint`,
 //!   `spec-review`, `charter-cite`, `source-text`, `supply-chain`, `abi-check`,
 //!   `c-header`, `font-atlas`, `devids`, `model-check` —
 //!   all read-only, non-compiling checks run at once so their costs overlap),

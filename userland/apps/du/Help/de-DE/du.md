@@ -27,12 +27,22 @@ Ein unlesbarer Pfad wird auf der Standardfehlerausgabe gemeldet, und
 der Lauf fährt mit dem Rest fort; ein unlesbares Verzeichnis trägt
 nichts bei statt einer geratenen Teilsumme.
 
-Eine über mehr als einen Namen erreichbare Datei wird **einmal**
-gezählt, ihr Speicher also nicht doppelt gemeldet; `-l` zählt
-stattdessen jeden Namen. `-x` (ein Dateisystem)
-ist noch nicht verfügbar; die Umgebungsvariablen der
-`DU_BLOCK_SIZE`-Familie werden nicht gelesen — die Skala wird allein
+Eine symbolische Verknüpfung wird als solche gezählt, sofern nicht `-H`
+oder `-L` vorgibt, ihr zu folgen. Alles, was ein zweites Mal angetroffen
+wird — ein weiterer Name einer bereits gezählten Datei, ein wiederholter
+oder in einem anderen liegender Operand, ein Verzeichnis, das `-L`
+zweimal erreicht —, wird ohne eigene Zeile ausgelassen, sein Speicher
+also nicht doppelt gemeldet; `-l` zählt stattdessen jedes Antreffen.
+`-x` (ein Dateisystem) ist noch nicht verfügbar; die Umgebungsvariablen
+der `DU_BLOCK_SIZE`-Familie werden nicht gelesen — die Skala wird allein
 durch Optionen gewählt.
+
+Am Terminal wird jeder Name, den die Ausgabe zeigt, angeführt, wo eine
+Shell es verlangen würde, und jedes Steuer- oder sonstige unsichtbare
+Zeichen darin als Escape-Sequenz geschrieben, sodass ein Name den
+Bildschirm weder steuern noch umordnen kann; GNU zeigt ihn unverändert.
+Eine Pipe, eine Datei oder eine `-0`-Ausgabe erhält den Namen Byte für
+Byte.
 
 ## OPTIONS
 
@@ -47,6 +57,11 @@ durch Optionen gewählt.
   seine Unterverzeichnisse aus.
 - `-l, --count-links` — eine Datei mit mehreren Namen einmal pro Name
   zählen statt einmal.
+- `-L, --dereference` — jeder symbolischen Verknüpfung folgen.
+- `-H, -D, --dereference-args` — nur den als Operanden genannten
+  symbolischen Verknüpfungen folgen.
+- `-P, --no-dereference` — keiner symbolischen Verknüpfung folgen (die
+  Voreinstellung).
 - `--apparent-size` — scheinbare Bytelängen messen, nicht belegten
   Speicher.
 - `-b, --bytes` — scheinbare Größe in einzelnen Bytes
@@ -76,8 +91,8 @@ durch Optionen gewählt.
 - `0` — jeder Operand wurde durchlaufen (oder die Kurzhilfe wurde
   ausgegeben).
 - `1` — ein Pfad konnte nicht gelesen oder die Ausgabe nicht
-  zugestellt werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  zugestellt werden. Eine nicht verstandene Befehlszeile endet ebenfalls
+  mit `1`.
 
 ## ENVIRONMENT
 

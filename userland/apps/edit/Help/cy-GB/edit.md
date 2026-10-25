@@ -76,8 +76,7 @@ unrhyw awdurdod arbennig.
   cymorth byr.
 - `1` — ni ellid llwytho'r ffeil a enwyd (nid testun, rhy fawr, neu
   wedi'i gwrthod), neu methodd y derfynell; argraffir y rheswm ar y
-  gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  gwall safonol. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

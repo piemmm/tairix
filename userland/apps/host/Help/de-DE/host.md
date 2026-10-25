@@ -49,9 +49,10 @@ Zeitüberschreitung auf der Standardfehlerausgabe.
 - `0` — mindestens eine Adresse wurde gefunden (oder die Kurzhilfe wurde
   geschrieben).
 - `1` — der Name löste keine Adresse auf (negative Antwort,
-  Zeitüberschreitung oder Resolver-Fehler).
-- `2` — die Befehlszeile wurde nicht verstanden, oder die Ausgabe konnte
-  nicht geschrieben werden.
+  Zeitüberschreitung oder Resolver-Fehler). Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
+- `2` — es ließ sich kein DNS-Socket öffnen, oder die Ausgabe konnte nicht
+  geschrieben werden.
 
 ## ENVIRONMENT
 

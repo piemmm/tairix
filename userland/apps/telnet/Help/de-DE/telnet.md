@@ -87,8 +87,7 @@ historische Werkzeug tut.
   kurze Hilfe wurde geschrieben.
 - `1` — die Sitzung war nicht möglich: der Rechner wurde nicht aufgelöst, der
   Socket wurde abgelehnt, oder das Terminal ließ sich nicht in den Rohmodus
-  schalten.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  schalten. Eine nicht verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

@@ -19,6 +19,7 @@ use tairix_vt::{Attributes, Cell, Color};
 use crate::buffer::Buffer;
 use crate::error::{CursesError, Result};
 use crate::geom::{Pos, Size};
+use tairix_visible::shown_char;
 use tairix_vt::{char_width, CONTINUATION};
 
 /// The Unicode box-drawing glyphs a default [`Window::draw_box`] uses.
@@ -63,16 +64,6 @@ pub struct Window {
     scroll_top: u16,
     scroll_bottom: u16,
     scrolling: bool,
-}
-
-/// `ch` as a cell shows it: a control character is no glyph, and a NUL would
-/// pass for the [`CONTINUATION`] half of a wide one, so either shows U+FFFD.
-fn glyph(ch: char) -> char {
-    if ch.is_control() {
-        char::REPLACEMENT_CHARACTER
-    } else {
-        ch
-    }
 }
 
 impl Window {
@@ -173,14 +164,17 @@ impl Window {
         Ok(())
     }
 
-    /// Write `cell` at `pos` without moving the cursor, a control character
-    /// in it as U+FFFD.
+    /// Write `cell` at `pos` without moving the cursor, a hidden character in
+    /// it as U+FFFD.
     ///
     /// # Errors
     ///
     /// [`CursesError::OutOfBounds`] if `pos` lies outside the window.
     pub fn put_cell(&mut self, pos: Pos, cell: Cell) -> Result<()> {
-        if self.buf.set(pos, Cell::styled(glyph(cell.ch), cell.attrs)) {
+        if self
+            .buf
+            .set(pos, Cell::styled(shown_char(cell.ch), cell.attrs))
+        {
             Ok(())
         } else {
             Err(CursesError::OutOfBounds)
@@ -193,9 +187,11 @@ impl Window {
     /// A double-width glyph (see [`char_width`]) occupies two cells: it is
     /// written into the cursor cell and the cell to its right is set to the
     /// [`CONTINUATION`] marker. If only one column remains on the line the
-    /// glyph wraps to the next line whole rather than being split. A control
-    /// character is written as U+FFFD, as every cell this window writes is.
+    /// glyph wraps to the next line whole rather than being split. A hidden
+    /// character is written as one U+FFFD, as every cell this window writes
+    /// is, however wide the width table calls it.
     pub fn add_char(&mut self, ch: char) {
+        let ch = shown_char(ch);
         if char_width(ch) == 2 {
             self.add_wide_char(ch);
         } else {
@@ -357,7 +353,7 @@ impl Window {
 
     /// `ch` in the current attributes, as a cell holds it.
     fn styled(&self, ch: char) -> Cell {
-        Cell::styled(glyph(ch), self.attrs)
+        Cell::styled(shown_char(ch), self.attrs)
     }
 
     /// A blank cell carrying only the current background colour (so an erase

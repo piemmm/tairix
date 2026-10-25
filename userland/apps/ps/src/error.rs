@@ -3,6 +3,7 @@
 use core::fmt;
 use tairix_abi::Errno;
 use tairix_procinfo::{CallError, ListError};
+use tairix_util::getopt::Refusal;
 
 /// Why a `ps` invocation did not complete.
 ///
@@ -10,10 +11,11 @@ use tairix_procinfo::{CallError, ListError};
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PsError {
-    /// The command line carried an unrecognised option. The caller should
-    /// print [`crate::USAGE`].
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// The command line carried an operand; `ps` takes none.
     Usage,
     /// The service refused the query because the caller lacks the
     /// capability the query declares. Distinguished
@@ -48,6 +50,7 @@ impl From<ListError> for PsError {
 impl fmt::Display for PsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::PermissionDenied => f.write_str(
                 "permission denied: listing every process requires a capability you do not hold",

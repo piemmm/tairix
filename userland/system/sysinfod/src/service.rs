@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::audio::{AudioDeviceDescriptor, ControlAccess, StreamDescriptor};
 use tairix_abi::display_ipc::DisplayStats;
-use tairix_abi::hwtree::{HwNode, HwTreeHeader};
+use tairix_abi::hwtree::{snapshot_nodes, HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetNeighborRecord, NetRouteRecord,
@@ -466,6 +466,21 @@ fn resource_limits(
     Ok(written)
 }
 
+/// The board's `compatible` strings in `tree`, a `hw_tree_read` snapshot: its
+/// root node's keys.
+///
+/// # Errors
+///
+/// [`Errno::BadMagic`] for a snapshot whose header disagrees with its body,
+/// or [`Errno::NotFound`] for one with no root.
+pub fn root_platform(tree: &[u8]) -> Result<PlatformCompatible, Errno> {
+    snapshot_nodes(tree)
+        .ok_or(Errno::BadMagic)?
+        .find(HwNode::is_root)
+        .map(|root| PlatformCompatible::of(&root))
+        .ok_or(Errno::NotFound)
+}
+
 /// Decode the [`PageRequest`], validate the snapshot the source returned,
 /// and pack the snapshot's [`HwTreeHeader`] plus the selected window of
 /// whole [`HwNode`] records into `response`.
@@ -476,29 +491,6 @@ fn resource_limits(
 /// blob is validated before a byte is served: a snapshot whose header and
 /// body disagree fails closed with [`Errno::BadMagic`] rather than paging
 /// bytes a client would mis-frame.
-/// The board's `compatible` strings in `tree`, a `hw_tree_read` snapshot: its
-/// root node's keys.
-///
-/// # Errors
-///
-/// [`Errno::BadMagic`] for a snapshot whose header disagrees with its body,
-/// or [`Errno::NotFound`] for one with no root.
-pub fn root_platform(tree: &[u8]) -> Result<PlatformCompatible, Errno> {
-    HwTreeHeader::from_bytes(tree)?;
-    let body = tree.get(HwTreeHeader::WIRE_LEN..).ok_or(Errno::BadMagic)?;
-    let (nodes, trailing) = body.as_chunks::<{ HwNode::WIRE_LEN }>();
-    if !trailing.is_empty() {
-        return Err(Errno::BadMagic);
-    }
-    for record in nodes {
-        let node = HwNode::from_bytes(record)?;
-        if node.is_root() {
-            return Ok(PlatformCompatible::of(&node));
-        }
-    }
-    Err(Errno::NotFound)
-}
-
 fn hardware_tree(
     source: &dyn SysinfoSource,
     caller: &Caller,
@@ -507,18 +499,12 @@ fn hardware_tree(
 ) -> Result<usize, Errno> {
     let request = whole(payload, PageRequest::WIRE_LEN, PageRequest::from_bytes)?;
     let blob = source.hardware_tree(caller)?;
-    let header = HwTreeHeader::from_bytes(&blob)?;
-    let count = usize::try_from(header.node_count()).map_err(|_| Errno::LengthOutOfRange)?;
-    let body = blob.get(HwTreeHeader::WIRE_LEN..).ok_or(Errno::BadMagic)?;
-    let (nodes, trailing) = body.as_chunks::<{ HwNode::WIRE_LEN }>();
-    if nodes.len() != count || !trailing.is_empty() {
-        return Err(Errno::BadMagic);
-    }
+    let snapshot = snapshot_nodes(&blob).ok_or(Errno::BadMagic)?;
     let (head, rest) = response
         .split_at_mut_checked(HwTreeHeader::WIRE_LEN)
         .ok_or(Errno::BufferTooSmall)?;
-    let written = page(request, nodes, rest, |node| *node)?;
-    head.copy_from_slice(&header.to_le_bytes());
+    let written = page(request, snapshot.records(), rest, |node| *node)?;
+    head.copy_from_slice(&snapshot.header().to_le_bytes());
     Ok(HwTreeHeader::WIRE_LEN + written)
 }
 
@@ -1252,9 +1238,9 @@ mod tests {
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<UserDirectoryRecord>, Errno> {
             Ok(alloc::vec![
-                UserDirectoryRecord::new(0, b"root").unwrap(),
-                UserDirectoryRecord::new(1000, b"alice").unwrap(),
-                UserDirectoryRecord::new(1001, b"bob").unwrap(),
+                UserDirectoryRecord::new(0, 0, b"root").unwrap(),
+                UserDirectoryRecord::new(1000, 1000, b"alice").unwrap(),
+                UserDirectoryRecord::new(1001, 1001, b"bob").unwrap(),
             ])
         }
         fn group_directory(
@@ -1705,7 +1691,7 @@ mod tests {
                     4096,
                 ),
                 ResourceLimitRecord::new(
-                    LimitKind::OpenStreams,
+                    LimitKind::OpenFiles,
                     ResourceLimit::new(4, 8).unwrap(),
                     3,
                 ),
@@ -2160,7 +2146,7 @@ mod tests {
         let mut source = FixtureSource::new();
         let mut nodes = tree_nodes();
         nodes[0]
-            .push_match_key(HwMatchKey::compatible(b"raspberrypi,4-model-b").unwrap())
+            .push_match_key(HwMatchKey::compatible(b"vendor,board").unwrap())
             .unwrap();
         source.hwtree = tree_blob(3, &nodes);
         let caps = Caps(&[]);
@@ -2169,7 +2155,7 @@ mod tests {
         let mut resp = [0u8; 512];
         let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         let board = PlatformCompatible::decode(&resp[..n]).unwrap();
-        assert!(board.strings().eq([&b"raspberrypi,4-model-b"[..]]));
+        assert!(board.strings().eq([&b"vendor,board"[..]]));
         assert!(sink.events.borrow().as_slice().is_empty(), "not audited");
     }
 
@@ -2185,6 +2171,22 @@ mod tests {
             super::root_platform(&whole[..whole.len() - 1]),
             Err(Errno::BadMagic)
         );
+    }
+
+    /// A header promising other than the records its body holds names no
+    /// board, as the tree's one walk refuses it.
+    #[test]
+    fn a_tree_whose_header_miscounts_its_body_names_no_board() {
+        for promised in [2, 4] {
+            let mut blob = tree_blob(1, &tree_nodes());
+            blob[..HwTreeHeader::WIRE_LEN]
+                .copy_from_slice(&HwTreeHeader::new(1, promised).to_le_bytes());
+            assert_eq!(
+                super::root_platform(&blob),
+                Err(Errno::BadMagic),
+                "{promised}"
+            );
+        }
     }
 
     #[test]

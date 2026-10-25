@@ -20,8 +20,9 @@ use crate::trb::{self, CompletionCode, Trb, TrbType};
 
 /// How long a command may run once it heads the ring before it is aborted.
 /// A controller executes commands in order and none runs more than a few
-/// milliseconds, so this only catches a hung one; it is the bound Linux's
-/// `XHCI_CMD_DEFAULT_TIMEOUT` sets too.
+/// milliseconds, so this only catches a hung one. Command timeouts are the
+/// driver's to set (xHCI 1.2 §4.6); five seconds is the figure §4.6.1.2 gives
+/// for an abort.
 const COMMAND_BUDGET_NS: u64 = 5_000_000_000;
 
 /// How long an aborted ring has to report itself stopped (xHCI 1.2

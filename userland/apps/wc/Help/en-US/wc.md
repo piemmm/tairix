@@ -32,6 +32,13 @@ operands.
 An input that cannot be read is reported on standard error and the run
 continues with the next input.
 
+On a terminal, each name the output shows is quoted where a shell would
+need it, and any control or other invisible character in it is written
+as an escape, so a name cannot command or rearrange the screen; GNU
+shows it unchanged. A pipe or a file receives the name byte for byte. A
+name holding a line break is quoted in a pipe too, as GNU `wc` does, so
+each count stays on one line.
+
 ## OPTIONS
 
 - `-c, --bytes` — print the byte count.
@@ -60,8 +67,7 @@ continues with the next input.
 
 - `0` — every input was counted (or the short help was written).
 - `1` — an input could not be read, or the output could not be
-  delivered.
-- `2` — the command line was not understood.
+  delivered. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

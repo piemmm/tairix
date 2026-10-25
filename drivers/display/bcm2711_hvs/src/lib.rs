@@ -1,5 +1,5 @@
-//! Raspberry Pi 4 display engine (`brcm,bcm2711-hvs`), driven natively as
-//! Linux's full-KMS `vc4` drives it (`plans/SOUND.md` `SND19m`).
+//! Raspberry Pi 4 display engine (`brcm,bcm2711-hvs`), driven natively rather
+//! than through the firmware (`plans/SOUND.md` `SND19m`).
 //!
 //! The firmware lights the screen at boot; the engine tells it the display is
 //! the ARM's now, brings down whatever pipe it left running in the order the
@@ -62,8 +62,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(BIND_PRIORITY, DISP
 
 /// The HDMI-feeding pixel valves, as the BCM2711 wires them: each a named
 /// window on the engine's node, reading its HVS output, feeding the encoder
-/// its node links to. Their FIFO depths and loads are Linux's
-/// `bcm2711_pv2_data` and `bcm2711_pv4_data`.
+/// its node links to.
 pub const VALVES: [ValveKind; 2] = [
     ValveKind {
         window: ENGINE_OUTPUTS[0].window,

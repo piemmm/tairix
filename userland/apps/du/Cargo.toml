@@ -35,6 +35,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one path-spelling grammar: `join` places a child inside a directory,
 # so this tool carries no second path parser.
 tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
+# The keyed set of nodes already counted: a hostile volume chooses the
+# identities, so they are hashed under the process key.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-?`/`--help`
 # switches use (plans/APPS.md).

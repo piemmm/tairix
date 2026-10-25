@@ -12,7 +12,7 @@
 //! via the `kernel_isa` conditional-compilation name, so the production
 //! kernel image is built for exactly one architecture at a time (the
 //! single selection point): the x86_64
-//! Multiboot2/ACPI pipeline or the aarch64 (Raspberry Pi 4) boot path.
+//! Multiboot2/ACPI pipeline or the aarch64 boot path.
 //!
 //! # Module map
 //!
@@ -23,8 +23,8 @@
 //! | `fatal_bridge` | The one panic/kernel-fault bridge into `kernel_core`'s fatal-report path.         |
 //! | `spawn_layout` | Shared user-space layout constants for every port's spawn seam/producer. |
 //! | `x86_64`        | The x86_64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer`, `ioapic_controller`, `msi`, `root_unlock`, `panic_ctx`, `serial_sink`. |
-//! | `aarch64`       | The aarch64 (Raspberry Pi 4) port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` P1). |
-//! | `riscv64`       | The riscv64 (QEMU `virt` / SiFive) port: `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` RV-P1). |
+//! | `aarch64`       | The aarch64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` P1). |
+//! | `riscv64`       | The riscv64 port: `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` RV-P1). |
 //! | `mem_map`       | aarch64 `/memory` → `BootMemoryMap` builder (host-tested; `plans/PI.md` P6c-1).    |
 //!
 //! # Why this is a library, not a `[[bin]]`
@@ -119,18 +119,9 @@ pub mod root_mount;
 // fail-closed rules are host-unit-tested.
 pub mod cpu_topology;
 
-// The in-kernel driver registry (`plans/PI.md` P10 5c / PLAN Stage 4.HW
-// item 5): the single source of truth pairing each in-kernel driver's
-// canonical `BIND_KEYS`, `/System/Drivers/` image path, build-signed
-// manifest image, and `register()` entry, and resolving a discovered
-// hardware node against them through the shared `lib/devmatch` policy — the
-// data-driven replacement for hand-sequenced bring-up. It carries each
-// driver's `register()` entry (a `tairix-drvhost` type) and `include!`s the
-// signed manifest images `build.rs` bakes, so it is gated on the two
-// instruction sets where `tairix-drvhost` is a dependency of this crate —
-// `x86_64` (the CI host, where its unit tests run) and `aarch64` (the
-// Raspberry Pi 4 boot path that consumes it to gate the live VL805 bring-up
-// on a match).
+// The bootstrap floor's registry, which `build.rs` generates from the floor
+// drivers' own manifests. It names `tairix-drvhost` types, so it compiles
+// where that crate is a dependency.
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod driver_catalog;
 
@@ -140,8 +131,8 @@ pub mod driver_catalog;
 // `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates), generic over hardware. Gated on
 // the three instruction sets where `tairix-drvhost` is a dependency of this
 // crate and the boot path drives autoload — `x86_64` (the CI host, where its
-// unit tests run), `aarch64` (the Raspberry Pi 4 boot path), and `riscv64`
-// (the QEMU `virt` / SiFive boot path, `plans/NETWORK.md` N4e-riscv64).
+// unit tests run), `aarch64` (its boot path), and `riscv64` (its boot path,
+// `plans/NETWORK.md` N4e-riscv64).
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod driver_loader;
 
@@ -153,8 +144,8 @@ pub mod driver_loader;
 // and the front half the production root mount (`root_mount`) builds on.
 // Resolution only — it never reads or mounts a volume — so it is
 // architecture-neutral and host-tested on the CI host; it is gated, like
-// `driver_catalog` it depends on, on the two instruction sets where that
-// registry compiles (`x86_64` and `aarch64`).
+// `driver_catalog` it depends on, on the instruction sets where that
+// registry compiles.
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod root_storage;
 
@@ -210,8 +201,14 @@ pub mod floor_dma;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod floor_irq;
 
-// The virtio-MMIO block slot the device-tree ports' floor disk is brought up
-// from, with each port supplying only what its silicon decides.
+// The host the kernel lends a floor driver over a device's own resources, and
+// the claim and line binding that come before it. Host-tested.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod floor_host;
+
+// The device-tree ports' floor bring-ups — a virtio-MMIO block slot, and a
+// device the kernel lends its driver a host for — with each port supplying
+// only what its silicon decides.
 #[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "riscv64")))]
 pub mod floor_mmio;
 
@@ -291,8 +288,7 @@ pub mod shared_block;
 // architecture-neutral and host-tested on the CI host; it is gated, like
 // the `root_storage` binding it consumes, on the two instruction sets
 // where that gate compiles. The live bring-up is further gated on
-// `freestanding` + `kernel_isa = "aarch64"` (the Raspberry Pi 4 / QEMU
-// `virt` boot path).
+// `freestanding` + `kernel_isa = "aarch64"` (its boot path).
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod unlock_service;
 
@@ -369,7 +365,7 @@ pub mod writeback_bound;
 pub mod block_cache;
 
 // The boot-time install of the read-only `/System` volume as the userland
-// `fs_*` filesystem mount (`PREREQUISITES.md` P-A): the type-erased
+// `fs_*` filesystem mount: the type-erased
 // `KernelFs` mount driver, the `LATE_FILESYSTEM` / `FS_SERVICE` statics the
 // dispatch hook serves the `fs_*` syscalls through, and `install_system_mount`
 // (a second, park-safe `'static` window onto the boot disk's `/System`
@@ -419,8 +415,8 @@ pub mod volume_policy;
 // `tairix_devmgr` (`DriverLoader`) and `tairix_drvhost`
 // (`scan_store`/`ImageSource`), so it is gated, like `system_files`, on the
 // two instruction sets where those crates are dependencies of this crate —
-// `x86_64` (the CI host, where its unit tests run) and `aarch64` (the
-// Raspberry Pi 4 boot path that drives it).
+// `x86_64` (the CI host, where its unit tests run) and `aarch64` (the boot
+// path that drives it).
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod driver_store_server;
 
@@ -433,8 +429,8 @@ pub mod driver_store_server;
 // copied into a `kernel/arch/<target>/` sibling. Gated, like its
 // driver-store dependencies, on the three instruction sets that drive it —
 // `x86_64` (the CI host, where its dependencies' unit tests run), `aarch64`
-// (the Raspberry Pi 4 boot path), and `riscv64` (the QEMU `virt` / SiFive
-// boot path, `plans/NETWORK.md` N4e-riscv64).
+// (its boot path), and `riscv64` (its boot path, `plans/NETWORK.md`
+// N4e-riscv64).
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod unlock_orchestrate;
 

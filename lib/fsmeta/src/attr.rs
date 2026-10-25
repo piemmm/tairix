@@ -10,6 +10,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_visible::is_hidden;
+
 use crate::key::AttrKey;
 use crate::{MetadataError, ATTRS_PER_INODE, TOTAL_ATTR_BYTES, VALUE_MAX};
 
@@ -296,20 +298,22 @@ impl AttrSet {
 ///
 /// A value is opaque bytes: it may be UTF-8 text, a packed foreign-metadata
 /// field, or anything a writer chose. Text here means valid UTF-8 with no
-/// control character, which is the only form that can be drawn as itself and
+/// character that would hide, reorder or break the text around it
+/// ([`is_hidden`]), which is the only form that can be drawn as itself and
 /// retyped unchanged — so an editor offering a value back for editing offers
 /// only what it could faithfully reproduce, and never silently rewrites bytes
 /// it could not.
 #[must_use]
 pub fn text_value(value: &[u8]) -> Option<&str> {
     match core::str::from_utf8(value) {
-        Ok(text) if !text.chars().any(char::is_control) => Some(text),
+        Ok(text) if !text.chars().any(is_hidden) => Some(text),
         _ => None,
     }
 }
 
-/// An attribute value's display form: [text](text_value) as it reads, and
-/// anything else escaped byte by byte as `\xNN`.
+/// An attribute value's display form: its text with each [`is_hidden`]
+/// character escaped byte by byte as `\xNN`, or, for bytes that are not UTF-8,
+/// each byte outside printable ASCII so.
 ///
 /// Values come from whoever wrote them, which on a mounted volume is not
 /// necessarily anybody trusted: control bytes reaching a terminal are escape
@@ -319,15 +323,28 @@ pub fn text_value(value: &[u8]) -> Option<&str> {
 pub fn display_value(value: &[u8]) -> alloc::string::String {
     use core::fmt::Write;
 
-    if let Some(text) = text_value(value) {
-        return alloc::string::String::from(text);
-    }
     let mut out = alloc::string::String::new();
-    for byte in value {
-        if (0x20..=0x7e).contains(byte) {
-            out.push(char::from(*byte));
-        } else {
-            let _ = write!(&mut out, "\\x{byte:02x}");
+    match core::str::from_utf8(value) {
+        Ok(text) => {
+            for ch in text.chars() {
+                if is_hidden(ch) {
+                    let mut utf8 = [0; 4];
+                    for byte in ch.encode_utf8(&mut utf8).bytes() {
+                        let _ = write!(&mut out, "\\x{byte:02x}");
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+        }
+        Err(_) => {
+            for &byte in value {
+                if (0x20..=0x7e).contains(&byte) {
+                    out.push(char::from(byte));
+                } else {
+                    let _ = write!(&mut out, "\\x{byte:02x}");
+                }
+            }
         }
     }
     out

@@ -30,8 +30,9 @@ shape and is the first consumer of the shared userland stub resolver,
 
 - `0` — at least one address was found (or the short help was written).
 - `1` — the name resolved to no address (a negative answer, a timeout, or a
-  resolver failure such as no configured server).
-- `2` — a usage error or an output failure.
+  resolver failure such as no configured server). A command line that was
+  not understood exits `1` too.
+- `2` — no DNS socket could be opened, or the output could not be written.
 
 ## How it resolves
 

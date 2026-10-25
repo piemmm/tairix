@@ -31,8 +31,8 @@ dumb baseline) gets only the input-discipline restore.
 ## EXIT STATUS
 
 - `0` — the terminal was restored.
-- `1` — the output could not be delivered.
-- `2` — the command line was not understood.
+- `1` — the output could not be delivered. A command line that was not
+  understood exits `1` too.
 
 ## ENVIRONMENT
 

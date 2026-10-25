@@ -19,46 +19,48 @@
 //! # What this crate is
 //!
 //! A **capability-gate-setting engine**, not a data source. For one parsed
-//! [`Command`] it asks the injected filesystem seam for each operand's kind,
-//! applies the new gate, and walks each directory `-R` must descend. The
-//! operations that touch the outside world are the injected seams:
+//! [`Command`] it opens each operand through its final link, sets the new
+//! gate through that descriptor, and walks each directory `-R` must descend.
+//! The operations that touch the outside world are the injected seams:
 //!
-//! * [`FileSystem`] — learn a path's kind, set its capability gate, and read a
-//!   directory's entries (for `-R`).
+//! * [`Roots`](tairix_fscopy::tree::Roots) — the shared tree seam: each
+//!   operand opened through its final link, each tree walked through the
+//!   directories the run holds open and never through a link.
+//! * [`Gates`] — set the gate of a node the run holds.
 //! * [`Output`] — write the usage banner to the terminal.
 //!
-//! The binary that ships as `setcap` wires the real syscall-backed filesystem
-//! and console output; tests wire in-memory fixtures. This is the seam
-//! discipline of the other userland crates (`cat`'s `FileSource`, `ls`'s
-//! `Listing`, `rm`'s `Removal`, `cp`'s and `mv`'s `FileSystem`, `chmod`'s and
-//! `chown`'s `FileSystem`), and it keeps every parsing, cap-spec, and
-//! recursion decision testable without a kernel.
+//! No binary ships it yet: the kernel has no call that sets a node's gate
+//! (plans/APPS.md §12.1), so the engine runs against `tairix_fscopy`'s
+//! in-memory tree in its tests, every parsing, cap-spec, and recursion
+//! decision testable without a kernel.
 //!
 //! # Fail closed
 //!
-//! An unknown option or a missing operand is a [`SetcapError::Usage`] that
-//! changes nothing; a capability operand that is neither a known `CAP_*` name
+//! An option `getopt` refuses ([`SetcapError::Option`]) or a missing
+//! operand ([`SetcapError::Usage`]) changes nothing; a capability operand
+//! that is neither a known `CAP_*` name
 //! nor `-` is a [`SetcapError::BadCapability`]; an operand that cannot be
-//! inspected surfaces the underlying [`Errno`](tairix_abi::Errno) as
-//! [`SetcapError::Stat`]; a gate that cannot be applied is
-//! [`SetcapError::Apply`]; a directory whose entries cannot be read during a
-//! recursive descent is [`SetcapError::Read`]. The first failure stops the
-//! run before any later operand, and there is no panic.
+//! opened surfaces the underlying [`Errno`](tairix_abi::Errno) as
+//! [`SetcapError::Stat`], and one that is a link naming nothing is
+//! [`SetcapError::Dangling`]; a gate that cannot be applied is
+//! [`SetcapError::Apply`]; a directory that cannot be opened or listed
+//! during a recursive descent is [`SetcapError::Read`]. A file that cannot
+//! be opened, changed or listed is reported and the rest are still changed,
+//! the rest of its directory too, and the run exits 1; a link met during a
+//! recursive descent is left alone. There is no panic.
 //!
 //! # Module map
 //!
 //! * [`error`] — [`SetcapError`], the outcomes of [`run`].
 //! * [`command`] — the [`Command`] shape and the [`parse`]r (incl.
 //!   [`parse_capability`]).
-//! * [`io`] — the [`FileSystem`] and [`Output`] seams and the
-//!   [`Entry`]/[`EntryKind`] data they carry.
+//! * [`io`] — the [`Gates`] seam and the [`Output`] stream.
 //! * [`client`] — the [`run`] entry point and the recursive engine.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependency is the
-//! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate. No `unsafe`, and no
+//! `no_std` (with `alloc`); it depends only on `lib/*` crates, so this
+//! userland tool never links a kernel or driver crate. No `unsafe`, and no
 //! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
@@ -75,4 +77,4 @@ pub mod io;
 pub use client::{run, USAGE};
 pub use command::{parse, parse_capability, Command};
 pub use error::SetcapError;
-pub use io::{Entry, EntryKind, FileSystem, Output};
+pub use io::{Gates, Output};

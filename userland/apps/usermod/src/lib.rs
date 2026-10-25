@@ -48,8 +48,7 @@ pub mod command;
 pub use client::{run, Output, RunError, Step};
 pub use command::{parse, Changes, Command, Lock, UsageError};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when the bundle's own `Help/` tree is
-/// unavailable.
+/// The usage banner the short-help switches print when the bundle's own
+/// `Help/` tree is unavailable.
 pub const USAGE: &str = "usage: usermod [-c COMMENT] [-d HOME] [-s SHELL] [-g GID] [-G LIST]\n\
                          \x20              [-L | -U] [--grants LIST] [--] NAME\n";

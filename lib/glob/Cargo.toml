@@ -15,6 +15,9 @@ workspace = true
 # `FS_NAME_MAX`: an extended pattern's candidate bound is the longest name a
 # filesystem stores, so the two cannot drift apart.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# Fallible growth for the matcher's working memory, so a heap that refuses it
+# is an answer, not an abort.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget

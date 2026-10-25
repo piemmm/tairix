@@ -34,6 +34,10 @@ use std::path::{Path, PathBuf};
 
 // The one walk the bundle composer shares, so a bundle's payload and the
 // bundle itself are found by one rule.
+#[expect(
+    dead_code,
+    reason = "the kernel's floor discovery reads a crate's package name; this script does not"
+)]
 #[path = "src/bundles.rs"]
 mod bundles;
 
@@ -167,9 +171,13 @@ fn main() {
         .to_path_buf();
 
     // A program crate added anywhere the walk looks reruns the build.
-    let programs = bundles::program_crates(&workspace.join("userland"), |dir| {
-        println!("cargo:rerun-if-changed={}", dir.display());
-    })
+    let programs = bundles::manifest_crates(
+        &workspace.join("userland"),
+        bundles::MANIFEST_SOURCE,
+        |dir| {
+            println!("cargo:rerun-if-changed={}", dir.display());
+        },
+    )
     .expect("the userland tree is readable");
 
     let mut rows = String::from("[\n");

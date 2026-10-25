@@ -58,8 +58,8 @@ impl ReverseCache {
     }
 }
 
-/// The one-line usage banner, printed on a usage error and as the fallback
-/// when the bundled help document is unavailable.
+/// The one-line usage banner, printed as the fallback when the bundled help
+/// document is unavailable.
 pub const USAGE: &str = "usage: ss [-tualnrpH46] [-s] [--]";
 
 /// The command word this bundle is named by, for the own-help lookup.

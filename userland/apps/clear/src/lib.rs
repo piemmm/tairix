@@ -37,13 +37,17 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use tairix_termcap::Capabilities;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+use tairix_util::quote::quote;
 use tairix_vt::{encode_all_into, EraseMode, Op};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `clear`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `clear`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: clear [-x] [-h | -?]";
 
 /// One thing the `clear` tool can do.
@@ -57,36 +61,59 @@ pub enum Command {
     Help,
 }
 
-/// The one failure [`parse`] reports.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Why [`parse`] refused a command line.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClearError {
-    /// The command line was not understood.
-    Usage,
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// An operand; the tool takes none (GNU `extra operand`).
+    ExtraOperand(String),
 }
+
+impl fmt::Display for ClearError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::ExtraOperand(operand) => {
+                write!(f, "extra operand {operand}", operand = quote(operand))
+            }
+        }
+    }
+}
+
+/// What each of `clear`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    KeepScrollback,
+    Help,
+}
+
+/// `clear`'s option, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::letter('x', Takes::Nothing, Flag::KeepScrollback),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `clear [-x] [-h | -?]`:
-///
-/// * `-h` / `-?` / `--help` — the reserved short-help switches
-///   (plans/APPS.md; they win immediately).
-/// * `-x` — accepted for GNU/ncurses compatibility ("do not clear the
-///   scrollback"); a TAIRiX console keeps no scrollback, so the behaviour
-///   is identical with and without it.
-/// * anything else — a [`ClearError::Usage`] error: the tool takes no
-///   operands.
+/// The grammar is `clear [-x] [-h | -?]`, read as GNU's `getopt_long` reads it
+/// ([`Scan`]). The help switches (`-h`, `-?`, `--help`) answer at once. `-x`
+/// is accepted, as often as it is given, for GNU/ncurses compatibility ("do
+/// not clear the scrollback"); a TAIRiX console keeps no scrollback, so the
+/// behaviour is identical with and without it. The tool takes no operands.
 ///
 /// # Errors
 ///
-/// [`ClearError::Usage`] for any input outside the grammar above.
+/// * [`ClearError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ClearError::ExtraOperand`] — an operand.
 pub fn parse(args: &[&str]) -> Result<Command, ClearError> {
-    let mut seen_x = false;
-    for arg in args {
-        match *arg {
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "-x" if !seen_x => seen_x = true,
-            _ => return Err(ClearError::Usage),
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ClearError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::KeepScrollback, _) => {}
+            Arg::Operand(operand) => return Err(ClearError::ExtraOperand(String::from(operand))),
         }
     }
     Ok(Command::Run)
@@ -121,6 +148,8 @@ pub fn clear_bytes(caps: &Capabilities) -> Option<Vec<u8>> {
 mod tests {
     extern crate std;
 
+    use alloc::string::{String, ToString};
+
     use tairix_termcap::TermType;
 
     use super::{clear_bytes, parse, ClearError, Command};
@@ -131,12 +160,12 @@ mod tests {
     }
 
     #[test]
-    fn dash_x_is_accepted_once() {
+    fn dash_x_is_accepted() {
         // `-x` is the GNU "keep the scrollback" switch; a TAIRiX console
         // keeps none, so it parses to the same command.
         assert_eq!(parse(&["-x"]), Ok(Command::Run));
-        // A repeated `-x` is not a valid GNU `clear` line either.
-        assert_eq!(parse(&["-x", "-x"]), Err(ClearError::Usage));
+        // ncurses `clear` takes a repeated `-x` as readily as a single one.
+        assert_eq!(parse(&["-x", "-x"]), Ok(Command::Run));
     }
 
     #[test]
@@ -148,9 +177,33 @@ mod tests {
     }
 
     #[test]
-    fn any_other_argument_is_usage() {
-        assert_eq!(parse(&["--frob"]), Err(ClearError::Usage));
-        assert_eq!(parse(&["operand"]), Err(ClearError::Usage));
+    fn an_operand_is_an_extra_operand() {
+        let err = parse(&["operand"]).expect_err("an operand is refused");
+        assert_eq!(err, ClearError::ExtraOperand(String::from("operand")));
+        assert_eq!(err.to_string(), "extra operand 'operand'");
+    }
+
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        match parse(args) {
+            Err(ClearError::Option(refusal)) => refusal.to_string(),
+            other => panic!("expected a refused option, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-y"]), "invalid option -- 'y'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--help=1"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

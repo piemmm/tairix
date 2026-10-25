@@ -37,7 +37,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, FileId, WaitSourceKind};
+use tairix_abi::{Errno, WaitSourceKind};
 use tairix_kernel_sec::Charge;
 use tairix_sync::SpinLock;
 
@@ -53,9 +53,9 @@ pub struct Member {
     /// member is the one found ready.
     pub token: u64,
     /// For a [`WaitSourceKind::File`] or [`WaitSourceKind::DirWatch`]
-    /// member: the stable identity of the node it watches, keyed on by the
-    /// change-notification registry. [`FileId::NONE`] for every other kind.
-    pub file: FileId,
+    /// member: the id the node it watches is pinned under, its watch table's
+    /// key for it. `0` for every other kind.
+    pub node: u64,
     /// The edge an edge-triggered member last reported: a `File` member's node
     /// generation, a `SystemNotice` member's topic generation. Unused (`0`) for
     /// every other kind.
@@ -67,6 +67,10 @@ pub struct Member {
     /// is on, held for the member's life so a volume that leaves still
     /// reports its departure to the member rather than vanishing from it.
     pub table: Option<WatchTable>,
+    /// For a `File` member: the pin on its node, held as an open descriptor
+    /// holds it, so the pinned id names that node for the member's whole life
+    /// rather than whatever the driver next numbers so.
+    pub pin: Option<crate::fs::NodeRef>,
 }
 
 /// A volume's watch table held by a member; two are equal only when they are
@@ -228,7 +232,7 @@ pub fn remove(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> Result<
             .position(|m| m.kind == kind && m.id == id)
             .ok_or(Errno::NotFound)?;
         set.member_charge.shrink(1);
-        Ok(set.members.remove(at))
+        Ok::<_, Errno>(set.members.remove(at))
     })??;
     release_file_member(&removed);
     Ok(())
@@ -239,7 +243,7 @@ pub fn remove(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> Result<
 fn release_file_member(member: &Member) {
     if member.kind == WaitSourceKind::File {
         if let Some(table) = &member.table {
-            table.0.file_member_remove(member.file.node);
+            table.0.file_member_remove(member.node);
         }
     }
 }
@@ -277,13 +281,13 @@ pub fn advance_paced(
     handle: u64,
     id: u64,
     observed: u64,
-    epochs: crate::fswatch::Epochs,
+    mounts: u64,
     now: u64,
 ) -> Result<(), Errno> {
     with_owned(owner, handle, |set| {
         if let Some(member) = find(set, WaitSourceKind::DirWatch, id) {
             member.pacing.observed = observed;
-            member.pacing.epochs = epochs;
+            member.pacing.mounts = mounts;
             member.pacing.reported_at = Some(now);
         }
     })
@@ -486,10 +490,11 @@ mod tests {
             kind: WaitSourceKind::Endpoint,
             id,
             token,
-            file: FileId::NONE,
+            node: 0,
             observed: 0,
             pacing: crate::fswatch::Pacing::default(),
             table: None,
+            pin: None,
         }
     }
 
@@ -539,10 +544,11 @@ mod tests {
                     kind: WaitSourceKind::Irq,
                     id: 5,
                     token: 55,
-                    file: FileId::NONE,
+                    node: 0,
                     observed: 0,
                     pacing: crate::fswatch::Pacing::default(),
                     table: None,
+                    pin: None,
                 }
             ),
             Ok(()),
@@ -631,10 +637,11 @@ mod tests {
                     kind: WaitSourceKind::Irq,
                     id: 5,
                     token: 55,
-                    file: FileId::NONE,
+                    node: 0,
                     observed: 0,
                     pacing: crate::fswatch::Pacing::default(),
                     table: None,
+                    pin: None,
                 }
             ),
             Ok(())

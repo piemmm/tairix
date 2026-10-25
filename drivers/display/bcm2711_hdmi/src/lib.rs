@@ -1,6 +1,6 @@
 //! The BCM2711's HDMI transmitters (`brcm,bcm2711-hdmi0`, `brcm,bcm2711-hdmi1`)
-//! as `encoder-v1` encoders and `audiochan-v1` audio devices, driven as
-//! Linux's `vc4_hdmi` drives them (`plans/SOUND.md` `SND19n`, `SND19o`).
+//! as `encoder-v1` encoders and `audiochan-v1` audio devices
+//! (`plans/SOUND.md` `SND19n`, `SND19o`).
 //!
 //! A transmitter finds its sink from its hotplug lines and the EDID its DDC
 //! bus reads, chooses the mode the sink, the transmitter and the display
@@ -38,7 +38,9 @@ pub use phy::LaneMap;
 pub use shared::Shared;
 pub use sink::Ddc;
 
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 use tairix_vcmailbox::ENGINE_OUTPUTS;
 
 /// The capabilities a transmitter's driver runs with, which its signed
@@ -58,26 +60,17 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// The bind priority [`BIND_KEYS`] carries: an exact `compatible` match.
 const BIND_PRIORITY: u16 = 10;
 
-const fn compatible_key(compatible: &[u8]) -> HwMatchKey {
-    match HwMatchKey::compatible(compatible) {
-        Ok(key) => key,
-        // A literal too long for the key fails const evaluation, never at run
-        // time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    }
-}
-
 /// The driver's canonical bind table, the one source its signed manifest and
 /// the autoload match are built from: HDMI0, then HDMI1, the encoders the
 /// display engine's outputs feed.
 pub const BIND_KEYS: &[DriverBindKey] = &[
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(ENGINE_OUTPUTS[0].encoder)),
-    DriverBindKey::new(BIND_PRIORITY, compatible_key(ENGINE_OUTPUTS[1].encoder)),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(ENGINE_OUTPUTS[0].encoder)),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(ENGINE_OUTPUTS[1].encoder)),
 ];
 
-/// Each [`BIND_KEYS`] entry's transmitter, as Linux's
-/// `bcm2711_hdmi0_variant` and `bcm2711_hdmi1_variant` describe them: only
-/// HDMI0 reaches HDMI 2.0 rates, and HDMI1's lanes are wired swapped.
+/// Each [`BIND_KEYS`] entry's transmitter: only HDMI0 reaches HDMI 2.0 rates
+/// (4Kp60 is HDMI0's alone: Raspberry Pi documentation, config.txt,
+/// `hdmi_enable_4kp60`), and HDMI1's lanes are wired swapped.
 pub const VARIANTS: [Variant; 2] = [
     Variant {
         name: "HDMI 0",

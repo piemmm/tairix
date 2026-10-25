@@ -5,8 +5,8 @@
 //! `virt` virtio-blk image) carries a partition table that names a FAT
 //! boot partition the firmware reads and the encrypted `ARXFS` root
 //! partition the kernel mounts (`tools/mkimage`).
-//! The table is **not** one scheme on one board: a Raspberry Pi image is
-//! an MBR disk, a UEFI x86_64 disk is GPT, and TAIRiX must read either on
+//! The table is **not** one scheme on one board: an image for firmware that
+//! reads only MBR is an MBR disk, a UEFI x86_64 disk is GPT, and TAIRiX must read either on
 //! any architecture (nothing here is board-specific).
 //!
 //! Two places must agree, byte for byte, on the on-disk layout — the

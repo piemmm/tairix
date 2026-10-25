@@ -56,8 +56,7 @@ Mae `--` yn gorffen dosrannu opsiynau: mae pob ymresymiad diweddarach yn operand
 
 - `0` — gwnaethpwyd pob newid a ofynnwyd amdano.
 - `1` — gwrthododd neu fethodd y gronfa newid; argraffir y cam a'r rheswm ar
-  y gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  y gwall safonol. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

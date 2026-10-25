@@ -22,7 +22,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::{mode_string, FileKind, FileStat, FS_MODE_MASK};
+use tairix_abi::fs::{mode_string, FileId, FileKind, FileStat, FS_MODE_MASK};
 use tairix_abi::NodeTimes;
 
 use crate::entry::{EntryKind, LinkTarget};
@@ -143,6 +143,7 @@ pub struct Properties {
     name: String,
     kind: EntryKind,
     target: Option<String>,
+    id: FileId,
     file_kind: FileKind,
     size: u64,
     allocated: u64,
@@ -162,6 +163,7 @@ impl Properties {
             name: name.into(),
             kind,
             target: None,
+            id: stat.id,
             file_kind: stat.kind,
             size: stat.size,
             allocated: stat.allocated,
@@ -276,6 +278,13 @@ impl Properties {
     #[must_use]
     pub const fn mode(&self) -> u32 {
         self.mode
+    }
+
+    /// The node described: what a change made from this summary must still
+    /// find under the name.
+    #[must_use]
+    pub const fn id(&self) -> FileId {
+        self.id
     }
 
     /// The node's structural kind, which the permission string's type

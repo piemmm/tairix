@@ -26,9 +26,11 @@ process sees it.
 - **A present copies no pixel.** Each frame is the backing of a 2D resource,
   carved under the node's DMA grant and granted to the presenter. A present
   has the device transfer the damaged rectangles from the backing into its
-  copy and flush them, in one batch the device answers on its interrupt, so
-  the frame is the presenter's again the moment the call returns. A frame's
-  first present transfers it whole.
+  copy and flush them. Every command is fenced, so the device answers it only
+  once it has run it, and a present goes in stages, each sent once the one
+  before has run: the device may run its queue in any order. The frame is
+  the presenter's again the moment the call returns. A frame's first present
+  transfers it whole.
 - **The pointer is the device's cursor.** A pointer image is copied into the
   driver's own 64 × 64 image, transferred, and shown on the cursor queue;
   moving it presents nothing.

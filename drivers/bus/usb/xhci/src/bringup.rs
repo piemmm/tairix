@@ -13,14 +13,14 @@
 //!
 //! # What lives here, and what does not
 //!
-//! The HCD is **arch-neutral**: the board PCIe root-complex bring-up and BAR
-//! assignment stay in the separate board bus drivers (`drivers/bus/pcie_brcm` +
-//! `drivers/bus/usb/vl805`), which assign the controller's BAR and emit the
+//! The HCD is **arch-neutral**: the PCIe root-complex bring-up and BAR
+//! assignment stay in the separate bus drivers, which assign the controller's
+//! BAR and emit the
 //! enumerated controller as the `usb,xhci` node carrying the BAR + DMA + IRQ
 //! grants. This HCD is autoloaded against that node, granted *only* the
 //! resources it requested, and reaches them through the [`DriverHost`] its
 //! runtime builds over those grants. So this orchestration knows nothing of
-//! PCI, the BCM2711, or any board: it maps a register window by address,
+//! PCI or any board: it maps a register window by address,
 //! carves a DMA region, and speaks the bus-agnostic xHCI protocol in
 //! [`tairix_usb`].
 //!

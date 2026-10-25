@@ -34,7 +34,7 @@ pub const USER_DIRECTORY_PAGE: u16 = 64;
 /// [`UserDirectoryRecord`] to `sink`.
 ///
 /// The query is ungated (the directory is the `/etc/passwd`-class public
-/// uid + username pairing); a system whose user database is not loaded
+/// uid, login group and username); a system whose user database is not loaded
 /// yields an empty directory. Records are delivered in the order the
 /// service returns them.
 ///
@@ -226,7 +226,7 @@ mod tests {
     }
 
     fn record(uid: u32, name: &[u8]) -> UserDirectoryRecord {
-        UserDirectoryRecord::new(uid, name).expect("record")
+        UserDirectoryRecord::new(uid, uid, name).expect("record")
     }
 
     #[test]

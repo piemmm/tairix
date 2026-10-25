@@ -41,6 +41,12 @@ use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Salt, Uid, UserRecord, UsersDb,
 };
 
+/// The record the fixture's own skeleton is laid with: the system user's.
+const SYSTEM_DIR: Security = Security::created(NodeKind::Directory, 0, 0);
+
+/// The record of a file the fixture plants for the system.
+const SYSTEM_FILE: Security = Security::created(NodeKind::RegularFile, 0, 0);
+
 /// Logical block (sector) size of the produced image, in bytes. Matches
 /// both the 512-byte sector QEMU's virtio-blk reports by default and the
 /// arxfs minimum block size, so the volume the driver formats here maps
@@ -298,8 +304,8 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
         &mut FixtureEntropy { next: 1 },
     )?;
     let root = fs.root();
-    fs.create(root, PLANTED_FILE_NAME, NodeKind::RegularFile)?;
-    let written = fs.write_at(root, PLANTED_FILE_NAME, 0, PLANTED_FILE_CONTENT)?;
+    let planted = fs.create(root, PLANTED_FILE_NAME, NodeKind::RegularFile, &SYSTEM_FILE)?;
+    let written = fs.write_at(planted, 0, PLANTED_FILE_CONTENT)?;
     if written != PLANTED_FILE_CONTENT.len() {
         return Err(DriverError::DeviceFault);
     }
@@ -347,16 +353,13 @@ fn plant_home_file(
     name: &[u8],
     content: &[u8],
 ) -> Result<(), DriverError> {
-    let node = fs.create(dir, name, NodeKind::RegularFile)?;
-    fs.set_security(
-        node,
-        Security::new(
-            0o644,
-            tairix_users::FIRST_USER_UID,
-            tairix_users::FIRST_USER_GID,
-        ),
-    )?;
-    if fs.write_at(dir, name, 0, content)? != content.len() {
+    let record = Security::new(
+        0o644,
+        tairix_users::FIRST_USER_UID,
+        tairix_users::FIRST_USER_GID,
+    );
+    let node = fs.create(dir, name, NodeKind::RegularFile, &record)?;
+    if fs.write_at(node, 0, content)? != content.len() {
         return Err(DriverError::DeviceFault);
     }
     Ok(())
@@ -394,9 +397,9 @@ pub fn build_users_root_image_keyed(
     let mut fs = ARXFS::format(dev, INODE_COUNT, keying, &mut FixtureEntropy { next: 1 })?;
     let root = fs.root();
     for name in tairix_abi::stored_root_entries() {
-        let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
+        let node = fs.create(root, name.as_bytes(), NodeKind::Directory, &SYSTEM_DIR)?;
         if name == "System" {
-            let settings = fs.create(node, b"Settings", NodeKind::Directory)?;
+            let settings = fs.create(node, b"Settings", NodeKind::Directory, &SYSTEM_DIR)?;
             tairix_users::provision_settings_dirs(&mut fs, settings).map_err(shape_error)?;
         }
         if name == "Users" {
@@ -404,7 +407,16 @@ pub fn build_users_root_image_keyed(
             // home shape, through the one walk the real provisioning path
             // takes, so a fixture home is not a shape no installed system
             // would ever have.
-            let home = fs.create(node, b"root", NodeKind::Directory)?;
+            let home = fs.create(
+                node,
+                b"root",
+                NodeKind::Directory,
+                &Security::new(
+                    tairix_users::HOME_MODE,
+                    tairix_users::FIRST_USER_UID,
+                    tairix_users::FIRST_USER_GID,
+                ),
+            )?;
             tairix_users::provision_home_shape(
                 &mut fs,
                 home,
@@ -423,17 +435,17 @@ pub fn build_users_root_image_keyed(
             plant_home_file(&mut fs, files, HOME_PICTURE_NAME, HOME_PICTURE_CONTENT)?;
         }
         if name == "System" {
-            let security = fs.create(node, b"Security", NodeKind::Directory)?;
-            fs.create(security, b"Users", NodeKind::RegularFile)?;
-            let written = fs.write_at(security, b"Users", 0, text.as_bytes())?;
+            let security = fs.create(node, b"Security", NodeKind::Directory, &SYSTEM_DIR)?;
+            let users = fs.create(security, b"Users", NodeKind::RegularFile, &SYSTEM_FILE)?;
+            let written = fs.write_at(users, 0, text.as_bytes())?;
             if written != text.len() {
                 return Err(DriverError::DeviceFault);
             }
             // The group registry the kernel identity-table build resolves
             // the planted account's primary gid against; without it the
             // build fails closed on the dangling gid 0 reference.
-            fs.create(security, b"Groups", NodeKind::RegularFile)?;
-            let written = fs.write_at(security, b"Groups", 0, groups_text.as_bytes())?;
+            let groups = fs.create(security, b"Groups", NodeKind::RegularFile, &SYSTEM_FILE)?;
+            let written = fs.write_at(groups, 0, groups_text.as_bytes())?;
             if written != groups_text.len() {
                 return Err(DriverError::DeviceFault);
             }
@@ -545,10 +557,11 @@ mod tests {
     fn a_fresh_file_round_trips_through_create_write_and_read() {
         let mut fs = mount();
         let root = fs.root();
-        fs.create(root, NEW_FILE_NAME, NodeKind::RegularFile)
+        let file = fs
+            .create(root, NEW_FILE_NAME, NodeKind::RegularFile, &SYSTEM_FILE)
             .expect("create new file");
         let written = fs
-            .write_at(root, NEW_FILE_NAME, 0, NEW_FILE_CONTENT)
+            .write_at(file, 0, NEW_FILE_CONTENT)
             .expect("write new file");
         assert_eq!(written, NEW_FILE_CONTENT.len());
 
@@ -671,9 +684,10 @@ mod tests {
     fn the_planted_file_survives_a_second_file_being_written() {
         let mut fs = mount();
         let root = fs.root();
-        fs.create(root, NEW_FILE_NAME, NodeKind::RegularFile)
+        let file = fs
+            .create(root, NEW_FILE_NAME, NodeKind::RegularFile, &SYSTEM_FILE)
             .expect("create new file");
-        fs.write_at(root, NEW_FILE_NAME, 0, NEW_FILE_CONTENT)
+        fs.write_at(file, 0, NEW_FILE_CONTENT)
             .expect("write new file");
 
         let node = fs.lookup(root, PLANTED_FILE_NAME).expect("planted present");

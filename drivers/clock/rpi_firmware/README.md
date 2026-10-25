@@ -25,11 +25,11 @@ Any `raspberrypi,firmware-clocks` node. A board without one leaves the driver
 unbound. A linked clock the firmware reports no range for is not served, so a
 board whose firmware lacks one still runs its frequency mechanism.
 
-Every range comes from the firmware (`RPI_FIRMWARE_GET_MIN_CLOCK_RATE` /
-`..._MAX_CLOCK_RATE`), never from a board constant, so a board whose
+Every range comes from the firmware (its *Get min clock rate* and *Get max
+clock rate* tags), never from a board constant, so a board whose
 `config.txt` moves one is driven over the range it has. The ARM clock's
-targets are asked for at 100 MHz intervals, the operating points the vendor's
-own Linux `cpufreq` driver builds.
+targets are asked for at 100 MHz intervals: a finer step spends a firmware
+round trip on a change too small to matter.
 
 ## What it vouches for
 
@@ -78,6 +78,7 @@ The `clock-v1` endpoint's own are `lib/clock`'s (`docs/src/lib/clock.md`).
 
 ## References
 
-- The Raspberry Pi firmware property interface, as the Linux
-  `clk-raspberrypi` and `raspberrypi-cpufreq` drivers spell it.
+- The Raspberry Pi firmware's mailbox property interface (the
+  `raspberrypi/firmware` wiki, *Mailbox property interface*): the clock ids
+  and the clock-rate tags.
 - `plans/CPUFREQ.md`, `plans/SOUND.md` SND19g.

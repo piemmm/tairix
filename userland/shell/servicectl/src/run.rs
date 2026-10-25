@@ -27,7 +27,7 @@
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
-    use tairix_servicectl::{dispatch, parse, report_usage, ControlChannel, Exit, ToolIo, USAGE};
+    use tairix_servicectl::{dispatch, parse, ControlChannel, ToolIo, USAGE};
 
     /// The production control channel: one synchronous call to whichever of
     /// the service manager's two reserved endpoints the command names.
@@ -59,18 +59,17 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes are the coreutils shape: `0` applied (or the short help
-    /// shown), `1` refused, `2` a command line that was not understood.
+    /// shown), `1` refused or a command line that was not understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line("servicectl: the argument vector is not valid UTF-8");
-            write_stderr_line(USAGE);
-            return Exit::Usage.code();
+        let Some(arguments) = tairix_help::arguments("servicectl") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
-            Err(err) => return report_usage(&mut RtIo, err).code(),
+            Err(err) => {
+                tairix_help::report_misuse("servicectl", &err);
+                return tairix_help::MISUSE;
+            }
         };
         // `dispatch` returns `None` for the help switch, whose text is this
         // bundle's own to read.

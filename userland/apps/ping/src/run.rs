@@ -36,13 +36,12 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
 
     use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_ping::{parse, run, Command, EchoEvent, PingError, PingIo, USAGE};
+    use tairix_ping::{parse, run, Command, EchoEvent, PingError, PingIo};
     use tairix_resolver::TargetFailure;
     use tairix_rng::{FastRng, RandU64};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
@@ -172,19 +171,17 @@ mod program {
     }
 
     /// Program entry point. Exit codes: `0` on success (at least one reply,
-    /// or help), `1` when every request went unanswered, and `2` on a usage
-    /// error or a setup/output failure.
+    /// or help), `1` when every request went unanswered or the command line
+    /// was not understood, and `2` on a setup/output failure.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("ping") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("ping: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("ping", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -201,7 +198,7 @@ mod program {
         match result {
             Ok(summary) => i32::from(!is_help && !summary.any_received()),
             Err(err) => {
-                write_stderr_line(&format!("ping: {err}"));
+                write_stderr_line(format_args!("ping: {err}"));
                 2
             }
         }

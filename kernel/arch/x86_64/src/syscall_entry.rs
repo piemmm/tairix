@@ -69,8 +69,9 @@
 //! * `AC` — defence against SMAP bypass / explicit alignment quirks.
 //! * `IOPL` — a user task must never carry I/O privilege into ring 0;
 //!   clearing `IOPL` on entry means kernel code always runs at
-//!   `IOPL=0` regardless of the caller's `RFLAGS` (matches Linux's
-//!   `MSR_SYSCALL_MASK`; `tests/SECURITY.md` §5, CWE-696).
+//!   `IOPL=0` regardless of the caller's `RFLAGS` (`SYSCALL` clears every
+//!   `RFLAGS` bit set in `IA32_FMASK`, Intel SDM Vol. 3A §6.8.8;
+//!   `tests/SECURITY.md` §5, CWE-696).
 //! * `NT`, `RF`, `VM` — task-switching and virtual-8086 holdovers
 //!   that have no meaning in long mode and must not affect kernel
 //!   state.
@@ -586,7 +587,7 @@ unsafe fn install_kernel_rsp0(
 /// reads a per-CPU field: `syscall`/`sysret` reads `gs:0` (this module's
 /// TLS) and an **interrupt or exception** (e.g. the P-1c preemption timer,
 /// a `#PF`/`#GP`) reads `TSS.RSP0`. The two are one and the same per-task
-/// stack (as on Linux), so they are repointed **together** here — one
+/// stack, so they are repointed **together** here — one
 /// definition that cannot diverge, rather than each
 /// resume site repeating two writes. Repointing only one would let an
 /// involuntary preemption (or fault) of one task land on another task's —

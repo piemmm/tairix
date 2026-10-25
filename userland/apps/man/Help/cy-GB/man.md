@@ -49,8 +49,8 @@ anhysbys, ffrydir y dudalen gyfan.
 
 - `0` — dangoswyd y dudalen.
 - `1` — ni chanfuwyd y gorchymyn na'i ddogfen gymorth, neu ni ellid
-  cyflwyno'r dudalen.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  cyflwyno'r dudalen. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen
+  â `1`.
 
 ## ENVIRONMENT
 

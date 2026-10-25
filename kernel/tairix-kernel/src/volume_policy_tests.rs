@@ -3,7 +3,7 @@
 use super::*;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
+    NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeStats,
 };
 use tairix_abi::DriverError;
 use tairix_kernel_core::fs::wrapper_conformance as conformance;
@@ -36,6 +36,7 @@ impl FilesystemRead for TwoNodeFs {
             ROOT => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 nlink: 2,
+                ino: ROOT.raw(),
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
@@ -44,6 +45,7 @@ impl FilesystemRead for TwoNodeFs {
             FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
                 nlink: 1,
+                ino: FILE.raw(),
                 size: 7,
                 allocated: 512,
                 times: NodeTimes::default(),
@@ -58,6 +60,14 @@ impl FilesystemRead for TwoNodeFs {
             Ok(FILE)
         } else {
             Err(DriverError::NotFound)
+        }
+    }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        match dir {
+            ROOT => Ok(ROOT),
+            FILE => Err(DriverError::Unsupported),
+            _ => Err(DriverError::NotFound),
         }
     }
 
@@ -78,6 +88,18 @@ impl FilesystemRead for TwoNodeFs {
     ) -> Result<(), DriverError> {
         Ok(())
     }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.node_info(node).map(|_| node)
+    }
+
+    fn unpin(&mut self, _pinned: NodeId) -> Result<Unpinned, DriverError> {
+        Ok(Unpinned::Released)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 impl FilesystemWrite for TwoNodeFs {
@@ -86,25 +108,20 @@ impl FilesystemWrite for TwoNodeFs {
         _dir: NodeId,
         _name: &[u8],
         _kind: NodeKind,
+        _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         Err(DriverError::Unsupported)
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        _offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        if dir == ROOT && name == b"file" {
+    fn write_at(&mut self, file: NodeId, _offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        if file == FILE {
             Ok(data.len())
         } else {
             Err(DriverError::NotFound)
         }
     }
 
-    fn truncate(&mut self, _dir: NodeId, _name: &[u8], _size: u64) -> Result<(), DriverError> {
+    fn truncate(&mut self, _file: NodeId, _size: u64) -> Result<(), DriverError> {
         Err(DriverError::Unsupported)
     }
 
@@ -135,10 +152,6 @@ impl FilesystemSecurity for TwoNodeFs {
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
         Err(DriverError::Unsupported)
-    }
-
-    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
-        self.node_info(node).map(|_| ())
     }
 
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
@@ -198,7 +211,8 @@ fn structural_surfaces_pass_through() {
     let mut buf = [0u8; 16];
     assert_eq!(fs.read_at(FILE, 0, &mut buf), Ok(7));
     assert_eq!(&buf[..7], b"payload");
-    assert_eq!(fs.write_at(ROOT, b"file", 0, b"xy"), Ok(2));
+    assert_eq!(fs.write_at(FILE, 0, b"xy"), Ok(2));
+    assert_eq!(fs.parent(ROOT), Ok(ROOT));
     assert_eq!(fs.stats().expect("stats").total_blocks, 100);
 }
 

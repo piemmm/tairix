@@ -36,8 +36,7 @@ operando.
 - `0` — o grupo foi criado.
 - `1` — o registo recusou ou falhou a criação (por exemplo uma
   capacidade em falta ou um id duplicado); a razão é impressa no erro
-  padrão.
-- `2` — a linha de comandos não foi compreendida.
+  padrão. Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

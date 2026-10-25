@@ -258,8 +258,7 @@ fn icbrt(v: u64) -> u64 {
 }
 
 /// CUBIC's `beta_loss = 0.7`, as a 1/1000 ratio: the multiplicative-decrease
-/// factor on inferred packet loss (RFC 9438 §4.6; the Linux CUBIC value
-/// since 2008).
+/// factor on inferred packet loss (RFC 9438 §4.6).
 const CUBIC_BETA_PERMILLE: u64 = 700;
 
 /// CUBIC's `beta_ecn = 0.85`, as a 1/1000 ratio: the RFC 8511 §3.1 ABE

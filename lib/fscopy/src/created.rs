@@ -6,15 +6,19 @@
 use alloc::string::String;
 
 use tairix_abi::{Errno, FileId};
-use tairix_collections::HashSet;
+use tairix_collections::{HashMap, HashSet};
 use tairix_hash::BuildSipHash13;
 
-/// The nodes a run has put in place, by identity, and by path on a backing
-/// that offers no identity.
+/// The nodes a run has put in place, each by identity with the name it was
+/// put at, and by path alone on a backing that offers no identity.
+///
+/// A node is held at its own name under any spelling a volume's folding of
+/// ASCII case gives it; another name for it — a hard link — is not, since
+/// replacing that name loses nothing the run made.
 ///
 /// Keyed, because a name can be a hostile volume's to choose.
 pub struct Created {
-    nodes: HashSet<FileId, BuildSipHash13>,
+    nodes: HashMap<FileId, String, BuildSipHash13>,
     names: HashSet<String, BuildSipHash13>,
 }
 
@@ -23,7 +27,7 @@ impl Created {
     #[must_use]
     pub const fn new(keys: BuildSipHash13) -> Self {
         Self {
-            nodes: HashSet::with_hasher(keys),
+            nodes: HashMap::with_hasher(keys),
             names: HashSet::with_hasher(keys),
         }
     }
@@ -35,25 +39,28 @@ impl Created {
     /// [`Errno::OutOfMemory`] when the record cannot grow: the caller stops
     /// rather than go on with an operand unguarded.
     pub fn note(&mut self, id: FileId, path: &str) -> Result<(), Errno> {
+        let mut name = String::new();
+        name.try_reserve_exact(path.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        name.push_str(path);
         let grown = if id.is_none() {
-            let mut name = String::new();
-            name.try_reserve_exact(path.len())
-                .map_err(|_| Errno::OutOfMemory)?;
-            name.push_str(path);
-            self.names.try_insert(name)
+            self.names.try_insert(name).map(|_| ())
         } else {
-            self.nodes.try_insert(id)
+            self.nodes.try_insert(id, name).map(|_| ())
         };
-        grown.map(|_| ()).map_err(|_| Errno::OutOfMemory)
+        grown.map_err(|_| Errno::OutOfMemory)
     }
 
-    /// Whether the node `id` found at `path` is one the run put in place.
+    /// Whether the node `id` found at `path` is one the run put in place
+    /// there.
     #[must_use]
     pub fn holds(&self, id: FileId, path: &str) -> bool {
         if id.is_none() {
             self.names.contains(path)
         } else {
-            self.nodes.contains(&id)
+            self.nodes
+                .get(&id)
+                .is_some_and(|put| put.eq_ignore_ascii_case(path))
         }
     }
 }
@@ -70,15 +77,26 @@ mod tests {
     };
 
     #[test]
-    fn a_node_is_known_by_its_identity_whatever_it_is_called() {
+    fn a_node_is_known_at_its_name_however_its_case_is_spelt() {
         let mut created = Created::new(BuildSipHash13::UNKEYED);
         assert!(!created.holds(NODE, "/d/x"));
         created.note(NODE, "/d/x").expect("room");
+        assert!(created.holds(NODE, "/d/x"));
         assert!(
             created.holds(NODE, "/d/X"),
-            "one node under another spelling"
+            "one name under a folding volume's other spelling"
         );
         assert!(!created.holds(FileId { node: 8, ..NODE }, "/d/x"));
+    }
+
+    #[test]
+    fn another_name_for_a_node_the_run_made_is_free_to_replace() {
+        let mut created = Created::new(BuildSipHash13::UNKEYED);
+        created.note(NODE, "/d/x").expect("room");
+        assert!(
+            !created.holds(NODE, "/d/z"),
+            "a hard link the run did not make"
+        );
     }
 
     #[test]

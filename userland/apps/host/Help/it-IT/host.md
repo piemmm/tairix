@@ -47,8 +47,9 @@ di errore.
 - `0` — è stato trovato almeno un indirizzo (o è stata scritta la guida
   breve).
 - `1` — il nome non ha risolto alcun indirizzo (risposta negativa, timeout o
-  errore del resolver).
-- `2` — la riga di comando non è stata compresa, o l'output non ha potuto
+  errore del resolver). Anche una riga di comando non compresa termina con
+  `1`.
+- `2` — non si è potuto aprire alcun socket DNS, o l'output non ha potuto
   essere scritto.
 
 ## ENVIRONMENT

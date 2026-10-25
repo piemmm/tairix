@@ -24,13 +24,22 @@ concede alcuna autorità su ciò che nomina: ogni uso successivo è
 autorizzato componente per componente sotto la vostra identità.
 
 Un nome di collegamento già occupato è rifiutato a meno che `-f` o `-i`
-dica di sostituirlo, e la sostituzione **rimuove** prima quel nome, così
-nulla passa attraverso un collegamento già presente verso ciò che indica.
-Una directory non è mai sostituita.
+dica di sostituirlo. Il nuovo collegamento prende allora il posto del
+nome in un solo passo, e solo una volta che esiste, così un collegamento
+che non si può creare — una destinazione mancante, per esempio — lascia
+il nome com'era, e nulla passa attraverso un collegamento già presente
+verso ciò che indica. Una directory non è mai sostituita. Un
+collegamento che prenderebbe il posto proprio del file che nomina è
+rifiutato perché si tratta dello stesso file: un file collegato a forza
+sul proprio nome, o un collegamento simbolico la cui destinazione, letta
+dalla directory del collegamento stesso, è il file che sostituirebbe.
+GNU invece legge quella destinazione dalla directory di lavoro e, dopo
+una domanda `-i` accettata, sostituisce un file con un collegamento a sé
+stesso.
 
-Il primo errore ferma l'esecuzione prima di ogni destinazione
-successiva; i collegamenti già creati restano. `--` termina l'analisi
-delle opzioni: ogni argomento successivo è un operando.
+Un collegamento che non si può creare è segnalato, e il successivo è
+creato comunque. `--` termina l'analisi delle opzioni: ogni argomento
+successivo è un operando.
 
 Senza `-s` il collegamento è **fisico**: una seconda voce di directory
 per l'inode della destinazione stessa. Entrambi i nomi raggiungono un
@@ -65,16 +74,18 @@ sicurezza.
 - `-d, -F, --directory` — accettare un operando directory. Il
   collegamento resta rifiutato: nessun utente può dare a una directory
   un secondo nome.
-- `-f, --force` — rimuovere un nome di collegamento esistente e creare
-  poi il collegamento.
-- `-i, --interactive` — chiedere prima di rimuovere un nome di
+- `-f, --force` — sostituire un nome di collegamento esistente con il
+  nuovo collegamento.
+- `-i, --interactive` — chiedere prima di sostituire un nome di
   collegamento esistente; solo una risposta che inizia con `y`/`Y`
-  acconsente. Vince l'ultima fra `-f` e `-i`.
+  acconsente, e una domanda rifiutata salta quel collegamento e fa
+  fallire l'esecuzione. Vince l'ultima fra `-f` e `-i`.
 - `-n, --no-dereference` — trattare una destinazione che è un
   collegamento simbolico a una directory come il semplice nome che è
   anche, invece che come directory in cui creare i collegamenti.
 - `-v, --verbose` — segnalare ogni collegamento creato come
-  `'link' -> 'target'`.
+  `'link' -> 'target'` se simbolico e come `'link' => 'target'` se
+  fisico.
 - `-t dir, --target-directory=dir` — creare ogni collegamento in `dir`,
   che deve già essere una directory. Il valore segue attaccato
   (`-tdir`, `--target-directory=dir`) o come argomento successivo.
@@ -98,9 +109,10 @@ sicurezza.
 ## EXIT STATUS
 
 - `0` — ogni collegamento è stato creato (o è stato scritto l'aiuto
-  breve); una domanda `-i` rifiutata non è un errore.
-- `1` — ogni altro caso, con il motivo sull'uscita di errore. Anche una
-  riga di comando non compresa termina con `1`.
+  breve).
+- `1` — ogni altro caso, compresa una domanda `-i` rifiutata, con
+  l'eventuale motivo sull'uscita di errore. Anche una riga di comando
+  non compresa termina con `1`.
 
 ## ENVIRONMENT
 

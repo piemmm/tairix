@@ -73,10 +73,10 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         color_strategy().prop_map(Sgr::Foreground),
         color_strategy().prop_map(Sgr::Background),
     ];
-    // Printable / non-control scalar values only: `Op::Print` carries a glyph,
-    // not a C0 control (which travels as its own `Op`).
+    // A glyph a cell may hold: a C0 control travels as its own `Op`, and a
+    // hidden character prints as U+FFFD.
     let printable = prop_oneof![0x20u32..0x7f, 0xa0u32..0xd800, 0xe000u32..0x11_0000]
-        .prop_map(|c| char::from_u32(c).unwrap_or(' '));
+        .prop_map(|c| char::from_u32(c).map_or(' ', tairix_visible::shown_char));
     prop_oneof![
         printable.prop_map(Op::Print),
         Just(Op::Bell),

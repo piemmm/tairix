@@ -29,10 +29,11 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependencies are the
-//! audited `lib/abi` ABI crate and the shared `lib/procinfo` client
-//! helpers, so this userland tool never links a kernel or driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
-//! production paths.
+//! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
+//! ABI crate, the shared `lib/procinfo` client helpers, the shared
+//! `lib/help` engine, and the shared `lib/util` command-line scanner, so this
+//! userland tool never links a kernel or driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -48,7 +49,7 @@ pub mod client;
 pub mod command;
 pub mod error;
 
-pub use client::{run, USAGE};
+pub use client::run;
 pub use command::{parse, Command};
 pub use error::PsError;
 pub use tairix_procinfo::{Output, Transport};

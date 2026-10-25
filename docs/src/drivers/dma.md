@@ -177,8 +177,8 @@ error flags (bits 2:0).
 
 ### DMA4
 
-A DMA4 channel addresses 40 bits; its interface reaches 36, which the driver
-narrows its carves to. A block is `TI`, the source's low word, the source's
+A DMA4 channel addresses 40 bits; its interface reaches the 35-bit address
+bus, which the driver narrows its carves to. A block is `TI`, the source's low word, the source's
 information word, the destination's low word, its information word, the
 length, the next block, and a reserved word. An information word carries the
 address's top byte, the burst length, the increment (set on the memory side

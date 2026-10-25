@@ -34,6 +34,15 @@ combinée avec des opérandes `file`.
 Une entrée illisible est signalée sur la sortie d'erreur et
 l'exécution continue avec l'entrée suivante.
 
+Sur un terminal, chaque nom affiché est mis entre guillemets là où un
+shell en aurait besoin, et tout caractère de contrôle ou autre caractère
+invisible qu'il contient est écrit sous forme de séquence d'échappement,
+de sorte qu'un nom ne peut ni commander ni réorganiser l'écran ; GNU
+l'affiche tel quel. Un tube ou un fichier reçoit le nom octet pour
+octet. Un nom contenant un saut de ligne est aussi mis entre guillemets
+dans un tube, comme le fait GNU `wc`, afin que chaque compte reste sur
+une seule ligne.
+
 ## OPTIONS
 
 - `-c, --bytes` — afficher le nombre d'octets.
@@ -63,8 +72,7 @@ l'exécution continue avec l'entrée suivante.
 
 - `0` — chaque entrée a été comptée (ou l'aide courte a été écrite).
 - `1` — une entrée n'a pas pu être lue, ou la sortie n'a pas pu être
-  délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+  délivrée. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

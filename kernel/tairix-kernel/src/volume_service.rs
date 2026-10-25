@@ -9,7 +9,8 @@
 //! flags, and publishes the volume's stable identity into the volume
 //! forest so `id::<volume-id>/…` paths resolve. Detach reverses it:
 //! flush, unmount, unregister, unpublish — failing closed (the volume
-//! stays attached) rather than discarding uncommitted data.
+//! stays attached) rather than discarding uncommitted data or a node a
+//! descriptor holds.
 //!
 //! The syscall layer has already verified `CAP_FS_MOUNT` and the caller's
 //! endpoint/window resource grants; this service re-validates everything
@@ -42,12 +43,13 @@
 //!
 //! * **clean** (nothing uncommitted): the volume is simply retracted —
 //!   unmounted, unregistered, unpublished — with one audit event; no
-//!   drama (drives.md §10).
+//!   drama (drives.md §10). A descriptor held across it answers stale.
 //! * **dirty**: the volume enters *unavailable-dirty* — the root, alias,
-//!   and mount stay visible but every new operation fails closed with a
-//!   typed device fault (the dead endpoint guarantees it), the retained
-//!   write set is kept for the verified re-insert replay or an explicit
-//!   force-discard, and the event records how many bytes are held.
+//!   and mount stay visible but every operation, a held descriptor's
+//!   included, fails closed with a typed device fault (the dead endpoint
+//!   guarantees it), the retained write set is kept for the verified
+//!   re-insert replay or an explicit force-discard, and the event records
+//!   how many bytes are held.
 //! * **lost** (retention was abandoned under the budget/pressure gate, or
 //!   a failed write left the medium state unknown): *unavailable-lost*,
 //!   and the event says so — uncommitted data existed that is not held.
@@ -59,6 +61,12 @@
 //! when it can; only when nothing can be committed — the volume is
 //! unavailable, or its flush fails — does it discard the retained set,
 //! logging the deliberate data loss with its own event id.
+//!
+//! A plain detach is also refused while a descriptor holds one of the
+//! volume's nodes. A force detach revokes them — the driver completing each
+//! deletion they deferred — so a revoked descriptor answers stale. A runtime
+//! volume is attached only directly beneath the catalog, so no volume is ever
+//! shown beneath another's projection for a detach to strand.
 //!
 //! # Verified re-insert (`plans/DEVICES.md` D4c)
 //!
@@ -77,6 +85,8 @@
 //! flush failure) fails closed: the volume returns **read-only** in the
 //! *recovery-conflict* state with the retained set still held for
 //! explicit salvage or the audited force-discard — never a silent merge.
+//! Either way the volume returns under a fresh registration, so a
+//! descriptor held across the removal answers stale.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -90,7 +100,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NameMatching,
-    NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeStats,
 };
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -111,7 +121,7 @@ use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{
-    Attachment, Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService,
+    Attachment, DriverLock, Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService,
 };
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -156,6 +166,9 @@ const VOLUME_DETACHED: EventId = EventId(4174);
 /// attached and no data was discarded.
 const VOLUME_DETACH_REFUSED: EventId = EventId(4175);
 
+/// What a [`VOLUME_DETACH_REFUSED`] record says, whatever refused the detach.
+const DETACH_REFUSED: &str = "volume-service: runtime volume detach refused";
+
 /// Audit event: a volume's serving driver vanished with nothing
 /// uncommitted; the volume was retracted cleanly (drives.md §10 — a
 /// clean surprise removal is no drama).
@@ -172,10 +185,11 @@ const VOLUME_SURPRISE_REMOVED_DIRTY: EventId = EventId(4177);
 /// data existed that is **not** held. The volume is unavailable-lost.
 const VOLUME_SURPRISE_REMOVED_LOST: EventId = EventId(4178);
 
-/// Audit event: a volume was force-unmounted, deliberately discarding
-/// whatever uncommitted data its journal retained (or had already lost).
-/// Carries the discarded byte count and the reason a clean commit was
-/// impossible (drives.md `fs.hotplug.force_unmount`).
+/// Audit event: a volume was force-unmounted, revoking the descriptors still
+/// holding its nodes and deliberately discarding whatever uncommitted data
+/// its journal retained (or had already lost). Carries the number of nodes
+/// revoked, the discarded byte count, and why a plain detach was refused
+/// (drives.md `fs.hotplug.force_unmount`).
 const VOLUME_FORCE_UNMOUNTED: EventId = EventId(4179);
 
 /// Audit event: a re-inserted volume was proven unmutated and its
@@ -297,6 +311,10 @@ impl FilesystemRead for UnavailableFs {
         Err(DriverError::DeviceFault)
     }
 
+    fn parent(&mut self, _dir: NodeId) -> Result<NodeId, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
     fn read_at(
         &mut self,
         _file: NodeId,
@@ -328,6 +346,20 @@ impl FilesystemRead for UnavailableFs {
     fn read_link(&mut self, _link: NodeId, _out: &mut [u8]) -> Result<usize, DriverError> {
         Err(DriverError::DeviceFault)
     }
+
+    fn pin(&mut self, _node: NodeId) -> Result<NodeId, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    /// A hold on the driver this stands in for went with it, so letting one
+    /// go always succeeds.
+    fn unpin(&mut self, _pinned: NodeId) -> Result<Unpinned, DriverError> {
+        Ok(Unpinned::Released)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 impl FilesystemWrite for UnavailableFs {
@@ -336,6 +368,7 @@ impl FilesystemWrite for UnavailableFs {
         _dir: NodeId,
         _name: &[u8],
         _kind: NodeKind,
+        _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         Err(DriverError::DeviceFault)
     }
@@ -345,6 +378,7 @@ impl FilesystemWrite for UnavailableFs {
         _dir: NodeId,
         _name: &[u8],
         _target: &[u8],
+        _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
         Err(DriverError::DeviceFault)
     }
@@ -355,25 +389,18 @@ impl FilesystemWrite for UnavailableFs {
 
     fn write_at(
         &mut self,
-        _dir: NodeId,
-        _name: &[u8],
+        _file: NodeId,
         _offset: u64,
         _data: &[u8],
     ) -> Result<usize, DriverError> {
         Err(DriverError::DeviceFault)
     }
 
-    fn truncate(&mut self, _dir: NodeId, _name: &[u8], _size: u64) -> Result<(), DriverError> {
+    fn truncate(&mut self, _file: NodeId, _size: u64) -> Result<(), DriverError> {
         Err(DriverError::DeviceFault)
     }
 
-    fn punch(
-        &mut self,
-        _dir: NodeId,
-        _name: &[u8],
-        _offset: u64,
-        _len: u64,
-    ) -> Result<(), DriverError> {
+    fn punch(&mut self, _file: NodeId, _offset: u64, _len: u64) -> Result<(), DriverError> {
         Err(DriverError::DeviceFault)
     }
 
@@ -402,10 +429,6 @@ impl FilesystemSecurity for UnavailableFs {
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
-        Err(DriverError::DeviceFault)
-    }
-
-    fn stamp_owner(&mut self, _node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
         Err(DriverError::DeviceFault)
     }
 
@@ -841,9 +864,13 @@ impl RuntimeVolumeService {
             let _ = vfs.mounts_write().detach(handle);
             return Err(("handle_in_use", Errno::Busy));
         }
+        // Under the driver's lock, so an operation that takes it after finds
+        // the projection gone; a node an open pinned meanwhile answers stale.
         let unwind = || {
-            let _ = LATE_FILESYSTEM.unregister(handle);
+            let driver = LATE_FILESYSTEM.driver(handle).ok();
+            let _held = driver.as_deref().map(DriverLock::lock);
             let _ = vfs.mounts_write().detach(handle);
+            let _ = LATE_FILESYSTEM.unregister(handle);
         };
         let claim = self.enter(volume).inspect_err(|_| unwind())?;
         if let Err(err) = publish_volume_identity(id, &["Storage", &name], &name, audit) {
@@ -873,6 +900,51 @@ impl RuntimeVolumeService {
             Some(cause),
         );
         errno
+    }
+
+    /// Audit a refused detach and hand back its errno.
+    fn refuse_detach(
+        audit: &'static (dyn Sink + Sync),
+        name: &str,
+        cause: &'static str,
+        errno: Errno,
+    ) -> Errno {
+        Self::audit_event(
+            audit,
+            VOLUME_DETACH_REFUSED,
+            DETACH_REFUSED,
+            name,
+            Some(cause),
+        );
+        errno
+    }
+
+    /// Audit a plain detach refused because descriptors hold `open` of the
+    /// volume's nodes, and hand back its errno.
+    fn refuse_open_nodes(audit: &'static (dyn Sink + Sync), name: &str, open: usize) -> Errno {
+        log(
+            audit,
+            &Event {
+                level: Level::Warn,
+                id: VOLUME_DETACH_REFUSED,
+                message: DETACH_REFUSED,
+                fields: &[
+                    Field {
+                        key: "volume",
+                        value: FieldValue::Str(name),
+                    },
+                    Field {
+                        key: "cause",
+                        value: FieldValue::Str("nodes_open"),
+                    },
+                    Field {
+                        key: "open_nodes",
+                        value: FieldValue::UnsignedInt(open as u64),
+                    },
+                ],
+            },
+        );
+        Errno::Busy
     }
 
     /// Audit a catalog name another volume holds. Not a refusal of the
@@ -1637,20 +1709,32 @@ impl VolumeService for RuntimeVolumeService {
     }
 
     fn detach(&self, request: &VolumeDetachRequest) -> Result<(), Errno> {
-        let wiring = self.wiring()?;
-        let audit = wiring.audit;
+        let audit = self.wiring()?.audit;
+        self.detach_volume(&request.volume_id, request.force, audit)
+    }
+}
+
+impl RuntimeVolumeService {
+    /// Detach the volume `id`; when `force`, revoke the descriptors holding
+    /// its nodes and discard what cannot be committed. A runtime volume is
+    /// attached only directly beneath the catalog, so none is ever shown
+    /// beneath another's projection.
+    ///
+    /// # Errors
+    ///
+    /// As [`VolumeService::detach`]: a plain detach is refused while a
+    /// descriptor holds a node.
+    fn detach_volume(
+        &self,
+        id: &[u8; 16],
+        force: bool,
+        audit: &'static (dyn Sink + Sync),
+    ) -> Result<(), Errno> {
         let refuse = |name: &str, cause: &'static str, errno: Errno| -> Errno {
-            RuntimeVolumeService::audit_event(
-                audit,
-                VOLUME_DETACH_REFUSED,
-                "volume-service: runtime volume detach refused",
-                name,
-                Some(cause),
-            );
-            errno
+            Self::refuse_detach(audit, name, cause, errno)
         };
         self.retire_unused_devices();
-        let Some((named, device)) = self.attached_device(&request.volume_id) else {
+        let Some((named, device)) = self.attached_device(id) else {
             return Err(refuse("unknown", "identity_not_attached", Errno::NotFound));
         };
         // A volume still on its device is detached under that device's lock,
@@ -1665,7 +1749,7 @@ impl VolumeService for RuntimeVolumeService {
             None => None,
         };
         let _op = pin.as_ref().map(|pin| pin.op.lock());
-        let (_claim, target) = match self.claim_for_detach(&request.volume_id, device) {
+        let (_claim, target) = match self.claim_for_detach(id, device) {
             DetachClaim::Held(claim, target) => (claim, target),
             // Detached, or retracted by a surprise removal, while this waited:
             // the goal state is reached.
@@ -1681,13 +1765,42 @@ impl VolumeService for RuntimeVolumeService {
             availability,
         } = target;
         let refused = |cause: &'static str, errno: Errno| -> Errno { refuse(&name, cause, errno) };
+        let vfs = LATE_FILESYSTEM
+            .vfs()
+            .map_err(|err| refused("no_mount_table", err))?;
+        // Asked before anything is revoked or discarded, so a volume the table
+        // would keep loses nothing to a detach that cannot happen.
+        vfs.mounts()
+            .detachable(handle)
+            .map_err(|err| refused("not_detachable", err.to_errno()))?;
 
-        // Held from the final commit to the retraction, so no write lands
-        // between them: an operation that resolved the volume before it left
-        // reaches the fail-closed stand-in instead of a driver whose writes
-        // would be acknowledged and then dropped with it.
+        // Held from the count of the volume's open nodes to the retraction:
+        // no pin is taken meanwhile, no write lands between the final commit
+        // and the retraction, and an operation that resolved the volume
+        // before it left finds its projection gone, or reaches the
+        // fail-closed stand-in instead of a driver whose writes would be
+        // acknowledged and then dropped with it.
         let driver = LATE_FILESYSTEM.driver(handle).ok();
-        let mut fs = driver.as_deref().map(SleepLock::lock);
+        let nodes = LATE_FILESYSTEM.nodes(handle);
+        let mut fs = driver.as_deref().map(DriverLock::lock);
+        let open = match (nodes.as_deref(), fs.as_deref_mut()) {
+            (Some(nodes), Some(fs)) => {
+                nodes.reap(fs);
+                nodes.outstanding()
+            }
+            _ => 0,
+        };
+        if open != 0 && !force {
+            return Err(Self::refuse_open_nodes(audit, &name, open));
+        }
+        if force {
+            if let (Some(nodes), Some(fs)) = (nodes.as_deref(), fs.as_deref_mut()) {
+                // A node the driver fails to free is left to the format's own
+                // recovery, as after a crash.
+                let _ = fs.release_pins();
+                nodes.retire();
+            }
+        }
 
         // A surprise-removed volume never detaches implicitly: discarding
         // its retained (or already lost) uncommitted data is the
@@ -1713,7 +1826,7 @@ impl VolumeService for RuntimeVolumeService {
         let discarded = match commit_refusal {
             None => None,
             Some((cause, errno)) => {
-                if !request.force {
+                if !force {
                     return Err(refused(cause, errno));
                 }
                 // The audited force-discard: read what is being given up
@@ -1727,69 +1840,96 @@ impl VolumeService for RuntimeVolumeService {
             }
         };
 
-        // Retract: unmount (new resolutions fail closed), unregister (the
-        // registry's driver reference drops), and withdraw the published
-        // identity. The claim kept a surprise removal off the entry, so it is
-        // still registered; the disk's client closes as the last pin on it
-        // goes.
-        self.state.lock().retain(|v| v.id != request.volume_id);
+        // Retract, still under the driver's lock: the projections leave the
+        // table, the stand-in takes the driver's place and the registration
+        // ends, so a held descriptor answers stale; then the published
+        // identity is withdrawn. The claim kept a surprise removal
+        // off the entry, so it is still registered; the disk's client closes
+        // once no operation holds its slot.
+        vfs.mounts_write()
+            .detach(handle)
+            .map_err(|err| refused("not_detachable", err.to_errno()))?;
+        self.state.lock().retain(|v| v.id != *id);
         if let Some(fs) = fs.as_deref_mut() {
             *fs = Box::new(UnavailableFs);
         }
-        let vfs = LATE_FILESYSTEM
-            .vfs()
-            .map_err(|err| refused("no_mount_table", err))?;
-        let _ = vfs.mounts_write().detach(handle);
         let _ = LATE_FILESYSTEM.unregister(handle);
         drop(fs);
-        let _ = VOLUME_FOREST.unpublish(&request.volume_id);
-        audit_detach_outcome(audit, &name, discarded);
+        let _ = VOLUME_FOREST.unpublish(id);
+        audit_detach_outcome(audit, &name, Forced::of(discarded, open));
         Ok(())
     }
 }
 
-/// Audit a completed detach: the clean withdrawal, or the force-unmount
-/// that deliberately discarded `bytes` of retained uncommitted data
-/// because `cause` made a clean commit impossible.
-fn audit_detach_outcome(
-    audit: &'static (dyn Sink + Sync),
-    name: &str,
-    discarded: Option<(&'static str, u64)>,
-) {
-    match discarded {
-        None => RuntimeVolumeService::audit_event(
+/// What a force detach gave up beyond a plain one: the open nodes it revoked
+/// and the retained writes it discarded.
+struct Forced {
+    /// Why a plain detach was refused.
+    cause: &'static str,
+    discarded_bytes: u64,
+    revoked: usize,
+}
+
+impl Forced {
+    /// What a detach that discarded `discarded` — the refused commit's cause
+    /// and the bytes given up — and revoked `revoked` open nodes gave up, or
+    /// `None` for one that gave up nothing.
+    fn of(discarded: Option<(&'static str, u64)>, revoked: usize) -> Option<Self> {
+        match (discarded, revoked) {
+            (None, 0) => None,
+            (None, revoked) => Some(Self {
+                cause: "nodes_open",
+                discarded_bytes: 0,
+                revoked,
+            }),
+            (Some((cause, discarded_bytes)), revoked) => Some(Self {
+                cause,
+                discarded_bytes,
+                revoked,
+            }),
+        }
+    }
+}
+
+/// Audit a completed detach: the clean withdrawal, or the force-unmount and
+/// what it gave up.
+fn audit_detach_outcome(audit: &'static (dyn Sink + Sync), name: &str, forced: Option<Forced>) {
+    let Some(forced) = forced else {
+        RuntimeVolumeService::audit_event(
             audit,
             VOLUME_DETACHED,
             "volume-service: runtime volume flushed, unmounted, and withdrawn",
             name,
             None,
-        ),
-        Some((cause, bytes)) => {
-            log(
-                audit,
-                &Event {
-                    level: Level::Warn,
-                    id: VOLUME_FORCE_UNMOUNTED,
-                    message: "volume-service: volume force-unmounted; retained uncommitted \
-                              writes deliberately discarded",
-                    fields: &[
-                        Field {
-                            key: "volume",
-                            value: FieldValue::Str(name),
-                        },
-                        Field {
-                            key: "cause",
-                            value: FieldValue::Str(cause),
-                        },
-                        Field {
-                            key: "discarded_bytes",
-                            value: FieldValue::UnsignedInt(bytes),
-                        },
-                    ],
+        );
+        return;
+    };
+    log(
+        audit,
+        &Event {
+            level: Level::Warn,
+            id: VOLUME_FORCE_UNMOUNTED,
+            message: "volume-service: volume force-unmounted over what a plain detach refuses",
+            fields: &[
+                Field {
+                    key: "volume",
+                    value: FieldValue::Str(name),
                 },
-            );
-        }
-    }
+                Field {
+                    key: "cause",
+                    value: FieldValue::Str(forced.cause),
+                },
+                Field {
+                    key: "discarded_bytes",
+                    value: FieldValue::UnsignedInt(forced.discarded_bytes),
+                },
+                Field {
+                    key: "revoked_nodes",
+                    value: FieldValue::UnsignedInt(forced.revoked as u64),
+                },
+            ],
+        },
+    );
 }
 
 /// Commit everything a departing volume holds: flush the filesystem's own
@@ -2074,6 +2214,11 @@ impl RuntimeVolumeService {
         let fstype = opened.fstype;
         let write_refusal = opened.write_refusal;
         let read_only = read_only || write_refusal.is_some();
+        // Under the stand-in's lock, so an operation that takes it after the
+        // move finds its projection gone. The volume returns under a fresh
+        // registration: a descriptor held across the removal answers stale.
+        let standing = LATE_FILESYSTEM.driver(target.handle).ok();
+        let held = standing.as_deref().map(DriverLock::lock);
         reattach_then_serve(
             vfs,
             Attachment::new(target.handle, device.medium, mount_flags(read_only)),
@@ -2099,6 +2244,7 @@ impl RuntimeVolumeService {
             },
         )
         .map_err(|(cause, errno)| refused(cause, errno))?;
+        drop(held);
         {
             let mut state = self.state.lock();
             if let Some(entry) = state.iter_mut().find(|v| v.id == target.id) {
@@ -2209,6 +2355,9 @@ impl RuntimeVolumeService {
     fn apply_vanish(outcome: VanishOutcome, audit: &'static (dyn Sink + Sync)) {
         match outcome {
             VanishOutcome::Clean(entry) => {
+                // No sleeping lock may be taken here, so the registration is
+                // only retired: its pins go with the driver, and a deletion
+                // they deferred is the format's own recovery's to finish.
                 if let Ok(vfs) = LATE_FILESYSTEM.vfs() {
                     let _ = vfs.mounts_write().detach(entry.handle);
                 }
@@ -2229,22 +2378,25 @@ impl RuntimeVolumeService {
                 id,
                 pending,
             } => {
-                // The unavailable volume's registry slot is re-pointed at
-                // the fail-closed stand-in: the real driver (and its
-                // plaintext cache) drops, so nothing of the vanished
-                // medium is ever served as live; the mount and the
-                // published root stay visible — and the registry entry is
-                // marked unavailable, so the mount snapshot never shows
-                // the vanished volume as healthy.
-                let _ = LATE_FILESYSTEM.unregister(handle);
-                let _ = LATE_FILESYSTEM.register(
-                    handle,
-                    alloc::boxed::Box::new(UnavailableFs),
-                    &name,
-                    fstype,
-                    id,
-                    None,
-                );
+                // The fail-closed stand-in takes over the volume's
+                // registration in place: the real driver (and its plaintext
+                // cache) drops, so nothing of the vanished medium is ever
+                // served as live, and a descriptor held across the removal
+                // answers the device fault; the mount and the published root
+                // stay visible — and the registry entry is marked
+                // unavailable, so the mount snapshot never shows the vanished
+                // volume as healthy.
+                if let Some(nodes) = LATE_FILESYSTEM.nodes(handle) {
+                    let _ = LATE_FILESYSTEM.register_with_nodes(
+                        handle,
+                        alloc::boxed::Box::new(UnavailableFs),
+                        &name,
+                        fstype,
+                        id,
+                        None,
+                        nodes,
+                    );
+                }
                 let _ = LATE_FILESYSTEM.set_availability(
                     handle,
                     match pending {

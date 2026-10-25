@@ -237,11 +237,10 @@ dispositivo, quindi viene salvata e il rifiuto viene indicato.
 - `0` — elenco, valore, guida breve o modifica completati.
 - `1` — le impostazioni non si sono potute leggere o modificare (per
   esempio il chiamante non può cambiare le impostazioni della macchina,
-  o non può leggerne le impostazioni di rete), oppure l'output non si è
-  potuto consegnare.
-- `2` — la riga di comando non è stata compresa, la chiave è
-  sconosciuta, il valore è fuori dall'insieme della chiave, oppure la
-  modifica lascerebbe incoerente la configurazione di rete.
+  o non può leggerne le impostazioni di rete), la chiave è sconosciuta,
+  il valore è fuori dall'insieme della chiave, la modifica lascerebbe
+  incoerente la configurazione di rete, oppure l'output non si è potuto
+  consegnare. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

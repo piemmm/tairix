@@ -2971,6 +2971,17 @@ use tairix_netchan::NetChannelServer;
 /// A representative notify endpoint id the stack would `port_bind`.
 const NOTIFY_ENDPOINT: u64 = 0x4E45_5453_5430_3030;
 
+/// The stack's attested origin, as the driver's serve loop reads it.
+const STACK_ORIGIN: Origin = Origin::new(
+    TrustDomain::User,
+    tairix_abi::net::NETSTACK_UID,
+    tairix_abi::net::NETSTACK_UID,
+    1,
+    ProcId::from_raw([0x14; 16]),
+    CapabilitySummary::EMPTY,
+    0,
+);
+
 /// An echo device: every frame the stack queues on TX is handed straight
 /// back on RX, so one service call round-trips a raw frame through the
 /// driver-side rings.
@@ -3037,9 +3048,15 @@ impl crate::channel::NetChannelTransport for ChannelLoopback {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         let req = NetChannelRequest::decode(request)?;
         let mut rig = self.rig.borrow_mut();
+        // The driver's serve loop admits every call before it dispatches it.
+        if let Err(reason) = rig.server.admit(&req, &STACK_ORIGIN) {
+            return copy_reply(reply, &tairix_abi::reply::encode_status_reply(Err(reason)));
+        }
         match req {
             NetChannelRequest::Facts => copy_reply(reply, &rig.server.facts_reply()),
-            NetChannelRequest::Attach(params) => copy_reply(reply, &rig.server.attach(params)),
+            NetChannelRequest::Attach(params) => {
+                copy_reply(reply, &rig.server.attach(params, STACK_ORIGIN.proc_id()))
+            }
             NetChannelRequest::Service => {
                 *self.services.borrow_mut() += 1;
                 let ChannelRig { server, region } = &mut *rig;

@@ -18,9 +18,12 @@ listing.
 A volume whose device was removed while it still held uncommitted
 writes stays visible as `unavailable-dirty` (or `unavailable-lost`)
 in the mount listing, and a plain `unmount` refuses: its retained
-data is held for a verified re-insert. `--force` is the deliberate
-exit — the retained data is discarded, the volume is retracted, and
-the loss is recorded in the audit log. On a healthy volume `--force`
+data is held for a verified re-insert. A volume with files still open
+on it, or that a program has as its working directory, refuses a plain
+`unmount` too. `--force` is the deliberate exit — files still open on
+the volume are cut off, a program working in it is left in a directory
+that is gone, the retained data is discarded, the volume is retracted,
+and what was given up is recorded in the audit log. On a healthy volume `--force`
 still flushes and detaches cleanly; nothing is discarded when a
 clean commit is possible.
 
@@ -30,8 +33,10 @@ the system's view bindings are not detachable.
 
 ## OPTIONS
 
-- `-f, --force` — force-unmount: retract the volume even when its
-  uncommitted data cannot be committed, discarding the retained data.
+- `-f, --force` — force-unmount: retract the volume even while files
+  are open on it, a program is working in it, or its uncommitted data
+  cannot be committed, cutting the open files off and discarding the
+  retained data.
 - `-?, --help` — show this command's own short help.
 
 ## EXAMPLES
@@ -45,8 +50,8 @@ the system's view bindings are not detachable.
 
 - `0` — the volume was detached (or the short help was written).
 - `1` — the volume was not found, was not detachable, or the kernel
-  refused the detach.
-- `2` — the command line was not understood.
+  refused the detach. A command line that was not understood exits `1`
+  too.
 
 ## ENVIRONMENT
 

@@ -50,8 +50,8 @@ survivent donc.
 - `0` — l'opération a été appliquée, ou l'aide courte a été affichée.
 - `1` — le gestionnaire a refusé l'opération, a enregistré l'inscription
   sans pouvoir démarrer ni arrêter le service, ou le point de terminaison de
-  contrôle n'a pas pu être atteint.
-- `2` — la ligne de commande n'a pas été comprise ; rien n'a été envoyé.
+  contrôle n'a pas pu être atteint. Une ligne de commande non comprise sort
+  aussi avec `1`.
 
 ## ENVIRONMENT
 

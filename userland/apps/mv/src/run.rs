@@ -11,19 +11,18 @@
 //! `main` collects the inherited argument vector, reads the `LANG` locale
 //! preference from the inherited environment (plans/APPS.md §5 — the shell
 //! exports it; the tool invents no second source), and runs the parsed
-//! command against the production seams: `RtFileSystem`, which renames,
-//! inspects, reads, and creates paths through the kernel-authorised `fs_*`
-//! syscalls (every per-inode and mount check stays kernel-side; the kernel's
-//! dedicated `CrossVolume` refusal of a cross-mount rename becomes the
-//! seam's `RenameOutcome::CrossDevice`, driving the copy-then-remove
-//! fallback), `RtPrompt`, which asks the `-i` confirmation on standard error
-//! and reads the reply from standard input (consent only on a leading
-//! `y`/`Y`; an unreadable reply is never consent), the shared
-//! `tairix_help::BundleHelp`, which reads the tool's own bundle's `Help/`
-//! tree for the short-help switches, and `Stdout`, which writes `-v`
-//! reports to the inherited standard output. The tool binds only to its
-//! inherited descriptors, never a console device, and holds no ambient
-//! authority.
+//! command against the production seams: `tairix_rt::copy::WorkingDirectory`,
+//! the shared tree seam over the kernel-authorised `fs_*` calls (every
+//! per-inode and mount check stays kernel-side; the kernel's dedicated
+//! `CrossVolume` refusal of a cross-mount rename drives the copy-then-remove
+//! fallback), `RtStaging`, which draws the runtime's staging names,
+//! `RtPrompt`, which asks the `-i` confirmation on standard error and reads
+//! the reply from standard input (consent only on a leading `y`/`Y`; an
+//! unreadable reply is never consent), the shared `tairix_help::BundleHelp`,
+//! which reads the tool's own bundle's `Help/` tree for the short-help
+//! switches, and `Stdout`, which writes `-v` reports to the inherited
+//! standard output. The tool binds only to its inherited descriptors, never a
+//! console device, and holds no ambient authority.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -39,304 +38,25 @@ mod program {
 
     use alloc::format;
     use alloc::string::String;
-    use alloc::vec::Vec;
-    use core::cell::RefCell;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags, SeekRegion, FS_MODE_MASK};
-    use tairix_abi::{Errno, FileId, FileKind, RenameFlags};
+    use tairix_abi::Errno;
     use tairix_hash::{BuildSipHash13, HashSeed};
     use tairix_help::BundleHelp;
-    use tairix_mv::{
-        parse, run, Ancestry, AttributeStore, Entry, EntryKind, FileSystem, Owner, PathFiles,
-        Prompt, RenameOutcome, Seams, USAGE,
-    };
-    use tairix_rt::copy::{OpenFiles, RtAncestry, RtAttributes};
+    use tairix_mv::{parse, run, MvError, Prompt, Seams, Staging};
+    use tairix_rt::copy::WorkingDirectory;
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
-    use tairix_rt::File;
 
     /// Longest interactive reply chunk read per syscall; the reply is only
     /// ever judged by its first byte, so the bound caps work, not meaning.
     const REPLY_MAX: usize = 64;
 
-    /// Read every entry of the directory at `path` into one snapshot, the
-    /// one batched listing read `ls` uses.
-    fn read_entries(path: &str) -> Result<Vec<Entry>, Errno> {
-        let buf = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
-        let mut entries = Vec::new();
-        for entry in DirEntries::new(&buf) {
-            let entry = entry?;
-            // The ABI contract makes every entry name UTF-8; a name that is
-            // not is a corrupt or hostile stream, refused whole rather than
-            // silently dropped — `OutOfRange`, the same errno the entry
-            // decoder itself uses for a field outside its permitted domain.
-            let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
-            entries.push(Entry {
-                name: String::from(name),
-                kind: entry_kind(entry.kind),
-            });
-        }
-        Ok(entries)
-    }
+    /// The runtime's staging names, which every staged replacement on the
+    /// system is spelled by.
+    struct RtStaging;
 
-    /// The distinction `mv` acts on: a link is moved as itself.
-    fn entry_kind(kind: FileKind) -> EntryKind {
-        match kind {
-            FileKind::Directory => EntryKind::Directory,
-            FileKind::Symlink => EntryKind::Symlink,
-            FileKind::Regular => EntryKind::File,
-        }
-    }
-
-    /// What `path` is under `flags`: a resolve-only open that requests no
-    /// read authority and learns only the metadata.
-    fn probe(path: &str, flags: OpenFlags) -> Result<EntryKind, Errno> {
-        let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
-        let stat = file.stat().map_err(Errno::from_syscall)?;
-        Ok(entry_kind(stat.kind))
-    }
-
-    /// The directory a path's final component lives in, with any trailing
-    /// slashes on the result normalised away so two spellings of the same
-    /// parent compare equal.
-    fn parent_of(path: &str) -> &str {
-        let trimmed = path.trim_end_matches('/');
-        match trimmed.rfind('/') {
-            Some(0) => "/",
-            Some(idx) => trimmed[..idx].trim_end_matches('/'),
-            None => "",
-        }
-    }
-
-    /// The production [`FileSystem`]: the kernel-authorised `fs_*` view. It
-    /// adds no authority — every path resolution, per-inode permission, and
-    /// mount-flag check happens kernel-side under the caller's attested
-    /// identity, and a refusal surfaces as the exact [`Errno`] the kernel
-    /// chose. A rename the kernel refuses with the dedicated `CrossVolume`
-    /// errno (the `EXDEV` equivalent) is reported as
-    /// [`RenameOutcome::CrossDevice`], driving the engine's copy-then-remove
-    /// fallback; every other refusal stays the error it is.
-    ///
-    /// The cross-device fallback streams a file chunk-by-chunk and walks a
-    /// directory entry-by-entry through path-based seam calls, so the host
-    /// keeps three one-slot caches — the open source handle, the open
-    /// destination handle (the `cat` host's pattern), and the last directory
-    /// snapshot — hoisting the per-chunk open and the per-entry re-read off
-    /// the copy path. A mutation under the snapshotted directory drops the
-    /// snapshot, so a stale listing is never served.
-    struct RtFileSystem {
-        files: OpenFiles,
-        listing: RefCell<Option<(String, Vec<Entry>)>>,
-    }
-
-    impl RtFileSystem {
-        fn new() -> Self {
-            Self {
-                files: OpenFiles::default(),
-                listing: RefCell::new(None),
-            }
-        }
-
-        /// Drop every cache a mutation of `path` could have staled: the
-        /// open handles on that exact path and the directory snapshot of
-        /// its parent (or of the path itself, for a removed or renamed
-        /// directory).
-        fn forget(&self, path: &str) {
-            self.files.forget(path);
-            let mut listing = self.listing.borrow_mut();
-            if matches!(&*listing, Some((dir, _)) if dir.trim_end_matches('/') == parent_of(path)
-                || dir.trim_end_matches('/') == path.trim_end_matches('/'))
-            {
-                *listing = None;
-            }
-        }
-    }
-
-    impl PathFiles for RtFileSystem {
-        fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-            self.files.read(path, offset, buf)
-        }
-
-        fn size(&self, path: &str) -> Result<u64, Errno> {
-            self.files.size(path)
-        }
-
-        fn next_region(
-            &self,
-            path: &str,
-            offset: u64,
-            region: SeekRegion,
-        ) -> Result<Option<u64>, Errno> {
-            self.files.next_region(path, offset, region)
-        }
-
-        fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-            self.files.write(path, offset, bytes)
-        }
-
-        fn set_len(&self, path: &str, len: u64) -> Result<(), Errno> {
-            self.files.set_len(path, len)
-        }
-    }
-
-    impl FileSystem for RtFileSystem {
-        fn kind(&self, path: &str) -> Result<EntryKind, Errno> {
-            // `NO_FOLLOW` is how a link is described as itself.
-            probe(path, OpenFlags::NO_FOLLOW)
-        }
-
-        fn resolved_kind(&self, path: &str) -> Result<EntryKind, Errno> {
-            probe(path, OpenFlags::empty())
-        }
-
-        fn read_link(&self, path: &str) -> Result<String, Errno> {
-            tairix_rt::readlink(path)
-        }
-
-        fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            self.forget(link);
-            Ok(())
-        }
-
-        fn rename(
-            &self,
-            source: &str,
-            dest: &str,
-            flags: RenameFlags,
-        ) -> Result<RenameOutcome, Errno> {
-            let ret = tairix_rt::fs_rename(source.as_bytes(), dest.as_bytes(), flags);
-            if ret == 0 {
-                self.forget(source);
-                self.forget(dest);
-                return Ok(RenameOutcome::Renamed);
-            }
-            match Errno::from_syscall(ret) {
-                // The kernel's dedicated cross-mount refusal: not an error
-                // but the signal to relocate by copy-then-remove.
-                Errno::CrossVolume => Ok(RenameOutcome::CrossDevice),
-                other => Err(other),
-            }
-        }
-
-        fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno> {
-            let mut listing = self.listing.borrow_mut();
-            let cached = matches!(&*listing, Some((dir, _)) if dir == path);
-            if !cached {
-                *listing = Some((String::from(path), read_entries(path)?));
-            }
-            let Some((_, entries)) = &*listing else {
-                // Unreachable by construction (the snapshot was just
-                // installed), but fail closed rather than panic.
-                return Err(Errno::NotFound);
-            };
-            let index = usize::try_from(index).map_err(|_| Errno::LengthOutOfRange)?;
-            Ok(entries.get(index).cloned())
-        }
-
-        fn mkdir(&self, path: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_mkdir(path.as_bytes());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            self.forget(path);
-            Ok(())
-        }
-
-        fn create(&self, path: &str) -> Result<(), Errno> {
-            // An exclusive, no-follow create, then close: the engine writes
-            // through `write`, which re-opens the file for the stream.
-            let file = tairix_rt::create_new(path.as_bytes()).map_err(Errno::from_syscall)?;
-            drop(file);
-            self.forget(path);
-            Ok(())
-        }
-
-        fn remove_file(&self, path: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            self.forget(path);
-            Ok(())
-        }
-
-        fn remove_dir(&self, path: &str) -> Result<(), Errno> {
-            // The DIRECTORY flag makes the kernel remove the name only when
-            // it is an (empty) directory, decided atomically under the
-            // filesystem's own lock, so a concurrent swap of the directory
-            // for a file fails closed instead of unlinking the file. A
-            // non-empty directory fails closed with the kernel's own errno.
-            let ret = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::DIRECTORY);
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            self.forget(path);
-            Ok(())
-        }
-
-        fn owner(&self, path: &str) -> Result<Owner, Errno> {
-            let file =
-                File::open(path.as_bytes(), OpenFlags::NO_FOLLOW).map_err(Errno::from_syscall)?;
-            let stat = file.stat().map_err(Errno::from_syscall)?;
-            Ok(Owner {
-                mode: stat.mode & FS_MODE_MASK,
-                uid: stat.uid,
-                gid: stat.gid,
-            })
-        }
-
-        fn set_mode(&self, path: &str, mode: u32) -> Result<(), Errno> {
-            match tairix_rt::fs_set_mode(path.as_bytes(), mode) {
-                0 => Ok(()),
-                ret => Err(Errno::from_syscall(ret)),
-            }
-        }
-
-        fn set_owner(&self, path: &str, uid: u32, gid: u32) -> Result<(), Errno> {
-            match tairix_rt::fs_set_owner(path.as_bytes(), uid, gid) {
-                0 => Ok(()),
-                ret => Err(Errno::from_syscall(ret)),
-            }
-        }
-
-        fn staging_name(&self, target: &str) -> Result<String, Errno> {
-            tairix_rt::staging_name(target)
-        }
-
-        fn sync(&self, path: &str) -> Result<(), Errno> {
-            File::open(path.as_bytes(), OpenFlags::NO_FOLLOW)
-                .and_then(|file| file.sync())
-                .map_err(Errno::from_syscall)
-        }
-    }
-
-    /// The kernel's own resolution and identities, through the shared
-    /// runtime-backed seam.
-    impl Ancestry for RtFileSystem {
-        fn canonical(&self, path: &str) -> Result<String, Errno> {
-            RtAncestry.canonical(path)
-        }
-
-        fn identity(&self, path: &str) -> Result<FileId, Errno> {
-            RtAncestry.identity(path)
-        }
-    }
-
-    /// The extended attributes, through the shared runtime-backed store.
-    impl AttributeStore for RtFileSystem {
-        fn attr_keys(&self, path: &str) -> Result<Vec<String>, Errno> {
-            RtAttributes.attr_keys(path)
-        }
-
-        fn attr_value(&self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
-            RtAttributes.attr_value(path, key)
-        }
-
-        fn attr_set(&self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
-            RtAttributes.attr_set(path, key, value)
+    impl Staging for RtStaging {
+        fn staging_name(&self, name: &str) -> Result<String, Errno> {
+            tairix_rt::staging_name(name)
         }
     }
 
@@ -372,34 +92,28 @@ mod program {
         }
     }
 
-    /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
-    /// own trailing newline), best-effort on the already-failing path.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` on a filesystem, prompt, or output
-    /// failure, `2` on a usage error (a malformed argument vector or an
-    /// unrecognised option).
+    /// failure or a command line not understood, as GNU's `mv` ends.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("mv") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("mv", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         let seams = Seams {
-            fs: &RtFileSystem::new(),
+            fs: &WorkingDirectory,
+            staging: &RtStaging,
             prompt: &RtPrompt,
             help: &BundleHelp::new("mv"),
             out: &Stdout,
@@ -407,10 +121,15 @@ mod program {
             // Without a key the record is predictable, never absent.
             keys: BuildSipHash13::with_seed(tairix_rt::hash_seed().unwrap_or(HashSeed::UNKEYED)),
         };
-        match run(command, locale, seams) {
-            Ok(()) => 0,
+        match run(command, locale, &seams) {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(err @ MvError::Usage) => {
+                tairix_help::report_misuse("mv", &err);
+                tairix_help::MISUSE
+            }
             Err(err) => {
-                write_stderr_line(&format!("mv: {err}"));
+                write_stderr_line(format_args!("mv: {err}"));
                 1
             }
         }

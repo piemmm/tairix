@@ -3,8 +3,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_glob::{Options as GlobOptions, Pattern};
+use tairix_glob::{Options as GlobOptions, OutOfMemory, Pattern, Scratch};
 use tairix_termcap::ColorChoice;
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 use tairix_util::quote::Style as QuotingStyle;
 
 use crate::error::LsError;
@@ -202,8 +203,8 @@ pub enum Sort {
     /// By file-name extension (the text from the last `.`), ties by name
     /// (`-X`, `--sort=extension`).
     Extension,
-    /// Natural "version" order (`-v`, `--sort=version`): the GNU `filevercmp`
-    /// ordering, so `f2` sorts before `f10`; ties by name.
+    /// Natural "version" order (`-v`, `--sort=version`): GNU's documented
+    /// version sort, so `f2` sorts before `f10`; ties by name.
     Version,
 }
 
@@ -393,18 +394,30 @@ pub struct Filters {
 impl Filters {
     /// Whether `name` is suppressed by these filters, given whether the
     /// listing is showing hidden entries (`show_hidden` is true under `-a`
-    /// or `-A`). Mirrors GNU's `file_ignored`: `-B` and `-I` patterns apply
-    /// always; `--hide` patterns apply only when hidden entries are
-    /// otherwise shown by default (i.e. not under `-a` / `-A`).
-    #[must_use]
-    pub fn suppresses(&self, name: &str, show_hidden: bool) -> bool {
+    /// or `-A`), as the coreutils manual (§10.1.1) defines the filters: `-B`
+    /// and `-I` patterns apply always; `--hide` patterns apply only when
+    /// neither `-a` nor `-A` is given.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when a pattern's match needed more memory than the
+    /// heap would give.
+    pub fn suppresses(
+        &self,
+        name: &str,
+        show_hidden: bool,
+        scratch: &mut Scratch,
+    ) -> Result<bool, OutOfMemory> {
         if self.ignore_backups && name.ends_with('~') {
-            return true;
+            return Ok(true);
         }
-        if self.ignore.iter().any(|pattern| pattern.matches(name)) {
-            return true;
+        let hiding: &[Pattern] = if show_hidden { &[] } else { &self.hide };
+        for pattern in self.ignore.iter().chain(hiding) {
+            if pattern.matches_with(name, scratch)? {
+                return Ok(true);
+            }
         }
-        !show_hidden && self.hide.iter().any(|pattern| pattern.matches(name))
+        Ok(false)
     }
 }
 
@@ -457,6 +470,161 @@ pub enum Command {
     Help,
 }
 
+/// What each of `ls`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    All,
+    AlmostAll,
+    Author,
+    BlockSize,
+    Classify,
+    Color,
+    Directory,
+    DereferenceCommandLine,
+    DereferenceCommandLineSymlinkToDir,
+    Dereference,
+    Escape,
+    FullTime,
+    FileType,
+    Format,
+    GroupDirectoriesFirst,
+    HumanReadable,
+    HideControlChars,
+    Hide,
+    Inode,
+    IgnoreBackups,
+    Ignore,
+    IndicatorStyle,
+    Kibibytes,
+    Literal,
+    NumericUidGid,
+    NoGroup,
+    QuoteName,
+    QuotingStyle,
+    Reverse,
+    Recursive,
+    Size,
+    Si,
+    ShowControlChars,
+    Sort,
+    Tabsize,
+    Time,
+    TimeStyle,
+    Width,
+    Zero,
+    /// `-C`.
+    Columns,
+    /// `-g`.
+    LongWithoutOwner,
+    /// `-l`.
+    Long,
+    /// `-m`.
+    Commas,
+    /// `-o`.
+    LongWithoutGroup,
+    /// `-p`.
+    Slash,
+    /// `-S`.
+    SortBySize,
+    /// `-t`.
+    SortByTime,
+    /// `-U`.
+    Unsorted,
+    /// `-X`.
+    SortByExtension,
+    /// `-v`.
+    SortByVersion,
+    /// `-f`.
+    AllUnsorted,
+    /// `-c`.
+    ChangeTime,
+    /// `-u`.
+    AccessTime,
+    /// `-x`.
+    Across,
+    /// `-1`.
+    OnePerLine,
+    Help,
+}
+
+/// `ls`'s options, as GNU's `ls` spells them, each family of long names in
+/// its order, and the reserved help switches: `-h` is human-readable sizes.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('a', &["all"], Flag::All),
+    Opt::flag('A', &["almost-all"], Flag::AlmostAll),
+    Opt::long(&["author"], Takes::Nothing, Flag::Author),
+    Opt::long(&["block-size"], Takes::Value, Flag::BlockSize),
+    Opt::flag('F', &["classify"], Flag::Classify),
+    Opt::long(&["color", "colour"], Takes::Attached, Flag::Color),
+    Opt::flag('d', &["directory"], Flag::Directory),
+    Opt::flag(
+        'H',
+        &["dereference-command-line"],
+        Flag::DereferenceCommandLine,
+    ),
+    Opt::long(
+        &["dereference-command-line-symlink-to-dir"],
+        Takes::Nothing,
+        Flag::DereferenceCommandLineSymlinkToDir,
+    ),
+    Opt::flag('L', &["dereference"], Flag::Dereference),
+    Opt::flag('b', &["escape"], Flag::Escape),
+    Opt::long(&["full-time"], Takes::Nothing, Flag::FullTime),
+    Opt::long(&["file-type"], Takes::Nothing, Flag::FileType),
+    Opt::long(&["format"], Takes::Value, Flag::Format),
+    Opt::long(
+        &["group-directories-first"],
+        Takes::Nothing,
+        Flag::GroupDirectoriesFirst,
+    ),
+    Opt::flag('h', &["human-readable"], Flag::HumanReadable),
+    Opt::flag('q', &["hide-control-chars"], Flag::HideControlChars),
+    Opt::long(&["hide"], Takes::Value, Flag::Hide),
+    Opt::flag('i', &["inode"], Flag::Inode),
+    Opt::flag('B', &["ignore-backups"], Flag::IgnoreBackups),
+    Opt::valued('I', &["ignore"], Flag::Ignore),
+    Opt::long(&["indicator-style"], Takes::Value, Flag::IndicatorStyle),
+    Opt::flag('k', &["kibibytes"], Flag::Kibibytes),
+    Opt::flag('N', &["literal"], Flag::Literal),
+    Opt::flag('n', &["numeric-uid-gid"], Flag::NumericUidGid),
+    Opt::flag('G', &["no-group"], Flag::NoGroup),
+    Opt::flag('Q', &["quote-name"], Flag::QuoteName),
+    Opt::long(&["quoting-style"], Takes::Value, Flag::QuotingStyle),
+    Opt::flag('r', &["reverse"], Flag::Reverse),
+    Opt::flag('R', &["recursive"], Flag::Recursive),
+    Opt::flag('s', &["size"], Flag::Size),
+    Opt::long(&["si"], Takes::Nothing, Flag::Si),
+    Opt::long(
+        &["show-control-chars"],
+        Takes::Nothing,
+        Flag::ShowControlChars,
+    ),
+    Opt::long(&["sort"], Takes::Value, Flag::Sort),
+    Opt::valued('T', &["tabsize"], Flag::Tabsize),
+    Opt::long(&["time"], Takes::Value, Flag::Time),
+    Opt::long(&["time-style"], Takes::Value, Flag::TimeStyle),
+    Opt::valued('w', &["width"], Flag::Width),
+    Opt::long(&["zero"], Takes::Nothing, Flag::Zero),
+    Opt::letter('C', Takes::Nothing, Flag::Columns),
+    Opt::letter('g', Takes::Nothing, Flag::LongWithoutOwner),
+    Opt::letter('l', Takes::Nothing, Flag::Long),
+    Opt::letter('m', Takes::Nothing, Flag::Commas),
+    Opt::letter('o', Takes::Nothing, Flag::LongWithoutGroup),
+    Opt::letter('p', Takes::Nothing, Flag::Slash),
+    Opt::letter('S', Takes::Nothing, Flag::SortBySize),
+    Opt::letter('t', Takes::Nothing, Flag::SortByTime),
+    Opt::letter('U', Takes::Nothing, Flag::Unsorted),
+    Opt::letter('X', Takes::Nothing, Flag::SortByExtension),
+    Opt::letter('v', Takes::Nothing, Flag::SortByVersion),
+    Opt::letter('f', Takes::Nothing, Flag::AllUnsorted),
+    Opt::letter('c', Takes::Nothing, Flag::ChangeTime),
+    Opt::letter('u', Takes::Nothing, Flag::AccessTime),
+    Opt::letter('x', Takes::Nothing, Flag::Across),
+    Opt::letter('1', Takes::Nothing, Flag::OnePerLine),
+    Opt::long(&["help"], Takes::Nothing, Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
@@ -465,178 +633,43 @@ pub enum Command {
 /// `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 /// `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 /// `[--full-time] [--author] [--file-type] [--group-directories-first]`
-/// `[--zero] [--] [path...]`:
+/// `[--zero] [--] [path...]`, read as GNU's `getopt_long` reads it
+/// ([`Scan`]): options anywhere among the operands, clustered, a long one by
+/// any unambiguous prefix, `--` ending them, and `--color`'s optional value
+/// only ever attached. The help switches are `-?` and `--help`, answering at
+/// once; `-h` is GNU's human-readable sizes. Each option sets what its
+/// [`Options`] or [`Filters`] field names, with GNU's precedence:
 ///
-/// * `-a` / `--all` — do not hide entries whose name begins with `.`.
-/// * `-A` / `--almost-all` — like `-a`, but never list `.` or `..`.
-/// * `-C` — list entries in columns, filled top-to-bottom.
-/// * `-d` / `--directory` — list directory operands themselves.
-/// * `-F` / `--classify` — append `/` to directories and `*` to
-///   executables.
-/// * `--file-type` / `--indicator-style=file-type` — append `/` to
-///   directories (and, on richer filesystems, a type indicator to other
-///   non-executables); like `-F` but never the executable `*`.
-/// * `--indicator-style=WORD` — the indicator suffix by name: `none`,
-///   `slash` (`-p`), `file-type` (`--file-type`), or `classify` (`-F`).
-/// * `-g` — long format without the owner column; implies `-l`.
-/// * `-G` / `--no-group` — omit the group column from the long format.
-///   Unlike `-o` it does *not* select the long format on its own.
-/// * `--author` — with the long format, print the author (the owning user)
-///   after the owner and before the group.
-/// * `-h` / `--human-readable` — human-readable sizes (base 1024, e.g.
-///   `4.9K`), for both the long-format file sizes and the `-s` blocks (as
-///   in the GNU tool; short help is `-?` / `--help`).
-/// * `--si` — like `-h` but powers of 1000 (e.g. `5.0k`).
-/// * `-k` / `--kibibytes` — use 1024-byte blocks for the `-s` cells and the
-///   directory `total` (TAIRiX's default, so this confirms rather than
-///   changes the output; a size option overrides it).
-/// * `--block-size=SIZE` — scale both the file sizes and the `-s` blocks by
-///   SIZE: a plain integer (bytes), or a unit `K`/`M`/`G`/`T`/`P`/`E`
-///   (1024-based), a `KiB`-form (1024-based), or a `KB`-form (1000-based),
-///   optionally with an integer coefficient. A bare unit prints its
-///   suffix; a coefficient suppresses it. A malformed SIZE is a usage
-///   error (fail closed).
-/// * `-l` — long format.
-/// * `--format=WORD` — the arrangement by name: `long` (`-l`) / `verbose`,
-///   `single-column` (`-1`), `vertical` (`-C`), `across` / `horizontal`
-///   (`-x`), or `commas` (`-m`).
-/// * `-m` — comma-separated names, wrapped to the output width.
-/// * `-n` / `--numeric-uid-gid` — long format with numeric owner and
-///   group; implies `-l` (owner and group are always numeric here — see
-///   the Help document).
-/// * `-o` — long format without the group column; implies `-l`.
-/// * `-p` — append `/` to directories.
-/// * `-N` / `--literal` / `--quoting-style=literal` — print names verbatim,
-///   no quoting.
-/// * `-Q` / `--quote-name` / `--quoting-style=c` — C-string quoting: each
-///   name double-quoted with C backslash escapes.
-/// * `-b` / `--escape` / `--quoting-style=escape` — like `-Q` but without
-///   the surrounding quotes and with spaces escaped.
-/// * `--quoting-style=WORD` — the quoting style by name: `literal` (`-N`),
-///   `shell`, `shell-always`, `shell-escape`, `shell-escape-always`, `c`
-///   (`-Q`), or `escape` (`-b`). The last quoting flag wins. The GNU
-///   default is `shell-escape` at a terminal and `literal` otherwise. The
-///   `locale` / `clocale` styles are refused (fail closed; a documented
-///   divergence).
-/// * `-q` / `--hide-control-chars` — show nongraphic characters as `?` (the
-///   default at a terminal); `--show-control-chars` prints them as-is (the
-///   default otherwise). Only affects the non-escaping styles.
-/// * `-r` / `--reverse` — reverse the sort order.
-/// * `-R` / `--recursive` — list subdirectories recursively.
-/// * `-L` / `--dereference` — show information about the file each
-///   symbolic link names, rather than the link itself, wherever a link
-///   appears. A link whose target cannot be reached (a dangling link) is
-///   reported on standard error and the listing continues, with a non-zero
-///   exit status.
-/// * `-H` / `--dereference-command-line` — dereference only the symbolic
-///   links named on the command line; links inside a listed directory show
-///   themselves. The later of `-L` / `-H` wins.
-/// * `--dereference-command-line-symlink-to-dir` — the GNU default when no
-///   format flag forces otherwise: a command-line link *to a directory* is
-///   dereferenced (so `ls linkdir` lists the directory) and every other
-///   link shows itself. `-l`, `-d`, and `-F` instead default to showing
-///   every link itself.
-/// * `-s` / `--size` — print each entry's allocated size in blocks (scaled
-///   by `-h` / `--si` / `--block-size` / `-k`), with a `total` line per
-///   directory block.
-/// * `-S` — sort by size, largest first.
-/// * `-t` — sort by the selected timestamp, newest first.
-/// * `-U` — do not sort; list entries in directory order.
-/// * `-X` — sort by file-name extension, ties by name.
-/// * `-v` — natural "version" sort (`filevercmp`), ties by name.
-/// * `-f` — do not sort and show all entries: enables `-a` and `-U` and
-///   disables `-l` and `-s` (applied where it appears, so a later
-///   `-l`/`-s`/sort flag overrides it — the GNU order semantics).
-/// * `--sort=WORD` — the sort key by name: `none` (`-U`), `size` (`-S`),
-///   `time` (`-t`), `version` (`-v`), `extension` (`-X`), or `name`.
-/// * `--group-directories-first` — list directories before other entries;
-///   directories come first even under `-r`.
-/// * `-c` — use the metadata-change time (ctime): with `-l` show it, and
-///   with `-t` sort by it; without `-l` sort by it.
-/// * `-u` — like `-c` but for the access time (atime).
-/// * `--time=WORD` — which timestamp to show and sort by: `atime`
-///   (`access` / `use`), `ctime` (`status`), `mtime` (`modification`), or
-///   `birth` (`creation`).
-/// * `-i` / `--inode` — print each entry's stable node number.
-/// * `-B` / `--ignore-backups` — do not list entries whose name ends with
-///   `~`, in every dotfile mode (a backup is hidden even under `-a`).
-/// * `-I PATTERN` / `--ignore=PATTERN` — do not list entries matching the
-///   glob `PATTERN` (repeatable); applied in every dotfile mode.
-/// * `--hide=PATTERN` — like `--ignore`, but has no effect when `-a` or
-///   `-A` is given (the GNU rule that an explicit "show hidden" wins).
-///   `-I` and `--hide` patterns are the shared `tairix_glob` matcher read
-///   as GNU's `fnmatch(FNM_PERIOD)`, so no wildcard matches a leading `.`;
-///   a malformed pattern is a usage error (fail closed).
-/// * `--time-style=STYLE` — how the long-format timestamp is rendered:
-///   `locale` (the default), `long-iso`, `full-iso`, or `iso`. A custom
-///   `+FORMAT` style is refused (fail closed; a documented divergence).
-/// * `--full-time` — like `-l --time-style=full-iso`.
-/// * `-T` / `--tabsize <cols>` — set the column-grid tab stop (default 8;
-///   `0` pads with spaces only).
-/// * `-w` / `--width <cols>` — set the output width; `0` means unlimited.
-/// * `-x` — list entries in columns, filled left-to-right.
-/// * `-1` — one name per line.
-/// * `--zero` — end each output line with NUL, not newline; also selects
-///   (overridably) the single-column arrangement, literal quoting, and
-///   shown control characters.
-/// * `-?` / `--help` — the reserved short-help switches (plans/APPS.md §4;
-///   they win immediately).
-/// * `--` — end option parsing; every later argument is a path.
-/// * any other `-…` — an [`LsError::Usage`] error (fail closed; never a
-///   silently ignored token).
-/// * anything else (including the bare `-`) — a path.
-///
-/// Short options may be combined into one argument (e.g. `-la` is
-/// `-l -a`); an unrecognised letter anywhere in such a cluster is a usage
-/// error. `-w`, `-T`, and `-I` each take the rest of their cluster as their
-/// value (`-w80`), or the next argument (`-w 80`) when they end the
-/// cluster. The last of `-l` / `-1` / `-C` / `-x` / `-m` (and the
-/// `--format` words) wins, with one GNU exception: `-1` has no effect
-/// after `-l` (so `-l -1` stays long). The later of `-p` / `-F` /
-/// `--file-type` / `--indicator-style` wins.
+/// * the last of `-l` / `-1` / `-C` / `-x` / `-m` / `--format` wins, except
+///   that `-1` has no effect after `-l`; the later of `-p` / `-F` /
+///   `--file-type` / `--indicator-style`, of the quoting options, and of
+///   `-L` / `-H` wins;
+/// * `-f` enables `-a` and `-U` and disables `-l` and `-s` where it stands,
+///   so a later flag overrides it;
+/// * an explicit `-t` / `-S` sort wins; otherwise a `-c` / `-u` / `--time`
+///   selection sorts by that time unless the long format is selected; `-k`
+///   yields to `-h` / `--si` / `--block-size`.
 ///
 /// With no path operand the single path is the current directory (`.`).
 ///
 /// # Errors
 ///
-/// [`LsError::Usage`] for any unrecognised option before `--`, a `-w` /
-/// `--width` without a valid non-negative integer value, an unknown
-/// `--time` / `--time-style` / `--quoting-style` word (including a custom
-/// `--time-style=+FORMAT` and the `locale` / `clocale` quoting styles), or
-/// a value given to a long option that takes none.
+/// * [`LsError::Option`] — an option `getopt` refuses, in its words.
+/// * [`LsError::Usage`] — a value `ls` cannot read: a `-w` / `-T` that is
+///   not a non-negative integer, a malformed `--block-size` or `-I` /
+///   `--hide` pattern, or an unknown `--sort` / `--time` / `--time-style` /
+///   `--quoting-style` / `--format` / `--indicator-style` / `--color` word
+///   (a custom `--time-style=+FORMAT` and the `locale` / `clocale` quoting
+///   styles included).
 pub fn parse(args: &[&str]) -> Result<Command, LsError> {
     let mut state = ParseState::default();
     let mut paths = Vec::new();
-    let mut options_done = false;
-    let mut args = args.iter();
-    while let Some(&arg) = args.next() {
-        if options_done {
-            paths.push(String::from(arg));
-            continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(LsError::Option)? {
+            Arg::Operand(path) => paths.push(String::from(path)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(flag, value) => state.apply(flag, value)?,
         }
-        if arg == "--" {
-            options_done = true;
-            continue;
-        }
-        if let Some(name) = arg.strip_prefix("--") {
-            let (key, inline) = match name.split_once('=') {
-                Some((key, value)) => (key, Some(value)),
-                None => (name, None),
-            };
-            if apply_long(key, inline, &mut state, &mut args)? {
-                return Ok(Command::Help);
-            }
-            continue;
-        }
-        // A short-option cluster is a leading `-` followed by at least one
-        // letter (the bare `-` is a path, not an option).
-        if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-            if apply_short(letters, &mut state, &mut args)? {
-                return Ok(Command::Help);
-            }
-            continue;
-        }
-        paths.push(String::from(arg));
     }
     state.resolve_sort();
     state.resolve_sizes();
@@ -706,271 +739,135 @@ impl ParseState {
             self.options.block_size = SizeFormat::KIBI_BLOCKS;
         }
     }
-}
 
-/// Compile an `-I`/`--hide` name pattern as GNU's `fnmatch(FNM_PERIOD)`
-/// reads it, so a wildcard never matches a leading `.`. A malformed pattern
-/// is a usage error, never a silently ignored filter.
-pub(crate) fn name_pattern(raw: &str) -> Result<Pattern, LsError> {
-    Pattern::with_options(raw, GlobOptions::PERIOD).map_err(|_| LsError::Usage)
-}
-
-/// Read a long option's value, taking it from the inline `--opt=value` form
-/// or the following argument. A missing value is a usage error (fail closed).
-fn long_value<'a>(
-    inline: Option<&'a str>,
-    args: &mut core::slice::Iter<'a, &'a str>,
-) -> Result<&'a str, LsError> {
-    match inline {
-        Some(value) => Ok(value),
-        None => Ok(*args.next().ok_or(LsError::Usage)?),
-    }
-}
-
-/// Apply one `--long` option. Returns `Ok(true)` when the option requests
-/// short help (`--help`), so the caller returns [`Command::Help`].
-// One flat long-option dispatch match; splitting it would scatter the option
-// table across helpers for no gain.
-#[allow(clippy::too_many_lines)]
-fn apply_long<'a>(
-    key: &str,
-    inline: Option<&'a str>,
-    state: &mut ParseState,
-    args: &mut core::slice::Iter<'a, &'a str>,
-) -> Result<bool, LsError> {
-    let options = &mut state.options;
-    match key {
-        "all" => options.hidden = Hidden::All,
-        "almost-all" => options.hidden = Hidden::AlmostAll,
-        "directory" => options.directory = true,
-        "classify" => options.indicator = Indicator::Classify,
-        "file-type" => options.indicator = Indicator::FileType,
-        "human-readable" => {
-            options.file_size = SizeFormat::Human { si: false };
-            options.block_size = SizeFormat::Human { si: false };
-            state.size_explicit = true;
-        }
-        "si" => {
-            options.file_size = SizeFormat::Human { si: true };
-            options.block_size = SizeFormat::Human { si: true };
-            state.size_explicit = true;
-        }
-        "kibibytes" => state.kibibytes = true,
-        "numeric-uid-gid" => options.format = Some(Format::Long),
-        "no-group" => options.hide_group = true,
-        "author" => options.author = true,
-        "literal" => options.quoting = Some(QuotingStyle::Literal),
-        "quote-name" => options.quoting = Some(QuotingStyle::C),
-        "escape" => options.quoting = Some(QuotingStyle::Escape),
-        "hide-control-chars" => options.hide_control_chars = Some(true),
-        "show-control-chars" => options.hide_control_chars = Some(false),
-        "size" => options.size = true,
-        "group-directories-first" => options.group_directories_first = true,
-        "reverse" => options.reverse = true,
-        "recursive" => options.recursive = true,
-        "inode" => options.inode = true,
-        "zero" => options.zero = true,
-        "dereference" => options.dereference = Some(Dereference::Always),
-        "dereference-command-line" => options.dereference = Some(Dereference::CommandLine),
-        "dereference-command-line-symlink-to-dir" => {
-            options.dereference = Some(Dereference::CommandLineDirectory);
-        }
-        "ignore-backups" => state.filters.ignore_backups = true,
-        "ignore" => {
-            state
-                .filters
-                .ignore
-                .push(name_pattern(long_value(inline, args)?)?);
-            return Ok(false);
-        }
-        "hide" => {
-            state
-                .filters
-                .hide
-                .push(name_pattern(long_value(inline, args)?)?);
-            return Ok(false);
-        }
-        "full-time" => {
-            options.format = Some(Format::Long);
-            options.time_style = TimeStyle::FullIso;
-        }
-        "help" => return Ok(true),
-        "block-size" => {
-            let size = parse_block_size(long_value(inline, args)?)?;
-            options.file_size = size;
-            options.block_size = size;
-            state.size_explicit = true;
-            return Ok(false);
-        }
-        "format" => {
-            options.format = Some(parse_format(long_value(inline, args)?)?);
-            return Ok(false);
-        }
-        "indicator-style" => {
-            options.indicator = parse_indicator_style(long_value(inline, args)?)?;
-            return Ok(false);
-        }
-        "tabsize" => {
-            options.tabsize = parse_width(long_value(inline, args)?)?;
-            return Ok(false);
-        }
-        "time" => {
-            options.time_field = parse_time_field(long_value(inline, args)?)?;
-            state.time_selected = true;
-            return Ok(false);
-        }
-        "time-style" => {
-            options.time_style = parse_time_style(long_value(inline, args)?)?;
-            return Ok(false);
-        }
-        "sort" => {
-            state.explicit_sort = Some(parse_sort(long_value(inline, args)?)?);
-            return Ok(false);
-        }
-        "quoting-style" => {
-            options.quoting = Some(parse_quoting_style(long_value(inline, args)?)?);
-            return Ok(false);
-        }
-        "width" => {
-            options.width = Some(parse_width(long_value(inline, args)?)?);
-            return Ok(false);
-        }
-        "color" | "colour" => {
-            options.color = parse_color_when(inline)?;
-            return Ok(false);
-        }
-        _ => return Err(LsError::Usage),
-    }
-    // A value on a long option that takes none (`--all=x`) is a usage error,
-    // not a silently ignored token.
-    if inline.is_some() {
-        return Err(LsError::Usage);
-    }
-    Ok(false)
-}
-
-/// Apply one short-option cluster (`-la`, `-w80`, …). Returns `Ok(true)`
-/// when the cluster requests short help (`-?`), so the caller returns
-/// [`Command::Help`].
-// One flat short-option dispatch match, like `apply_long`; splitting it would
-// scatter the option table across helpers for no gain.
-#[allow(clippy::too_many_lines)]
-fn apply_short<'a>(
-    letters: &'a str,
-    state: &mut ParseState,
-    args: &mut core::slice::Iter<'a, &'a str>,
-) -> Result<bool, LsError> {
-    let options = &mut state.options;
-    let mut rest = letters;
-    while let Some(letter) = rest.chars().next() {
-        rest = &rest[letter.len_utf8()..];
-        match letter {
-            'a' => options.hidden = Hidden::All,
-            'A' => options.hidden = Hidden::AlmostAll,
-            'C' => options.format = Some(Format::Columns),
-            'd' => options.directory = true,
-            'F' => options.indicator = Indicator::Classify,
-            'g' => {
+    /// Apply the option `flag` names, with the value the scan gave it.
+    // One flat option dispatch match; splitting it would scatter the option
+    // table across helpers for no gain.
+    #[allow(clippy::too_many_lines)]
+    fn apply(&mut self, flag: Flag, value: Option<&str>) -> Result<(), LsError> {
+        // The scan gives every valued option its value; none is refused,
+        // never guessed at.
+        let given = || value.ok_or(LsError::Usage);
+        let options = &mut self.options;
+        match flag {
+            Flag::All => options.hidden = Hidden::All,
+            Flag::AlmostAll => options.hidden = Hidden::AlmostAll,
+            Flag::Author => options.author = true,
+            Flag::BlockSize => {
+                let size = parse_block_size(given()?)?;
+                options.file_size = size;
+                options.block_size = size;
+                self.size_explicit = true;
+            }
+            Flag::Classify => options.indicator = Indicator::Classify,
+            Flag::Color => options.color = parse_color_when(value)?,
+            Flag::Directory => options.directory = true,
+            Flag::DereferenceCommandLine => {
+                options.dereference = Some(Dereference::CommandLine);
+            }
+            Flag::DereferenceCommandLineSymlinkToDir => {
+                options.dereference = Some(Dereference::CommandLineDirectory);
+            }
+            Flag::Dereference => options.dereference = Some(Dereference::Always),
+            Flag::Escape => options.quoting = Some(QuotingStyle::Escape),
+            Flag::FullTime => {
+                options.format = Some(Format::Long);
+                options.time_style = TimeStyle::FullIso;
+            }
+            Flag::FileType => options.indicator = Indicator::FileType,
+            Flag::Format => options.format = Some(parse_format(given()?)?),
+            Flag::GroupDirectoriesFirst => options.group_directories_first = true,
+            Flag::HumanReadable => {
+                options.file_size = SizeFormat::Human { si: false };
+                options.block_size = SizeFormat::Human { si: false };
+                self.size_explicit = true;
+            }
+            Flag::HideControlChars => options.hide_control_chars = Some(true),
+            Flag::Hide => self.filters.hide.push(name_pattern(given()?)?),
+            Flag::Inode => options.inode = true,
+            Flag::IgnoreBackups => self.filters.ignore_backups = true,
+            Flag::Ignore => self.filters.ignore.push(name_pattern(given()?)?),
+            Flag::IndicatorStyle => options.indicator = parse_indicator_style(given()?)?,
+            Flag::Kibibytes => self.kibibytes = true,
+            Flag::Literal => options.quoting = Some(QuotingStyle::Literal),
+            // `-n` selects the long format like `-l`; its numeric
+            // owner/group is already the only output.
+            Flag::Long | Flag::NumericUidGid => options.format = Some(Format::Long),
+            Flag::NoGroup => options.hide_group = true,
+            Flag::QuoteName => options.quoting = Some(QuotingStyle::C),
+            Flag::QuotingStyle => options.quoting = Some(parse_quoting_style(given()?)?),
+            Flag::Reverse => options.reverse = true,
+            Flag::Recursive => options.recursive = true,
+            Flag::Size => options.size = true,
+            Flag::Si => {
+                options.file_size = SizeFormat::Human { si: true };
+                options.block_size = SizeFormat::Human { si: true };
+                self.size_explicit = true;
+            }
+            Flag::ShowControlChars => options.hide_control_chars = Some(false),
+            Flag::Sort => self.explicit_sort = Some(parse_sort(given()?)?),
+            Flag::Tabsize => options.tabsize = parse_width(given()?)?,
+            Flag::Time => {
+                options.time_field = parse_time_field(given()?)?;
+                self.time_selected = true;
+            }
+            Flag::TimeStyle => options.time_style = parse_time_style(given()?)?,
+            Flag::Width => options.width = Some(parse_width(given()?)?),
+            Flag::Zero => options.zero = true,
+            Flag::Columns => options.format = Some(Format::Columns),
+            Flag::LongWithoutOwner => {
                 options.format = Some(Format::Long);
                 options.hide_owner = true;
             }
-            'G' => options.hide_group = true,
-            'L' => options.dereference = Some(Dereference::Always),
-            'H' => options.dereference = Some(Dereference::CommandLine),
-            'h' => {
-                options.file_size = SizeFormat::Human { si: false };
-                options.block_size = SizeFormat::Human { si: false };
-                state.size_explicit = true;
-            }
-            'k' => state.kibibytes = true,
-            // `-n` selects the long format like `-l`; its numeric
-            // owner/group is already the only output.
-            'l' | 'n' => options.format = Some(Format::Long),
-            'm' => options.format = Some(Format::Commas),
-            'o' => {
+            Flag::Commas => options.format = Some(Format::Commas),
+            Flag::LongWithoutGroup => {
                 options.format = Some(Format::Long);
                 options.hide_group = true;
             }
-            'p' => options.indicator = Indicator::Slash,
-            'N' => options.quoting = Some(QuotingStyle::Literal),
-            'Q' => options.quoting = Some(QuotingStyle::C),
-            'b' => options.quoting = Some(QuotingStyle::Escape),
-            'q' => options.hide_control_chars = Some(true),
-            'r' => options.reverse = true,
-            'R' => options.recursive = true,
-            's' => options.size = true,
-            'S' => state.explicit_sort = Some(Sort::Size),
-            't' => state.explicit_sort = Some(Sort::Time),
-            'U' => state.explicit_sort = Some(Sort::None),
-            'X' => state.explicit_sort = Some(Sort::Extension),
-            'v' => state.explicit_sort = Some(Sort::Version),
+            Flag::Slash => options.indicator = Indicator::Slash,
+            Flag::SortBySize => self.explicit_sort = Some(Sort::Size),
+            Flag::SortByTime => self.explicit_sort = Some(Sort::Time),
+            Flag::Unsorted => self.explicit_sort = Some(Sort::None),
+            Flag::SortByExtension => self.explicit_sort = Some(Sort::Extension),
+            Flag::SortByVersion => self.explicit_sort = Some(Sort::Version),
             // `-f` enables `-a` and `-U` and turns off `-l`/`-s`, in order:
             // a later long/size/sort flag in the same line overrides it.
-            'f' => {
+            Flag::AllUnsorted => {
                 options.hidden = Hidden::All;
                 if options.is_long() {
                     options.format = None;
                 }
                 options.size = false;
-                state.explicit_sort = Some(Sort::None);
+                self.explicit_sort = Some(Sort::None);
             }
-            'c' => {
+            Flag::ChangeTime => {
                 options.time_field = TimeField::Changed;
-                state.time_selected = true;
+                self.time_selected = true;
             }
-            'u' => {
+            Flag::AccessTime => {
                 options.time_field = TimeField::Accessed;
-                state.time_selected = true;
+                self.time_selected = true;
             }
-            'i' => options.inode = true,
-            'B' => state.filters.ignore_backups = true,
-            // `-w` takes a value: the rest of the cluster, or the next
-            // argument when it ends the cluster.
-            'w' => {
-                let raw = if rest.is_empty() {
-                    *args.next().ok_or(LsError::Usage)?
-                } else {
-                    rest
-                };
-                options.width = Some(parse_width(raw)?);
-                break;
-            }
-            // `-I` takes a value like `-w`: the rest of the cluster, or the
-            // next argument when it ends the cluster.
-            'I' => {
-                let raw = if rest.is_empty() {
-                    *args.next().ok_or(LsError::Usage)?
-                } else {
-                    rest
-                };
-                state.filters.ignore.push(name_pattern(raw)?);
-                break;
-            }
-            // `-T` takes a value like `-w`: the rest of the cluster, or the
-            // next argument when it ends the cluster.
-            'T' => {
-                let raw = if rest.is_empty() {
-                    *args.next().ok_or(LsError::Usage)?
-                } else {
-                    rest
-                };
-                options.tabsize = parse_width(raw)?;
-                break;
-            }
-            'x' => options.format = Some(Format::Across),
+            Flag::Across => options.format = Some(Format::Across),
             // `-1` has no effect after `-l`: the long format wins (the GNU
             // rule), so a column arrangement is only selected when the long
             // format is not already chosen.
-            '1' => {
+            Flag::OnePerLine => {
                 if !options.is_long() {
                     options.format = Some(Format::OnePerLine);
                 }
             }
-            '?' => return Ok(true),
-            _ => return Err(LsError::Usage),
+            Flag::Help => {}
         }
+        Ok(())
     }
-    Ok(false)
+}
+
+/// Compile an `-I`/`--hide` name pattern as POSIX `fnmatch(FNM_PERIOD)`
+/// reads it, so a wildcard never matches a leading `.`. A malformed pattern
+/// is a usage error, never a silently ignored filter.
+pub(crate) fn name_pattern(raw: &str) -> Result<Pattern, LsError> {
+    Pattern::with_options(raw, GlobOptions::PERIOD).map_err(|_| LsError::Usage)
 }
 
 /// Parse a `-w` / `--width` value: a non-negative decimal integer, where
@@ -1165,7 +1062,7 @@ mod tests {
     };
     use crate::error::LsError;
     use alloc::format;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
     fn list(options: Options, paths: &[&str]) -> Command {
@@ -1418,8 +1315,11 @@ mod tests {
 
     #[test]
     fn a_bad_or_missing_width_is_a_usage_error() {
-        assert_eq!(parse(&["-w"]), Err(LsError::Usage));
-        assert_eq!(parse(&["--width"]), Err(LsError::Usage));
+        assert_eq!(refused(&["-w"]), "option requires an argument -- 'w'");
+        assert_eq!(
+            refused(&["--width"]),
+            "option '--width' requires an argument"
+        );
         assert_eq!(parse(&["-w", "wide"]), Err(LsError::Usage));
         assert_eq!(parse(&["--width=-5"]), Err(LsError::Usage));
         assert_eq!(parse(&["-wx"]), Err(LsError::Usage));
@@ -1427,7 +1327,10 @@ mod tests {
 
     #[test]
     fn a_value_on_a_valueless_long_option_is_a_usage_error() {
-        assert_eq!(parse(&["--all=yes"]), Err(LsError::Usage));
+        assert_eq!(
+            refused(&["--all=yes"]),
+            "option '--all' doesn't allow an argument"
+        );
     }
 
     #[test]
@@ -1770,7 +1673,7 @@ mod tests {
             );
         }
         assert_eq!(parse(&["--sort=bogus"]), Err(LsError::Usage));
-        assert_eq!(parse(&["--sort"]), Err(LsError::Usage));
+        assert_eq!(refused(&["--sort"]), "option '--sort' requires an argument");
     }
 
     #[test]
@@ -1856,7 +1759,7 @@ mod tests {
             );
         }
         assert_eq!(parse(&["--time=bogus"]), Err(LsError::Usage));
-        assert_eq!(parse(&["--time"]), Err(LsError::Usage));
+        assert_eq!(refused(&["--time"]), "option '--time' requires an argument");
     }
 
     #[test]
@@ -1985,8 +1888,11 @@ mod tests {
             Ok(listing(Options::DEFAULT, literal, &["."]))
         );
         // A value-taking option with no value fails closed.
-        assert_eq!(parse(&["-I"]), Err(LsError::Usage));
-        assert_eq!(parse(&["--ignore"]), Err(LsError::Usage));
+        assert_eq!(refused(&["-I"]), "option requires an argument -- 'I'");
+        assert_eq!(
+            refused(&["--ignore"]),
+            "option '--ignore' requires an argument"
+        );
     }
 
     #[test]
@@ -2002,14 +1908,51 @@ mod tests {
         assert_eq!(parse(&["-"]), Ok(list(Options::DEFAULT, &["-"])));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-Z"]), Err(LsError::Usage));
-        assert_eq!(parse(&["--frobnicate"]), Err(LsError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-Z"]), "invalid option -- 'Z'");
+        assert_eq!(
+            refused(&["--frobnicate"]),
+            "unrecognized option '--frobnicate'"
+        );
         // The retired invented synonym for `-l` stays retired.
-        assert_eq!(parse(&["--long"]), Err(LsError::Usage));
+        assert_eq!(refused(&["--long"]), "unrecognized option '--long'");
         // An unknown letter inside an otherwise-valid cluster still fails.
-        assert_eq!(parse(&["-lZ"]), Err(LsError::Usage));
+        assert_eq!(refused(&["-lZ"]), "invalid option -- 'Z'");
+        assert_eq!(refused(&["-T"]), "option requires an argument -- 'T'");
+        assert_eq!(
+            refused(&["--zero=1"]),
+            "option '--zero' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `ls --rev --recu --col=never` as
+    /// `ls --reverse --recursive --color=never`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--rev", "--recu", "--col=never"]),
+            Ok(list(
+                Options {
+                    reverse: true,
+                    recursive: true,
+                    color: ColorChoice::Never,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            ))
+        );
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
+        assert_eq!(
+            refused(&["--s"]),
+            "option '--s' is ambiguous; possibilities: '--size' '--si' '--show-control-chars' \
+             '--sort'"
+        );
     }
 
     #[test]
@@ -2144,7 +2087,10 @@ mod tests {
             );
         }
         // Missing value fails closed too.
-        assert_eq!(parse(&["--block-size"]), Err(LsError::Usage));
+        assert_eq!(
+            refused(&["--block-size"]),
+            "option '--block-size' requires an argument"
+        );
     }
 
     #[test]
@@ -2316,7 +2262,10 @@ mod tests {
             ))
         );
         assert_eq!(parse(&["-T", "wide"]), Err(LsError::Usage));
-        assert_eq!(parse(&["--tabsize"]), Err(LsError::Usage));
+        assert_eq!(
+            refused(&["--tabsize"]),
+            "option '--tabsize' requires an argument"
+        );
     }
 
     #[test]

@@ -74,11 +74,11 @@ that is not a calendar, a date the calendar does not have, the write/read
 round trip, a failed write leaving the chip unable to vouch, and every year
 the plausibility window admits.
 
-**QEMU does not model the Broadcom Serial Controller** these parts hang off,
+**QEMU models no I²C controller** these parts hang off,
 so no integration test is possible for this tier: no emulated machine in the
 matrix presents an I²C bus with a clock chip on it. The decode, the encode,
 and every fail-closed path are host-proven and the live part is an on-metal
-acceptance item, as for the rest of `plans/PI.md`'s Raspberry Pi work.
+acceptance item.
 
 ## References
 

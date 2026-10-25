@@ -1,0 +1,7 @@
+# The kernel's bootstrap floor: the kernel opens this driver's device itself,
+# before the driver store it reads is reachable. `bind` restates the crate's
+# `BIND_KEYS` for the build to sign, and the build refuses any other.
+bring-up = "host"
+isas = "aarch64"
+bind = "compatible:brcm,bcm2711-emmc2@10"
+reason = "It reads the SD card the root volume, and the driver store on it, live on."

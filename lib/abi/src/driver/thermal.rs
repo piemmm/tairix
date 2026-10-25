@@ -33,8 +33,9 @@ impl Millicelsius {
     /// The temperature in tenths of a degree, rounded half away from zero.
     #[must_use]
     pub const fn tenths(self) -> i32 {
-        let half = if self.0 < 0 { -50 } else { 50 };
-        (self.0 + half) / 100
+        // Both divisions truncate toward zero, so half a tenth or more rounds
+        // away from it on either side, and nothing can overflow.
+        self.0 / 100 + self.0 % 100 / 50
     }
 }
 

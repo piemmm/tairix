@@ -514,7 +514,7 @@ where
     ///
     /// `probe` opens the directory named by the spelled path, reads one batch
     /// into the given buffer, and closes it, returning the bytes the batch
-    /// occupies — on a running system `tairix_rt::open_dir` plus one
+    /// occupies — on a running system `tairix_rt::Dir::open` plus one
     /// `Dir::read`. A batch costs the kernel what the buffer holds, so the
     /// [`PROBE_BUF_LEN`] buffer it is handed costs the same on a directory of
     /// a hundred entries and on one of a hundred thousand.
@@ -572,7 +572,7 @@ pub struct RtLinkReader;
 /// The kernel's refusal of the open or the read.
 #[cfg(feature = "rt")]
 pub fn probe_directory(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
-    let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
+    let dir = tairix_rt::Dir::open(path.as_bytes()).map_err(Errno::from_syscall)?;
     dir.read(buf).map_err(Errno::from_syscall)
 }
 

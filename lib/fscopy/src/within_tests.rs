@@ -1,9 +1,8 @@
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-
 use tairix_abi::{Errno, FileId};
 
-use super::{landing, Ancestry, Descent, Landing};
+use super::{landing, Descent, Landing, Unresolved};
+use crate::fixture::{Handle, Tree};
+use crate::tree::Roots;
 
 const fn id(node: u64) -> FileId {
     FileId {
@@ -12,136 +11,81 @@ const fn id(node: u64) -> FileId {
     }
 }
 
-/// Spellings resolved by table (anything else resolves to itself) and the
-/// identity of every directory that exists.
-#[derive(Default)]
-struct Tree {
-    spelled: BTreeMap<&'static str, &'static str>,
-    nodes: BTreeMap<&'static str, FileId>,
-}
-
-impl Tree {
-    fn with(mut self, path: &'static str, node: u64) -> Self {
-        self.nodes.insert(path, id(node));
-        self
-    }
-
-    fn spelling(mut self, path: &'static str, canonical: &'static str) -> Self {
-        self.spelled.insert(path, canonical);
-        self
-    }
-}
-
-impl Ancestry for Tree {
-    fn canonical(&self, path: &str) -> Result<String, Errno> {
-        Ok(String::from(
-            self.spelled.get(path).copied().unwrap_or(path),
-        ))
-    }
-
-    fn identity(&self, path: &str) -> Result<FileId, Errno> {
-        self.nodes.get(path).copied().ok_or(Errno::NotFound)
-    }
-}
-
 fn tree() -> Tree {
-    Tree::default()
-        .with("/", 1)
-        .with("/a", 2)
-        .with("/a/x", 3)
-        .with("/b", 4)
-        .with("/Users", 5)
-        .with("/Users/root", 6)
-        .with("/Users/root/Home", 7)
+    Tree::new()
+        .dir("/a/x/y")
+        .dir("/b")
+        .dir("/ab")
+        .link("/b/to-a", "/a")
+        .dir("/a/mnt")
+        .volume("/a/mnt")
+}
+
+fn open(tree: &Tree, path: &str) -> Handle {
+    tree.open_dir(path, true).expect("the directory opens")
+}
+
+fn landed(tree: &Tree, source: &str, dir: &str) -> Result<Landing, Unresolved> {
+    landing(&open(tree, source), &open(tree, dir))
 }
 
 #[test]
-fn a_target_beside_the_source_is_apart() {
-    assert_eq!(landing(&tree(), "/a", id(2), "/b/a"), Ok(Landing::Apart));
-    assert_eq!(landing(&tree(), "/a", id(2), "/ab"), Ok(Landing::Apart));
+fn a_climb_ends_at_a_root_with_no_identity() {
+    let tree = Tree::new().dir("/s").dir("/d/e").unidentified("/");
+    let before = tree.calls().len();
+    assert_eq!(landed(&tree, "/s", "/d/e"), Ok(Landing::Apart));
+    assert!(tree.calls().len() - before < 16, "{:?}", tree.calls());
 }
 
 #[test]
-fn a_target_inside_the_source_is_within_however_deep() {
-    assert_eq!(landing(&tree(), "/a", id(2), "/a/b"), Ok(Landing::Within));
-    assert_eq!(landing(&tree(), "/a", id(2), "/a/x/y"), Ok(Landing::Within));
+fn a_directory_beside_the_source_is_apart() {
+    let tree = tree();
+    assert_eq!(landed(&tree, "/a", "/b"), Ok(Landing::Apart));
+    assert_eq!(landed(&tree, "/a", "/ab"), Ok(Landing::Apart));
+    assert_eq!(landed(&tree, "/a/x", "/a"), Ok(Landing::Apart));
+}
+
+#[test]
+fn a_directory_inside_the_source_is_within_however_deep() {
+    let tree = tree();
+    assert_eq!(landed(&tree, "/a", "/a/x"), Ok(Landing::Within));
+    assert_eq!(landed(&tree, "/a", "/a/x/y"), Ok(Landing::Within));
 }
 
 #[test]
 fn the_source_itself_is_the_same() {
-    assert_eq!(landing(&tree(), "/a", id(2), "/a"), Ok(Landing::Same));
+    assert_eq!(landed(&tree(), "/a", "/a"), Ok(Landing::Same));
 }
 
 #[test]
-fn a_link_or_a_climb_on_the_way_cannot_hide_the_source() {
-    let tree = tree()
-        .spelling("/b/to-a/y", "/a/y")
-        .spelling("/b/../a/y", "/a/y");
-    assert_eq!(
-        landing(&tree, "/a", id(2), "/b/to-a/y"),
-        Ok(Landing::Within)
-    );
-    assert_eq!(
-        landing(&tree, "/a", id(2), "/b/../a/y"),
-        Ok(Landing::Within)
-    );
+fn a_link_on_the_way_cannot_hide_the_source() {
+    let tree = tree();
+    assert_eq!(landed(&tree, "/a", "/b/to-a/x"), Ok(Landing::Within));
+    assert_eq!(landed(&tree, "/a", "/b/to-a"), Ok(Landing::Same));
+    assert_eq!(landed(&tree, "/a", "/b/../a/x/y"), Ok(Landing::Within));
 }
 
 #[test]
-fn a_second_spelling_of_the_source_is_found_by_its_identity() {
-    let tree = tree()
-        .with("Home:/", 7)
-        .with("Home:/docs", 8)
-        .with("/Users/root/Home/docs", 8);
-    assert_eq!(
-        landing(&tree, "Home:/docs", id(8), "/Users/root/Home/docs/copy"),
-        Ok(Landing::Within)
-    );
-    assert_eq!(
-        landing(&tree, "Home:/docs", id(8), "/Users/root/Home/docs"),
-        Ok(Landing::Same)
-    );
+fn a_volume_attached_inside_the_source_is_within_it() {
+    let tree = tree().dir("/a/mnt/in");
+    assert_eq!(landed(&tree, "/a", "/a/mnt/in"), Ok(Landing::Within));
+    assert_eq!(landed(&tree, "/a/mnt", "/b"), Ok(Landing::Apart));
 }
 
 #[test]
-fn without_an_identity_only_the_resolved_paths_decide() {
-    let tree = tree()
-        .with("Home:/docs", 8)
-        .with("/Users/root/Home/docs", 8);
+fn a_climb_that_fails_is_the_targets_and_a_source_unknown_is_the_sources() {
+    let tree = tree().refuse("open_dir /a/x/..", Errno::PermissionDenied);
     assert_eq!(
-        landing(
-            &tree,
-            "Home:/docs",
-            FileId::NONE,
-            "/Users/root/Home/docs/copy"
-        ),
-        Ok(Landing::Apart)
+        landed(&tree, "/b", "/a/x/y"),
+        Err(Unresolved::Target(Errno::PermissionDenied))
     );
+    let tree = self::tree().refuse("stat /b", Errno::DeviceFault);
+    let failure = landed(&tree, "/b", "/a");
+    assert_eq!(failure, Err(Unresolved::Source(Errno::DeviceFault)));
     assert_eq!(
-        landing(&tree, "/a", FileId::NONE, "/a/b"),
-        Ok(Landing::Within)
+        failure.map_err(|unresolved| unresolved.at("/b", "/a")),
+        Err(("/b", Errno::DeviceFault))
     );
-}
-
-#[test]
-fn a_resolution_that_fails_is_the_answer() {
-    struct Broken;
-    impl Ancestry for Broken {
-        fn canonical(&self, _: &str) -> Result<String, Errno> {
-            Err(Errno::LinkLoop)
-        }
-        fn identity(&self, _: &str) -> Result<FileId, Errno> {
-            Ok(id(2))
-        }
-    }
-    assert_eq!(landing(&Broken, "/a", id(2), "/b"), Err(Errno::LinkLoop));
-    let garbled = tree().spelling("/b/x", "not//a path");
-    assert_eq!(
-        landing(&garbled, "/a", id(2), "/b/x"),
-        Err(Errno::OutOfRange)
-    );
-    let gone = Tree::default().with("/", 1).with("/a", 2);
-    assert_eq!(landing(&gone, "/a", id(2), "/b/x"), Err(Errno::NotFound));
 }
 
 #[test]

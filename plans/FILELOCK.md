@@ -26,15 +26,17 @@ contributor must not re-litigate, and what is deliberately out of scope.
    conversation, not a patch.
 
 3. **Acquisition is checked even though the lock grants nothing.**
-   `CAP_FS_ACCESS` at the dispatcher; the path re-resolved and
-   re-authorised under the caller's attested identity on every call; a
-   shared lock needs read access and an exclusive one write access; the
-   per-process record count bounded by `LimitKind::FileLocks`.
+   `CAP_FS_ACCESS` at the dispatcher; the node the descriptor pinned
+   re-authorised under the descriptor's authority on every call; a shared
+   lock needs read access and an exclusive one write access; the
+   per-process record count bounded by `LimitKind::FileLocks`. A
+   descriptor of the opener's own or one conferred at spawn is a lock
+   subject; a grant is not.
 
-4. **Keyed on `FileId`, not on a path.** A rename moves neither the lock
-   nor the identity participants agree on. A backing with no stable
-   identity fails closed rather than letting two unrelated nodes share one
-   owner's records.
+4. **Keyed on the pinned node, not on a path or a number.** The key is the
+   volume registration and the id its driver holds the node under
+   (`plans/OPENFILE.md`), so a rename moves nothing, a FAT write keeps the
+   key, and no request asks the node for its identity.
 
 5. **Fairness is designed in, with two exemptions.** A request prepared to
    wait conflicts with earlier-queued waiters as well as holders, so a

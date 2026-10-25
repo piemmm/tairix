@@ -34,7 +34,7 @@ i'r allbwn gwall safonol — nid yw byth yn disodli sesiwn sy'n rhedeg.
 ## EXIT STATUS
 
 - `0` — cafodd y cymorth byr ei ddangos.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni ddeallwyd y llinell orchymyn.
 - unrhyw god arall nad yw'n sero — ni allai'r sesiwn gychwyn (dim sedd,
   dim gwasanaeth arddangos) neu daeth i ben (collwyd prydles y sedd);
   ysgrifennir y rheswm i'r allbwn gwall safonol.

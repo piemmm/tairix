@@ -34,7 +34,7 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
   `DriverError::BufferTooSmall`; the engine never panics.
 - **`evdev` → `InputEvent` decode**: the wire record is
   `struct virtio_input_event { __le16 type; __le16 code; __le32 value; }`
-  (virtio 1.1 §5.8.6) in the Linux `evdev` namespaces, mapped onto the
+  (virtio 1.1 §5.8.6) in the evdev namespaces, mapped onto the
   platform-neutral `InputEvent`: `EV_KEY` → `Key` (the evdev keycode, `value`
   1 press / 0 release), `EV_REL` `REL_X`/`REL_Y` → `Pointer`, and both
   wheels → `Scroll` in scroll units on the shared axes, which count toward the
@@ -49,13 +49,13 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
   consumed but surface no event, so the engine never fabricates a bogus one
   (`AGENTS.md` §2.9 — fail closed, never guess).
 - **`is_keyboard`**: whether the device reports a key below the buttons
-  (`BTN_MISC`), read from its `EV_KEY` bitmap at `open` — how Linux's keyboard
-  handler tells a keyboard from a pointer that only has buttons. A device that
+  (`BTN_MISC`), read from its `EV_KEY` bitmap at `open`, which tells a keyboard
+  from a pointer that only has buttons. A device that
   states no bitmap is no keyboard.
 - **Multi-touch**: a device whose `EV_ABS` bitmap offers
   `ABS_MT_POSITION_X`, `ABS_MT_POSITION_Y` and `ABS_MT_TRACKING_ID`, each
   position axis with a stated range, is a touch surface, read through
-  `poll_reports`. Its slots follow the Linux multi-touch protocol (type B):
+  `poll_reports`. Its slots follow evdev's slot protocol:
   `ABS_MT_SLOT` addresses a slot, a non-negative tracking id begins a contact
   and a negative one lifts it, and each `SYN_REPORT` closes one
   [`TouchFrame`](../abi/input.md) naming every contact still down, its

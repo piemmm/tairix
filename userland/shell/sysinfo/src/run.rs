@@ -27,32 +27,29 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::time::Time64;
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
-    use tairix_rt::args;
     use tairix_rt::io::{write_stderr_line, Stdout};
-    use tairix_sysinfo::{parse, run, USAGE};
+    use tairix_sysinfo::{parse, run};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` on a service or output failure, `2` on
-    /// a usage error (a malformed argument vector or an unrecognised query).
+    /// Exit codes: `0` on success, `1` on a service or output failure or a
+    /// command line that was not understood (a malformed argument vector or
+    /// an unrecognised query).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("sysinfo") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            write_stderr_line(USAGE);
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("sysinfo", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The wall clock is read here, at the edge, and passed in: the
@@ -75,7 +72,7 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err) => {
-                write_stderr_line(&format!("sysinfo: {err}"));
+                write_stderr_line(format_args!("sysinfo: {err}"));
                 1
             }
         }

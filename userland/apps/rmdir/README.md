@@ -46,8 +46,9 @@ rmdir [-pv] [--ignore-fail-on-non-empty] [--] directory...
 
 - `0` — every removal succeeded (a tolerated non-empty refusal is not a
   failure).
-- `1` — a filesystem or output failure.
-- `2` — the command line was not understood.
+- `1` — a filesystem or output failure, or a command line that was not
+  understood: `rmdir: reason`, then `Try 'rmdir --help' for more
+  information.`, as GNU's `rmdir` reports it.
 
 ## Stability
 

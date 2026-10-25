@@ -33,8 +33,7 @@ for script compatibility and changes nothing.
 
 - `0` — the clear sequence was written.
 - `1` — the terminal cannot clear, or the output could not be
-  delivered.
-- `2` — the command line was not understood.
+  delivered. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

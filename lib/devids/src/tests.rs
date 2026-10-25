@@ -451,7 +451,7 @@ const OUI_FIXTURE: &str = "\
 # vetted oui.ids fixture
 00000c  Cisco Systems, Inc
 001b63  Apple, Inc.
-b827eb  Raspberry Pi Foundation
+005056  VMware, Inc.
 ";
 
 #[test]
@@ -461,10 +461,7 @@ fn an_oui_table_names_organisations_by_their_six_digit_ids() {
     let bytes = db.encode();
     let ids = decoded(&bytes, DbKind::Oui);
     assert_eq!(ids.organisation(0x00_1b_63), Some("Apple, Inc."));
-    assert_eq!(
-        ids.organisation(0xb8_27_eb),
-        Some("Raspberry Pi Foundation")
-    );
+    assert_eq!(ids.organisation(0x00_50_56), Some("VMware, Inc."));
     assert_eq!(ids.organisation(0x00_00_0d), None);
     assert_eq!(
         decoded(&parse_ok(DbKind::Pci, PCI_FIXTURE).encode(), DbKind::Pci).organisation(0x8086),

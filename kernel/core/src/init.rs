@@ -1505,7 +1505,7 @@ mod dispatch_loop_tests {
         use tairix_abi::cpufreq::CpuFreqLimits;
         use tairix_kernel_sec::ProcessId;
 
-        // The reported defect: a Raspberry Pi held its ARM clock at the
+        // The reported defect: a board held its ARM clock at the
         // ceiling while the scheduler reported the boot CPU two percent busy.
         // The bracket the governor folds used to open at the top of every
         // iteration and close only where the loop committed to `wfi`, so
@@ -2104,7 +2104,8 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // resources: its grants, streams, limits and matched-node record, so
         // the node takes a successor only once nothing of this one holds on.
         let driver = self.aspaces.read().loaded_driver(sec_id);
-        self.aspaces.write().withdraw(sec_id);
+        let withdrawn = self.aspaces.write().withdraw(sec_id);
+        drop(withdrawn);
         crate::hwtree::driver_released(driver, tairix_abi::driver::DriverEnding::Unloaded);
 
         // The number the admission held is never returned: this teardown
@@ -2396,8 +2397,8 @@ fn run_phases<A: KernelArch>(
     // weakened to predictable bytes.
     seed_entropy_reserve(state);
 
-    // Mint the per-boot identifier now the reserve is (best-effort) seeded
-    // (`PREREQUISITES.md` P-E). The draw is non-blocking and fail-closed: a
+    // Mint the per-boot identifier now the reserve is (best-effort) seeded.
+    // The draw is non-blocking and fail-closed: a
     // port whose entropy source could not seed the reserve yields
     // `BootId::UNSET`, and `boot_id_get` then reports `EntropyNotReady` rather
     // than the all-zero sentinel — never a predictable id. Audited as a
@@ -2590,8 +2591,8 @@ fn run_phases<A: KernelArch>(
 
     let wall_clock: &'static crate::wallclock::KernelWallClock = &state.wall_clock;
 
-    // The live introspection source the `sysinfo_introspect` syscall serves
-    // (`PREREQUISITES.md` P-C): built over the leaked `KernelState` (its
+    // The live introspection source the `sysinfo_introspect` syscall serves:
+    // built over the leaked `KernelState` (its
     // `CapTable` / scheduler / frame allocator / per-task limits / arch),
     // the mounted filesystem service (mount table), the wall clock (uptime),
     // and the binary's kernel heap (its live capacity). Leaked for the same
@@ -2602,8 +2603,8 @@ fn run_phases<A: KernelArch>(
     let introspect: &'static (dyn crate::introspect::IntrospectSource + 'static) = crate::forever(
         Box::new(crate::introspect_source::KernelIntrospectSource::new(
             state, filesystem, wall_clock,
-            // The account directory (uid + username, no credential
-            // material) is derived from the same kernel-held database
+            // The account directory (uid, login group and username, no
+            // credential material) is derived from the same kernel-held database
             // `users_db_read` serves; with none installed the directory is
             // truthfully empty.
             users_db,
@@ -2681,7 +2682,7 @@ fn run_phases<A: KernelArch>(
         // `hw_tree_wait` fail-closed when no inventory was seeded.
         .with_hw_tree(hw_tree)
         // Serve the `fs_*` syscalls through the disk-backed filesystem
-        // service the boot path installed (`PREREQUISITES.md` P-A); the
+        // service the boot path installed; the
         // default `NULL_FILESYSTEM` keeps every `fs_*` syscall fail-closed
         // when no volume was mounted.
         .with_filesystem(filesystem)
@@ -2706,11 +2707,11 @@ fn run_phases<A: KernelArch>(
         // `wall_time_set` under `CAP_TIME_SET`.
         .with_wall_clock(wall_clock)
         // Serve `sysinfo_introspect` through the live introspection source
-        // built above (`PREREQUISITES.md` P-C); the default `NULL_INTROSPECT`
+        // built above; the default `NULL_INTROSPECT`
         // keeps the syscall fail-closed `NotImplemented` until wired.
         .with_introspect(introspect)
-        // Serve `boot_id_get` with the per-boot id minted above
-        // (`PREREQUISITES.md` P-E). When the reserve could not be seeded this
+        // Serve `boot_id_get` with the per-boot id minted above.
+        // When the reserve could not be seeded this
         // is `BootId::UNSET` and `boot_id_get` fails closed `EntropyNotReady`.
         .with_boot_id(boot_id)
         // Serve `log_emit` through the kernel diagnostic sink; the audit sink
@@ -3774,6 +3775,60 @@ mod tests {
         unsafe { core::alloc::GlobalAlloc::dealloc(heap, block, layout) };
     }
 
+    /// The limits domain reports the descriptors a process holds as its
+    /// `open-files` usage, which once read as zero whatever it held.
+    #[test]
+    fn the_limits_domain_reports_a_processs_descriptors_as_its_open_files_usage() {
+        use tairix_abi::sysinfo::ResourceLimitRecord;
+        use tairix_abi::{LimitKind, OpenFlags, ProcId};
+        use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let heap = boot.heap;
+        let (state, _process_wait) =
+            run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let (process, proc_id) = (ProcessId(0x7111), ProcId::from_raw([0x7A; 16]));
+        state.caps.write().insert(
+            TaskCapabilities::derive(
+                process,
+                UserId(1000),
+                CapabilitySet::EMPTY,
+                CapabilitySet::EMPTY,
+                audit_sink,
+            )
+            .with_proc_id(proc_id),
+        );
+        for _ in 0..3 {
+            state
+                .aspaces
+                .write()
+                .open_resource(
+                    process,
+                    crate::resource::ResourceBacking::Random,
+                    OpenFlags::READ,
+                )
+                .expect("opens");
+        }
+
+        let source = crate::introspect_source::KernelIntrospectSource::new(
+            state,
+            &crate::fs::NULL_FILESYSTEM,
+            &crate::wallclock::NULL_WALL_CLOCK,
+            &crate::NULL_USERS_DB,
+            &crate::NULL_GROUPS_DB,
+            heap,
+        );
+        let bytes = crate::introspect::IntrospectSource::task_limits(&source, proc_id)
+            .expect("the limits domain answers");
+        let open_files = bytes
+            .chunks(ResourceLimitRecord::WIRE_LEN)
+            .map(|chunk| ResourceLimitRecord::from_bytes(chunk).expect("decodes"))
+            .find(|record| record.kind == LimitKind::OpenFiles)
+            .expect("every kind is reported");
+        assert_eq!(open_files.usage, 3);
+    }
+
     /// The process domain marks a parser-sandbox worker as one and names its
     /// owner by pid, so a listing can present the worker as its owner's, not
     /// as a second copy of the owner's program.
@@ -3917,7 +3972,7 @@ mod tests {
 
     #[test]
     fn service_between_dispatches_tops_up_the_console_transmit() {
-        // Regression for the Pi 4 metal serial stall: the dispatch loop's
+        // Regression for the metal serial stall: the dispatch loop's
         // Ran arm must top up the buffered console transmit on **every**
         // dispatch, not only when it reaches the idle park — otherwise
         // runnable tasks keep the loop from ever idling and the log freezes

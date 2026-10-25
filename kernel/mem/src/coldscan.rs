@@ -30,9 +30,10 @@
 //! Clearing the bit also invalidates the page's TLB entry (the HAL
 //! primitive does this), so the hardware — or the software
 //! access-flag-fault path on ports without a hardware flag — re-sets it on
-//! the next real access. This is the same approximation Linux's page
-//! reclaim uses; it needs no per-page timestamp and no allocation on the
-//! hot path beyond the returned candidate list.
+//! the next real access. This is the classic CLOCK (second-chance)
+//! approximation of least-recently-used (Corbató, 1968); it needs no
+//! per-page timestamp and no allocation on the hot path beyond the
+//! returned candidate list.
 //!
 //! # Fail closed
 //!

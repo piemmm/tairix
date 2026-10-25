@@ -1,5 +1,5 @@
-//! Production syscall-dispatch callback for the riscv64 (QEMU `virt` /
-//! SiFive) `tairix-kernel` binary — the riscv64 sibling of
+//! Production syscall-dispatch callback for the riscv64
+//! `tairix-kernel` binary — the riscv64 sibling of
 //! [`crate::x86_64::dispatch`] (x86_64) and [`crate::aarch64::dispatch`]
 //! (`plans/PI.md` RV-P2).
 //!

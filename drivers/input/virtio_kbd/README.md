@@ -4,7 +4,7 @@ The autoloaded **user-space virtio-input keyboard driver process** — the `Run`
 binary `devmgr` spawns when a virtio-input device is discovered (`AGENTS.md`
 §18, `plans/PI.md` P10 chunk 5d-2-ii). This is the "drivers in user space"
 steady state (`AGENTS.md` §4) on the hardware QEMU `-M virt` actually presents;
-the metal Pi 4 keyboard is the USB `drivers/input/usb_kbd`.
+a USB keyboard is `drivers/input/usb_kbd`'s.
 
 ## What it does
 

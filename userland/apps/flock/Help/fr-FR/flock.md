@@ -68,9 +68,8 @@ est averti au lieu de tourner sans le verrou qu'il demandait.
   commande n'a pas tourné.
 - `1` — le verrou n'a pu être pris pour une raison qu'attendre ne
   corrigerait pas, ou la commande n'a pu être lancée ; la raison est
-  affichée sur la sortie d'erreur.
-- `2` — la ligne de commande n'a pas été comprise ; rien n'a été verrouillé
-  ni exécuté.
+  affichée sur la sortie d'erreur. Une ligne de commande non comprise sort
+  aussi avec `1`, sans que rien n'ait été verrouillé ni exécuté.
 - `126` — la commande a été trouvée mais n'a pu être exécutée.
 - `127` — la commande n'a pas été trouvée.
 

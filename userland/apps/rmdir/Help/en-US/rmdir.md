@@ -21,9 +21,9 @@ removed.
 
 With `--ignore-fail-on-non-empty` a "directory not empty" refusal is
 not an error — the operand (or the `-p` walk) simply stops there. No
-other refusal is tolerated. The first genuine failure stops the run
-before any later operand. `--` ends option parsing: every later
-argument is a path.
+other refusal is tolerated. An operand that cannot be removed is
+reported and the next is still removed. `--` ends option parsing:
+every later argument is a path.
 
 ## OPTIONS
 
@@ -47,8 +47,7 @@ argument is a path.
 - `0` — every removal succeeded (a refusal tolerated by
   `--ignore-fail-on-non-empty` is not a failure).
 - `1` — a filesystem or output failure; the reason is printed on
-  standard error.
-- `2` — the command line was not understood.
+  standard error. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

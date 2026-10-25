@@ -15,10 +15,10 @@ use tairix_procinfo::{field_lossy, Namespace};
 use crate::command::{Command, Options, Piece, Subject, Trailer};
 use crate::error::StatError;
 use crate::io::{Filesystem, Mounts, Names, Output};
-use tairix_util::quote::quote;
+use tairix_util::quote::{output_style, quote, Quoted, Style};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `stat`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `stat`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: stat [-Lft] [-c FORMAT | --printf=FORMAT] [--] file...
 
@@ -46,21 +46,27 @@ const TERSE_FILE: &str = "%n %s %b %f %u %g %D %i %h %X %Y %Z %W %o";
 /// replaced by the type name the mount records.
 const TERSE_FS: &str = "%n %i %l %T %b %f %a %c %d %s %S";
 
-/// The full report `stat` writes with no format given.
-const FULL_FILE: &str = "\
-  File: %N\n\
-  Size: %-10s\tBlocks: %-8b IO Block: %-6o %F\n\
-Volume: %D\tInode: %-10i  Links: %h\n\
-Access: (%a/%A)  Uid: (%u/%U)  Gid: (%g/-)\n\
-Access: %x\nModify: %y\nChange: %z\n Birth: %w\n";
+/// The full report `stat` writes with no format given: GNU's layout, with the
+/// volume in place of a device number and no group name.
+const FULL_FILE: &str = concat!(
+    "  File: %N\n",
+    "  Size: %-10s\tBlocks: %-10b IO Block: %-6o %F\n",
+    "Volume: %D\tInode: %-10i  Links: %h\n",
+    "Access: (%04a/%10.10A)  Uid: (%5u/%8U)   Gid: (%5g/       -)\n",
+    "Access: %x\n",
+    "Modify: %y\n",
+    "Change: %z\n",
+    " Birth: %w\n",
+);
 
-/// The full report `stat -f` writes with no format given.
-const FULL_FS: &str = "\
-  File: %n\n\
-    ID: %-16i Namelen: %-7l Type: %T\n\
-Block size: %-10s\n\
-Blocks: Total: %-10b Free: %-10f Available: %a\n\
-Inodes: Total: %-10c Free: %d\n";
+/// The full report `stat -f` writes with no format given, GNU's layout.
+const FULL_FS: &str = concat!(
+    "  File: \"%n\"\n",
+    "    ID: %-8i Namelen: %-7l Type: %T\n",
+    "Block size: %-10s Fundamental block size: %S\n",
+    "Blocks: Total: %-10b Free: %-10f Available: %a\n",
+    "Inodes: Total: %-10c Free: %d\n",
+);
 
 /// The seams one `stat` run reports through.
 ///
@@ -108,8 +114,9 @@ pub fn run(
     let (pieces, trailer) = form(&options)?;
 
     let mut clean = true;
+    let names = output_style(reporter.out.at_terminal());
     for path in &paths {
-        match reporter.describe(path, &options) {
+        match reporter.describe(path, &options, names) {
             Ok(facts) => {
                 let mut rendered = render(&pieces, &facts);
                 if trailer == Trailer::Newline {
@@ -173,8 +180,11 @@ fn form(options: &Options) -> Result<(Vec<Piece>, Trailer), StatError> {
 /// kernel the same question twice: `%N` and `%F` both need the kind, `%m`
 /// and `%o` both need the covering mount.
 struct Facts {
-    /// The operand as the caller spelled it — what `%n` prints.
+    /// The operand as the caller spelled it, which `%N` quotes.
     name: String,
+    /// The operand as the report shows it — what `%n` prints: escaped at a
+    /// terminal, its own bytes in a pipe ([`output_style`]).
+    shown: String,
     /// The node's own report. Gathered under both readings: `-f` describes
     /// the volume, and the volume's identity is the one every node on it
     /// carries, so the two vocabularies name the same volume in the same
@@ -192,7 +202,7 @@ struct Facts {
 
 impl Reporter<'_> {
     /// Gather one operand's facts.
-    fn describe(&self, path: &str, options: &Options) -> Result<Facts, Errno> {
+    fn describe(&self, path: &str, options: &Options, names: Style) -> Result<Facts, Errno> {
         // Every reading confirms the operand exists first, so `-f` on an
         // absent path is the same refusal `stat` gives, not a volume report
         // about a path that is not there.
@@ -214,6 +224,7 @@ impl Reporter<'_> {
             .and_then(|(canonical, namespace)| Mount::covering(&namespace, &canonical));
         Ok(Facts {
             name: String::from(path),
+            shown: format!("{}", Quoted::new(path, names)),
             user: self.names.user(stat.uid),
             stat,
             subject: options.subject,
@@ -272,7 +283,7 @@ fn field(letter: char, facts: &Facts) -> String {
         // every field but the operand's own name says so.
         Subject::Filesystem => match &facts.mount {
             Some(mount) => fs_field(letter, mount, facts),
-            None if letter == 'n' => facts.name.clone(),
+            None if letter == 'n' => facts.shown.clone(),
             None if letter == 'i' => volume_hex(facts.stat.id.volume),
             None => String::from("?"),
         },
@@ -307,7 +318,7 @@ fn file_field(letter: char, stat: &FileStat, facts: &Facts, mount: Option<&Mount
         'h' => stat.nlink.to_string(),
         'i' => stat.id.node.to_string(),
         'm' => mount.map_or_else(|| String::from("?"), |m| m.target.clone()),
-        'n' => facts.name.clone(),
+        'n' => facts.shown.clone(),
         'N' => match &facts.target {
             Some(target) => format!("{} -> {}", quote(&facts.name), quote(target)),
             None => format!("{}", quote(&facts.name)),
@@ -346,7 +357,7 @@ fn fs_field(letter: char, mount: &Mount, facts: &Facts) -> String {
         'f' => usage.free_blocks.to_string(),
         'i' => volume_hex(facts.stat.id.volume),
         'l' => FS_NAME_MAX.to_string(),
-        'n' => facts.name.clone(),
+        'n' => facts.shown.clone(),
         // A TAIRiX volume declares one block size, which is both the
         // transfer size and the fundamental one, so the pair agrees rather
         // than one of them being invented.

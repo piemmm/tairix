@@ -1909,7 +1909,7 @@ mod tests {
     /// `fault_par` and `desc_0..` interrogate memory a running peer can still
     /// be editing. A probe and a table walk taken either side of a concurrent
     /// page-table update disagree, and the disagreement reads as a defect in
-    /// the tables rather than in the reading — a Pi 4 capture whose probe said
+    /// the tables rather than in the reading — a metal capture whose probe said
     /// "absent" and whose walk then produced a valid descriptor for the same
     /// address cost a diagnosis this way.
     ///
@@ -2366,7 +2366,7 @@ mod tests {
     /// An address the tables map but the TLB refuses is reported as such,
     /// because it is otherwise indistinguishable from a clobbered table.
     ///
-    /// A Pi 4 fault at a *varying* low-RAM address whose descriptors read back
+    /// A metal fault at a *varying* low-RAM address whose descriptors read back
     /// as a valid block is the case this separates: with a coherent walker and
     /// correct tables, a refused translation is a maintenance defect, and
     /// `maps_after_tlbi=yes` is what says so.

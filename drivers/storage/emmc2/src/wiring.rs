@@ -11,11 +11,11 @@
 
 use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::driver::mmio::MmioMapError;
+use tairix_abi::driver::timing::CompletionWait;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
 
 use crate::{
-    regs, Board, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci, DMA_DATA_BYTES,
-    DMA_TABLE_BYTES,
+    regs, Board, BringUpFault, BringUpStage, Emmc2, IrqSdhci, DMA_DATA_BYTES, DMA_TABLE_BYTES,
 };
 
 /// Map the discovered EMMC2 register window and bring the card online.

@@ -16,8 +16,8 @@ offset within the report (after the id byte when there is one), element size
 and count, flags, usages, logical and physical range, unit and exponent, and
 the innermost collection it sits in. Offsets run per report and kind, so a
 re-entered report continues its own. A usage carries its page; one written
-without a page takes the page in force at its main item, as Windows and Linux
-read it. Push and Pop save and restore the global state with the report id; a
+without a page takes the page in force at its main item (HID 1.11 §6.2.2.8).
+Push and Pop save and restore the global state with the report id; a
 long item is skipped; of a delimiter set only the first usage is taken.
 
 Beside each usage entry the model keeps the place in its field's list where

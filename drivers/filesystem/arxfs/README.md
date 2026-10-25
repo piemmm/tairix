@@ -436,7 +436,9 @@ freed — is what makes that resumable. The name's removal and the set entry are
 published together, so a crash mid-delete leaves an inode the set names and the
 next writable mount finishes it before serving; an ordinary delete is still one
 transaction, because the operation that detaches the name takes the first step
-itself. A `truncate` needs no entry, freeing downward and publishing the shorter
+itself. A node the kernel holds is published in the set as its last name goes
+but freed only by its last unpin, the set alone recording it across a crash. A
+`truncate` needs no entry, freeing downward and publishing the shorter
 size at each boundary, so an interrupted one is a shorter file and never one of
 its original length with holes where its data was (`arxfs-spec.md` §14). The
 commit order (`docs/src/filesystem/arxfs-spec.md` §14,
@@ -639,10 +641,12 @@ system's writable grafts. No `unwrap`/`expect`/`panic!` and no `unsafe`.
 
 ## Security
 
-`arxfs` **stores** each inode's owner, mode, ACL, and capability gate. It
-reports the record through `FilesystemSecurity` (`security(node)`) and
-accepts an updated one through `ARXFS::set_security`, but makes **no**
-permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
+`arxfs` **stores** each inode's owner, mode, ACL, and capability gate. A node
+is born with the whole record `create` or `create_link` is given, in the inode
+write that mints it. The driver reports the record through `FilesystemSecurity`
+(`security(node)`) and accepts an updated one through `ARXFS::set_security`,
+but makes **no** permission decision itself: the VFS is the policy point
+(`AGENTS.md` §5.4).
 
 ## Required capabilities
 
@@ -813,11 +817,20 @@ delete of a file with more extents than one transaction may hold publishes the
 inode in the set and finishes it in further transactions, an interrupted one is
 completed by the next writable mount and returns exactly the blocks an
 uninterrupted one does, a read-only mount leaves the set and the device
-untouched, a stale handle cannot hard-link a node the set names, an interrupted
-truncate is only ever a prefix of the file that was there, and `check` reclaims
-an orphan by the same route. The bounded-iteration harness prices it: deleting
-four times the extents holds the same peak footprint, where doing it inside one
-transaction grows with the file.
+untouched, a stale handle can neither hard-link nor write a node the set names,
+an interrupted truncate is only ever a prefix of the file that was there, and
+`check` reclaims an orphan by the same route — an orphaned directory whole,
+its own entries never naming it or its contents again. The bounded-iteration harness
+prices it: deleting four times the extents holds the same peak footprint, where
+doing it inside one transaction grows with the file.
+
+The **pin tests** hold the deferred deletion a hold makes: a held file keeps its
+data and space past its last name and takes byte I/O and record changes until
+its last unpin reclaims it, holds count, a rename over a held file keeps it, a
+removed held directory takes no entries, `release_pins` frees every nameless
+held node, the drain and `check` pass held nodes over, a crash leaves a held
+unlinked node to the next mount's drain, a node neither named nor held answers
+`NotFound` to every call, and `create` stores the whole record it is given.
 
 The 1 GiB filesystem soak (`cargo xtask fssoak --target arxfs`) drives the
 shared cross-filesystem exerciser, and `cargo xtask fuzz` harnesses fuzz the
@@ -830,7 +843,9 @@ offline `check` on every successful mount and feeds every image to
 paths, and since Stage 11 reports SMART-style telemetry and runs `health` on
 every successful mount, driving the health-baseline record decode path, and
 since Stage 12 also walking every reachable directory on every successful
-mount, driving the encrypted directory-block decode path)
+mount, driving the encrypted directory-block decode path, and driving the pin
+path on every successful mount: a file created with a record, held, written,
+unlinked and released)
 and the first-party compression decoder (`fuzz_compress`, in `lib/compress`)
 (`AGENTS.md` §19.6).
 

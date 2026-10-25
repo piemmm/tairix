@@ -62,6 +62,8 @@ use tairix_abi::fs::FS_PATH_MAX;
 use tairix_abi::Errno;
 use tairix_browse::vfs::{absolute_path, components_from_absolute_path};
 use tairix_browse::BrowseError;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+use tairix_util::quote::quote;
 
 use crate::operation::device_refusal;
 
@@ -119,8 +121,8 @@ pub struct Start {
 /// A command line the program cannot act on, and so refuses outright.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageError {
-    /// An unrecognised option; carries the offending argument.
-    UnknownOption(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A second operand; carries it. The window shows one directory, so two
     /// locations have no meaning and the second is never silently dropped.
     ExtraOperand(String),
@@ -136,11 +138,12 @@ pub enum UsageError {
 impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            UsageError::UnknownOption(arg) => write!(f, "unrecognized option {arg:?}"),
-            UsageError::ExtraOperand(arg) => write!(f, "extra operand {arg:?}"),
+            UsageError::Option(refusal) => write!(f, "{refusal}"),
+            UsageError::ExtraOperand(arg) => write!(f, "extra operand {}", quote(arg)),
             UsageError::LocationInDesktopRole(arg) => write!(
                 f,
-                "starting location {arg:?} has no meaning with {}",
+                "starting location {} has no meaning with {}",
+                quote(arg),
                 tairix_window::DESKTOP_ROLE_SWITCH
             ),
             UsageError::NotUtf8 => f.write_str("argument vector is not valid UTF-8"),
@@ -148,53 +151,56 @@ impl fmt::Display for UsageError {
     }
 }
 
+/// What each of `files`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Desktop,
+    Help,
+}
+
+/// [`tairix_window::DESKTOP_ROLE_SWITCH`] as a long option's name, its `--`
+/// taken off.
+const DESKTOP_ROLE: &str = tairix_window::DESKTOP_ROLE_SWITCH.split_at(2).1;
+
+/// `files`'s option, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::long(&[DESKTOP_ROLE], Takes::Nothing, Flag::Desktop),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the program's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `files [--desktop] [path]`:
-///
-/// * `-h` / `-?` / `--help` — the reserved short-help switches; they win
-///   immediately, wherever they appear.
-/// * `--desktop` — the desktop session asking for [`Role::Desktop`].
-/// * `--` — end of options: the next argument is the path operand even when
-///   it starts with a dash.
-/// * one optional operand — the folder to open at, or a file to show selected
-///   in the folder holding it. It is validated here and, when it does not
-///   survive, reported through [`Start::refused`] with the window still
-///   opening among the launching user's own files.
+/// The grammar is `files [--desktop] [path]`, read as GNU's `getopt_long`
+/// reads it ([`Scan`]): options anywhere among the operands, a long one by any
+/// unambiguous prefix, `--` ending them. The help switches (`-h`, `-?`,
+/// `--help`) answer at once; `--desktop` is the desktop session asking for
+/// [`Role::Desktop`]. The one optional operand is the folder to open at, or a
+/// file to show selected in the folder holding it. It is validated here and,
+/// when it does not survive, reported through [`Start::refused`] with the
+/// window still opening among the launching user's own files.
 ///
 /// # Errors
 ///
-/// [`UsageError::UnknownOption`] for an option this program does not know,
-/// [`UsageError::ExtraOperand`] for a second operand, and
-/// [`UsageError::LocationInDesktopRole`] for a location named alongside the
-/// desktop-role switch.
+/// * [`UsageError::Option`] — an option `getopt` refuses, in its words.
+/// * [`UsageError::ExtraOperand`] — a second operand.
+/// * [`UsageError::LocationInDesktopRole`] — a location named alongside the
+///   desktop-role switch.
 pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
     let mut operand: Option<&str> = None;
-    let mut options_done = false;
     let mut role = Role::Window;
-    for &arg in args {
-        if !options_done {
-            match arg {
-                "--" => {
-                    options_done = true;
-                    continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(UsageError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Desktop, _) => role = Role::Desktop,
+            Arg::Operand(spelling) => {
+                if operand.is_some() {
+                    return Err(UsageError::ExtraOperand(String::from(spelling)));
                 }
-                "-h" | "-?" | "--help" => return Ok(Command::Help),
-                _ if arg == tairix_window::DESKTOP_ROLE_SWITCH => {
-                    role = Role::Desktop;
-                    continue;
-                }
-                _ if arg.starts_with('-') && arg.len() > 1 => {
-                    return Err(UsageError::UnknownOption(String::from(arg)));
-                }
-                _ => {}
+                operand = Some(spelling);
             }
         }
-        if operand.is_some() {
-            return Err(UsageError::ExtraOperand(String::from(arg)));
-        }
-        operand = Some(arg);
     }
     if role == Role::Desktop {
         if let Some(spelling) = operand {

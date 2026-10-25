@@ -32,10 +32,10 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 
-use tairix_abi::driver::filesystem::DirVisit;
+use tairix_abi::driver::filesystem::{DirVisit, MountFlags, NodeId, NodeKind};
 use tairix_abi::{
-    CapabilityId, CapabilityQuery, DirEntry, Errno, FileKind, FileStat, OpenFlags, RealpathMode,
-    RenameFlags, UnlinkFlags, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS,
+    CapabilityId, CapabilityQuery, DirEntry, Errno, FileKind, FileStat, NodeExpect, OpenFlags,
+    RealpathMode, RenameFlags, SeekRegion, UnlinkFlags, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS,
 };
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 use tairix_arch_aarch64::paging::{
@@ -55,7 +55,10 @@ use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
-use tairix_kernel_core::fs::{FinalLink, Listing};
+use tairix_kernel_core::fs::{
+    Acting, At, CreateMode, FinalLink, Listing, LookedUp, MountTable, NodeHandle, NodeRef, Opened,
+    Path, VfsError, VolumeNodes,
+};
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, FilesystemService,
     InitSpawnCtx, KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
@@ -220,11 +223,12 @@ extern "C" fn file_map_user_fault(
 
 /// The in-guest read-only filesystem double: serves exactly the one
 /// fixture file the shared definition emits, under the caller-blind
-/// `FilesystemService` seam the production handlers consume. Everything
-/// else fails closed — a mutation is `ReadOnly`, as on a read-only mount,
-/// an unknown path is `NotFound`, and the surfaces this vertical never
-/// exercises are `NotImplemented` (an inert interface
-/// announces itself, mirroring `NullFilesystemService`).
+/// `FilesystemService` seam the production handlers consume. Each open
+/// pins the file in a volume of its own. Everything else fails closed — a
+/// mutation is `ReadOnly`, as on a read-only mount, an unknown path is
+/// `NotFound`, and the surfaces this vertical never exercises are
+/// `NotImplemented` (an inert interface announces itself, mirroring
+/// `NullFilesystemService`).
 struct FixtureFs;
 
 impl FilesystemService for FixtureFs {
@@ -232,29 +236,35 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         flags: OpenFlags,
-    ) -> Result<(), Errno> {
-        if path != FIXTURE_PATH {
+        _mode: CreateMode,
+    ) -> Result<Opened, Errno> {
+        if at.path != FIXTURE_PATH {
             return Err(Errno::NotFound);
         }
         if flags.is_write() {
             return Err(Errno::ReadOnly);
         }
-        Ok(())
+        let volume = Arc::new(VolumeNodes::new(1));
+        let slot = volume.admit().map_err(|_| Errno::OutOfMemory)?;
+        Ok(Opened::Node {
+            node: NodeRef::new(slot, NodeId::from_raw(1), NodeKind::RegularFile)
+                .map_err(VfsError::to_errno)?,
+            projection: Arc::clone(MountTable::new(MountFlags::READ_ONLY).resolve(&Path::root())),
+            kind: NodeKind::RegularFile,
+            opened_as: Arc::new(String::from(FIXTURE_PATH)),
+            at_floor: false,
+        })
     }
 
-    fn read(
+    fn read_node(
         &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        path: &str,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
-        if path != FIXTURE_PATH {
-            return Err(Errno::NotFound);
-        }
         let len = FIXTURE_CONTENT.len() as u64;
         if offset >= len {
             return Ok(0);
@@ -266,11 +276,10 @@ impl FilesystemService for FixtureFs {
         Ok(n)
     }
 
-    fn write(
+    fn write_node(
         &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
         _offset: u64,
         _append: bool,
         _data: &[u8],
@@ -278,15 +287,50 @@ impl FilesystemService for FixtureFs {
         Err(Errno::ReadOnly)
     }
 
-    fn readdir(
+    fn readdir_node(
         &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _final_link: FinalLink,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
         _at: &mut Listing,
         _each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
     ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn lookup_entries_node(
+        &self,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _names: &[&[u8]],
+    ) -> Result<LookedUp, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn stat_node(&self, _node: &NodeHandle, _who: &Acting<'_>) -> Result<FileStat, Errno> {
+        Ok(fixture_stat())
+    }
+
+    fn seek_region_node(
+        &self,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _offset: u64,
+        _region: SeekRegion,
+    ) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn punch_node(
+        &self,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _offset: u64,
+        _len: u64,
+    ) -> Result<(), Errno> {
+        Err(Errno::ReadOnly)
+    }
+
+    fn sync_node(&self, _node: &NodeHandle, _who: &Acting<'_>) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -295,7 +339,7 @@ impl FilesystemService for FixtureFs {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _target: &str,
-        _path: &str,
+        _at: At<'_>,
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
@@ -304,8 +348,8 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _existing: &str,
-        _link: &str,
+        _existing: At<'_>,
+        _new: At<'_>,
         _existing_link: FinalLink,
     ) -> Result<(), Errno> {
         // The fixture's flat map holds one name per entry; a second name for
@@ -317,7 +361,7 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
     ) -> Result<String, Errno> {
         Err(Errno::NotImplemented)
     }
@@ -326,7 +370,7 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
         _mode: RealpathMode,
     ) -> Result<String, Errno> {
         Err(Errno::NotImplemented)
@@ -336,42 +380,35 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        path: &str,
+        at: At<'_>,
         _final_link: FinalLink,
     ) -> Result<FileStat, Errno> {
-        if path != FIXTURE_PATH {
+        if at.path != FIXTURE_PATH {
             return Err(Errno::NotFound);
         }
-        let len = FIXTURE_CONTENT.len() as u64;
-        Ok(FileStat {
-            kind: FileKind::Regular,
-            nlink: 1,
-            size: len,
-            allocated: len,
-            mode: 0o444,
-            uid: 0,
-            gid: 0,
-            id: tairix_abi::FileId::NONE,
-            times: tairix_abi::NodeTimes::default(),
-            content_gen: tairix_abi::driver::filesystem::NodeInfo::NO_CONTENT_GEN,
-        })
+        Ok(fixture_stat())
     }
 
-    fn truncate(
+    fn truncate_node(
         &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
         _size: u64,
     ) -> Result<(), Errno> {
         Err(Errno::ReadOnly)
     }
 
-    fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
+    fn sync_all(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 
-    fn mkdir(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<(), Errno> {
+    fn mkdir(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _at: At<'_>,
+        _mode: CreateMode,
+    ) -> Result<(), Errno> {
         Err(Errno::ReadOnly)
     }
 
@@ -379,8 +416,9 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
         _flags: UnlinkFlags,
+        _expect: Option<&NodeExpect>,
     ) -> Result<(), Errno> {
         Err(Errno::ReadOnly)
     }
@@ -389,9 +427,10 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _from: &str,
-        _to: &str,
+        _from: At<'_>,
+        _to: At<'_>,
         _flags: RenameFlags,
+        _expect: Option<&NodeExpect>,
     ) -> Result<(), Errno> {
         Err(Errno::ReadOnly)
     }
@@ -400,55 +439,29 @@ impl FilesystemService for FixtureFs {
         &self,
         _uid: u32,
         _caps: &dyn CapabilityQuery,
-        _path: &str,
+        _at: At<'_>,
         _mode: u32,
+        _final_link: FinalLink,
     ) -> Result<(), Errno> {
         Err(Errno::ReadOnly)
     }
+}
 
-    // The fixture stores no extended attributes; every attribute call
-    // answers the typed unsupported-backing refusal.
-    fn attr_get(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _key: &[u8],
-        _value_out: &mut [u8],
-    ) -> Result<usize, Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn attr_set(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _key: &[u8],
-        _value: &[u8],
-    ) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn attr_list(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _index: u64,
-        _key_out: &mut [u8],
-    ) -> Result<Option<usize>, Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn attr_remove(
-        &self,
-        _uid: u32,
-        _caps: &dyn CapabilityQuery,
-        _path: &str,
-        _key: &[u8],
-    ) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
+/// What the fixture file reports: a world-readable regular file of the
+/// shared content's length.
+fn fixture_stat() -> FileStat {
+    let len = FIXTURE_CONTENT.len() as u64;
+    FileStat {
+        kind: FileKind::Regular,
+        nlink: 1,
+        size: len,
+        allocated: len,
+        mode: 0o444,
+        uid: 0,
+        gid: 0,
+        id: tairix_abi::FileId::NONE,
+        times: tairix_abi::NodeTimes::default(),
+        content_gen: tairix_abi::driver::filesystem::NodeInfo::NO_CONTENT_GEN,
     }
 }
 

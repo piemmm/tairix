@@ -18,7 +18,7 @@ use tairix_abi::Errno;
 use tairix_curses::Event;
 
 use crate::buffer::{width_of_prefix, DecodeError, TextBuffer};
-use tairix_util::quote::quote_if_needed;
+use tairix_util::quote::{quote_if_needed, quote_subject};
 
 /// The filesystem seam the editor loads and saves through. The production
 /// implementation wraps the kernel-authorised `fs_*` syscalls (adding no
@@ -192,14 +192,14 @@ impl Model {
                     return Err(format!(
                         "{path}: {}",
                         decode_message(err),
-                        path = quote_if_needed(path)
+                        path = quote_subject(path)
                     ))
                 }
             },
             Err(Errno::NotFound) => {
                 self.notice = Some(String::from("New file"));
             }
-            Err(errno) => return Err(format!("{path}: {errno}", path = quote_if_needed(path))),
+            Err(errno) => return Err(format!("{path}: {errno}", path = quote_subject(path))),
         }
         self.path = Some(String::from(path));
         Ok(())
@@ -581,7 +581,7 @@ impl Model {
                     self.notice = Some(format!(
                         "{path}: {}",
                         decode_message(err),
-                        path = quote_if_needed(path)
+                        path = quote_subject(path)
                     ));
                 }
             },
@@ -592,7 +592,7 @@ impl Model {
                 self.notice = Some(String::from("New file"));
             }
             Err(errno) => {
-                self.notice = Some(format!("{path}: {errno}", path = quote_if_needed(path)));
+                self.notice = Some(format!("{path}: {errno}", path = quote_subject(path)));
             }
         }
     }
@@ -615,7 +615,7 @@ impl Model {
                 self.resume_pending()
             }
             Err(errno) => {
-                self.notice = Some(format!("{path}: {errno}", path = quote_if_needed(&path)));
+                self.notice = Some(format!("{path}: {errno}", path = quote_subject(&path)));
                 self.pending = None;
                 Action::Continue
             }

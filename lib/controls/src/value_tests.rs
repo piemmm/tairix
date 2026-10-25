@@ -246,6 +246,24 @@ fn slider_drag_updates_and_commits() {
     ));
 }
 
+/// An owner holding back what would rebuild a slider asks whether a drag is
+/// under way: from the press that takes the knob to whatever settles it.
+#[test]
+fn a_slider_is_dragged_from_its_press_to_its_settle() {
+    let b = bounds();
+    for end in [RELEASE, InputEvent::PointerCancelled] {
+        let mut slider = Slider::new(0);
+        let _ = slider.on_pointer(&moved(100, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
+        assert!(!slider.is_dragging(), "a hover takes nothing");
+        let _ = slider.on_pointer(&PRESS, b, Scale::ONE, &Theme::dark(), &mut sink());
+        assert!(slider.is_dragging(), "the press takes the knob");
+        let _ = slider.on_pointer(&moved(151, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
+        assert!(slider.is_dragging(), "a sample keeps it");
+        let _ = slider.on_pointer(&end, b, Scale::ONE, &Theme::dark(), &mut sink());
+        assert!(!slider.is_dragging(), "{end:?} lets it go");
+    }
+}
+
 /// The settle point is the whole reason the variants are distinct: a drag
 /// reports one settle however many samples it took, so an owner that persists
 /// on settle writes once per drag rather than once per motion event.

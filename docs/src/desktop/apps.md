@@ -1729,9 +1729,8 @@ to click.
 The management verbs — cut, copy, move, delete — act on a *set* of entries,
 not just the focus cursor. That set and the cut/copy clipboard are modelled
 purely in `lib/browse` (`plans/NEW-FILEMANAGER.md` FM7), host-tested without a
-kernel exactly as the rename and activation models are; the app-side verbs
-that execute a plan (the `fs_rename` / streamed copy / `fs_unlink`) ride on top
-of it in a later increment.
+kernel exactly as the rename and activation models are; the app carries a plan
+out through the shared engine (`lib/fscopy`).
 
 `select::Selection` is the per-listing set of marked entries plus the anchor a
 range extension grows from. A listing opens with **nothing selected**: the
@@ -1789,50 +1788,36 @@ root-first component-prefix test, so `/a/b` is inside `/a` but `/ab` is not —
 and a paste back into an item's own directory is not silently applied but
 flagged (`PasteItem::overwrites_source`) for the app to confirm or to give the
 copy a new name (`AGENTS.md` §2.24). The engine only names *what* would move
-where and *why a paste is refused*; the app performs the capability-checked
-`fs_rename` / streamed copy under the launching user's own identity, so
+where and *why a paste is refused*; the app carries each item out as an
+operation of the shared engine under the launching user's own identity, so
 composing the model grants no authority and the trusted picker never builds a
-clipboard.
+clipboard. Each item is captured as `Listed` — its path and the node the
+listing showed there — so a name that has come to hold another node by the
+time the item is carried out is refused, not carried.
 
-Given a `plan_paste` result, `execute::paste_strategy(op, source, dest)` decides
-*how* each item is carried out from the clipboard operation and the two items'
-`execute::VolumeId`s (the 16-byte `fs_stat` volume identity): a `Copy` always
-streams, a `Cut` within one volume is a single `Rename`, and a `Cut` across
-volumes is a `CopyThenDelete` — the same `st_dev` decision `mv` makes, in one
-place (`AGENTS.md` §2.2). One file is copied by the shared copy engine
-([`tairix-fscopy`](../lib/fscopy.md)) a bounded chunk at a time, so a large copy
-holds no unbounded buffer, never spins (`AGENTS.md` §2.23) and stays cancellable
-between chunks: its bytes with its holes, then its extended attributes. The
-source of a cross-volume move is removed only once its copy has fully
-succeeded, so a failed copy loses no data. The model does no I/O; the app
-performs every `fs_rename` / `fs_read` / `fs_write` / `fs_unlink` under the
-launching user's own identity, so the read-only picker never runs it.
-
-An `execute::CopyWalk` copies a whole *tree* — the copy-side analogue of the
-delete-side `delete::DeleteWalk`.
-Where a delete removes a directory's contents *before* the directory, a copy
-*creates* the destination directory *before* streaming its contents into it, so
-a child always has a parent to land in. `CopyWalk::from_items` begins the walk
-from the resolved `(source, dest, is_directory)` items — the app supplies each
-item's kind, which the path-only clipboard does not carry — and is fail closed:
-an empty set, or a source or destination naming the root, yields no walk
-(`AGENTS.md` §5.4). `CopyWalk::next_action` yields the next `execute::CopyAction`
-— `MakeDir { source, dest }` (the app `fs_mkdir`s the destination directory,
-gives it the source's extended attributes and reports `CopyWalk::created`),
-`List { source }` (the app reads the source with `fs_readdir` and reports its
-children with `CopyWalk::expand`), or `CopyFile { source, dest }` (the app copies
-the file through the copy engine and reports `CopyWalk::copied_file`). It keeps its own explicit stack rather than
-recursing on the call stack, so a deeply nested tree cannot overflow it, and it
-is bounded by `execute::MAX_COPY_DEPTH` — the same `MAX_WALK_DEPTH` fail-closed
-recursion bound `DeleteWalk` obeys, held in one place so the two walks cannot
-disagree (`AGENTS.md` §2.2, §26.6). It holds its exact position between steps, so
-the app may cancel or be preempted and resume without repeating or skipping work
-(`AGENTS.md` §2.23); a deeper tree is `CopyWalkError::TooDeep` and driving it
-against the wrong step is `CopyWalkError::OutOfStep`, both leaving the walk
-unchanged. `CopyWalk::copied` is the walk's own count of what it has copied,
-which the progress window shows against the whole a preparing pass counted. The
-engine does no I/O; the app performs every syscall under the
-launching user's own identity, so the read-only picker never runs a walk.
+Given a `plan_paste` result, `execute::paste_strategy(op, source, dest)` states
+*how* each item will be carried out from the clipboard operation and the two
+items' `execute::VolumeId`s (the 16-byte `fs_stat` volume identity): a `Copy`
+always streams, a `Cut` within one volume is a single `Rename`, and a `Cut`
+across volumes is a `CopyThenDelete` — the same `st_dev` decision `mv` makes,
+which a paste's count reads to tell an item a move renames, carrying nothing,
+from one it copies. Each item is then one operation of the shared engine
+([`tairix-fscopy`](../lib/fscopy.md)), carried out a bounded unit at a time — one
+entry acted on or one chunk of a file's bytes — so a large copy holds no
+unbounded buffer, never spins and stays cancellable between units. Every entry
+is reached by name from a folder the operation holds, never by a joined path,
+so a folder swapped for a link mid-paste leads it nowhere. A file is copied with
+its holes, then its extended attributes. What a paste makes takes its source's
+mode as `cp` gives it — a file its permission bits, a folder its permission and
+sticky bits, each less the umask — and a folder is filled holding its owner's
+read, write and search, then given its own mode, through the handle the
+operation holds on it, once the item is copied whole, fails or is cancelled. A
+move keeps its source's mode and owner as `mv` does; across volumes the engine
+puts the copy on the medium, then removes only what it copied while unchanged,
+so a failed copy loses no data and an entry added or changed meanwhile is kept
+and named. The plan chose every destination name free, so a name taken since
+refuses the item rather than being replaced. The model does no I/O; the app's operations run
+under the launching user's own identity, so the read-only picker never runs one.
 
 ### The delete model
 
@@ -1841,12 +1826,11 @@ Deleting the selection (`plans/NEW-FILEMANAGER.md` FM7b) is modelled purely in
 Delete verb exactly as the clipboard and paste-execution models are.
 `Browser::plan_delete()` captures the current multi-selection into a
 `delete::DeletePlan` (`None` when nothing is selected), one `delete::DeleteTarget`
-per marked entry in listing order. Each target carries the entry's absolute
-component path — so it names exactly the node the browser shows and can never
-resolve to a different one (`AGENTS.md` §2.2) — and whether it is
-directory-backed on disk: a directory *or* a sealed `<Name>.app` bundle, since
-either is removed with `UnlinkFlags::DIRECTORY` and recursed into as the
-directory it really is, while a regular file is a leaf. `DeletePlan::new` is
+per marked entry in listing order. Each target carries the entry as `Listed` —
+its absolute component path and the node the listing showed there, so a
+removal finding another node under the name leaves it alone — and whether it
+was listed as directory-backed: a directory *or* a sealed `<Name>.app` bundle,
+removed with everything in it, which is what the confirmation warns of. `DeletePlan::new` is
 fail closed: an empty selection, or any target naming the filesystem root (an
 empty component list), yields no plan rather than one that could remove nothing
 or the root itself (`AGENTS.md` §5.4). `DeletePlan::len` and
@@ -1854,39 +1838,23 @@ or the root itself (`AGENTS.md` §5.4). `DeletePlan::len` and
 reports — the count, and whether folders (and their contents) are among the
 removals — so the app's `lib/controls` `Dialog` warns truthfully rather than
 treating every deletion as a single file (`AGENTS.md` §2.24). The model names
-*what* would be removed; the app performs each `fs_unlink` under the launching
-user's own identity — an ordinary permission-checked VFS call, no new
+*what* would be removed; the app carries each target out under the launching
+user's own identity — ordinary permission-checked VFS calls, no new
 capability — so composing the model grants nothing and the read-only picker
 never builds a delete plan.
 
-Where the `DeletePlan` names *what* would be removed, `delete::DeleteWalk`
-models *how* — the depth-first recursive removal that clears a directory's
-contents before the directory itself. It is the delete-side analogue of the
-paste-side `execute::CopyWalk`: a pure, host-provable driven cursor that
-touches no filesystem. `DeleteWalk::from_plan` begins the walk and
-`DeleteWalk::next_action` yields the next `delete::DeleteAction` — `List(path)`
-(the app reads that directory with `fs_readdir` and reports its children with
-`DeleteWalk::expand`, so they are removed first) or
-`Remove { path, is_directory }` (the app unlinks the leaf file, or the
-already-emptied directory with `UnlinkFlags::DIRECTORY`, and reports it with
-`DeleteWalk::complete_removal`). The walk keeps its own explicit stack rather
-than recursing on the call stack, so a deeply nested tree cannot overflow it,
-and it is bounded by `delete::MAX_DELETE_DEPTH` (a fail-closed defence, not a
-scaled capacity — a tree deeper than the bound is `DeleteError::TooDeep`, never
-descended without limit, `AGENTS.md` §26.6, §24.4). It holds its exact position
-between steps, so the app may cancel or be preempted between any two steps and
-resume without repeating or skipping work — no unbounded buffer and no spin
-(`AGENTS.md` §2.23). Driving it against the wrong step (an `expand` on a leaf,
-or a `complete_removal` on a directory not yet listed) is
-`DeleteError::OutOfStep` and leaves the walk unchanged. `DeleteWalk::removed` is
-the walk's own count of what it has removed, which the progress window shows
-against the whole a preparing pass counted (`Survey`). This is the browser
-engine's own component-path traversal, deliberately distinct from `rm`'s
-coreutils removal engine (which recurses natively over its own raw-path removal
-seam with prompt/force/verbose semantics) — two consumers with two data models,
-not one algorithm copied twice (`AGENTS.md` §2.2). The engine does no I/O; the
-app performs every read and unlink under the launching user's own identity, so
-the read-only picker never runs a walk.
+Where the `DeletePlan` names *what* would be removed, the shared engine carries
+it out: each target is one removal operation of `tairix-fscopy`, which removes a
+folder's entries before the folder, each reached by name from a folder it holds,
+a link as the link it is, and each only while it is the node its listing read —
+an entry put in its place meanwhile is kept, and the removal says so. It
+holds its place between units, so the app may cancel or be preempted between any
+two and resume without repeating or skipping work; what it has removed is
+counted in its report, which the progress window shows against the whole a
+preparing pass counted (`Survey`). `cp`, `mv` and `rm` reach a tree through the
+same tree seam, so there is no second removal walk. The model does no I/O; the
+app's operations run under the launching user's own identity, so the read-only
+picker never runs one.
 
 The Delete verb is wired in the `files.app` `Run` binary. Pressing `Delete` on
 a selection asks first, in an alert of its own window that the desktop draws
@@ -1900,12 +1868,9 @@ gives. The alert holds the window it was asked about until it is answered:
 `Escape` cancels, and the answer reaches the window as `AlertClosed`. On
 confirm a *recoverable* removal is a move to Trash (the
 move-to-Trash section below); this paragraph describes the *permanent* removal
-the app falls back to when Trash is unavailable or cross-volume. It drives a
-`DeleteWalk` to completion — reading each
-directory with the same capability-checked listing call and shared decode the
-browser navigates with, and `fs_unlink`-ing each node depth-first (with
-`UnlinkFlags::DIRECTORY` for a directory-backed target) under the launching
-user's own identity, no new capability. The removal is bounded and fail closed:
+the app falls back to when Trash is unavailable or cross-volume. Each target is
+removed by the shared engine, each node unlinked depth-first by name from the
+folder holding it, under the launching user's own identity, no new capability. The removal is bounded and fail closed:
 the first refused read or unlink stops it, states the reason in the window
 naming the item and the volume's own answer (fail loud, `AGENTS.md` §2.24), and
 leaves whatever was already removed removed rather than a fabricated success;
@@ -1939,8 +1904,9 @@ operation it belongs to: closing a folder window closes its progress windows
 and cancels their operations, and their answers are dropped. A
 machine that refuses the thread carries an operation out on the loop to its
 end — slower and not cancellable, never wrong. A single `Job` carries a
-`DeleteWalk` (a delete), a `TrashRun` (a move to Trash) or a `Paste` state
-machine (a copy/move), so all three run through one path (`AGENTS.md` §2.2). The
+`Removal` (a delete), a `TrashRun` (a move to Trash) or a `Paste` (a copy/move),
+the first and last an engine operation per item, so all three run through one
+path (`AGENTS.md` §2.2). The
 progress window shows the shared `lib/browse::progress` model (`ProgressModel`
 — the operation, what it acts on and where to, what is done of what whole, the
 item in hand, a smoothed rate, whether it waits, and a *latched* cancel) drawn
@@ -1968,12 +1934,12 @@ alike re-lists so what actually remains is shown honestly. A copy cancelled or
 stopped part-way through a file removes that destination file, which it created
 exclusively, rather than leaving it half-written — but only while its name
 still names that file, so a file another program has put there since is left
-alone. A run a refusal stopped states
+alone — and gives the folders it made their modes. A run a refusal stopped states
 why in the window, in a notice naming the item and the volume's own answer —
 "its volume is read-only" is told apart from "it may not be moved". A
-cross-volume move's source-removal cleanup runs as a `Deleting` stage of the
-same `Paste`, over the shared delete walk, so a move's cleanup and an
-interactive delete share one removal definition (`AGENTS.md` §2.2).
+cross-volume move removes its originals within its own operation, by the
+engine's one removal, so a move's cleanup and an interactive delete share one
+removal definition (`AGENTS.md` §2.2).
 
 ### The move-to-Trash model
 
@@ -1983,9 +1949,9 @@ behind that recoverable delete, host-proven ahead of the app wiring exactly as
 the delete and paste-execution models landed ahead of their verbs.
 `trash_strategy` decides, from the item's and the user's Trash directory's
 `execute::VolumeId`s, whether the removal can be a cheap `TrashStrategy::Move` —
-a single same-volume `fs_rename` that carries the item into Trash intact,
+a single same-volume rename that carries the item into Trash intact,
 recoverable until the user empties it — or must fall back to the irreversible
-`TrashStrategy::Unlink`, the existing `DeleteWalk` path, when the item lives on
+`TrashStrategy::Unlink`, the permanent delete's removal, when the item lives on
 a different volume from Trash (a rename cannot span a volume boundary, exactly
 as `mv` decides from `st_dev`). It is the same volume identity
 `execute::paste_strategy` compares, so the two decisions share one definition
@@ -1999,7 +1965,7 @@ refuses a Trash directory that names the root (`RootTrash`), an invalid original
 name (`InvalidName`), a disambiguation past the per-name length limit
 (`TooLong`), and a search that exhausts the fixed `MAX_TRASH_NAME_ATTEMPTS`
 bound (`NoFreeName`, `AGENTS.md` §5.4, §24.4). The model touches no filesystem
-and holds no authority — the app performs the `fs_stat`/`fs_rename` under the
+and holds no authority — the app performs the stat and the rename under the
 launching user's own identity, no new capability — so composing it grants
 nothing and the read-only picker never runs it.
 
@@ -2017,16 +1983,18 @@ resolves each target's collision-free `trash_dest_path`. If all of that holds
 the removal is a recoverable **move to Trash**: the question
 `render::delete_alert` builds for `trash::DeleteDisposition::Trash` is a desktop
 alert whose default answer is *Move to Trash* and which says the items can be
-restored, and on that answer the app hands a `Job::Trash` to the operations worker, which renames each target into
-its captured Trash destination — one `fs_rename` per item, as a delete or paste
-is carried out (`ProgressOp::Trash`), so even a large selection stays
-responsive and cancellable (`AGENTS.md` §2.23). Whether the removal can be a
+restored, and on that answer the app hands a `Job::Trash` to the operations
+worker, which moves each target to its captured Trash destination as one move
+of the shared engine — a single rename on the Trash's volume, made only while
+the name holds the node the listing showed — as a delete or paste is carried
+out (`ProgressOp::Trash`), so even a large selection stays responsive and
+cancellable (`AGENTS.md` §2.23). Whether the removal can be a
 move to Trash is asked of the reader when Delete is pressed, and the
 confirmation opens worded for what its answer found. Anything
 that makes the move impossible — an unset or root `HOME`, a Trash directory that
 cannot be created or stat'd, or a cross-volume target (a mounted volume under
 the current directory) — falls back, fail closed, to the irreversible
-`DeleteWalk` unlink, and the question is asked with
+removal, and the question is asked with
 `DeleteDisposition::Permanent` (a warning whose destructive *Delete
 Permanently* is never the `Enter` answer, and "cannot be undone"), so the user is never promised a recovery the removal will not honour.
 Every step is the launching user's own §5.3-checked call — **no new
@@ -2038,7 +2006,7 @@ emptying it is no longer speculative surface (`AGENTS.md` §2.4).
 `trash::empty_trash_plan` turns an `fs_readdir` of the Trash directory into a
 `delete::DeletePlan` over its *contents* — never the Trash directory itself, so
 emptying leaves the now-empty folder in place — carried out by the same
-recursive `DeleteWalk` a permanent delete already uses, so there is no second
+recursive removal a permanent delete already uses, so there is no second
 removal engine (`AGENTS.md` §2.2). Emptying is always permanent, so the app
 confirms it with `DeleteDisposition::Permanent`. It returns nothing to do for an
 already-empty Trash (a no-op the app simply does not offer, not an error) and is
@@ -2062,9 +2030,9 @@ current directory *is* the user's Trash and it is non-empty (a `ManagerToolModel
 the app computes from `HOME`, since the engine does not know it); when it is
 enabled, clicking it builds `trash::empty_trash_plan` from the listing the
 window shows, asks the `DeleteDisposition::Permanent` question, and — on its
-destructive answer — hands the plan's `DeleteWalk` to the operations worker an
-ordinary delete uses (`ProgressOp::Delete`), under the launching
-user's own `fs_readdir`/`fs_unlink` (no new capability). A stale click recomputes
+destructive answer — hands the plan to the operations worker an ordinary
+delete uses (`ProgressOp::Delete`), under the launching user's own identity (no
+new capability). A stale click recomputes
 the Trash location and refuses to empty anything else (fail closed, `AGENTS.md`
 §5.4).
 
@@ -2094,18 +2062,15 @@ survives navigating to the paste target. **`Ctrl+V`** pastes it into the
 current directory: `plan_paste` validates the plan (a paste of a folder into
 itself is refused outright and nothing is enqueued), and the plan is handed to
 the operations worker as a `Paste` (see the progress + cancel description
-above), which reads the destination directory's `execute::VolumeId` first, so a
-large copy never freezes the window. Every item runs under the launching user's own identity —
-**no new capability**, every operation an ordinary §5.3-checked VFS call the
-user could perform themselves. `execute::paste_strategy` chooses the mechanism
-per item from the two nodes' volume ids: a same-volume move is one `fs_rename`,
-a cross-volume move is copy-then-delete (the source removed through the shared
-delete walk, as a `Deleting` stage of the same `Paste`, only once
-its copy has fully succeeded), and a copy streams — a single file through the
-shared copy engine and a directory (or sealed `.app` bundle) through an
-`execute::CopyWalk`, both driven over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
-with one reused, fixed-size (`FS_IO_MAX`) buffer so a copy of any size holds no
-unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). Every file and
+above), whose count reads the destination directory's `execute::VolumeId` first,
+so a large copy never freezes the window. Every item runs under the launching
+user's own identity — **no new capability**, every operation an ordinary
+§5.3-checked VFS call the user could perform themselves — as one operation of
+the shared engine: a same-volume move is one `fs_rename`, a cross-volume move a
+copy whose originals the same operation removes once the copy is whole and on
+the medium, and a copy streams, a file or a directory (or sealed `.app` bundle)
+alike, through one reused buffer of at most a chunk, so a copy of any size holds
+no unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). Every file and
 directory the paste makes carries its source's extended attributes; those a
 destination cannot keep are gathered across the paste and, once it ends,
 stated in one warning alert over the folder window ("Not every attribute was
@@ -2173,7 +2138,7 @@ count (fail closed).
 
 The **confirm-and-remove** flow (`plans/NEW-FILEMANAGER.md` FM9-c) is reached
 by right-clicking the selection and choosing **Delete**, which runs the same
-`begin_delete` → confirm-dialog → `DeleteWalk` path the `Delete` key drives.
+`begin_delete` → confirm-dialog → removal path the `Delete` key drives.
 Making the right-click reach the app required a compositor fix that makes the
 *whole* context menu usable in the desktop: secondary (right) button presses
 were being dropped, so `tairix_wm`'s input router now raises+focuses and
@@ -2289,7 +2254,8 @@ removes the crowding that made nine permission checkboxes sit a glyph apart.
 the context menu's item submenu. The node is resolved from the listing that named it —
 its path through the shared `Browser::chosen_target_path` spelling — and then
 **read off the event loop**: describing a node is one `fs_stat` plus one
-`fs_attr_get` per attribute key, which on a contended volume is a visible stall
+`fs_attr_get` per attribute key, both through the one handle that describes it
+— a link's own, opened `NO_FOLLOW` — which on a contended volume is a visible stall
 rather than a frame (`AGENTS.md` §28.1). The window states that it is reading
 until the answer lands, and states a refusal's reason if the node can no longer
 be named or described — an answer, not a crash, and never a fabricated summary
@@ -2351,9 +2317,14 @@ exactly as the properties view model landed ahead of the drawn panel.
 the settable `rwx`/setuid/setgid/sticky word — refusing it rather than masking
 it into a lesser mode, so the mode committed is always exactly the one asked
 for and never silently a different one (`AGENTS.md` §2.24, §5.4). The file
-manager validates the mode *before* it asks the reader for the `fs_set_mode`
-call, made under the user's own identity — an ordinary permission-checked VFS
-call, no new capability (`AGENTS.md` §4, §5.3). A VFS
+manager validates the mode *before* it asks the reader to set it, under the
+user's own identity — an ordinary permission-checked VFS call, no new
+capability (`AGENTS.md` §4, §5.3). Every change the window makes — a mode, an
+owner, an attribute — reaches the name itself through a handle that follows no
+link, and only while the name holds the node the window described
+(`change::make`): a link's own mode is changed, never its target's, and a name
+that holds another node now is refused as no longer what the window showed,
+which the window then reads afresh. A VFS
 refusal (the user does not own the node, a read-only mount, a lost race) leaves
 the node's mode exactly as it was, and the app words the kernel's own answer for
 an honest in-UI one (`AGENTS.md` §2.24). The model reads nothing and holds
@@ -2408,7 +2379,7 @@ the window acts on both through one path; the cursor itself is
 A primary-button press on a toggle flips only that `rwx` bit — preserving the
 current setuid/setgid/sticky bits (the settable word masked by `FS_MODE_MASK`,
 dropping the non-settable file-type bits `fs_stat` also reports) — and commits
-the new mode over `fs_set_mode` under the user's own identity. On success the
+the new mode to the node described, under the user's own identity. On success the
 node is re-read, so what the window shows is what the kernel applied rather
 than what was asked for, and no further flip is computed until it has been: a
 flip of the mode still shown would quietly undo the one before it. A refusal —
@@ -2443,7 +2414,7 @@ and `validate_owner` fails closed on a field set to the reserved
 `FS_OWNER_UNCHANGED` sentinel as an explicit target, refusing it before any
 syscall rather than misreading it as "unchanged". `owner_ids` validates and
 maps `None` onto the sentinel, giving the ids the file manager asks the reader
-to call `fs_set_owner` with under the user's own identity; a VFS refusal — including
+to give the node described under the user's own identity; a VFS refusal — including
 the `PermissionDenied` a caller without `CAP_FS_CHOWN` receives — leaves the
 ownership exactly as it was and is surfaced as `OwnerError::Refused` for an
 honest in-UI answer (`AGENTS.md` §2.24, §5.4). The model holds no authority, so
@@ -2476,8 +2447,8 @@ next keystroke.
 
 The editor opens on a click, or on `Space`/`Enter` from the section's keyboard
 cursor, pre-filled with the current id and bounded to a
-`u32`'s ten digits, live-validates the typed value, and on `Enter` commits over
-`fs_set_owner` under the user's own identity (the kernel enforces
+`u32`'s ten digits, live-validates the typed value, and on `Enter` commits to
+the node described under the user's own identity (the kernel enforces
 `CAP_FS_CHOWN` and the group-membership rule); `Escape` cancels. A non-numeric
 or out-of-range id, or a VFS refusal, states its reason in the field and keeps
 the editor open, an honest answer rather than a silent or fabricated result
@@ -2500,13 +2471,15 @@ was refused states its reason, a node that carries none says *none*, and the
 editor, which stays put; the cursor over them is the shared `RowList`.
 
 Values are opaque bytes, so every one is shown through the shared
-`tairix_fsmeta::attr::display_value` escaping (`\xNN` for anything that is not
-control-free UTF-8): nothing a volume stored reaches a surface raw. Clicking a
+`tairix_fsmeta::attr::display_value` escaping (`\xNN` for each character
+`tairix_visible::is_hidden` names, and each byte of a value that is not
+UTF-8): nothing a volume stored reaches a surface raw. Clicking a
 row loads it into the `key = value` editor for editing in place — and a value
 whose bytes a typed line could not reproduce is offered back by key alone, with
 the reason stated, rather than lossily rewritten. *Set* applies the line and
 *Remove* deletes the cursor row's attribute, both through
-`fs_attr_set`/`fs_attr_remove` needing only the `CAP_FS_ACCESS` the app already
+`fs_attr_set`/`fs_attr_remove` on a handle opened on the name itself, never
+through a link put there since, needing only the `CAP_FS_ACCESS` the app already
 holds — the real gate is the node's own write permission. The key is validated
 through the shared `tairix_fsmeta::attr::parse_assignment` grammar *before* the
 call, so a malformed or unknown-namespace key is refused in the app rather than

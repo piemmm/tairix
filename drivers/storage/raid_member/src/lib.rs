@@ -55,7 +55,7 @@ pub use agent::{AgentStep, MemberAgent, REOFFER_BASE_NS, REOFFER_CEILING_NS};
 pub use offer::Transport;
 
 use tairix_abi::raid_ipc::{RAID_CANDIDATE_COMPATIBLE, RAID_MEMBER_COMPATIBLE};
-use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
+use tairix_abi::{compatible_key, CapabilityId, DriverBindKey};
 
 /// Bind priority of the member-agent keys.
 ///
@@ -64,20 +64,6 @@ use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
 /// than win a contest; it matches the storage policy drivers' priority so the
 /// resolution stays uniform across the class.
 const BIND_PRIORITY: u16 = 10;
-
-/// Build the bind key for `compatible` at the agent's priority.
-///
-/// A compatible string too long for a match key is a compile-time error
-/// rather than a driver that silently binds nothing.
-const fn bind_key(compatible: &'static [u8]) -> DriverBindKey {
-    DriverBindKey::new(
-        BIND_PRIORITY,
-        match HwMatchKey::compatible(compatible) {
-            Ok(key) => key,
-            Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-        },
-    )
-}
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the block endpoint and data window it delegates to the array composer, and
@@ -92,6 +78,6 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// recognised as an array member, and a whole device it found empty enough to
 /// create an array over.
 pub const BIND_KEYS: &[DriverBindKey] = &[
-    bind_key(RAID_MEMBER_COMPATIBLE),
-    bind_key(RAID_CANDIDATE_COMPATIBLE),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(RAID_MEMBER_COMPATIBLE)),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(RAID_CANDIDATE_COMPATIBLE)),
 ];

@@ -62,7 +62,7 @@ use tairix_fontface::{
 use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_log::Sink;
 use tairix_reclaim::{PressureGauge, ReclaimCache, ReclaimOwner};
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 use tairix_vt::char_width;
 
 use crate::discovery::FaceLoad;

@@ -3,8 +3,7 @@
 //! Each served interface gets a node carrying a transport: a call endpoint
 //! its class driver submits URBs on and a shared buffer the data moves
 //! through. A node is kept while the device it was built from is served,
-//! wherever the device table now places it — the Linux USB core's
-//! reset-and-verify rule (`usb_reset_and_verify_device`). A node id is never
+//! wherever the device table now places it. A node id is never
 //! reissued, so keeping the node is what lets a device survive a controller
 //! reset with its driver bound.
 //!

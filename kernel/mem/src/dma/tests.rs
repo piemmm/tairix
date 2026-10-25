@@ -724,7 +724,7 @@ fn allocate_all_dma_then_free_it_all_reclaims_fully_every_round() {
 
 #[test]
 fn a_full_span_window_serves_a_multi_device_enclosure_lazily() {
-    // The Pi 4 defect: the per-task DMA window was a fixed 256-page
+    // The metal defect: the per-task DMA window was a fixed 256-page
     // ceiling, and a 13-device USB enclosure — one ~68 KiB ring/buffer
     // region per attached device, each rounded to a 32-page buddy block
     // plus two guard slots — exhausted it mid-walk, so the whole port was

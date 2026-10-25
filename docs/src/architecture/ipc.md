@@ -309,6 +309,18 @@ bits are rejected fail-closed. `tairix_rt::call_recv_ready` is that take
 for a woken loop: it answers the call, or `None` for one withdrawn since the
 wake, which is simply nothing to serve.
 
+A client that must not wait on a wedged server forever posts with a
+deadline. `tairix_rt::call_within` is that call for a client with nothing
+else to do meanwhile: it posts, parks on a wait-set observing the endpoint's
+replies — which the deadline readies too, as the endpoint's end does — and
+reaps (`tairix_rt::call_await`), answering `TimedOut` once the deadline
+passes unanswered, and withdrawing the call if the wait itself fails. The set
+holds no other member that can stay ready, so every wake is the call's: a
+member whose endpoint ended stays ready, so a client keeps a reply member
+only while it calls that endpoint. A timed-out call says nothing of what the
+server did: one still queued at its deadline was never received, while one
+in service may have been carried out and its reply refused.
+
 ## Audit catalogue
 
 Audit events live in the `kernel/ipc` reserved range `3_000..4_000`

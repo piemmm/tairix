@@ -56,8 +56,8 @@ opérande.
 - `0` — le compte a été créé.
 - `1` — la base a refusé ou échoué la création (par exemple une capacité
   manquante, un identifiant en double ou un groupe inconnu) ; la raison
-  est imprimée sur l'erreur standard.
-- `2` — la ligne de commande n'a pas été comprise.
+  est imprimée sur l'erreur standard. Une ligne de commande non comprise
+  sort aussi avec `1`.
 
 ## ENVIRONMENT
 

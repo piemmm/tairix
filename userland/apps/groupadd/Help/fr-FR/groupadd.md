@@ -39,8 +39,8 @@ opérande.
 - `0` — le groupe a été créé.
 - `1` — le registre a refusé ou échoué la création (par exemple une
   capacité manquante ou un identifiant en double) ; la raison est
-  imprimée sur l'erreur standard.
-- `2` — la ligne de commande n'a pas été comprise.
+  imprimée sur l'erreur standard. Une ligne de commande non comprise
+  sort aussi avec `1`.
 
 ## ENVIRONMENT
 

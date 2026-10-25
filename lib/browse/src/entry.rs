@@ -16,6 +16,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::time::Time64;
@@ -288,6 +289,17 @@ impl Occupancy {
             Self::Unprobed | Self::Empty | Self::Indeterminate => None,
         }
     }
+}
+
+/// An entry as a listing showed it, for an operation to act on: an
+/// operation finding another node under its path refuses it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Listed {
+    /// The entry's absolute root-first component path.
+    pub path: Vec<String>,
+    /// The node the listing named there, or [`FileId::NONE`] where it named
+    /// none.
+    pub id: FileId,
 }
 
 /// One child of the directory currently shown.

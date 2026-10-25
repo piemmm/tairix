@@ -41,7 +41,6 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -49,7 +48,7 @@ mod program {
     use tairix_abi::{Errno, APPINFO_WIRE_MAX};
     use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
     use tairix_appdata::RtHost;
-    use tairix_applib::{parse, run, AppDataStore, AppLibError, Store, Stores, OWN_WORD, USAGE};
+    use tairix_applib::{parse, run, AppDataStore, AppLibError, Store, Stores, OWN_WORD};
     use tairix_appstore::{manifest_path, DirEntry, StoreReader};
     use tairix_help::BundleHelp;
     use tairix_proglib::LIBRARY_PATH;
@@ -86,7 +85,7 @@ mod program {
 
     impl Store for FileStore {
         fn read(&self) -> Result<Option<Document>, Errno> {
-            let ret = tairix_rt::fs_open(self.path.as_bytes(), OpenFlags::READ);
+            let ret = tairix_rt::fs_open(self.path.as_bytes(), OpenFlags::READ, 0);
             if ret < 0 {
                 // An absent store is the empty library, not a failure.
                 // Every other refusal surfaces.
@@ -114,9 +113,10 @@ mod program {
             // The ProgramLibrary directory may not exist yet (a store on an
             // image predating it), so it is created when missing.
             tairix_rt::replace_file(
-                self.path.as_bytes(),
+                &self.path,
                 document.render().as_bytes(),
                 tairix_rt::ParentDir::CreatedIfMissing,
+                tairix_abi::fs::FS_NEW_FILE_MODE,
             )
         }
     }
@@ -155,7 +155,7 @@ mod program {
 
         fn read_appinfo(&self, bundle: &str) -> Result<Option<Vec<u8>>, Errno> {
             let path = manifest_path(bundle);
-            let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+            let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ, 0);
             if ret < 0 {
                 // A directory without a manifest is simply not a bundle.
                 let err = Errno::from_syscall(ret);
@@ -200,22 +200,19 @@ mod program {
     /// Exit codes: `0` on success (a listing, a completed change, a rescan,
     /// or the short help), `1` on a store, bundle, or output failure —
     /// notably a permission denial, whose reason is stated on the
-    /// diagnostic stream — `2` on a usage or validation error (a malformed
-    /// argument vector, an unknown option, folder, or entry, or a bundle
-    /// that is not registrable as asked).
+    /// diagnostic stream — or a command line that was not understood (a
+    /// malformed argument vector, an unknown option or folder), `2` on a
+    /// validation error (an unknown entry, or a bundle that is not
+    /// registrable as asked).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments(OWN_WORD) else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("{OWN_WORD}: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse(OWN_WORD, &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -245,9 +242,8 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err @ AppLibError::Usage) => {
-                write_stderr_line(&format!("{OWN_WORD}: {err}"));
-                write_stderr_line(USAGE);
-                2
+                tairix_help::report_misuse(OWN_WORD, &err);
+                tairix_help::MISUSE
             }
             Err(
                 err @ (AppLibError::UnknownFolder
@@ -257,11 +253,11 @@ mod program {
                 | AppLibError::BadManifest
                 | AppLibError::Entry(_)),
             ) => {
-                write_stderr_line(&format!("{OWN_WORD}: {err}"));
+                write_stderr_line(format_args!("{OWN_WORD}: {err}"));
                 2
             }
             Err(err) => {
-                write_stderr_line(&format!("{OWN_WORD}: {err}"));
+                write_stderr_line(format_args!("{OWN_WORD}: {err}"));
                 1
             }
         }

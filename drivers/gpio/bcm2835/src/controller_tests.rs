@@ -18,12 +18,13 @@ use tairix_abi::hwtree::HwResource;
 use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, ProcId, RegisterBlock, PROC_ID_LEN,
 };
+use tairix_drvrt::irqline::LineRecord;
 use tairix_drvrt::testkit::{FakeKernel, Records};
 use tairix_drvrt::{Supplier, SupplierHost};
 
-use crate::block::{Block, Layout, WINDOW_LEN};
-use crate::controller::{Controller, HeaderPort, Record, Role, BANK_INTERRUPTS};
-use crate::{register, BIND_KEYS, LAYOUTS};
+use crate::block::{Block, Trigger, LINES, WINDOW_LEN};
+use crate::controller::{Controller, HeaderPort, Record, BANK_INTERRUPTS, HEADER_CALLS_PER_WAKE};
+use crate::{register, BIND_KEYS};
 
 const DEVICE: ProcId = ProcId::from_raw([1; PROC_ID_LEN]);
 const FAN: ProcId = ProcId::from_raw([2; PROC_ID_LEN]);
@@ -64,6 +65,8 @@ struct Gpio {
     latch: Cell<u64>,
     /// Every write, in order, as (offset, value).
     writes: RefCell<Vec<(usize, u32)>>,
+    /// Every read's offset, in order.
+    reads: RefCell<Vec<usize>>,
 }
 
 impl Gpio {
@@ -73,6 +76,7 @@ impl Gpio {
             pins: Cell::new(0),
             latch: Cell::new(0),
             writes: RefCell::new(Vec::new()),
+            reads: RefCell::new(Vec::new()),
         }
     }
 
@@ -149,6 +153,7 @@ impl RegisterBlock for Gpio {
         if offset >= WINDOW_LEN {
             return Err(DriverError::OutOfRange);
         }
+        self.reads.borrow_mut().push(offset);
         Ok(self.reg(offset))
     }
 
@@ -235,7 +240,7 @@ impl Rig {
 
     fn controller<'r>(&self, gpio: &'r Gpio, banks: usize) -> Server<'r> {
         Controller::new(
-            Block::new(gpio, Layout::BCM2711),
+            Block::new(gpio),
             self.kernel.clone(),
             endpoint(),
             banks,
@@ -592,16 +597,19 @@ fn an_ended_consumer_s_line_is_taken_by_its_link_s_next_holder() {
     );
     rig.kernel.end(DEVICE);
     rig.wait(&mut server, OTHER, interrupt);
-    assert!(rig.records.all().contains(&Record::Reclaimed {
-        line: 17,
-        from: DEVICE
-    }));
+    assert!(rig
+        .records
+        .all()
+        .contains(&Record::Interrupt(LineRecord::Reclaimed {
+            line: 17,
+            from: DEVICE
+        })));
     server.peer_exited(OTHER);
     assert!(!gpio.detects(17), "released with its consumer");
 }
 
 #[test]
-fn a_header_call_the_kernel_cannot_attribute_is_refused() {
+fn a_header_frame_that_does_not_decode_is_refused() {
     let gpio = Gpio::new();
     let rig = Rig::new();
     let mut server = rig.controller(&gpio, BANK_INTERRUPTS);
@@ -622,7 +630,76 @@ fn a_header_call_the_kernel_cannot_attribute_is_refused() {
 }
 
 #[test]
-fn every_claim_is_recorded_with_its_role() {
+fn a_call_the_kernel_cannot_attribute_is_refused_on_either_endpoint() {
+    let gpio = Gpio::new();
+    let rig = Rig::new();
+    let mut server = rig.controller(&gpio, BANK_INTERRUPTS);
+    let mut header = [0u8; HEADER_REQUEST_LEN];
+    HeaderRequest::Lines.encode(&mut header).expect("fits");
+    rig.header
+        .queue
+        .borrow_mut()
+        .push_back((FakeKernel::OUT_OF_SERVICE, header.to_vec()));
+    server.woke(BANK_INTERRUPTS).unwrap();
+    let interrupt = link(17, RISING);
+    rig.grant(DEVICE, &interrupt);
+    let mut wait = [0u8; IRQLINE_MAX_REQUEST];
+    IrqLineRequest::Wait(interrupt)
+        .encode(&mut wait)
+        .expect("fits");
+    server.serve(FakeKernel::OUT_OF_SERVICE, &wait);
+    assert_eq!(
+        rig.kernel.answered(),
+        0,
+        "an unnamed caller has nobody to tell"
+    );
+    assert!(!gpio.detects(17), "and nothing was claimed for it");
+    assert_eq!(
+        rig.records.all(),
+        [
+            Record::Refused {
+                caller: None,
+                reason: Errno::NotFound
+            },
+            Record::Interrupt(LineRecord::Refused {
+                caller: None,
+                reason: Errno::NotFound
+            }),
+        ]
+    );
+}
+
+#[test]
+fn one_wake_serves_at_most_its_bound_of_header_calls() {
+    let gpio = Gpio::new();
+    let rig = Rig::new();
+    let mut server = rig.controller(&gpio, BANK_INTERRUPTS);
+    let mut frame = [0u8; HEADER_REQUEST_LEN];
+    HeaderRequest::Lines.encode(&mut frame).expect("fits");
+    let tickets: Vec<u64> = (0..=HEADER_CALLS_PER_WAKE)
+        .map(|_| {
+            let ticket = rig.kernel.call(FAN);
+            rig.header
+                .queue
+                .borrow_mut()
+                .push_back((ticket, frame.to_vec()));
+            ticket
+        })
+        .collect();
+    server.woke(BANK_INTERRUPTS).unwrap();
+    assert_eq!(
+        rig.kernel.answered(),
+        HEADER_CALLS_PER_WAKE,
+        "the rest wait for the next wake, so the banks are not starved"
+    );
+    server.woke(BANK_INTERRUPTS).unwrap();
+    assert!(tickets
+        .iter()
+        .all(|&ticket| rig.kernel.answer(ticket).is_some()));
+}
+
+#[test]
+fn every_claim_is_recorded_as_its_kind() {
     let gpio = Gpio::new();
     let rig = Rig::new();
     let mut server = rig.controller(&gpio, BANK_INTERRUPTS);
@@ -630,11 +707,18 @@ fn every_claim_is_recorded_with_its_role() {
         rig.change(&mut server, FAN, claim(18, Polarity::ActiveHigh, true)),
         Ok(())
     );
-    assert!(rig.records.all().contains(&Record::Claimed {
+    let interrupt = link(17, RISING);
+    rig.grant(DEVICE, &interrupt);
+    rig.wait(&mut server, DEVICE, interrupt);
+    let records = rig.records.all();
+    assert!(records.contains(&Record::Claimed {
         line: 18,
-        holder: FAN,
-        role: Role::Output
+        holder: FAN
     }));
+    assert!(records.contains(&Record::Interrupt(LineRecord::Claimed {
+        line: 17,
+        holder: DEVICE
+    })));
 }
 
 /// A host that grants the load gate, or does not.
@@ -650,9 +734,121 @@ impl DriverHost for Host {
 }
 
 #[test]
-fn the_bind_table_and_layouts_agree_and_loading_needs_its_capability() {
-    assert_eq!(BIND_KEYS.len(), LAYOUTS.len());
-    assert_eq!(LAYOUTS, [Layout::BCM2711, Layout::BCM2835]);
+fn the_driver_binds_the_bcm2711_block_alone_and_loading_needs_its_capability() {
+    let keys: Vec<&[u8]> = BIND_KEYS
+        .iter()
+        .map(|bind| bind.key.compatible_bytes())
+        .collect();
+    assert_eq!(keys, [&b"brcm,bcm2711-gpio"[..]]);
     assert!(register(&Host(true)).is_ok());
     assert_eq!(register(&Host(false)), Err(DriverError::PermissionDenied));
+}
+
+#[test]
+fn an_edge_that_fires_unwaited_is_masked_until_the_next_wait() {
+    let gpio = Gpio::new();
+    let rig = Rig::new();
+    let mut server = rig.controller(&gpio, BANK_INTERRUPTS);
+    let interrupt = link(17, RISING);
+    rig.grant(DEVICE, &interrupt);
+    let first = rig.wait(&mut server, DEVICE, interrupt);
+    gpio.raise(17);
+    server.woke(0).unwrap();
+    assert_eq!(decode_reply(&rig.kernel.answer(first).unwrap()), Ok(()));
+    assert!(gpio.detects(17), "armed for the next edge");
+    gpio.lower(17);
+    gpio.raise(17);
+    server.woke(0).unwrap();
+    assert!(
+        !gpio.detects(17),
+        "masked once an edge latches with no wait posted"
+    );
+    gpio.lower(17);
+    gpio.raise(17);
+    assert!(
+        !gpio.pending(17),
+        "so a bouncing line raises no further interrupt"
+    );
+    let second = rig.wait(&mut server, DEVICE, interrupt);
+    assert_eq!(
+        decode_reply(&rig.kernel.answer(second).unwrap()),
+        Ok(()),
+        "the latched edge answers at once"
+    );
+    assert!(gpio.detects(17), "and the wait re-arms the line");
+    gpio.lower(17);
+    gpio.raise(17);
+    server.woke(0).unwrap();
+    let third = rig.wait(&mut server, DEVICE, interrupt);
+    assert_eq!(
+        decode_reply(&rig.kernel.answer(third).unwrap()),
+        Ok(()),
+        "an edge after the re-arm is caught"
+    );
+}
+
+/// How many detect-enable reads `gpio` has seen.
+fn detect_reads(gpio: &Gpio) -> usize {
+    gpio.reads
+        .borrow()
+        .iter()
+        .filter(|&&offset| offset >= REN)
+        .count()
+}
+
+#[test]
+fn a_level_interrupt_reads_only_the_enable_its_trigger_sets() {
+    let gpio = Gpio::new();
+    let rig = Rig::new();
+    let mut server = rig.controller(&gpio, BANK_INTERRUPTS);
+    let interrupt = link(30, HIGH);
+    rig.grant(DEVICE, &interrupt);
+    gpio.reads.borrow_mut().clear();
+    let ticket = rig.wait(&mut server, DEVICE, interrupt);
+    assert_eq!(
+        detect_reads(&gpio),
+        1,
+        "armed through the high-level enable alone"
+    );
+    gpio.reads.borrow_mut().clear();
+    gpio.raise(30);
+    server.woke(1).unwrap();
+    assert_eq!(decode_reply(&rig.kernel.answer(ticket).unwrap()), Ok(()));
+    assert_eq!(detect_reads(&gpio), 1, "and disarmed through it alone");
+}
+
+#[test]
+fn the_header_listing_reads_each_function_select_once() {
+    let gpio = Gpio::new();
+    let rig = Rig::new();
+    let mut server = rig.controller(&gpio, BANK_INTERRUPTS);
+    gpio.reads.borrow_mut().clear();
+    let table = decode_lines(&rig.ask(&mut server, FAN, HeaderRequest::Lines)).unwrap();
+    assert_eq!(table.entries().len(), 26);
+    assert_eq!(
+        *gpio.reads.borrow(),
+        [FSEL, FSEL + 4, FSEL + 8],
+        "three selects hold GPIO 2–27"
+    );
+}
+
+#[test]
+fn the_block_refuses_a_line_it_does_not_have() {
+    let gpio = Gpio::new();
+    let block = Block::new(&gpio);
+    assert_eq!(block.function(LINES), Err(DriverError::OutOfRange));
+    assert_eq!(
+        block.set_direction(70, true),
+        Err(DriverError::OutOfRange),
+        "line 70's select would be GPSET0"
+    );
+    assert_eq!(block.drive(LINES, true), Err(DriverError::OutOfRange));
+    assert_eq!(
+        block.detect(LINES, Trigger::Rising, true),
+        Err(DriverError::OutOfRange)
+    );
+    assert!(
+        gpio.reads.borrow().is_empty() && gpio.writes.borrow().is_empty(),
+        "no register in the window was touched"
+    );
 }

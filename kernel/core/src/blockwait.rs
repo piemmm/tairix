@@ -1,7 +1,7 @@
 //! [`IrqParkWaiter`] — the parking [`IrqWaiter`] an in-kernel block-device
 //! completion wait drives.
 //!
-//! A block driver hosted in the kernel (the boot virtio-blk and EMMC2
+//! A block driver hosted in the kernel (the boot virtio-blk and SD-host
 //! devices behind `SharedBlock`) must give the CPU up while a device
 //! completion is outstanding. Its waits run in whatever task context
 //! reached the device — a user task inside an `fs_*` syscall, or an
@@ -15,7 +15,7 @@
 //!
 //! An earlier revision halted the *CPU* instead (a masked re-check + `wfi`
 //! park inside the calling task). That starves the dispatch loop for the
-//! whole device wait: on Pi 4 metal a cold-cache directory walk (`ls -lsR`)
+//! whole device wait: on metal a cold-cache directory walk (`ls -lsR`)
 //! stalled console output for every SD-card read and could strand the
 //! system outright once the tickless one-shot was unarmed, because nothing
 //! else was left to wake the halted CPU. The `wfi` shape survives here only

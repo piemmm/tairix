@@ -322,7 +322,7 @@ mod tests {
     fn round_trips_a_record_with_typed_fields() {
         let mut buf = [0u8; LOG_RECORD_MAX];
         let fields = [
-            ("driver", FieldValue::Str("vcmailbox")),
+            ("driver", FieldValue::Str("mailbox")),
             ("node", FieldValue::UnsignedInt(42)),
         ];
         let len = encode_record(&mut buf, 2, 7030, "bundle accepted", &fields)
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(record.message(), "bundle accepted");
         assert_eq!(record.field_count(), 2);
         let mut iter = record.fields();
-        assert_eq!(iter.next(), Some(("driver", FieldValue::Str("vcmailbox"))));
+        assert_eq!(iter.next(), Some(("driver", FieldValue::Str("mailbox"))));
         assert_eq!(iter.next(), Some(("node", FieldValue::UnsignedInt(42))));
         assert_eq!(iter.next(), None);
     }

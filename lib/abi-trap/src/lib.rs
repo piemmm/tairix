@@ -222,27 +222,39 @@ pub unsafe fn raw_syscall(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> u64 {
 /// inspects the recorded `(number, args)`.
 #[cfg(all(not(abi_trap_native), feature = "host-seam"))]
 pub mod seam {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::vec::Vec;
     use tairix_abi::{Errno, SYSCALL_MAX_ARGS};
+
+    /// One trap: its number and its arguments.
+    pub type Trap = (u64, [u64; SYSCALL_MAX_ARGS]);
 
     std::thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };
         static RETURN_VALUE: Cell<u64> = const { Cell::new(0) };
-        static LAST_CALL: Cell<Option<(u64, [u64; SYSCALL_MAX_ARGS])>> = const { Cell::new(None) };
+        static LAST_CALL: Cell<Option<Trap>> = const { Cell::new(None) };
+        static CALLS: RefCell<Vec<Trap>> = const { RefCell::new(Vec::new()) };
     }
 
-    /// Arm the seam for the current thread: the next trap returns `value` and
-    /// its `(number, args)` are recorded for inspection.
+    /// Arm the seam for the current thread: every trap returns `value` and
+    /// is recorded for inspection.
     pub fn arm(value: u64) {
         RETURN_VALUE.with(|v| v.set(value));
         LAST_CALL.with(|c| c.set(None));
+        CALLS.with(|calls| calls.borrow_mut().clear());
         ARMED.with(|a| a.set(true));
+    }
+
+    /// Every trap on this thread since [`arm`], in order.
+    #[must_use]
+    pub fn calls() -> Vec<Trap> {
+        CALLS.with(|calls| calls.borrow().clone())
     }
 
     /// The `(number, args)` of the most recent trap on this thread, or `None`
     /// if no trap has been issued since [`arm`].
     #[must_use]
-    pub fn last_call() -> Option<(u64, [u64; SYSCALL_MAX_ARGS])> {
+    pub fn last_call() -> Option<Trap> {
         LAST_CALL.with(Cell::get)
     }
 
@@ -252,7 +264,7 @@ pub mod seam {
     /// # Panics
     ///
     /// If `call` issued no trap.
-    pub fn capture(ret: u64, call: impl FnOnce()) -> (u64, [u64; SYSCALL_MAX_ARGS]) {
+    pub fn capture(ret: u64, call: impl FnOnce()) -> Trap {
         arm(ret);
         call();
         last_call().expect("the wrapper must issue a trap")
@@ -283,6 +295,7 @@ pub mod seam {
             return None;
         }
         LAST_CALL.with(|c| c.set(Some((number, *args))));
+        CALLS.with(|calls| calls.borrow_mut().push((number, *args)));
         Some(RETURN_VALUE.with(Cell::get))
     }
 }

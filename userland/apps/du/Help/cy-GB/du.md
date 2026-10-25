@@ -28,11 +28,20 @@ Adroddir llwybr na ellir ei ddarllen ar y gwall safonol ac mae'r
 daith yn parhau gyda'r gweddill; nid yw cyfeiriadur annarllenadwy yn
 cyfrannu dim yn hytrach na swm rhannol wedi'i ddyfalu.
 
-Cyfrifir ffeil y cyrhaeddir ati trwy fwy nag un enw **unwaith**, felly
-nid adroddir ei storfa ddwywaith; mae `-l` yn cyfrif pob enw yn lle
-hynny. Nid yw `-x` (un system ffeiliau) ar gael eto; ni
-ddarllenir newidynnau amgylchedd teulu `DU_BLOCK_SIZE` — dewisir y
-raddfa gan opsiynau'n unig.
+Mae dolen symbolaidd yn cyfrif fel y ddolen ei hun oni bai bod `-H` neu
+`-L` yn gofyn am ei dilyn. Gadewir allan unrhyw beth a geir yr eildro —
+enw arall ar ffeil a gyfrifwyd eisoes, operand a ailadroddir neu sy'n
+gorwedd y tu mewn i un arall, cyfeiriadur y mae `-L` yn ei gyrraedd
+ddwywaith — heb res iddo'i hun, felly nid adroddir ei storfa ddwywaith;
+mae `-l` yn cyfrif pob tro y'i gwelir yn lle hynny. Nid yw `-x` (un
+system ffeiliau) ar gael eto; ni ddarllenir newidynnau amgylchedd teulu
+`DU_BLOCK_SIZE` — dewisir y raddfa gan opsiynau'n unig.
+
+Wrth derfynell, dyfynnir pob enw y mae'r allbwn yn ei ddangos lle byddai
+ar gragen ei angen, ac ysgrifennir unrhyw nod rheoli neu nod anweledig
+arall ynddo fel dilyniant dianc, felly ni all enw orchymyn y sgrin na'i
+haildrefnu; mae GNU yn ei ddangos heb ei newid. Mae pibell, ffeil, neu
+allbwn `-0` yn derbyn yr enw beit am beit.
 
 ## OPTIONS
 
@@ -48,6 +57,11 @@ raddfa gan opsiynau'n unig.
   is-gyfeiriaduron.
 - `-l, --count-links` — cyfrif ffeil ag iddi fwy nag un enw unwaith
   fesul enw yn lle unwaith.
+- `-L, --dereference` — dilyn pob dolen symbolaidd.
+- `-H, -D, --dereference-args` — dilyn dim ond y dolenni symbolaidd a
+  enwir fel operandau.
+- `-P, --no-dereference` — peidio â dilyn unrhyw ddolen symbolaidd (y
+  rhagosodiad).
 - `--apparent-size` — mesur hydoedd ymddangosiadol mewn beitiau, nid
   storfa a neilltuwyd.
 - `-b, --bytes` — maint ymddangosiadol mewn beitiau unigol
@@ -73,8 +87,8 @@ raddfa gan opsiynau'n unig.
 ## EXIT STATUS
 
 - `0` — cerddwyd pob operand (neu ysgrifennwyd y cymorth byr).
-- `1` — ni ellid darllen llwybr, neu ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni ellid darllen llwybr, neu ni ellid cyflwyno'r allbwn. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

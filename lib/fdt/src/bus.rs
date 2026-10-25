@@ -2,7 +2,7 @@
 //! consumer needs to turn a node's raw `reg` into a CPU-physical window.
 //!
 //! Real boards put peripherals behind buses carrying their own
-//! `#address-cells`/`#size-cells` and `ranges` (the Pi 4's `/soc`, a PCIe
+//! `#address-cells`/`#size-cells` and `ranges` (a system-on-chip's `/soc`, a PCIe
 //! root complex), so a raw `reg` read is a *bus* address, never the address
 //! a driver may map. Decoding it needs per-depth state the plain node
 //! iterator does not carry, which is what this module adds: [`BusLevel`]
@@ -418,7 +418,7 @@ pub fn dma_reach(levels: &[BusLevel<'_>], depth: usize) -> Option<DmaReach> {
 /// CPU-physical window `[base, base + len)` a device on the bus may DMA
 /// through, returned as `(top, len)` where `top = base + len` is the
 /// *exclusive* upper bound — the same form a hardware-tree walk hands
-/// `HwResource::dma` for the `VideoCore` mailbox carve, so a consumer
+/// `HwResource::dma` for a firmware mailbox carve, so a consumer
 /// reads `top` as "every DMA address must lie below this".
 ///
 /// `child_address` is the bridge's own `#address-cells` — `3` for a PCI
@@ -477,7 +477,7 @@ pub fn dma_ranges_aperture_of(
 /// Decode a PCI host bridge's outbound `ranges` memory window
 /// (Devicetree Spec v0.4 §2.3.8): the CPU-physical aperture the bridge
 /// forwards to PCIe memory space, returned as
-/// `(cpu_base, pcie_base, size)` — the three values the VL805 wiring's
+/// `(cpu_base, pcie_base, size)` — the three values a root-complex driver's
 /// `PcieWindows` outbound fields need, and the
 /// `(base, len, translated_base)` an `HwResource::bus_window` carries.
 ///
@@ -850,7 +850,7 @@ mod tests {
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
         b.begin_node("pcie@7d500000");
-        b.prop_str("compatible", "brcm,bcm2711-pcie");
+        b.prop_str("compatible", "vendor,pcie");
         b.prop_u32("#address-cells", 3);
         b.prop_u32("#size-cells", 2);
         if !dma_ranges.is_empty() {
@@ -868,7 +868,7 @@ mod tests {
         f(dma_ranges_aperture(&pcie, 3, 2, 2));
     }
 
-    /// One BCM2711-shaped `dma-ranges` entry: 3-cell child PCI address,
+    /// One PCI host's `dma-ranges` entry: 3-cell child PCI address,
     /// 2-cell parent CPU base, 2-cell size. The child PCI base
     /// (`phys.mid`/`phys.lo`, the inbound viewport's far side) is `0`.
     fn dma_ranges_entry(pci_hi: u32, parent_base: u64, size: u64) -> Vec<u8> {
@@ -887,13 +887,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_bcm2711_pcie_inbound_aperture() {
-        // The real Pi 4 tree: PCI 0x0 → CPU 0x0 for 3 GiB, so devices
+    fn reads_a_pcie_hosts_inbound_aperture() {
+        // PCI 0x0 → CPU 0x0 for 3 GiB, so devices
         // behind the bridge DMA only the low 3 GiB of SDRAM. The top is
         // the exclusive upper bound, the len the aperture extent.
         let dr = dma_ranges_entry(0x0200_0000, 0x0, 0xc000_0000);
         with_pcie_dma_ranges(&dr, |aperture| {
-            // (top, len, inbound PCIe base) — the Pi views memory at
+            // (top, len, inbound PCIe base) — memory is viewed at
             // PCIe address 0.
             assert_eq!(aperture, Some((0xc000_0000, 0xc000_0000, 0)));
         });
@@ -952,7 +952,7 @@ mod tests {
             b.prop_u32("#address-cells", 2);
             b.prop_u32("#size-cells", 2);
             b.begin_node("pcie@7d500000");
-            b.prop_str("compatible", "brcm,bcm2711-pcie");
+            b.prop_str("compatible", "vendor,pcie");
             b.prop("dma-ranges", &dr);
             b.end_node();
             b.end_node();
@@ -980,7 +980,7 @@ mod tests {
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
         b.begin_node("pcie@7d500000");
-        b.prop_str("compatible", "brcm,bcm2711-pcie");
+        b.prop_str("compatible", "vendor,pcie");
         b.prop_u32("#address-cells", 3);
         b.prop_u32("#size-cells", 2);
         if !ranges.is_empty() {
@@ -1010,8 +1010,8 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_bcm2711_pcie_outbound_window() {
-        // The real Pi 4 tree: 32-bit memory space (phys.hi 0x02…),
+    fn reads_a_pcie_hosts_outbound_window() {
+        // 32-bit memory space (phys.hi 0x02…),
         // CPU 0x6_0000_0000 -> PCIe 0xc000_0000, 1 GiB.
         let r = ranges_entry(0x0200_0000, 0xc000_0000, 0x6_0000_0000, 0x4000_0000);
         with_pcie_ranges(&r, |win| {
@@ -1065,7 +1065,7 @@ mod tests {
             b.prop_u32("#address-cells", 2);
             b.prop_u32("#size-cells", 2);
             b.begin_node("pcie@7d500000");
-            b.prop_str("compatible", "brcm,bcm2711-pcie");
+            b.prop_str("compatible", "vendor,pcie");
             b.prop("ranges", &r);
             b.end_node();
             b.end_node();

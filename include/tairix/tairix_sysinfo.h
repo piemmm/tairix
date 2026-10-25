@@ -194,7 +194,7 @@
 #define TAIRIX_MOUNT_RECORD_WIRE_LEN 224u
 #define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 152u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
-#define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 40u
+#define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 44u
 #define TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN 40u
 #define TAIRIX_SELF_ACCOUNT_RECORD_WIRE_LEN 432u
 #define TAIRIX_DMA_UNIT_RECORD_WIRE_LEN 40u
@@ -367,11 +367,13 @@ typedef struct tairix_resource_limit_record {
     uint64_t usage;
 } tairix_resource_limit_record_t;
 
-/* One account entry: the uid + username pairing, and nothing else (no
-* credential material). The inline name is valid for name_len bytes. */
+/* One account entry: the uid, login group and username, and nothing else
+* (no credential material). The inline name is valid for name_len bytes. */
 typedef struct tairix_user_directory_record {
     uint32_t uid;
+    uint32_t primary_gid;
     uint8_t name_len;
+    uint8_t reserved[3];
     uint8_t name[TAIRIX_MAX_USERNAME_LEN];
 } tairix_user_directory_record_t;
 
@@ -380,6 +382,7 @@ typedef struct tairix_user_directory_record {
 typedef struct tairix_group_directory_record {
     uint32_t gid;
     uint8_t name_len;
+    uint8_t reserved[3];
     uint8_t name[TAIRIX_MAX_GROUPNAME_LEN];
 } tairix_group_directory_record_t;
 

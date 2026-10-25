@@ -161,28 +161,33 @@ fn a_second_operand_is_refused_rather_than_ignored() {
     );
     assert_eq!(
         UsageError::ExtraOperand("/System".to_string()).to_string(),
-        "extra operand \"/System\""
+        "extra operand '/System'"
     );
 }
 
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
 #[test]
-fn an_unrecognised_option_is_refused() {
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["--grid"]), "unrecognized option '--grid'");
+    assert_eq!(refused(&["-x", "/Users/ada"]), "invalid option -- 'x'");
     assert_eq!(
-        parse(&["--grid"]),
-        Err(UsageError::UnknownOption("--grid".to_string()))
-    );
-    assert_eq!(
-        parse(&["-x", "/Users/ada"]),
-        Err(UsageError::UnknownOption("-x".to_string()))
-    );
-    assert_eq!(
-        UsageError::UnknownOption("-x".to_string()).to_string(),
-        "unrecognized option \"-x\""
+        refused(&["--desktop=yes"]),
+        "option '--desktop' doesn't allow an argument"
     );
     assert_eq!(
         UsageError::NotUtf8.to_string(),
         "argument vector is not valid UTF-8"
     );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(start_of(&["--desk"]).role, Role::Desktop);
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
 #[test]

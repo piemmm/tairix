@@ -84,8 +84,8 @@ riportano:
 - `0` — la sessione è terminata con `q`, oppure è stata mostrata la
   guida breve.
 - `1` — il servizio o il terminale è fallito; il motivo è stampato
-  sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+  sull'errore standard. Anche una riga di comando non compresa termina
+  con `1`.
 
 ## ENVIRONMENT
 

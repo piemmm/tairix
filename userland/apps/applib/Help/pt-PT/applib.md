@@ -110,9 +110,11 @@ capturar com `3>records.jsonl` e tudo o resto pode ignorar.
 - `0` — a listagem, alteração, rescan ou ajuda curta foram concluídos.
 - `1` — uma falha de armazenamento, pacote ou saída (por exemplo, o
   utilizador não pode alterar o catálogo de toda a máquina); o motivo
-  é indicado no fluxo de diagnóstico.
-- `2` — a linha de comandos não foi compreendida, a pasta ou entrada
-  é desconhecida, ou o pacote não pode ser registado conforme pedido.
+  é indicado no fluxo de diagnóstico. Uma linha de comandos não
+  compreendida (incluindo uma pasta `--category` desconhecida) também
+  termina com `1`.
+- `2` — a entrada é desconhecida, ou o pacote não pode ser registado
+  conforme pedido.
 
 ## ENVIRONMENT
 

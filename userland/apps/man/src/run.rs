@@ -49,7 +49,7 @@ mod program {
 
     use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::{Errno, InputMode, TerminalSize, STDOUT};
-    use tairix_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
+    use tairix_man::{parse, run, BundleStore, Console, ManError, Request};
     use tairix_rt::io::{self, write_stderr_line, Read, StdInfo, Stdin, Stdout, Write};
     use tairix_sandbox::helpdoc::HelpService;
     use tairix_sandbox::host::ParserSandbox;
@@ -75,7 +75,7 @@ mod program {
             // A resolve-only directory open: no read authority is requested,
             // the descriptor is closed at once, and only existence is
             // learned.
-            let ret = tairix_rt::fs_open(bundle_dir.as_bytes(), OpenFlags::DIRECTORY);
+            let ret = tairix_rt::fs_open(bundle_dir.as_bytes(), OpenFlags::DIRECTORY, 0);
             if ret >= 0 {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 // A non-negative fs_open result is a descriptor the kernel
@@ -130,7 +130,7 @@ mod program {
     /// `path` has no children (`Ok(vec![])`); any other refusal is the
     /// kernel's own [`Errno`], surfaced verbatim.
     fn list_dirs(path: &str) -> Result<Vec<String>, Errno> {
-        let dir = match tairix_rt::open_dir(path.as_bytes()) {
+        let dir = match tairix_rt::Dir::open(path.as_bytes()) {
             Ok(dir) => dir,
             Err(ret) => {
                 return match Errno::from_syscall(ret) {
@@ -193,7 +193,8 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success, `1` when the command, its bundle, its
-    /// document, or the output path fails, `2` on a usage error.
+    /// document, or the output path fails, or the command line was not
+    /// understood.
     fn main() -> i32 {
         // The worker role: this same binary, re-spawned by its own parent
         // inside the kernel sandbox spawn mode, serves the help-render
@@ -204,15 +205,15 @@ mod program {
             return serve_stdio(&mut HelpService).exit_code();
         }
 
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("man") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            write_stderr_line(USAGE);
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("man", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         let path = tairix_rt::env_var(b"PATH").and_then(|raw| core::str::from_utf8(raw).ok());
@@ -255,12 +256,12 @@ mod program {
 
         match result {
             Ok(()) => 0,
-            Err(ManError::Usage) => {
-                write_stderr_line(USAGE);
-                2
+            Err(err @ ManError::Usage) => {
+                tairix_help::report_misuse("man", &err);
+                tairix_help::MISUSE
             }
             Err(err) => {
-                write_stderr_line(&format!("man: {err}"));
+                write_stderr_line(format_args!("man: {err}"));
                 1
             }
         }

@@ -5,7 +5,8 @@
 //! kernel or a terminal. Two injected traits do that:
 //!
 //! * [`ProcessHost`] launches a resolved pipeline, waits on a foreground job,
-//!   signals a job (for `fg`/`bg`), and polls for background state changes.
+//!   signals a job (for `fg`/`bg`), polls for background state changes, and
+//!   holds the process's working directory and file mode creation mask.
 //! * [`Console`] carries the shell's and its builtins' text output.
 //!
 //! On a running kernel these are backed by syscalls (`spawn`/`wait`/`kill`
@@ -17,7 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
-use tairix_abi::{Errno, LimitKind, ResourceLimit};
+use tairix_abi::{Errno, FileId, LimitKind, ResourceLimit};
 use tairix_resref::{ResourceRef, TargetClass};
 
 use crate::error::ParseError;
@@ -201,8 +202,8 @@ pub trait ProcessHost {
     /// call, or `None` if none have. Must not block.
     fn poll(&self) -> Option<(Pid, WaitOutcome)>;
 
-    /// Change the working directory to `path`, returning the resolved
-    /// absolute directory on success (used by the `cd` builtin).
+    /// Change the working directory to `path`, absolute or relative to the
+    /// working directory, as the kernel resolves it (used by `cd`).
     ///
     /// The host — not the shell — validates that the target exists, is a
     /// directory, and is permitted: the shell holds no
@@ -211,7 +212,34 @@ pub trait ProcessHost {
     /// # Errors
     ///
     /// Returns the host's [`Errno`] if the directory cannot be entered.
-    fn change_directory(&self, path: &str) -> Result<String, Errno>;
+    fn change_directory(&self, path: &str) -> Result<(), Errno>;
+
+    /// The working directory's own path, as the kernel names it (used by
+    /// `cd -P` and `pwd -P`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the host's [`Errno`] when the path cannot be learned — the
+    /// directory removed, or one above it unreadable.
+    fn working_directory(&self) -> Result<String, Errno>;
+
+    /// The identity of the directory `path` names, a final link followed
+    /// (used by `cd` and `pwd` to learn what a path in `PWD` reaches).
+    ///
+    /// # Errors
+    ///
+    /// Returns the host's [`Errno`]: [`Errno::NotADirectory`] for anything
+    /// but a directory.
+    fn directory_identity(&self, path: &str) -> Result<FileId, Errno>;
+
+    /// The process's file mode creation mask: the permission bits a file or
+    /// directory the shell, or a command it launches, creates is born
+    /// without (used by the `umask` builtin).
+    fn umask(&self) -> u32;
+
+    /// Replace the process's file mode creation mask with `mask`, which
+    /// every command launched afterwards inherits.
+    fn set_umask(&self, mask: u32);
 }
 
 /// The shell's text output sink: standard output and standard error.

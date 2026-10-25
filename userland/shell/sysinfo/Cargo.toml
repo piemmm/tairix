@@ -47,6 +47,8 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # handing it to `lib/procinfo`'s resolver, so the tool embeds no second
 # reference grammar. Parsing only — it resolves nothing and grants nothing.
 tairix-resref = { path = "../../../lib/resref", version = "=0.0.0" }
+# GNU `getopt_long`'s reading of the command line.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, syscall/`ipc_call`

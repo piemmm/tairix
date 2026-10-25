@@ -4,52 +4,58 @@
 extern crate alloc;
 
 use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use core::cell::{Cell as CoreCell, RefCell};
 
-use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
 use tairix_abi::{
-    CapabilityId, Errno, FileId, FileKind, LoadHeader, ManifestHeader, RenameFlags, RxePermission,
-    Segment, LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
+    CapabilityId, Errno, FileId, FileKind, LoadHeader, ManifestHeader, RxePermission, Segment,
+    FS_SETGID_BIT, LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
 };
 use tairix_appdata::fake::FakeService;
 use tairix_appdata::Settings as SettingsStore;
 use tairix_curses::{Event, Pos, Size, Window};
+use tairix_fscopy::op::{OpError as EngineError, Verb};
+use tairix_fscopy::{Landing, Unresolved};
 
 use tairix_log::{Event as LogEvent, Sink};
-use tairix_path::{join, leaf_name};
+use tairix_path::{dir_name, join, leaf_name};
 use tairix_sandbox::decode::{DecodeService, SymbolRecord, MAX_INPUT};
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::ParserSandbox;
 
 use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
-use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeInfo};
+use crate::fs::{Fs, FsEntry, VolumeInfo};
 use crate::info::{note_hidden_entries, Info};
 use crate::model::{
-    ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SettingsState, SortKey, View, Viewer,
+    ModePrompt, Model, NameFilter, Overlay, Pane, Prompt, SettingsState, SortKey, View, Viewer,
 };
-use crate::ops::{is_inside, parent_of, Decision, FileOp, OpProgress};
+use crate::ops::{is_inside, Run};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
 use crate::settings::{SettingKey, Settings};
 use crate::tag::{TagEntry, TagRange};
 use crate::view_disasm::{Decode, DisasmPane, DisasmView};
 use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
-use crate::OWN_WORD;
+use crate::{parse, Command, OWN_WORD};
 use tairix_appconf::{Keys, Registry};
 use tairix_procinfo::VolumeBytes;
 
-/// An in-memory filesystem: per-path listings, per-path file bytes,
-/// per-path modes, a denied set (listings and stats), a set-mode denial
-/// set, failure injection for the mutating operations, a log of applied
-/// mode changes, and a count of listings served (so laziness is
-/// observable). Listings are kept in step with the mutations so a refresh
-/// observes the operation's effect, exactly as the kernel view would.
+mod operations;
+
+/// An in-memory filesystem for the listing, editor and viewer flows:
+/// per-path listings, file bytes and modes, a denied set (listings and
+/// stats), a set-mode denial set, a read refusal, a log of applied mode
+/// changes, and a count of listings served (so laziness is observable). A
+/// directory made through it takes the mode asked less the umask and the
+/// setgid bit of the one it is made in, and none is made in a directory
+/// whose mode withholds its owner's write. It starts no copy, move or
+/// removal: those flows run over the tree in `operations`.
 struct FakeFs {
     dirs: BTreeMap<String, Vec<FsEntry>>,
     files: BTreeMap<String, Vec<u8>>,
@@ -61,10 +67,6 @@ struct FakeFs {
     space: Option<VolumeBytes>,
     /// `read` of this path fails with the errno.
     read_fail: Option<(String, Errno)>,
-    /// `write` to this path fails with the errno.
-    write_fail: Option<(String, Errno)>,
-    /// `rename` reports the cross-volume boundary for these prefixes.
-    cross_volume: Vec<String>,
     /// What `list_volumes` reports (empty by default).
     volumes: Vec<VolumeInfo>,
     /// Per-path extended attributes, in insertion order (the backing's
@@ -76,19 +78,8 @@ struct FakeFs {
     /// The target every symbolic link in the tree stores, keyed by link
     /// path — the only thing a link holds.
     links: BTreeMap<String, String>,
-    /// A file another program creates at its path just before the next
-    /// rename reaches it — after every look the app took.
-    appears_at_rename: Option<(String, Vec<u8>)>,
-    /// The stored runs `(start, end)` of the files registered sparse; any
-    /// other file is all data.
-    runs: BTreeMap<String, Vec<(u64, u64)>>,
-    /// Every write as `(path, offset, len)`, so a test sees what was written.
-    writes: Vec<(String, u64, usize)>,
-    /// Setting this attribute key anywhere answers the errno.
-    attr_refusal: Option<(String, Errno)>,
-    /// Second names for files, each keyed by the name and holding the path
-    /// whose bytes it shares, as a hard link does.
-    names: BTreeMap<String, String>,
+    /// The umask every directory made is born under.
+    umask: u32,
 }
 
 impl FakeFs {
@@ -108,82 +99,43 @@ impl FakeFs {
                 available: 500,
             }),
             read_fail: None,
-            write_fail: None,
-            cross_volume: Vec::new(),
             volumes: Vec::new(),
             attrs: BTreeMap::new(),
             attrs_unsupported: false,
-            appears_at_rename: None,
-            runs: BTreeMap::new(),
-            writes: Vec::new(),
-            attr_refusal: None,
-            names: BTreeMap::new(),
+            umask: 0o022,
         }
     }
 
-    /// Give the file at `of` the second name `path`.
-    fn second_name(mut self, path: &str, of: &str) -> Self {
-        let len = self.files.get(of).map_or(0, |bytes| bytes.len() as u64);
-        self.names.insert(path.to_owned(), of.to_owned());
-        self.upsert_entry(parent_of(path), file(leaf_name(path), len, 0));
-        self
-    }
-
-    /// The path whose bytes `path` names.
-    fn node(&self, path: &str) -> String {
-        self.names
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| path.to_owned())
-    }
-
-    /// Register `path` as a sparse file `len` bytes long storing `runs`
-    /// (`(start, bytes)`, sorted and apart) and reading as zeros elsewhere.
-    fn sparse(mut self, path: &str, len: u64, runs: &[(u64, &[u8])]) -> Self {
-        let mut bytes = vec![0u8; usize::try_from(len).expect("fixture sizes fit in usize")];
-        for (start, run) in runs {
-            let start = usize::try_from(*start).expect("fixture offsets fit in usize");
-            bytes[start..start + run.len()].copy_from_slice(run);
+    /// The mode of what `path` names, a link on the way or at its end
+    /// followed: the one registered or made, else the default a node of its
+    /// kind is given.
+    fn mode_of(&self, path: &str) -> Result<u32, Errno> {
+        let path = tairix_fscopy::fixture::resolve(path, |here| self.links.get(here).cloned())?;
+        if let Some(mode) = self.modes.get(&path) {
+            Ok(*mode)
+        } else if path == "/" || self.dirs.contains_key(&path) {
+            Ok(0o755)
+        } else if self.files.contains_key(&path) {
+            Ok(0o644)
+        } else {
+            Err(Errno::NotFound)
         }
-        self.files.insert(path.to_owned(), bytes);
-        self.runs.insert(
-            path.to_owned(),
-            runs.iter()
-                .map(|(start, run)| (*start, start + run.len() as u64))
-                .collect(),
-        );
-        self.upsert_entry(parent_of(path), file(leaf_name(path), len, 0));
-        self
     }
 
-    /// Have every volume answer `errno` to setting the attribute `key`.
-    fn refuses_attr(mut self, key: &str, errno: Errno) -> Self {
-        self.attr_refusal = Some((key.to_owned(), errno));
-        self
+    /// Refuse a name made in `path`'s directory while its mode withholds its
+    /// owner's write, as the kernel refuses its owner.
+    fn may_make_in(&self, path: &str) -> Result<(), Errno> {
+        match self.mode_of(dir_name(path)) {
+            Ok(mode) if mode & 0o200 == 0 => Err(Errno::PermissionDenied),
+            _ => Ok(()),
+        }
     }
 
-    /// The bytes written to `path`, summed over every write.
-    fn written(&self, path: &str) -> usize {
-        self.writes
-            .iter()
-            .filter(|(written, _, _)| written == path)
-            .map(|(_, _, len)| len)
-            .sum()
-    }
-
-    /// The value of `path`'s attribute `key`, if it carries one.
-    fn attr_of(&self, path: &str, key: &str) -> Option<Vec<u8>> {
-        self.attrs
-            .get(path)
-            .and_then(|set| set.iter().find(|(k, _)| k == key))
-            .map(|(_, value)| value.clone())
-    }
-
-    /// Have another program create `path` holding `bytes` just before the
-    /// next rename.
-    fn appears_at_rename(mut self, path: &str, bytes: &[u8]) -> Self {
-        self.appears_at_rename = Some((path.to_owned(), bytes.to_vec()));
-        self
+    /// Whether anything at all — a link included — holds the name `path`.
+    fn taken(&self, path: &str) -> bool {
+        self.dirs.contains_key(path)
+            || self.files.contains_key(path)
+            || self.links.contains_key(path)
     }
 
     /// Register the volumes `list_volumes` reports.
@@ -223,11 +175,6 @@ impl FakeFs {
         self
     }
 
-    /// The target stored for the link at `path`, if any.
-    fn link_target(&self, path: &str) -> Option<String> {
-        self.links.get(path).cloned()
-    }
-
     fn mode(mut self, path: &str, mode: u32) -> Self {
         self.modes.insert(path.to_owned(), mode);
         self
@@ -248,40 +195,11 @@ impl FakeFs {
         self
     }
 
-    fn write_fails(mut self, path: &str, errno: Errno) -> Self {
-        self.write_fail = Some((path.to_owned(), errno));
-        self
-    }
-
-    /// Mark the subtree under `prefix` as living on another volume, so a
-    /// rename in or out of it reports the cross-device boundary.
-    fn cross(mut self, prefix: &str) -> Self {
-        self.cross_volume.push(prefix.to_owned());
-        self
-    }
-
-    /// The volume `path` lives on: the marked prefix containing it, or
-    /// the root volume.
-    fn volume_of(&self, path: &str) -> &str {
-        self.cross_volume
-            .iter()
-            .find(|prefix| path == *prefix || is_inside(prefix, path))
-            .map_or("/", String::as_str)
-    }
-
     /// Replace-or-add `entry` in the listing of `parent`.
     fn upsert_entry(&mut self, parent: &str, entry: FsEntry) {
         if let Some(list) = self.dirs.get_mut(parent) {
             list.retain(|e| e.name != entry.name);
             list.push(entry);
-        }
-    }
-
-    /// Remove the entry named by `path` from its parent's listing.
-    fn drop_entry(&mut self, path: &str) {
-        let (parent, name) = (parent_of(path).to_owned(), leaf_name(path).to_owned());
-        if let Some(list) = self.dirs.get_mut(&parent) {
-            list.retain(|e| e.name != name);
         }
     }
 
@@ -315,17 +233,16 @@ impl Fs for FakeFs {
         if self.denied.iter().any(|denied| denied == path) {
             return Err(Errno::PermissionDenied);
         }
-        self.modes.get(path).copied().ok_or(Errno::NotFound)
+        self.mode_of(path)
     }
 
     fn set_mode(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
         if self.set_denied.iter().any(|denied| denied == path) {
             return Err(Errno::PermissionDenied);
         }
-        if !self.modes.contains_key(path) {
-            return Err(Errno::NotFound);
-        }
-        self.modes.insert(path.to_owned(), mode);
+        self.mode_of(path)?;
+        let named = tairix_fscopy::fixture::resolve(path, |here| self.links.get(here).cloned())?;
+        self.modes.insert(named, mode);
         self.set_modes.borrow_mut().push((path.to_owned(), mode));
         Ok(())
     }
@@ -362,11 +279,6 @@ impl Fs for FakeFs {
         if self.set_denied.iter().any(|denied| denied == path) {
             return Err(Errno::PermissionDenied);
         }
-        if let Some((refused, errno)) = &self.attr_refusal {
-            if refused == key {
-                return Err(*errno);
-            }
-        }
         // The real kernel validates the shared key grammar; the fake pins
         // the split the editor relies on (a namespace dot must exist).
         if !key.contains('.') {
@@ -396,21 +308,24 @@ impl Fs for FakeFs {
         Ok(())
     }
 
-    fn canonical(&mut self, path: &str) -> Result<String, Errno> {
-        tairix_fscopy::fixture::resolve(path, |here| self.links.get(here).cloned())
-    }
-
-    fn identity(&mut self, path: &str) -> Result<FileId, Errno> {
-        let node = if let Some(original) = self.names.get(path) {
-            original.as_str()
-        } else if path == "/" || self.dirs.contains_key(path) || self.files.contains_key(path) {
-            path
-        } else if self.links.contains_key(path) {
-            return Ok(FileId::NONE);
-        } else {
-            return Err(Errno::NotFound);
+    fn landing(&mut self, src: &str, dir: &str) -> Result<Landing, Unresolved> {
+        let directory = |path: &str| {
+            let path = tairix_fscopy::fixture::resolve(path, |here| self.links.get(here).cloned())?;
+            if path == "/" || self.dirs.contains_key(&path) {
+                Ok(path)
+            } else {
+                Err(Errno::NotFound)
+            }
         };
-        Ok(path_identity(node))
+        let source = directory(src).map_err(Unresolved::Source)?;
+        let dir = directory(dir).map_err(Unresolved::Target)?;
+        Ok(if dir == source {
+            Landing::Same
+        } else if is_inside(&source, &dir) {
+            Landing::Within
+        } else {
+            Landing::Apart
+        })
     }
 
     fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno> {
@@ -424,41 +339,10 @@ impl Fs for FakeFs {
         if self.links.contains_key(path) {
             return Ok(FileKind::Symlink);
         }
-        if self.files.contains_key(path) || self.names.contains_key(path) {
+        if self.files.contains_key(path) {
             return Ok(FileKind::Regular);
         }
         Err(Errno::NotFound)
-    }
-
-    fn read_link(&mut self, path: &str) -> Result<String, Errno> {
-        if self.denied.iter().any(|denied| denied == path) {
-            return Err(Errno::PermissionDenied);
-        }
-        self.links.get(path).cloned().ok_or(Errno::OutOfRange)
-    }
-
-    fn create_link(&mut self, target: &str, path: &str) -> Result<(), Errno> {
-        if self.denied.iter().any(|denied| denied == path) {
-            return Err(Errno::PermissionDenied);
-        }
-        // A new link never replaces an existing name.
-        if self.links.contains_key(path)
-            || self.files.contains_key(path)
-            || self.dirs.contains_key(path)
-        {
-            return Err(Errno::AlreadyExists);
-        }
-        self.links.insert(path.to_owned(), target.to_owned());
-        self.upsert_entry(
-            parent_of(path),
-            FsEntry {
-                name: leaf_name(path).to_owned(),
-                kind: FileKind::Symlink,
-                size: target.len() as u64,
-                modified: Time64::UNIX_EPOCH,
-            },
-        );
-        Ok(())
     }
 
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -467,7 +351,7 @@ impl Fs for FakeFs {
                 return Err(*errno);
             }
         }
-        let bytes = self.files.get(&self.node(path)).ok_or(Errno::NotFound)?;
+        let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
         let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
         if start >= bytes.len() {
             return Ok(0);
@@ -477,116 +361,24 @@ impl Fs for FakeFs {
         Ok(take)
     }
 
-    fn size(&mut self, path: &str) -> Result<u64, Errno> {
-        self.files
-            .get(&self.node(path))
-            .map(|bytes| bytes.len() as u64)
-            .ok_or(Errno::NotFound)
-    }
-
-    fn next_region(
-        &mut self,
-        path: &str,
-        offset: u64,
-        region: SeekRegion,
-    ) -> Result<Option<u64>, Errno> {
-        let len = self.size(path)?;
-        if offset >= len {
-            return Ok(None);
-        }
-        let runs = self
-            .runs
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| vec![(0, len)]);
-        let inside = runs
-            .iter()
-            .find(|(start, end)| (*start..*end).contains(&offset));
-        Ok(match (region, inside) {
-            (SeekRegion::Data, Some(_)) | (SeekRegion::Hole, None) => Some(offset),
-            (SeekRegion::Hole, Some((_, end))) => Some(*end),
-            (SeekRegion::Data, None) => runs
-                .iter()
-                .map(|(start, _)| *start)
-                .find(|&start| start > offset),
-        })
-    }
-
-    fn create(&mut self, path: &str) -> Result<(), Errno> {
-        if self.dirs.contains_key(path) {
+    fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
+        if self.taken(path) {
             return Err(Errno::AlreadyExists);
         }
-        // A create truncates the node a second name shares.
-        self.files.insert(self.node(path), Vec::new());
-        self.upsert_entry(
-            parent_of(path),
-            FsEntry {
-                name: leaf_name(path).to_owned(),
-                kind: FileKind::Regular,
-                size: 0,
-                modified: Time64::UNIX_EPOCH,
-            },
-        );
-        Ok(())
-    }
-
-    fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-        if let Some((failing, errno)) = &self.write_fail {
-            if failing == path {
-                return Err(*errno);
-            }
-        }
-        let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
-        let node = self.node(path);
-        let file = self.files.get_mut(&node).ok_or(Errno::NotFound)?;
-        let end = start + bytes.len();
-        if file.len() < end {
-            file.resize(end, 0);
-        }
-        file[start..end].copy_from_slice(bytes);
-        let size = file.len() as u64;
-        self.writes.push((path.to_owned(), offset, bytes.len()));
-        self.upsert_entry(
-            parent_of(path),
-            FsEntry {
-                name: leaf_name(path).to_owned(),
-                kind: FileKind::Regular,
-                size,
-                modified: Time64::UNIX_EPOCH,
-            },
-        );
-        Ok(())
-    }
-
-    fn set_len(&mut self, path: &str, len: u64) -> Result<(), Errno> {
-        if let Some((failing, errno)) = &self.write_fail {
-            if failing == path {
-                return Err(*errno);
-            }
-        }
-        let len = usize::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
-        let node = self.node(path);
-        self.files
-            .get_mut(&node)
-            .ok_or(Errno::NotFound)?
-            .resize(len, 0);
-        self.upsert_entry(parent_of(path), file(leaf_name(path), len as u64, 0));
-        Ok(())
-    }
-
-    fn mkdir(&mut self, path: &str) -> Result<(), Errno> {
-        if self.dirs.contains_key(path) || self.files.contains_key(path) {
-            return Err(Errno::AlreadyExists);
-        }
-        if !self.dirs.contains_key(parent_of(path)) {
+        if !self.dirs.contains_key(dir_name(path)) {
             return Err(Errno::NotFound);
         }
+        self.may_make_in(path)?;
+        let inherited = self.mode_of(dir_name(path))? & FS_SETGID_BIT;
+        let mode = (mode & !self.umask) | inherited;
         self.dirs.insert(path.to_owned(), Vec::new());
+        self.modes.insert(path.to_owned(), mode);
         self.upsert_entry(
-            parent_of(path),
+            dir_name(path),
             FsEntry {
                 name: leaf_name(path).to_owned(),
                 kind: FileKind::Directory,
+                id: FileId::NONE,
                 size: 0,
                 modified: Time64::UNIX_EPOCH,
             },
@@ -594,128 +386,17 @@ impl Fs for FakeFs {
         Ok(())
     }
 
-    fn remove_file(&mut self, path: &str) -> Result<(), Errno> {
-        // The name as typed: a link is unlinked as the leaf it is, and what
-        // it names is untouched; a second name goes, its node stays.
-        let removed = self.names.remove(path).is_some()
-            || self.links.remove(path).is_some()
-            || self.files.remove(path).is_some();
-        if !removed {
-            return Err(Errno::NotFound);
-        }
-        // A removed node's attributes go with it.
-        self.attrs.remove(path);
-        self.drop_entry(path);
-        Ok(())
+    fn transfer(
+        &mut self,
+        _verb: Verb,
+        (src, _): (&str, FileId),
+        _target: &str,
+    ) -> Result<Box<dyn Run>, EngineError> {
+        Err(EngineError::Read(src.to_owned(), Errno::NotSupported))
     }
 
-    fn remove_dir(&mut self, path: &str) -> Result<(), Errno> {
-        match self.dirs.get(path) {
-            None => return Err(Errno::NotFound),
-            Some(entries) if !entries.is_empty() => return Err(Errno::NotEmpty),
-            Some(_) => {}
-        }
-        self.dirs.remove(path);
-        self.attrs.remove(path);
-        self.drop_entry(path);
-        Ok(())
-    }
-
-    fn rename(&mut self, src: &str, dst: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno> {
-        if self.volume_of(src) != self.volume_of(dst) {
-            return Ok(RenameOutcome::CrossDevice);
-        }
-        if let Some((path, bytes)) = self.appears_at_rename.take() {
-            self.files.insert(path, bytes);
-        }
-        if flags.refuses_replace() && (self.files.contains_key(dst) || self.links.contains_key(dst))
-        {
-            return Err(Errno::AlreadyExists);
-        }
-        if self.dirs.contains_key(dst) {
-            // The kernel refuses renaming onto an existing directory.
-            return Err(Errno::AlreadyExists);
-        }
-        // A rename moves the *name*, so a link travels as the link it is and
-        // what it points at is untouched. A leaf destination is replaced, as
-        // the kernel's rename does.
-        if let Some(target) = self.links.remove(src) {
-            self.files.remove(dst);
-            self.links.insert(dst.to_owned(), target.clone());
-            self.drop_entry(src);
-            self.drop_entry(dst);
-            self.upsert_entry(
-                parent_of(dst),
-                FsEntry {
-                    name: leaf_name(dst).to_owned(),
-                    kind: FileKind::Symlink,
-                    size: target.len() as u64,
-                    modified: Time64::UNIX_EPOCH,
-                },
-            );
-            return Ok(RenameOutcome::Renamed);
-        }
-        if let Some(bytes) = self.files.remove(src) {
-            self.links.remove(dst);
-            self.files.insert(dst.to_owned(), bytes.clone());
-            self.drop_entry(src);
-            self.upsert_entry(
-                parent_of(dst),
-                FsEntry {
-                    name: leaf_name(dst).to_owned(),
-                    kind: FileKind::Regular,
-                    size: bytes.len() as u64,
-                    modified: Time64::UNIX_EPOCH,
-                },
-            );
-            return Ok(RenameOutcome::Renamed);
-        }
-        if self.dirs.contains_key(src) {
-            // Re-key the directory and every descendant path in both maps.
-            let prefix = alloc::format!("{}/", src.trim_end_matches('/'));
-            let rekey = |path: &str| -> Option<String> {
-                if path == src {
-                    Some(dst.to_owned())
-                } else {
-                    path.strip_prefix(&prefix)
-                        .map(|rest| alloc::format!("{}/{rest}", dst.trim_end_matches('/')))
-                }
-            };
-            let dirs = core::mem::take(&mut self.dirs);
-            self.dirs = dirs
-                .into_iter()
-                .map(|(path, list)| (rekey(&path).unwrap_or(path), list))
-                .collect();
-            let files = core::mem::take(&mut self.files);
-            self.files = files
-                .into_iter()
-                .map(|(path, bytes)| (rekey(&path).unwrap_or(path), bytes))
-                .collect();
-            self.drop_entry(src);
-            self.upsert_entry(
-                parent_of(dst),
-                FsEntry {
-                    name: leaf_name(dst).to_owned(),
-                    kind: FileKind::Directory,
-                    size: 0,
-                    modified: Time64::UNIX_EPOCH,
-                },
-            );
-            return Ok(RenameOutcome::Renamed);
-        }
-        Err(Errno::NotFound)
-    }
-}
-
-/// A node's identity in the fakes: FNV-1a over its path, stable for a path
-/// and distinct between paths, however the tree around it changes.
-fn path_identity(path: &str) -> FileId {
-    let hash = path.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    });
-    FileId {
-        volume: [3; 16],
-        node: hash | 1,
+    fn remove(&mut self, (path, _): (&str, FileId)) -> Result<Box<dyn Run>, EngineError> {
+        Err(EngineError::Read(path.to_owned(), Errno::NotSupported))
     }
 }
 
@@ -723,6 +404,7 @@ fn file(name: &str, size: u64, secs: i64) -> FsEntry {
     FsEntry {
         name: name.to_owned(),
         kind: FileKind::Regular,
+        id: FileId::NONE,
         size,
         modified: Time64::from_secs(secs),
     }
@@ -732,18 +414,8 @@ fn dir(name: &str) -> FsEntry {
     FsEntry {
         name: name.to_owned(),
         kind: FileKind::Directory,
+        id: FileId::NONE,
         size: 0,
-        modified: Time64::UNIX_EPOCH,
-    }
-}
-
-/// A symbolic-link *entry* named `name`, whose size is the length of the
-/// target it stores — the only thing a link holds.
-fn link_entry(name: &str, target: &str) -> FsEntry {
-    FsEntry {
-        name: name.to_owned(),
-        kind: FileKind::Symlink,
-        size: target.len() as u64,
         modified: Time64::UNIX_EPOCH,
     }
 }
@@ -778,10 +450,35 @@ fn model(fs: &mut FakeFs) -> Model {
     Model::new(fs, "/", String::from("keys: q quits")).expect("root lists")
 }
 
+/// Every request the test binary makes, metered per thread.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
+/// One scratch serves every name the live filter tests, so filtering a
+/// listing costs no allocation per name.
+#[test]
+fn the_live_filter_allocates_nothing_per_name() {
+    let names: Vec<FsEntry> = (0..500).map(|n| file(&format!("f{n}.c"), 1, 0)).collect();
+    let mut fs = FakeFs::new().dir("/", names).mode("/", 0o755);
+    let mut m = model(&mut fs);
+    let allocations = |m: &Model| {
+        let (shown, metering) = tairix_fuzzseed::meter::metered(|| m.visible_files().len());
+        assert_eq!(shown, 500);
+        metering.allocations
+    };
+    let plain = allocations(&m);
+    m.filter = NameFilter::from_text("*.c");
+    let filtered = allocations(&m);
+    assert!(
+        filtered <= plain + 8,
+        "{filtered} allocations filtered against {plain}"
+    );
+}
+
 /// The open prompt, asserted to be the mode editor.
 fn mode_prompt(m: &Model) -> ModePrompt {
-    match m.prompt.clone() {
-        Some(Prompt::Mode(prompt)) => prompt,
+    match &m.prompt {
+        Some(Prompt::Mode(prompt)) => prompt.clone(),
         other => panic!("expected the mode prompt, got {other:?}"),
     }
 }
@@ -1082,7 +779,7 @@ fn the_mode_prompt_opens_prefilled_edits_and_applies() {
     assert_eq!(mode_prompt(&m).input, "6007");
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert_eq!(
         fs.set_modes.borrow().as_slice(),
         &[(String::from("/a.rs"), 0o600)]
@@ -1101,7 +798,7 @@ fn esc_cancels_the_mode_prompt_without_writing() {
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('0'));
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(fs.set_modes.borrow().is_empty());
 }
 
@@ -1112,7 +809,7 @@ fn a_refused_stat_opens_no_prompt() {
     // Tree pane, cursor onto the denied directory row.
     m.tree_cursor = 2; // "locked"
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('a'));
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     let message = m.message.clone().expect("denial surfaced");
     assert!(message.contains("locked"), "{message}");
 }
@@ -1127,10 +824,10 @@ fn a_kernel_refusal_of_the_change_is_surfaced_and_nothing_applies() {
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
     assert!(m.prompt.is_some());
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(fs.set_modes.borrow().is_empty());
     let message = m.message.clone().expect("denial surfaced");
-    assert!(message.contains("PermissionDenied"), "{message}");
+    assert!(message.contains("permission denied"), "{message}");
 }
 
 #[test]
@@ -1145,7 +842,7 @@ fn an_emptied_prompt_applies_nothing() {
         handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
     }
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(fs.set_modes.borrow().is_empty());
     assert!(m.message.is_some(), "the empty apply is reported");
 }
@@ -1218,7 +915,7 @@ fn a_new_attribute_is_typed_as_key_value_and_applies() {
         handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(key));
     }
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     // The view refreshed with the applied attribute.
     let view = attrs_view(&m);
     assert_eq!(
@@ -1311,7 +1008,7 @@ fn a_kernel_refusal_of_an_attribute_write_is_surfaced() {
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
     assert!(attrs_view(&m).entries.is_empty());
     let message = m.message.clone().expect("denial surfaced");
-    assert!(message.contains("PermissionDenied"), "{message}");
+    assert!(message.contains("permission denied"), "{message}");
 }
 
 #[test]
@@ -1328,7 +1025,7 @@ fn a_backing_without_attributes_says_so() {
     // The editing key states the fact instead of opening a doomed prompt;
     // the mode editor still works on such a mount.
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     let message = m
         .message
         .clone()
@@ -1477,7 +1174,7 @@ fn mkdir_creates_a_directory_in_the_listed_directory() {
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('M'));
     type_text(&mut m, &mut fs, "new");
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(fs.has_dir("/new"));
     // The refreshed panes show the new directory.
     assert!(m.files.iter().any(|e| e.name == "new"));
@@ -1497,65 +1194,8 @@ fn mkdir_refuses_an_invalid_name_and_esc_cancels() {
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('M'));
     type_text(&mut m, &mut fs, "x");
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(!fs.has_dir("/x"));
-}
-
-#[test]
-fn rename_moves_a_file_within_its_directory() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
-    // The prompt is prefilled with the current name; rub it out.
-    for _ in 0.."a.rs".len() {
-        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
-    }
-    type_text(&mut m, &mut fs, "z.rs");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(fs.contents("/a.rs"), None);
-    assert_eq!(fs.contents("/z.rs"), Some(vec![b'x'; 30]));
-    assert!(m.files.iter().any(|e| e.name == "z.rs"));
-}
-
-#[test]
-fn rename_onto_an_existing_file_asks_first() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
-    for _ in 0.."a.rs".len() {
-        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
-    }
-    type_text(&mut m, &mut fs, "b.txt");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    // The rename paused on the existing target; skip leaves both intact.
-    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
-    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
-    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
-}
-
-/// The name was free when the user typed it; a file another program creates
-/// before the rename lands is asked about, never replaced unasked.
-#[test]
-fn a_rename_asks_about_a_name_created_after_it_was_typed() {
-    let mut fs = fixture().appears_at_rename("/new.rs", b"theirs");
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
-    for _ in 0.."a.rs".len() {
-        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
-    }
-    type_text(&mut m, &mut fs, "new.rs");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
-    assert_eq!(fs.contents("/new.rs"), Some(b"theirs".to_vec()));
-    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
 }
 
 #[test]
@@ -1563,24 +1203,11 @@ fn renaming_the_session_root_is_refused() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(m.message.clone().expect("refused").contains("session root"));
 }
 
 // --- File operations: delete -----------------------------------------------
-
-#[test]
-fn delete_removes_a_file_after_confirmation() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    assert!(matches!(m.prompt, Some(Prompt::ConfirmDelete(_))));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
-    assert_eq!(fs.contents("/a.rs"), None);
-    assert!(!m.files.iter().any(|e| e.name == "a.rs"));
-}
 
 #[test]
 fn delete_declined_changes_nothing() {
@@ -1591,23 +1218,8 @@ fn delete_declined_changes_nothing() {
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
     // Any key but `y` declines — `n`, Esc, or anything else.
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('n'));
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
-}
-
-#[test]
-fn delete_removes_a_directory_and_its_contents() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    // Tree pane, cursor onto "docs" (which holds guide.md).
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
-    assert!(!fs.has_dir("/docs"));
-    assert_eq!(fs.contents("/docs/guide.md"), None);
-    // The file pane climbed to the nearest surviving ancestor.
-    assert_eq!(m.files_dir, "/");
-    assert!(m.tree_rows().iter().all(|r| r.path != "/docs"));
 }
 
 #[test]
@@ -1615,53 +1227,11 @@ fn deleting_the_session_root_is_refused() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(m.message.clone().expect("refused").contains("session root"));
 }
 
 // --- File operations: copy --------------------------------------------------
-
-#[test]
-fn copy_streams_a_file_to_a_new_absolute_destination() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 4; // big (999 bytes)
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/big2");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(fs.contents("/big2"), Some(vec![b'x'; 999]));
-    assert_eq!(fs.contents("/big"), Some(vec![b'x'; 999]));
-    assert!(m.files.iter().any(|e| e.name == "big2" && e.size == 999));
-}
-
-#[test]
-fn copy_into_an_existing_directory_lands_under_the_base_name() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    // A relative destination is joined onto the listed directory.
-    type_text(&mut m, &mut fs, "docs");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(fs.contents("/docs/a.rs"), Some(vec![b'x'; 30]));
-}
-
-#[test]
-fn copy_reproduces_a_directory_tree() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    // Tree pane, cursor onto "docs".
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/copy");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(fs.has_dir("/copy"));
-    assert_eq!(fs.contents("/copy/guide.md"), Some(vec![b'x'; 5]));
-    // The source is untouched.
-    assert_eq!(fs.contents("/docs/guide.md"), Some(vec![b'x'; 5]));
-}
 
 #[test]
 fn copy_onto_itself_and_into_its_own_subtree_are_refused_before_io() {
@@ -1696,382 +1266,15 @@ fn a_bad_destination_spelling_is_refused_by_the_path_grammar() {
     assert!(m.message.clone().expect("refused").contains("bad path"));
 }
 
-// --- File operations: the overwrite question --------------------------------
-
-#[test]
-fn copy_over_an_existing_file_asks_and_overwrites_on_o() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 4; // big (999 bytes)
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    // Nothing was written while the question is open.
-    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('o'));
-    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 999]));
-}
-
-#[test]
-fn overwriting_another_name_for_the_source_keeps_the_source_whole() {
-    let mut fs = fixture().second_name("/twin", "/big");
-    let mut op = FileOp::copy("/big", FileKind::Regular, "/twin");
-    assert_eq!(op.advance(&mut fs), OpProgress::NeedsDecision);
-    op.resolve(Decision::Overwrite);
-    assert_eq!(op.advance(&mut fs), OpProgress::Done);
-    assert_eq!(
-        fs.contents("/big"),
-        Some(vec![b'x'; 999]),
-        "the source keeps its bytes"
-    );
-    assert_eq!(fs.contents("/twin"), Some(vec![b'x'; 999]));
-}
-
-#[test]
-fn copy_over_an_existing_file_skips_on_s_and_cancels_on_c() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
-    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
-    let message = m.message.clone().expect("summary");
-    assert!(message.contains("skipped"), "{message}");
-    // Cancel likewise leaves the target alone.
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
-    let message = m.message.clone().expect("summary");
-    assert!(message.contains("cancelled"), "{message}");
-}
-
-#[test]
-fn a_merging_directory_copy_asks_per_conflicting_file() {
-    // Copying /src into /dst merges with the existing /dst/src, which
-    // already holds a different one.txt.
-    let mut fs = FakeFs::new()
-        .dir("/", vec![dir("src"), dir("dst")])
-        .dir("/src", vec![file("one.txt", 3, 0), file("two.txt", 4, 0)])
-        .dir("/dst", vec![dir("src")])
-        .dir("/dst/src", vec![file("one.txt", 9, 0)]);
-    let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto dst
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto src
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/dst");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    // Only the conflicting file pauses; skipping it still copies the rest.
-    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
-    assert_eq!(m.prompt, None);
-    assert_eq!(fs.contents("/dst/src/one.txt"), Some(vec![b'x'; 9]));
-    assert_eq!(fs.contents("/dst/src/two.txt"), Some(vec![b'x'; 4]));
-}
-
 // --- File operations: move ---------------------------------------------------
-
-#[test]
-fn move_renames_within_one_volume() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
-    type_text(&mut m, &mut fs, "/docs");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(fs.contents("/a.rs"), None);
-    assert_eq!(fs.contents("/docs/a.rs"), Some(vec![b'x'; 30]));
-    assert!(!m.files.iter().any(|e| e.name == "a.rs"));
-}
-
-#[test]
-fn move_across_volumes_copies_then_removes_the_source() {
-    // /vol is another volume, so the rename honestly reports the boundary
-    // and the engine falls back to copy-then-remove.
-    let mut fs = FakeFs::new()
-        .dir("/", vec![dir("vol"), dir("src")])
-        .dir("/vol", vec![])
-        .dir("/src", vec![file("data", 7, 0)])
-        .cross("/vol");
-    let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto src
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
-    type_text(&mut m, &mut fs, "/vol");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(fs.has_dir("/vol/src"));
-    assert_eq!(fs.contents("/vol/src/data"), Some(vec![b'x'; 7]));
-    assert!(!fs.has_dir("/src"));
-}
-
-#[test]
-fn a_cross_volume_move_skip_keeps_the_skipped_source() {
-    // The conflicting file is skipped, so its source directory is
-    // intentionally left holding it — never a failed operation.
-    let mut fs = FakeFs::new()
-        .dir("/", vec![dir("vol"), dir("src")])
-        .dir("/vol", vec![dir("src")])
-        .dir("/vol/src", vec![file("data", 9, 0)])
-        .dir("/src", vec![file("data", 7, 0)])
-        .cross("/vol");
-    let mut m = model(&mut fs);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Down); // onto src
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
-    type_text(&mut m, &mut fs, "/vol");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
-    // The target kept its bytes, the skipped source survives, and the
-    // summary says one entry was skipped.
-    assert_eq!(fs.contents("/vol/src/data"), Some(vec![b'x'; 9]));
-    assert_eq!(fs.contents("/src/data"), Some(vec![b'x'; 7]));
-    assert!(fs.has_dir("/src"));
-    let message = m.message.clone().expect("summary");
-    assert!(message.contains("skipped"), "{message}");
-}
 
 #[test]
 fn moving_the_session_root_is_refused() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
-    assert_eq!(m.prompt, None);
+    assert!(m.prompt.is_none());
     assert!(m.message.clone().expect("refused").contains("session root"));
-}
-
-// --- File operations: failure injection --------------------------------------
-
-#[test]
-fn a_read_failure_mid_copy_removes_the_partial_target() {
-    let mut fs = fixture().read_fails("/big", Errno::PermissionDenied);
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/copy");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    let message = m.message.clone().expect("failure surfaced");
-    assert!(message.contains("PermissionDenied"), "{message}");
-    // The half-written target was removed, and the pane shows no ghost.
-    assert_eq!(fs.contents("/copy"), None);
-    assert!(!m.files.iter().any(|e| e.name == "copy"));
-}
-
-#[test]
-fn a_write_failure_mid_copy_removes_the_partial_target() {
-    let mut fs = fixture().write_fails("/copy", Errno::NoSpace);
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/copy");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    let message = m.message.clone().expect("failure surfaced");
-    assert!(message.contains("NoSpace"), "{message}");
-    assert_eq!(fs.contents("/copy"), None);
-}
-
-// --- File operations: holes and extended attributes -------------------------
-
-/// `/src` carries an attribute of its own and holds a sparse file carrying
-/// RISC OS and Mac attributes; `/vol` is another volume.
-fn metadata_fixture() -> FakeFs {
-    FakeFs::new()
-        .dir("/", vec![dir("src"), dir("vol")])
-        .dir("/src", vec![dir("sub")])
-        .dir("/src/sub", vec![])
-        .dir("/vol", vec![])
-        .sparse(
-            "/src/image",
-            3 << 20,
-            &[(0, &[7; 5000]), (2 << 20, &[9; 100])],
-        )
-        .attr("/src/image", "acorn.filetype", b"ffd")
-        .attr("/src/image", "mac.type", b"TEXT")
-        .attr("/src", "acorn.attr", b"DLWR/wr")
-        .cross("/vol")
-}
-
-/// Copy (`c`) or move (`m`) the tree row under the root's first child to
-/// the typed destination.
-fn transfer_src(m: &mut Model, fs: &mut FakeFs, key: char, destination: &str) {
-    handle_event(m, fs, &mut decode(), &Event::Down);
-    handle_event(m, fs, &mut decode(), &Event::Char(key));
-    type_text(m, fs, destination);
-    handle_event(m, fs, &mut decode(), &Event::Enter);
-}
-
-#[test]
-fn a_copy_keeps_a_files_holes_and_every_attribute_in_the_tree() {
-    let mut fs = metadata_fixture();
-    let mut m = model(&mut fs);
-    transfer_src(&mut m, &mut fs, 'c', "/copy");
-    assert_eq!(fs.contents("/copy/image"), fs.contents("/src/image"));
-    assert_eq!(
-        fs.written("/copy/image"),
-        5100,
-        "only the stored runs are written"
-    );
-    assert_eq!(
-        fs.attr_of("/copy/image", "acorn.filetype").as_deref(),
-        Some(&b"ffd"[..])
-    );
-    assert_eq!(
-        fs.attr_of("/copy/image", "mac.type").as_deref(),
-        Some(&b"TEXT"[..])
-    );
-    assert_eq!(
-        fs.attr_of("/copy", "acorn.attr").as_deref(),
-        Some(&b"DLWR/wr"[..]),
-        "the new directory's own"
-    );
-    assert!(fs.has_dir("/copy/sub"));
-    assert_eq!(m.message.as_deref(), Some("copied 1 entry"));
-    assert!(m.advisories.is_empty());
-}
-
-#[test]
-fn a_cross_volume_move_keeps_holes_and_attributes_and_removes_the_source() {
-    let mut fs = metadata_fixture();
-    let mut m = model(&mut fs);
-    transfer_src(&mut m, &mut fs, 'm', "/vol");
-    assert_eq!(
-        fs.contents("/vol/src/image").map(|bytes| bytes.len()),
-        Some(3 << 20)
-    );
-    assert_eq!(fs.written("/vol/src/image"), 5100);
-    assert_eq!(
-        fs.attr_of("/vol/src/image", "acorn.filetype").as_deref(),
-        Some(&b"ffd"[..])
-    );
-    assert_eq!(
-        fs.attr_of("/vol/src", "acorn.attr").as_deref(),
-        Some(&b"DLWR/wr"[..])
-    );
-    assert!(!fs.has_dir("/src"));
-}
-
-#[test]
-fn what_a_destination_cannot_keep_is_said_once_on_the_message_line_and_fd_3() {
-    let mut fs = metadata_fixture().refuses_attr("mac.type", Errno::NotSupported);
-    let mut m = model(&mut fs);
-    transfer_src(&mut m, &mut fs, 'c', "/copy");
-    assert_eq!(
-        m.message.as_deref(),
-        Some(
-            "copied 1 entry — extended attributes not kept on 1 file \
-             (the destination cannot store them): mac.type"
-        )
-    );
-    assert_eq!(
-        fs.attr_of("/copy/image", "acorn.filetype").as_deref(),
-        Some(&b"ffd"[..]),
-        "the rest carried"
-    );
-    assert_eq!(m.advisories.len(), 1);
-    let record = String::from_utf8_lossy(&m.advisories[0]).into_owned();
-    assert!(record.contains("\"producer\":\"fstree\""), "{record}");
-    assert!(record.contains("fs.attributes_not_kept"), "{record}");
-}
-
-#[test]
-fn an_attribute_refused_for_a_fault_fails_the_copy_and_removes_the_target() {
-    let mut fs = metadata_fixture().refuses_attr("mac.type", Errno::DeviceFault);
-    let mut m = model(&mut fs);
-    transfer_src(&mut m, &mut fs, 'c', "/copy");
-    let message = m.message.clone().expect("failure surfaced");
-    assert!(
-        message.contains("/copy/image: attribute mac.type: DeviceFault"),
-        "{message}"
-    );
-    assert_eq!(fs.contents("/copy/image"), None);
-    assert_eq!(fs.attr_of("/copy/image", "acorn.filetype"), None);
-}
-
-#[test]
-fn a_batch_reports_what_all_its_copies_left_as_one() {
-    let mut fs = metadata_fixture()
-        .attr("/src/sub", "acorn.filetype", b"fff")
-        .refuses_attr("acorn.filetype", Errno::NotSupported);
-    fs = fs.dir("/src/sub", vec![file("note", 3, 0)]).attr(
-        "/src/sub/note",
-        "acorn.filetype",
-        b"fff",
-    );
-    let mut m = model(&mut fs);
-    tag(&mut m, "/src/image", FileKind::Regular, 3 << 20);
-    tag(&mut m, "/src/sub/note", FileKind::Regular, 3);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/vol");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(
-        m.message.as_deref(),
-        Some(
-            "batch: copied 2 of 2 tagged — extended attributes not kept on 2 files \
-             (the destination cannot store them): acorn.filetype"
-        )
-    );
-    assert_eq!(m.advisories.len(), 1, "one record for the whole batch");
-    assert_eq!(
-        fs.attr_of("/vol/image", "mac.type").as_deref(),
-        Some(&b"TEXT"[..])
-    );
-}
-
-#[test]
-fn the_session_delivers_an_operations_advisory_record_to_fd_3() {
-    let mut fs = metadata_fixture().refuses_attr("mac.type", Errno::NotSupported);
-    let mut m = model(&mut fs);
-    let size = Size::new(24, 90);
-    let tty = ResizingTty::new(
-        size,
-        &[(b"\x1b[B", size), (b"c/copy\r", size), (b"q", size)],
-    );
-    let mut screen = tairix_curses::Screen::new(tty, tairix_termcap::TermType::Xterm256Color, size);
-    let mut host = service();
-    let mut store = SettingsStore::open(&mut host, OWN_WORD);
-    let mut info = CapturedInfo {
-        records: Vec::new(),
-    };
-    crate::app::run(
-        &mut m,
-        &mut fs,
-        &mut decode(),
-        &mut screen,
-        &mut info,
-        &mut store,
-    )
-    .expect("session ends");
-    assert!(fs.has_dir("/copy"), "the copy ran");
-    let copies: Vec<_> = info
-        .records
-        .iter()
-        .filter(|record| record.contains("fs.attributes_not_kept"))
-        .collect();
-    assert_eq!(copies.len(), 1, "{:?}", info.records);
-    assert!(m.advisories.is_empty(), "delivered, not left queued");
-}
-
-#[test]
-fn the_overwrite_question_appears_on_the_message_line() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 4; // big
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/b.txt");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    let mut window = Window::new(Pos::new(0, 0), Size::new(6, 70));
-    render(&m, &mut window);
-    let line = row_text(&window, 5);
-    assert!(line.starts_with("/b.txt exists"), "{line}");
-    assert!(line.contains("o)verwrite"), "{line}");
 }
 
 // --- End-to-end scripted session -----------------------------------------
@@ -2112,6 +1315,7 @@ fn a_scripted_session_browses_sorts_and_quits() {
 fn tag(m: &mut Model, path: &str, kind: FileKind, size: u64) {
     m.tags.insert(TagEntry {
         path: path.to_owned(),
+        id: FileId::NONE,
         kind,
         size,
     });
@@ -2206,108 +1410,6 @@ fn clear_drops_every_tag() {
 }
 
 #[test]
-fn batch_delete_continues_past_a_failure_and_reports_it_in_order() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    // Tag order fixes the batch (and report) order: b.txt, locked, a.rs.
-    tag(&mut m, "/b.txt", FileKind::Regular, 10);
-    tag(&mut m, "/locked", FileKind::Directory, 0);
-    tag(&mut m, "/a.rs", FileKind::Regular, 30);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    assert!(matches!(
-        m.prompt,
-        Some(Prompt::ConfirmBatchDelete { count: 3 })
-    ));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
-    // The failed entry did not stop the later one.
-    assert!(fs.contents("/b.txt").is_none());
-    assert!(fs.contents("/a.rs").is_none());
-    // The denied directory survives, still listed in the root.
-    assert!(fs
-        .dirs
-        .get("/")
-        .is_some_and(|list| list.iter().any(|e| e.name == "locked")));
-    assert_eq!(
-        m.message.as_deref(),
-        Some("batch: deleted 2 of 3 tagged, 1 failed")
-    );
-    // The report overlay lists exactly the failure, in encounter order.
-    assert_eq!(m.overlay, Overlay::Report);
-    assert_eq!(
-        m.report_lines,
-        vec![String::from("/locked: PermissionDenied")]
-    );
-    // Succeeded entries are untagged; the failed one stays tagged.
-    assert!(m.tags.contains("/locked"));
-    assert_eq!(m.tags.count(), 1);
-}
-
-/// A fixture whose destination directory already holds one of the batch's
-/// names, so a copy pauses on the overwrite question.
-fn conflict_fixture() -> FakeFs {
-    FakeFs::new()
-        .dir(
-            "/",
-            vec![
-                dir("docs"),
-                file("b.txt", 10, 2_000),
-                file("big", 999, 3_000),
-            ],
-        )
-        .dir(
-            "/docs",
-            vec![file("guide.md", 5, 4_000), file("b.txt", 5, 1_000)],
-        )
-}
-
-#[test]
-fn batch_copy_skip_continues_with_the_rest() {
-    let mut fs = conflict_fixture();
-    let mut m = model(&mut fs);
-    tag(&mut m, "/b.txt", FileKind::Regular, 10);
-    tag(&mut m, "/big", FileKind::Regular, 999);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    for ch in "docs".chars() {
-        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(ch));
-    }
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    // The existing /docs/b.txt paused the batch on its question.
-    assert!(matches!(m.prompt, Some(Prompt::BatchOverwrite(_))));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
-    assert_eq!(
-        m.message.as_deref(),
-        Some("batch: copied 2 of 2 tagged, 1 skipped")
-    );
-    // The skipped target is untouched; the rest copied.
-    assert_eq!(fs.contents("/docs/b.txt").map(|b| b.len()), Some(5));
-    assert_eq!(fs.contents("/docs/big").map(|b| b.len()), Some(999));
-    // Both entries completed (the skip was inside one), so both untag.
-    assert!(m.tags.is_empty());
-}
-
-#[test]
-fn batch_cancel_drops_the_remaining_entries() {
-    let mut fs = conflict_fixture();
-    let mut m = model(&mut fs);
-    tag(&mut m, "/b.txt", FileKind::Regular, 10);
-    tag(&mut m, "/big", FileKind::Regular, 999);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    for ch in "docs".chars() {
-        handle_event(&mut m, &mut fs, &mut decode(), &Event::Char(ch));
-    }
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(matches!(m.prompt, Some(Prompt::BatchOverwrite(_))));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    let message = m.message.clone().expect("a batch report");
-    assert!(message.ends_with("(cancelled)"), "got {message}");
-    // The cancelled entry is reported; the remainder never ran.
-    assert_eq!(m.report_lines, vec![String::from("/b.txt: cancelled")]);
-    assert!(fs.contents("/docs/big").is_none());
-    // Nothing succeeded, so both entries stay tagged for a retry.
-    assert_eq!(m.tags.count(), 2);
-}
-
-#[test]
 fn batch_destination_must_be_an_existing_directory() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
@@ -2340,7 +1442,7 @@ fn walker_reads_at_most_the_tick_budget() {
     // The denied directory is recorded, never silently dropped.
     assert_eq!(
         walker.errors,
-        vec![String::from("/locked: PermissionDenied")]
+        vec![String::from("/locked: permission denied")]
     );
     assert_eq!(walker.files_seen, 5);
     assert_eq!(walker.bytes, 1_045);
@@ -2401,7 +1503,7 @@ fn usage_walk_completes_with_figures_and_reports_unreadable() {
     assert_eq!(m.overlay, Overlay::Report);
     assert_eq!(
         m.report_lines,
-        vec![String::from("/locked: PermissionDenied")]
+        vec![String::from("/locked: permission denied")]
     );
 }
 
@@ -2554,7 +1656,7 @@ fn name_search_lists_matching_paths_below_the_branch() {
     let paths: Vec<&str> = walk.entries.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(paths, ["/docs/guide.md"]);
     // The denied directory is still recorded, never silently dropped.
-    assert_eq!(walk.walker.errors, ["/locked: PermissionDenied"]);
+    assert_eq!(walk.walker.errors, ["/locked: permission denied"]);
     let mut window = Window::new(Pos::new(0, 0), Size::new(10, 70));
     render(&m, &mut window);
     let status = row_text(&window, 8);
@@ -2635,6 +1737,7 @@ fn a_match_spanning_a_read_boundary_is_found() {
     let mut scan = ContentScan::new(needle);
     scan.enqueue(vec![FlatEntry {
         path: String::from("/data"),
+        id: FileId::NONE,
         kind: FileKind::Regular,
         size: 12,
         modified: Time64::UNIX_EPOCH,
@@ -2684,11 +1787,13 @@ fn content_search_over_the_tagged_set_scans_tagged_files_and_dirs() {
     let mut m = model(&mut fs);
     m.tags.insert(TagEntry {
         path: String::from("/b.txt"),
+        id: FileId::NONE,
         kind: FileKind::Regular,
         size: 10,
     });
     m.tags.insert(TagEntry {
         path: String::from("/docs"),
+        id: FileId::NONE,
         kind: FileKind::Directory,
         size: 0,
     });
@@ -2719,7 +1824,7 @@ fn a_read_refusal_during_the_scan_is_recorded_not_dropped() {
         walk.walker
             .errors
             .iter()
-            .any(|line| line == "/big: PermissionDenied"),
+            .any(|line| line == "/big: permission denied"),
         "got {:?}",
         walk.walker.errors
     );
@@ -2804,26 +1909,12 @@ impl Fs for SparseFs {
         Err(Errno::NotSupported)
     }
 
-    fn canonical(&mut self, path: &str) -> Result<String, Errno> {
-        Ok(String::from(path))
-    }
-
-    fn identity(&mut self, _path: &str) -> Result<FileId, Errno> {
-        Ok(FileId::NONE)
+    fn landing(&mut self, _src: &str, _dir: &str) -> Result<Landing, Unresolved> {
+        Ok(Landing::Apart)
     }
 
     fn stat_kind(&mut self, _path: &str) -> Result<FileKind, Errno> {
         Ok(FileKind::Regular)
-    }
-
-    fn read_link(&mut self, _path: &str) -> Result<String, Errno> {
-        // Every node in this fixture is a plain byte source, so nothing here
-        // is a link to read.
-        Err(Errno::OutOfRange)
-    }
-
-    fn create_link(&mut self, _target: &str, _path: &str) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
     }
 
     fn read(&mut self, _path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -2839,50 +1930,21 @@ impl Fs for SparseFs {
         Ok(take)
     }
 
-    fn size(&mut self, _path: &str) -> Result<u64, Errno> {
-        Ok(self.size)
+    fn mkdir(&mut self, _path: &str, _mode: u32) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
     }
 
-    fn next_region(
+    fn transfer(
         &mut self,
-        _path: &str,
-        _offset: u64,
-        _region: SeekRegion,
-    ) -> Result<Option<u64>, Errno> {
-        Err(Errno::NotSupported)
+        _verb: Verb,
+        (src, _): (&str, FileId),
+        _target: &str,
+    ) -> Result<Box<dyn Run>, EngineError> {
+        Err(EngineError::Read(src.to_owned(), Errno::PermissionDenied))
     }
 
-    fn create(&mut self, _path: &str) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
-    }
-
-    fn write(&mut self, _path: &str, _offset: u64, _bytes: &[u8]) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
-    }
-
-    fn set_len(&mut self, _path: &str, _len: u64) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
-    }
-
-    fn mkdir(&mut self, _path: &str) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
-    }
-
-    fn remove_file(&mut self, _path: &str) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
-    }
-
-    fn remove_dir(&mut self, _path: &str) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
-    }
-
-    fn rename(
-        &mut self,
-        _src: &str,
-        _dst: &str,
-        _flags: RenameFlags,
-    ) -> Result<RenameOutcome, Errno> {
-        Err(Errno::PermissionDenied)
+    fn remove(&mut self, (path, _): (&str, FileId)) -> Result<Box<dyn Run>, EngineError> {
+        Err(EngineError::Read(path.to_owned(), Errno::PermissionDenied))
     }
 }
 
@@ -2893,10 +1955,11 @@ impl FakeFs {
         let size = bytes.len() as u64;
         self.files.insert(path.to_owned(), bytes.to_vec());
         self.upsert_entry(
-            parent_of(path),
+            dir_name(path),
             FsEntry {
                 name: leaf_name(path).to_owned(),
                 kind: FileKind::Regular,
+                id: FileId::NONE,
                 size,
                 modified: Time64::UNIX_EPOCH,
             },
@@ -3094,7 +2157,7 @@ fn a_refused_head_read_opens_nothing() {
     assert_eq!(m.view, View::Panes);
     assert!(m.viewer.is_none());
     let message = m.message.clone().expect("a report");
-    assert!(message.contains("PermissionDenied"), "got {message}");
+    assert!(message.contains("permission denied"), "got {message}");
 }
 
 #[test]
@@ -3396,7 +2459,7 @@ fn a_read_refused_mid_view_closes_the_viewer() {
     assert_eq!(m.view, View::Panes);
     assert!(m.viewer.is_none());
     let message = m.message.clone().expect("a report");
-    assert!(message.contains("PermissionDenied"), "got {message}");
+    assert!(message.contains("permission denied"), "got {message}");
 }
 
 // --- The disassembly viewer (S9) -------------------------------------------
@@ -3926,30 +2989,6 @@ fn an_unreachable_store_leaves_the_defaults_standing_and_names_the_refusal() {
 }
 
 #[test]
-fn confirm_delete_off_deletes_without_a_question() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.settings.confirm_delete = false;
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    assert_eq!(m.prompt, None, "no question was asked");
-    assert!(fs.contents("/a.rs").is_none(), "the file is gone");
-}
-
-#[test]
-fn confirm_batch_delete_off_runs_the_batch_without_a_question() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.settings.confirm_batch_delete = false;
-    tag(&mut m, "/a.rs", FileKind::Regular, 30);
-    tag(&mut m, "/b.txt", FileKind::Regular, 10);
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    assert_eq!(m.prompt, None, "no question was asked");
-    assert!(fs.contents("/a.rs").is_none() && fs.contents("/b.txt").is_none());
-}
-
-#[test]
 fn the_settings_menu_renders_the_toggles_and_the_stores_state() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
@@ -3966,7 +3005,7 @@ fn the_settings_menu_renders_the_toggles_and_the_stores_state() {
     m.settings_refusal = Some(Errno::PermissionDenied);
     render(&m, &mut window);
     let footer = row_text(&window, 4);
-    assert!(footer.contains("not saved") && footer.contains("PermissionDenied"));
+    assert!(footer.contains("not saved") && footer.contains("permission denied"));
     assert!(footer.contains("this session only"));
 }
 
@@ -4057,43 +3096,11 @@ fn a_malformed_range_reports_and_tags_nothing() {
 // --- Repeat (`.`) -----------------------------------------------------------
 
 #[test]
-fn dot_repeats_the_last_copy_on_the_new_selection() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/docs");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(fs.contents("/docs/a.rs").is_some());
-    assert_eq!(m.last_op, Some(RepeatOp::CopyInto(String::from("/docs"))));
-    // `.` on the next file repeats the copy into the same directory.
-    m.file_cursor = 3; // b.txt
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
-    assert!(fs.contents("/docs/b.txt").is_some());
-}
-
-#[test]
 fn dot_with_no_history_says_so() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
     assert_eq!(m.message.as_deref(), Some("nothing to repeat"));
-}
-
-#[test]
-fn dot_repeats_a_delete_and_still_asks() {
-    let mut fs = fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
-    assert!(fs.contents("/a.rs").is_none());
-    assert_eq!(m.last_op, Some(RepeatOp::Delete));
-    // The repeat still asks: the confirmation setting is on.
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('.'));
-    assert!(matches!(m.prompt, Some(Prompt::ConfirmDelete(_))));
 }
 
 // --- Prompt-line completion --------------------------------------------------
@@ -4209,44 +3216,6 @@ fn hidden_omissions_are_reported_once_per_change() {
     assert_eq!(info.records.len(), 2);
 }
 
-// --- The S10 end-to-end session ---------------------------------------------
-
-/// One scripted session across the stage's surface: tag two files, batch
-/// copy them, verify through the volume list, adjust a setting, and quit
-/// — every step through the ordinary key loop.
-#[test]
-fn a_scripted_session_tags_copies_and_visits_the_new_surfaces() {
-    let mut fs = volumed_fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = 2; // a.rs
-    let script = [
-        Event::Char('t'), // tag a.rs (cursor steps to b.txt)
-        Event::Char('t'), // tag b.txt
-        Event::Char('c'), // batch copy prompt
-    ];
-    for event in &script {
-        handle_event(&mut m, &mut fs, &mut decode(), event);
-    }
-    type_text(&mut m, &mut fs, "/docs");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(fs.contents("/docs/a.rs").is_some() && fs.contents("/docs/b.txt").is_some());
-    let rest = [
-        Event::Char('V'), // the volume list
-        Event::Esc,       // close it
-        Event::Char('S'), // the settings menu
-        Event::Char('1'), // confirm-delete off (no home: session only)
-        Event::Esc,       // close it
-        Event::Char('q'), // quit
-    ];
-    for event in &rest {
-        handle_event(&mut m, &mut fs, &mut decode(), event);
-    }
-    assert!(m.quit);
-    assert!(!m.settings.confirm_delete);
-    assert_eq!(m.overlay, Overlay::None);
-}
-
 // --- Session loop: the terminal changes size ----------------------------
 
 /// A tty whose reported geometry changes as the session reads it, so
@@ -4333,177 +3302,6 @@ fn the_session_resizes_its_window_and_repaints_at_the_new_size() {
 
 // --- File operations: symbolic links (`plans/SYMLINKS.md` S4) --------------
 
-/// The link fixture: `/` holds a link to a file, one to a directory, and one
-/// that names nothing, beside the ordinary entries a transfer targets.
-fn link_fixture() -> FakeFs {
-    FakeFs::new()
-        .dir(
-            "/",
-            vec![
-                dir("docs"),
-                file("a.rs", 30, 1_000),
-                file("b.txt", 10, 2_000),
-                link_entry("to-file", "/a.rs"),
-                link_entry("to-dir", "/docs"),
-                link_entry("gone", "../removed"),
-            ],
-        )
-        .dir("/docs", vec![file("guide.md", 5, 4_000)])
-        .link("/to-file", "/a.rs")
-        .link("/to-dir", "/docs")
-        .link("/gone", "../removed")
-        .mode("/", 0o755)
-}
-
-/// The index of the file-pane row named `name` in the model's listing.
-fn row_of(m: &Model, name: &str) -> usize {
-    m.files
-        .iter()
-        .position(|entry| entry.name == name)
-        .unwrap_or_else(|| panic!("the listing holds {name}"))
-}
-
-#[test]
-fn copying_a_link_recreates_it_with_the_same_target() {
-    let mut fs = link_fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = row_of(&m, "to-file");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/copy-of-link");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    // A link, holding the same spelling — never a regular file holding the
-    // target's text.
-    assert_eq!(fs.stat_kind("/copy-of-link"), Ok(FileKind::Symlink));
-    assert_eq!(fs.link_target("/copy-of-link").as_deref(), Some("/a.rs"));
-    // Nothing was read or written through the link.
-    assert_eq!(fs.contents("/copy-of-link"), None);
-    // The source link and its target are untouched.
-    assert_eq!(fs.stat_kind("/to-file"), Ok(FileKind::Symlink));
-    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
-}
-
-#[test]
-fn copying_a_dangling_link_still_recreates_it() {
-    // A link is data: what it names has no bearing on duplicating it.
-    let mut fs = link_fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = row_of(&m, "gone");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/still-gone");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(fs.stat_kind("/still-gone"), Ok(FileKind::Symlink));
-    assert_eq!(fs.link_target("/still-gone").as_deref(), Some("../removed"));
-}
-
-#[test]
-fn copying_a_tree_recreates_the_links_inside_it() {
-    let mut fs = FakeFs::new()
-        .dir("/", vec![dir("tree"), file("a.rs", 30, 1_000)])
-        .dir("/tree", vec![file("f", 3, 0), link_entry("inner", "/a.rs")])
-        .link("/tree/inner", "/a.rs")
-        .mode("/", 0o755);
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = row_of(&m, "tree");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/tree-copy");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(fs.contents("/tree-copy/f"), Some(vec![b'x'; 3]));
-    assert_eq!(fs.stat_kind("/tree-copy/inner"), Ok(FileKind::Symlink));
-    assert_eq!(fs.link_target("/tree-copy/inner").as_deref(), Some("/a.rs"));
-}
-
-#[test]
-fn deleting_a_link_removes_the_link_and_not_its_target() {
-    let mut fs = link_fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = row_of(&m, "to-dir");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
-    assert_eq!(fs.stat_kind("/to-dir"), Err(Errno::NotFound));
-    // The directory the link named is still there, with its contents.
-    assert!(fs.has_dir("/docs"));
-    assert_eq!(fs.contents("/docs/guide.md"), Some(vec![b'x'; 5]));
-}
-
-#[test]
-fn moving_a_link_moves_the_link() {
-    let mut fs = link_fixture().cross("/other").dir("/other", vec![]);
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = row_of(&m, "to-file");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
-    // A cross-volume move cannot rename, so it recreates the link and
-    // removes the original — still never touching the target.
-    type_text(&mut m, &mut fs, "/other/moved");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert_eq!(fs.stat_kind("/other/moved"), Ok(FileKind::Symlink));
-    assert_eq!(fs.link_target("/other/moved").as_deref(), Some("/a.rs"));
-    assert_eq!(fs.stat_kind("/to-file"), Err(Errno::NotFound));
-    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
-}
-
-#[test]
-fn a_link_at_the_destination_is_asked_about_and_replaced_not_written_through() {
-    let mut fs = link_fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = row_of(&m, "b.txt");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    type_text(&mut m, &mut fs, "/to-file");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    // The question is asked, and says what would be replaced.
-    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
-    assert!(
-        prompt_line(&m).contains("symbolic link"),
-        "{}",
-        prompt_line(&m)
-    );
-    // Nothing has happened yet: the link stands and its target is intact.
-    assert_eq!(fs.stat_kind("/to-file"), Ok(FileKind::Symlink));
-    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('o'));
-    // The *link* was replaced by the copy; the file it named is untouched,
-    // which is what "never written through" means.
-    assert_eq!(fs.stat_kind("/to-file"), Ok(FileKind::Regular));
-    assert_eq!(fs.contents("/to-file"), Some(vec![b'x'; 10]));
-    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
-}
-
-#[test]
-fn a_directory_is_never_transferred_onto_a_link() {
-    let mut fs = link_fixture();
-    let mut m = model(&mut fs);
-    m.pane = Pane::Files;
-    m.file_cursor = row_of(&m, "docs");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
-    // A link is a leaf, so a directory cannot merge into it.
-    type_text(&mut m, &mut fs, "/gone");
-    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
-    assert!(
-        m.message
-            .clone()
-            .expect("refused")
-            .contains("different kind"),
-        "{:?}",
-        m.message
-    );
-    assert_eq!(fs.stat_kind("/gone"), Ok(FileKind::Symlink));
-}
-
-#[test]
-fn the_file_pane_shows_a_link_as_a_link() {
-    let mut fs = link_fixture();
-    let m = model(&mut fs);
-    // The size column names what the row is; a link's own byte count is the
-    // length of the path it stores, which is not a size a reader wants.
-    let text = painted_text(&m);
-    assert!(text.contains("<link>"), "{text}");
-}
-
 #[test]
 fn a_link_on_the_way_does_not_hide_a_copy_into_its_own_source() {
     use crate::ops::{plan_target, OpError};
@@ -4514,7 +3312,7 @@ fn a_link_on_the_way_does_not_hide_a_copy_into_its_own_source() {
         .link("/b/to-a", "/a");
     assert_eq!(
         plan_target(&mut fs, "/a", FileKind::Directory, "/b/to-a/c"),
-        Err(OpError::IntoItself)
+        Err(OpError::Engine(EngineError::IntoItself))
     );
     assert_eq!(
         plan_target(&mut fs, "/a", FileKind::Directory, "/b/c"),
@@ -4522,16 +3320,55 @@ fn a_link_on_the_way_does_not_hide_a_copy_into_its_own_source() {
     );
 }
 
+/// An operation's failure names its path as a `name: reason` line does, a
+/// hidden character escaped, and the reason in words.
 #[test]
-fn a_copy_that_meets_its_own_copy_stops_there_rather_than_without_end() {
-    // Planned past the check, as a directory renamed in meanwhile would be.
-    let mut fs = FakeFs::new()
-        .dir("/", vec![dir("a")])
-        .dir("/a", vec![file("f", 3, 0)]);
-    let mut op = FileOp::copy("/a", FileKind::Directory, "/a/inner");
+fn an_operation_failure_names_its_path_quoted_and_its_reason_in_words() {
+    use crate::ops::OpError;
+    let failure = OpError::Engine(EngineError::Read(
+        String::from("/a\u{1b}[2J"),
+        Errno::NotFound,
+    ));
     assert_eq!(
-        op.advance(&mut fs),
-        OpProgress::Failed(crate::ops::OpError::IntoItself)
+        failure.describe(),
+        alloc::format!("'/a'$'\\033''[2J': {}", Errno::NotFound)
     );
-    assert!(!fs.dirs.contains_key("/a/inner/inner"));
+}
+
+/// `/loop` names itself, so the source's path no longer resolves: the
+/// refusal names the source, not the target.
+#[test]
+fn a_source_whose_path_no_longer_resolves_is_named_as_the_source() {
+    use crate::ops::{plan_target, OpError};
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("b")])
+        .dir("/b", Vec::new())
+        .dir("/loop/src", vec![file("f", 3, 0)])
+        .link("/loop", "/loop");
+    assert_eq!(
+        plan_target(&mut fs, "/loop/src", FileKind::Directory, "/b/c"),
+        Err(OpError::Engine(EngineError::Read(
+            String::from("/loop/src"),
+            Errno::LinkLoop
+        )))
+    );
+}
+
+#[test]
+fn the_session_starts_in_the_one_directory_named() {
+    assert_eq!(parse(&[]), Ok(Command::Open(String::from("/"))));
+    assert_eq!(parse(&["/Home"]), Ok(Command::Open(String::from("/Home"))));
+    assert_eq!(parse(&["-h"]), Ok(Command::Help));
+    assert_eq!(parse(&["/Home", "-?"]), Ok(Command::Help));
+    // `--` ends the options, so a directory may begin with a dash.
+    assert_eq!(parse(&["--", "-d"]), Ok(Command::Open(String::from("-d"))));
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    let refused = |args: &[&str]| parse(args).expect_err("refused").to_string();
+    assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+    // `fstree` has no long option, `--help` included.
+    assert_eq!(refused(&["--help"]), "unrecognized option '--help'");
+    assert_eq!(refused(&["/a", "/b"]), "unknown argument: /b");
 }

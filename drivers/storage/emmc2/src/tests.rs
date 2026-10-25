@@ -12,7 +12,9 @@ use super::*;
 use crate::mock::{MockSdhci, ModelHost, STATE_STBY, STORE_BLOCKS};
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::dma::{DmaHost, DmaSlab};
+use tairix_abi::driver::timing::{CompletionWait, Delay};
 use tairix_abi::driver::DriverKind;
+use tairix_abi::HwMatchKey;
 use tairix_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
 
 const BS: usize = BLOCK_SIZE as usize;
@@ -874,7 +876,7 @@ fn every_transfer_path_asks_a_card_of_unknown_state_before_its_command() {
 /// capability or mapper gate or at a controller that never resets.
 struct NoIrq;
 
-impl crate::CompletionWait for NoIrq {
+impl CompletionWait for NoIrq {
     fn await_irq(&self) -> CompletionSignal {
         CompletionSignal::Fired
     }

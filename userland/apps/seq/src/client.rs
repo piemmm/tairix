@@ -6,13 +6,16 @@ use alloc::vec::Vec;
 
 use tairix_help::{own_short_help, HelpSource};
 
+use core::cmp::Ordering;
+
 use crate::command::{Command, Job};
 use crate::error::SeqError;
+use crate::exact::Integer;
 use crate::format::Format;
-use crate::number::{parse_number, scan_arg, Operand, NOT_FIXED_POINT};
+use crate::number::{scan_operand, Layout, Operand};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `seq`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `seq`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: seq [-f format] [-s string] [-w] [first [increment]] last";
 
 /// `seq`'s own command word: the short-help switches render its own Help
@@ -51,275 +54,233 @@ pub fn run(
     print_job(&job, out)
 }
 
-/// The largest integer increment the exact decimal path takes (the GNU
-/// `SEQ_FAST_STEP_LIMIT`, chosen there by measurement).
-const FAST_STEP_LIMIT: f64 = 200.0;
-
-/// True when `s` consists of at least one digit and nothing else.
-fn all_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// Scan the operands and print the sequence, choosing the exact decimal
-/// path where GNU does and the floating-point path otherwise.
+/// Print the sequence `job` names.
 fn print_job(job: &Job, out: &dyn Output) -> Result<(), SeqError> {
-    let n = job.operands.len();
-    let plain = !job.equal_width && job.format.is_none() && job.separator.len() == 1;
-    let separator = job.separator.as_bytes().first().copied().unwrap_or(b'\n');
-    let user_start = if n == 1 { "1" } else { &job.operands[0] };
-
-    // First exact attempt: every operand is already a plain digit string
-    // (and a third operand is a usable integer step).
-    let fast_step = if n == 3 {
-        let text = &job.operands[1];
-        if all_digits(text) {
-            // The filter proves 0 < v <= 200 and a digits-only spelling
-            // proves integrality, so the conversion is exact.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            parse_number(text)
-                .filter(|&v| 0.0 < v && v <= FAST_STEP_LIMIT)
-                .map(|v| v as u64)
-        } else {
-            None
+    let spelled = spellings(&job.operands);
+    let mut scanned = [Operand {
+        value: 1.0,
+        layout: Layout::Fixed {
+            integer: 1,
+            precision: 0,
+        },
+    }; 3];
+    for (at, (slot, text)) in scanned.iter_mut().zip(spelled).enumerate() {
+        *slot = scan_operand(text)?;
+        // A zero step is refused before LAST is read, as GNU refuses it.
+        if at == STEP && slot.value == 0.0 {
+            return Err(SeqError::ZeroIncrement(String::from(text)));
         }
+    }
+    let values = scanned.map(|operand| operand.value);
+    let mut emitter = Emitter::new(out, job.separator.as_bytes());
+    match (&job.format, Plan::of(job, &spelled, &scanned)) {
+        (Some(format), _) => floats(values, format, &mut emitter)?,
+        (None, Plan::Integers(first, step, last, width)) => {
+            integers(first, &step, &last, width, &mut emitter)?;
+        }
+        (None, Plan::Floats(format)) => floats(values, &format, &mut emitter)?,
+    }
+    emitter.finish()
+}
+
+/// Where INCREMENT sits among the three operands.
+const STEP: usize = 1;
+
+/// The FIRST, INCREMENT and LAST spellings, an omitted FIRST or INCREMENT
+/// being `1`.
+fn spellings(operands: &[String]) -> [&str; 3] {
+    match operands {
+        [last] => ["1", "1", last],
+        [first, last] => [first, "1", last],
+        [first, step, last, ..] => [first, step, last],
+        [] => ["1", "1", "1"],
+    }
+}
+
+/// How the default format prints a sequence.
+enum Plan {
+    /// Exactly, as integers: FIRST, INCREMENT, the bound LAST sets, and the
+    /// `-w` width.
+    Integers(Integer, Integer, Integer, usize),
+    /// Through a float format.
+    Floats(Format),
+}
+
+impl Plan {
+    /// The default plan: `%g` when an operand shows no fixed point (`-w`
+    /// then pads nothing, as GNU's does), otherwise the precision FIRST and
+    /// INCREMENT show, padded under `-w` to the wider of FIRST and LAST.
+    fn of(job: &Job, spelled: &[&str; 3], scanned: &[Operand; 3]) -> Self {
+        let precision_of = |operand: &Operand| match operand.layout {
+            Layout::Fixed { precision, .. } => Some(precision),
+            Layout::Free => None,
+        };
+        let [Some(first), Some(step), Some(_)] = scanned.each_ref().map(precision_of) else {
+            return Self::Floats(Format::shortest());
+        };
+        let precision = first.max(step);
+        let width = if job.equal_width {
+            scanned[0]
+                .layout
+                .width_at(precision)
+                .max(scanned[2].layout.width_at(precision))
+        } else {
+            0
+        };
+        if precision == 0 {
+            let descending = scanned[1].value < 0.0;
+            let exact = Integer::from_spelling(spelled[0])
+                .zip(Integer::from_spelling(spelled[1]))
+                .zip(Integer::bound(spelled[2], descending));
+            if let Some(((first, step), last)) = exact {
+                return Self::Integers(first, step, last, width);
+            }
+        }
+        Self::Floats(Format::fixed(precision, width))
+    }
+}
+
+/// Print FIRST, FIRST + INCREMENT, … through LAST exactly.
+fn integers(
+    mut value: Integer,
+    step: &Integer,
+    last: &Integer,
+    width: usize,
+    emitter: &mut Emitter<'_>,
+) -> Result<(), SeqError> {
+    let past = if step.is_negative() {
+        Ordering::Less
     } else {
-        Some(1)
+        Ordering::Greater
     };
-    if all_digits(&job.operands[0])
-        && (n == 1 || all_digits(&job.operands[n - 1]))
-        && (n < 3 || (fast_step.is_some() && all_digits(&job.operands[2])))
-        && plain
-    {
-        if let Some(step) = fast_step {
-            return seq_fast(user_start, &job.operands[n - 1], step, separator, out);
-        }
-    }
-
-    // The general scan, in GNU's operand order (left to right, with the
-    // zero-increment check before the third operand is scanned).
-    let mut first = Operand::ONE;
-    let mut step = Operand::ONE;
-    let mut last = scan_arg(&job.operands[0])?;
-    if n > 1 {
-        first = last;
-        last = scan_arg(&job.operands[1])?;
-        if n > 2 {
-            step = last;
-            if step.value == 0.0 {
-                return Err(SeqError::ZeroIncrement(job.operands[1].clone()));
-            }
-            last = scan_arg(&job.operands[2])?;
-        }
-    }
-
-    // Second exact attempt, for integers spelled another way (`1e1`,
-    // `0x14`) or an `inf` end value.
-    if first.precision == 0
-        && step.precision == 0
-        && last.precision == 0
-        && first.value.is_finite()
-        && 0.0 <= first.value
-        && 0.0 <= last.value
-        && 0.0 < step.value
-        && step.value <= FAST_STEP_LIMIT
-        && plain
-    {
-        let s1 = if all_digits(user_start) {
-            String::from(user_start)
-        } else {
-            Format::fixed(0).render(first.value)
-        };
-        let s2 = if last.value.is_finite() {
-            Format::fixed(0).render(last.value)
-        } else {
-            String::from("inf")
-        };
-        if !s1.starts_with('-') && !s2.starts_with('-') {
-            // A precision-0 operand is integral and the guard proves
-            // 0 < step <= 200, so the conversion is exact.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            return seq_fast(&s1, &s2, step.value as u64, separator, out);
-        }
-    }
-
-    let format = match &job.format {
-        Some(format) => format.clone(),
-        None => default_format(first, step, last, job.equal_width),
-    };
-    print_numbers(
-        &format,
-        job.separator.as_bytes(),
-        first.value,
-        step.value,
-        last.value,
-        out,
-    )
-}
-
-/// The default format (GNU `get_default_format`): fixed point at the
-/// operands' precision when every operand is fixed point — zero-padded to
-/// a common width under `-w` — and `%g` otherwise.
-fn default_format(first: Operand, step: Operand, last: Operand, equal_width: bool) -> Format {
-    let prec = first.precision.max(step.precision);
-    if prec != NOT_FIXED_POINT && last.precision != NOT_FIXED_POINT {
-        let prec_usize = usize::try_from(prec).unwrap_or(0);
-        if equal_width {
-            // Adjust each operand's spelled width to the shared precision.
-            let mut first_width = first.width + (prec - first.precision);
-            let mut last_width = last.width + (prec - last.precision);
-            if last.precision != 0 && prec == 0 {
-                last_width -= 1; // no space for the '.'
-            }
-            if last.precision == 0 && prec != 0 {
-                last_width += 1; // space for the '.'
-            }
-            if first.precision == 0 && prec != 0 {
-                first_width += 1; // space for the '.'
-            }
-            let width = first_width.max(last_width);
-            if (0..=i64::from(i32::MAX)).contains(&width) {
-                return Format::fixed_padded(usize::try_from(width).unwrap_or(0), prec_usize);
-            }
-        } else {
-            return Format::fixed(prec_usize);
-        }
-    }
-    Format::shortest()
-}
-
-/// Print all whole numbers from `a` to `b` inclusive (`b` may be `inf`),
-/// stepping by `step`, in exact decimal string arithmetic — no float can
-/// misrepresent a large integer here (GNU `seq_fast`).
-fn seq_fast(a: &str, b: &str, step: u64, separator: u8, out: &dyn Output) -> Result<(), SeqError> {
-    let a = trim_leading_zeros(a);
-    let b = trim_leading_zeros(b);
-    let inf = b == "inf";
-
-    // The current number, most significant digit first.
-    let mut digits: Vec<u8> = a.bytes().collect();
-    let b_digits: &[u8] = b.as_bytes();
-
-    let mut buf: Vec<u8> = Vec::with_capacity(FLUSH_LEN + digits.len() + 1);
-    let mut wrote_any = false;
-    while inf || cmp_digits(&digits, b_digits).is_le() {
-        buf.extend_from_slice(&digits);
-        buf.push(separator);
-        wrote_any = true;
-        if buf.len() >= FLUSH_LEN {
-            // Hold the final byte back: the last separator of the whole
-            // run must become the terminator, and only the next
-            // comparison knows whether this number was the last.
-            out.write_all(&buf[..buf.len() - 1])
-                .map_err(|_| SeqError::Output)?;
-            let last = buf[buf.len() - 1];
-            buf.clear();
-            buf.push(last);
-        }
-        add_to_digits(&mut digits, step);
-    }
-
-    if wrote_any {
-        // Swap the trailing separator for the newline terminator.
-        buf.pop();
-        buf.push(b'\n');
-        out.write_all(&buf).map_err(|_| SeqError::Output)?;
+    while value.cmp(last) != past {
+        emitter.integer(&value, width)?;
+        value.add(step);
     }
     Ok(())
 }
 
-/// Trim leading zeros, leaving one digit when the string is all zeros.
-fn trim_leading_zeros(s: &str) -> &str {
-    let trimmed = s.trim_start_matches('0');
-    if trimmed.is_empty() {
-        &s[s.len() - 1..]
-    } else {
-        trimmed
-    }
-}
-
-/// Compare two decimal digit strings without redundant leading zeros.
-fn cmp_digits(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
-    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
-}
-
-/// Add `step` to the digit string in place (most significant digit
-/// first), growing on the left when the sum carries out.
-fn add_to_digits(digits: &mut Vec<u8>, step: u64) {
-    let mut carry = step;
-    let mut index = digits.len();
-    while index > 0 && carry > 0 {
-        index -= 1;
-        let sum = u64::from(digits[index] - b'0') + carry % 10;
-        digits[index] = b'0' + (sum % 10) as u8;
-        carry = carry / 10 + sum / 10;
-    }
-    while carry > 0 {
-        digits.insert(0, b'0' + (carry % 10) as u8);
-        carry /= 10;
-    }
-}
-
-/// Print the floating-point sequence through `format` (GNU
-/// `print_numbers`), including the rule that a value one step past LAST
-/// still prints when it renders equal to LAST but differently from its
-/// predecessor — the x86 `seq 0 0.000001 0.000003` rounding case.
-fn print_numbers(
+/// Print `first + i × step` for `i` = 0, 1, … while it has not passed
+/// `last`, each through `format`.
+///
+/// Each value is the product, never a running sum, so no error accumulates.
+/// A value rounding carried just past `last` stands for `last` when its
+/// number, as `format` writes it, reads back as `last` exactly and the
+/// value before it did not already, as GNU's does; FIRST past `last` never
+/// prints.
+fn floats(
+    [first, step, last]: [f64; 3],
     format: &Format,
-    separator: &[u8],
-    first: f64,
-    step: f64,
-    last: f64,
-    out: &dyn Output,
+    emitter: &mut Emitter<'_>,
 ) -> Result<(), SeqError> {
-    let past = |x: f64| if step < 0.0 { x < last } else { last < x };
-    if past(first) {
-        return Ok(());
-    }
-
-    let mut buf: Vec<u8> = Vec::with_capacity(FLUSH_LEN + 64);
-    let mut x = first;
-    let mut out_of_range = false;
-    let mut i = 1.0_f64;
+    let reads_back_as_last = |x: f64| {
+        format
+            .rounded(x)
+            .is_some_and(|value| value.partial_cmp(&last) == Some(Ordering::Equal))
+    };
+    let passed = |x: f64| x.is_nan() || if step > 0.0 { x > last } else { x < last };
+    let mut previous = None;
+    let mut index = 0.0;
     loop {
-        let x0 = x;
-        buf.extend_from_slice(format.render(x).as_bytes());
-        if buf.len() >= FLUSH_LEN {
-            out.write_all(&buf).map_err(|_| SeqError::Output)?;
-            buf.clear();
-        }
-        if out_of_range {
-            break;
-        }
-
-        // `first + i * step` accumulates less rounding error than a
-        // running `x += step`.
-        x = first + i * step;
-        i += 1.0;
-        if past(x) {
-            if !prints_as_last(format, x, x0, last) {
-                break;
+        let x = if index == 0.0 {
+            first
+        } else {
+            first + index * step
+        };
+        if passed(x) {
+            // LAST's own rendering, so a step landing a hair below zero is
+            // never shown as `-0.0`.
+            if previous.is_some_and(|before| !reads_back_as_last(before)) && reads_back_as_last(x) {
+                emitter.float(format, last)?;
             }
-            // Print the extra number on the next pass, then stop.
-            out_of_range = true;
+            return Ok(());
         }
-        buf.extend_from_slice(separator);
+        emitter.float(format, x)?;
+        previous = Some(x);
+        index += 1.0;
     }
-    buf.push(b'\n');
-    out.write_all(&buf).map_err(|_| SeqError::Output)
 }
 
-/// The extra-number rule: `x` (one step past LAST) is printed when its
-/// rendering parses back to exactly LAST and differs from the previous
-/// number's rendering.
-fn prints_as_last(format: &Format, x: f64, x0: f64, last: f64) -> bool {
-    let x_str = format.render(x);
-    let numeric = &x_str[format.prefix.len()..x_str.len() - format.suffix.len()];
-    // Exact equality is the GNU rule: the re-parsed rendering must be
-    // LAST itself, not merely near it.
-    #[allow(clippy::float_cmp)]
-    match parse_number(numeric) {
-        Some(value) if value == last => format.render(x0) != x_str,
-        _ => false,
+/// The output stream, buffered: numbers joined by the separator and the
+/// last ended by a line break, written in blocks of at most [`FLUSH_LEN`]
+/// however wide a number's padding.
+struct Emitter<'a> {
+    out: &'a dyn Output,
+    separator: &'a [u8],
+    buffer: Vec<u8>,
+    started: bool,
+}
+
+impl<'a> Emitter<'a> {
+    fn new(out: &'a dyn Output, separator: &'a [u8]) -> Self {
+        Self {
+            out,
+            separator,
+            buffer: Vec::new(),
+            started: false,
+        }
+    }
+
+    fn begin(&mut self) -> Result<(), SeqError> {
+        if self.started {
+            self.buffer.extend_from_slice(self.separator);
+        }
+        self.started = true;
+        self.flush_full()
+    }
+
+    /// `x` through `format`, written as it renders so a field of any size
+    /// stays within the buffer.
+    fn float(&mut self, format: &Format, x: f64) -> Result<(), SeqError> {
+        self.begin()?;
+        format.render_into(x, self).map_err(|_| SeqError::Output)?;
+        self.flush_full()
+    }
+
+    /// `value` as `%0WIDTHd` prints it, its padding written in blocks.
+    fn integer(&mut self, value: &Integer, width: usize) -> Result<(), SeqError> {
+        self.begin()?;
+        if value.sign_shown() {
+            self.buffer.push(b'-');
+        }
+        let mut zeros = width.saturating_sub(value.shown_len());
+        while zeros > 0 {
+            let block = zeros.min(FLUSH_LEN);
+            self.buffer.resize(self.buffer.len() + block, b'0');
+            zeros -= block;
+            self.flush_full()?;
+        }
+        self.buffer.extend(value.digit_bytes());
+        self.flush_full()
+    }
+
+    fn flush_full(&mut self) -> Result<(), SeqError> {
+        if self.buffer.len() >= FLUSH_LEN {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), SeqError> {
+        self.out
+            .write_all(&self.buffer)
+            .map_err(|_| SeqError::Output)?;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), SeqError> {
+        if self.started {
+            self.buffer.push(b'\n');
+        }
+        self.flush()
+    }
+}
+
+impl core::fmt::Write for Emitter<'_> {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        self.buffer.extend_from_slice(text.as_bytes());
+        self.flush_full().map_err(|_| core::fmt::Error)
     }
 }
 
@@ -328,7 +289,7 @@ mod tests {
     extern crate std;
 
     use alloc::format;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
@@ -522,6 +483,127 @@ mod tests {
             seq(&["nan"]),
             Err(SeqError::NotANumber(String::from("nan")))
         );
+    }
+
+    /// A value rounding carried just past LAST stands for LAST, printed as
+    /// LAST is: `0.3 − 3 × 0.1` is a hair below zero in `f64`.
+    #[test]
+    fn a_value_just_past_last_is_printed_as_last() {
+        assert_eq!(
+            seq(&["0.3", "-0.1", "0"]).expect("runs"),
+            "0.3\n0.2\n0.1\n0.0\n"
+        );
+        assert_eq!(
+            seq(&["-f", "%+.1f", "0.3", "-0.1", "0"]).expect("runs"),
+            "+0.3\n+0.2\n+0.1\n+0.0\n"
+        );
+        assert_eq!(
+            seq(&["0", "0.1", "0.3"]).expect("runs"),
+            "0.0\n0.1\n0.2\n0.3\n"
+        );
+        // Not a value merely rendered as LAST, nor one LAST already shows.
+        assert_eq!(seq(&["-f", "%.0f", "0", "1", "0.6"]).expect("runs"), "0\n");
+        assert_eq!(
+            seq(&["-f", "%.0f", "0", "0.6", "1"]).expect("runs"),
+            "0\n1\n"
+        );
+        assert_eq!(
+            seq(&["-f", "%.1f", "1.0000000000000002", "1"]).expect("runs"),
+            ""
+        );
+    }
+
+    /// An uppercase hexadecimal exponent is read as C reads it, as a
+    /// lowercase one is: GNU lays `0X1P-1` out as an integer, printing
+    /// `seq 0X1P-1 3` as 0 1 2 3 and `seq 0 0X1P-1 2` without end.
+    #[test]
+    fn an_uppercase_hexadecimal_exponent_is_read_as_c_reads_it() {
+        assert_eq!(seq(&["0X1P-1", "3"]).expect("runs"), "0.5\n1.5\n2.5\n");
+        assert_eq!(
+            seq(&["0", "0X1P-1", "2"]).expect("runs"),
+            "0\n0.5\n1\n1.5\n2\n"
+        );
+        assert_eq!(seq(&["0", "0X1P-1", "2"]), seq(&["0", "0x1p-1", "2"]));
+    }
+
+    /// A field of any size is written in blocks, never held whole: a huge
+    /// precision and a huge `-w` width alike.
+    #[test]
+    fn a_field_of_any_size_is_written_a_block_at_a_time() {
+        #[derive(Default)]
+        struct Blocks {
+            written: RefCell<usize>,
+            largest: RefCell<usize>,
+        }
+        impl Output for Blocks {
+            fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+                *self.written.borrow_mut() += bytes.len();
+                let mut largest = self.largest.borrow_mut();
+                *largest = (*largest).max(bytes.len());
+                Ok(())
+            }
+        }
+        for (args, written) in [
+            (&["-f", "%.1000000f", "1", "2"][..], 2 * 1_000_003),
+            (&["-w", "0e100000", "1"][..], 2 * 100_002),
+        ] {
+            let sink = Blocks::default();
+            run(parse(args).expect("parses"), None, &NoHelp, &sink).expect("runs");
+            assert_eq!(*sink.written.borrow(), written, "{args:?}");
+            assert!(*sink.largest.borrow() < 2 * super::FLUSH_LEN, "{args:?}");
+        }
+    }
+
+    /// The tool against GNU coreutils 9.4's own answers (`LC_ALL=C`), run
+    /// over a seeded corpus of operand spellings, formats and separators:
+    /// each case is its arguments, its output, its diagnostic and its exit
+    /// status, with `\\`, `\\t` and `\\n` escaped. The documented
+    /// divergences are not in it.
+    #[test]
+    fn every_case_answers_as_gnu_seq_answers() {
+        let unescape = |text: &str| {
+            let mut out = String::new();
+            let mut chars = text.chars();
+            while let Some(c) = chars.next() {
+                out.push(match (c, c == '\\') {
+                    (_, true) => match chars.next() {
+                        Some('n') => '\n',
+                        Some('t') => '\t',
+                        _ => '\\',
+                    },
+                    (c, false) => c,
+                });
+            }
+            out
+        };
+        let corpus = include_str!("gnu_cases.txt");
+        let lines: Vec<&str> = corpus.lines().collect();
+        assert!(lines.len() > 4000, "the corpus is whole");
+        for case in lines.chunks(4) {
+            let field = |at: usize, tag: &str| {
+                case[at]
+                    .strip_prefix(tag)
+                    .map(|rest| rest.strip_prefix('\t').unwrap_or(rest))
+                    .expect("a well-formed case")
+            };
+            let args: Vec<String> = field(0, "A").split('\t').map(unescape).collect();
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            let (out, err, status) = (
+                unescape(field(1, "O")),
+                unescape(field(2, "E")),
+                field(3, "R"),
+            );
+            match seq(&words) {
+                Ok(got) => assert!(
+                    status == "0" && got == out,
+                    "{words:?}: {got:?}, GNU {out:?} {err:?}"
+                ),
+                Err(refused) => assert!(
+                    status == "1" && refused.to_string() == err,
+                    "{words:?}: {refused}, GNU {out:?} {err:?}"
+                ),
+            }
+        }
     }
 
     #[test]

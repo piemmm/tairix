@@ -22,8 +22,8 @@ use crate::session::Session;
 use crate::Output;
 use tairix_util::quote::quote_if_needed;
 
-/// The one-line usage banner, printed on a usage error and as the fallback when
-/// the bundled help document is unavailable.
+/// The one-line usage banner, printed when `telnet` starts with no host and
+/// as the fallback when the bundled help document is unavailable.
 pub const USAGE: &str = "usage: telnet [option...] [host [port]]";
 
 /// The command word this bundle is named by, for the own-help lookup.

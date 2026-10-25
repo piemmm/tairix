@@ -113,8 +113,8 @@ use tairix_caps::CapabilitySet;
 ///   ceiling.
 ///
 /// Nothing else is baseline: self-scoped `sysinfo` queries, `stream_*` on
-/// inherited descriptors, lowering one's own resource limits, and
-/// `fs_getcwd` already require no capability. A sandboxed process still
+/// inherited descriptors and lowering one's own resource limits already
+/// require no capability. A sandboxed process still
 /// gets none of this, because its manifest requests none of it.
 ///
 /// This is an **account ceiling**, never any program's manifest: each

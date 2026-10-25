@@ -39,6 +39,7 @@ use tairix_net::dns::{Name, Presentation, WireName};
 use tairix_net::dnssd::{InstanceName, ServiceType, Transport};
 use tairix_net::mdns::TxtStrings;
 use tairix_net::mdns::{is_link_local_name, LOCAL_LABEL};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
 /// The one-line usage banner.
@@ -120,8 +121,8 @@ pub enum Command {
 pub enum ParseError {
     /// None of `-B`, `-L`, `-G` was given, or more than one.
     NoMode,
-    /// An unrecognised option.
-    UnknownOption(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A mode was given the wrong number of operands.
     Operands,
     /// A service type outside `_name._tcp` / `_name._udp`.
@@ -142,9 +143,7 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoMode => f.write_str("exactly one of -B, -L, or -G is required"),
-            Self::UnknownOption(option) => {
-                write!(f, "unknown option {option}", option = quote(option))
-            }
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Operands => f.write_str("wrong number of operands for the mode"),
             Self::BadType(ty) => write!(
                 f,
@@ -176,52 +175,73 @@ impl fmt::Display for ParseError {
     }
 }
 
+/// What each of `dns-sd`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Browse,
+    Resolve,
+    Lookup,
+    Seconds,
+    Help,
+}
+
+/// `dns-sd`'s options, as the established tool spells them, and the reserved
+/// help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::letter('B', Takes::Nothing, Flag::Browse),
+    Opt::letter('L', Takes::Nothing, Flag::Resolve),
+    Opt::letter('G', Takes::Nothing, Flag::Lookup),
+    Opt::letter('t', Takes::Value, Flag::Seconds),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse a `dns-sd` argument vector.
+///
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, clustered, `-t`'s value attached or the next argument, `--`
+/// ending them. The help switches (`-h`, `-?`, `--help`) answer at once.
+/// Exactly one of `-B`, `-L`, `-G` names the mode the operands are for.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] describing the first argument not understood.
+/// A [`ParseError`] describing the first argument not understood;
+/// [`ParseError::Option`] for an option `getopt` refuses, in its words.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
-    let mut mode: Option<char> = None;
+    let mut mode: Option<Flag> = None;
     let mut seconds = None;
     let mut operands: Vec<&str> = Vec::new();
-    let mut index = 0;
-    while let Some(&arg) = args.get(index) {
-        index += 1;
-        match arg {
-            "-?" | "-h" | "--help" => return Ok(Command::Help),
-            "-B" | "-L" | "-G" => {
-                if mode.is_some() {
-                    return Err(ParseError::NoMode);
-                }
-                mode = arg.chars().nth(1);
-            }
-            "-t" => {
-                let value = args.get(index).ok_or(ParseError::Operands)?;
-                index += 1;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(operand) => operands.push(operand),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Seconds, value) => {
+                let value = value.unwrap_or_default();
                 seconds = Some(
                     value
                         .parse::<u32>()
-                        .map_err(|_| ParseError::BadSeconds(String::from(*value)))?,
+                        .map_err(|_| ParseError::BadSeconds(String::from(value)))?,
                 );
             }
-            option if option.starts_with('-') && option.len() > 1 => {
-                return Err(ParseError::UnknownOption(String::from(option)));
+            Arg::Opt(flag, _) => {
+                if mode.is_some() {
+                    return Err(ParseError::NoMode);
+                }
+                mode = Some(flag);
             }
-            operand => operands.push(operand),
         }
     }
     let request = match (mode, operands.as_slice()) {
-        (Some('B'), []) => Request::Types,
-        (Some('B'), [ty] | [ty, _]) if *ty == SERVICES_TYPE => {
+        (Some(Flag::Browse), []) => Request::Types,
+        (Some(Flag::Browse), [ty] | [ty, _]) if *ty == SERVICES_TYPE => {
             domain(operands.get(1).copied())?;
             Request::Types
         }
-        (Some('B'), [ty] | [ty, _]) => {
+        (Some(Flag::Browse), [ty] | [ty, _]) => {
             domain(operands.get(1).copied())?;
             Request::Browse(service_type(ty)?)
         }
-        (Some('L'), [instance, ty] | [instance, ty, _]) => {
+        (Some(Flag::Resolve), [instance, ty] | [instance, ty, _]) => {
             domain(operands.get(2).copied())?;
             Request::Resolve {
                 instance: InstanceName::new(instance.as_bytes())
@@ -229,7 +249,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
                 service: service_type(ty)?,
             }
         }
-        (Some('G'), [family, host]) => Request::Host {
+        (Some(Flag::Lookup), [family, host]) => Request::Host {
             families: match *family {
                 "v4" => Families {
                     v4: true,

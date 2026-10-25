@@ -89,7 +89,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     /// `syscalls`, and the kernel-issued `grants`.
     ///
     /// `coherency` is the cache-maintenance shim for a **non-coherent** DMA
-    /// interconnect (e.g. the BCM2711 PCIe master, which does not snoop the
+    /// interconnect (a PCIe master that does not snoop the
     /// CPU caches); pass `None` on a coherent interconnect (and for the QEMU
     /// `virt` stand-in), where the kernel's coherent carve needs no CPU-side
     /// maintenance. The shim is supplied by the (architecture-aware) driver

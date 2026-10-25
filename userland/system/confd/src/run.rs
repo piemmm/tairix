@@ -120,11 +120,18 @@ mod program {
         }
 
         fn replace(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-            tairix_rt::replace_file(path.as_bytes(), bytes, tairix_rt::ParentDir::Existing)
+            tairix_rt::replace_file(
+                path,
+                bytes,
+                tairix_rt::ParentDir::Existing,
+                tairix_abi::fs::FS_NEW_FILE_MODE,
+            )
         }
 
         fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_mkdir(path.as_bytes());
+            // Born no wider than it is to be; then set exactly, whatever the
+            // umask took.
+            let ret = tairix_rt::fs_mkdir(path.as_bytes(), mode);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -197,14 +204,16 @@ mod program {
             // primitive would tell this service when the holder closed its
             // copy. `TRUNCATE` is deliberately absent — an open must not
             // discard a blob the application meant to append to.
-            let flags = if write {
-                OpenFlags::READ
-                    .union(OpenFlags::WRITE)
-                    .union(OpenFlags::CREATE)
+            let file = if write {
+                File::create(
+                    path.as_bytes(),
+                    OpenFlags::READ.union(OpenFlags::WRITE),
+                    tairix_abi::fs::FS_NEW_FILE_MODE,
+                )
             } else {
-                OpenFlags::READ
-            };
-            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+                File::open(path.as_bytes(), OpenFlags::READ)
+            }
+            .map_err(Errno::from_syscall)?;
             let handle = tairix_rt::fd_grant(file.fd(), ceiling, recipient);
             Errno::syscall_result(handle)
         }

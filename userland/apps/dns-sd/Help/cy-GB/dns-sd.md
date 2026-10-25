@@ -55,9 +55,9 @@ barth ar y cyswllt.
 ## EXIT STATUS
 
 - `0` — cwblhaodd y gorchymyn ei rediad (neu ysgrifennwyd y cymorth byr).
-- `1` — gwrthododd y gwasanaeth darganfod y cais neu nid yw'n rhedeg.
-- `2` — ni ddeallwyd y llinell orchymyn, neu nid oedd modd ysgrifennu'r
-  allbwn.
+- `1` — gwrthododd y gwasanaeth darganfod y cais neu nid yw'n rhedeg. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
+- `2` — nid oedd modd ysgrifennu'r allbwn.
 
 ## ENVIRONMENT
 

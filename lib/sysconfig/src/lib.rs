@@ -919,7 +919,7 @@ pub const fn fan_signal_value(polarity: Polarity) -> &'static str {
 }
 
 fn fan_signal_from(value: &str) -> Option<Polarity> {
-    [Polarity::ActiveHigh, Polarity::ActiveLow]
+    Polarity::ALL
         .into_iter()
         .find(|polarity| fan_signal_value(*polarity) == value)
 }
@@ -2122,6 +2122,19 @@ mod tests {
             "keys are case-sensitive"
         );
         assert_eq!(Key::from_name(""), None);
+    }
+
+    #[test]
+    fn every_value_a_closed_key_lists_is_one_it_takes_and_renders() {
+        for key in Key::ALL {
+            if let ValueShape::Closed(values) = key.shape() {
+                for value in values {
+                    let mut config = SystemConfig::default();
+                    assert_eq!(config.set(*key, value), Ok(()), "{} = {value}", key.name());
+                    assert_eq!(config.render_value(*key), *value, "{}", key.name());
+                }
+            }
+        }
     }
 
     #[test]

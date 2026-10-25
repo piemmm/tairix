@@ -83,8 +83,8 @@ tragen:
 
 - `0` — die Sitzung endete mit `q`, oder die Kurzhilfe wurde angezeigt.
 - `1` — der Dienst oder das Terminal versagte; der Grund wird auf der
-  Standardfehlerausgabe ausgegeben.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Standardfehlerausgabe ausgegeben. Eine nicht verstandene Befehlszeile
+  endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

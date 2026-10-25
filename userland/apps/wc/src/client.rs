@@ -13,10 +13,10 @@ use crate::command::{Command, Job, Operand, Selection, TotalMode};
 use crate::counter::{Counter, Counts};
 use crate::error::WcError;
 use crate::io::{FileSource, Input, Output, SizeProbe};
-use tairix_util::quote::{quote, quote_if_needed};
+use tairix_util::quote::{output_style, quote, quote_subject, Quoted, Style};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `wc`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `wc`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: wc [-clmwL] [--total <when>] [--files0-from <file>] [--] [file...]";
 
 /// `wc`'s own command word: the short-help switches render its own Help
@@ -91,6 +91,7 @@ pub fn run(
     };
 
     let width = number_width(&job, &entries, files);
+    let names = output_style(out.at_terminal());
     let list_is_stdin = job.files0_from.as_deref() == Some("-");
     let show_rows = job.total != TotalMode::Only;
     let mut totals = Counts::default();
@@ -124,10 +125,7 @@ pub fn run(
             }
             Entry::Named(name) => match count_file(files, name) {
                 FileCount::OpenFailed(errno) => {
-                    diagnose(
-                        err,
-                        &format!("{name}: {errno}", name = quote_if_needed(name)),
-                    )?;
+                    diagnose(err, &format!("{name}: {errno}", name = quote_subject(name)))?;
                     all_ok = false;
                     continue;
                 }
@@ -148,7 +146,8 @@ pub fn run(
 
         let (counts, read_error) = outcome;
         if show_rows {
-            out.write_all(format_row(&counts, job.select, width, label).as_bytes())
+            let name = label.map(|name| row_name(name, names));
+            out.write_all(format_row(&counts, job.select, width, name).as_bytes())
                 .map_err(WcError::Output)?;
         }
         totals.add(&counts);
@@ -157,7 +156,7 @@ pub fn run(
                 err,
                 &format!(
                     "{}: {errno}",
-                    quote_if_needed(label.unwrap_or("standard input"))
+                    quote_subject(label.unwrap_or("standard input"))
                 ),
             )?;
             all_ok = false;
@@ -170,7 +169,7 @@ pub fn run(
         TotalMode::Auto => entries.len() > 1,
     };
     if print_total {
-        let label = (job.total != TotalMode::Only).then_some("total");
+        let label = (job.total != TotalMode::Only).then_some(Quoted::new("total", Style::Literal));
         out.write_all(format_row(&totals, job.select, width, label).as_bytes())
             .map_err(WcError::Output)?;
     }
@@ -243,7 +242,7 @@ fn read_list(list: &str, files: &dyn FileSource, stdin: &dyn Input) -> Result<Ve
             Err(errno) => {
                 return Err(format!(
                     "{list}: read error: {errno}",
-                    list = quote_if_needed(list)
+                    list = quote_subject(list)
                 ))
             }
         }
@@ -280,7 +279,7 @@ fn bad_record_message(job: &Job, position: usize, what: &str) -> String {
         Some(list) => format!(
             "{list}:{}: {what}",
             position + 1,
-            list = quote_if_needed(list)
+            list = quote_subject(list)
         ),
         None => String::from(what),
     }
@@ -330,10 +329,27 @@ fn count_stream(
     }
 }
 
+/// `name` as its row shows it: as the output shows a name from elsewhere
+/// ([`output_style`]), and quoted in a pipe too when it holds a line break,
+/// so a row stays one line, as GNU's `wc` keeps it.
+fn row_name(name: &str, names: Style) -> Quoted<'_> {
+    let style = if name.contains('\n') {
+        Style::ShellEscape
+    } else {
+        names
+    };
+    Quoted::new(name, style)
+}
+
 /// One output row: the selected counts in the fixed GNU order (lines,
 /// words, chars, bytes, max line width), each right-aligned to `width`,
 /// space-separated, then the label.
-fn format_row(counts: &Counts, select: Selection, width: usize, name: Option<&str>) -> String {
+fn format_row(
+    counts: &Counts,
+    select: Selection,
+    width: usize,
+    name: Option<Quoted<'_>>,
+) -> String {
     let mut row = String::new();
     let values = [
         (select.lines, counts.lines),
@@ -351,8 +367,7 @@ fn format_row(counts: &Counts, select: Selection, width: usize, name: Option<&st
         }
     }
     if let Some(name) = name {
-        row.push(' ');
-        row.push_str(name);
+        let _ = core::fmt::Write::write_fmt(&mut row, format_args!(" {name}"));
     }
     row.push('\n');
     row
@@ -558,6 +573,52 @@ mod tests {
     }
 
     /// Run `args` against the fixtures, returning (all-ok, stdout, stderr).
+    /// A capturing stream the kernel attests as a terminal.
+    #[derive(Default)]
+    struct Console(Sink);
+
+    impl Output for Console {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+            self.0.write_all(bytes)
+        }
+
+        fn at_terminal(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_rows_name_is_escaped_at_a_terminal_and_one_line_in_a_pipe() {
+        let files = MemFiles::new(&[("e\u{1b}x", b"a\n"), ("n\nl", b"b\n")]);
+        let out = Console::default();
+        run(
+            command(&["-l", "e\u{1b}x", "n\nl"]),
+            None,
+            &files,
+            &MemStdin::new(b""),
+            &NoHelp,
+            &out,
+            &Sink::default(),
+        )
+        .expect("fixture output streams never fail");
+        assert_eq!(out.0.text(), "1 'e'$'\\033''x'\n1 'n'$'\\n''l'\n2 total\n");
+        let (_, piped, _) = run_case(&["-l", "e\u{1b}x", "n\nl"], &files, &MemStdin::new(b""));
+        assert_eq!(piped, "1 e\u{1b}x\n1 'n'$'\\n''l'\n2 total\n");
+    }
+
+    #[test]
+    fn a_diagnostic_quotes_a_name_holding_a_colon() {
+        let (_, _, err) = run_case(
+            &["a:b", "missing"],
+            &MemFiles::new(&[]),
+            &MemStdin::new(b""),
+        );
+        assert_eq!(
+            err,
+            alloc::format!("wc: 'a:b': {0}\nwc: missing: {0}\n", Errno::NotFound)
+        );
+    }
+
     fn run_case(args: &[&str], files: &MemFiles, stdin: &MemStdin) -> (bool, String, String) {
         let out = Sink::default();
         let err = Sink::default();

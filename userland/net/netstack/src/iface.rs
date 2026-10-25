@@ -1756,8 +1756,8 @@ impl Netstack {
     /// neighbour cache (applied separately by a [`NetInterfaceConfigMsg`]
     /// naming the bond); its members are the physical NICs that carry its
     /// frames but hold no addresses. The bond inherits the first declared
-    /// member's device identity (MAC/MTU) — Linux's default bond-MAC
-    /// policy — kept stable for the bond's life so a peer's ARP/ND cache
+    /// member's device identity (MAC/MTU), kept stable for the bond's life
+    /// so a peer's ARP/ND cache
     /// survives failover.
     ///
     /// Every declared member must already be present (its driver bound and

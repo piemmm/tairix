@@ -31,6 +31,12 @@ gwybodaeth safonol (fd 3); nid yw byth yn newid yr allbwn na'r statws
 gadael. Adroddir am ffeil na ellir ei darllen ar yr allbwn gwall ac mae'r
 rhediad yn parhau â'r ffeil nesaf.
 
+Wrth derfynell, dyfynnir pob enw a ddangosir yn yr allbwn lle byddai
+angen hynny ar gragen, ac ysgrifennir unrhyw nod rheoli neu nod
+anweledig arall sydd ynddo wedi'i ddianc, fel na all enw reoli nac
+aildrefnu'r sgrin; mae GNU yn ei ddangos heb ei newid. Mae pibell neu
+ffeil yn derbyn yr enw beit am feit.
+
 ## OPTIONS
 
 - `-c, --bytes <num>` — argraffu `num` beit olaf pob ffeil; gyda `+` ar y
@@ -62,8 +68,8 @@ rhediad yn parhau â'r ffeil nesaf.
 ## EXIT STATUS
 
 - `0` — argraffwyd pob ffeil (neu ysgrifennwyd y cymorth byr).
-- `1` — ni ellid darllen ffeil, neu ni ellid cyflenwi'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni ellid darllen ffeil, neu ni ellid cyflenwi'r allbwn. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

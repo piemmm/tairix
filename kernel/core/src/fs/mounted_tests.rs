@@ -32,14 +32,19 @@ use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, UserId, User
 
 use super::{LateFilesystem, LateIdentity, MountedFilesystemService};
 use crate::fs::blkmeter::{BlkHealthCountersAtomic, BlkIoStatsAtomic, VolumeIoSource};
-use crate::fs::memfs::{RwMockFs, SYSTEM_ONLY_NAME};
+use crate::fs::memfs::{RwMockFs, SYSTEM_ONLY_NAME, SYSTEM_RECORD};
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
 use crate::fs::test_volume::{
-    caps, dir_driver, driver, identity_table, vfs, NullSink, MOUNT, MOUNT_MEDIUM, TEST_GID,
-    TEST_UID,
+    acting, at, attr_get_path, attr_list_path, attr_remove_path, attr_set_path, caps, close,
+    driver, identity_table, list_path, mounted, new_dir, new_file, open_path, own_handle, path,
+    punch_path, read_path, seek_region_path, sync_path, truncate_path, vfs, write_path, Account,
+    FlushSpy, NullSink, MOUNT, MOUNT_MEDIUM, PLANTED, TEST_ACCOUNT, TEST_GID, TEST_UID,
 };
-use crate::fs::{Attachment, FinalLink, Listing, Mode, Path, Vfs, VfsError};
+use crate::fs::{
+    Attachment, Authority, CreateMode, Cwd, FinalLink, Listing, Mode, NodeHandle, Opened, Path,
+    Vfs, VfsError,
+};
 
 /// A removable volume served by `driver`, attached with the flags every
 /// runtime volume carries.
@@ -50,16 +55,39 @@ fn removable(driver: DriverHandle) -> Attachment {
     Attachment::new(driver, Some(stick), MountFlags::NOEXEC)
 }
 
-/// Back the `/Storage` catalog with the volume `driver` serves, so a listing
-/// can merge the runtime mounts beneath it with names the volume holds.
-fn back_storage(vfs: &Vfs, driver: DriverHandle) {
+/// Back the view root with the volume `root` serves and show each of
+/// `children` beneath its floor, as `/System` is shown beneath `/`, so a
+/// listing merges those projections with the names the volume holds.
+fn root_with_children(vfs: &Vfs, root: DriverHandle, children: &[(DriverHandle, &str)]) {
     let mut mounts = vfs.mounts_write();
     mounts
-        .attach(Attachment::new(driver, None, MountFlags::default()))
-        .expect("attach");
-    mounts
-        .set_backing(&Path::parse("/Storage").expect("path"), driver, Vec::new())
-        .expect("back /Storage");
+        .attach(Attachment::new(root, None, MountFlags::default()))
+        .expect("attach the root volume");
+    mounts.back_root(root).expect("back /");
+    for &(child, point) in children {
+        mounts
+            .attach(Attachment::new(child, None, MountFlags::default()))
+            .expect("attach");
+        mounts
+            .mount(
+                Path::parse(point).expect("path"),
+                MountFlags::default(),
+                Some(child),
+            )
+            .expect("shown beneath /");
+    }
+}
+
+/// Project `/Users` on its own, so mounts beneath it sit at a projection's
+/// floor.
+fn users_projection(vfs: &Vfs) {
+    vfs.mounts_write()
+        .mount(
+            Path::parse("/Users").expect("path"),
+            MountFlags::default(),
+            None,
+        )
+        .expect("projects /Users");
 }
 
 /// Two rebased sub-mounts that share **one** backing driver (the
@@ -74,15 +102,15 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
 
     // One driver carrying two backing subtrees, plus an independent second
     // driver. Both are owned by the test principal.
-    let mut shared = dir_driver();
+    let mut shared = driver();
     let sroot = shared.root();
     shared
-        .create(sroot, b"LogsArea", NodeKind::Directory)
+        .create(sroot, b"LogsArea", NodeKind::Directory, &PLANTED)
         .expect("logs subtree");
     shared
-        .create(sroot, b"SettingsArea", NodeKind::Directory)
+        .create(sroot, b"SettingsArea", NodeKind::Directory, &PLANTED)
         .expect("settings subtree");
-    let other = dir_driver();
+    let other = driver();
 
     // The VFS: two rebased mounts on the shared driver and one plain mount on
     // the other, with their in-RAM mount-point directories created so the
@@ -108,6 +136,7 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
             .attach(Attachment::new(driver, None, MountFlags::default()))
             .expect("attach");
     }
+    users_projection(&vfs);
     for (mount_point, subtree) in [
         ("/Users/logs", "LogsArea"),
         ("/Users/settings", "SettingsArea"),
@@ -140,23 +169,17 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
     let svc = MountedFilesystemService::new(cell, identity);
 
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
-    svc.open(TEST_UID, &caps, "/Users/logs/a", create)
-        .expect("create under logs");
-    svc.write(TEST_UID, &caps, "/Users/logs/a", 0, false, b"L")
-        .expect("write logs");
-    svc.open(TEST_UID, &caps, "/Users/settings/b", create)
-        .expect("create under settings");
-    svc.write(TEST_UID, &caps, "/Users/settings/b", 0, false, b"S")
-        .expect("write settings");
-    svc.open(TEST_UID, &caps, "/Users/other/c", create)
-        .expect("create under other");
-    svc.write(TEST_UID, &caps, "/Users/other/c", 0, false, b"O")
-        .expect("write other");
+    open_path(&svc, TEST_UID, &caps, "/Users/logs/a", create).expect("create under logs");
+    write_path(&svc, TEST_UID, &caps, "/Users/logs/a", 0, false, b"L").expect("write logs");
+    open_path(&svc, TEST_UID, &caps, "/Users/settings/b", create).expect("create under settings");
+    write_path(&svc, TEST_UID, &caps, "/Users/settings/b", 0, false, b"S").expect("write settings");
+    open_path(&svc, TEST_UID, &caps, "/Users/other/c", create).expect("create under other");
+    write_path(&svc, TEST_UID, &caps, "/Users/other/c", 0, false, b"O").expect("write other");
 
     // Each file reads back through its own mount.
     let read = |path| {
         let mut buf = [0u8; 1];
-        svc.read(TEST_UID, &caps, path, 0, &mut buf).map(|_| buf[0])
+        read_path(&svc, TEST_UID, &caps, path, 0, &mut buf).map(|_| buf[0])
     };
     assert_eq!(read("/Users/logs/a"), Ok(b'L'));
     assert_eq!(read("/Users/settings/b"), Ok(b'S'));
@@ -171,15 +194,13 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
     assert_eq!(read("/Users/logs/c"), Err(Errno::NotFound));
 }
 
-/// Listing a driver-backed directory merges the mount points of its
-/// direct-child mounts — the `Storage:` catalog enumeration: a runtime
-/// mount with no node of its name on the parent volume appears as a
-/// structural directory entry, a name the parent volume already holds is
-/// not repeated, and the merged name resolves through to the mounted
-/// volume's own content.
+/// Listing a driver-backed floor merges the mount points of its direct-child
+/// mounts, as `/` merges `/System`: a mount with no node of its name on the
+/// parent volume appears as a structural directory entry, a name the parent
+/// volume already holds is not repeated, and the merged name resolves
+/// through to the mounted volume's own content.
 #[test]
 fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
-    use crate::fs::perm::Metadata;
     use tairix_abi::time::Time64;
 
     let h_parent = DriverHandle::from_raw(9).expect("handle");
@@ -188,39 +209,24 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
 
     // The parent volume holds one plain directory and one whose name
     // collides with a child mount point.
-    let mut parent = dir_driver();
+    let mut parent = driver();
     let proot = parent.root();
     parent
-        .create(proot, b"existing", NodeKind::Directory)
+        .create(proot, b"existing", NodeKind::Directory, &PLANTED)
         .expect("existing dir");
     parent
-        .create(proot, b"dup", NodeKind::Directory)
+        .create(proot, b"dup", NodeKind::Directory, &PLANTED)
         .expect("dup dir");
 
     // The hotplug volume carries one file, so resolution through the
     // merged name is provable end to end.
     let mut usb = driver();
     let uroot = usb.root();
-    usb.create(uroot, b"note", NodeKind::RegularFile)
+    usb.create(uroot, b"note", NodeKind::RegularFile, &PLANTED)
         .expect("note file");
 
     let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
-    back_storage(&vfs, h_parent);
-    let template = Metadata::new(UserId(TEST_UID), GroupId(TEST_GID), Mode::from_bits(0o775));
-    vfs.mounts_write()
-        .attach_at(
-            removable(h_usb),
-            Path::parse("/Storage/usb1").expect("path"),
-            template.clone(),
-        )
-        .expect("runtime mount");
-    vfs.mounts_write()
-        .attach_at(
-            removable(h_dup),
-            Path::parse("/Storage/dup").expect("path"),
-            template,
-        )
-        .expect("colliding runtime mount");
+    root_with_children(&vfs, h_parent, &[(h_usb, "/usb1"), (h_dup, "/dup")]);
 
     let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
@@ -236,7 +242,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     let caps = caps();
 
     let entries = svc
-        .readdir_bounded(TEST_UID, &caps, "/Storage", FinalLink::Follow, usize::MAX)
+        .readdir_bounded(TEST_UID, &caps, at("/"), FinalLink::Follow, usize::MAX)
         .expect("listing succeeds");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert!(
@@ -265,20 +271,160 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
 
     // Read one entry per batch through one listing, the merge resumes in
     // both its parts and lists exactly what one whole read does.
-    assert_eq!(names_a_batch_at_a_time(&svc, "/Storage"), names);
+    assert_eq!(names_a_batch_at_a_time(&svc, "/"), names);
 
     // The merged name is not a phantom: it resolves through to the mounted
     // volume's own content.
     let inside = svc
+        .readdir_bounded(TEST_UID, &caps, at("/usb1"), FinalLink::Follow, usize::MAX)
+        .expect("child volume lists");
+    assert!(inside.iter().any(|e| e.name == "note"), "{inside:?}");
+}
+
+/// The production boot shape before the root is unlocked, over a `vfs` that
+/// projects `/System` and `/System/Logs`: `/` and `/System/Logs` backed by a
+/// root volume no driver serves yet, `/System` by a served one holding
+/// `Services/Run`. Answers the cell, the root handle, and the service.
+fn before_the_root_is_served(
+    vfs: Vfs,
+) -> (
+    &'static LateFilesystem<RwMockFs>,
+    DriverHandle,
+    MountedFilesystemService<RwMockFs>,
+) {
+    let h_root = DriverHandle::from_raw(9).expect("handle");
+    let h_system = DriverHandle::from_raw(10).expect("handle");
+    let mut system = driver();
+    let sroot = system.root();
+    let services = system
+        .create(sroot, b"Services", NodeKind::Directory, &PLANTED)
+        .expect("Services");
+    let run = system
+        .create(services, b"Run", NodeKind::RegularFile, &PLANTED)
+        .expect("Run");
+    system.write_at(run, 0, b"R").expect("contents");
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .attach(Attachment::new(h_root, None, MountFlags::default()))
+            .expect("attach the root volume");
+        mounts
+            .attach(Attachment::new(h_system, None, MountFlags::READ_ONLY))
+            .expect("attach /System");
+        mounts.back_root(h_root).expect("back /");
+        mounts
+            .set_backing(&Path::parse("/System").expect("path"), h_system, Vec::new())
+            .expect("back /System");
+        let logs = Path::parse("/System/Logs").expect("path");
+        let subtree = logs.components().to_vec();
+        mounts
+            .set_backing(&logs, h_root, subtree)
+            .expect("back /System/Logs");
+    }
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(h_system, system, "system", "memfs", [0u8; 16], None)
+        .expect("register /System");
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    (cell, h_root, MountedFilesystemService::new(cell, identity))
+}
+
+/// Before the volume backing `/` is served, as before the root is unlocked,
+/// the projections shown beneath its floor are reached through it by their
+/// own names, and nothing the unserved volume holds is: every such walk fails
+/// closed as one standing on it does.
+#[test]
+fn the_projections_beneath_an_unserved_floor_are_reached_through_it() {
+    let (cell, h_root, svc) = before_the_root_is_served(Vfs::with_default_layout(
+        UserId(TEST_UID),
+        GroupId(TEST_GID),
+    ));
+    let caps = caps();
+    let read = |path| {
+        let mut buf = [0u8; 1];
+        read_path(&svc, TEST_UID, &caps, path, 0, &mut buf).map(|_| buf[0])
+    };
+    assert_eq!(read("/System/Services/Run"), Ok(b'R'));
+    assert_eq!(read("System/Services/Run"), Ok(b'R'), "from the root start");
+    assert_eq!(read("/System/../System/Services/Run"), Ok(b'R'));
+    assert_eq!(read("/../System/Services/Run"), Ok(b'R'));
+    let listed = svc
         .readdir_bounded(
             TEST_UID,
             &caps,
-            "/Storage/usb1",
+            at("/System/Services"),
             FinalLink::Follow,
             usize::MAX,
         )
-        .expect("child volume lists");
-    assert!(inside.iter().any(|e| e.name == "note"), "{inside:?}");
+        .expect("lists");
+    assert!(listed.iter().any(|e| e.name == "Run"), "{listed:?}");
+
+    let dir = OpenFlags::READ.union(OpenFlags::DIRECTORY);
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    for (path, flags) in [
+        ("/", dir),
+        ("/Users", dir),
+        ("/System/..", dir),
+        ("/system/Services/Run", OpenFlags::READ),
+        ("/System/Logs/x", OpenFlags::READ),
+        ("/System/Logs/x", create),
+        ("/x", create),
+    ] {
+        assert_eq!(
+            open_path(&svc, TEST_UID, &caps, path, flags),
+            Err(Errno::NotImplemented),
+            "{path}"
+        );
+    }
+
+    let mut volume = driver();
+    let floor = volume.root();
+    volume
+        .create(floor, b"Users", NodeKind::Directory, &PLANTED)
+        .expect("Users");
+    cell.register(h_root, volume, "root", "memfs", [0u8; 16], None)
+        .expect("register /");
+    assert_eq!(open_path(&svc, TEST_UID, &caps, "/Users", dir), Ok(()));
+    assert_eq!(read("/System/Services/Run"), Ok(b'R'));
+}
+
+/// What stands for an unserved floor is the boot layout's record of it, so a
+/// caller it denies search reaches nothing beneath; once the volume is served
+/// its own record governs instead.
+#[test]
+fn an_unserved_floor_is_searched_under_its_layout_record() {
+    let vfs = Vfs::new(crate::fs::Metadata::new(
+        UserId(0),
+        GroupId(0),
+        Mode::from_bits(0o700),
+    ));
+    for (point, flags) in [
+        ("/System", MountFlags::READ_ONLY),
+        ("/System/Logs", MountFlags::NOEXEC),
+    ] {
+        vfs.mounts_write()
+            .mount(Path::parse(point).expect("path"), flags, None)
+            .expect("projected");
+    }
+    let (cell, h_root, svc) = before_the_root_is_served(vfs);
+    let caps = caps();
+    let mut buf = [0u8; 1];
+    assert_eq!(
+        read_path(&svc, TEST_UID, &caps, "/System/Services/Run", 0, &mut buf),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        read_path(&svc, TEST_UID, &caps, "System/Services/Run", 0, &mut buf),
+        Err(Errno::PermissionDenied),
+        "the root start is searched too"
+    );
+    cell.register(h_root, driver(), "root", "memfs", [0u8; 16], None)
+        .expect("register /");
+    assert_eq!(
+        read_path(&svc, TEST_UID, &caps, "/System/Services/Run", 0, &mut buf),
+        Ok(1)
+    );
 }
 
 /// Build a service over freshly leaked mount + identity cells. `mount` and
@@ -321,18 +467,18 @@ fn the_storage_catalog_lists_its_volumes_and_stores_nothing() {
     let svc = ready();
     let caps = caps();
     let stat = svc
-        .stat(TEST_UID, &caps, "/Storage", FinalLink::Follow)
+        .stat(TEST_UID, &caps, at("/Storage"), FinalLink::Follow)
         .expect("the catalog stats");
     assert_eq!(stat.kind, FileKind::Directory);
     assert_eq!((stat.uid, stat.gid, stat.mode), (TEST_UID, TEST_GID, 0o755));
 
     let mut names = Vec::new();
-    svc.readdir(
+    list_path(
+        &svc,
         TEST_UID,
         &caps,
         "/Storage",
-        FinalLink::Follow,
-        &mut Listing::default(),
+        OpenFlags::DIRECTORY,
         &mut |entry| {
             names.push(alloc::string::String::from_utf8_lossy(entry.name).into_owned());
             DirVisit::Take
@@ -344,7 +490,7 @@ fn the_storage_catalog_lists_its_volumes_and_stores_nothing() {
         .lookup_entries(
             TEST_UID,
             &caps,
-            "/Storage",
+            at("/Storage"),
             FinalLink::Follow,
             &[b"vol", b"absent"],
         )
@@ -352,65 +498,55 @@ fn the_storage_catalog_lists_its_volumes_and_stores_nothing() {
     assert!(looked.entries[0].is_some() && looked.entries[1].is_none());
 
     assert_eq!(
-        svc.open(TEST_UID, &caps, "/Storage", OpenFlags::DIRECTORY),
+        open_path(&svc, TEST_UID, &caps, "/Storage", OpenFlags::DIRECTORY),
         Ok(())
     );
     assert_eq!(
-        svc.open(TEST_UID, &caps, "/Storage", OpenFlags::READ),
+        open_path(&svc, TEST_UID, &caps, "/Storage", OpenFlags::READ),
         Err(Errno::IsADirectory)
     );
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, "/Storage", RealpathMode::Existing),
+        svc.realpath(TEST_UID, &caps, at("/Storage"), RealpathMode::Existing),
         Ok(alloc::string::String::from("/Storage"))
     );
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, "/Storage/new", RealpathMode::Final),
+        svc.realpath(TEST_UID, &caps, at("/Storage/new"), RealpathMode::Final),
         Ok(alloc::string::String::from("/Storage/new"))
     );
     assert_eq!(
-        svc.stat(TEST_UID, &caps, "/Storage/absent", FinalLink::Follow),
+        svc.stat(TEST_UID, &caps, at("/Storage/absent"), FinalLink::Follow),
         Err(Errno::NotFound)
     );
 
     let read_only = VfsError::ReadOnly.to_errno();
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
     assert_eq!(
-        svc.open(TEST_UID, &caps, "/Storage/new", create),
-        Err(read_only)
-    );
-    assert_eq!(svc.mkdir(TEST_UID, &caps, "/Storage/new"), Err(read_only));
-    assert_eq!(
-        svc.unlink(TEST_UID, &caps, "/Storage", UnlinkFlags::DIRECTORY),
+        open_path(&svc, TEST_UID, &caps, "/Storage/new", create),
         Err(read_only)
     );
     assert_eq!(
-        svc.set_mode(TEST_UID, &caps, "/Storage", 0o777),
+        svc.mkdir(TEST_UID, &caps, at("/Storage/new"), new_dir()),
         Err(read_only)
     );
     assert_eq!(
-        svc.mkdir(TEST_UID, &caps, "/Storage/absent/deeper"),
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at("/Storage"),
+            UnlinkFlags::DIRECTORY,
+            None
+        ),
+        Err(read_only)
+    );
+    assert_eq!(
+        svc.set_mode(TEST_UID, &caps, at("/Storage"), 0o777, FinalLink::Follow),
+        Err(read_only)
+    );
+    assert_eq!(
+        svc.mkdir(TEST_UID, &caps, at("/Storage/absent/deeper"), new_dir()),
         Err(Errno::NotFound),
         "a name below a vacant one is simply not there"
     );
-}
-
-/// A fully-installed writable service whose created directories are
-/// traversable (mode `0o755`), so a test can build a tree and then walk it.
-fn ready_traversable() -> MountedFilesystemService<RwMockFs> {
-    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
-    cell.install_vfs(vfs(false)).expect("install vfs");
-    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-    cell.register(handle, dir_driver(), "vol", "memfs", [0u8; 16], None)
-        .expect("register driver");
-    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
-    identity
-        .install(identity_table())
-        .expect("install identity");
-    MountedFilesystemService::new(cell, identity)
-}
-
-fn path(name: &str) -> alloc::string::String {
-    alloc::format!("{MOUNT}/{name}")
 }
 
 #[test]
@@ -421,11 +557,11 @@ fn an_uninstalled_mount_fails_closed_not_implemented() {
     let caps = caps();
     let mut buf = [0u8; 4];
     assert_eq!(
-        svc.read(TEST_UID, &caps, &path("x"), 0, &mut buf),
+        read_path(&svc, TEST_UID, &caps, &path("x"), 0, &mut buf),
         Err(Errno::NotImplemented)
     );
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &path("x"), FinalLink::Follow),
+        svc.stat(TEST_UID, &caps, at(&path("x")), FinalLink::Follow),
         Err(Errno::NotImplemented)
     );
 }
@@ -438,7 +574,7 @@ fn an_uninstalled_identity_fails_closed_not_implemented() {
     let svc = service(true, false, false);
     let caps = caps();
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &path("x"), FinalLink::Follow),
+        svc.stat(TEST_UID, &caps, at(&path("x")), FinalLink::Follow),
         Err(Errno::NotImplemented)
     );
 }
@@ -450,7 +586,7 @@ fn an_unknown_principal_is_denied() {
     let svc = ready();
     let caps = caps();
     assert_eq!(
-        svc.stat(4242, &caps, &path("x"), FinalLink::Follow),
+        svc.stat(4242, &caps, at(&path("x")), FinalLink::Follow),
         Err(Errno::PermissionDenied)
     );
 }
@@ -466,7 +602,7 @@ fn the_system_principal_resolves_before_the_identity_table_installs() {
     let svc = service(true, false, false);
     let caps = caps();
     assert_eq!(
-        svc.stat(0, &caps, &path("x"), FinalLink::Follow),
+        svc.stat(0, &caps, at(&path("x")), FinalLink::Follow),
         Err(Errno::NotFound)
     );
 }
@@ -479,13 +615,99 @@ fn an_installed_table_without_uid0_still_resolves_the_system_principal() {
     let svc = ready();
     let caps = caps();
     assert_eq!(
-        svc.stat(0, &caps, &path("x"), FinalLink::Follow),
+        svc.stat(0, &caps, at(&path("x")), FinalLink::Follow),
         Err(Errno::NotFound)
     );
     assert_eq!(
-        svc.stat(4242, &caps, &path("x"), FinalLink::Follow),
+        svc.stat(4242, &caps, at(&path("x")), FinalLink::Follow),
         Err(Errno::PermissionDenied)
     );
+}
+
+/// Groups are read from the table in force: a replacement that takes a
+/// principal out of a group ends what the group granted at its next
+/// operation, through its own open descriptor too, and one that puts it back
+/// restores it, however often its groups were resolved before.
+#[test]
+fn a_replaced_identity_table_binds_a_principals_groups_at_its_next_operation() {
+    const READER_UID: u32 = 1001;
+    const READER_GID: u32 = 1001;
+    let table = |member: bool| {
+        let mut builder = IdentityTableBuilder::new();
+        builder.push_group(GroupRecord {
+            gid: GroupId(TEST_GID),
+        });
+        builder.push_group(GroupRecord {
+            gid: GroupId(READER_GID),
+        });
+        builder.push_user(UserRecord {
+            uid: UserId(TEST_UID),
+            primary_gid: GroupId(TEST_GID),
+            supplementary_gids: Vec::new(),
+            capability_grants: CapabilitySet::empty(),
+        });
+        builder.push_user(UserRecord {
+            uid: UserId(READER_UID),
+            primary_gid: GroupId(READER_GID),
+            supplementary_gids: if member {
+                alloc::vec![GroupId(TEST_GID)]
+            } else {
+                Vec::new()
+            },
+            capability_grants: CapabilitySet::empty(),
+        });
+        builder.verify(&NullSink).expect("well-formed table")
+    };
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    cell.register(
+        DriverHandle::from_raw(9).expect("handle"),
+        driver(),
+        "vol",
+        "memfs",
+        [0u8; 16],
+        None,
+    )
+    .expect("register");
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity.install(table(true)).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let caps = caps();
+    let shared = "/Storage/vol/shared";
+    open_path(
+        &svc,
+        TEST_UID,
+        &caps,
+        shared,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    svc.set_mode(TEST_UID, &caps, at(shared), 0o640, FinalLink::Follow)
+        .expect("chmod");
+    let held =
+        own_handle(&svc, READER_UID, &caps, shared, OpenFlags::READ).expect("a member opens");
+    let who = acting(READER_UID, &caps);
+    let mut buf = [0u8; 1];
+    for _ in 0..2 {
+        assert_eq!(svc.read_node(&held, &who, 0, &mut buf), Ok(0));
+    }
+    identity.replace(table(false)).expect("replaces");
+    assert_eq!(
+        svc.read_node(&held, &who, 0, &mut buf),
+        Err(Errno::PermissionDenied),
+        "the replaced table's groups bind the open descriptor's next read"
+    );
+    assert_eq!(
+        open_path(&svc, READER_UID, &caps, shared, OpenFlags::READ),
+        Err(Errno::PermissionDenied)
+    );
+    identity.replace(table(true)).expect("replaces");
+    assert_eq!(
+        svc.read_node(&held, &who, 0, &mut buf),
+        Ok(0),
+        "and so does a membership given back"
+    );
+    close(&svc, held);
 }
 
 #[test]
@@ -496,11 +718,14 @@ fn create_write_read_back_under_attested_identity() {
     let flags = OpenFlags::CREATE
         .union(OpenFlags::WRITE)
         .union(OpenFlags::READ);
-    svc.open(TEST_UID, &caps, &p, flags).expect("create-open");
-    assert_eq!(svc.write(TEST_UID, &caps, &p, 0, false, b"hello"), Ok(5));
+    open_path(&svc, TEST_UID, &caps, &p, flags).expect("create-open");
+    assert_eq!(
+        write_path(&svc, TEST_UID, &caps, &p, 0, false, b"hello"),
+        Ok(5)
+    );
 
     let mut buf = [0u8; 16];
-    let n = svc.read(TEST_UID, &caps, &p, 0, &mut buf).expect("read");
+    let n = read_path(&svc, TEST_UID, &caps, &p, 0, &mut buf).expect("read");
     assert_eq!(&buf[..n], b"hello");
 }
 
@@ -512,14 +737,18 @@ fn a_file_its_caller_may_not_write_is_refused_in_a_writable_directory() {
     let svc = ready();
     let caps = caps();
     let p = create_file(&svc, "locked");
-    svc.write(TEST_UID, &caps, &p, 0, false, b"kept")
-        .expect("write");
-    svc.set_mode(TEST_UID, &caps, &p, 0o444).expect("chmod");
+    write_path(&svc, TEST_UID, &caps, &p, 0, false, b"kept").expect("write");
+    svc.set_mode(TEST_UID, &caps, at(&p), 0o444, FinalLink::Follow)
+        .expect("chmod");
 
     let denied = Err(Errno::PermissionDenied);
-    assert_eq!(svc.open(TEST_UID, &caps, &p, OpenFlags::WRITE), denied);
     assert_eq!(
-        svc.open(
+        open_path(&svc, TEST_UID, &caps, &p, OpenFlags::WRITE),
+        denied
+    );
+    assert_eq!(
+        open_path(
+            &svc,
             TEST_UID,
             &caps,
             &p,
@@ -528,14 +757,16 @@ fn a_file_its_caller_may_not_write_is_refused_in_a_writable_directory() {
         denied
     );
     assert_eq!(
-        svc.write(TEST_UID, &caps, &p, 0, false, b"over")
-            .map(|_| ()),
+        write_path(&svc, TEST_UID, &caps, &p, 0, false, b"over").map(|_| ()),
         denied
     );
-    assert_eq!(svc.truncate(TEST_UID, &caps, &p, 0), denied);
-    assert_eq!(svc.open(TEST_UID, &caps, &p, OpenFlags::READ), Ok(()));
+    assert_eq!(truncate_path(&svc, TEST_UID, &caps, &p, 0), denied);
+    assert_eq!(
+        open_path(&svc, TEST_UID, &caps, &p, OpenFlags::READ),
+        Ok(())
+    );
     let mut buf = [0u8; 8];
-    let n = svc.read(TEST_UID, &caps, &p, 0, &mut buf).expect("read");
+    let n = read_path(&svc, TEST_UID, &caps, &p, 0, &mut buf).expect("read");
     assert_eq!(&buf[..n], b"kept", "nothing was written or cut");
 }
 
@@ -546,27 +777,37 @@ fn a_writable_file_is_written_in_a_directory_its_caller_may_not_write() {
     let svc = ready();
     let caps = caps();
     let dir = path("d");
-    svc.mkdir(TEST_UID, &caps, &dir).expect("mkdir");
-    svc.set_mode(TEST_UID, &caps, &dir, 0o755)
+    svc.mkdir(TEST_UID, &caps, at(&dir), new_dir())
+        .expect("mkdir");
+    svc.set_mode(TEST_UID, &caps, at(&dir), 0o755, FinalLink::Follow)
         .expect("traversable");
     let file = alloc::format!("{dir}/f");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.set_mode(TEST_UID, &caps, &dir, 0o555).expect("closed");
+    svc.set_mode(TEST_UID, &caps, at(&dir), 0o555, FinalLink::Follow)
+        .expect("closed");
 
-    assert_eq!(svc.open(TEST_UID, &caps, &file, OpenFlags::WRITE), Ok(()));
-    assert_eq!(svc.write(TEST_UID, &caps, &file, 0, false, b"edit"), Ok(4));
-    assert_eq!(svc.truncate(TEST_UID, &caps, &file, 2), Ok(()));
+    assert_eq!(
+        open_path(&svc, TEST_UID, &caps, &file, OpenFlags::WRITE),
+        Ok(())
+    );
+    assert_eq!(
+        write_path(&svc, TEST_UID, &caps, &file, 0, false, b"edit"),
+        Ok(4)
+    );
+    assert_eq!(truncate_path(&svc, TEST_UID, &caps, &file, 2), Ok(()));
     let mut buf = [0u8; 8];
-    let n = svc.read(TEST_UID, &caps, &file, 0, &mut buf).expect("read");
+    let n = read_path(&svc, TEST_UID, &caps, &file, 0, &mut buf).expect("read");
     assert_eq!(&buf[..n], b"ed");
     assert_eq!(
-        svc.open(
+        open_path(
+            &svc,
             TEST_UID,
             &caps,
             &alloc::format!("{dir}/g"),
@@ -582,19 +823,23 @@ fn an_append_write_ignores_the_offset_and_extends() {
     let svc = ready();
     let caps = caps();
     let p = path("log");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &p,
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    assert_eq!(svc.write(TEST_UID, &caps, &p, 0, false, b"abc"), Ok(3));
+    assert_eq!(
+        write_path(&svc, TEST_UID, &caps, &p, 0, false, b"abc"),
+        Ok(3)
+    );
     // The supplied offset (0) is ignored; the append lands at end of file.
-    assert_eq!(svc.write(TEST_UID, &caps, &p, 0, true, b"de"), Ok(2));
+    assert_eq!(write_path(&svc, TEST_UID, &caps, &p, 0, true, b"de"), Ok(2));
 
     let mut buf = [0u8; 8];
-    let n = svc.read(TEST_UID, &caps, &p, 0, &mut buf).expect("read");
+    let n = read_path(&svc, TEST_UID, &caps, &p, 0, &mut buf).expect("read");
     assert_eq!(&buf[..n], b"abcde");
 }
 
@@ -603,18 +848,18 @@ fn stat_reports_kind_size_and_attested_owner() {
     let svc = ready();
     let caps = caps();
     let p = path("f");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &p,
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.write(TEST_UID, &caps, &p, 0, false, b"1234")
-        .expect("write");
+    write_path(&svc, TEST_UID, &caps, &p, 0, false, b"1234").expect("write");
 
     let st = svc
-        .stat(TEST_UID, &caps, &p, FinalLink::Follow)
+        .stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
         .expect("stat");
     assert_eq!(st.kind, FileKind::Regular);
     assert_eq!(st.size, 4);
@@ -623,27 +868,51 @@ fn stat_reports_kind_size_and_attested_owner() {
     assert_eq!(st.mode, 0o644);
 }
 
-/// The names `path` lists, read one entry per batch through one listing.
-fn names_a_batch_at_a_time(svc: &dyn FilesystemService, path: &str) -> Vec<alloc::string::String> {
+/// One batch of the listing of `opened` from `at`, through the opener's own
+/// descriptor.
+fn a_batch(
+    svc: &dyn FilesystemService,
+    opened: &Opened,
+    at: &mut Listing,
+    each: &mut dyn FnMut(&tairix_abi::DirEntry<'_>) -> DirVisit,
+) -> Result<(), Errno> {
+    let caps = caps();
+    let who = acting(TEST_UID, &caps);
+    match opened {
+        Opened::Catalog(catalog) => svc.readdir_catalog(TEST_UID, &caps, catalog, at, each),
+        Opened::Node {
+            node,
+            projection,
+            opened_as,
+            at_floor,
+            ..
+        } => {
+            let handle = NodeHandle {
+                node: node.clone(),
+                projection: Arc::clone(projection),
+                authority: Authority::Holder,
+                opened_as: Arc::clone(opened_as),
+                at_floor: *at_floor,
+            };
+            svc.readdir_node(&handle, &who, at, each)
+        }
+    }
+}
+
+/// The names `opened` lists, read one entry per batch through one listing.
+fn names_of(svc: &dyn FilesystemService, opened: &Opened) -> Vec<alloc::string::String> {
     let mut at = Listing::default();
     let mut names = Vec::new();
     while !at.is_done() {
         let mut took = false;
-        svc.readdir(
-            TEST_UID,
-            &caps(),
-            path,
-            FinalLink::Follow,
-            &mut at,
-            &mut |entry| {
-                if took {
-                    return DirVisit::Stop;
-                }
-                took = true;
-                names.push(alloc::string::String::from_utf8(entry.name.to_vec()).expect("utf8"));
-                DirVisit::Take
-            },
-        )
+        a_batch(svc, opened, &mut at, &mut |entry| {
+            if took {
+                return DirVisit::Stop;
+            }
+            took = true;
+            names.push(alloc::string::String::from_utf8(entry.name.to_vec()).expect("utf8"));
+            DirVisit::Take
+        })
         .expect("a batch");
         assert!(
             took || at.is_done(),
@@ -653,15 +922,33 @@ fn names_a_batch_at_a_time(svc: &dyn FilesystemService, path: &str) -> Vec<alloc
     names
 }
 
-/// A listing whose directory is renamed away and replaced between batches
-/// is refused rather than resumed inside the new one; restarting reads what
-/// the path names now.
+/// The names `path` lists, read one entry per batch through one descriptor.
+fn names_a_batch_at_a_time(svc: &dyn FilesystemService, path: &str) -> Vec<alloc::string::String> {
+    let opened = svc
+        .open(
+            TEST_UID,
+            &caps(),
+            at(path),
+            OpenFlags::DIRECTORY,
+            CreateMode::NONE,
+        )
+        .expect("opens");
+    names_of(svc, &opened)
+}
+
+/// A listing reads the directory its descriptor was opened on: renamed away
+/// and replaced at its path between batches, the listing carries on through
+/// the original, and a fresh open lists what the path names now.
+///
+/// Regression: a listing re-resolved its path every batch, so a directory
+/// moved under it was refused as stale.
 #[test]
-fn a_listing_whose_directory_is_replaced_between_batches_is_stale() {
-    let svc = ready_traversable();
+fn a_listing_reads_the_directory_it_was_opened_on_however_its_path_moves() {
+    let svc = ready();
     let caps = caps();
     let create = |name: &str| {
-        svc.open(
+        open_path(
+            &svc,
             TEST_UID,
             &caps,
             &path(name),
@@ -669,69 +956,57 @@ fn a_listing_whose_directory_is_replaced_between_batches_is_stale() {
         )
         .expect("create");
     };
-    svc.mkdir(TEST_UID, &caps, &path("d")).expect("mkdir");
+    svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+        .expect("mkdir");
     create("d/a");
     create("d/b");
-    let mut at = Listing::default();
-    svc.readdir(
-        TEST_UID,
-        &caps,
-        &path("d"),
-        FinalLink::Follow,
-        &mut at,
-        &mut |_| DirVisit::Stop,
-    )
-    .expect("the first batch fixes the listing to d");
+    let opened = svc
+        .open(
+            TEST_UID,
+            &caps,
+            at(&path("d")),
+            OpenFlags::DIRECTORY,
+            CreateMode::NONE,
+        )
+        .expect("opens");
+    let mut listing = Listing::default();
+    a_batch(&svc, &opened, &mut listing, &mut |_| DirVisit::Stop).expect("the first batch");
     svc.rename(
         TEST_UID,
         &caps,
-        &path("d"),
-        &path("old"),
+        at(&path("d")),
+        at(&path("old")),
         RenameFlags::empty(),
+        None,
     )
     .expect("rename away");
-    svc.mkdir(TEST_UID, &caps, &path("d")).expect("a new d");
+    svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+        .expect("a new d");
     create("d/c");
-    assert_eq!(
-        svc.readdir(
-            TEST_UID,
-            &caps,
-            &path("d"),
-            FinalLink::Follow,
-            &mut at,
-            &mut |_| { DirVisit::Take }
-        ),
-        Err(Errno::Stale)
-    );
-    at.restart();
     let mut names = Vec::new();
-    svc.readdir(
-        TEST_UID,
-        &caps,
-        &path("d"),
-        FinalLink::Follow,
-        &mut at,
-        &mut |entry| {
-            names.push(entry.name.to_vec());
-            DirVisit::Take
-        },
-    )
-    .expect("a restart lists the new directory");
-    assert_eq!(names, [b"c".to_vec()]);
+    a_batch(&svc, &opened, &mut listing, &mut |entry| {
+        names.push(entry.name.to_vec());
+        DirVisit::Take
+    })
+    .expect("the listing carries on");
+    assert_eq!(names, [b"a".to_vec(), b"b".to_vec()]);
+    assert_eq!(names_a_batch_at_a_time(&svc, &path("d")), ["c"]);
 }
 
-/// A directory removed between two batches leaves its listing stale however
-/// soon the volume gives its number to the next directory made at the path,
-/// as FAT gives its first cluster and ext4 its inode; and the registry keeps
-/// no record once the listing goes.
+/// A directory removed while a descriptor holds it lists nothing more, and
+/// keeps its number from the next directory made while it is held, however
+/// eagerly the volume reuses numbers; once let go, its number is free again.
+///
+/// Regression: the next directory made at the path took the removed one's
+/// number, so a listing could not tell the two apart.
 #[test]
-fn a_listing_whose_directory_is_removed_and_its_number_reused_is_stale() {
+fn a_held_directory_removed_lists_nothing_and_keeps_its_number() {
     let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
     cell.register(
         handle,
-        dir_driver().with_reused_numbers(),
+        driver().with_reused_numbers(),
         "vol",
         "memfs",
         [0u8; 16],
@@ -742,59 +1017,58 @@ fn a_listing_whose_directory_is_removed_and_its_number_reused_is_stale() {
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
     let caps = caps();
-    let create = |name: &str| {
-        svc.open(
-            TEST_UID,
-            &caps,
-            &path(name),
-            OpenFlags::CREATE.union(OpenFlags::WRITE),
-        )
-        .expect("create");
+    let id_of = |name: &str| {
+        svc.stat(TEST_UID, &caps, at(&path(name)), FinalLink::Follow)
+            .expect("stat")
+            .id
     };
-    svc.mkdir(TEST_UID, &caps, &path("d")).expect("mkdir");
-    create("d/a");
-    create("d/b");
-    let old = svc
-        .stat(TEST_UID, &caps, &path("d"), FinalLink::Follow)
-        .expect("stat")
-        .id;
-    let mut at = Listing::default();
-    svc.readdir(
+    svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+        .expect("mkdir");
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
-        &path("d"),
-        FinalLink::Follow,
-        &mut at,
-        &mut |_| DirVisit::Stop,
+        &path("d/a"),
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
-    .expect("the first batch fixes the listing to d");
-    assert_eq!(cell.listings.len(), 1);
-    for name in ["d/a", "d/b"] {
-        svc.unlink(TEST_UID, &caps, &path(name), UnlinkFlags::empty())
-            .expect("unlink");
-    }
-    svc.unlink(TEST_UID, &caps, &path("d"), UnlinkFlags::DIRECTORY)
-        .expect("rmdir");
-    svc.mkdir(TEST_UID, &caps, &path("d")).expect("a new d");
-    create("d/c");
-    let new = svc
-        .stat(TEST_UID, &caps, &path("d"), FinalLink::Follow)
-        .expect("stat")
-        .id;
-    assert_eq!(new, old, "the new directory took the old one's number");
-    assert_eq!(
-        svc.readdir(
-            TEST_UID,
-            &caps,
-            &path("d"),
-            FinalLink::Follow,
-            &mut at,
-            &mut |_| DirVisit::Take
-        ),
-        Err(Errno::Stale)
-    );
-    drop(at);
-    assert_eq!(cell.listings.len(), 0, "no record outlives its listings");
+    .expect("create");
+    let old = id_of("d");
+    let held = own_handle(&svc, TEST_UID, &caps, &path("d"), OpenFlags::DIRECTORY).expect("opens");
+    svc.unlink(
+        TEST_UID,
+        &caps,
+        at(&path("d/a")),
+        UnlinkFlags::empty(),
+        None,
+    )
+    .expect("unlink");
+    svc.unlink(
+        TEST_UID,
+        &caps,
+        at(&path("d")),
+        UnlinkFlags::DIRECTORY,
+        None,
+    )
+    .expect("rmdir");
+    svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+        .expect("a new d");
+    assert_ne!(id_of("d"), old, "a held number is not handed out");
+    let mut names = Vec::new();
+    svc.readdir_node(
+        &held,
+        &acting(TEST_UID, &caps),
+        &mut Listing::default(),
+        &mut |entry| {
+            names.push(entry.name.to_vec());
+            DirVisit::Take
+        },
+    )
+    .expect("a removed directory lists");
+    assert!(names.is_empty(), "a removed directory lists nothing");
+    close(&svc, held);
+    svc.mkdir(TEST_UID, &caps, at(&path("e")), new_dir())
+        .expect("mkdir");
+    assert_eq!(id_of("e"), old, "let go, its number is free again");
 }
 
 /// Listing the mount points beneath a directory enters the driver with no
@@ -805,7 +1079,7 @@ fn a_listing_holds_no_mount_table_guard_into_its_driver() {
     let h_parent = DriverHandle::from_raw(9).expect("handle");
     let h_usb = DriverHandle::from_raw(10).expect("handle");
     let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
-    let parent = dir_driver().with_lookup_probe(Box::new(move || {
+    let parent = driver().with_lookup_probe(Box::new(move || {
         let vfs = cell.vfs().expect("installed");
         assert!(
             vfs.mounts_unlocked(),
@@ -813,18 +1087,7 @@ fn a_listing_holds_no_mount_table_guard_into_its_driver() {
         );
     }));
     let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
-    back_storage(&vfs, h_parent);
-    vfs.mounts_write()
-        .attach_at(
-            removable(h_usb),
-            Path::parse("/Storage/usb1").expect("path"),
-            crate::fs::perm::Metadata::new(
-                UserId(TEST_UID),
-                GroupId(TEST_GID),
-                Mode::from_bits(0o775),
-            ),
-        )
-        .expect("runtime mount");
+    root_with_children(&vfs, h_parent, &[(h_usb, "/usb1")]);
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(h_parent, parent, "root", "memfs", [0u8; 16], None)
         .expect("register parent");
@@ -833,15 +1096,18 @@ fn a_listing_holds_no_mount_table_guard_into_its_driver() {
     let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
-    assert_eq!(names_a_batch_at_a_time(&svc, "/Storage"), ["usb1"]);
+    let names = names_a_batch_at_a_time(&svc, "/");
+    assert!(names.iter().any(|name| name == "usb1"), "{names:?}");
 }
 
 #[test]
 fn mkdir_then_readdir_reports_each_entrys_kind() {
     let svc = ready();
     let caps = caps();
-    svc.mkdir(TEST_UID, &caps, &path("sub")).expect("mkdir");
-    svc.open(
+    svc.mkdir(TEST_UID, &caps, at(&path("sub")), new_dir())
+        .expect("mkdir");
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &path("file"),
@@ -850,7 +1116,7 @@ fn mkdir_then_readdir_reports_each_entrys_kind() {
     .expect("create file");
 
     let mut entries = svc
-        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
+        .readdir_bounded(TEST_UID, &caps, at(MOUNT), FinalLink::Follow, usize::MAX)
         .expect("readdir");
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let kinds: Vec<(FileKind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
@@ -868,7 +1134,8 @@ fn mkdir_then_readdir_reports_each_entrys_kind() {
 fn readdir_reports_one_identity_for_two_names_of_one_node() {
     let svc = ready();
     let caps = caps();
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &path("first"),
@@ -878,14 +1145,14 @@ fn readdir_reports_one_identity_for_two_names_of_one_node() {
     svc.link(
         TEST_UID,
         &caps,
-        &path("first"),
-        &path("second"),
+        at(&path("first")),
+        at(&path("second")),
         FinalLink::Keep,
     )
     .expect("second name");
 
     let entries = svc
-        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
+        .readdir_bounded(TEST_UID, &caps, at(MOUNT), FinalLink::Follow, usize::MAX)
         .expect("readdir");
     let first = entries
         .iter()
@@ -902,7 +1169,7 @@ fn readdir_reports_one_identity_for_two_names_of_one_node() {
     // The listing's identity is the same one `stat` reports for the path, so
     // the two views of a node cannot disagree about what it is.
     let stat = svc
-        .stat(TEST_UID, &caps, &path("first"), FinalLink::Follow)
+        .stat(TEST_UID, &caps, at(&path("first")), FinalLink::Follow)
         .expect("stat");
     assert_eq!(stat.id, first.id);
     assert_eq!(stat.nlink, first.nlink);
@@ -915,7 +1182,8 @@ fn readdir_reports_distinct_identities_for_distinct_nodes() {
     let svc = ready();
     let caps = caps();
     for name in ["one", "two"] {
-        svc.open(
+        open_path(
+            &svc,
             TEST_UID,
             &caps,
             &path(name),
@@ -924,7 +1192,7 @@ fn readdir_reports_distinct_identities_for_distinct_nodes() {
         .expect("create");
     }
     let entries = svc
-        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
+        .readdir_bounded(TEST_UID, &caps, at(MOUNT), FinalLink::Follow, usize::MAX)
         .expect("readdir");
     let ids: Vec<tairix_abi::FileId> = entries.iter().map(|e| e.id).collect();
     assert_eq!(ids.len(), 2);
@@ -932,23 +1200,78 @@ fn readdir_reports_distinct_identities_for_distinct_nodes() {
     assert!(entries.iter().all(|e| e.nlink == NodeInfo::SINGLE_NAME));
 }
 
+/// A node's identity is the number its format gives it, not the id the
+/// driver resolves it by: `stat`, a listing and a lookup of entries all report
+/// the number, so they agree with each other and with nothing else.
+#[test]
+fn a_nodes_identity_is_its_formats_number_not_its_id() {
+    const BIAS: u64 = 1 << 40;
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+    cell.register(
+        handle,
+        driver().with_ino_bias(BIAS),
+        "vol",
+        "memfs",
+        [0u8; 16],
+        None,
+    )
+    .expect("register driver");
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let caps = caps();
+    open_path(
+        &svc,
+        TEST_UID,
+        &caps,
+        &path("f"),
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+
+    let file = svc
+        .stat(TEST_UID, &caps, at(&path("f")), FinalLink::Follow)
+        .expect("stat");
+    assert!(file.id.node > BIAS, "the format's number, not the id");
+    let listed = svc
+        .readdir_bounded(TEST_UID, &caps, at(MOUNT), FinalLink::Follow, usize::MAX)
+        .expect("readdir");
+    assert_eq!(
+        listed.iter().find(|e| e.name == "f").map(|e| e.id),
+        Some(file.id)
+    );
+    let dir = svc
+        .stat(TEST_UID, &caps, at(MOUNT), FinalLink::Follow)
+        .expect("stat the directory");
+    assert!(dir.id.node > BIAS);
+    let names: [&[u8]; 1] = [b"f"];
+    let looked = svc
+        .lookup_entries(TEST_UID, &caps, at(MOUNT), FinalLink::Follow, &names)
+        .expect("looks up");
+    assert_eq!(looked.dir, dir.id);
+    assert_eq!(looked.entries[0].as_ref().map(|e| e.id), Some(file.id));
+}
+
 #[test]
 fn unlink_removes_the_file() {
     let svc = ready();
     let caps = caps();
     let p = path("gone");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &p,
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.unlink(TEST_UID, &caps, &p, UnlinkFlags::empty())
+    svc.unlink(TEST_UID, &caps, at(&p), UnlinkFlags::empty(), None)
         .expect("unlink");
     let mut buf = [0u8; 4];
     assert_eq!(
-        svc.read(TEST_UID, &caps, &p, 0, &mut buf),
+        read_path(&svc, TEST_UID, &caps, &p, 0, &mut buf),
         Err(Errno::NotFound)
     );
 }
@@ -961,7 +1284,8 @@ fn directory_only_unlink_refuses_a_file_and_removes_an_empty_directory() {
     let svc = ready();
     let caps = caps();
     let file = path("plain");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
@@ -969,17 +1293,18 @@ fn directory_only_unlink_refuses_a_file_and_removes_an_empty_directory() {
     )
     .expect("create");
     assert_eq!(
-        svc.unlink(TEST_UID, &caps, &file, UnlinkFlags::DIRECTORY),
+        svc.unlink(TEST_UID, &caps, at(&file), UnlinkFlags::DIRECTORY, None),
         Err(Errno::NotADirectory)
     );
-    svc.stat(TEST_UID, &caps, &file, FinalLink::Follow)
+    svc.stat(TEST_UID, &caps, at(&file), FinalLink::Follow)
         .expect("file survives the refused dir-only removal");
     let dir = path("empty");
-    svc.mkdir(TEST_UID, &caps, &dir).expect("mkdir");
-    svc.unlink(TEST_UID, &caps, &dir, UnlinkFlags::DIRECTORY)
+    svc.mkdir(TEST_UID, &caps, at(&dir), new_dir())
+        .expect("mkdir");
+    svc.unlink(TEST_UID, &caps, at(&dir), UnlinkFlags::DIRECTORY, None)
         .expect("dir-only remove of an empty directory");
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &dir, FinalLink::Follow),
+        svc.stat(TEST_UID, &caps, at(&dir), FinalLink::Follow),
         Err(Errno::NotFound)
     );
 }
@@ -989,18 +1314,18 @@ fn truncate_changes_the_size() {
     let svc = ready();
     let caps = caps();
     let p = path("t");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &p,
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.write(TEST_UID, &caps, &p, 0, false, b"0123456789")
-        .expect("write");
-    svc.truncate(TEST_UID, &caps, &p, 4).expect("truncate");
+    write_path(&svc, TEST_UID, &caps, &p, 0, false, b"0123456789").expect("write");
+    truncate_path(&svc, TEST_UID, &caps, &p, 4).expect("truncate");
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &p, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
             .expect("stat")
             .size,
         4
@@ -1012,7 +1337,8 @@ fn an_exclusive_create_of_an_existing_path_fails_closed() {
     let svc = ready();
     let caps = caps();
     let p = path("dup");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &p,
@@ -1024,7 +1350,7 @@ fn an_exclusive_create_of_an_existing_path_fails_closed() {
         .union(OpenFlags::WRITE);
     // The dedicated `EEXIST` equivalent crosses the ABI boundary intact.
     assert_eq!(
-        svc.open(TEST_UID, &caps, &p, exclusive),
+        open_path(&svc, TEST_UID, &caps, &p, exclusive),
         Err(Errno::AlreadyExists)
     );
 }
@@ -1034,7 +1360,8 @@ fn a_directory_open_of_a_regular_file_fails_closed() {
     let svc = ready();
     let caps = caps();
     let p = path("plain");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &p,
@@ -1043,7 +1370,7 @@ fn a_directory_open_of_a_regular_file_fails_closed() {
     .expect("create");
     // The dedicated `ENOTDIR` equivalent crosses the ABI boundary intact.
     assert_eq!(
-        svc.open(TEST_UID, &caps, &p, OpenFlags::DIRECTORY),
+        open_path(&svc, TEST_UID, &caps, &p, OpenFlags::DIRECTORY),
         Err(Errno::NotADirectory)
     );
 }
@@ -1055,7 +1382,7 @@ fn a_write_to_a_read_only_mount_fails_closed() {
     let svc = service(true, true, true);
     let caps = caps();
     assert_eq!(
-        svc.write(TEST_UID, &caps, &path("x"), 0, false, b"nope"),
+        write_path(&svc, TEST_UID, &caps, &path("x"), 0, false, b"nope"),
         Err(Errno::ReadOnly)
     );
 }
@@ -1064,7 +1391,11 @@ fn a_write_to_a_read_only_mount_fails_closed() {
 fn sync_before_a_mount_is_installed_fails_closed() {
     let svc = service(false, true, false);
     let caps = caps();
-    assert_eq!(svc.sync(TEST_UID, &caps), Err(Errno::NotImplemented));
+    assert_eq!(
+        sync_path(&svc, TEST_UID, &caps, &path("x")),
+        Err(Errno::NotImplemented)
+    );
+    assert_eq!(svc.sync_all(TEST_UID, &caps), Err(Errno::NotImplemented));
 }
 
 #[test]
@@ -1073,7 +1404,56 @@ fn sync_flushes_the_mounted_volume() {
     // mount and returns success rather than the hollow `NotImplemented`.
     let svc = ready();
     let caps = caps();
-    assert_eq!(svc.sync(TEST_UID, &caps), Ok(()));
+    assert_eq!(sync_path(&svc, TEST_UID, &caps, MOUNT), Ok(()));
+    assert_eq!(svc.sync_all(TEST_UID, &caps), Ok(()));
+}
+
+/// A descriptor's sync flushes its own volume only: a failing volume beside
+/// it is neither flushed nor allowed to fail the call. The whole-system flush
+/// still tries every volume and reports the refusal.
+#[test]
+fn sync_flushes_only_the_volume_serving_the_path() {
+    let vfs = vfs(false);
+    let bad = DriverHandle::from_raw(10).expect("non-zero handle");
+    vfs.mounts_write()
+        .attach_at(
+            Attachment::new(
+                bad,
+                Some(MOUNT_MEDIUM),
+                MountFlags::from_bits(0).expect("empty flags"),
+            ),
+            Path::parse("/Storage/bad").expect("valid mount path"),
+            crate::fs::Metadata::new(UserId(TEST_UID), GroupId(TEST_GID), Mode::from_bits(0o755)),
+        )
+        .expect("second volume");
+    let cell: &'static LateFilesystem<FlushSpy> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    let good = DriverHandle::from_raw(9).expect("non-zero handle");
+    cell.register(good, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
+        .expect("register");
+    cell.register(bad, FlushSpy::refusing(), "bad", "spy", [0u8; 16], None)
+        .expect("register");
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity
+        .install(identity_table())
+        .expect("install identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let caps = caps();
+    let flushes = |volume| cell.driver(volume).expect("registered").lock().flushes;
+
+    assert_eq!(sync_path(&svc, TEST_UID, &caps, MOUNT), Ok(()));
+    assert_eq!((flushes(good), flushes(bad)), (1, 0));
+    assert_eq!(
+        sync_path(&svc, TEST_UID, &caps, "/Storage"),
+        Ok(()),
+        "the catalog stores nothing to flush"
+    );
+    assert_eq!(svc.sync_all(TEST_UID, &caps), Err(Errno::DeviceFault));
+    assert_eq!(
+        (flushes(good), flushes(bad)),
+        (2, 1),
+        "every volume is tried"
+    );
 }
 
 #[test]
@@ -1082,50 +1462,56 @@ fn rename_moves_a_file_under_the_attested_identity() {
     let caps = caps();
     let src = path("a");
     let dst = path("b");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &src,
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.write(TEST_UID, &caps, &src, 0, false, b"hi")
-        .expect("write");
-    svc.rename(TEST_UID, &caps, &src, &dst, RenameFlags::empty())
-        .expect("rename");
+    write_path(&svc, TEST_UID, &caps, &src, 0, false, b"hi").expect("write");
+    svc.rename(
+        TEST_UID,
+        &caps,
+        at(&src),
+        at(&dst),
+        RenameFlags::empty(),
+        None,
+    )
+    .expect("rename");
     let mut buf = [0u8; 2];
     assert_eq!(
-        svc.read(TEST_UID, &caps, &src, 0, &mut buf),
+        read_path(&svc, TEST_UID, &caps, &src, 0, &mut buf),
         Err(Errno::NotFound)
     );
-    assert_eq!(svc.read(TEST_UID, &caps, &dst, 0, &mut buf), Ok(2));
+    assert_eq!(read_path(&svc, TEST_UID, &caps, &dst, 0, &mut buf), Ok(2));
     assert_eq!(&buf, b"hi");
 }
 
 /// Create `name` holding `body` on `svc`.
 fn file_with(svc: &MountedFilesystemService<RwMockFs>, name: &str, body: &[u8]) {
     let caps = caps();
-    svc.open(
+    open_path(
+        svc,
         TEST_UID,
         &caps,
         &path(name),
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.write(TEST_UID, &caps, &path(name), 0, false, body)
-        .expect("write");
+    write_path(svc, TEST_UID, &caps, &path(name), 0, false, body).expect("write");
 }
 
 /// The names the mounted volume's root lists.
 fn root_names(svc: &MountedFilesystemService<RwMockFs>) -> Vec<Vec<u8>> {
-    let mut at = Listing::default();
     let mut names = Vec::new();
-    svc.readdir(
+    list_path(
+        svc,
         TEST_UID,
         &caps(),
         MOUNT,
-        FinalLink::Follow,
-        &mut at,
+        OpenFlags::DIRECTORY,
         &mut |entry| {
             names.push(entry.name.to_vec());
             DirVisit::Take
@@ -1145,16 +1531,23 @@ fn a_no_replace_rename_refuses_an_occupied_destination_and_keeps_both() {
         svc.rename(
             TEST_UID,
             &caps,
-            &path("a"),
-            &path("b"),
-            RenameFlags::NO_REPLACE
+            at(&path("a")),
+            at(&path("b")),
+            RenameFlags::NO_REPLACE,
+            None,
         ),
         Err(Errno::AlreadyExists)
     );
     let mut buf = [0u8; 2];
-    assert_eq!(svc.read(TEST_UID, &caps, &path("a"), 0, &mut buf), Ok(2));
+    assert_eq!(
+        read_path(&svc, TEST_UID, &caps, &path("a"), 0, &mut buf),
+        Ok(2)
+    );
     assert_eq!(&buf, b"aa");
-    assert_eq!(svc.read(TEST_UID, &caps, &path("b"), 0, &mut buf), Ok(2));
+    assert_eq!(
+        read_path(&svc, TEST_UID, &caps, &path("b"), 0, &mut buf),
+        Ok(2)
+    );
     assert_eq!(&buf, b"bb");
 }
 
@@ -1166,9 +1559,10 @@ fn a_no_replace_rename_to_a_free_name_moves_the_file() {
     svc.rename(
         TEST_UID,
         &caps,
-        &path("a"),
-        &path("c"),
+        at(&path("a")),
+        at(&path("c")),
         RenameFlags::NO_REPLACE,
+        None,
     )
     .expect("rename");
     assert_eq!(root_names(&svc), [b"c".to_vec()]);
@@ -1186,14 +1580,18 @@ fn a_no_replace_rename_refuses_a_sibling_differing_only_in_case() {
         svc.rename(
             TEST_UID,
             &caps,
-            &path("a"),
-            &path("B"),
-            RenameFlags::NO_REPLACE
+            at(&path("a")),
+            at(&path("B")),
+            RenameFlags::NO_REPLACE,
+            None,
         ),
         Err(Errno::AlreadyExists)
     );
     let mut buf = [0u8; 2];
-    assert_eq!(svc.read(TEST_UID, &caps, &path("b"), 0, &mut buf), Ok(2));
+    assert_eq!(
+        read_path(&svc, TEST_UID, &caps, &path("b"), 0, &mut buf),
+        Ok(2)
+    );
     assert_eq!(&buf, b"bb");
 }
 
@@ -1206,12 +1604,19 @@ fn a_rename_respells_its_own_entry_on_a_folding_volume() {
         let svc = ready();
         let caps = caps();
         file_with(&svc, "Foo.txt", b"ff");
-        svc.rename(TEST_UID, &caps, &path("Foo.txt"), &path("foo.txt"), flags)
-            .expect("re-spell");
+        svc.rename(
+            TEST_UID,
+            &caps,
+            at(&path("Foo.txt")),
+            at(&path("foo.txt")),
+            flags,
+            None,
+        )
+        .expect("re-spell");
         assert_eq!(root_names(&svc), [b"foo.txt".to_vec()]);
         let mut buf = [0u8; 2];
         assert_eq!(
-            svc.read(TEST_UID, &caps, &path("foo.txt"), 0, &mut buf),
+            read_path(&svc, TEST_UID, &caps, &path("foo.txt"), 0, &mut buf),
             Ok(2)
         );
         assert_eq!(&buf, b"ff");
@@ -1226,9 +1631,10 @@ fn rename_of_a_missing_source_fails_closed() {
         svc.rename(
             TEST_UID,
             &caps,
-            &path("nope"),
-            &path("x"),
-            RenameFlags::empty()
+            at(&path("nope")),
+            at(&path("x")),
+            RenameFlags::empty(),
+            None,
         ),
         Err(Errno::NotFound)
     );
@@ -1242,9 +1648,10 @@ fn rename_on_a_read_only_mount_fails_closed() {
         svc.rename(
             TEST_UID,
             &caps,
-            &path("a"),
-            &path("b"),
-            RenameFlags::empty()
+            at(&path("a")),
+            at(&path("b")),
+            RenameFlags::empty(),
+            None,
         ),
         Err(Errno::ReadOnly)
     );
@@ -1255,7 +1662,8 @@ fn set_mode_rewrites_the_permission_bits_for_the_owner() {
     let svc = ready();
     let caps = caps();
     let p = path("f");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &p,
@@ -1263,10 +1671,11 @@ fn set_mode_rewrites_the_permission_bits_for_the_owner() {
     )
     .expect("create");
 
-    svc.set_mode(TEST_UID, &caps, &p, 0o600).expect("chmod");
+    svc.set_mode(TEST_UID, &caps, at(&p), 0o600, FinalLink::Follow)
+        .expect("chmod");
 
     let st = svc
-        .stat(TEST_UID, &caps, &p, FinalLink::Follow)
+        .stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
         .expect("stat");
     assert_eq!(st.mode, 0o600);
     assert_eq!(st.uid, TEST_UID);
@@ -1280,7 +1689,13 @@ fn set_mode_above_the_permission_mask_fails_closed() {
     let svc = ready();
     let caps = caps();
     assert_eq!(
-        svc.set_mode(TEST_UID, &caps, &path("f"), 0o10_0644),
+        svc.set_mode(
+            TEST_UID,
+            &caps,
+            at(&path("f")),
+            0o10_0644,
+            FinalLink::Follow
+        ),
         Err(Errno::OutOfRange)
     );
 }
@@ -1290,7 +1705,7 @@ fn set_mode_on_a_read_only_mount_fails_closed() {
     let svc = service(true, true, true);
     let caps = caps();
     assert_eq!(
-        svc.set_mode(TEST_UID, &caps, &path("a"), 0o600),
+        svc.set_mode(TEST_UID, &caps, at(&path("a")), 0o600, FinalLink::Follow),
         Err(Errno::ReadOnly)
     );
 }
@@ -1300,7 +1715,7 @@ fn set_mode_before_a_mount_is_installed_fails_closed() {
     let svc = service(false, true, false);
     let caps = caps();
     assert_eq!(
-        svc.set_mode(TEST_UID, &caps, &path("a"), 0o600),
+        svc.set_mode(TEST_UID, &caps, at(&path("a")), 0o600, FinalLink::Follow),
         Err(Errno::NotImplemented)
     );
 }
@@ -1313,9 +1728,10 @@ fn rename_before_a_mount_is_installed_fails_closed() {
         svc.rename(
             TEST_UID,
             &caps,
-            &path("a"),
-            &path("b"),
-            RenameFlags::empty()
+            at(&path("a")),
+            at(&path("b")),
+            RenameFlags::empty(),
+            None,
         ),
         Err(Errno::NotImplemented)
     );
@@ -1333,37 +1749,95 @@ fn chown_caps() -> CapabilitySet {
 /// test principal a member of the supplementary group `gid`, so the
 /// unprivileged owner-may-set-a-group-they-belong-to branch is exercised.
 fn ready_with_supplementary(gid: u32) -> MountedFilesystemService<RwMockFs> {
-    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
-    cell.install_vfs(vfs(false)).expect("install vfs");
-    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-    cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
-        .expect("register driver");
-    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
-    let mut builder = IdentityTableBuilder::new();
-    builder.push_group(GroupRecord {
-        gid: GroupId(TEST_GID),
-    });
-    builder.push_group(GroupRecord { gid: GroupId(gid) });
-    builder.push_user(UserRecord {
-        uid: UserId(TEST_UID),
-        primary_gid: GroupId(TEST_GID),
-        supplementary_gids: Vec::from([GroupId(gid)]),
-        capability_grants: CapabilitySet::empty(),
-    });
-    identity
-        .install(
-            builder
-                .verify(&NullSink)
-                .expect("well-formed identity table"),
+    let account = Account {
+        groups: &[gid],
+        ..TEST_ACCOUNT
+    };
+    mounted(driver(), false, &[account]).service
+}
+
+/// A writable service whose identity table holds the test principal and each
+/// of `others`, every one in a group of its own.
+fn ready_with_users(others: &[u32]) -> MountedFilesystemService<RwMockFs> {
+    service_over(driver(), others).0
+}
+
+/// A writable service over `fs` at [`MOUNT`], whose identity table holds the
+/// test principal and each of `others` in a group of its own, and the cell it
+/// serves from.
+fn service_over(
+    fs: RwMockFs,
+    others: &[u32],
+) -> (
+    MountedFilesystemService<RwMockFs>,
+    &'static LateFilesystem<RwMockFs>,
+) {
+    let accounts: Vec<Account<'_>> = [TEST_UID]
+        .iter()
+        .chain(others)
+        .map(|&uid| Account {
+            uid,
+            gid: uid,
+            groups: &[],
+        })
+        .collect();
+    let serving = mounted(fs, false, &accounts);
+    (serving.service, serving.mounted)
+}
+
+/// In a sticky directory a writer may create, but only an entry's owner or
+/// the directory's owner may unlink it, rename it away, or replace it.
+#[test]
+fn a_sticky_directory_guards_each_name_for_its_owner_and_the_directory_s() {
+    const WRITER: u32 = 1001;
+    const OTHER: u32 = 1002;
+    let svc = ready_with_users(&[WRITER, OTHER]);
+    let caps = caps();
+    svc.mkdir(TEST_UID, &caps, at(&path("drop")), new_dir())
+        .expect("mkdir");
+    svc.set_mode(
+        TEST_UID,
+        &caps,
+        at(&path("drop")),
+        0o1777,
+        FinalLink::Follow,
+    )
+    .expect("sticky");
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    for name in ["drop/a", "drop/b"] {
+        open_path(&svc, WRITER, &caps, &path(name), create).expect("a writer creates");
+    }
+    open_path(&svc, OTHER, &caps, &path("drop/mine"), create).expect("a writer creates");
+    let unlink =
+        |uid, name: &str| svc.unlink(uid, &caps, at(&path(name)), UnlinkFlags::empty(), None);
+    let rename = |uid, from: &str, to: &str| {
+        svc.rename(
+            uid,
+            &caps,
+            at(&path(from)),
+            at(&path(to)),
+            RenameFlags::empty(),
+            None,
         )
-        .expect("install identity");
-    MountedFilesystemService::new(cell, identity)
+    };
+    let denied = Err(Errno::PermissionDenied);
+    assert_eq!(unlink(OTHER, "drop/a"), denied);
+    assert_eq!(rename(OTHER, "drop/a", "drop/taken"), denied);
+    assert_eq!(
+        rename(OTHER, "drop/mine", "drop/a"),
+        denied,
+        "replacing a name removes it"
+    );
+    assert_eq!(unlink(WRITER, "drop/a"), Ok(()));
+    assert_eq!(unlink(TEST_UID, "drop/b"), Ok(()));
+    assert_eq!(rename(OTHER, "drop/mine", "drop/moved"), Ok(()));
 }
 
 /// Create a regular file owned by the test principal and return its path.
 fn create_file(svc: &MountedFilesystemService<RwMockFs>, name: &str) -> alloc::string::String {
     let p = path(name);
-    svc.open(
+    open_path(
+        svc,
         TEST_UID,
         &caps(),
         &p,
@@ -1380,21 +1854,35 @@ fn set_owner_reassigns_the_uid_only_for_a_privileged_caller() {
 
     // Unprivileged: reassigning the owner is refused and nothing changes.
     assert_eq!(
-        svc.set_owner(TEST_UID, &caps(), &p, 2000, FS_OWNER_UNCHANGED),
+        svc.set_owner(
+            TEST_UID,
+            &caps(),
+            at(&p),
+            2000,
+            FS_OWNER_UNCHANGED,
+            FinalLink::Follow
+        ),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps(), at(&p), FinalLink::Follow)
             .expect("stat")
             .uid,
         TEST_UID
     );
 
     // Privileged (`CAP_FS_CHOWN`): the owner is reassigned.
-    svc.set_owner(TEST_UID, &chown_caps(), &p, 2000, FS_OWNER_UNCHANGED)
-        .expect("chown");
+    svc.set_owner(
+        TEST_UID,
+        &chown_caps(),
+        at(&p),
+        2000,
+        FS_OWNER_UNCHANGED,
+        FinalLink::Follow,
+    )
+    .expect("chown");
     assert_eq!(
-        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps(), at(&p), FinalLink::Follow)
             .expect("stat")
             .uid,
         2000
@@ -1406,17 +1894,52 @@ fn set_owner_strips_the_setuid_bit_on_a_change() {
     let svc = ready();
     let p = create_file(&svc, "bin");
     // A setuid, group-executable file.
-    svc.set_mode(TEST_UID, &caps(), &p, 0o4755).expect("chmod");
+    svc.set_mode(TEST_UID, &caps(), at(&p), 0o4755, FinalLink::Follow)
+        .expect("chmod");
 
-    svc.set_owner(TEST_UID, &chown_caps(), &p, 2000, FS_OWNER_UNCHANGED)
-        .expect("chown");
+    svc.set_owner(
+        TEST_UID,
+        &chown_caps(),
+        at(&p),
+        2000,
+        FS_OWNER_UNCHANGED,
+        FinalLink::Follow,
+    )
+    .expect("chown");
 
     let st = svc
-        .stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        .stat(TEST_UID, &caps(), at(&p), FinalLink::Follow)
         .expect("stat");
     assert_eq!(st.uid, 2000);
     // The setuid bit is gone; a reassigned file cannot stay setuid.
     assert_eq!(st.mode & 0o7777, 0o0755);
+}
+
+#[test]
+fn set_owner_keeps_a_shared_directorys_set_group_id_bit() {
+    let svc = ready();
+    let dir = path("shared");
+    svc.mkdir(TEST_UID, &caps(), at(&dir), new_dir())
+        .expect("mkdir");
+    svc.set_mode(TEST_UID, &caps(), at(&dir), 0o2775, FinalLink::Follow)
+        .expect("chmod");
+
+    svc.set_owner(
+        TEST_UID,
+        &chown_caps(),
+        at(&dir),
+        2000,
+        FS_OWNER_UNCHANGED,
+        FinalLink::Follow,
+    )
+    .expect("chown");
+
+    let st = svc
+        .stat(TEST_UID, &caps(), at(&dir), FinalLink::Follow)
+        .expect("stat");
+    assert_eq!(st.uid, 2000);
+    // Its entries go on being born in its group.
+    assert_eq!(st.mode & 0o7777, 0o2775);
 }
 
 #[test]
@@ -1426,11 +1949,18 @@ fn set_owner_group_change_to_a_non_member_group_is_denied_unprivileged() {
     // The owner belongs only to gid 1000; setting an unrelated group without
     // `CAP_FS_CHOWN` is refused, and the group is unchanged.
     assert_eq!(
-        svc.set_owner(TEST_UID, &caps(), &p, FS_OWNER_UNCHANGED, 55),
+        svc.set_owner(
+            TEST_UID,
+            &caps(),
+            at(&p),
+            FS_OWNER_UNCHANGED,
+            55,
+            FinalLink::Follow
+        ),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps(), at(&p), FinalLink::Follow)
             .expect("stat")
             .gid,
         TEST_GID
@@ -1443,10 +1973,17 @@ fn set_owner_group_change_to_a_member_group_is_allowed_unprivileged() {
     let p = create_file(&svc, "g");
     // The owner is a member of gid 7, so an unprivileged `chgrp` to it
     // succeeds — no capability needed.
-    svc.set_owner(TEST_UID, &caps(), &p, FS_OWNER_UNCHANGED, 7)
-        .expect("chgrp to a member group");
+    svc.set_owner(
+        TEST_UID,
+        &caps(),
+        at(&p),
+        FS_OWNER_UNCHANGED,
+        7,
+        FinalLink::Follow,
+    )
+    .expect("chgrp to a member group");
     assert_eq!(
-        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps(), at(&p), FinalLink::Follow)
             .expect("stat")
             .gid,
         7
@@ -1458,10 +1995,17 @@ fn set_owner_privileged_group_change_needs_no_membership() {
     let svc = ready();
     let p = create_file(&svc, "g");
     // A `CAP_FS_CHOWN` holder may set any group, member or not.
-    svc.set_owner(TEST_UID, &chown_caps(), &p, FS_OWNER_UNCHANGED, 55)
-        .expect("privileged chgrp");
+    svc.set_owner(
+        TEST_UID,
+        &chown_caps(),
+        at(&p),
+        FS_OWNER_UNCHANGED,
+        55,
+        FinalLink::Follow,
+    )
+    .expect("privileged chgrp");
     assert_eq!(
-        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps(), at(&p), FinalLink::Follow)
             .expect("stat")
             .gid,
         55
@@ -1476,13 +2020,14 @@ fn set_owner_leaving_both_unchanged_is_a_noop_even_unprivileged() {
     svc.set_owner(
         TEST_UID,
         &caps(),
-        &p,
+        at(&p),
         FS_OWNER_UNCHANGED,
         FS_OWNER_UNCHANGED,
+        FinalLink::Follow,
     )
     .expect("no-op chown");
     let st = svc
-        .stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        .stat(TEST_UID, &caps(), at(&p), FinalLink::Follow)
         .expect("stat");
     assert_eq!(st.uid, TEST_UID);
     assert_eq!(st.gid, TEST_GID);
@@ -1495,9 +2040,10 @@ fn set_owner_on_a_read_only_mount_fails_closed() {
         svc.set_owner(
             TEST_UID,
             &chown_caps(),
-            &path("a"),
+            at(&path("a")),
             2000,
-            FS_OWNER_UNCHANGED
+            FS_OWNER_UNCHANGED,
+            FinalLink::Follow,
         ),
         Err(Errno::ReadOnly)
     );
@@ -1510,9 +2056,10 @@ fn set_owner_before_a_mount_is_installed_fails_closed() {
         svc.set_owner(
             TEST_UID,
             &chown_caps(),
-            &path("a"),
+            at(&path("a")),
             2000,
-            FS_OWNER_UNCHANGED
+            FS_OWNER_UNCHANGED,
+            FinalLink::Follow,
         ),
         Err(Errno::NotImplemented)
     );
@@ -1530,30 +2077,38 @@ fn set_owner_before_a_mount_is_installed_fails_closed() {
 /// a read-only volume over `/System`, and the writable grafts rebased back
 /// out of it onto the root's own `/System/Logs` and `/System/Settings`.
 fn production_layout() -> MountedFilesystemService<RwMockFs> {
+    production_layout_planted(|_| {})
+}
+
+/// [`production_layout`], `plant` given the root volume before it is served.
+fn production_layout_planted(
+    plant: impl FnOnce(&mut RwMockFs),
+) -> MountedFilesystemService<RwMockFs> {
     // The read-only `/System` volume: content at the volume root, including
     // the same-named `Logs`/`Settings` the writable mounts shadow.
-    let mut system = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    let mut system = RwMockFs::new();
     system.set_root_security(NodeSecurity::new(0o755, 0, 0));
     let root = system.root();
     for name in [&b"Kernel"[..], b"Drivers", b"Logs", b"Settings"] {
         system
-            .create(root, name, NodeKind::Directory)
+            .create(root, name, NodeKind::Directory, &SYSTEM_RECORD)
             .expect("mkdir system subdir");
     }
 
     // The writable root volume: carries its own `/System/Logs` and
     // `/System/Settings` directories the sub-mounts rebase onto.
-    let mut rootvol = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    let mut rootvol = RwMockFs::new();
     rootvol.set_root_security(NodeSecurity::new(0o755, 0, 0));
     let rv_root = rootvol.root();
     let rv_system = rootvol
-        .create(rv_root, b"System", NodeKind::Directory)
+        .create(rv_root, b"System", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("mkdir System");
     for name in [&b"Logs"[..], b"Settings"] {
         rootvol
-            .create(rv_system, name, NodeKind::Directory)
+            .create(rv_system, name, NodeKind::Directory, &SYSTEM_RECORD)
             .expect("mkdir writable exception");
     }
+    plant(&mut rootvol);
 
     // The production mount layout: writable root as `/`, read-only volume
     // over `/System`, writable exceptions rebased back out of it.
@@ -1596,12 +2151,49 @@ fn production_layout() -> MountedFilesystemService<RwMockFs> {
     MountedFilesystemService::new(cell, identity)
 }
 
+/// Nothing reaches the directory a projection covers: a name a link
+/// supplies at the floor is not found there, and a caller's name is matched
+/// against the projections shown there as the volume matches its own.
+///
+/// Regression: a link to `/System` on the root volume, or a caller's
+/// `/system` on a volume that folds case, reached the root volume's own
+/// covered `System` directory, outside every mount point.
+#[test]
+fn nothing_reaches_what_a_projection_covers() {
+    let svc = production_layout_planted(|rootvol| {
+        let root = rootvol.root();
+        for (name, target) in [(&b"l"[..], &b"/System"[..]), (b"folded", b"/system")] {
+            rootvol
+                .create_link(root, name, target, &SYSTEM_RECORD)
+                .expect("plant the link");
+        }
+    });
+    let caps = caps();
+    let kind = |path: &str| {
+        svc.stat(TEST_UID, &caps, at(path), FinalLink::Follow)
+            .map(|stat| stat.kind)
+    };
+    assert_eq!(kind("/l"), Err(Errno::NotFound));
+    assert_eq!(kind("/l/Logs"), Err(Errno::NotFound));
+    assert_eq!(kind("/folded/Logs"), Err(Errno::NotFound));
+    // Only the system volume holds `Kernel`: the caller reached the
+    // projection, never the directory beneath it.
+    assert_eq!(kind("/System/Kernel"), Ok(FileKind::Directory));
+    assert_eq!(kind("/system/Kernel"), Ok(FileKind::Directory));
+}
+
 #[test]
 fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
     let svc = production_layout();
     let caps = caps();
     let entries = svc
-        .readdir_bounded(TEST_UID, &caps, "/System", FinalLink::Follow, usize::MAX)
+        .readdir_bounded(
+            TEST_UID,
+            &caps,
+            at("/System"),
+            FinalLink::Follow,
+            usize::MAX,
+        )
         .expect("an ordinary user lists /System");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     for expected in ["Kernel", "Drivers", "Logs", "Settings"] {
@@ -1617,7 +2209,7 @@ fn the_root_lists_and_finds_the_storage_catalog() {
     let svc = production_layout();
     let caps = caps();
     let entries = svc
-        .readdir_bounded(TEST_UID, &caps, "/", FinalLink::Follow, usize::MAX)
+        .readdir_bounded(TEST_UID, &caps, at("/"), FinalLink::Follow, usize::MAX)
         .expect("an ordinary user lists /");
     let catalog = entries
         .iter()
@@ -1628,7 +2220,7 @@ fn the_root_lists_and_finds_the_storage_catalog() {
         .lookup_entries(
             TEST_UID,
             &caps,
-            "/",
+            at("/"),
             FinalLink::Follow,
             &[tairix_abi::STORAGE_CATALOG.as_bytes()],
         )
@@ -1645,10 +2237,16 @@ fn a_write_through_a_system_graft_carries_the_system_class() {
     let caps = caps();
     let name = core::str::from_utf8(SYSTEM_ONLY_NAME).expect("ascii");
     let flags = OpenFlags::CREATE.union(OpenFlags::WRITE);
-    svc.open(0, &caps, &alloc::format!("/System/Settings/{name}"), flags)
-        .expect("a create through the graft is the system's");
+    open_path(
+        &svc,
+        0,
+        &caps,
+        &alloc::format!("/System/Settings/{name}"),
+        flags,
+    )
+    .expect("a create through the graft is the system's");
     assert_eq!(
-        svc.open(0, &caps, &alloc::format!("/{name}"), flags),
+        open_path(&svc, 0, &caps, &alloc::format!("/{name}"), flags),
         Err(Errno::NoSpace),
         "the same create elsewhere on the volume is ordinary"
     );
@@ -1962,7 +2560,8 @@ fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
     let svc = ready();
     let caps = caps();
     let src = path("a");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &src,
@@ -1973,9 +2572,10 @@ fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
         svc.rename(
             TEST_UID,
             &caps,
-            &src,
-            "/System/Applications/b",
-            RenameFlags::empty()
+            at(&src),
+            at("/System/Applications/b"),
+            RenameFlags::empty(),
+            None,
         ),
         Err(Errno::NotFound)
     );
@@ -1993,20 +2593,7 @@ where
         + Send
         + 'static,
 {
-    let cell: &'static LateFilesystem<F> = crate::forever(Box::new(LateFilesystem::new()));
-    cell.install_vfs(vfs(read_only)).expect("install vfs");
-    cell.register(
-        DriverHandle::from_raw(9).expect("handle"),
-        fs_driver,
-        "vol",
-        "memfs",
-        [0u8; 16],
-        None,
-    )
-    .expect("register");
-    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
-    identity.install(identity_table()).expect("identity");
-    MountedFilesystemService::new(cell, identity)
+    mounted(fs_driver, read_only, &[TEST_ACCOUNT]).service
 }
 
 /// Set/get/list/remove round-trip for an ordinary-namespace attribute, with
@@ -2017,47 +2604,47 @@ fn attrs_round_trip_through_the_service() {
     let svc = attr_service(driver(), false);
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
     let path = "/Storage/vol/f";
-    svc.open(TEST_UID, &caps, path, create).expect("create");
+    open_path(&svc, TEST_UID, &caps, path, create).expect("create");
 
-    svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"hi")
-        .expect("set");
+    attr_set_path(&svc, TEST_UID, &caps, path, b"user.comment", b"hi").expect("set");
     let mut value = [0u8; 8];
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut value),
+        attr_get_path(&svc, TEST_UID, &caps, path, b"user.comment", &mut value),
         Ok(2)
     );
     assert_eq!(&value[..2], b"hi");
 
     // An empty value is stored and read back as zero bytes, not "absent".
-    svc.attr_set(TEST_UID, &caps, path, b"user.empty", b"")
-        .expect("set empty");
+    attr_set_path(&svc, TEST_UID, &caps, path, b"user.empty", b"").expect("set empty");
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, path, b"user.empty", &mut value),
+        attr_get_path(&svc, TEST_UID, &caps, path, b"user.empty", &mut value),
         Ok(0)
     );
 
     // The listing yields the visible keys in stored order, then ends.
     let mut key = [0u8; 64];
     assert_eq!(
-        svc.attr_list(TEST_UID, &caps, path, 0, &mut key),
+        attr_list_path(&svc, TEST_UID, &caps, path, 0, &mut key),
         Ok(Some(b"user.comment".len()))
     );
     assert_eq!(&key[..b"user.comment".len()], b"user.comment");
     assert_eq!(
-        svc.attr_list(TEST_UID, &caps, path, 1, &mut key),
+        attr_list_path(&svc, TEST_UID, &caps, path, 1, &mut key),
         Ok(Some(b"user.empty".len()))
     );
-    assert_eq!(svc.attr_list(TEST_UID, &caps, path, 2, &mut key), Ok(None));
+    assert_eq!(
+        attr_list_path(&svc, TEST_UID, &caps, path, 2, &mut key),
+        Ok(None)
+    );
 
-    svc.attr_remove(TEST_UID, &caps, path, b"user.comment")
-        .expect("remove");
+    attr_remove_path(&svc, TEST_UID, &caps, path, b"user.comment").expect("remove");
     // Absence is the dedicated code, for get and for a second remove alike.
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut value),
+        attr_get_path(&svc, TEST_UID, &caps, path, b"user.comment", &mut value),
         Err(Errno::NoData)
     );
     assert_eq!(
-        svc.attr_remove(TEST_UID, &caps, path, b"user.comment"),
+        attr_remove_path(&svc, TEST_UID, &caps, path, b"user.comment"),
         Err(Errno::NoData)
     );
 }
@@ -2106,27 +2693,27 @@ fn attr_access_follows_the_nodes_own_permissions() {
     let caps = caps();
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
     let path = "/Storage/vol/private";
-    svc.open(TEST_UID, &caps, path, create).expect("create");
-    svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"hi")
-        .expect("owner sets");
-    svc.set_mode(TEST_UID, &caps, path, 0o600).expect("chmod");
+    open_path(&svc, TEST_UID, &caps, path, create).expect("create");
+    attr_set_path(&svc, TEST_UID, &caps, path, b"user.comment", b"hi").expect("owner sets");
+    svc.set_mode(TEST_UID, &caps, at(path), 0o600, FinalLink::Follow)
+        .expect("chmod");
 
     // The other principal can neither read nor write the node's attributes.
     let mut buf = [0u8; 8];
     assert_eq!(
-        svc.attr_get(OTHER_UID, &caps, path, b"user.comment", &mut buf),
+        attr_get_path(&svc, OTHER_UID, &caps, path, b"user.comment", &mut buf),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        svc.attr_list(OTHER_UID, &caps, path, 0, &mut buf),
+        attr_list_path(&svc, OTHER_UID, &caps, path, 0, &mut buf),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        svc.attr_set(OTHER_UID, &caps, path, b"user.comment", b"x"),
+        attr_set_path(&svc, OTHER_UID, &caps, path, b"user.comment", b"x"),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        svc.attr_remove(OTHER_UID, &caps, path, b"user.comment"),
+        attr_remove_path(&svc, OTHER_UID, &caps, path, b"user.comment"),
         Err(Errno::PermissionDenied)
     );
 }
@@ -2140,7 +2727,7 @@ fn attr_mutation_on_a_read_only_mount_fails_closed() {
     let mut fs = driver();
     let root = fs.root();
     let node = fs
-        .create(root, b"f", NodeKind::RegularFile)
+        .create(root, b"f", NodeKind::RegularFile, &PLANTED)
         .expect("create");
     fs.set_attr(node, b"user.comment", b"hi").expect("seed");
     let svc = attr_service(fs, true);
@@ -2148,15 +2735,15 @@ fn attr_mutation_on_a_read_only_mount_fails_closed() {
 
     let mut buf = [0u8; 8];
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut buf),
+        attr_get_path(&svc, TEST_UID, &caps, path, b"user.comment", &mut buf),
         Ok(2)
     );
     assert_eq!(
-        svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"x"),
+        attr_set_path(&svc, TEST_UID, &caps, path, b"user.comment", b"x"),
         Err(Errno::ReadOnly)
     );
     assert_eq!(
-        svc.attr_remove(TEST_UID, &caps, path, b"user.comment"),
+        attr_remove_path(&svc, TEST_UID, &caps, path, b"user.comment"),
         Err(Errno::ReadOnly)
     );
 }
@@ -2170,7 +2757,7 @@ fn privileged_namespaces_are_refused_and_hidden() {
     let mut fs = driver();
     let root = fs.root();
     let node = fs
-        .create(root, b"f", NodeKind::RegularFile)
+        .create(root, b"f", NodeKind::RegularFile, &PLANTED)
         .expect("create");
     // Stored out-of-band (as a privileged service one day would); the
     // syscall surface itself refuses to write these namespaces.
@@ -2181,25 +2768,28 @@ fn privileged_namespaces_are_refused_and_hidden() {
 
     let mut buf = [0u8; 64];
     assert_eq!(
-        svc.attr_set(TEST_UID, &caps, path, b"system.hidden", b"x"),
+        attr_set_path(&svc, TEST_UID, &caps, path, b"system.hidden", b"x"),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, path, b"system.hidden", &mut buf),
+        attr_get_path(&svc, TEST_UID, &caps, path, b"system.hidden", &mut buf),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        svc.attr_remove(TEST_UID, &caps, path, b"trusted.x"),
+        attr_remove_path(&svc, TEST_UID, &caps, path, b"trusted.x"),
         Err(Errno::PermissionDenied)
     );
     // The listing shows only the visible key: index 0 is the user key and
     // index 1 is already the end, with no gap betraying the hidden one.
     assert_eq!(
-        svc.attr_list(TEST_UID, &caps, path, 0, &mut buf),
+        attr_list_path(&svc, TEST_UID, &caps, path, 0, &mut buf),
         Ok(Some(b"user.visible".len()))
     );
     assert_eq!(&buf[..b"user.visible".len()], b"user.visible");
-    assert_eq!(svc.attr_list(TEST_UID, &caps, path, 1, &mut buf), Ok(None));
+    assert_eq!(
+        attr_list_path(&svc, TEST_UID, &caps, path, 1, &mut buf),
+        Ok(None)
+    );
 }
 
 /// Malformed keys and undersized buffers fail closed with their dedicated
@@ -2210,34 +2800,40 @@ fn attr_key_grammar_and_buffers_fail_closed() {
     let svc = attr_service(driver(), false);
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
     let path = "/Storage/vol/f";
-    svc.open(TEST_UID, &caps, path, create).expect("create");
-    svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"hello")
-        .expect("set");
+    open_path(&svc, TEST_UID, &caps, path, create).expect("create");
+    attr_set_path(&svc, TEST_UID, &caps, path, b"user.comment", b"hello").expect("set");
 
     // No `namespace.rest` split, and an unknown namespace: both refused.
     assert_eq!(
-        svc.attr_set(TEST_UID, &caps, path, b"nodot", b"x"),
+        attr_set_path(&svc, TEST_UID, &caps, path, b"nodot", b"x"),
         Err(Errno::OutOfRange)
     );
     assert_eq!(
-        svc.attr_set(TEST_UID, &caps, path, b"bogus.key", b"x"),
+        attr_set_path(&svc, TEST_UID, &caps, path, b"bogus.key", b"x"),
         Err(Errno::OutOfRange)
     );
     // A value that does not fit is refused whole, never truncated.
     let mut tiny = [0u8; 2];
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, path, b"user.comment", &mut tiny),
+        attr_get_path(&svc, TEST_UID, &caps, path, b"user.comment", &mut tiny),
         Err(Errno::BufferTooSmall)
     );
     let mut tiny_key = [0u8; 4];
     assert_eq!(
-        svc.attr_list(TEST_UID, &caps, path, 0, &mut tiny_key),
+        attr_list_path(&svc, TEST_UID, &caps, path, 0, &mut tiny_key),
         Err(Errno::BufferTooSmall)
     );
     // A missing path is the path's own error, not an attribute answer.
     let mut buf = [0u8; 8];
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, "/Storage/vol/absent", b"user.x", &mut buf),
+        attr_get_path(
+            &svc,
+            TEST_UID,
+            &caps,
+            "/Storage/vol/absent",
+            b"user.x",
+            &mut buf
+        ),
         Err(Errno::NotFound)
     );
 }
@@ -2269,6 +2865,9 @@ impl FilesystemRead for NoAttrsFs {
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
         self.0.lookup(dir, name)
     }
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        self.0.parent(dir)
+    }
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         self.0.read_at(file, offset, buf)
     }
@@ -2281,22 +2880,34 @@ impl FilesystemRead for NoAttrsFs {
     ) -> Result<(), DriverError> {
         self.0.read_dir(dir, cursor, after, visit)
     }
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.0.pin(node)
+    }
+    fn unpin(
+        &mut self,
+        pinned: NodeId,
+    ) -> Result<tairix_abi::driver::filesystem::Unpinned, DriverError> {
+        self.0.unpin(pinned)
+    }
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        self.0.release_pins()
+    }
 }
 impl FilesystemWrite for NoAttrsFs {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        self.0.create(dir, name, kind)
-    }
-    fn write_at(
+    fn create(
         &mut self,
         dir: NodeId,
         name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        self.0.write_at(dir, name, offset, data)
+        kind: NodeKind,
+        record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
+        self.0.create(dir, name, kind, record)
     }
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        self.0.truncate(dir, name, size)
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        self.0.write_at(file, offset, data)
+    }
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        self.0.truncate(file, size)
     }
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.0.remove(dir, name)
@@ -2345,23 +2956,23 @@ fn attrs_on_an_unsupporting_backing_are_a_typed_refusal() {
     let svc = attr_service(NoAttrsFs(driver()), false);
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
     let path = "/Storage/vol/f";
-    svc.open(TEST_UID, &caps, path, create).expect("create");
+    open_path(&svc, TEST_UID, &caps, path, create).expect("create");
 
     let mut buf = [0u8; 8];
     assert_eq!(
-        svc.attr_get(TEST_UID, &caps, path, b"user.x", &mut buf),
+        attr_get_path(&svc, TEST_UID, &caps, path, b"user.x", &mut buf),
         Err(Errno::NotSupported)
     );
     assert_eq!(
-        svc.attr_set(TEST_UID, &caps, path, b"user.x", b"v"),
+        attr_set_path(&svc, TEST_UID, &caps, path, b"user.x", b"v"),
         Err(Errno::NotSupported)
     );
     assert_eq!(
-        svc.attr_list(TEST_UID, &caps, path, 0, &mut buf),
+        attr_list_path(&svc, TEST_UID, &caps, path, 0, &mut buf),
         Err(Errno::NotSupported)
     );
     assert_eq!(
-        svc.attr_remove(TEST_UID, &caps, path, b"user.x"),
+        attr_remove_path(&svc, TEST_UID, &caps, path, b"user.x"),
         Err(Errno::NotSupported)
     );
 }
@@ -2379,15 +2990,15 @@ fn symlink_then_readlink_round_trips_the_stored_target() {
     let caps = caps();
     let link = path("alias");
 
-    svc.symlink(TEST_UID, &caps, "/target/name", &link)
+    svc.symlink(TEST_UID, &caps, "/target/name", at(&link))
         .expect("create the link");
     assert_eq!(
-        svc.readlink(TEST_UID, &caps, &link),
+        svc.readlink(TEST_UID, &caps, at(&link)),
         Ok(alloc::string::String::from("/target/name"))
     );
     // A second link of the same name is refused, not silently replaced.
     assert_eq!(
-        svc.symlink(TEST_UID, &caps, "/other", &link),
+        svc.symlink(TEST_UID, &caps, "/other", at(&link)),
         Err(Errno::AlreadyExists)
     );
 }
@@ -2397,7 +3008,8 @@ fn readlink_of_a_non_link_fails_closed() {
     let svc = ready();
     let caps = caps();
     let file = path("plain");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
@@ -2405,9 +3017,12 @@ fn readlink_of_a_non_link_fails_closed() {
     )
     .expect("create");
 
-    assert_eq!(svc.readlink(TEST_UID, &caps, &file), Err(Errno::OutOfRange));
     assert_eq!(
-        svc.readlink(TEST_UID, &caps, &path("absent")),
+        svc.readlink(TEST_UID, &caps, at(&file)),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        svc.readlink(TEST_UID, &caps, at(&path("absent"))),
         Err(Errno::NotFound)
     );
 }
@@ -2417,7 +3032,7 @@ fn symlink_on_a_read_only_mount_is_refused() {
     let svc = service(true, true, true);
     let caps = caps();
     assert_eq!(
-        svc.symlink(TEST_UID, &caps, "/target", &path("alias")),
+        svc.symlink(TEST_UID, &caps, "/target", at(&path("alias"))),
         Err(Errno::ReadOnly)
     );
 }
@@ -2427,28 +3042,28 @@ fn stat_describes_the_link_under_keep_and_its_target_under_follow() {
     let svc = ready();
     let caps = caps();
     let file = path("real");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
         OpenFlags::CREATE.union(OpenFlags::WRITE),
     )
     .expect("create");
-    svc.write(TEST_UID, &caps, &file, 0, false, b"1234")
-        .expect("write");
+    write_path(&svc, TEST_UID, &caps, &file, 0, false, b"1234").expect("write");
     let link = path("alias");
     let target = alloc::format!("/{}", "real");
-    svc.symlink(TEST_UID, &caps, &target, &link)
+    svc.symlink(TEST_UID, &caps, &target, at(&link))
         .expect("create the link");
 
     let kept = svc
-        .stat(TEST_UID, &caps, &link, FinalLink::Keep)
+        .stat(TEST_UID, &caps, at(&link), FinalLink::Keep)
         .expect("lstat");
     assert_eq!(kept.kind, FileKind::Symlink);
     assert_eq!(kept.size, target.len() as u64);
 
     let followed = svc
-        .stat(TEST_UID, &caps, &link, FinalLink::Follow)
+        .stat(TEST_UID, &caps, at(&link), FinalLink::Follow)
         .expect("stat");
     assert_eq!(followed.kind, FileKind::Regular);
     assert_eq!(followed.size, 4);
@@ -2459,7 +3074,7 @@ fn an_open_asking_for_bytes_of_a_link_it_may_not_follow_is_refused() {
     let svc = ready();
     let caps = caps();
     let link = path("alias");
-    svc.symlink(TEST_UID, &caps, "/nowhere", &link)
+    svc.symlink(TEST_UID, &caps, "/nowhere", at(&link))
         .expect("create the link");
 
     // A link stores a path, not bytes: `NO_FOLLOW` plus byte access over one
@@ -2469,14 +3084,14 @@ fn an_open_asking_for_bytes_of_a_link_it_may_not_follow_is_refused() {
         OpenFlags::NO_FOLLOW.union(OpenFlags::WRITE),
     ] {
         assert_eq!(
-            svc.open(TEST_UID, &caps, &link, flags),
+            open_path(&svc, TEST_UID, &caps, &link, flags),
             Err(Errno::LinkLoop),
             "{flags:?} over a link must not yield a byte handle"
         );
     }
     // The resolve-only handle — the `lstat` posture — is what succeeds, even
     // though the target does not exist.
-    svc.open(TEST_UID, &caps, &link, OpenFlags::NO_FOLLOW)
+    open_path(&svc, TEST_UID, &caps, &link, OpenFlags::NO_FOLLOW)
         .expect("a resolve-only handle on the link itself");
 }
 
@@ -2487,7 +3102,8 @@ fn no_follow_does_not_disturb_an_open_whose_final_component_is_not_a_link() {
     let svc = ready();
     let caps = caps();
     let file = path("plain");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
@@ -2495,7 +3111,8 @@ fn no_follow_does_not_disturb_an_open_whose_final_component_is_not_a_link() {
     )
     .expect("create");
 
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
@@ -2508,23 +3125,25 @@ fn no_follow_does_not_disturb_an_open_whose_final_component_is_not_a_link() {
 fn an_open_that_follows_a_link_to_a_directory_still_refuses_byte_access() {
     let svc = ready();
     let caps = caps();
-    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("mkdir");
+    svc.mkdir(TEST_UID, &caps, at(&path("dir")), new_dir())
+        .expect("mkdir");
     let link = path("todir");
-    svc.symlink(TEST_UID, &caps, "/dir", &link)
+    svc.symlink(TEST_UID, &caps, "/dir", at(&link))
         .expect("create the link");
 
     // Following reaches the directory, so the ordinary "no byte access to a
     // directory" rule applies to what the link names.
     assert_eq!(
-        svc.open(TEST_UID, &caps, &link, OpenFlags::READ),
+        open_path(&svc, TEST_UID, &caps, &link, OpenFlags::READ),
         Err(Errno::IsADirectory)
     );
     // And a directory open through the link succeeds, because it is one.
-    svc.open(TEST_UID, &caps, &link, OpenFlags::DIRECTORY)
+    open_path(&svc, TEST_UID, &caps, &link, OpenFlags::DIRECTORY)
         .expect("a directory open follows the link");
     // Kept, the same name is not a directory at all.
     assert_eq!(
-        svc.open(
+        open_path(
+            &svc,
             TEST_UID,
             &caps,
             &link,
@@ -2538,12 +3157,10 @@ fn an_open_that_follows_a_link_to_a_directory_still_refuses_byte_access() {
 fn readdir_under_keep_refuses_a_link_rather_than_listing_its_target() {
     let svc = ready();
     let caps = caps();
-    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("mkdir");
-    // The fixture's driver mints a node `0o644`; a directory needs its
-    // search bit before anything can be created inside it.
-    svc.set_mode(TEST_UID, &caps, &path("dir"), 0o755)
-        .expect("make the directory traversable");
-    svc.open(
+    svc.mkdir(TEST_UID, &caps, at(&path("dir")), new_dir())
+        .expect("mkdir");
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &path("dir/inside"),
@@ -2551,15 +3168,15 @@ fn readdir_under_keep_refuses_a_link_rather_than_listing_its_target() {
     )
     .expect("create inside");
     let link = path("todir");
-    svc.symlink(TEST_UID, &caps, "/dir", &link)
+    svc.symlink(TEST_UID, &caps, "/dir", at(&link))
         .expect("create the link");
 
     let followed = svc
-        .readdir_bounded(TEST_UID, &caps, &link, FinalLink::Follow, usize::MAX)
+        .readdir_bounded(TEST_UID, &caps, at(&link), FinalLink::Follow, usize::MAX)
         .expect("following lists the target");
     assert!(followed.iter().any(|e| e.name == "inside"), "{followed:?}");
     assert_eq!(
-        svc.readdir_bounded(TEST_UID, &caps, &link, FinalLink::Keep, usize::MAX),
+        svc.readdir_bounded(TEST_UID, &caps, at(&link), FinalLink::Keep, usize::MAX),
         Err(Errno::NotADirectory)
     );
 }
@@ -2568,12 +3185,13 @@ fn readdir_under_keep_refuses_a_link_rather_than_listing_its_target() {
 fn readdir_reports_a_link_entry_as_a_link_never_as_its_target() {
     let svc = ready();
     let caps = caps();
-    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("mkdir");
-    svc.symlink(TEST_UID, &caps, "/dir", &path("todir"))
+    svc.mkdir(TEST_UID, &caps, at(&path("dir")), new_dir())
+        .expect("mkdir");
+    svc.symlink(TEST_UID, &caps, "/dir", at(&path("todir")))
         .expect("create the link");
 
     let mut entries = svc
-        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
+        .readdir_bounded(TEST_UID, &caps, at(MOUNT), FinalLink::Follow, usize::MAX)
         .expect("readdir");
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let kinds: Vec<(FileKind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
@@ -2588,11 +3206,11 @@ fn an_uninstalled_mount_refuses_both_link_operations() {
     let svc = service(false, true, false);
     let caps = caps();
     assert_eq!(
-        svc.symlink(TEST_UID, &caps, "/t", &path("alias")),
+        svc.symlink(TEST_UID, &caps, "/t", at(&path("alias"))),
         Err(Errno::NotImplemented)
     );
     assert_eq!(
-        svc.readlink(TEST_UID, &caps, &path("alias")),
+        svc.readlink(TEST_UID, &caps, at(&path("alias"))),
         Err(Errno::NotImplemented)
     );
 }
@@ -2605,10 +3223,11 @@ fn an_open_creating_through_a_dangling_link_creates_the_target() {
     let svc = ready();
     let caps = caps();
     let link = path("alias");
-    svc.symlink(TEST_UID, &caps, "/made-later", &link)
+    svc.symlink(TEST_UID, &caps, "/made-later", at(&link))
         .expect("create the link");
 
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &link,
@@ -2617,22 +3236,54 @@ fn an_open_creating_through_a_dangling_link_creates_the_target() {
     .expect("create through the dangling link");
 
     let target = svc
-        .stat(TEST_UID, &caps, &path("made-later"), FinalLink::Keep)
+        .stat(TEST_UID, &caps, at(&path("made-later")), FinalLink::Keep)
         .expect("the target was created");
     assert_eq!(target.kind, FileKind::Regular);
     // The link itself is untouched and now resolves.
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &link, FinalLink::Keep)
+        svc.stat(TEST_UID, &caps, at(&link), FinalLink::Keep)
             .expect("the link survived")
             .kind,
         FileKind::Symlink
     );
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &link, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps, at(&link), FinalLink::Follow)
             .expect("the link resolves")
             .kind,
         FileKind::Regular
     );
+}
+
+/// An exclusive create never follows a final link, dangling or live: the
+/// name is taken, as POSIX requires, so a link planted where a program
+/// creates exclusively cannot turn the create onto the file it names.
+///
+/// Regression: the open followed the link and made its target.
+#[test]
+fn an_exclusive_create_refuses_a_final_link_rather_than_following_it() {
+    let svc = ready();
+    let caps = caps();
+    let link = path("alias");
+    svc.symlink(TEST_UID, &caps, "/made-later", at(&link))
+        .expect("create the link");
+    let made = || svc.stat(TEST_UID, &caps, at(&path("made-later")), FinalLink::Keep);
+    let exclusive = OpenFlags::CREATE
+        .union(OpenFlags::EXCLUSIVE)
+        .union(OpenFlags::WRITE);
+    assert_eq!(
+        open_path(&svc, TEST_UID, &caps, &link, exclusive),
+        Err(Errno::AlreadyExists)
+    );
+    assert_eq!(made().err(), Some(Errno::NotFound));
+    let directory = OpenFlags::CREATE
+        .union(OpenFlags::DIRECTORY)
+        .union(OpenFlags::EXCLUSIVE);
+    assert_eq!(
+        svc.open(TEST_UID, &caps, at(&link), directory, new_dir())
+            .err(),
+        Some(Errno::AlreadyExists)
+    );
+    assert_eq!(made().err(), Some(Errno::NotFound));
 }
 
 #[test]
@@ -2640,7 +3291,8 @@ fn writes_through_a_link_reach_the_target_and_leave_the_link_intact() {
     let svc = ready();
     let caps = caps();
     let file = path("real");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
@@ -2648,26 +3300,30 @@ fn writes_through_a_link_reach_the_target_and_leave_the_link_intact() {
     )
     .expect("create");
     let link = path("alias");
-    svc.symlink(TEST_UID, &caps, "/real", &link)
+    svc.symlink(TEST_UID, &caps, "/real", at(&link))
         .expect("create the link");
 
     assert_eq!(
-        svc.write(TEST_UID, &caps, &link, 0, false, b"payload"),
+        write_path(&svc, TEST_UID, &caps, &link, 0, false, b"payload"),
         Ok(7)
     );
     let mut buf = [0u8; 16];
-    assert_eq!(svc.read(TEST_UID, &caps, &file, 0, &mut buf), Ok(7));
+    assert_eq!(read_path(&svc, TEST_UID, &caps, &file, 0, &mut buf), Ok(7));
     assert_eq!(&buf[..7], b"payload");
     // An append resolves the size through the link too.
-    assert_eq!(svc.write(TEST_UID, &caps, &link, 0, true, b"!"), Ok(1));
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &file, FinalLink::Follow)
+        write_path(&svc, TEST_UID, &caps, &link, 0, true, b"!"),
+        Ok(1)
+    );
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, at(&file), FinalLink::Follow)
             .expect("stat the target")
             .size,
         8
     );
     // Truncate-on-open reaches the target, not the link.
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &link,
@@ -2675,13 +3331,13 @@ fn writes_through_a_link_reach_the_target_and_leave_the_link_intact() {
     )
     .expect("open the link for truncation");
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &file, FinalLink::Follow)
+        svc.stat(TEST_UID, &caps, at(&file), FinalLink::Follow)
             .expect("stat the target")
             .size,
         0
     );
     assert_eq!(
-        svc.readlink(TEST_UID, &caps, &link),
+        svc.readlink(TEST_UID, &caps, at(&link)),
         Ok(alloc::string::String::from("/real"))
     );
 }
@@ -2691,12 +3347,15 @@ fn mkdir_over_a_link_reports_it_as_already_existing() {
     let svc = ready();
     let caps = caps();
     let link = path("alias");
-    svc.symlink(TEST_UID, &caps, "/absent", &link)
+    svc.symlink(TEST_UID, &caps, "/absent", at(&link))
         .expect("create the link");
 
-    assert_eq!(svc.mkdir(TEST_UID, &caps, &link), Err(Errno::AlreadyExists));
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &path("absent"), FinalLink::Keep),
+        svc.mkdir(TEST_UID, &caps, at(&link), new_dir()),
+        Err(Errno::AlreadyExists)
+    );
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, at(&path("absent")), FinalLink::Keep),
         Err(Errno::NotFound)
     );
 }
@@ -2713,30 +3372,28 @@ fn mkdir_over_a_link_reports_it_as_already_existing() {
 fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
     let h = DriverHandle::from_raw(9).expect("handle");
 
-    let mut volume = dir_driver();
+    let mut volume = driver();
     let vroot = volume.root();
     // The decoy: same name, at the volume root, outside what the mount
     // projects.
-    volume
-        .create(vroot, b"inside", NodeKind::RegularFile)
+    let decoy = volume
+        .create(vroot, b"inside", NodeKind::RegularFile, &PLANTED)
         .expect("decoy");
     let area = volume
-        .create(vroot, b"Area", NodeKind::Directory)
+        .create(vroot, b"Area", NodeKind::Directory, &PLANTED)
         .expect("subtree");
-    volume
-        .create(area, b"inside", NodeKind::RegularFile)
+    let inside = volume
+        .create(area, b"inside", NodeKind::RegularFile, &PLANTED)
         .expect("projected file");
     volume
-        .create_link(area, b"abs", b"/inside")
+        .create_link(area, b"abs", b"/inside", &PLANTED)
         .expect("absolute link");
     volume
-        .create_link(area, b"up", b"../inside")
+        .create_link(area, b"up", b"../inside", &PLANTED)
         .expect("ascending link");
+    volume.write_at(decoy, 0, b"V").expect("decoy contents");
     volume
-        .write_at(vroot, b"inside", 0, b"V")
-        .expect("decoy contents");
-    volume
-        .write_at(area, b"inside", 0, b"I")
+        .write_at(inside, 0, b"I")
         .expect("projected contents");
 
     let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
@@ -2756,6 +3413,7 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
     vfs.mounts_write()
         .attach(Attachment::new(h, None, MountFlags::default()))
         .expect("attach");
+    users_projection(&vfs);
     vfs.mounts_write()
         .mount_rebased(
             Path::parse("/Users/area").expect("path"),
@@ -2777,14 +3435,14 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
     // An absolute target names the mount's own root, so it reaches the
     // projected file rather than the volume-root decoy.
     assert_eq!(
-        svc.read(TEST_UID, &caps, "/Users/area/abs", 0, &mut buf),
+        read_path(&svc, TEST_UID, &caps, "/Users/area/abs", 0, &mut buf),
         Ok(1)
     );
     assert_eq!(&buf, b"I");
     // `..` is floored at the projected root, so ascending from the subtree
     // stays inside it.
     assert_eq!(
-        svc.read(TEST_UID, &caps, "/Users/area/up", 0, &mut buf),
+        read_path(&svc, TEST_UID, &caps, "/Users/area/up", 0, &mut buf),
         Ok(1)
     );
     assert_eq!(&buf, b"I");
@@ -2799,38 +3457,38 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
 
 #[test]
 fn realpath_resolves_every_link_and_reports_a_view_path() {
-    let svc = ready_traversable();
+    let svc = ready();
     let caps = caps();
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
 
-    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("dir");
-    svc.open(TEST_UID, &caps, &path("dir/file"), create)
-        .expect("file");
+    svc.mkdir(TEST_UID, &caps, at(&path("dir")), new_dir())
+        .expect("dir");
+    open_path(&svc, TEST_UID, &caps, &path("dir/file"), create).expect("file");
     // An interior link and a final link, so one answer proves both are
     // followed.
-    svc.symlink(TEST_UID, &caps, "/dir", &path("d"))
+    svc.symlink(TEST_UID, &caps, "/dir", at(&path("d")))
         .expect("interior link");
-    svc.symlink(TEST_UID, &caps, "file", &path("dir/f"))
+    svc.symlink(TEST_UID, &caps, "file", at(&path("dir/f")))
         .expect("final link");
 
     let canonical = alloc::format!("{MOUNT}/dir/file");
     for spelling in ["dir/file", "d/file", "dir/f", "d/f"] {
         assert_eq!(
-            svc.realpath(TEST_UID, &caps, &path(spelling), RealpathMode::Existing),
+            svc.realpath(TEST_UID, &caps, at(&path(spelling)), RealpathMode::Existing),
             Ok(canonical.clone()),
             "canonicalising {spelling}"
         );
     }
     // The mount point itself is its own canonical name.
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, MOUNT, RealpathMode::Existing),
+        svc.realpath(TEST_UID, &caps, at(MOUNT), RealpathMode::Existing),
         Ok(alloc::string::String::from(MOUNT))
     );
 }
 
 #[test]
 fn realpath_resolves_dot_dot_through_a_link_physically() {
-    let svc = ready_traversable();
+    let svc = ready();
     let caps = caps();
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
 
@@ -2841,22 +3499,22 @@ fn realpath_resolves_dot_dot_through_a_link_physically() {
     // reaching the real `/sibling`, never the `/here/sibling` decoy a
     // lexical collapse of `here/link/..` would name. Both exist, so a
     // lexical answer would look plausible.
-    svc.mkdir(TEST_UID, &caps, &path("here")).expect("here");
-    svc.mkdir(TEST_UID, &caps, &path("there")).expect("there");
-    svc.open(TEST_UID, &caps, &path("sibling"), create)
-        .expect("real sibling");
-    svc.open(TEST_UID, &caps, &path("here/sibling"), create)
-        .expect("decoy sibling");
-    svc.symlink(TEST_UID, &caps, "/there", &path("here/link"))
+    svc.mkdir(TEST_UID, &caps, at(&path("here")), new_dir())
+        .expect("here");
+    svc.mkdir(TEST_UID, &caps, at(&path("there")), new_dir())
+        .expect("there");
+    open_path(&svc, TEST_UID, &caps, &path("sibling"), create).expect("real sibling");
+    open_path(&svc, TEST_UID, &caps, &path("here/sibling"), create).expect("decoy sibling");
+    svc.symlink(TEST_UID, &caps, "/there", at(&path("here/link")))
         .expect("link");
-    svc.symlink(TEST_UID, &caps, "../sibling", &path("there/up"))
+    svc.symlink(TEST_UID, &caps, "../sibling", at(&path("there/up")))
         .expect("ascending link");
 
     assert_eq!(
         svc.realpath(
             TEST_UID,
             &caps,
-            &path("here/link/up"),
+            at(&path("here/link/up")),
             RealpathMode::Existing
         ),
         Ok(alloc::format!("{MOUNT}/sibling"))
@@ -2865,21 +3523,22 @@ fn realpath_resolves_dot_dot_through_a_link_physically() {
 
 #[test]
 fn realpath_modes_decide_how_much_of_the_path_must_exist() {
-    let svc = ready_traversable();
+    let svc = ready();
     let caps = caps();
 
-    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("dir");
+    svc.mkdir(TEST_UID, &caps, at(&path("dir")), new_dir())
+        .expect("dir");
 
     // A vacant final name: refused by `-e`, named by `-f` and `-m`.
     let vacant = path("dir/absent");
     let vacant_canonical = alloc::format!("{MOUNT}/dir/absent");
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, &vacant, RealpathMode::Existing),
+        svc.realpath(TEST_UID, &caps, at(&vacant), RealpathMode::Existing),
         Err(Errno::NotFound)
     );
     for mode in [RealpathMode::Final, RealpathMode::Missing] {
         assert_eq!(
-            svc.realpath(TEST_UID, &caps, &vacant, mode),
+            svc.realpath(TEST_UID, &caps, at(&vacant), mode),
             Ok(vacant_canonical.clone())
         );
     }
@@ -2888,57 +3547,58 @@ fn realpath_modes_decide_how_much_of_the_path_must_exist() {
     let deep = path("gone/away/leaf");
     for mode in [RealpathMode::Existing, RealpathMode::Final] {
         assert_eq!(
-            svc.realpath(TEST_UID, &caps, &deep, mode),
+            svc.realpath(TEST_UID, &caps, at(&deep), mode),
             Err(Errno::NotFound)
         );
     }
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, &deep, RealpathMode::Missing),
+        svc.realpath(TEST_UID, &caps, at(&deep), RealpathMode::Missing),
         Ok(alloc::format!("{MOUNT}/gone/away/leaf"))
     );
 }
 
 #[test]
 fn realpath_of_a_dangling_link_follows_its_target() {
-    let svc = ready_traversable();
+    let svc = ready();
     let caps = caps();
 
-    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("dir");
+    svc.mkdir(TEST_UID, &caps, at(&path("dir")), new_dir())
+        .expect("dir");
     // A dangling link whose parent exists: `-f` names the target, `-e`
     // refuses it. The link's own name is never the answer.
-    svc.symlink(TEST_UID, &caps, "/dir/nothing", &path("dangling"))
+    svc.symlink(TEST_UID, &caps, "/dir/nothing", at(&path("dangling")))
         .expect("dangling link");
     let link = path("dangling");
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, &link, RealpathMode::Existing),
+        svc.realpath(TEST_UID, &caps, at(&link), RealpathMode::Existing),
         Err(Errno::NotFound)
     );
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, &link, RealpathMode::Final),
+        svc.realpath(TEST_UID, &caps, at(&link), RealpathMode::Final),
         Ok(alloc::format!("{MOUNT}/dir/nothing"))
     );
 
     // A dangling link whose target's *parent* is absent too: `-f` refuses
     // it (only the last component may be missing), `-m` names it.
-    svc.symlink(TEST_UID, &caps, "/gone/leaf", &path("deeper"))
+    svc.symlink(TEST_UID, &caps, "/gone/leaf", at(&path("deeper")))
         .expect("deeper link");
     let deeper = path("deeper");
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, &deeper, RealpathMode::Final),
+        svc.realpath(TEST_UID, &caps, at(&deeper), RealpathMode::Final),
         Err(Errno::NotFound)
     );
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, &deeper, RealpathMode::Missing),
+        svc.realpath(TEST_UID, &caps, at(&deeper), RealpathMode::Missing),
         Ok(alloc::format!("{MOUNT}/gone/leaf"))
     );
 }
 
 #[test]
 fn realpath_refuses_a_cycle_and_needs_search_permission_on_the_way() {
-    let svc = ready_traversable();
+    let svc = ready();
     let caps = caps();
 
-    svc.symlink(TEST_UID, &caps, "/loop", &path("loop"))
+    svc.symlink(TEST_UID, &caps, "/loop", at(&path("loop")))
         .expect("self-cycle");
     for mode in [
         RealpathMode::Existing,
@@ -2946,7 +3606,7 @@ fn realpath_refuses_a_cycle_and_needs_search_permission_on_the_way() {
         RealpathMode::Missing,
     ] {
         assert_eq!(
-            svc.realpath(TEST_UID, &caps, &path("loop"), mode),
+            svc.realpath(TEST_UID, &caps, at(&path("loop")), mode),
             Err(Errno::LinkLoop),
             "a cycle is refused under every reading"
         );
@@ -2956,14 +3616,21 @@ fn realpath_refuses_a_cycle_and_needs_search_permission_on_the_way() {
     // no ambient root — hides what is under it from canonicalisation exactly
     // as it does from a read. Asked under the most permissive reading, so it
     // is the permission check refusing and not the absence.
-    svc.mkdir(TEST_UID, &caps, &path("closed")).expect("closed");
-    svc.set_mode(TEST_UID, &caps, &path("closed"), 0o600)
-        .expect("drop the search bit");
+    svc.mkdir(TEST_UID, &caps, at(&path("closed")), new_dir())
+        .expect("closed");
+    svc.set_mode(
+        TEST_UID,
+        &caps,
+        at(&path("closed")),
+        0o600,
+        FinalLink::Follow,
+    )
+    .expect("drop the search bit");
     assert_eq!(
         svc.realpath(
             TEST_UID,
             &caps,
-            &path("closed/inside"),
+            at(&path("closed/inside")),
             RealpathMode::Missing
         ),
         Err(Errno::PermissionDenied)
@@ -2976,16 +3643,16 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
     // point rather than the subtree's path on the backing volume — and a
     // link inside it that tries to escape resolves within the projection.
     let h = DriverHandle::from_raw(9).expect("handle");
-    let mut volume = dir_driver();
+    let mut volume = driver();
     let vroot = volume.root();
     let area = volume
-        .create(vroot, b"Area", NodeKind::Directory)
+        .create(vroot, b"Area", NodeKind::Directory, &PLANTED)
         .expect("subtree");
     volume
-        .create(area, b"inside", NodeKind::RegularFile)
+        .create(area, b"inside", NodeKind::RegularFile, &PLANTED)
         .expect("file");
     volume
-        .create_link(area, b"up", b"../inside")
+        .create_link(area, b"up", b"../inside", &PLANTED)
         .expect("ascending link");
 
     let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
@@ -3005,6 +3672,7 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
     vfs.mounts_write()
         .attach(Attachment::new(h, None, MountFlags::default()))
         .expect("attach");
+    users_projection(&vfs);
     vfs.mounts_write()
         .mount_rebased(
             Path::parse("/Users/area").expect("path"),
@@ -3026,13 +3694,18 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
         svc.realpath(
             TEST_UID,
             &caps,
-            "/Users/area/inside",
+            at("/Users/area/inside"),
             RealpathMode::Existing
         ),
         Ok(canonical.clone())
     );
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, "/Users/area/up", RealpathMode::Existing),
+        svc.realpath(
+            TEST_UID,
+            &caps,
+            at("/Users/area/up"),
+            RealpathMode::Existing
+        ),
         Ok(canonical)
     );
 }
@@ -3043,7 +3716,8 @@ mod watch {
     use crate::fswatch::Drain;
 
     fn create(svc: &impl FilesystemService, path: &str) {
-        svc.open(
+        open_path(
+            svc,
             TEST_UID,
             &caps(),
             path,
@@ -3052,51 +3726,110 @@ mod watch {
         .expect("create");
     }
 
-    /// A directory made through the service is handed to its creator without
-    /// moving any epoch, so the watchers of the volume do not rescan for it,
-    /// while a real change of a directory's mode still does.
+    /// A pin reports to its own registration's watch table: once the volume
+    /// has gone and its identity is claimed afresh, the old registration's
+    /// pin reaches no table, never the new one that shares its identity.
     #[test]
-    fn a_mkdir_through_the_service_moves_no_epoch() {
+    fn a_pins_watch_table_is_its_own_registrations() {
+        let volume = [0x74; 16];
+        let Watched {
+            service: svc,
+            watch,
+            registry,
+            mounted,
+        } = watched_service(volume);
+        create(svc, "/Storage/vol/f");
+        let old =
+            own_handle(svc, TEST_UID, &caps(), "/Storage/vol/f", OpenFlags::READ).expect("opens");
+        assert!(svc
+            .watch_table(&old)
+            .is_some_and(|table| Arc::ptr_eq(&table, &watch)));
+        let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+        drop(mounted.unregister(handle).expect("registered"));
+        let claim = registry
+            .claim(
+                volume,
+                tairix_abi::driver::filesystem::NameMatching::Exact,
+                crate::test_pressure::unpressured(),
+            )
+            .expect("the identity is claimed afresh");
+        assert!(
+            svc.watch_table(&old).is_none(),
+            "the old registration's pin reports to no table"
+        );
+        drop(claim);
+        close(svc, old);
+    }
+
+    /// A directory made through the service is reported by name, costing its
+    /// parent's watchers no rescan, while a change of the new directory's own
+    /// mode makes its watchers rescan.
+    #[test]
+    fn a_mkdir_reports_its_name_and_a_mode_change_rescans_its_own_watchers() {
         let Watched {
             service: svc,
             watch,
             ..
         } = watched_service([0x73; 16]);
-        let root = svc
-            .stat(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
-            .expect("stats")
-            .id;
-        watch.watch(root.node, watch.epochs(0)).expect("arms");
-        let before = watch.epochs(0);
-        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/made")
+        let node_of = |path: &str| {
+            svc.stat(TEST_UID, &caps(), at(path), FinalLink::Follow)
+                .expect("stats")
+                .id
+                .node
+        };
+        let root = node_of(MOUNT);
+        let parent = watch.watch(root, 0).expect("arms").0;
+        svc.mkdir(TEST_UID, &caps(), at("/Storage/vol/made"), new_dir())
             .expect("mkdir");
-        assert_eq!(watch.epochs(0), before);
-        svc.set_mode(TEST_UID, &caps(), "/Storage/vol/made", 0o700)
-            .expect("chmod");
-        assert_ne!(watch.epochs(0), before);
+        let made = node_of("/Storage/vol/made");
+        let inner = watch.watch(made, 0).expect("arms").0;
+        assert!(matches!(
+            watch.take(root, parent, usize::MAX, false),
+            Ok(Some(Drain::Names { .. }))
+        ));
+        svc.set_mode(
+            TEST_UID,
+            &caps(),
+            at("/Storage/vol/made"),
+            0o700,
+            FinalLink::Follow,
+        )
+        .expect("chmod");
+        assert!(matches!(
+            watch.take(made, inner, usize::MAX, false),
+            Ok(Some(Drain::Rescan { .. }))
+        ));
     }
 
     #[test]
     fn lookup_entries_reports_what_readdir_does_for_those_names() {
         let svc = watched_service([0x70; 16]).service;
         create(svc, "/Storage/vol/a.txt");
-        svc.write(TEST_UID, &caps(), "/Storage/vol/a.txt", 0, false, b"moo")
-            .expect("write");
-        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/d")
+        write_path(
+            svc,
+            TEST_UID,
+            &caps(),
+            "/Storage/vol/a.txt",
+            0,
+            false,
+            b"moo",
+        )
+        .expect("write");
+        svc.mkdir(TEST_UID, &caps(), at("/Storage/vol/d"), new_dir())
             .expect("mkdir");
         let listing = svc
-            .readdir_bounded(TEST_UID, &caps(), MOUNT, FinalLink::Follow, usize::MAX)
+            .readdir_bounded(TEST_UID, &caps(), at(MOUNT), FinalLink::Follow, usize::MAX)
             .expect("lists");
         let names: [&[u8]; 3] = [b"a.txt", b"d", b"absent"];
         let found = svc
-            .lookup_entries(TEST_UID, &caps(), MOUNT, FinalLink::Follow, &names)
+            .lookup_entries(TEST_UID, &caps(), at(MOUNT), FinalLink::Follow, &names)
             .expect("looks up");
         let listed = |name: &str| listing.iter().find(|e| e.name == name).cloned();
         assert_eq!(found.entries[0], listed("a.txt"));
         assert_eq!(found.entries[1], listed("d"));
         assert_eq!(found.entries[2], None);
         let stat = svc
-            .stat(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
+            .stat(TEST_UID, &caps(), at(MOUNT), FinalLink::Follow)
             .expect("stats");
         assert_eq!(
             found.dir, stat.id,
@@ -3107,15 +3840,21 @@ mod watch {
     #[test]
     fn lookup_entries_is_refused_where_a_listing_would_be() {
         let svc = watched_service([0x71; 16]).service;
-        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/private")
+        svc.mkdir(TEST_UID, &caps(), at("/Storage/vol/private"), new_dir())
             .expect("mkdir");
-        svc.set_mode(TEST_UID, &caps(), "/Storage/vol/private", 0o300)
-            .expect("chmod");
+        svc.set_mode(
+            TEST_UID,
+            &caps(),
+            at("/Storage/vol/private"),
+            0o300,
+            FinalLink::Follow,
+        )
+        .expect("chmod");
         assert_eq!(
             svc.lookup_entries(
                 TEST_UID,
                 &caps(),
-                "/Storage/vol/private",
+                at("/Storage/vol/private"),
                 FinalLink::Follow,
                 &[]
             )
@@ -3127,7 +3866,7 @@ mod watch {
             svc.lookup_entries(
                 TEST_UID,
                 &caps(),
-                "/Storage/vol/file",
+                at("/Storage/vol/file"),
                 FinalLink::Follow,
                 &[]
             )
@@ -3144,16 +3883,16 @@ mod watch {
             ..
         } = watched_service([0x72; 16]);
         let dir = svc
-            .stat(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
+            .stat(TEST_UID, &caps(), at(MOUNT), FinalLink::Follow)
             .expect("stats")
             .id;
-        let watcher = watch.watch(dir.node, watch.epochs(0)).expect("arms").0;
+        let watcher = watch.watch(dir.node, 0).expect("arms").0;
         let drained = || match watch
             .take(dir.node, watcher, usize::MAX, false)
             .expect("copies out")
         {
             Some(Drain::Names { names, upto, .. }) => {
-                watch.commit(dir.node, watcher, upto, watch.epochs(0));
+                watch.commit(dir.node, watcher, upto, 0);
                 names
                     .iter()
                     .map(|n| alloc::string::String::from_utf8(n.to_vec()).expect("utf-8"))
@@ -3163,7 +3902,8 @@ mod watch {
         };
         create(svc, "/Storage/vol/new.txt");
         assert_eq!(drained(), ["new.txt"]);
-        svc.write(
+        write_path(
+            svc,
             TEST_UID,
             &caps(),
             "/Storage/vol/new.txt",
@@ -3173,19 +3913,26 @@ mod watch {
         )
         .expect("append");
         assert_eq!(drained(), ["new.txt"]);
-        svc.set_mode(TEST_UID, &caps(), "/Storage/vol/new.txt", 0o600)
-            .expect("chmod");
+        svc.set_mode(
+            TEST_UID,
+            &caps(),
+            at("/Storage/vol/new.txt"),
+            0o600,
+            FinalLink::Follow,
+        )
+        .expect("chmod");
         assert_eq!(drained(), ["new.txt"], "a metadata change is reported too");
         svc.rename(
             TEST_UID,
             &caps(),
-            "/Storage/vol/new.txt",
-            "/Storage/vol/old.txt",
+            at("/Storage/vol/new.txt"),
+            at("/Storage/vol/old.txt"),
             RenameFlags::empty(),
+            None,
         )
         .expect("rename");
         assert_eq!(drained(), ["new.txt", "old.txt"]);
-        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/sub")
+        svc.mkdir(TEST_UID, &caps(), at("/Storage/vol/sub"), new_dir())
             .expect("mkdir");
         assert_eq!(drained(), ["sub"]);
         create(svc, "/Storage/vol/sub/inner");
@@ -3193,8 +3940,9 @@ mod watch {
         svc.unlink(
             TEST_UID,
             &caps(),
-            "/Storage/vol/old.txt",
+            at("/Storage/vol/old.txt"),
             UnlinkFlags::empty(),
+            None,
         )
         .expect("unlink");
         assert_eq!(drained(), ["old.txt"]);
@@ -3211,22 +3959,23 @@ mod watch {
 fn a_program_is_read_only_from_a_mount_that_runs_programs() {
     let h_root = DriverHandle::from_raw(31).expect("handle");
     let h_stick = DriverHandle::from_raw(32).expect("handle");
-    let mut root = dir_driver();
+    let mut root = driver();
     let root_dir = root.root();
-    root.create(root_dir, b"run", NodeKind::RegularFile)
+    let run = root
+        .create(root_dir, b"run", NodeKind::RegularFile, &PLANTED)
         .expect("run");
-    root.write_at(root_dir, b"run", 0, b"R").expect("contents");
-    root.create_link(root_dir, b"onto", b"/Storage/stick/run")
+    root.write_at(run, 0, b"R").expect("contents");
+    root.create_link(root_dir, b"onto", b"/Storage/stick/run", &PLANTED)
         .expect("link");
-    let mut stick = dir_driver();
+    let mut stick = driver();
     let stick_dir = stick.root();
-    stick
-        .create(stick_dir, b"run", NodeKind::RegularFile)
+    let run = stick
+        .create(stick_dir, b"run", NodeKind::RegularFile, &PLANTED)
         .expect("run");
+    stick.write_at(run, 0, b"S").expect("contents");
     stick
-        .write_at(stick_dir, b"run", 0, b"S")
-        .expect("contents");
-    stick.create_link(stick_dir, b"hop", b"/run").expect("link");
+        .create_link(stick_dir, b"hop", b"/run", &PLANTED)
+        .expect("link");
 
     let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
     {
@@ -3260,12 +4009,12 @@ fn a_program_is_read_only_from_a_mount_that_runs_programs() {
     let caps = caps();
     let program = |path| {
         let mut buf = [0u8; 1];
-        svc.read_program(TEST_UID, &caps, path, 0, &mut buf)
+        svc.read_program(TEST_UID, &caps, at(path), 0, &mut buf)
             .map(|_| buf[0])
     };
     let data = |path| {
         let mut buf = [0u8; 1];
-        svc.read(TEST_UID, &caps, path, 0, &mut buf).map(|_| buf[0])
+        read_path(&svc, TEST_UID, &caps, path, 0, &mut buf).map(|_| buf[0])
     };
     assert_eq!(program("/run"), Ok(b'R'));
     assert_eq!(program("/Storage/stick/run"), Err(Errno::PermissionDenied));
@@ -3284,7 +4033,8 @@ fn a_seek_reports_holes_through_the_secured_path() {
     let svc = ready();
     let caps = caps();
     let file = path("sparse");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
@@ -3292,29 +4042,29 @@ fn a_seek_reports_holes_through_the_secured_path() {
     )
     .expect("create");
     assert_eq!(
-        svc.write(TEST_UID, &caps, &file, 100, false, b"data"),
+        write_path(&svc, TEST_UID, &caps, &file, 100, false, b"data"),
         Ok(4)
     );
     assert_eq!(
-        svc.seek_region(TEST_UID, &caps, &file, 0, SeekRegion::Data),
+        seek_region_path(&svc, TEST_UID, &caps, &file, 0, SeekRegion::Data),
         Ok(100)
     );
     assert_eq!(
-        svc.seek_region(TEST_UID, &caps, &file, 100, SeekRegion::Hole),
+        seek_region_path(&svc, TEST_UID, &caps, &file, 100, SeekRegion::Hole),
         Ok(104)
     );
     assert_eq!(
-        svc.seek_region(TEST_UID, &caps, &file, 104, SeekRegion::Data),
+        seek_region_path(&svc, TEST_UID, &caps, &file, 104, SeekRegion::Data),
         Err(Errno::NoData)
     );
     assert_eq!(
-        svc.seek_region(TEST_UID, &caps, MOUNT, 0, SeekRegion::Data),
+        seek_region_path(&svc, TEST_UID, &caps, MOUNT, 0, SeekRegion::Data),
         Err(Errno::IsADirectory)
     );
-    svc.set_mode(TEST_UID, &caps, &file, 0o200)
+    svc.set_mode(TEST_UID, &caps, at(&file), 0o200, FinalLink::Follow)
         .expect("write-only");
     assert_eq!(
-        svc.seek_region(TEST_UID, &caps, &file, 0, SeekRegion::Data),
+        seek_region_path(&svc, TEST_UID, &caps, &file, 0, SeekRegion::Data),
         Err(Errno::PermissionDenied),
         "where the holes lie is what reading the file reveals"
     );
@@ -3327,7 +4077,8 @@ fn a_punch_is_gated_as_a_write() {
     let svc = ready();
     let caps = caps();
     let file = path("punched");
-    svc.open(
+    open_path(
+        &svc,
         TEST_UID,
         &caps,
         &file,
@@ -3335,27 +4086,1509 @@ fn a_punch_is_gated_as_a_write() {
     )
     .expect("create");
     assert_eq!(
-        svc.write(TEST_UID, &caps, &file, 0, false, b"0123456789"),
+        write_path(&svc, TEST_UID, &caps, &file, 0, false, b"0123456789"),
         Ok(10)
     );
-    assert_eq!(svc.punch(TEST_UID, &caps, &file, 2, 4), Ok(()));
+    assert_eq!(punch_path(&svc, TEST_UID, &caps, &file, 2, 4), Ok(()));
     let mut buf = [0xFFu8; 10];
-    assert_eq!(svc.read(TEST_UID, &caps, &file, 0, &mut buf), Ok(10));
+    assert_eq!(read_path(&svc, TEST_UID, &caps, &file, 0, &mut buf), Ok(10));
     assert_eq!(&buf, b"01\0\0\0\x006789");
     assert_eq!(
-        svc.seek_region(TEST_UID, &caps, &file, 0, SeekRegion::Hole),
+        seek_region_path(&svc, TEST_UID, &caps, &file, 0, SeekRegion::Hole),
         Ok(2)
     );
-    svc.set_mode(TEST_UID, &caps, &file, 0o400)
+    svc.set_mode(TEST_UID, &caps, at(&file), 0o400, FinalLink::Follow)
         .expect("read-only file");
     assert_eq!(
-        svc.punch(TEST_UID, &caps, &file, 0, 1),
+        punch_path(&svc, TEST_UID, &caps, &file, 0, 1),
         Err(Errno::PermissionDenied)
     );
 
     let read_only = service(true, true, true);
     assert_eq!(
-        read_only.punch(TEST_UID, &caps, &path("x"), 0, 1),
+        punch_path(&read_only, TEST_UID, &caps, &path("x"), 0, 1),
         Err(Errno::ReadOnly)
     );
+}
+
+/// Descriptors bound for life to the node they opened (`plans/OPENFILE.md`):
+/// nothing after the open looks at a path.
+mod held {
+    use super::*;
+    use crate::fs::{Acting, VolumeNodes};
+
+    /// What `path` holds, read through a descriptor of its own.
+    fn contents(svc: &MountedFilesystemService<RwMockFs>, path: &str) -> Vec<u8> {
+        let mut buf = [0u8; 64];
+        let read = read_path(svc, TEST_UID, &caps(), path, 0, &mut buf).expect("reads");
+        buf[..read].to_vec()
+    }
+
+    fn id_of(svc: &MountedFilesystemService<RwMockFs>, path: &str) -> tairix_abi::FileId {
+        svc.stat(TEST_UID, &caps(), at(path), FinalLink::Follow)
+            .expect("stats")
+            .id
+    }
+
+    /// A descriptor keeps the file it opened through a rename of it and a new
+    /// file made at its old name: it reads the original bytes, and its writes
+    /// land in the renamed file.
+    ///
+    /// Regression: a descriptor re-resolved its path on every operation, so
+    /// it read and wrote whatever came to bear the name.
+    #[test]
+    fn a_descriptor_keeps_its_file_through_a_rename_and_a_new_file_at_its_name() {
+        let (svc, _) = service_over(driver(), &[]);
+        let caps = caps();
+        let who = acting(TEST_UID, &caps);
+        file_with(&svc, "a", b"old");
+        let held = own_handle(
+            &svc,
+            TEST_UID,
+            &caps,
+            &path("a"),
+            OpenFlags::READ.union(OpenFlags::WRITE),
+        )
+        .expect("opens");
+        svc.rename(
+            TEST_UID,
+            &caps,
+            at(&path("a")),
+            at(&path("b")),
+            RenameFlags::empty(),
+            None,
+        )
+        .expect("rename");
+        file_with(&svc, "a", b"new");
+        let mut buf = [0u8; 8];
+        let read = svc.read_node(&held, &who, 0, &mut buf).expect("reads");
+        assert_eq!(&buf[..read], b"old");
+        svc.write_node(&held, &who, 0, false, b"X").expect("writes");
+        assert_eq!(contents(&svc, &path("b")), b"Xld");
+        assert_eq!(
+            contents(&svc, &path("a")),
+            b"new",
+            "the new file is untouched"
+        );
+        close(&svc, held);
+    }
+
+    /// A descriptor whose file was renamed away never reaches a link planted
+    /// at its old name.
+    #[test]
+    fn a_descriptor_never_reaches_a_link_planted_at_its_old_name() {
+        let (svc, _) = service_over(driver(), &[]);
+        let caps = caps();
+        file_with(&svc, "victim", b"secret");
+        file_with(&svc, "mine", b"mine");
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("mine"), OpenFlags::WRITE).expect("opens");
+        svc.rename(
+            TEST_UID,
+            &caps,
+            at(&path("mine")),
+            at(&path("moved")),
+            RenameFlags::empty(),
+            None,
+        )
+        .expect("rename away");
+        svc.symlink(TEST_UID, &caps, "victim", at(&path("mine")))
+            .expect("plant a link");
+        svc.write_node(&held, &acting(TEST_UID, &caps), 0, false, b"MINE")
+            .expect("writes");
+        assert_eq!(contents(&svc, &path("victim")), b"secret");
+        assert_eq!(contents(&svc, &path("moved")), b"MINE");
+        close(&svc, held);
+    }
+
+    /// An open file unlinked reads on with no name, its number kept from the
+    /// next node made, and its close frees it.
+    #[test]
+    fn an_unlinked_open_file_reads_on_with_no_name_and_its_close_frees_it() {
+        let (svc, _) = service_over(driver().with_reused_numbers(), &[]);
+        let caps = caps();
+        let who = acting(TEST_UID, &caps);
+        file_with(&svc, "doomed", b"still here");
+        let number = id_of(&svc, &path("doomed"));
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("doomed"), OpenFlags::READ).expect("opens");
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at(&path("doomed")),
+            UnlinkFlags::empty(),
+            None,
+        )
+        .expect("unlink");
+        let mut buf = [0u8; 16];
+        let read = svc.read_node(&held, &who, 0, &mut buf).expect("reads");
+        assert_eq!(&buf[..read], b"still here");
+        assert_eq!(svc.stat_node(&held, &who).map(|stat| stat.nlink), Ok(0));
+        file_with(&svc, "next", b"x");
+        assert_ne!(id_of(&svc, &path("next")), number, "a held number is kept");
+        close(&svc, held);
+        file_with(&svc, "after", b"y");
+        assert_eq!(id_of(&svc, &path("after")), number, "freed at the close");
+    }
+
+    /// A node's mode and ACL are judged on every operation: an owner's chmod
+    /// revokes a grant and another principal's own descriptor, while the
+    /// owner's own descriptor reads on, since the owner could restore it.
+    #[test]
+    fn a_chmod_revokes_a_grant_and_another_principals_descriptor_but_not_the_owners() {
+        let other = 2000;
+        let (svc, _) = service_over(driver(), &[other]);
+        let caps = caps();
+        file_with(&svc, "shared", b"data");
+        let owners = own_handle(&svc, TEST_UID, &caps, &path("shared"), OpenFlags::READ)
+            .expect("the owner opens");
+        let others = own_handle(&svc, other, &caps, &path("shared"), OpenFlags::READ)
+            .expect("another principal opens");
+        svc.set_mode(
+            TEST_UID,
+            &caps,
+            at(&path("shared")),
+            0o000,
+            FinalLink::Follow,
+        )
+        .expect("chmod");
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            svc.read_node(&owners, &acting(TEST_UID, &caps), 0, &mut buf),
+            Ok(4)
+        );
+        let grant = Acting {
+            uid: TEST_UID,
+            caps: &caps,
+            granted: true,
+        };
+        assert_eq!(
+            svc.read_node(&owners, &grant, 0, &mut buf),
+            Err(Errno::PermissionDenied),
+            "a grant has no owner's exemption"
+        );
+        assert_eq!(
+            svc.read_node(&others, &acting(other, &caps), 0, &mut buf),
+            Err(Errno::PermissionDenied)
+        );
+        close(&svc, owners);
+        close(&svc, others);
+    }
+
+    /// The descriptor that created a file writes it after its owner made it
+    /// read-only, as POSIX's `open(O_CREAT, 0444)` then `write` does; a new
+    /// open is judged on the mode.
+    #[test]
+    fn the_creating_descriptor_writes_a_file_its_owner_made_read_only() {
+        let (svc, _) = service_over(driver(), &[]);
+        let caps = caps();
+        let created = own_handle(
+            &svc,
+            TEST_UID,
+            &caps,
+            &path("ro"),
+            OpenFlags::CREATE.union(OpenFlags::WRITE),
+        )
+        .expect("creates");
+        svc.set_mode(TEST_UID, &caps, at(&path("ro")), 0o444, FinalLink::Follow)
+            .expect("chmod");
+        assert_eq!(
+            svc.write_node(&created, &acting(TEST_UID, &caps), 0, false, b"ok"),
+            Ok(2)
+        );
+        assert_eq!(
+            open_path(&svc, TEST_UID, &caps, &path("ro"), OpenFlags::WRITE),
+            Err(Errno::PermissionDenied)
+        );
+        // Asked about, it answers as the path does: read-only.
+        let ask = |judged| {
+            svc.access_node(
+                &created,
+                &acting(TEST_UID, &caps),
+                crate::fs::Access::Write,
+                judged,
+            )
+        };
+        assert_eq!(ask(crate::fs::Judged::AsOperation), Ok(()));
+        assert_eq!(
+            ask(crate::fs::Judged::AsQuery),
+            Err(Errno::PermissionDenied)
+        );
+        close(&svc, created);
+    }
+
+    /// A node's capability gate is judged on the set each operation runs
+    /// with, so a descriptor's next read stops once its capability goes.
+    #[test]
+    fn a_capability_gate_binds_each_operation_to_the_set_it_runs_with() {
+        let (svc, cell) = service_over(driver(), &[]);
+        file_with(&svc, "gated", b"audit");
+        {
+            let driver = cell
+                .driver(DriverHandle::from_raw(9).expect("handle"))
+                .expect("registered");
+            let mut fs = driver.lock();
+            let root = fs.root();
+            let node = fs.lookup(root, b"gated").expect("found");
+            let mut sec = fs.security(node).expect("security");
+            sec.required_cap = Some(CapabilityId::AUDIT_READ);
+            fs.set_security(node, sec).expect("gates");
+        }
+        let mut holding = CapabilitySet::empty();
+        holding.insert(CapabilityId::AUDIT_READ);
+        let held = own_handle(&svc, TEST_UID, &holding, &path("gated"), OpenFlags::READ)
+            .expect("a holder opens");
+        let mut buf = [0u8; 5];
+        assert_eq!(
+            svc.read_node(&held, &acting(TEST_UID, &holding), 0, &mut buf),
+            Ok(5)
+        );
+        let narrowed = CapabilitySet::empty();
+        assert_eq!(
+            svc.read_node(&held, &acting(TEST_UID, &narrowed), 0, &mut buf),
+            Err(Errno::PermissionDenied),
+            "the owner's exemption never passes the gate"
+        );
+        close(&svc, held);
+    }
+
+    /// A descriptor whose projection left the mount table is stale, and one
+    /// whose registration was retired is never redirected to a volume
+    /// attached under the same name and handle since; a fresh open reaches
+    /// the new volume.
+    #[test]
+    fn a_withdrawn_or_retired_descriptor_is_stale_and_never_reaches_a_successor() {
+        let (svc, cell) = service_over(driver(), &[]);
+        let caps = caps();
+        let who = acting(TEST_UID, &caps);
+        let handle = DriverHandle::from_raw(9).expect("handle");
+        file_with(&svc, "f", b"one");
+        let held = own_handle(&svc, TEST_UID, &caps, &path("f"), OpenFlags::READ).expect("opens");
+        let vfs = cell.vfs().expect("installed");
+        vfs.mounts_write().detach(handle).expect("detach");
+        let mut buf = [0u8; 3];
+        assert_eq!(svc.read_node(&held, &who, 0, &mut buf), Err(Errno::Stale));
+
+        cell.unregister(handle).expect("registered");
+        let mut next = driver();
+        let root = next.root();
+        let file = next
+            .create(root, b"f", NodeKind::RegularFile, &PLANTED)
+            .expect("create");
+        next.write_at(file, 0, b"two").expect("write");
+        vfs.mounts_write()
+            .attach_at(
+                Attachment::new(handle, Some(MOUNT_MEDIUM), MountFlags::default()),
+                Path::parse(MOUNT).expect("path"),
+                crate::fs::Metadata::new(
+                    UserId(TEST_UID),
+                    GroupId(TEST_GID),
+                    Mode::from_bits(0o755),
+                ),
+            )
+            .expect("another volume at the same name");
+        cell.register(handle, next, "vol", "memfs", [0u8; 16], None)
+            .expect("register");
+        assert_eq!(svc.read_node(&held, &who, 0, &mut buf), Err(Errno::Stale));
+        assert_eq!(svc.stat_node(&held, &who).map(|_| ()), Err(Errno::Stale));
+        assert_eq!(contents(&svc, &path("f")), b"two");
+        close(&svc, held);
+    }
+
+    /// A stand-in registered under a registration takes it over in place, so
+    /// the descriptors opened through it answer the stand-in; no other
+    /// registration may take the handle.
+    #[test]
+    fn a_stand_in_takes_over_the_registration_its_descriptors_answer_through() {
+        let cell: &'static LateFilesystem<FlushSpy> =
+            crate::forever(Box::new(LateFilesystem::new()));
+        cell.install_vfs(vfs(false)).expect("install vfs");
+        let handle = DriverHandle::from_raw(9).expect("handle");
+        cell.register(handle, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
+            .expect("register");
+        let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+        identity.install(identity_table()).expect("identity");
+        let svc = MountedFilesystemService::new(cell, identity);
+        let caps = caps();
+        let who = acting(TEST_UID, &caps);
+        let held = own_handle(&svc, TEST_UID, &caps, MOUNT, OpenFlags::empty()).expect("opens");
+        assert_eq!(svc.sync_node(&held, &who), Ok(()));
+        let nodes = cell.nodes(handle).expect("registered");
+        cell.register_with_nodes(
+            handle,
+            FlushSpy::refusing(),
+            "vol",
+            "spy",
+            [0u8; 16],
+            None,
+            Arc::clone(&nodes),
+        )
+        .expect("the stand-in takes over");
+        assert_eq!(
+            svc.sync_node(&held, &who),
+            Err(Errno::DeviceFault),
+            "answered by the stand-in, not stale"
+        );
+        assert_eq!(
+            cell.register_with_nodes(
+                handle,
+                FlushSpy::new(),
+                "vol",
+                "spy",
+                [0u8; 16],
+                None,
+                Arc::new(VolumeNodes::new(u64::MAX)),
+            )
+            .map(drop),
+            Err(crate::fs::RegisterError::AlreadyRegistered)
+        );
+        close(&svc, held);
+    }
+
+    /// A descriptor dropped where no close reaps it keeps its pin until the
+    /// write-back flusher's next pass, which releases it.
+    #[test]
+    fn the_write_back_pass_reaps_what_a_drop_left() {
+        let (svc, cell) = service_over(driver(), &[]);
+        let caps = caps();
+        file_with(&svc, "doomed", b"x");
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("doomed"), OpenFlags::READ).expect("opens");
+        let pinned = held.node.pinned();
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at(&path("doomed")),
+            UnlinkFlags::empty(),
+            None,
+        )
+        .expect("unlink");
+        drop(held);
+        let driver = cell
+            .driver(DriverHandle::from_raw(9).expect("handle"))
+            .expect("registered");
+        assert!(driver.lock().node_info(pinned).is_ok(), "still pinned");
+        let sink = crate::test_sink::TestSink::new();
+        crate::fs::writeback::publish_due(cell, &sink, 0);
+        assert_eq!(
+            driver.lock().node_info(pinned).map(|_| ()),
+            Err(tairix_abi::driver::DriverError::NotFound),
+            "the pass released it, freeing the nameless node"
+        );
+    }
+
+    /// A working directory is a directory its caller may search, pinned as
+    /// it is entered: a catalog is held as the catalog, and the view root
+    /// pins nothing.
+    #[test]
+    fn a_working_directory_is_a_searchable_directory_pinned_as_it_is_entered() {
+        let svc = ready();
+        let caps = caps();
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        file_with(&svc, "f", b"");
+        let Ok(Cwd::Dir(cwd)) = svc.chdir(TEST_UID, &caps, at(&path("d"))) else {
+            panic!("a directory is a working directory");
+        };
+        assert_eq!(*cwd.opened_as, path("d"));
+        assert_eq!(
+            svc.chdir(TEST_UID, &caps, at(&path("f"))).err(),
+            Some(Errno::NotADirectory)
+        );
+        assert_eq!(
+            svc.chdir(TEST_UID, &caps, at(&path("none"))).err(),
+            Some(Errno::NotFound)
+        );
+        assert!(matches!(
+            svc.chdir(TEST_UID, &caps, at("/Storage")),
+            Ok(Cwd::Catalog(_))
+        ));
+        assert!(matches!(svc.chdir(TEST_UID, &caps, at("/")), Ok(Cwd::Root)));
+        svc.set_mode(TEST_UID, &caps, at(&path("d")), 0o644, FinalLink::Follow)
+            .expect("chmod");
+        assert_eq!(
+            svc.chdir(TEST_UID, &caps, at(&path("d"))).err(),
+            Some(Errno::PermissionDenied),
+            "a directory its caller may not search"
+        );
+        close(&svc, cwd);
+    }
+
+    /// A descriptor of the catalog lists it until its projection leaves the
+    /// mount table, here replaced by a backed one.
+    #[test]
+    fn a_catalog_descriptor_lists_until_its_projection_leaves() {
+        let (svc, cell) = service_over(driver(), &[]);
+        let caps = caps();
+        let Ok(Opened::Catalog(catalog)) = svc.open(
+            TEST_UID,
+            &caps,
+            at("/Storage"),
+            OpenFlags::DIRECTORY,
+            CreateMode::NONE,
+        ) else {
+            panic!("the catalog opens as itself");
+        };
+        let mut names = Vec::new();
+        svc.readdir_catalog(
+            TEST_UID,
+            &caps,
+            &catalog,
+            &mut Listing::default(),
+            &mut |entry| {
+                names.push(entry.name.to_vec());
+                DirVisit::Take
+            },
+        )
+        .expect("lists");
+        assert_eq!(names, [b"vol".to_vec()]);
+        cell.vfs()
+            .expect("installed")
+            .mounts_write()
+            .set_backing(
+                &Path::parse("/Storage").expect("path"),
+                DriverHandle::from_raw(9).expect("handle"),
+                Vec::new(),
+            )
+            .expect("backs the catalog");
+        assert_eq!(
+            svc.readdir_catalog(
+                TEST_UID,
+                &caps,
+                &catalog,
+                &mut Listing::default(),
+                &mut |_| DirVisit::Take
+            ),
+            Err(Errno::Stale)
+        );
+    }
+
+    /// A directory removed while a descriptor holds it answers a lookup as
+    /// gone, which is how its watchers learn of it.
+    #[test]
+    fn a_removed_held_directory_answers_its_lookup_as_gone() {
+        let (svc, _) = service_over(driver(), &[]);
+        let caps = caps();
+        let who = acting(TEST_UID, &caps);
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("d"), OpenFlags::DIRECTORY).expect("opens");
+        assert!(svc.lookup_entries_node(&held, &who, &[]).is_ok());
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at(&path("d")),
+            UnlinkFlags::DIRECTORY,
+            None,
+        )
+        .expect("rmdir");
+        assert_eq!(
+            svc.lookup_entries_node(&held, &who, &[]).map(|_| ()),
+            Err(Errno::NotFound)
+        );
+        close(&svc, held);
+    }
+
+    /// An open whose pin the driver refuses takes back the name it made, and
+    /// gives back the release slot it reserved.
+    #[test]
+    fn an_open_whose_pin_is_refused_takes_back_the_name_it_made() {
+        let (svc, cell) = service_over(driver(), &[]);
+        let caps = caps();
+        let driver = cell
+            .driver(DriverHandle::from_raw(9).expect("handle"))
+            .expect("registered");
+        driver.lock().refuse_pins(Some(DriverError::OutOfMemory));
+        let flags = OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::EXCLUSIVE);
+        assert_eq!(
+            open_path(&svc, TEST_UID, &caps, &path("f"), flags),
+            Err(Errno::OutOfMemory)
+        );
+        let mut fs = driver.lock();
+        let root = fs.root();
+        assert_eq!(fs.lookup(root, b"f"), Err(DriverError::NotFound));
+        assert_eq!(driver.nodes().outstanding(), 0, "the slot was given back");
+    }
+
+    /// A truncating open truncates last, so one refused its pin leaves the
+    /// file's bytes.
+    #[test]
+    fn a_truncating_open_refused_its_pin_leaves_the_bytes() {
+        let (svc, cell) = service_over(driver(), &[]);
+        let caps = caps();
+        file_with(&svc, "f", b"kept");
+        let driver = cell
+            .driver(DriverHandle::from_raw(9).expect("handle"))
+            .expect("registered");
+        driver.lock().refuse_pins(Some(DriverError::OutOfMemory));
+        let flags = OpenFlags::WRITE.union(OpenFlags::TRUNCATE);
+        assert!(open_path(&svc, TEST_UID, &caps, &path("f"), flags).is_err());
+        driver.lock().refuse_pins(None);
+        assert_eq!(contents(&svc, &path("f")), b"kept");
+    }
+
+    /// A byte operation after a principal's first takes its groups from the
+    /// service's cache, so nothing on its way allocates.
+    #[test]
+    fn a_warm_byte_operation_allocates_nothing() {
+        use crate::test_alloc::{opt_in_current_thread, opt_out_current_thread, LiveBytes};
+        static COUNTER: LiveBytes = LiveBytes::new();
+        let svc = ready();
+        let caps = caps();
+        file_with(&svc, "f", b"x");
+        let held = own_handle(&svc, TEST_UID, &caps, &path("f"), OpenFlags::READ).expect("opens");
+        let who = acting(TEST_UID, &caps);
+        let mut buf = [0u8; 1];
+        assert_eq!(svc.read_node(&held, &who, 0, &mut buf), Ok(1));
+        opt_in_current_thread(&COUNTER);
+        let read = svc.read_node(&held, &who, 0, &mut buf);
+        opt_out_current_thread();
+        assert_eq!(read, Ok(1));
+        assert_eq!(COUNTER.allocations(), 0, "a warm read allocated");
+        close(&svc, held);
+    }
+
+    /// A projection's floor no name reaches any more lists nothing, the
+    /// projections attached beneath its name included.
+    #[test]
+    fn a_removed_floor_lists_nothing() {
+        let handle = DriverHandle::from_raw(9).expect("handle");
+        let mut fs = driver();
+        let root = fs.root();
+        fs.create(root, b"Sub", NodeKind::Directory, &PLANTED)
+            .expect("subtree");
+        let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+        let caps = caps();
+        let cred = Credentials {
+            uid: UserId(TEST_UID),
+            gid: GroupId(TEST_GID),
+            supplementary_gids: &[],
+            caps: &caps,
+        };
+        for point in ["/Users/whole", "/Users/sub", "/Users/sub/inner"] {
+            vfs.mkdir(
+                &cred,
+                &Path::parse(point).expect("path"),
+                Mode::from_bits(0o755),
+            )
+            .expect("mount point");
+        }
+        vfs.mounts_write()
+            .attach(Attachment::new(handle, None, MountFlags::default()))
+            .expect("attach");
+        users_projection(&vfs);
+        {
+            let mut mounts = vfs.mounts_write();
+            mounts
+                .mount(
+                    Path::parse("/Users/whole").expect("path"),
+                    MountFlags::default(),
+                    Some(handle),
+                )
+                .expect("the whole volume");
+            mounts
+                .mount_rebased(
+                    Path::parse("/Users/sub").expect("path"),
+                    MountFlags::default(),
+                    Some(handle),
+                    alloc::vec![alloc::string::String::from("Sub")],
+                )
+                .expect("its subtree");
+            mounts
+                .mount(
+                    Path::parse("/Users/sub/inner").expect("path"),
+                    MountFlags::default(),
+                    None,
+                )
+                .expect("a projection beneath the subtree");
+        }
+        let cell: &'static LateFilesystem<RwMockFs> =
+            crate::forever(Box::new(LateFilesystem::new()));
+        cell.install_vfs(vfs).expect("install vfs");
+        cell.register(handle, fs, "vol", "memfs", [0u8; 16], None)
+            .expect("register");
+        let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+        identity.install(identity_table()).expect("identity");
+        let svc = MountedFilesystemService::new(cell, identity);
+        let who = acting(TEST_UID, &caps);
+        let names = |held: &NodeHandle| {
+            let mut names = Vec::new();
+            let listed = svc.readdir_node(held, &who, &mut Listing::default(), &mut |entry| {
+                names.push(entry.name.to_vec());
+                DirVisit::Take
+            });
+            listed.map(|()| names)
+        };
+        let floor = own_handle(&svc, TEST_UID, &caps, "/Users/sub", OpenFlags::DIRECTORY)
+            .expect("opens the floor");
+        assert_eq!(names(&floor), Ok(alloc::vec![b"inner".to_vec()]));
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at("/Users/whole/Sub"),
+            UnlinkFlags::DIRECTORY,
+            None,
+        )
+        .expect("rmdir");
+        assert_eq!(names(&floor), Ok(Vec::new()));
+        close(&svc, floor);
+    }
+}
+
+/// Queue the release of a pin on a fresh file of the volume `driver` serves,
+/// answering the volume's registration and the pinned id.
+fn queue_a_release(
+    driver: &crate::fs::DriverLock<RwMockFs>,
+) -> (
+    Arc<crate::fs::VolumeNodes>,
+    tairix_abi::driver::filesystem::NodeId,
+) {
+    let pinned = {
+        let mut fs = driver.lock();
+        let root = fs.root();
+        let file = fs
+            .create(root, b"held", NodeKind::RegularFile, &SYSTEM_RECORD)
+            .expect("create");
+        fs.pin(file).expect("pin")
+    };
+    let nodes = Arc::clone(driver.nodes());
+    let slot = nodes.admit().expect("a slot");
+    drop(crate::fs::NodeRef::new(slot, pinned, NodeKind::RegularFile).expect("a pin"));
+    (nodes, pinned)
+}
+
+/// The flusher only tries a volume's lock: a pass made while another holds
+/// one volume reaps the rest and leaves that one due, so a long operation
+/// never stalls the flusher. The pass below runs on the thread holding the
+/// busy volume, so waiting for its lock would never return.
+#[test]
+fn a_flusher_pass_leaves_a_busy_volume_due_and_reaps_the_others() {
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    let register = |raw, name| {
+        let handle = DriverHandle::from_raw(raw).expect("non-zero handle");
+        cell.register(handle, RwMockFs::new(), name, "memfs", [0u8; 16], None)
+            .expect("register")
+    };
+    let (busy, free) = (register(21, "busy"), register(22, "free"));
+    let (busy_nodes, busy_pin) = queue_a_release(&busy);
+    let (free_nodes, free_pin) = queue_a_release(&free);
+    let held = busy.lock();
+    cell.reap_due();
+    assert!(busy_nodes.is_reap_due(), "a busy volume stays due");
+    assert!(!free_nodes.is_reap_due());
+    assert_eq!(
+        free.lock().unpin(free_pin),
+        Err(tairix_abi::driver::DriverError::NotFound),
+        "the free volume was reaped"
+    );
+    drop(held);
+    cell.reap_due();
+    assert!(!busy_nodes.is_reap_due());
+    assert_eq!(
+        busy.lock().unpin(busy_pin),
+        Err(tairix_abi::driver::DriverError::NotFound),
+        "the volume was reaped once it was free"
+    );
+}
+
+/// A pass walks registrations by instance number, so one withdrawn behind its
+/// cursor moves none it has still to visit.
+#[test]
+fn a_flusher_pass_finds_a_due_volume_past_one_withdrawn_beneath_it() {
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    let handles = [31, 32, 33].map(|raw| DriverHandle::from_raw(raw).expect("non-zero handle"));
+    let drivers = handles.map(|handle| {
+        cell.register(handle, RwMockFs::new(), "vol", "memfs", [0u8; 16], None)
+            .expect("register")
+    });
+    let (second, _) = queue_a_release(&drivers[1]);
+    let (third, _) = queue_a_release(&drivers[2]);
+    assert!(cell.unregister(handles[0]).is_some());
+    let next = cell.next_reap_due(Some(second.instance()));
+    assert!(next.is_some_and(|(_, nodes)| Arc::ptr_eq(&nodes, &third)));
+    cell.reap_due();
+    assert!(!second.is_reap_due() && !third.is_reap_due());
+}
+
+/// A registration is found by its instance, and the flusher walks the due ones
+/// in instance order, whatever order the registrations arrived in: the registry
+/// is kept sorted for its binary searches.
+#[test]
+fn registrations_arriving_out_of_order_are_kept_in_instance_order() {
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    let later = Arc::new(crate::fs::VolumeNodes::new(9));
+    let earlier = Arc::new(crate::fs::VolumeNodes::new(3));
+    let between = Arc::new(crate::fs::VolumeNodes::new(5));
+    let mut drivers = Vec::new();
+    for (raw, nodes) in [(41, &later), (42, &earlier), (43, &between)] {
+        let handle = DriverHandle::from_raw(raw).expect("non-zero handle");
+        drivers.push(
+            cell.register_with_nodes(
+                handle,
+                RwMockFs::new(),
+                "vol",
+                "memfs",
+                [0u8; 16],
+                None,
+                Arc::clone(nodes),
+            )
+            .expect("register"),
+        );
+    }
+    for nodes in [&later, &earlier, &between] {
+        assert!(cell.registered(nodes.instance()).is_some());
+    }
+    assert!(cell.registered(4).is_none());
+    for driver in &drivers {
+        let _ = queue_a_release(driver);
+    }
+    let order: Vec<u64> = core::iter::successors(cell.next_reap_due(None), |(_, nodes)| {
+        cell.next_reap_due(Some(nodes.instance()))
+    })
+    .map(|(_, nodes)| nodes.instance())
+    .collect();
+    assert_eq!(order, [3, 5, 9]);
+}
+
+/// Paths resolved from a working directory or a held directory, `..` taken
+/// physically across projections, and the expectations a removal or a rename
+/// is held to.
+mod resolve {
+    use super::*;
+    use crate::fs::{Acting, At, Metadata, Start};
+    use tairix_abi::fs::{Access as Wanted, NodeExpect};
+    use tairix_abi::time::Time64;
+
+    /// `path` from where `cwd` stands.
+    fn from<'a>(cwd: &'a Cwd, path: &'a str) -> At<'a> {
+        At {
+            start: cwd.start(),
+            path,
+        }
+    }
+
+    /// `path` from the directory `held` holds.
+    fn beneath<'a>(held: &'a NodeHandle, path: &'a str) -> At<'a> {
+        At {
+            start: Start::Dir(held),
+            path,
+        }
+    }
+
+    /// `path`, entered as the test principal's working directory.
+    fn enter(svc: &dyn FilesystemService, at: At<'_>) -> Cwd {
+        svc.chdir(TEST_UID, &caps(), at)
+            .expect("a working directory")
+    }
+
+    /// Let `cwd` go, reaping what it pins.
+    fn leave(svc: &dyn FilesystemService, cwd: Cwd) {
+        if let Cwd::Dir(handle) = cwd {
+            close(svc, handle);
+        }
+    }
+
+    /// The bytes of the file `at` names, read through a descriptor of its
+    /// own.
+    fn bytes(svc: &dyn FilesystemService, at: At<'_>) -> Result<Vec<u8>, Errno> {
+        let caps = caps();
+        let opened = svc.open(TEST_UID, &caps, at, OpenFlags::READ, CreateMode::NONE)?;
+        let Opened::Node {
+            node,
+            projection,
+            opened_as,
+            at_floor,
+            ..
+        } = opened
+        else {
+            return Err(Errno::IsADirectory);
+        };
+        let handle = NodeHandle {
+            node,
+            projection,
+            authority: Authority::Holder,
+            opened_as,
+            at_floor,
+        };
+        let mut buf = [0u8; 32];
+        let read = svc.read_node(&handle, &acting(TEST_UID, &caps), 0, &mut buf);
+        close(svc, handle);
+        Ok(buf[..read?].to_vec())
+    }
+
+    fn canonical(svc: &dyn FilesystemService, at: At<'_>) -> Result<alloc::string::String, Errno> {
+        svc.realpath(TEST_UID, &caps(), at, RealpathMode::Existing)
+    }
+
+    /// The service over `vfs`, each of `volumes` registered under its handle.
+    fn serving(vfs: Vfs, volumes: Vec<(u64, RwMockFs)>) -> MountedFilesystemService<RwMockFs> {
+        let cell: &'static LateFilesystem<RwMockFs> =
+            crate::forever(Box::new(LateFilesystem::new()));
+        cell.install_vfs(vfs).expect("install vfs");
+        for (raw, fs) in volumes {
+            let handle = DriverHandle::from_raw(raw).expect("handle");
+            cell.register(handle, fs, "vol", "memfs", [0u8; 16], None)
+                .expect("register");
+        }
+        let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+        identity.install(identity_table()).expect("identity");
+        MountedFilesystemService::new(cell, identity)
+    }
+
+    /// The default layout with each of `points` attached as a removable
+    /// volume beneath the catalog, under handles from 11 up.
+    fn removables(points: &[&str]) -> Vfs {
+        let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+        let template = Metadata::new(UserId(TEST_UID), GroupId(TEST_GID), Mode::from_bits(0o755));
+        for (raw, point) in (11..).zip(points) {
+            let handle = DriverHandle::from_raw(raw).expect("handle");
+            vfs.mounts_write()
+                .attach_at(
+                    removable(handle),
+                    Path::parse(point).expect("path"),
+                    template.clone(),
+                )
+                .expect("attached beneath the catalog");
+        }
+        vfs
+    }
+
+    /// An expectation of the node `node` alone.
+    fn node_alone(id: tairix_abi::FileId) -> NodeExpect {
+        NodeExpect {
+            id,
+            content_gen: 0,
+            size: 0,
+            modified: Time64::UNIX_EPOCH,
+            changed: Time64::UNIX_EPOCH,
+        }
+    }
+
+    /// A working directory is its directory, not the path it was entered
+    /// by: it survives a rename, and once its label reaches another node
+    /// its canonical path is found by climbing from it.
+    ///
+    /// Regression: the working directory was a string, so a rename left it
+    /// naming nothing and a new directory at the old name took its place.
+    #[test]
+    fn a_working_directory_survives_a_rename_and_is_found_afresh() {
+        let svc = ready();
+        let caps = caps();
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        file_with(&svc, "d/inside", b"in");
+        let cwd = enter(&svc, at(&path("d")));
+        svc.rename(
+            TEST_UID,
+            &caps,
+            at(&path("d")),
+            at(&path("e")),
+            RenameFlags::empty(),
+            None,
+        )
+        .expect("rename");
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("a new directory at the old name");
+        assert_eq!(
+            svc.canonical_of(TEST_UID, &caps, cwd.start()),
+            Ok(path("e"))
+        );
+        assert_eq!(bytes(&svc, from(&cwd, "inside")), Ok(b"in".to_vec()));
+        assert_eq!(canonical(&svc, from(&cwd, "inside")), Ok(path("e/inside")));
+        leave(&svc, cwd);
+    }
+
+    /// A working directory removed under its holder names nothing: its
+    /// canonical path and every path from it are not found, and nothing can
+    /// be made in it.
+    #[test]
+    fn a_removed_working_directory_is_not_found() {
+        let svc = ready();
+        let caps = caps();
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        let cwd = enter(&svc, at(&path("d")));
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at(&path("d")),
+            UnlinkFlags::DIRECTORY,
+            None,
+        )
+        .expect("rmdir");
+        assert_eq!(
+            svc.canonical_of(TEST_UID, &caps, cwd.start()),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            svc.mkdir(TEST_UID, &caps, from(&cwd, "x"), new_dir()),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            svc.stat(TEST_UID, &caps, from(&cwd, ".."), FinalLink::Follow)
+                .err(),
+            Some(Errno::NotFound)
+        );
+        leave(&svc, cwd);
+    }
+
+    /// `..` leaves the directory a walk stands in, which a link it followed
+    /// chose, never the text before it.
+    ///
+    /// Regression: `..` was collapsed against the path's text, so `cd l; ..`
+    /// returned to the link's directory rather than its target's parent.
+    #[test]
+    fn dot_dot_from_a_directory_entered_through_a_link_is_physical() {
+        let svc = ready();
+        let caps = caps();
+        for dir in ["a", "a/b"] {
+            svc.mkdir(TEST_UID, &caps, at(&path(dir)), new_dir())
+                .expect("mkdir");
+        }
+        file_with(&svc, "a/marker", b"a");
+        svc.symlink(TEST_UID, &caps, "a/b", at(&path("l")))
+            .expect("link");
+        let cwd = enter(&svc, at(&path("l")));
+        assert_eq!(
+            svc.canonical_of(TEST_UID, &caps, cwd.start()),
+            Ok(path("a/b"))
+        );
+        assert_eq!(canonical(&svc, from(&cwd, "..")), Ok(path("a")));
+        assert_eq!(bytes(&svc, from(&cwd, "../marker")), Ok(b"a".to_vec()));
+        assert_eq!(
+            canonical(&svc, at(&alloc::format!("{MOUNT}/l/../marker"))),
+            Ok(path("a/marker"))
+        );
+        leave(&svc, cwd);
+    }
+
+    /// A caller's `..` at a volume's floor climbs into the catalog it is
+    /// shown in and on into a sibling volume; one a link supplies stays on
+    /// the link's own volume.
+    #[test]
+    fn a_callers_dot_dot_crosses_projections_and_a_links_stays_on_its_volume() {
+        let mut usb = driver();
+        let root = usb.root();
+        let decoy = usb
+            .create(root, b"usb2", NodeKind::Directory, &PLANTED)
+            .expect("a directory of the sibling's name");
+        let inside = usb
+            .create(decoy, b"x", NodeKind::RegularFile, &PLANTED)
+            .expect("its file");
+        usb.write_at(inside, 0, b"inside").expect("fill");
+        usb.create_link(root, b"up", b"../usb2/x", &PLANTED)
+            .expect("an ascending link");
+        let mut sibling = driver();
+        let sibling_root = sibling.root();
+        let other = sibling
+            .create(sibling_root, b"x", NodeKind::RegularFile, &PLANTED)
+            .expect("the sibling's file");
+        sibling.write_at(other, 0, b"other").expect("fill");
+        let svc = serving(
+            removables(&["/Storage/usb", "/Storage/usb2"]),
+            alloc::vec![(11, usb), (12, sibling)],
+        );
+        let caps = caps();
+
+        let cwd = enter(&svc, at("/Storage/usb"));
+        assert_eq!(canonical(&svc, from(&cwd, "..")), Ok("/Storage".into()));
+        assert_eq!(bytes(&svc, from(&cwd, "../usb2/x")), Ok(b"other".to_vec()));
+        assert_eq!(bytes(&svc, from(&cwd, "up")), Ok(b"inside".to_vec()));
+        assert!(matches!(
+            svc.chdir(TEST_UID, &caps, from(&cwd, "..")),
+            Ok(Cwd::Catalog(_))
+        ));
+        assert_eq!(
+            canonical(&svc, at("/../Storage/usb/..")),
+            Ok("/Storage".into())
+        );
+        leave(&svc, cwd);
+    }
+
+    /// Each `..` asks search permission of the directory it leaves, and
+    /// leaves only a directory.
+    ///
+    /// Regression: `d/..` was spelled away before the walk, so it reached
+    /// the parent of a directory its caller may not search, or of a file.
+    #[test]
+    fn a_dot_dot_needs_search_on_the_directory_it_leaves() {
+        let svc = ready();
+        let caps = caps();
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        svc.set_mode(TEST_UID, &caps, at(&path("d")), 0o600, FinalLink::Follow)
+            .expect("closed to search");
+        file_with(&svc, "f", b"");
+        let stat = |text: &str| {
+            svc.stat(TEST_UID, &caps, at(&path(text)), FinalLink::Follow)
+                .map(|stat| stat.kind)
+        };
+        assert_eq!(stat("d/.."), Err(Errno::PermissionDenied));
+        assert_eq!(stat("f/.."), Err(Errno::NotADirectory));
+        assert_eq!(stat("f/../f"), Err(Errno::NotADirectory));
+    }
+
+    /// A removal or a rename holding an expectation acts only on the node it
+    /// expects, decided under the volume's lock, and otherwise changes
+    /// nothing.
+    #[test]
+    fn a_stale_expectation_changes_nothing() {
+        let svc = ready();
+        let caps = caps();
+        file_with(&svc, "f", b"one");
+        let stat = svc
+            .stat(TEST_UID, &caps, at(&path("f")), FinalLink::Keep)
+            .expect("stat");
+        let wrong = node_alone(tairix_abi::FileId {
+            node: stat.id.node + 1,
+            ..stat.id
+        });
+        // The node's number on another volume, as a volume swapped in under
+        // the same name would number one of its own.
+        let elsewhere = node_alone(tairix_abi::FileId {
+            volume: [0x5A; 16],
+            ..stat.id
+        });
+        assert_eq!(
+            svc.unlink(
+                TEST_UID,
+                &caps,
+                at(&path("f")),
+                UnlinkFlags::EXPECT_NODE,
+                Some(&elsewhere)
+            ),
+            Err(Errno::Stale)
+        );
+        assert_eq!(
+            svc.rename(
+                TEST_UID,
+                &caps,
+                at(&path("f")),
+                at(&path("g")),
+                RenameFlags::EXPECT_NODE,
+                Some(&elsewhere),
+            ),
+            Err(Errno::Stale)
+        );
+        assert_eq!(
+            svc.unlink(
+                TEST_UID,
+                &caps,
+                at(&path("f")),
+                UnlinkFlags::EXPECT_NODE,
+                Some(&wrong)
+            ),
+            Err(Errno::Stale)
+        );
+        let unchanged = NodeExpect {
+            id: stat.id,
+            content_gen: stat.content_gen,
+            size: stat.size,
+            modified: stat.times.modified,
+            changed: stat.times.changed,
+        };
+        write_path(&svc, TEST_UID, &caps, &path("f"), 3, false, b"two").expect("grow");
+        assert_eq!(
+            svc.unlink(
+                TEST_UID,
+                &caps,
+                at(&path("f")),
+                UnlinkFlags::EXPECT_UNCHANGED,
+                Some(&unchanged)
+            ),
+            Err(Errno::Stale)
+        );
+        assert_eq!(
+            svc.rename(
+                TEST_UID,
+                &caps,
+                at(&path("f")),
+                at(&path("g")),
+                RenameFlags::EXPECT_NODE,
+                Some(&wrong)
+            ),
+            Err(Errno::Stale)
+        );
+        assert_eq!(bytes(&svc, at(&path("f"))), Ok(b"onetwo".to_vec()));
+        assert_eq!(
+            svc.stat(TEST_UID, &caps, at(&path("g")), FinalLink::Keep)
+                .err(),
+            Some(Errno::NotFound)
+        );
+
+        let its_own = node_alone(stat.id);
+        svc.rename(
+            TEST_UID,
+            &caps,
+            at(&path("f")),
+            at(&path("g")),
+            RenameFlags::EXPECT_NODE,
+            Some(&its_own),
+        )
+        .expect("the node expected moves");
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at(&path("g")),
+            UnlinkFlags::EXPECT_NODE,
+            Some(&its_own),
+        )
+        .expect("the node expected goes");
+    }
+
+    /// An expectation goes with the flag naming it, and one of the node
+    /// alone asks nothing else of it.
+    #[test]
+    fn an_expectation_its_flags_do_not_name_is_out_of_range() {
+        let svc = ready();
+        let caps = caps();
+        file_with(&svc, "f", b"");
+        let id = svc
+            .stat(TEST_UID, &caps, at(&path("f")), FinalLink::Keep)
+            .expect("stat")
+            .id;
+        let alone = node_alone(id);
+        let padded = NodeExpect { size: 1, ..alone };
+        let unlink = |flags, expect| svc.unlink(TEST_UID, &caps, at(&path("f")), flags, expect);
+        assert_eq!(
+            unlink(UnlinkFlags::empty(), Some(&alone)),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            unlink(UnlinkFlags::EXPECT_NODE, None),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            unlink(UnlinkFlags::EXPECT_UNCHANGED, None),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            unlink(UnlinkFlags::EXPECT_NODE, Some(&padded)),
+            Err(Errno::OutOfRange)
+        );
+        let rename = |flags, expect| {
+            svc.rename(
+                TEST_UID,
+                &caps,
+                at(&path("f")),
+                at(&path("g")),
+                flags,
+                expect,
+            )
+        };
+        assert_eq!(
+            rename(RenameFlags::empty(), Some(&alone)),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            rename(RenameFlags::EXPECT_NODE, Some(&padded)),
+            Err(Errno::OutOfRange)
+        );
+        assert!(svc
+            .stat(TEST_UID, &caps, at(&path("f")), FinalLink::Keep)
+            .is_ok());
+    }
+
+    /// A path from a directory descriptor is canonicalised from where that
+    /// directory stands now, however it has moved since it was opened.
+    #[test]
+    fn a_path_from_a_renamed_directory_descriptor_is_canonicalised_exactly() {
+        let svc = ready();
+        let caps = caps();
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("d"), OpenFlags::DIRECTORY).expect("opens");
+        svc.rename(
+            TEST_UID,
+            &caps,
+            at(&path("d")),
+            at(&path("e")),
+            RenameFlags::empty(),
+            None,
+        )
+        .expect("rename");
+        let final_name = svc.realpath(TEST_UID, &caps, beneath(&held, "x"), RealpathMode::Final);
+        assert_eq!(final_name, Ok(path("e/x")));
+        assert_eq!(canonical(&svc, beneath(&held, "..")), Ok(MOUNT.into()));
+        assert_eq!(canonical(&svc, beneath(&held, ".")), Ok(path("e")));
+        close(&svc, held);
+    }
+
+    /// `CREATE | DIRECTORY | EXCLUSIVE` makes the directory and answers it
+    /// open, with no byte access; any other spelling of it makes nothing.
+    #[test]
+    fn creating_a_directory_answers_it_open() {
+        let svc = ready();
+        let caps = caps();
+        let flags = OpenFlags::CREATE
+            .union(OpenFlags::DIRECTORY)
+            .union(OpenFlags::EXCLUSIVE);
+        let opened = svc.open(TEST_UID, &caps, at(&path("n")), flags, new_dir());
+        let Ok(Opened::Node {
+            kind,
+            node,
+            projection,
+            opened_as,
+            at_floor,
+        }) = opened
+        else {
+            panic!("the new directory opens");
+        };
+        assert_eq!(kind, NodeKind::Directory);
+        let held = NodeHandle {
+            node,
+            projection,
+            authority: Authority::Holder,
+            opened_as,
+            at_floor,
+        };
+        let who = acting(TEST_UID, &caps);
+        let stat = svc.stat_node(&held, &who).expect("stats");
+        assert_eq!((stat.kind, stat.mode), (FileKind::Directory, 0o755));
+        svc.mkdir(TEST_UID, &caps, beneath(&held, "inner"), new_dir())
+            .expect("the descriptor names its directory");
+        close(&svc, held);
+
+        assert_eq!(
+            open_path(&svc, TEST_UID, &caps, &path("n"), flags).err(),
+            Some(Errno::AlreadyExists)
+        );
+        let refused = [
+            OpenFlags::CREATE.union(OpenFlags::DIRECTORY),
+            flags.union(OpenFlags::READ),
+            flags.union(OpenFlags::WRITE),
+        ];
+        for asked in refused {
+            assert_eq!(
+                svc.open(TEST_UID, &caps, at(&path("m")), asked, new_dir())
+                    .err(),
+                Some(Errno::OutOfRange),
+                "{asked:?}"
+            );
+        }
+        assert_eq!(
+            svc.stat(TEST_UID, &caps, at(&path("m")), FinalLink::Keep)
+                .err(),
+            Some(Errno::NotFound)
+        );
+    }
+
+    /// A directory no name reaches takes no new name, and has no parent.
+    #[test]
+    fn a_removed_held_directory_takes_no_new_name() {
+        let svc = ready();
+        let caps = caps();
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        file_with(&svc, "g", b"");
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("d"), OpenFlags::DIRECTORY).expect("opens");
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at(&path("d")),
+            UnlinkFlags::DIRECTORY,
+            None,
+        )
+        .expect("rmdir");
+        assert_eq!(
+            svc.mkdir(TEST_UID, &caps, beneath(&held, "x"), new_dir()),
+            Err(Errno::NotFound)
+        );
+        let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+        assert_eq!(
+            svc.open(TEST_UID, &caps, beneath(&held, "f"), create, new_file())
+                .err(),
+            Some(Errno::NotFound)
+        );
+        assert_eq!(
+            svc.rename(
+                TEST_UID,
+                &caps,
+                at(&path("g")),
+                beneath(&held, "g"),
+                RenameFlags::empty(),
+                None
+            ),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            svc.link(
+                TEST_UID,
+                &caps,
+                at(&path("g")),
+                beneath(&held, "g"),
+                FinalLink::Keep
+            ),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            svc.stat(TEST_UID, &caps, beneath(&held, ".."), FinalLink::Follow)
+                .err(),
+            Some(Errno::NotFound)
+        );
+        close(&svc, held);
+    }
+
+    /// A start whose projection has left the mount table is stale, and an
+    /// absolute path ignores its start.
+    #[test]
+    fn a_start_whose_projection_has_gone_is_stale() {
+        let (svc, cell) = service_over(driver(), &[]);
+        let caps = caps();
+        svc.mkdir(TEST_UID, &caps, at(&path("d")), new_dir())
+            .expect("mkdir");
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("d"), OpenFlags::DIRECTORY).expect("opens");
+        let Ok(Opened::Catalog(catalog)) = svc.open(
+            TEST_UID,
+            &caps,
+            at("/Storage"),
+            OpenFlags::DIRECTORY,
+            CreateMode::NONE,
+        ) else {
+            panic!("the catalog opens as itself");
+        };
+        let in_catalog = At {
+            start: Start::Catalog(&catalog),
+            path: "vol",
+        };
+        assert!(svc
+            .stat(TEST_UID, &caps, in_catalog, FinalLink::Follow)
+            .is_ok());
+        let vfs = cell.vfs().expect("installed");
+        let handle = DriverHandle::from_raw(9).expect("handle");
+        vfs.mounts_write()
+            .set_backing(&Path::parse("/Storage").expect("path"), handle, Vec::new())
+            .expect("replaces the catalog");
+        vfs.mounts_write().detach(handle).expect("detach");
+        let stat = |at| {
+            svc.stat(TEST_UID, &caps, at, FinalLink::Follow)
+                .map(|s| s.kind)
+        };
+        assert_eq!(stat(beneath(&held, "x")), Err(Errno::Stale));
+        assert_eq!(stat(in_catalog), Err(Errno::Stale));
+        assert_eq!(stat(beneath(&held, "/")), Ok(FileKind::Directory));
+        close(&svc, held);
+    }
+
+    /// `fs_access` answers as the caller, each access it is asked for judged
+    /// by the node's record; asked nothing, it answers whether the node
+    /// exists; under `Keep` it asks about a final link itself.
+    #[test]
+    fn access_answers_each_access_as_the_caller() {
+        const OTHER: u32 = 1001;
+        let svc = ready_with_users(&[OTHER]);
+        let caps = caps();
+        file_with(&svc, "f", b"x");
+        svc.set_mode(TEST_UID, &caps, at(&path("f")), 0o640, FinalLink::Follow)
+            .expect("chmod");
+        svc.symlink(TEST_UID, &caps, "f", at(&path("l")))
+            .expect("link");
+        let access = |uid, name: &str, want, final_link| {
+            svc.access(uid, &caps, at(&path(name)), want, final_link)
+        };
+        let follow = FinalLink::Follow;
+        assert_eq!(access(TEST_UID, "f", Wanted::READ, follow), Ok(()));
+        assert_eq!(
+            access(TEST_UID, "f", Wanted::READ.union(Wanted::WRITE), follow),
+            Ok(())
+        );
+        assert_eq!(
+            access(TEST_UID, "f", Wanted::EXEC, follow),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            access(OTHER, "f", Wanted::READ, follow),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(access(OTHER, "f", Wanted::empty(), follow), Ok(()));
+        assert_eq!(
+            access(OTHER, "absent", Wanted::empty(), follow),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(access(OTHER, "l", Wanted::READ, FinalLink::Keep), Ok(()));
+        assert_eq!(
+            access(OTHER, "l", Wanted::READ, follow),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    /// After the node's own verdict `fs_access` adds the projection's: no
+    /// write where nothing may be written, and no program run where
+    /// programs may not run.
+    #[test]
+    fn access_adds_the_projections_flags_to_the_nodes_verdict() {
+        let caps = caps();
+        let follow = FinalLink::Follow;
+        let read_only = service(true, true, true);
+        assert_eq!(
+            read_only.access(TEST_UID, &caps, at(MOUNT), Wanted::WRITE, follow),
+            Err(Errno::ReadOnly)
+        );
+        assert_eq!(
+            read_only.access(TEST_UID, &caps, at(MOUNT), Wanted::READ, follow),
+            Ok(())
+        );
+        assert_eq!(
+            read_only.access(TEST_UID, &caps, at("/Storage"), Wanted::WRITE, follow),
+            Err(Errno::ReadOnly)
+        );
+
+        let mut fs = driver();
+        let root = fs.root();
+        fs.create(root, b"run", NodeKind::RegularFile, &PLANTED)
+            .expect("a program");
+        fs.create(root, b"dir", NodeKind::Directory, &PLANTED)
+            .expect("a directory");
+        let noexec = serving(removables(&["/Storage/usb"]), alloc::vec![(11, fs)]);
+        let access = |name: &str, want| {
+            noexec.access(
+                TEST_UID,
+                &caps,
+                at(&alloc::format!("/Storage/usb/{name}")),
+                want,
+                follow,
+            )
+        };
+        assert_eq!(access("run", Wanted::EXEC), Err(Errno::PermissionDenied));
+        assert_eq!(access("run", Wanted::READ), Ok(()));
+        assert_eq!(access("dir", Wanted::EXEC), Ok(()));
+    }
+
+    /// A mode change through a descriptor is its owner's, and never one a
+    /// grant makes.
+    #[test]
+    fn a_mode_change_through_a_descriptor_is_never_a_grants() {
+        let svc = ready();
+        let caps = caps();
+        file_with(&svc, "f", b"x");
+        let held =
+            own_handle(&svc, TEST_UID, &caps, &path("f"), OpenFlags::empty()).expect("opens");
+        let own = acting(TEST_UID, &caps);
+        assert_eq!(svc.set_mode_node(&held, &own, 0o600), Ok(()));
+        assert_eq!(
+            svc.stat(TEST_UID, &caps, at(&path("f")), FinalLink::Follow)
+                .map(|stat| stat.mode),
+            Ok(0o600)
+        );
+        let granted = Acting {
+            uid: TEST_UID,
+            caps: &caps,
+            granted: true,
+        };
+        assert_eq!(
+            svc.set_mode_node(&held, &granted, 0o644),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            svc.set_mode_node(&held, &own, 0o10_0644),
+            Err(Errno::OutOfRange)
+        );
+        close(&svc, held);
+    }
 }

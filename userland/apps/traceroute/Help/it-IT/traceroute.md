@@ -68,9 +68,9 @@ comprese (predefinita 60 per IPv4 e 80 per IPv6).
 
 - `0` — la traccia è stata eseguita, che abbia raggiunto l'host o no (o è
   stato scritto l'aiuto breve).
-- `2` — la riga di comando non è stata compresa, la destinazione non si è
-  risolta, il socket non si è potuto aprire, o una sonda non si è potuta
-  inviare.
+- `1` — la riga di comando non è stata compresa.
+- `2` — la destinazione non si è risolta, il socket non si è potuto
+  aprire, o una sonda non si è potuta inviare.
 
 ## ENVIRONMENT
 

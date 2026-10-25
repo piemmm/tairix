@@ -236,11 +236,13 @@ impl<'a> VolumeAttachRequest<'a> {
 ///
 /// A plain detach (`force == false`) flushes first and fails closed — a
 /// volume whose uncommitted data cannot be committed (a flush failure, or
-/// a surprise-removed *unavailable* volume) stays attached. A **force**
-/// detach (`force == true`) is the deliberate, separately-audited
-/// force-unmount: it retracts the volume even when nothing can be
-/// committed, discarding any retained uncommitted writes, and the data
-/// loss is logged with its own audit event.
+/// a surprise-removed *unavailable* volume), a volume a descriptor still
+/// holds a node of, and one another volume is shown beneath all stay
+/// attached. A **force** detach (`force == true`) is the deliberate,
+/// separately-audited force-unmount: it detaches the volumes shown beneath
+/// first, revokes the descriptors still holding its nodes, and retracts the
+/// volume even when nothing can be committed, discarding any retained
+/// uncommitted writes; what it gave up is logged with its own audit event.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeDetachRequest {
     /// The volume's stable 16-byte identity, as the forest published it.

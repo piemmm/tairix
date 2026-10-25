@@ -47,7 +47,7 @@ const DATA_CRC: u32 = regs::INT_ERROR | (1 << 21);
 /// `DAT[3:0]` all high in the present-state register.
 const DAT_LINES_HIGH: u32 = 0xF << 20;
 
-/// The BCM2711 EMMC2's registers, as Linux dumps them.
+/// The BCM2711 EMMC2's registers, as a Raspberry Pi 4's read.
 pub(crate) const BCM2711_VERSION: u32 = 0x1002_0000;
 pub(crate) const BCM2711_CAPS: u32 = 0x45ee_6432;
 pub(crate) const BCM2711_CAPS1: u32 = 0x0000_a525;

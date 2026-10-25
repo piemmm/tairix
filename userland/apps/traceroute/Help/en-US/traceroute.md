@@ -63,8 +63,9 @@ selecting UDP or TCP probes is refused rather than quietly ignored.
 
 - `0` — the trace ran, whether or not it reached the host (or the short
   help was written).
-- `2` — the command line was not understood, the target did not resolve,
-  the socket could not be opened, or a probe could not be sent.
+- `1` — the command line was not understood.
+- `2` — the target did not resolve, the socket could not be opened, or a
+  probe could not be sent.
 
 ## ENVIRONMENT
 

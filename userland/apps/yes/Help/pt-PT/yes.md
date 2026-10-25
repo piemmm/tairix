@@ -36,8 +36,8 @@ escreva `yes -- -x` para imprimir uma cadeia que parece uma opção.
 
 - `0` — uma ajuda curta pedida foi servida.
 - `1` — a saída deixou de aceitar bytes (a única condição de paragem da
-  ferramenta).
-- `2` — a linha de comandos não foi compreendida.
+  ferramenta). Uma linha de comandos não compreendida também termina
+  com `1`.
 
 ## ENVIRONMENT
 

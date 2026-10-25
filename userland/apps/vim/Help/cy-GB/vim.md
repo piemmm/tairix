@@ -73,8 +73,8 @@ raddoli ar gyfer camau diweddarach; mae'r rhestr raddoli'n byw yn
 
 - `0` — daeth y sesiwn i ben gyda gorchymyn gadael, neu dangoswyd y
   cymorth byr.
-- `1` — methodd y derfynell; argraffir y rheswm ar y gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — methodd y derfynell; argraffir y rheswm ar y gwall safonol. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -12,14 +12,16 @@
 //! An unreadable directory is recorded and skipped — the walk continues and
 //! the report says exactly what could not be read, never silently partial.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
-use tairix_abi::FileKind;
-use tairix_glob::Pattern;
+use tairix_abi::{Errno, FileId, FileKind};
+use tairix_glob::{Pattern, Scratch};
 use tairix_path::join;
+use tairix_util::quote::quote_subject;
 
 use crate::fs::Fs;
 use crate::search::ContentScan;
@@ -29,6 +31,8 @@ use crate::search::ContentScan;
 pub struct FlatEntry {
     /// The file's full path.
     pub path: String,
+    /// The node its directory's listing named.
+    pub id: FileId,
     /// The entry's kind (regular files only today; the field keeps the
     /// tag and batch machinery honest about what it operates on).
     pub kind: FileKind,
@@ -115,7 +119,8 @@ impl Walker {
             let mut entries = match fs.list_dir(&dir) {
                 Ok(entries) => entries,
                 Err(errno) => {
-                    self.errors.push(format!("{dir}: {errno:?}"));
+                    self.errors
+                        .push(format!("{}: {errno}", quote_subject(&dir)));
                     continue;
                 }
             };
@@ -134,6 +139,7 @@ impl Walker {
                     self.bytes = self.bytes.saturating_add(entry.size);
                     found.push(FlatEntry {
                         path: join(&dir, &entry.name),
+                        id: entry.id,
                         kind: entry.kind,
                         size: entry.size,
                         modified: entry.modified,
@@ -182,7 +188,7 @@ pub enum Sieve {
         /// The needle as typed, for the status line.
         text: String,
         /// The streaming scanner and its queue.
-        scan: ContentScan,
+        scan: Box<ContentScan>,
     },
 }
 
@@ -245,7 +251,7 @@ impl WalkState {
         scan.enqueue(seeds);
         let sieve = Sieve::Content {
             text: String::from(text),
-            scan,
+            scan: Box::new(scan),
         };
         Self::sieved(root, WalkPurpose::Flat, sieve, walker, page)
     }
@@ -282,9 +288,22 @@ impl WalkState {
             Sieve::All => found,
             Sieve::Name { pattern, .. } => {
                 let root = &self.root;
+                let errors = &mut self.walker.errors;
+                let mut scratch = Scratch::new();
                 found
                     .into_iter()
-                    .filter(|entry| pattern.matches(relative_to(root, &entry.path)))
+                    .filter(|entry| {
+                        pattern
+                            .matches_with(relative_to(root, &entry.path), &mut scratch)
+                            .unwrap_or_else(|_| {
+                                errors.push(format!(
+                                    "{}: {}",
+                                    quote_subject(&entry.path),
+                                    Errno::OutOfMemory
+                                ));
+                                false
+                            })
+                    })
                     .collect()
             }
             Sieve::Content { scan, .. } => {

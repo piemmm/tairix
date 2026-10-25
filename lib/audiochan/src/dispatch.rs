@@ -339,13 +339,22 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
 
     /// Map the region `mixer` granted, check it holds the agreed ring, and
     /// attach the server; on any refusal the mapping goes and no attach state
-    /// is kept.
+    /// is kept. An attach replaces the one before it on `params.endpoint`,
+    /// accepted or not, so that attachment and its region go first.
     fn attach(&mut self, params: &AttachParams, mixer: ProcId) -> [u8; STATUS_REPLY_LEN] {
         if usize::from(params.endpoint) >= ENDPOINT_SLOTS {
             return encode_status_reply(Err(Errno::NotFound));
         }
-        // A re-attach without a detach replaces the old mapping.
+        self.server.unattach(params.endpoint);
         self.release_region(params.endpoint);
+        let status = self.attach_region(params, mixer);
+        if !self.server.any_attached() {
+            let _ = self.server.audio_mut().set_event_interrupts(false);
+        }
+        status
+    }
+
+    fn attach_region(&mut self, params: &AttachParams, mixer: ProcId) -> [u8; STATUS_REPLY_LEN] {
         let mut region = match self.io.map(params.region_grant, mixer) {
             Ok(region) => region,
             Err(err) => return encode_status_reply(Err(err)),

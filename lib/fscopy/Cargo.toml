@@ -1,6 +1,6 @@
 [package]
 name = "tairix-fscopy"
-description = "TAIRiX shared file copy engine: a file's bytes copied with its holes (GNU `cp --sparse` semantics over the hole-aware seek), its extended attributes carried as the destination can keep them, and one report of what it could not. The one copy every copying tool — cp, mv, fstree, the file manager — runs, so none carries a private loop. no_std + alloc, forbids unsafe."
+description = "TAIRiX shared file copy engine and tree seam: a file's bytes copied with its holes (GNU `cp --sparse` semantics over the hole-aware seek), its extended attributes carried as the destination can keep them, one report of what it could not, and the seam a tool walks a tree by through directories held open. The one copy every copying tool — cp, mv, fstree, the file manager — runs, so none carries a private loop. no_std + alloc, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,21 +12,23 @@ publish.workspace = true
 workspace = true
 
 [features]
-# The kernel's resolution in miniature, for the copying tools' in-memory
-# test filesystems.
+# The in-memory filesystem behind the shared tree seam, with its attacker
+# hook, for the first-party tools' host tests.
 test-support = []
 
 # The seams over the running system's files are `tairix_rt::copy`, so the
 # engine depends on the ABI alone and the runtime can run it too.
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
-# The one spelling of a path's ancestors, which the containment check walks.
+# The one rule a name from elsewhere is written by, a key in a report too.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The one path grammar: a walk names each entry beneath its root by it.
 tairix-path = { path = "../path", version = "=0.0.0" }
 # The fallible keyed set the record of a run's destinations is held in.
 tairix-collections = { path = "../collections", version = "=0.0.0" }
 tairix-hash = { path = "../hash", version = "=0.0.0" }
 
 [dev-dependencies]
-# The crate itself with its test support, so the resolver's own tests run.
+# The crate itself with its test support, so the seam is tested over the
+# fixture tree.
 tairix-fscopy = { path = ".", version = "=0.0.0", features = ["test-support"] }

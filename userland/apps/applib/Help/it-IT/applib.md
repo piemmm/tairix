@@ -115,10 +115,11 @@ può ignorare.
   completati.
 - `1` — un errore di archivio, pacchetto o output (ad esempio, il
   chiamante non può modificare il catalogo a livello di macchina); la
-  ragione è indicata sullo stream diagnostico.
-- `2` — la riga di comando non è stata compresa, la cartella o la voce
-  è sconosciuta, o il pacchetto non può essere registrato come
-  richiesto.
+  ragione è indicata sullo stream diagnostico. Anche una riga di
+  comando non compresa (inclusa una cartella `--category`
+  sconosciuta) termina con `1`.
+- `2` — la voce è sconosciuta, o il pacchetto non può essere
+  registrato come richiesto.
 
 ## ENVIRONMENT
 

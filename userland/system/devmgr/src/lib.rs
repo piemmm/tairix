@@ -58,7 +58,6 @@ pub mod netbind;
 // the ring-0 image.
 #[cfg(feature = "program")]
 pub mod netcfg;
-pub mod observe;
 pub mod presence;
 #[cfg(feature = "program")]
 pub mod service;
@@ -72,7 +71,7 @@ pub use autoload::{
     NodeRestart, ReportedNodes,
 };
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
-pub use netbind::{bind_new_channels, netchan_endpoint, NetBindState, NetstackBind};
+pub use netbind::{bind_new_channels, NetBindState, NetstackBind};
 #[cfg(feature = "program")]
 pub use netcfg::{
     deliver_interface_configs, deliver_network_settings, NetConfigState, NetIfConfigState,

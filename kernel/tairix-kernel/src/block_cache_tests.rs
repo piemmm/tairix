@@ -853,7 +853,7 @@ fn a_sequential_stream_coalesces_into_far_fewer_device_reads() {
     // The measurement that motivates readahead: the filesystem serves a
     // file one content block per iteration, so a cold sequential read of N
     // blocks would, block-for-block, cost N device round-trips — each a full
-    // submit/park/wake on virtio or emmc2. The window doubles from 32 KiB to
+    // submit/park/wake on virtio or an SD host. The window doubles from 32 KiB to
     // 256 KiB: on 512-byte sectors 64 → 128 → 256 → 512 blocks, so one cold
     // block, four ramp windows and the window clamped to the disk's end
     // stream 1024 blocks.

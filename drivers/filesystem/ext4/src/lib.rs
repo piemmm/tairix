@@ -35,11 +35,12 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     AclModel, AllocationClass, DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity,
-    NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
 };
 use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_collections::RadixTree;
 use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
 use tairix_writeback::{CommitScheduler, DirtySet, WritebackBound, WritebackReading};
 
@@ -181,9 +182,6 @@ const MIN_JOURNAL_CAPACITY: usize = 64;
 
 /// Longest name the format stores.
 const MAX_NAME_LEN: usize = 255;
-/// Modes new nodes take; the VFS stamps the owner.
-const NEW_FILE_MODE: u16 = S_IFREG | 0o644;
-const NEW_DIR_MODE: u16 = S_IFDIR | 0o755;
 
 /// One of the four instants an inode records: a classic seconds field and,
 /// in an enlarged record, the `_extra` field that extends it.
@@ -301,6 +299,7 @@ impl Inode {
         Ok(NodeInfo {
             kind,
             nlink: u32::from(self.links),
+            ino: u64::from(self.ino),
             size,
             allocated: self.blocks.saturating_mul(512),
             times: self.times,
@@ -379,6 +378,17 @@ pub struct Ext4<B: Block> {
     generation: u32,
     /// Whether this mount's first commit has counted the mount.
     session_counted: bool,
+    /// The kernel's holds, counted per inode. A held inode that loses its last
+    /// link joins the orphan chain and is released by its last unpin.
+    held: RadixTree<u32>,
+    /// Where each orphan this mount listed sits on the chain: the orphan whose
+    /// `i_dtime` names it, or `0` where the superblock's head does. It takes
+    /// an orphan off the chain without walking it.
+    orphan_prev: RadixTree<u32>,
+    /// The open transaction's changes to `orphan_prev`, oldest first, each
+    /// beside the value it replaced, so an undone operation or a lost commit
+    /// puts the index back with the chain.
+    orphan_undo: Vec<(u64, Option<u32>)>,
 }
 
 impl<B: Block> Ext4<B> {
@@ -460,6 +470,9 @@ impl<B: Block> Ext4<B> {
             release_fault: None,
             generation,
             session_counted: false,
+            held: RadixTree::new(),
+            orphan_prev: RadixTree::new(),
+            orphan_undo: Vec::new(),
         };
         if fs.attach_journal(writable, may_replay)? {
             return Self::assemble(fs.dev, writable, false);
@@ -709,6 +722,22 @@ impl<B: Block> Ext4<B> {
             generation: le32(raw, inode::GENERATION),
             head,
         })
+    }
+
+    /// Whether the kernel holds inode `ino`.
+    fn is_held(&self, ino: u32) -> bool {
+        self.held.contains_key(u64::from(ino))
+    }
+
+    /// Inode `ino`, or `NotFound` once no link and no hold reaches it. A freed
+    /// inode keeps its type, so its link count is what tells it from a live
+    /// one.
+    fn live_inode(&mut self, ino: u32) -> Result<Inode, DriverError> {
+        let inode = self.read_inode(ino)?;
+        if inode.links == 0 && !self.is_held(ino) {
+            return Err(DriverError::NotFound);
+        }
+        Ok(inode)
     }
 
     /// Read metadata block `block` into `buf[..block_size]`.
@@ -1219,7 +1248,11 @@ impl<B: Block> Ext4<B> {
     }
 
     /// Refuse, before anything changes, a directory no name can be added to.
+    /// A removed one a hold keeps takes none.
     fn check_insertable(&mut self, dir_ino: u32, dir: &Inode) -> Result<(), DriverError> {
+        if dir.links == 0 {
+            return Err(DriverError::NotFound);
+        }
         if dir.flags & INODE_FLAG_IMMUTABLE != 0 {
             return Err(DriverError::PermissionDenied);
         }
@@ -1373,9 +1406,13 @@ impl<B: Block> Ext4<B> {
         Ok(true)
     }
 
-    /// Resolve a child of directory `dir_ino` by name.
+    /// Resolve a child of directory `dir_ino` by name. A removed directory,
+    /// held or not, names nothing.
     fn lookup_child(&mut self, dir_ino: u32, name: &[u8]) -> Result<u32, DriverError> {
         let dir = self.read_inode(dir_ino)?;
+        if dir.links == 0 {
+            return Err(DriverError::NotFound);
+        }
         if dir.kind() != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
         }
@@ -1418,8 +1455,11 @@ impl<B: Block> Ext4<B> {
     }
 
     /// Drop one name from inode `ino` (record `raw`), deleting it when that
-    /// was the last. Linux makes hard links freely, so an unlink frees only
-    /// at zero; a directory cannot carry a second name, so it goes outright.
+    /// was the last. Other writers make hard links freely, so an unlink frees only
+    /// at zero; a directory cannot carry a second name, so it goes outright. An
+    /// inode the kernel holds is kept, listed on the orphan chain in this same
+    /// operation so a crash before its last unpin leaves it for the mount to
+    /// finish.
     fn drop_one_name(
         &mut self,
         ino: u32,
@@ -1433,6 +1473,11 @@ impl<B: Block> Ext4<B> {
             put_le16(raw, INODE_LINKS, remaining);
             put_stamps(raw, now, &[Stamp::Change]);
             return self.write_inode_raw(ino, raw);
+        }
+        if self.is_held(ino) {
+            put_le16(raw, INODE_LINKS, 0);
+            put_stamps(raw, now, &[Stamp::Change]);
+            return self.orphan_add(ino, raw);
         }
         self.release_inode(ino, raw, false)
     }
@@ -1481,12 +1526,11 @@ impl<B: Block> Ext4<B> {
         Ok((at, named(at, b"..")?.ino))
     }
 
-    /// The parent of directory `dir_ino`, from its `..` record.
-    fn dir_parent_ino(&mut self, dir_ino: u32) -> Result<u32, DriverError> {
-        let dir = self.read_inode(dir_ino)?;
+    /// The parent of directory `dir`, from its `..` record.
+    fn dir_parent_ino(&mut self, dir: &Inode) -> Result<u32, DriverError> {
         let bs = self.layout.block_size as usize;
         let mut block = self.block_scratch()?;
-        self.first_block(dir_ino, &dir, &mut block[..bs])?;
+        self.first_block(dir.ino, dir, &mut block[..bs])?;
         Ok(self.dot_dot(&block[..bs])?.1)
     }
 
@@ -1521,7 +1565,8 @@ impl<B: Block> Ext4<B> {
             if candidate == ROOT_INODE {
                 return Ok(false);
             }
-            let parent = self.dir_parent_ino(candidate)?;
+            let dir = self.read_inode(candidate)?;
+            let parent = self.dir_parent_ino(&dir)?;
             if parent == candidate {
                 return Ok(false);
             }
@@ -1717,7 +1762,7 @@ impl<B: Block> FilesystemRead for Ext4<B> {
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
-        let inode = self.read_inode(node_inode(node)?)?;
+        let inode = self.live_inode(node_inode(node)?)?;
         inode.info()
     }
 
@@ -1726,8 +1771,24 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         Ok(NodeId::from_raw(u64::from(ino)))
     }
 
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        let inode = self.read_inode(node_inode(dir)?)?;
+        // No directory holds a removed one's name, whether a hold keeps it or
+        // it is freed.
+        if inode.links == 0 {
+            return Err(DriverError::NotFound);
+        }
+        match inode.kind() {
+            Some(NodeKind::Directory) => {}
+            Some(_) => return Err(DriverError::Unsupported),
+            None => return Err(DriverError::NotFound),
+        }
+        let parent = self.dir_parent_ino(&inode)?;
+        Ok(NodeId::from_raw(u64::from(parent)))
+    }
+
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
-        let inode = self.read_inode(node_inode(file)?)?;
+        let inode = self.live_inode(node_inode(file)?)?;
         match inode.kind() {
             Some(NodeKind::RegularFile) => self.read_contents(&inode, offset, buf),
             Some(NodeKind::Directory | NodeKind::Symlink) => Err(DriverError::Unsupported),
@@ -1742,7 +1803,7 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         region: SeekRegion,
     ) -> Result<Option<u64>, DriverError> {
         let ino = node_inode(file)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.live_inode(ino)?;
         if inode.kind() != Some(NodeKind::RegularFile) {
             return Err(DriverError::Unsupported);
         }
@@ -1750,7 +1811,7 @@ impl<B: Block> FilesystemRead for Ext4<B> {
     }
 
     fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
-        let inode = self.read_inode(node_inode(link)?)?;
+        let inode = self.live_inode(node_inode(link)?)?;
         if inode.kind() != Some(NodeKind::Symlink) {
             return Err(DriverError::Unsupported);
         }
@@ -1783,9 +1844,13 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError> {
         let ino = node_inode(dir)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.live_inode(ino)?;
         if inode.kind() != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
+        }
+        // A removed directory a hold keeps lists nothing.
+        if inode.links == 0 {
+            return Ok(());
         }
         let bs = self.layout.block_size as usize;
         let mut index = self.block_scratch()?;
@@ -1796,6 +1861,51 @@ impl<B: Block> FilesystemRead for Ext4<B> {
                 self.list_from(&inode, seed, cursor, visit)
             }
         }
+    }
+
+    /// The pinned id is the inode number, the id every lookup answers.
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        let ino = node_inode(node)?;
+        if self.live_inode(ino)?.kind().is_none() {
+            return Err(DriverError::NotFound);
+        }
+        let key = u64::from(ino);
+        if let Some(holds) = self.held.get_mut(key) {
+            *holds = holds.checked_add(1).ok_or(DriverError::OutOfMemory)?;
+        } else {
+            self.held
+                .try_insert(key, 1)
+                .map_err(|_| DriverError::OutOfMemory)?;
+        }
+        Ok(node)
+    }
+
+    /// The last unpin of an inode with no link left releases it: its blocks,
+    /// its slot, and its place on the orphan chain.
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        let ino = node_inode(pinned)?;
+        let key = u64::from(ino);
+        let holds = self.held.get_mut(key).ok_or(DriverError::NotFound)?;
+        if *holds > 1 {
+            *holds -= 1;
+            return Ok(Unpinned::Held);
+        }
+        self.held.remove(key);
+        self.free_if_unlinked(ino)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        let held = core::mem::take(&mut self.held);
+        let mut outcome = Ok(());
+        for (key, _) in &held {
+            let freed = u32::try_from(key)
+                .map_err(|_| DriverError::DeviceFault)
+                .and_then(|ino| self.free_if_unlinked(ino));
+            if let Err(err) = freed {
+                outcome = Err(err);
+            }
+        }
+        outcome
     }
 }
 
@@ -1813,7 +1923,8 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
         let mut raw = self.inode_scratch()?;
         self.read_inode_raw(ino, &mut raw)?;
         let mode = le16(&raw, 0);
-        if kind_of(mode).is_none() {
+        let unreached = le16(&raw, INODE_LINKS) == 0 && !self.is_held(ino);
+        if kind_of(mode).is_none() || unreached {
             return Err(DriverError::NotFound);
         }
         let mut sec = NodeSecurity::new(
@@ -1850,22 +1961,6 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
             put_split_id(&mut raw, INODE_GID_LO, INODE_GID_HI, security.gid);
             fs.mirror_acl(&mut raw, mode)?;
             put_stamps(&mut raw, fs.now(), &[Stamp::Change]);
-            fs.write_inode_raw(ino, &mut raw)
-        })
-    }
-
-    /// Joins the transaction the node's creation opened, so a crash never
-    /// leaves the new node with its default owner.
-    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
-        let ino = node_inode(node)?;
-        self.continuation(|fs| {
-            let mut raw = fs.inode_scratch()?;
-            fs.read_inode_raw(ino, &mut raw)?;
-            if kind_of(le16(&raw, 0)).is_none() {
-                return Err(DriverError::NotFound);
-            }
-            put_split_id(&mut raw, INODE_UID_LO, INODE_UID_HI, uid);
-            put_split_id(&mut raw, INODE_GID_LO, INODE_GID_HI, gid);
             fs.write_inode_raw(ino, &mut raw)
         })
     }
@@ -1907,10 +2002,15 @@ fn validate_name(name: &[u8]) -> Result<(), DriverError> {
 
 impl<B: Block> Ext4<B> {
     /// Read a regular file's record for writing, refusing anything else and
-    /// a file whose contents this driver does not write.
+    /// a file whose contents this driver does not write. A freed inode keeps
+    /// its type, so its link count is what refuses a stale id to it, unless
+    /// the kernel holds it.
     fn open_regular_for_write(&mut self, ino: u32) -> Result<Vec<u8>, DriverError> {
         let mut raw = self.inode_scratch()?;
         self.read_inode_raw(ino, &mut raw)?;
+        if le16(&raw, INODE_LINKS) == 0 && !self.is_held(ino) {
+            return Err(DriverError::NotFound);
+        }
         if le16(&raw, 0) & S_IFMT != S_IFREG
             || le32(&raw, INODE_FLAGS) & (INODE_FLAG_INLINE_DATA | INODE_FLAG_ENCRYPT) != 0
         {
@@ -1919,20 +2019,41 @@ impl<B: Block> Ext4<B> {
         Ok(raw)
     }
 
-    /// Lay down new inode `ino` of `mode` in `raw`, a child of `parent`: a
-    /// fresh generation, extent-mapped where the volume has extents, and a
-    /// directory's first block holding `.` and `..`.
+    /// Release inode `ino`, which no hold reaches any more, if no link does
+    /// either.
+    fn free_if_unlinked(&mut self, ino: u32) -> Result<Unpinned, DriverError> {
+        let mut raw = self.inode_scratch().map_err(|_| DriverError::DeviceFault)?;
+        self.read_inode_raw(ino, &mut raw)
+            .map_err(|_| DriverError::DeviceFault)?;
+        if le16(&raw, INODE_LINKS) != 0 {
+            return Ok(Unpinned::Released);
+        }
+        self.operation(|fs| {
+            let mut raw = fs.inode_scratch()?;
+            fs.read_inode_raw(ino, &mut raw)?;
+            fs.release_inode(ino, &mut raw, true)
+        })
+        .map_err(|_| DriverError::DeviceFault)?;
+        Ok(Unpinned::Freed)
+    }
+
+    /// Lay down new inode `ino` of `mode` in `raw`, a child of `parent` owned
+    /// as `record` says: a fresh generation, extent-mapped where the volume
+    /// has extents, and a directory's first block holding `.` and `..`.
     fn lay_new_inode(
         &mut self,
         parent: u32,
         ino: u32,
         mode: u16,
+        record: &NodeSecurity,
         raw: &mut [u8],
         now: Option<Time64>,
     ) -> Result<(), DriverError> {
         let is_dir = mode & S_IFMT == S_IFDIR;
         raw.fill(0);
         put_le16(raw, 0, mode);
+        put_split_id(raw, INODE_UID_LO, INODE_UID_HI, record.uid);
+        put_split_id(raw, INODE_GID_LO, INODE_GID_HI, record.gid);
         put_le16(raw, INODE_LINKS, if is_dir { 2 } else { 1 });
         if self.layout.inode_size > 128 {
             put_le16(raw, inode::EXTRA_ISIZE, NEW_EXTRA_ISIZE);
@@ -1964,7 +2085,16 @@ impl<B: Block> Ext4<B> {
 }
 
 impl<B: Block> FilesystemWrite for Ext4<B> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+    /// The node is born with `record`'s owner, group and permission bits, the
+    /// type bits the format's own. ext4 keeps no capability gate and a new
+    /// node takes no ACL, so the rest of the record is not stored.
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
         if kind == NodeKind::Symlink {
             return Err(DriverError::Unsupported);
         }
@@ -1980,11 +2110,14 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
                 return Err(DriverError::AlreadyExists);
             }
             let is_dir = kind == NodeKind::Directory;
-            let mode = if is_dir { NEW_DIR_MODE } else { NEW_FILE_MODE };
+            let kind_bits = if is_dir { S_IFDIR } else { S_IFREG };
+            let permissions =
+                u16::try_from(record.mode & 0o7777).map_err(|_| DriverError::OutOfRange)?;
+            let mode = kind_bits | permissions;
             let now = fs.now();
             let new_ino = fs.alloc_inode(dir_ino, is_dir)?;
             let mut raw = fs.inode_scratch()?;
-            fs.lay_new_inode(dir_ino, new_ino, mode, &mut raw, now)?;
+            fs.lay_new_inode(dir_ino, new_ino, mode, record, &mut raw, now)?;
             fs.insert_child(
                 dir_ino,
                 Child {
@@ -1998,17 +2131,10 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         })
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        let dir_ino = node_inode(dir)?;
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        let ino = node_inode(file)?;
         self.operation(|fs| {
-            let child = fs.lookup_child(dir_ino, name)?;
-            let mut raw = fs.open_regular_for_write(child)?;
+            let mut raw = fs.open_regular_for_write(ino)?;
             let flags = le32(&raw, INODE_FLAGS);
             let appending = offset == file::inode_size_bytes(&raw, &fs.layout);
             if flags & INODE_FLAG_IMMUTABLE != 0 || (flags & INODE_FLAG_APPEND != 0 && !appending) {
@@ -2017,17 +2143,16 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
             if data.is_empty() {
                 return Ok(0);
             }
-            fs.write_file(child, &mut raw, offset, data)
+            fs.write_file(ino, &mut raw, offset, data)
         })
     }
 
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        let dir_ino = node_inode(dir)?;
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        let ino = node_inode(file)?;
         self.operation(|fs| {
-            let child = fs.lookup_child(dir_ino, name)?;
-            let mut raw = fs.open_regular_for_write(child)?;
+            let mut raw = fs.open_regular_for_write(ino)?;
             check_changeable(le32(&raw, INODE_FLAGS))?;
-            fs.truncate_file(child, &mut raw, size)
+            fs.truncate_file(ino, &mut raw, size)
         })
     }
 

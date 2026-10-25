@@ -7,7 +7,7 @@ standard output and to each file operand (created if absent; overwritten,
 or appended with `-a`), so a pipeline's data can be seen and captured at
 once. Option handling matches GNU: `-a`/`--append`, `-p`,
 `--output-error[=MODE]` with the `warn`/`warn-nopipe`/`exit`/`exit-nopipe`
-modes matched like GNU `argmatch` (an unambiguous prefix is accepted; the
+modes matched as GNU `tee` matches them (an unambiguous prefix is accepted; the
 value arrives only attached with `=`, and a bare `--output-error` selects
 `warn-nopipe`), interleaved options and operands, and `--` end-of-options.
 A `-` operand names a file called `-`, as in GNU. `-h`/`-?`/`--help`
@@ -32,8 +32,8 @@ Two deliberate, documented divergences follow from TAIRiX having no
 
 The engine streams in constant memory (one 4 KiB chunk fanned out to
 every still-live output) and stops reading once no output remains. A
-failed output is diagnosed and handled per the selected mode, exactly as
-GNU `tee.c` nulls a failed descriptor; a failed diagnostic write is
+failed output is diagnosed and handled per the selected mode while the other
+outputs carry on, as in GNU `tee`; a failed diagnostic write is
 fatal. The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its dependencies are the
 audited `lib/abi` vocabulary and the shared `tairix-help` crate, so it
@@ -60,8 +60,8 @@ tee [-ap] [--output-error[=mode]] [--] [file...]
   help was served); a standard-output failure tolerated by a `-nopipe`
   mode does not change this.
 - `1` — an output failed in a way the selected mode counts, input could
-  not be read, or a diagnostic could not be delivered.
-- `2` — the command line was not understood.
+  not be read, or a diagnostic could not be delivered. A command line
+  that was not understood exits `1` too.
 
 ## Stability
 

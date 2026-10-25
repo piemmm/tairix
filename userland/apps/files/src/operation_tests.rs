@@ -12,12 +12,13 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use super::{
-    attribute_refusal, change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
-    empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal, progress_control,
-    read_refusal, remove_refusal, trash_read_refusal, BarPace, ProgressControl,
-    COMPLETION_DWELL_NS,
+    change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
+    destination_refusal, empty_confirmation_may_open, item_refusal, mode_flip_allowed,
+    move_refusal, operation_refusal, progress_control, reach_refusal, read_refusal, remove_refusal,
+    trash_read_refusal, write_refusal, BarPace, ProgressControl, COMPLETION_DWELL_NS,
 };
 use tairix_abi::Errno;
+use tairix_fscopy::op::OpError;
 
 /// The progress window this app is given, addressed by every synthesised
 /// event.
@@ -213,6 +214,10 @@ fn a_read_only_destination_is_told_apart_from_a_denied_one() {
 fn a_refusal_names_its_cause_and_a_failing_device_reads_alike() {
     for refusal in [
         create_refusal,
+        write_refusal,
+        read_refusal,
+        reach_refusal,
+        destination_refusal,
         remove_refusal,
         move_refusal,
         change_refusal,
@@ -236,22 +241,38 @@ fn a_refusal_names_its_cause_and_a_failing_device_reads_alike() {
         "its volume cannot store that"
     );
     assert_eq!(
-        read_refusal(Errno::OutOfRange),
-        "a folder in it could not be read"
+        change_refusal(Errno::Stale),
+        "it is no longer what this window showed"
     );
+    assert_eq!(read_refusal(Errno::OutOfRange), "it could not be read");
 }
 
 /// A plan that comes back after the user moved on — to another selection,
 /// another folder, or into something else on screen — opens no confirmation.
 #[test]
 fn a_delete_confirmation_opens_only_over_the_selection_it_plans() {
-    let path = |name: &str| alloc::vec![String::from("home"), String::from(name)];
-    let asked = tairix_browse::DeletePlan::new(alloc::vec![(path("a"), false)]).expect("a plan");
-    let other = tairix_browse::DeletePlan::new(alloc::vec![(path("b"), false)]).expect("a plan");
+    let plan = |name: &str, node: u64| {
+        let listed = tairix_browse::Listed {
+            path: alloc::vec![String::from("home"), String::from(name)],
+            id: tairix_abi::FileId {
+                volume: [1; 16],
+                node,
+            },
+        };
+        tairix_browse::DeletePlan::new(alloc::vec![tairix_browse::DeleteTarget::new(listed, false)])
+            .expect("a plan")
+    };
+    let asked = plan("a", 1);
+    let other = plan("b", 2);
+    let swapped = plan("a", 3);
     assert!(confirmation_may_open(&asked, Some(&asked), false));
     assert!(
         !confirmation_may_open(&asked, Some(&other), false),
         "another selection"
+    );
+    assert!(
+        !confirmation_may_open(&asked, Some(&swapped), false),
+        "another node under the selected name"
     );
     assert!(
         !confirmation_may_open(&asked, None, false),
@@ -351,22 +372,51 @@ fn a_completed_operation_closes_once_its_full_bar_has_been_seen() {
     );
 }
 
+/// An operation's refusal names the entry it stopped at, else the item asked
+/// for, and says why in the words the rest of the manager uses.
 #[test]
-fn attributes_the_source_withheld_are_told_from_ones_the_copy_refused() {
-    assert_eq!(
-        attribute_refusal(&tairix_fscopy::AttrError::Read(Errno::PermissionDenied)),
-        "the source's extended attributes could not be read"
-    );
-    let refused = tairix_fscopy::AttrError::Write {
-        key: String::from("user.k"),
-        error: Errno::Busy,
-    };
-    assert_eq!(
-        attribute_refusal(&refused),
-        "a copy's extended attributes could not be set"
+fn an_operations_refusal_names_the_entry_it_stopped_at() {
+    let item = [String::from("Users"), String::from("Photos")];
+    let full = OpError::Write(
+        String::from("/Storage/usb/Photos/2024/a.jpg"),
+        Errno::NoSpace,
     );
     assert_eq!(
-        attribute_refusal(&tairix_fscopy::AttrError::Read(Errno::DeviceOffline)),
-        "its device was removed"
+        operation_refusal("copy", &item, &full),
+        "could not copy \u{201c}a.jpg\u{201d}: the destination is full"
+    );
+    assert_eq!(
+        operation_refusal("move", &item, &OpError::IntoItself),
+        alloc::format!(
+            "could not move \u{201c}Photos\u{201d}: {}",
+            super::INTO_ITSELF
+        )
+    );
+    assert_eq!(
+        operation_refusal(
+            "copy",
+            &item,
+            &OpError::Read(String::new(), Errno::OutOfMemory)
+        ),
+        "could not copy \u{201c}Photos\u{201d}: there was not enough memory for it",
+        "a refusal spelling no path names the item"
+    );
+    assert_eq!(
+        operation_refusal(
+            "delete",
+            &item,
+            &OpError::Changed(String::from("/Users/Photos/b"))
+        ),
+        "could not delete \u{201c}b\u{201d}: it changed meanwhile, so it was left as it is"
+    );
+    let taken = OpError::Rename(String::from("/Users/Photos"), Errno::AlreadyExists);
+    assert_eq!(
+        operation_refusal("move", &item, &taken),
+        "could not move \u{201c}Photos\u{201d}: an item with that name appeared at the destination"
+    );
+    let unwritable = OpError::Write(String::from("/Storage/usb/Photos"), Errno::DeviceFault);
+    assert_eq!(
+        operation_refusal("copy", &item, &unwritable),
+        "could not copy \u{201c}Photos\u{201d}: its device failed"
     );
 }

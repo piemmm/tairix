@@ -13,7 +13,9 @@ is device bring-up plus one `serve` call.
 ## The two halves
 
 * `server` — `NetChannelServer`, the pure, host-testable request handler: the
-  detached/attached state machine, the geometry validation, the ring service,
+  detached/attached state machine, who may call (the network stack alone,
+  and once attached only the instance that attached), the geometry
+  validation, the ring service,
   the group filter, and the receive pre-filter it installs. It performs no
   I/O, so the whole control plane is exercised on the host against a mock
   `Net`.

@@ -7,7 +7,9 @@
 //! coreutils: `-a` adds a row per file, `-s` reports only the operands, `-c`
 //! appends a grand total, `-d` bounds the reported depth, `-S` excludes
 //! subdirectories from a directory's own row, `-l` counts a multiply-named file
-//! once per name, `--apparent-size`/`-b` measure apparent byte lengths, and
+//! once per name, `-P` counts a link as itself while `-H`/`-D` follow the
+//! operands' links and `-L` every link, `--apparent-size`/`-b` measure
+//! apparent byte lengths, and
 //! `-k`/`-m`/`-h`/`--si`/`-B <size>` select the scale. `-?`/`--help` render the
 //! tool's own short help from its bundled `Help/` tree through the shared
 //! `lib/help` engine (plans/APPS.md §4).
@@ -21,7 +23,8 @@
 //! stack), and writes the `size<TAB>path` rows. The operations that touch
 //! the outside world are the injected seams:
 //!
-//! * [`Walk`] — stat a path and read a directory's entries.
+//! * [`Walk`] — stat a path, through a final link or of the link itself, and
+//!   read a directory's entries.
 //! * [`Output`] — the standard output rows and standard error
 //!   diagnostics.
 //! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by
@@ -96,7 +99,7 @@ pub mod command;
 pub mod error;
 pub mod io;
 
-pub use client::{run, USAGE};
-pub use command::{parse, Command, Options, ParseError};
+pub use client::run;
+pub use command::{parse, Command, Dereference, Options, ParseError};
 pub use error::DuError;
-pub use io::{Entry, Metadata, Output, Walk};
+pub use io::{Entry, FinalLink, Metadata, Output, Walk};

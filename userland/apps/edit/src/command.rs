@@ -2,10 +2,12 @@
 
 use alloc::string::String;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::EditError;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `edit`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `edit`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: edit [file] [-h | -?]";
 
 /// One thing the `edit` tool can do.
@@ -24,42 +26,40 @@ pub enum Command {
     Help,
 }
 
+/// What each of `edit`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `edit`'s options: the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `edit [file] [-h | -?]`:
-///
-/// * `-h` / `-?` / `--help` — the reserved short-help switches
-///   (plans/APPS.md §4; they win immediately).
-/// * `--` — end of options; the next argument is the file operand even
-///   when it starts with a dash.
-/// * one optional operand — the file to edit. Everything the editor does
-///   beyond that is keys pressed inside the session, so a second operand
-///   or any other option is refused.
+/// The grammar is `edit [file] [-h | -?]`, read as GNU's `getopt_long` reads
+/// it ([`Scan`]): options anywhere among the operands, `--` ending them. The
+/// help switches (`-h`, `-?`, `--help`) answer at once. The one optional
+/// operand is the file to edit; everything the editor does beyond that is
+/// keys pressed inside the session.
 ///
 /// # Errors
 ///
-/// [`EditError::Usage`] on an unrecognised option or a second operand.
+/// * [`EditError::Option`] — an option `getopt` refuses, in its words.
+/// * [`EditError::Usage`] — a second operand.
 pub fn parse(args: &[&str]) -> Result<Command, EditError> {
     let mut path: Option<String> = None;
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done {
-            match arg {
-                "--" => {
-                    options_done = true;
-                    continue;
-                }
-                "-h" | "-?" | "--help" => return Ok(Command::Help),
-                _ if arg.starts_with('-') && arg.len() > 1 => return Err(EditError::Usage),
-                _ => {}
-            }
-        }
-        if path.is_some() {
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(EditError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
             // A second operand: the editor holds exactly one buffer.
-            return Err(EditError::Usage);
+            Arg::Operand(_) if path.is_some() => return Err(EditError::Usage),
+            Arg::Operand(file) => path = Some(String::from(file)),
         }
-        path = Some(String::from(arg));
     }
     Ok(Command::Run { path })
 }

@@ -517,7 +517,7 @@ mod program {
     /// shows at once; `None`, stated, where it cannot be.
     fn watch_machine_settings(set: u64) -> Option<tairix_rt::Dir> {
         let (place, _) = machine_zone_place();
-        let watched = tairix_rt::open_dir(place.as_bytes())
+        let watched = tairix_rt::Dir::open(place.as_bytes())
             .and_then(|dir| dir.watch(MACHINE_ZONE_WATCH_LATENCY_NS).map(|()| dir))
             .map_err(Errno::from_syscall)
             .and_then(|dir| {
@@ -7262,12 +7262,16 @@ mod program {
                     edits,
                 } => {
                     let opened = match access.save_flags() {
-                        Some(flags) => tairix_rt::File::open(path.as_bytes(), flags)
-                            .map(|file| tairix_browse::document::Opened {
-                                file,
-                                writable: true,
-                            })
-                            .map_err(Errno::from_syscall),
+                        Some(flags) => tairix_rt::File::create(
+                            path.as_bytes(),
+                            flags,
+                            tairix_abi::fs::FS_NEW_FILE_MODE,
+                        )
+                        .map(|file| tairix_browse::document::Opened {
+                            file,
+                            writable: true,
+                        })
+                        .map_err(Errno::from_syscall),
                         None => tairix_browse::document::open_for(path.as_bytes(), edits),
                     };
                     FileAnswer::Pick { serial, opened }
@@ -7295,7 +7299,10 @@ mod program {
                     })
                 }
                 Self::Desktop(DesktopCall::Folder { path }) => {
-                    let made = status(tairix_rt::fs_mkdir(path.as_bytes()));
+                    let made = status(tairix_rt::fs_mkdir(
+                        path.as_bytes(),
+                        tairix_abi::fs::FS_NEW_DIR_MODE,
+                    ));
                     FileAnswer::Desktop(DesktopAnswer::Made { path, made })
                 }
                 // Target first, then link: the stored target is data the
@@ -7741,7 +7748,7 @@ mod program {
     fn watch_saver_store(set: u64, home: Option<&str>) -> Option<tairix_rt::Dir> {
         let roots = tairix_appstore::saver_roots(home);
         let store = roots.get(1)?;
-        let watched = tairix_rt::open_dir(store.as_bytes())
+        let watched = tairix_rt::Dir::open(store.as_bytes())
             .and_then(|dir| dir.watch(SAVER_STORE_WATCH_LATENCY_NS).map(|()| dir))
             .map_err(Errno::from_syscall)
             .and_then(|dir| {
@@ -7970,7 +7977,7 @@ mod program {
 
     impl PictureFiles for RtPictureFiles {
         fn make_folder(&mut self, path: &str) -> Result<(), Errno> {
-            match tairix_rt::fs_mkdir(path.as_bytes()) {
+            match tairix_rt::fs_mkdir(path.as_bytes(), tairix_abi::fs::FS_NEW_DIR_MODE) {
                 0.. => Ok(()),
                 refused => match Errno::from_syscall(refused) {
                     Errno::AlreadyExists => Ok(()),
@@ -7983,7 +7990,8 @@ mod program {
             // What an earlier keep left goes first; creating afresh rather than
             // opening it is what refuses to write through a link planted there.
             self.discard(path);
-            let file = tairix_rt::create_new(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let file = tairix_rt::create_new(path.as_bytes(), tairix_abi::fs::FS_NEW_FILE_MODE)
+                .map_err(Errno::from_syscall)?;
             let written = tairix_rt::fs_write_all(file.fd(), 0, bytes)
                 .and_then(|()| file.sync().map_err(Errno::from_syscall));
             if written.is_err() {
@@ -13169,7 +13177,7 @@ mod program {
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     ///
-    /// Exit codes: `0` for a served short help, `2` on a usage error, and
+    /// Exit codes: `0` for a served short help, `1` on a usage error, and
     /// otherwise the session's own codes — on success this never returns
     /// until the session ends: the loop runs until the seat is lost or a
     /// fault ends it.
@@ -13181,19 +13189,17 @@ mod program {
         if worker_role() {
             return serve_stdio(&mut ImageRenderService::default()).exit_code();
         }
-        // The command surface next: a malformed (non-UTF-8) argument
-        // vector is a usage error, reported rather than guessed at, and
-        // the reserved short-help switches never touch the seat.
-        let Some(arguments) = tairix_rt::args() else {
-            io::write_stderr_line(USAGE);
-            return 2;
+        // The command surface next: the reserved short-help switches never
+        // touch the seat.
+        let Some(arguments) = tairix_help::arguments(APP_NAME) else {
+            return tairix_help::MISUSE;
         };
         match parse(&arguments) {
             Ok(Command::Run) => {}
             Ok(Command::Help) => return tairix_help::print_own_short_help(APP_NAME, Some(USAGE)),
-            Err(CliError::Usage) => {
-                io::write_stderr_line(USAGE);
-                return 2;
+            Err(err @ CliError::Usage) => {
+                tairix_help::report_misuse(APP_NAME, &err);
+                return tairix_help::MISUSE;
             }
         }
 

@@ -89,7 +89,7 @@ modifie jamais la sortie principale.
 - `0` — la requête a réussi (ou l'aide a été écrite).
 - `1` — une capacité a été refusée, un nom n'a pas été résolu, le
   composeur a refusé la requête, ou la sortie n'a pas pu être écrite.
-- `2` — la ligne de commande n'a pas été comprise.
+  Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

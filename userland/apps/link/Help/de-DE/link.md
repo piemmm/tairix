@@ -57,8 +57,8 @@ Optionsauswertung.
 
 - `0` — die Verknüpfung wurde erzeugt (oder die Kurzhilfe geschrieben).
 - `1` — das Dateisystem hat die Verknüpfung abgelehnt, oder die Ausgabe
-  ist fehlgeschlagen; der Grund steht auf der Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  ist fehlgeschlagen; der Grund steht auf der Standardfehlerausgabe. Eine
+  nicht verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

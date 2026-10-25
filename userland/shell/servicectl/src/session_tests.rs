@@ -14,8 +14,8 @@ use tairix_abi::{
     EnrolOutcome, Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState,
 };
 
-use crate::command::{parse, Command, UsageError};
-use crate::session::{dispatch, report_usage, run, run_enrol, ControlChannel, Exit, ToolIo};
+use crate::command::{parse, Command};
+use crate::session::{dispatch, run, run_enrol, ControlChannel, Exit, ToolIo};
 
 /// A channel double: records the request frame it was given and replays a
 /// scripted answer.
@@ -375,23 +375,6 @@ fn a_corrupt_reply_fails_closed_rather_than_reporting_success() {
 
     assert_eq!(exit, Exit::Failed);
     assert!(io.out.is_empty(), "a corrupt reply never reads as applied");
-}
-
-#[test]
-fn every_usage_failure_states_its_reason_and_the_banner() {
-    for err in [
-        UsageError::MissingCommand,
-        UsageError::UnknownCommand,
-        UsageError::WrongOperandCount,
-        UsageError::NameTooLong,
-    ] {
-        let mut io = MockIo::default();
-        let exit = report_usage(&mut io, err);
-        assert_eq!(exit, Exit::Usage);
-        assert_eq!(exit.code(), 2);
-        assert_eq!(io.err.len(), 2, "the reason and the usage banner");
-        assert!(io.err[1].contains("servicectl"), "{:?}", io.err);
-    }
 }
 
 #[test]

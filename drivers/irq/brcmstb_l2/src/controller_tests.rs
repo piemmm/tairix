@@ -12,10 +12,11 @@ use tairix_abi::hwtree::HwResource;
 use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, ProcId, RegisterBlock, PROC_ID_LEN,
 };
+use tairix_drvrt::irqline::LineRecord;
 use tairix_drvrt::testkit::{FakeKernel, Records};
 use tairix_drvrt::Supplier;
 
-use crate::controller::{Controller, Layout, Record, LINES};
+use crate::controller::{Controller, Layout, LINES};
 use crate::{register, BIND_KEYS, LAYOUTS};
 
 const HDMI: ProcId = ProcId::from_raw([1; PROC_ID_LEN]);
@@ -123,8 +124,8 @@ fn mask_status(layout: Layout) -> usize {
 
 struct Rig<'r> {
     kernel: FakeKernel,
-    records: Records<Record>,
-    controller: Controller<'r, FakeKernel, Records<Record>>,
+    records: Records<LineRecord>,
+    controller: Controller<'r, FakeKernel, Records<LineRecord>>,
 }
 
 fn rig(l2: &L2) -> Rig<'_> {
@@ -157,7 +158,7 @@ impl Rig<'_> {
         self.kernel.answer(ticket).map(|frame| decode_reply(&frame))
     }
 
-    fn records(&self) -> Vec<Record> {
+    fn records(&self) -> Vec<LineRecord> {
         self.records.all()
     }
 }
@@ -243,7 +244,7 @@ fn a_wait_counts_only_for_a_line_the_kernel_attests_the_caller_holds() {
     assert_eq!(l2.mask.get(), u32::MAX, "nothing was unmasked");
     assert!(rig.records().iter().all(|record| matches!(
         record,
-        Record::Refused {
+        LineRecord::Refused {
             caller: Some(HDMI),
             ..
         }
@@ -261,7 +262,7 @@ fn a_line_stays_with_a_live_holder_and_is_reclaimed_from_an_ended_one() {
     let taken = rig.post(OTHER, link(4));
     assert_eq!(rig.answer(taken), None, "held for the line");
     assert_eq!(rig.answer(held), None, "the ended holder is not answered");
-    assert!(rig.records().contains(&Record::Reclaimed {
+    assert!(rig.records().contains(&LineRecord::Reclaimed {
         line: 4,
         from: HDMI
     }));
@@ -304,8 +305,8 @@ fn an_ended_consumer_has_its_lines_masked_and_released() {
     assert!(!l2.masked(4) && !l2.masked(5));
     rig.controller.peer_exited(HDMI);
     assert!(l2.masked(4) && l2.masked(5));
-    assert!(rig.records().contains(&Record::Abandoned { line: 4 }));
-    assert!(rig.records().contains(&Record::Abandoned { line: 5 }));
+    assert!(rig.records().contains(&LineRecord::Released { line: 4 }));
+    assert!(rig.records().contains(&LineRecord::Released { line: 5 }));
     assert!(!rig.kernel.watched().contains(&HDMI));
     let next = rig.post(OTHER, link(4));
     assert_eq!(
@@ -324,7 +325,7 @@ fn a_firing_its_consumer_cannot_hear_leaves_the_line_masked() {
     l2.raise(4);
     rig.controller.woke(0).expect("serviced");
     assert!(l2.masked(4));
-    assert!(rig.records().contains(&Record::Unanswered { line: 4 }));
+    assert!(rig.records().contains(&LineRecord::Unanswered { line: 4 }));
 }
 
 #[test]

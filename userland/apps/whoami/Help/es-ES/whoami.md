@@ -37,8 +37,8 @@ La orden no acepta operandos; un argumento es un error
 - `0` — se escribió el nombre (o la ayuda corta solicitada).
 - `1` — falló la lectura de la identidad, la consulta del directorio o
   la salida, o el directorio no contiene ningún nombre para el
-  identificador de usuario.
-- `2` — la línea de órdenes no se entendió.
+  identificador de usuario. Una línea de órdenes no entendida también
+  termina con `1`.
 
 ## ENVIRONMENT
 

@@ -26,24 +26,19 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_basename::{output, parse, Command, USAGE};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{Stdout, Write};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when the results (or short help) were written, `1`
-    /// when the output could not be delivered, `2` on a usage error.
+    /// when the output could not be delivered or the command line was not
+    /// understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("basename") else {
+            return tairix_help::MISUSE;
         };
         let (names, suffix, zero) = match parse(&arguments) {
             Ok(Command::Emit {
@@ -53,9 +48,8 @@ mod program {
             }) => (names, suffix, zero),
             Ok(Command::Help) => return tairix_help::print_own_short_help("basename", Some(USAGE)),
             Err(err) => {
-                write_stderr_line(&format!("basename: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("basename", &err);
+                return tairix_help::MISUSE;
             }
         };
         match Stdout.write_all(&output(&names, suffix.as_deref(), zero)) {

@@ -50,12 +50,13 @@ write-protected device by either side alone.
 
 `RemoteBlock` is generic over `BlkCall`, one synchronous request/reply
 exchange with the serving block driver. The production implementation,
-`RtBlkCall`, issues `call_post`/`call_reap` on the granted endpoint with
-the caller's own per-request deadline (derived from the device's declared
-medium, never a value the transport chooses for itself), parking
-on a `CallReply` wait-set rather than a busy poll when a reply is not yet
-ready. A wedged device therefore fails a transfer closed at its deadline
-instead of parking the caller forever.
+`RtBlkCall`, calls the granted endpoint through `tairix_rt::call_within` —
+the one deadline call loop, which the cooling service shares — with the
+caller's own per-request deadline (derived from the device's declared
+medium, never a value the transport chooses for itself), parking on a
+`CallReply` wait-set rather than a busy poll when a reply is not yet ready.
+A wedged device therefore fails a transfer closed at its deadline instead of
+parking the caller forever, and a wait that fails withdraws the call.
 
 A served device need not declare a medium the ABI recognises, so what the
 completion carries is an `Option<BlkMedium>`: a medium word this version does
@@ -68,21 +69,16 @@ the device is *served as*, derived from the medium it declared, while
 `medium` reports what it actually said, which a layer over the client
 inherits.
 
-That wait-set is the **caller's**, supplied to `RtBlkCall::new(endpoint,
-waitset)`. A wait-set is reclaimed only when its owning process exits, so a
-transport that minted one for itself would strand a kernel object per
-instance. That is invisible in a run-to-completion consumer like the volume
-manager, which opens exactly one transport and then exits — but the RAID
-composer is long-lived and reconnects a member device on *every* assembly
-attempt, so a self-minting transport would leak a wait-set per attempt and an
-array that can never be assembled would drive that leak on its backoff timer
-indefinitely. Taking the set from the caller makes it part of that process's
-own one-time setup whatever its shape, and lets a single set carry every
-member of a multi-device consumer. The transport adds its endpoint's
-`CallReply` member on first use and treats an already-present membership as
-success, so several transports may legitimately share one set; readiness is
-level-triggered, so a wake caused by an unrelated member simply re-checks and
-parks again, and no wake is consumed away from the set's owner.
+That wait-set is the transport's own: made on first use with its endpoint's
+`CallReply` member and nothing else, and closed when the transport drops. The
+kernel keeps a member whose endpoint has ended ready, as the sign that it
+ended, so a set shared across the members of a multi-device consumer would
+leave every other device's transfers spinning on a removed device's member
+until they were answered; one set per transport confines that sign to the
+transport whose device ended, whose next call fails closed at its post. A set
+closed with its transport costs nothing past it, so the RAID composer, which
+reconnects a member device on every assembly attempt, holds a set per open
+member and no more.
 
 `RtBlkCall` builds on `tairix-rt`'s syscall wrappers, which themselves
 build cleanly on the host (the underlying syscall trap fails closed with a

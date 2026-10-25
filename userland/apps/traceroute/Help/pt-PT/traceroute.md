@@ -69,9 +69,9 @@ incluídos (predefinição 60 para IPv4 e 80 para IPv6).
 
 - `0` — o traçado decorreu, tenha ou não chegado ao anfitrião (ou a ajuda
   curta foi escrita).
-- `2` — a linha de comandos não foi compreendida, o destino não foi
-  resolvido, o socket não pôde ser aberto, ou uma sonda não pôde ser
-  enviada.
+- `1` — a linha de comandos não foi compreendida.
+- `2` — o destino não foi resolvido, o socket não pôde ser aberto, ou uma
+  sonda não pôde ser enviada.
 
 ## ENVIRONMENT
 

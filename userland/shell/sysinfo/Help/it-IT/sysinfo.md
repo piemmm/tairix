@@ -115,8 +115,8 @@ Senza interrogazione viene mostrata la guida breve.
 
 - `0` — l'interrogazione è stata risposta e mostrata.
 - `1` — il servizio ha rifiutato o è fallito, oppure il risultato non è
-  stato consegnato.
-- `2` — la riga di comando non è stata compresa.
+  stato consegnato. Anche una riga di comando non compresa termina con
+  `1`.
 
 ## ENVIRONMENT
 

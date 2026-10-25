@@ -1,7 +1,7 @@
 # `tairix-drv-display-bcm2711-hvs` — Raspberry Pi 4 display engine
 
-The seat's display on a Raspberry Pi 4, driven natively as Linux's full-KMS
-`vc4` drives it: the HVS composites the display's surface into the pixel
+The seat's display on a Raspberry Pi 4, driven natively rather than through
+the firmware: the HVS composites the display's surface into the pixel
 valves feeding the HDMI outputs, and the encoder behind each valve is driven
 over `encoder-v1` by its own driver (`plans/SOUND.md` SND19m). Stability
 tier: `experimental`.
@@ -31,8 +31,9 @@ its scan-out reads memory through, and the `ConsoleHost` fact.
   cannot be hosted ends the driver with the firmware still told nothing, so
   the screen stays as it was. Then it tells
   the firmware the display is the ARM's (`NOTIFY_DISPLAY_DONE`), records the
-  firmware's answer, and takes the display over whatever it is, as Linux's
-  `vc4` does: it brings down any pipe the firmware left running in the order
+  firmware's answer, and takes the display over whatever it is, since a
+  refusal would otherwise leave the screen with no driver: it brings down any
+  pipe the firmware left running in the order
   the hardware needs — the valve's video, the encoder, the valve, the HVS
   channel, the encoder's power — and sets every mode itself.
 - **One surface, every output.** The display's surface takes the mode of the
@@ -61,8 +62,8 @@ its scan-out reads memory through, and the `ConsoleHost` fact.
   next stack, which is built for it with the others.
 - **The pointer moves without a present.** A pointer image is copied into
   one of the engine's own, and the pointer's position, size and pointer
-  words are rewritten in the lists the channels read, as Linux's `vc4`
-  updates a cursor, a changed size narrowed first so no word in between
+  words are rewritten in the lists the channels read, a changed size
+  narrowed first so no word in between
   reads past an image; an image a list stopped naming is drawn into again
   only once two frames have ended on every running channel.
 - **Memory a list names is never given back.** A buffer its presenter frees

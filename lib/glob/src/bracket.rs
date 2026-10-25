@@ -4,6 +4,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 use crate::compile::fold;
 use crate::{GlobError, Mark, MAX_CLASS_ITEMS};
@@ -66,6 +67,11 @@ impl CharClass {
             Self::Word => c.is_alphanumeric() || c == '_',
             Self::Xdigit => c.is_ascii_hexdigit(),
         }
+    }
+
+    /// This class's bit in a [`Bracket`]'s set of classes.
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
     }
 }
 
@@ -138,6 +144,8 @@ const CHARACTER_NAMES: &[(&str, char)] = &[
     ("comma", ','),
     ("hyphen", '-'),
     ("hyphen-minus", '-'),
+    ("minus", '-'),
+    ("dash", '-'),
     ("period", '.'),
     ("full-stop", '.'),
     ("slash", '/'),
@@ -187,36 +195,97 @@ fn spells(body: &[Mark], name: &str) -> bool {
             .all(|(m, c)| !m.literal && m.ch == c)
 }
 
-/// One member of a bracket expression.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Item {
-    /// A single character, case-folded when matching ignores case.
-    Char(char),
-    /// An inclusive code-point range `lo..=hi`, its endpoints case-folded
-    /// when matching ignores case.
-    Range(char, char),
-    /// A named class, tested on the candidate character as written.
-    Class(CharClass),
+/// What a bracket expression's elements add up to as it is read.
+#[derive(Default)]
+struct Members {
+    count: usize,
+    ascii: u128,
+    wide: Vec<(char, char)>,
+    classes: u16,
 }
 
-/// A compiled bracket expression.
+impl Members {
+    fn class(&mut self, class: CharClass) {
+        self.count += 1;
+        self.classes |= class.bit();
+    }
+
+    /// Add `lo..=hi`, its endpoints already case-folded when matching
+    /// ignores case.
+    fn range(&mut self, lo: char, hi: char) {
+        self.count += 1;
+        if lo.is_ascii() {
+            let (from, to) = (u32::from(lo), u32::from(hi).min(0x7F));
+            self.ascii |= (u128::MAX >> (127 - (to - from))) << from;
+        }
+        if !hi.is_ascii() {
+            self.wide.push((lo.max('\u{80}'), hi));
+        }
+    }
+
+    fn into_bracket(mut self, negated: bool) -> Bracket {
+        self.wide.sort_unstable();
+        self.wide.dedup_by(|later, kept| {
+            let overlaps = later.0 <= kept.1;
+            if overlaps {
+                kept.1 = kept.1.max(later.1);
+            }
+            overlaps
+        });
+        Bracket {
+            negated,
+            ascii: self.ascii,
+            wide: self.wide,
+            classes: self.classes,
+        }
+    }
+}
+
+/// A compiled bracket expression, its characters case-folded when matching
+/// ignores case: the ASCII ones a bit set, the rest sorted ranges that never
+/// overlap, and its classes a bit set, so a test is a bit lookup, a binary
+/// search and a check per class however many members it holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Bracket {
     negated: bool,
-    items: Vec<Item>,
+    ascii: u128,
+    wide: Vec<(char, char)>,
+    classes: u16,
 }
 
 impl Bracket {
+    /// The heap its wide ranges hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.wide.capacity() * core::mem::size_of::<(char, char)>()
+    }
+
     /// Whether the candidate character — `raw` as written, `folded` as
     /// compared — is accepted. Classes test `raw`, so `[[:upper:]]` keeps
     /// its meaning when matching ignores case, as bash's does.
     pub(crate) fn contains(&self, raw: char, folded: char) -> bool {
-        let hit = self.items.iter().any(|item| match *item {
-            Item::Char(c) => c == folded,
-            Item::Range(lo, hi) => lo <= folded && folded <= hi,
-            Item::Class(class) => class.contains(raw),
-        });
+        let hit = self.holds(folded)
+            || (self.classes != 0
+                && CLASSES
+                    .iter()
+                    .any(|&(_, class)| self.classes & class.bit() != 0 && class.contains(raw)));
         hit != self.negated
+    }
+
+    fn holds(&self, c: char) -> bool {
+        if c.is_ascii() {
+            return (self.ascii >> u32::from(c)) & 1 == 1;
+        }
+        self.wide
+            .binary_search_by(|&(lo, hi)| {
+                if hi < c {
+                    Ordering::Less
+                } else if c < lo {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .is_ok()
     }
 }
 
@@ -230,17 +299,21 @@ enum Element {
     Equivalent(char),
 }
 
-/// What the bracket expressions of one component share, so parsing them
-/// all costs time linear in its length, a run of unclosed `[` included:
-/// where each `[:…:]`, `[=…=]` and `[.….]` element can close, and the element
-/// positions a scan is known to read on from to the end with no closing `]`.
+/// What the bracket expressions of one pattern share, so parsing them all
+/// costs time linear in its length, a run of unclosed `[` included: where
+/// each `[:…:]`, `[=…=]` and `[.….]` element can close, where a `/` lies in
+/// pathname mode, and the element positions a scan is known to read on from
+/// with no closing `]`.
 pub(crate) struct Brackets {
     /// For `:`, `=` and `.`, the nearest index at or after each that holds
     /// that mark followed by `]`, both unescaped.
     pairs: [Vec<usize>; 3],
-    /// Element positions from which a scan reads to the end unclosed: the
-    /// scan from a position never depends on where it began, so a later scan
-    /// reaching one knows its answer.
+    /// In pathname mode, the nearest index at or after each that holds a
+    /// `/`, which no bracket expression spans; empty otherwise.
+    slashes: Vec<usize>,
+    /// Element positions from which a scan reads on unclosed, to the end or
+    /// to a `/`: the scan from a position never depends on where it began,
+    /// so a later scan reaching one knows its answer.
     open_ended: Vec<bool>,
     /// The positions the scan in progress has read, to mark if it fails.
     trail: Vec<usize>,
@@ -248,23 +321,33 @@ pub(crate) struct Brackets {
     pub(crate) elements_read: usize,
 }
 
-const NO_PAIR: usize = usize::MAX;
+/// No such index ahead.
+const NONE_AHEAD: usize = usize::MAX;
 
 impl Brackets {
-    pub(crate) fn new(input: &[Mark]) -> Self {
-        let pairs_of = |kind: char| {
-            let mut next = vec![NO_PAIR; input.len() + 1];
+    pub(crate) fn new(input: &[Mark], pathname: bool) -> Self {
+        let nearest = |holds: &dyn Fn(usize) -> bool| {
+            let mut next = vec![NONE_AHEAD; input.len() + 1];
             for at in (0..input.len()).rev() {
-                let mark = input[at];
-                let closes = !mark.literal
-                    && mark.ch == kind
-                    && input.get(at + 1).is_some_and(|b| !b.literal && b.ch == ']');
-                next[at] = if closes { at } else { next[at + 1] };
+                next[at] = if holds(at) { at } else { next[at + 1] };
             }
             next
         };
+        let closing = |kind: char| {
+            nearest(&|at| {
+                let mark = input[at];
+                !mark.literal
+                    && mark.ch == kind
+                    && input.get(at + 1).is_some_and(|b| !b.literal && b.ch == ']')
+            })
+        };
         Self {
-            pairs: [pairs_of(':'), pairs_of('='), pairs_of('.')],
+            pairs: [closing(':'), closing('='), closing('.')],
+            slashes: if pathname {
+                nearest(&|at| input[at].ch == '/')
+            } else {
+                Vec::new()
+            },
             open_ended: vec![false; input.len() + 1],
             trail: Vec::new(),
             #[cfg(test)]
@@ -273,24 +356,35 @@ impl Brackets {
     }
 
     /// The index of the `kind` mark of the `kind]` pair closing an element
-    /// whose `[kind` opens at `open`.
+    /// whose `[kind` opens at `open`; in pathname mode a pair past a `/`
+    /// closes none.
     fn terminator(&self, kind: char, open: usize) -> Option<usize> {
         let table = match kind {
             ':' => &self.pairs[0],
             '=' => &self.pairs[1],
             _ => &self.pairs[2],
         };
-        table.get(open + 2).copied().filter(|&at| at != NO_PAIR)
+        let body = open + 2;
+        table
+            .get(body)
+            .copied()
+            .filter(|&at| at != NONE_AHEAD && !self.holds_slash(body, at))
+    }
+
+    /// Whether `input[from..to]` holds a `/` in pathname mode.
+    fn holds_slash(&self, from: usize, to: usize) -> bool {
+        self.slashes.get(from).is_some_and(|&at| at < to)
     }
 }
 
 /// Parse the bracket expression opening at `input[start] == '['`, `input`
-/// being the whole component `brackets` was built for.
+/// being the whole pattern `brackets` was built for.
 ///
-/// `None` when no `]` closes it: the `[` is then an ordinary character, as
-/// POSIX specifies. Otherwise the expression and the marks it spans, or the
-/// fault a complete expression holds — so a bad range inside an expression
-/// that never closes cannot refuse a pattern POSIX reads literally.
+/// `None` when no `]` closes it, or in pathname mode when a `/` comes first:
+/// the `[` is then an ordinary character, as POSIX specifies. Otherwise the
+/// expression and the marks it spans, or the fault a complete expression
+/// holds — so a bad range inside an expression that never closes cannot
+/// refuse a pattern POSIX reads literally.
 pub(crate) fn parse(
     input: &[Mark],
     start: usize,
@@ -306,7 +400,7 @@ pub(crate) fn parse(
         at += 1;
     }
     let first = at;
-    let mut items = Vec::new();
+    let mut members = Members::default();
     let mut fault = None;
     brackets.trail.clear();
     loop {
@@ -320,15 +414,21 @@ pub(crate) fn parse(
             return unclosed(brackets);
         };
         if mark.ch == ']' && !mark.literal && at > first {
-            return Some(fault.map_or(Ok((Bracket { negated, items }, at + 1 - start)), Err));
+            return Some(match fault {
+                Some(err) => Err(err),
+                None => Ok((members.into_bracket(negated), at + 1 - start)),
+            });
         }
         #[cfg(test)]
         {
             brackets.elements_read += 1;
         }
         let (element, width) = element_at(input, at, brackets);
+        if brackets.holds_slash(at, at + width) {
+            return unclosed(brackets);
+        }
         at += width;
-        if items.len() >= MAX_CLASS_ITEMS {
+        if members.count >= MAX_CLASS_ITEMS {
             fault.get_or_insert(GlobError::TooManyTokens);
             continue;
         }
@@ -336,25 +436,31 @@ pub(crate) fn parse(
             Err(err) => {
                 fault.get_or_insert(err);
             }
-            Ok(Element::Class(class)) => items.push(Item::Class(class)),
-            Ok(Element::Equivalent(c)) => items.push(Item::Char(fold_if(c))),
+            Ok(Element::Class(class)) => members.class(class),
+            Ok(Element::Equivalent(c)) => members.range(fold_if(c), fold_if(c)),
             Ok(Element::Char(lo)) => match range_end(input, at, brackets) {
                 Some((hi, width)) => {
+                    if brackets.holds_slash(at, at + width) {
+                        return unclosed(brackets);
+                    }
                     at += width;
+                    // Folded first, as bash orders a range: `[a-Z]` is
+                    // `[a-z]` when matching ignores case.
+                    let (lo, hi) = (fold_if(lo), fold_if(hi));
                     if hi < lo {
                         fault.get_or_insert(GlobError::ReversedRange);
                     } else {
-                        items.push(Item::Range(fold_if(lo), fold_if(hi)));
+                        members.range(lo, hi);
                     }
                 }
-                None => items.push(Item::Char(fold_if(lo))),
+                None => members.range(fold_if(lo), fold_if(lo)),
             },
         }
     }
 }
 
-/// A scan that reached the end with no `]`: every position it read leads
-/// there too.
+/// A scan that ended with no `]`, at the end or at a `/`: every position it
+/// read leads there too.
 fn unclosed(brackets: &mut Brackets) -> Option<Result<(Bracket, usize), GlobError>> {
     for &at in &brackets.trail {
         brackets.open_ended[at] = true;
@@ -429,12 +535,12 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{parse, Brackets};
-    use crate::Mark;
+    use crate::{Mark, MAX_CLASS_ITEMS};
 
     /// Mark strings over the characters bracket syntax turns on, each mark
     /// escaped now and then.
     fn random_marks(rng: &mut tairix_fuzzseed::Prng, most: usize) -> Vec<Mark> {
-        const ALPHABET: [char; 8] = ['[', ']', ':', '=', '.', '-', '!', 'a'];
+        const ALPHABET: [char; 9] = ['[', ']', ':', '=', '.', '-', '!', 'a', '/'];
         (0..rng.at_most(most))
             .map(|_| Mark {
                 ch: ALPHABET[rng.below(ALPHABET.len())],
@@ -454,21 +560,30 @@ mod tests {
         let mut rng = tairix_fuzzseed::Prng::new(0x6272_6163);
         for _ in 0..2_000 {
             let input = random_marks(&mut rng, 24);
-            let table = Brackets::new(&input);
-            for kind in [':', '=', '.'] {
-                for open in 0..input.len() {
-                    let scanned = (open + 2..input.len().saturating_sub(1)).find(|&at| {
-                        let (close, bracket) = (input[at], input[at + 1]);
-                        !close.literal && close.ch == kind && !bracket.literal && bracket.ch == ']'
-                    });
-                    assert_eq!(table.terminator(kind, open), scanned, "{kind} at {open}");
+            for pathname in [false, true] {
+                let table = Brackets::new(&input, pathname);
+                for kind in [':', '=', '.'] {
+                    for open in 0..input.len() {
+                        // In pathname mode no element reaches past a `/`.
+                        let scanned = (open + 2..input.len().saturating_sub(1))
+                            .take_while(|&at| !pathname || input[at].ch != '/')
+                            .find(|&at| {
+                                let (close, bracket) = (input[at], input[at + 1]);
+                                !close.literal
+                                    && close.ch == kind
+                                    && !bracket.literal
+                                    && bracket.ch == ']'
+                            });
+                        assert_eq!(table.terminator(kind, open), scanned, "{kind} at {open}");
+                    }
                 }
             }
         }
     }
 
     /// What one scan learns of where scans end is shared with every later
-    /// one, in any order, and changes no answer.
+    /// one, in any order, and changes no answer — a `/` ending a scan in
+    /// pathname mode included.
     #[test]
     fn a_shared_table_parses_every_bracket_as_a_fresh_one_would() {
         let mut rng = tairix_fuzzseed::Prng::new(0x6d65_6d6f);
@@ -479,9 +594,10 @@ mod tests {
                 positions.reverse();
             }
             let fold = rng.below(2) == 0;
-            let mut shared = Brackets::new(&input);
+            let pathname = rng.below(2) == 0;
+            let mut shared = Brackets::new(&input, pathname);
             for start in positions {
-                let alone = parse(&input, start, &mut Brackets::new(&input), fold);
+                let alone = parse(&input, start, &mut Brackets::new(&input, pathname), fold);
                 assert_eq!(parse(&input, start, &mut shared, fold), alone, "{start}");
             }
         }
@@ -495,10 +611,14 @@ mod tests {
         let marks = |text: &str| -> Vec<Mark> {
             text.chars().map(|ch| Mark { ch, literal: false }).collect()
         };
-        let tails = ["[.ab.]".repeat(500), "[:".repeat(1548)];
-        for tail in tails {
+        let tails = [
+            ("[.ab.]".repeat(500), false),
+            ("[:".repeat(1548), false),
+            ("a/]".repeat(500), true),
+        ];
+        for (tail, pathname) in tails {
             let input = marks(&alloc::format!("{}{tail}", "[".repeat(RUN)));
-            let mut brackets = Brackets::new(&input);
+            let mut brackets = Brackets::new(&input, pathname);
             for start in 0..RUN {
                 assert_eq!(parse(&input, start, &mut brackets, false), None);
             }
@@ -508,6 +628,102 @@ mod tests {
                 brackets.elements_read,
                 input.len()
             );
+        }
+    }
+
+    /// A bracket keeps its characters where one lookup finds them — ASCII in
+    /// a bit set, the rest as sorted ranges that never overlap — and accepts
+    /// exactly what its members name, at every size it may reach.
+    #[test]
+    fn a_bracket_finds_any_member_by_one_lookup() {
+        const POOL: [char; 12] = [
+            '\0',
+            '-',
+            '0',
+            'a',
+            'z',
+            '~',
+            '\u{7f}',
+            '\u{80}',
+            'é',
+            'λ',
+            '\u{ffff}',
+            '\u{10fffc}',
+        ];
+        let near = |c: char, step: i64| {
+            u32::try_from(i64::from(u32::from(c)) + step)
+                .ok()
+                .and_then(char::from_u32)
+        };
+        let mut rng = tairix_fuzzseed::Prng::new(0x6269_7473);
+        for _ in 0..200 {
+            let negated = rng.below(2) == 0;
+            let mut input = alloc::vec![Mark {
+                ch: '[',
+                literal: false
+            }];
+            if negated {
+                input.push(Mark {
+                    ch: '!',
+                    literal: false,
+                });
+            }
+            let mut members = Vec::new();
+            for _ in 0..=rng.below(MAX_CLASS_ITEMS) {
+                let mut spread = || {
+                    let base = *rng.pick(&POOL);
+                    near(base, i64::try_from(rng.below(3)).unwrap_or(0)).unwrap_or(base)
+                };
+                let (x, y) = (spread(), spread());
+                let (lo, hi) = if rng.below(2) == 0 {
+                    (x, x)
+                } else {
+                    (x.min(y), x.max(y))
+                };
+                input.push(Mark {
+                    ch: lo,
+                    literal: true,
+                });
+                if hi != lo {
+                    input.push(Mark {
+                        ch: '-',
+                        literal: false,
+                    });
+                    input.push(Mark {
+                        ch: hi,
+                        literal: true,
+                    });
+                }
+                members.push((lo, hi));
+            }
+            input.push(Mark {
+                ch: ']',
+                literal: false,
+            });
+            let Some(Ok((bracket, width))) =
+                parse(&input, 0, &mut Brackets::new(&input, false), false)
+            else {
+                panic!("a complete expression: {input:?}");
+            };
+            assert_eq!(width, input.len());
+            assert!(bracket
+                .wide
+                .iter()
+                .all(|&(lo, hi)| !lo.is_ascii() && lo <= hi));
+            assert!(bracket.wide.windows(2).all(|pair| pair[0].1 < pair[1].0));
+            let probes = members
+                .iter()
+                .flat_map(|&(lo, hi)| [Some(lo), Some(hi), near(lo, -1), near(hi, 1)])
+                .flatten()
+                .chain(POOL);
+            for probe in probes {
+                let named = members.iter().any(|&(lo, hi)| lo <= probe && probe <= hi);
+                assert_eq!(
+                    bracket.contains(probe, probe),
+                    named != negated,
+                    "{probe:?}"
+                );
+            }
         }
     }
 }

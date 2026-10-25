@@ -42,7 +42,7 @@ produced, which names the test it was in. A measured warm run:
 | Stage | Cost | Shape |
 | --- | --- | --- |
 | `fmt --check` | 4 s | sequential, streams live |
-| static gates (`deps-check`, `cfg-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `help-lint`, `devids`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `help-lint`, `devids`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
 | `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
@@ -187,6 +187,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports, inside a freestanding port one that omits `target_os`, and anywhere but `tools/xtask/` an attribute `cfg` naming `miri` |
+| `board-check` | Rejects a board, SoC or board part named in generic code: the Rust sources and crate READMEs under `lib/`, `kernel/`, `drivers/` and `userland/`, outside the ports, each device's own crate and the Settings application's Raspberry Pi category |
 | `event-ids`   | Rejects an event id outside its crate's range in `tairix_log::registry`, a crate defining ids with no range, and one id defined by two crates |
 | `driver-exits`| Rejects an exit code or `exit` module declared by a crate built on the driver runtime: every driver ends through `tairix_drvrt::exit` |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
@@ -200,7 +201,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 
-The tree scans (`cfg-check`, `charter-cite`, `source-text`, `spec-review`)
+The tree scans (`cfg-check`, `board-check`, `charter-cite`, `source-text`, `spec-review`)
 walk what a change can carry: `target/`, `.git` and every untracked path git
 ignores (fetched tooling, the generated book, built images) are passed over,
 and a tracked file is scanned even where an ignore pattern names it.

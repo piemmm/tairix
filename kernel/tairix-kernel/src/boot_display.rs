@@ -112,7 +112,7 @@ fn observe_boot_display(
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FirmwareSurfaces {
     /// A display engine takes the screen over, and every firmware surface
-    /// with it, as Linux's `vc4` removes every firmware framebuffer.
+    /// with it: once the engine owns scan-out no firmware surface still shows.
     TakenOver,
     /// The boot display node describes the surface of `len` bytes at `base`.
     Published {

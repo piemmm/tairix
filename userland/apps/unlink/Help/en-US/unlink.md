@@ -41,8 +41,8 @@ a name that begins with a dash is removable.
 
 - `0` — the name was removed (or the short help was written).
 - `1` — the filesystem refused the removal, or the output failed; the
-  reason is printed on standard error.
-- `2` — the command line was not understood.
+  reason is printed on standard error. A command line that was not
+  understood exits `1` too.
 
 ## ENVIRONMENT
 

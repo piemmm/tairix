@@ -25,13 +25,12 @@
 //! repeating hex pattern for the cases where a deterministic payload is what
 //! is wanted (reproducing a pattern-sensitive fault, exercising a codec).
 
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::net_ipc::NetAddrFamily;
-use tairix_util::argv::option_value;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan};
 use tairix_util::quote::quote;
 
 /// Default payload size in bytes (the classic `ping` 56, which with the
@@ -134,10 +133,8 @@ impl Config {
 /// Why an argument vector was not a valid `ping` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// An option that is not part of the surface.
-    UnknownOption(String),
-    /// A value-taking option was given without its value.
-    MissingValue(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A value-taking option's value did not parse (or was out of range).
     InvalidValue {
         /// The option, e.g. `-c`.
@@ -154,8 +151,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
-            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::InvalidValue { option, value } => {
                 write!(
                     f,
@@ -203,121 +199,83 @@ impl Default for Builder {
     }
 }
 
+/// What each of `ping`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Count,
+    Interval,
+    Size,
+    Pattern,
+    Timeout,
+    Deadline,
+    Ipv4,
+    Ipv6,
+    Numeric,
+    Quiet,
+    Help,
+}
+
+/// `ping`'s options and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('c', &["count"], Flag::Count),
+    Opt::valued('i', &["interval"], Flag::Interval),
+    Opt::valued('s', &["size"], Flag::Size),
+    Opt::valued('p', &["pattern"], Flag::Pattern),
+    Opt::valued('W', &["timeout"], Flag::Timeout),
+    Opt::valued('w', &["deadline"], Flag::Deadline),
+    Opt::flag('4', &["ipv4"], Flag::Ipv4),
+    Opt::flag('6', &["ipv6"], Flag::Ipv6),
+    Opt::flag('n', &["numeric"], Flag::Numeric),
+    Opt::flag('q', &["quiet"], Flag::Quiet),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse an argument vector (without the program name).
+///
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among the
+/// operands, clustered, a value attached or the next argument, a long option by
+/// any unambiguous prefix, `--` ending them. The help switches (`-?`,
+/// `--help`) answer at once. The one operand is the target, kept as typed.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] naming the offending argument; the caller reports it
-/// with the usage banner and exits `2`.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::InvalidValue`] — a value that does not parse or is out of
+///   range, the option named by its letter.
+/// * [`ParseError::MissingTarget`] — no target.
+/// * [`ParseError::ExtraOperand`] — a second target.
+///
+/// The caller reports each, then where the help is, and exits `1`.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut builder = Builder::default();
-    let mut options_ended = false;
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i];
-        i += 1;
-        if options_ended || arg == "-" || !arg.starts_with('-') {
-            set_target(&mut builder, arg)?;
-            continue;
-        }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            if parse_long(&mut builder, long, arg, args, &mut i)? {
-                return Ok(Command::Help);
-            }
-            continue;
-        }
-        // A short cluster or a value-taking short option.
-        if parse_short(&mut builder, arg, args, &mut i)? {
-            return Ok(Command::Help);
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(word) => set_target(&mut builder, word)?,
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(flag, value) => builder.set(flag, value.unwrap_or_default())?,
         }
     }
     build(builder)
 }
 
-/// Parse one `--long` option (possibly `--key=value`), consuming a
-/// following value argument when the option takes one and none is attached.
-/// Returns `Ok(true)` when it requested help.
-fn parse_long(
-    builder: &mut Builder,
-    long: &str,
-    original: &str,
-    args: &[&str],
-    i: &mut usize,
-) -> Result<bool, ParseError> {
-    let (key, inline) = match long.split_once('=') {
-        Some((k, v)) => (k, Some(v)),
-        None => (long, None),
-    };
-    let mut take_value = |key: &str| {
-        option_value(inline, args, i).ok_or_else(|| ParseError::MissingValue(format!("--{key}")))
-    };
-    match key {
-        "help" => return Ok(true),
-        "numeric" => builder.numeric = true,
-        "count" => builder.count = Some(parse_count(take_value(key)?, "--count")?),
-        "interval" => builder.interval_ns = parse_seconds(take_value(key)?, "--interval")?,
-        "timeout" => builder.timeout_ns = parse_seconds(take_value(key)?, "--timeout")?,
-        "deadline" => builder.deadline_ns = Some(parse_seconds(take_value(key)?, "--deadline")?),
-        "size" => builder.size = parse_size(take_value(key)?, "--size")?,
-        "pattern" => builder.payload = parse_pattern(take_value(key)?, "--pattern")?,
-        "quiet" => builder.quiet = true,
-        "ipv4" => builder.family = Some(NetAddrFamily::V4),
-        "ipv6" => builder.family = Some(NetAddrFamily::V6),
-        _ => return Err(ParseError::UnknownOption(original.to_string())),
-    }
-    Ok(false)
-}
-
-/// Parse one short-option argument. Returns `Ok(true)` when it requested
-/// help (so [`parse`] returns [`Command::Help`]).
-fn parse_short(
-    builder: &mut Builder,
-    arg: &str,
-    args: &[&str],
-    i: &mut usize,
-) -> Result<bool, ParseError> {
-    let flags = &arg[1..];
-    for (pos, flag) in flags.char_indices() {
+impl Builder {
+    /// Apply the option `flag` names, with the value it took.
+    fn set(&mut self, flag: Flag, value: &str) -> Result<(), ParseError> {
         match flag {
-            '?' => return Ok(true),
-            '4' => builder.family = Some(NetAddrFamily::V4),
-            '6' => builder.family = Some(NetAddrFamily::V6),
-            'n' => builder.numeric = true,
-            'q' => builder.quiet = true,
-            'c' | 'i' | 's' | 'W' | 'w' | 'p' => {
-                // The value is the rest of this argument, or the next one.
-                let rest = &flags[pos + flag.len_utf8()..];
-                let attached = (!rest.is_empty()).then_some(rest);
-                let value = option_value(attached, args, i)
-                    .ok_or_else(|| ParseError::MissingValue(format!("-{flag}")))?;
-                apply_value_flag(builder, flag, value)?;
-                return Ok(false);
-            }
-            other => return Err(ParseError::UnknownOption(format!("-{other}"))),
+            Flag::Count => self.count = Some(parse_count(value, "-c")?),
+            Flag::Interval => self.interval_ns = parse_seconds(value, "-i")?,
+            Flag::Size => self.size = parse_size(value, "-s")?,
+            Flag::Pattern => self.payload = parse_pattern(value, "-p")?,
+            Flag::Timeout => self.timeout_ns = parse_seconds(value, "-W")?,
+            Flag::Deadline => self.deadline_ns = Some(parse_seconds(value, "-w")?),
+            Flag::Ipv4 => self.family = Some(NetAddrFamily::V4),
+            Flag::Ipv6 => self.family = Some(NetAddrFamily::V6),
+            Flag::Numeric => self.numeric = true,
+            Flag::Quiet => self.quiet = true,
+            Flag::Help => {}
         }
+        Ok(())
     }
-    Ok(false)
-}
-
-/// Apply a value-taking short flag's parsed value.
-fn apply_value_flag(builder: &mut Builder, flag: char, value: &str) -> Result<(), ParseError> {
-    match flag {
-        'c' => builder.count = Some(parse_count(value, "-c")?),
-        'i' => builder.interval_ns = parse_seconds(value, "-i")?,
-        's' => builder.size = parse_size(value, "-s")?,
-        'W' => builder.timeout_ns = parse_seconds(value, "-W")?,
-        'w' => builder.deadline_ns = Some(parse_seconds(value, "-w")?),
-        'p' => builder.payload = parse_pattern(value, "-p")?,
-        // The caller dispatches only the flags matched above; a value flag
-        // added there without a case here is a compile-time hole, so this
-        // arm refuses rather than guessing a meaning.
-        _ => return Err(invalid(&format!("-{flag}"), value)),
-    }
-    Ok(())
 }
 
 /// Record the single target operand, rejecting a second one.
@@ -420,7 +378,46 @@ fn invalid(option: &str, value: &str) -> ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use alloc::vec;
+
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-Q", "10.0.0.1"]), "invalid option -- 'Q'");
+        assert_eq!(
+            refused(&["--frob", "10.0.0.1"]),
+            "unrecognized option '--frob'"
+        );
+        assert_eq!(
+            refused(&["10.0.0.1", "-c"]),
+            "option requires an argument -- 'c'"
+        );
+        assert_eq!(
+            refused(&["10.0.0.1", "--count"]),
+            "option '--count' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--quiet=1", "10.0.0.1"]),
+            "option '--quiet' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        let config = config(&["--cou=3", "--num", "10.0.0.1"]);
+        assert_eq!(config.count, Some(3));
+        assert!(config.numeric);
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
+        assert_eq!(
+            refused(&["--ipv", "10.0.0.1"]),
+            "option '--ipv' is ambiguous; possibilities: '--ipv4' '--ipv6'"
+        );
+    }
 
     fn config(args: &[&str]) -> Config {
         match parse(args).expect("parses") {
@@ -531,7 +528,7 @@ mod tests {
     fn a_missing_value_fails_closed() {
         assert_eq!(
             parse(&["-c"]),
-            Err(ParseError::MissingValue("-c".to_string()))
+            Err(ParseError::Option(Refusal::MissingShortValue('c')))
         );
     }
 
@@ -582,11 +579,11 @@ mod tests {
     fn an_unknown_option_fails_closed() {
         assert_eq!(
             parse(&["-z", "10.0.0.1"]),
-            Err(ParseError::UnknownOption("-z".to_string()))
+            Err(ParseError::Option(Refusal::UnknownShort('z')))
         );
         assert_eq!(
             parse(&["--bogus", "10.0.0.1"]),
-            Err(ParseError::UnknownOption("--bogus".to_string()))
+            Err(ParseError::Option(Refusal::UnknownLong("--bogus".into())))
         );
     }
 

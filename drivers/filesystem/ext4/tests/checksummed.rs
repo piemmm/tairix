@@ -19,7 +19,7 @@
 // the width-narrowing casts are exact for these fixtures.
 #![allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
 
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_abi::DriverError;
 use tairix_drv_fs_ext4::Ext4;
 
@@ -281,14 +281,19 @@ fn mutate(fixture: &[u8]) -> Vec<u8> {
     let root = fs.root();
 
     let file = fs
-        .create(root, b"report.txt", NodeKind::RegularFile)
+        .create(
+            root,
+            b"report.txt",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create file");
     let body = b"checksummed ext4 mutation round-trip, spanning blocks.\n";
-    assert_eq!(fs.write_at(root, b"report.txt", 0, body), Ok(body.len()));
+    assert_eq!(fs.write_at(file, 0, body), Ok(body.len()));
 
     // A multi-block write (crosses several 1 KiB blocks).
     let big = vec![0x5Au8; 3500];
-    assert_eq!(fs.write_at(root, b"report.txt", 0, &big), Ok(big.len()));
+    assert_eq!(fs.write_at(file, 0, &big), Ok(big.len()));
 
     // Read it back through the driver.
     let mut rb = vec![0u8; big.len()];
@@ -296,8 +301,14 @@ fn mutate(fixture: &[u8]) -> Vec<u8> {
     assert_eq!(rb, big);
 
     // Shrink, then a subdirectory create + remove.
-    fs.truncate(root, b"report.txt", 1000).expect("truncate");
-    fs.create(root, b"sub", NodeKind::Directory).expect("mkdir");
+    fs.truncate(file, 1000).expect("truncate");
+    fs.create(
+        root,
+        b"sub",
+        NodeKind::Directory,
+        &NodeSecurity::new(0o755, 0, 0),
+    )
+    .expect("mkdir");
     fs.remove(root, b"sub").expect("rmdir");
 
     fs.into_block().expect("commit").data
@@ -305,7 +316,8 @@ fn mutate(fixture: &[u8]) -> Vec<u8> {
 
 #[test]
 fn reference_crc_matches_known_vector() {
-    // CRC-32C of "123456789" with the Linux (no final-xor) convention.
+    // CRC-32C of "123456789" without the final inversion ext4 keeps: the
+    // catalogue check value 0xE3069283, inverted.
     assert_eq!(crc32c(0xFFFF_FFFF, b"123456789"), 0x1CF9_6D7C);
 }
 

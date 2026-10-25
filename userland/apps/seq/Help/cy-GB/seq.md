@@ -20,9 +20,17 @@ uwchlaw, ac ni chaiff fod yn sero. Gall `last` fod yn `inf` i gyfrif
 am byth. Mae trachywiredd rhagosodedig yr allbwn yn dilyn sillafiad yr
 operandau (mae `seq 1 0.25 2` yn argraffu dau le degol), a chynhyrchir
 rhediadau cyfanrifau plaen yn union, waeth pa mor fawr yw'r rhifau.
+Darllenir rhif hecsadegol ag esbonydd mewn priflythyren (`0X1P-1`) fel y
+darllenir un ag esbonydd mewn llythyren fach; mae GNU `seq` yn darllen
+ei gynllun fel cynllun cyfanrif ac yn argraffu'r rhifau anghywir.
 
 Mae sganio opsiynau'n dod i ben wrth yr operand cyntaf, ac operand yw
 rhif negatif blaen, nid opsiwn: mae `seq -5 5` yn cyfrif o -5.
+
+Mae diagnosis yn dangos y fformat, a chyfarwyddeb anhysbys ynddo, gydag
+unrhyw nod rheoli neu nod anweledig arall wedi'i ddianc, fel na all y
+naill na'r llall reoli'r derfynell; mae GNU yn dangos y gyfarwyddeb heb
+ei newid.
 
 ## OPTIONS
 
@@ -51,9 +59,9 @@ rhif negatif blaen, nid opsiwn: mae `seq -5 5` yn cyfrif o -5.
 ## EXIT STATUS
 
 - `0` — ysgrifennwyd y dilyniant (neu gymorth byr y gofynnwyd amdano).
-- `1` — peidiodd yr allbwn â derbyn beitiau.
-- `2` — ni ddeallwyd y llinell orchymyn (opsiwn anhysbys, rhif
-  annilys, cynyddiad sero neu fformat gwael).
+- `1` — peidiodd yr allbwn â derbyn beitiau. Mae llinell orchymyn na
+  ddeallwyd (opsiwn anhysbys, rhif annilys, cynyddiad sero neu fformat
+  gwael) hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

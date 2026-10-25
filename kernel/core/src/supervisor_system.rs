@@ -243,8 +243,8 @@ impl<A: KernelArch + 'static> KernelSupervisorSystem<A> {
         // audit ring included), DMA buffers a device may still map
         // non-cacheably, and all driver and userland memory — is marked used
         // and is never swept. Writing such an in-use frame races its owner and
-        // can wedge the machine; that is exactly what froze a real Raspberry
-        // Pi 4, where the old boot-map sweep reached a live DMA buffer.
+        // can wedge the machine; that is exactly what froze a real board,
+        // where the old boot-map sweep reached a live DMA buffer.
         let frames = self.state.frame_allocator;
         // The active console framebuffer is the one exclusion the *allocator*
         // may not know about: firmware carves it out of usable DRAM the

@@ -199,7 +199,7 @@ impl IconKind {
             Self::Language | Self::Dns => BadgeHue::Teal,
             Self::Power | Self::Startup => BadgeHue::Green,
             Self::Sound | Self::SoundDevices | Self::SoundEffects => BadgeHue::Pink,
-            Self::Notifications | Self::RaspberryPi | Self::AlertError => BadgeHue::Red,
+            Self::Notifications | Self::BoardFan | Self::AlertError => BadgeHue::Red,
             Self::Theme | Self::AlertWarning => BadgeHue::Orange,
             _ => return None,
         })

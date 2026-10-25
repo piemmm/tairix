@@ -24,13 +24,23 @@ verleiht keine Rechte an dem, was sie benennt — jede spätere Nutzung
 wird Komponente für Komponente unter Ihrer eigenen Identität geprüft.
 
 Ein bereits belegter Verknüpfungsname wird abgewiesen, sofern nicht `-f`
-oder `-i` das Ersetzen erlaubt; das Ersetzen **entfernt** diesen Namen
-zuerst, damit nichts durch eine schon vorhandene Verknüpfung hindurch
-auf ihr Ziel wirkt. Ein Verzeichnis wird niemals ersetzt.
+oder `-i` das Ersetzen erlaubt. Die neue Verknüpfung tritt dann in einem
+Schritt an die Stelle des Namens, und zwar erst, wenn sie existiert;
+eine Verknüpfung, die sich nicht erstellen lässt — etwa weil ihr Ziel
+fehlt —, lässt den Namen daher unverändert, und nichts wirkt durch eine
+schon vorhandene Verknüpfung hindurch auf ihr Ziel. Ein Verzeichnis wird
+niemals ersetzt. Eine Verknüpfung, die an die Stelle genau der Datei
+träte, die sie benennt, wird als dieselbe Datei abgewiesen: eine Datei,
+die erzwungen auf ihren eigenen Namen verknüpft würde, oder eine
+symbolische Verknüpfung, deren Ziel, vom Verzeichnis der Verknüpfung
+selbst aus gelesen, die Datei ist, die sie ersetzen würde. GNU liest
+dieses Ziel stattdessen vom Arbeitsverzeichnis aus und ersetzt nach
+einer bejahten `-i`-Frage eine Datei durch eine Verknüpfung auf sich
+selbst.
 
-Der erste Fehlschlag beendet den Lauf vor jedem weiteren Ziel; bereits
-erstellte Verknüpfungen bleiben. `--` beendet die Optionsauswertung:
-jedes weitere Argument ist ein Operand.
+Eine Verknüpfung, die sich nicht erstellen lässt, wird gemeldet, und die
+nächste wird dennoch erstellt. `--` beendet die Optionsauswertung: jedes
+weitere Argument ist ein Operand.
 
 Ohne `-s` ist die Verknüpfung **hart**: ein zweiter Verzeichniseintrag
 für die Inode des Ziels selbst. Beide Namen erreichen eine Datei, ein
@@ -63,16 +73,17 @@ Verknüpfung speichert kein Ziel, das relativ werden könnte.
 - `-d, -F, --directory` — einen Verzeichnis-Operanden annehmen. Die
   Verknüpfung wird dennoch abgewiesen: kein Benutzer darf einem
   Verzeichnis einen zweiten Namen geben.
-- `-f, --force` — einen vorhandenen Verknüpfungsnamen entfernen und
-  die Verknüpfung dann erstellen.
-- `-i, --interactive` — vor dem Entfernen eines vorhandenen
+- `-f, --force` — einen vorhandenen Verknüpfungsnamen durch die neue
+  Verknüpfung ersetzen.
+- `-i, --interactive` — vor dem Ersetzen eines vorhandenen
   Verknüpfungsnamens fragen; nur eine mit `y`/`Y` beginnende Antwort
-  stimmt zu. Die spätere von `-f` und `-i` gewinnt.
+  stimmt zu, und eine abgelehnte Frage überspringt diese Verknüpfung und
+  lässt den Lauf fehlschlagen. Die spätere von `-f` und `-i` gewinnt.
 - `-n, --no-dereference` — ein Ziel, das eine symbolische Verknüpfung
   auf ein Verzeichnis ist, als den einfachen Namen behandeln, der es
   auch ist, statt als Verzeichnis für die Verknüpfungen.
-- `-v, --verbose` — jede erstellte Verknüpfung als
-  `'link' -> 'target'` melden.
+- `-v, --verbose` — jede erstellte Verknüpfung melden, eine symbolische
+  als `'link' -> 'target'` und eine harte als `'link' => 'target'`.
 - `-t dir, --target-directory=dir` — jede Verknüpfung in `dir`
   erstellen, das bereits ein Verzeichnis sein muss. Der Wert folgt
   angehängt (`-tdir`, `--target-directory=dir`) oder als nächstes
@@ -97,9 +108,10 @@ Verknüpfung speichert kein Ziel, das relativ werden könnte.
 ## EXIT STATUS
 
 - `0` — jede Verknüpfung wurde erstellt (oder die Kurzhilfe
-  geschrieben); eine abgelehnte `-i`-Frage ist kein Fehlschlag.
-- `1` — alles andere, mit der Begründung auf der Standardfehlerausgabe.
-  Eine nicht verstandene Befehlszeile endet ebenfalls mit `1`.
+  geschrieben).
+- `1` — alles andere, eine abgelehnte `-i`-Frage eingeschlossen, mit der
+  etwaigen Begründung auf der Standardfehlerausgabe. Eine nicht
+  verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

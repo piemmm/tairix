@@ -1318,7 +1318,7 @@ mod tests {
     }
 
     /// A first client buffering a whole notification — 36 480 frames, as the
-    /// 2026-10-17 Pi 4 boot's cue did — no longer programs a 16 384-frame
+    /// 2026-10-17 boot's cue did — no longer programs a 16 384-frame
     /// period every later stream on the endpoint waits behind.
     #[test]
     fn a_deep_first_client_does_not_make_the_period_long() {

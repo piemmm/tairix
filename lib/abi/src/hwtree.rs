@@ -35,6 +35,7 @@ use crate::blkio::{BlkMedium, BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
 use crate::driver::exit::DriverEnding;
 use crate::driver::net::MAC_ADDRESS_LEN;
+use crate::driver::supply::{IoRail, PowerRail};
 use crate::driver::thermal::ThermalCalibration;
 use crate::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_SELECTOR_MAX_CELLS};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
@@ -77,8 +78,8 @@ pub const HW_COMPATIBLE_MAX: usize = 64;
 /// a RAID array assembled from several member disks, a future
 /// device-mapper-style volume — has no discovered node to hang from and no
 /// parent whose lifetime outlives the devices it is built out of. The
-/// virtual bus is that parent: an always-present container, exactly like
-/// Linux's `virtual` bus, whose lifetime is the machine's rather than any
+/// virtual bus is that parent: an always-present container whose lifetime
+/// is the machine's rather than any
 /// disk's, so pulling a member can never orphan the array node built above
 /// it.
 ///
@@ -421,9 +422,10 @@ impl HwMatchKey {
         self.class
     }
 
-    /// Encode `self` little-endian.
+    /// Encode `self` little-endian; `const`, so a bind table can be checked
+    /// against its encoding at build time.
     #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+    pub const fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u16(&mut out, 0, self.kind);
         out[2] = self.compatible_len;
@@ -431,7 +433,11 @@ impl HwMatchKey {
         put_u16(&mut out, 4, self.vendor);
         put_u16(&mut out, 6, self.product);
         put_u32(&mut out, 8, self.class);
-        out[12..12 + HW_COMPATIBLE_MAX].copy_from_slice(&self.compatible);
+        let mut at = 0;
+        while at < HW_COMPATIBLE_MAX {
+            out[12 + at] = self.compatible[at];
+            at += 1;
+        }
         out
     }
 
@@ -484,6 +490,23 @@ impl HwMatchKey {
         }
         Ok(key)
     }
+}
+
+/// The `compatible` [`HwMatchKey`] for a string fixed at build time, made in
+/// const evaluation, so a string longer than [`HW_COMPATIBLE_MAX`] fails the
+/// build rather than a run: the form a bind table names its keys in.
+#[macro_export]
+macro_rules! compatible_key {
+    ($compatible:expr) => {
+        const {
+            match $crate::hwtree::HwMatchKey::compatible($compatible) {
+                ::core::result::Result::Ok(key) => key,
+                ::core::result::Result::Err(_) => {
+                    ::core::panic!("compatible string fits HW_COMPATIBLE_MAX")
+                }
+            }
+        }
+    };
 }
 
 /// Whether a DMA master's accesses snoop the CPU's caches: what decides how
@@ -568,7 +591,7 @@ pub enum HwResourceKind {
     /// significant) and `len` is `1`.
     ///
     /// A network device's factory MAC is not readable from its own registers
-    /// on every part: on the BCM2711's GENET the platform firmware publishes
+    /// on every part: on some integrated MACs the platform firmware publishes
     /// it (the device-tree `mac-address` / `local-mac-address`
     /// ethernet-controller binding) and the driver programs it in. Carrying
     /// it here is how a NIC driver autoloaded into user space learns the
@@ -695,9 +718,21 @@ pub enum HwProperty {
     /// [`HwResource::thermal_calibration`] and [`HwNode::thermal_calibration`].
     /// Only discovery states it.
     ThermalCalibration = 11,
-    /// The node is a temperature sensor's channel: what it measures, as
+    /// The node is a temperature sensor that measures this zone, as
     /// [`ThermalZone`](crate::driver::thermal::ThermalZone)'s wire value.
+    /// Only discovery states it: what a sensor measures is the board's
+    /// thermal description, never its driver's word.
     ThermalZone = 12,
+    /// The rail selecting the device's I/O voltage, which the platform
+    /// firmware switches on one of its own lines. Built and read through
+    /// [`HwResource::io_rail`] and [`HwNode::io_rail`]. Only discovery states
+    /// it: the firmware answers the device's driver for that line alone.
+    IoRail = 13,
+    /// The rail switching the device's power, which the platform firmware
+    /// switches on one of its own lines. Built and read through
+    /// [`HwResource::power_rail`] and [`HwNode::power_rail`]. Only discovery
+    /// states it, for the reason [`Self::IoRail`] is.
+    PowerRail = 14,
 }
 
 impl HwProperty {
@@ -716,6 +751,8 @@ impl HwProperty {
         Self::GpioHeaderLines,
         Self::ThermalCalibration,
         Self::ThermalZone,
+        Self::IoRail,
+        Self::PowerRail,
     ];
 
     /// Raw on-wire key.
@@ -734,6 +771,9 @@ impl HwProperty {
                 | Self::ConsoleHost
                 | Self::GpioHeaderLines
                 | Self::ThermalCalibration
+                | Self::ThermalZone
+                | Self::IoRail
+                | Self::PowerRail
         )
     }
 
@@ -753,6 +793,8 @@ impl HwProperty {
             10 => Some(Self::GpioHeaderLines),
             11 => Some(Self::ThermalCalibration),
             12 => Some(Self::ThermalZone),
+            13 => Some(Self::IoRail),
+            14 => Some(Self::PowerRail),
             _ => None,
         }
     }
@@ -1849,6 +1891,21 @@ impl HwResource {
         Self::property(HwProperty::ThermalCalibration, calibration.to_word())
     }
 
+    /// The fact that `rail` selects the device's I/O voltage
+    /// ([`HwProperty::IoRail`]).
+    #[must_use]
+    pub fn io_rail(rail: IoRail) -> Self {
+        Self::property(HwProperty::IoRail, rail.to_word())
+    }
+
+    /// The fact that `rail` switches the device's power
+    /// ([`HwProperty::PowerRail`]), or [`None`] for a delay past what the
+    /// record carries.
+    #[must_use]
+    pub fn power_rail(rail: PowerRail) -> Option<Self> {
+        Some(Self::property(HwProperty::PowerRail, rail.to_word()?))
+    }
+
     /// The fact that entry `index` of the node's `clocks` is a fixed clock
     /// running at `hz` ([`HwProperty::FixedClockRate`]), or [`None`] for a
     /// rate past what the record carries.
@@ -2895,12 +2952,45 @@ impl HwNode {
             .find_map(|(held, value)| (held == key).then_some(value))
     }
 
+    /// The endpoint a device channel published as `compatible` names: what
+    /// its driver serves once it does. [`None`] for a node not naming
+    /// `compatible`, and for one naming no endpoint, never guessed at.
+    #[must_use]
+    pub fn channel_endpoint(&self, compatible: &[u8]) -> Option<u64> {
+        let names = self.match_keys().iter().any(|key| {
+            key.kind() == Some(HwMatchKind::Compatible) && key.compatible_bytes() == compatible
+        });
+        if !names {
+            return None;
+        }
+        self.resources()
+            .iter()
+            .find(|resource| resource.kind() == Some(HwResourceKind::Endpoint))
+            .map(HwResource::base)
+    }
+
     /// The calibration a sensor's node states
     /// ([`HwProperty::ThermalCalibration`]), or [`None`] when it states none.
     #[must_use]
     pub fn thermal_calibration(&self) -> Option<ThermalCalibration> {
         self.property(HwProperty::ThermalCalibration)
             .map(ThermalCalibration::from_word)
+    }
+
+    /// The rail a node states selects its device's I/O voltage
+    /// ([`HwProperty::IoRail`]), or [`None`] when it states none or a
+    /// malformed one.
+    #[must_use]
+    pub fn io_rail(&self) -> Option<IoRail> {
+        IoRail::from_word(self.property(HwProperty::IoRail)?)
+    }
+
+    /// The rail a node states switches its device's power
+    /// ([`HwProperty::PowerRail`]), or [`None`] when it states none or a
+    /// malformed one.
+    #[must_use]
+    pub fn power_rail(&self) -> Option<PowerRail> {
+        PowerRail::from_word(self.property(HwProperty::PowerRail)?)
     }
 
     /// The medium a block unit's node states ([`HwProperty::BlockMedium`]),
@@ -3462,14 +3552,28 @@ where
 /// corrupt record can hide a node but can never invent one.
 #[derive(Clone, Debug)]
 pub struct HwTreeNodes<'a> {
-    /// The record region alone: the header is consumed by [`snapshot_nodes`],
-    /// which has already validated that this holds exactly `remaining` whole
-    /// records.
+    header: HwTreeHeader,
+    /// The record region alone, which [`snapshot_nodes`] has already
+    /// validated holds exactly `remaining` whole records.
     records: &'a [u8],
     remaining: usize,
 }
 
-impl HwTreeNodes<'_> {
+impl<'a> HwTreeNodes<'a> {
+    /// The snapshot's header: the generation it was taken at, and the records
+    /// it promised.
+    #[must_use]
+    pub const fn header(&self) -> HwTreeHeader {
+        self.header
+    }
+
+    /// The records not yet walked, each as the kernel wrote it.
+    #[must_use]
+    pub fn records(&self) -> &'a [[u8; HwNode::WIRE_LEN]] {
+        let records: &'a [u8] = self.records;
+        records.as_chunks::<{ HwNode::WIRE_LEN }>().0
+    }
+
     /// How many records the snapshot promised.
     ///
     /// A count, not a yield guarantee: an undecodable record is skipped, so the
@@ -3518,9 +3622,10 @@ impl Iterator for HwTreeNodes<'_> {
 /// consumer never re-derives the header validation or the record stride. It
 /// fails closed to [`None`] for a snapshot whose promised extent cannot be
 /// trusted — a short or malformed header, a node count that does not fit the
-/// host, or a byte span that overflows or exceeds `blob` — rather than
-/// interpreting a truncated tree, because a partially-read tree would silently
-/// omit nodes a security decision may depend on.
+/// host, or a byte span that overflows or is not exactly `blob`'s length —
+/// rather than interpreting a truncated tree, because a partially-read tree
+/// would silently omit nodes a security decision may depend on, and bytes past
+/// the promised records are records the header does not count.
 #[must_use]
 pub fn snapshot_nodes(blob: &[u8]) -> Option<HwTreeNodes<'_>> {
     let header = HwTreeHeader::from_bytes(blob).ok()?;
@@ -3528,11 +3633,12 @@ pub fn snapshot_nodes(blob: &[u8]) -> Option<HwTreeNodes<'_>> {
     let span = count
         .checked_mul(HwNode::WIRE_LEN)?
         .checked_add(HwTreeHeader::WIRE_LEN)?;
-    if blob.len() < span {
+    if blob.len() != span {
         return None;
     }
     Some(HwTreeNodes {
-        records: &blob[HwTreeHeader::WIRE_LEN..span],
+        header,
+        records: blob.get(HwTreeHeader::WIRE_LEN..)?,
         remaining: count,
     })
 }
@@ -3568,8 +3674,8 @@ mod tests {
     #[test]
     fn a_self_node_round_trips_its_id_and_keys_in_order() {
         let keys = [
-            compatible(b"brcm,bcm2711-l2-intc"),
-            compatible(b"brcm,l2-intc"),
+            compatible(b"vendor,soc-l2-intc"),
+            compatible(b"vendor,l2-intc"),
         ];
         let record = HwSelfNode::new(42, &keys, BlkStatus::Reset).expect("fits");
         let decoded = HwSelfNode::from_bytes(&record.to_le_bytes()).expect("canonical");
@@ -3581,7 +3687,7 @@ mod tests {
 
     #[test]
     fn a_self_node_refuses_too_many_keys_and_any_non_canonical_byte() {
-        let key = compatible(b"brcm,bcm2711-hdmi0");
+        let key = compatible(b"vendor,hdmi0");
         assert_eq!(
             HwSelfNode::new(1, &[key; HW_NODE_MAX_MATCH_KEYS + 1], BlkStatus::Ok),
             Err(Errno::LengthOutOfRange)
@@ -3791,6 +3897,9 @@ mod tests {
                 HwProperty::ConsoleHost,
                 HwProperty::GpioHeaderLines,
                 HwProperty::ThermalCalibration,
+                HwProperty::ThermalZone,
+                HwProperty::IoRail,
+                HwProperty::PowerRail,
             ]));
         let mut node = HwNode::new(9, HW_NODE_ROOT_ID, HwDeviceClass::Display);
         node.push_resource(HwResource::property(HwProperty::RadioCoexistence, 1))
@@ -3806,6 +3915,50 @@ mod tests {
             HwNode::from_bytes(&node.to_le_bytes()).map(|n| n.states_discovery_only()),
             Ok(true)
         );
+    }
+
+    #[test]
+    fn a_node_states_its_rails_through_the_wire_and_nothing_malformed_reads_as_one() {
+        let io = IoRail {
+            line: 4,
+            level_1v8: Some(true),
+            level_3v3: Some(false),
+            settle_us: 5000,
+        };
+        let power = PowerRail {
+            line: 6,
+            active_low: false,
+            startup_us: 0,
+            off_on_us: 3000,
+        };
+        let mut node = HwNode::new(5, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
+        assert_eq!((node.io_rail(), node.power_rail()), (None, None));
+        node.push_resource(HwResource::io_rail(io)).unwrap();
+        node.push_resource(HwResource::power_rail(power).expect("fits"))
+            .unwrap();
+        assert!(node.states_discovery_only());
+        let wire = HwNode::from_bytes(&node.to_le_bytes()).expect("decodes");
+        assert_eq!((wire.io_rail(), wire.power_rail()), (Some(io), Some(power)));
+
+        let mut forged = HwNode::new(6, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
+        forged
+            .push_resource(HwResource::property(HwProperty::IoRail, u64::MAX))
+            .unwrap();
+        forged
+            .push_resource(HwResource::property(HwProperty::PowerRail, u64::MAX))
+            .unwrap();
+        assert_eq!((forged.io_rail(), forged.power_rail()), (None, None));
+    }
+
+    #[test]
+    fn a_power_rail_too_slow_for_its_record_is_not_stated() {
+        let rail = PowerRail {
+            line: 6,
+            active_low: false,
+            startup_us: PowerRail::MAX_DELAY_US + 1,
+            off_on_us: 0,
+        };
+        assert_eq!(HwResource::power_rail(rail), None);
     }
 
     #[test]
@@ -4025,6 +4178,12 @@ mod tests {
     }
 
     #[test]
+    fn a_compile_time_compatible_key_is_the_run_time_one() {
+        const KEY: HwMatchKey = crate::compatible_key!(b"vendor,gpio");
+        assert_eq!(KEY, compatible(b"vendor,gpio"));
+    }
+
+    #[test]
     fn numeric_match_keys_round_trip() {
         let pci = HwMatchKey::pci(0x1af4, 0x1000, 0x0002_0000);
         assert_eq!(pci.kind(), Some(HwMatchKind::Pci));
@@ -4071,7 +4230,7 @@ mod tests {
     /// decoder accepts re-encodes to the bytes it came from.
     #[test]
     fn match_key_decode_refuses_every_non_canonical_byte() {
-        let compatible = HwMatchKey::compatible(b"brcm,l2-intc").expect("fits");
+        let compatible = HwMatchKey::compatible(b"vendor,l2-intc").expect("fits");
         let canonical = compatible.to_le_bytes();
         assert_eq!(HwMatchKey::from_bytes(&canonical), Ok(compatible));
         let dirty = |offset: usize, bytes: [u8; HwMatchKey::WIRE_LEN]| {
@@ -4081,7 +4240,7 @@ mod tests {
         };
         // The reserved byte, a numeric field a string key does not use, and a
         // byte past the string.
-        for offset in [3, 4, 8, 12 + b"brcm,l2-intc".len()] {
+        for offset in [3, 4, 8, 12 + b"vendor,l2-intc".len()] {
             assert_eq!(
                 dirty(offset, canonical),
                 Err(Errno::BadMagic),
@@ -4092,7 +4251,7 @@ mod tests {
         for offset in [2, 6, 12] {
             assert!(dirty(offset, virtio).is_err(), "offset {offset}");
         }
-        let pci = HwMatchKey::pci(0x14E4, 0x2711, 0x000C_0330).to_le_bytes();
+        let pci = HwMatchKey::pci(0xABCD, 0x1234, 0x000C_0330).to_le_bytes();
         assert_eq!(dirty(12, pci), Err(Errno::BadMagic));
     }
 
@@ -4120,18 +4279,18 @@ mod tests {
     #[test]
     fn bind_key_matches_exactly_and_by_wildcard() {
         // A fully-specified PCI bind key matches only its exact device.
-        let exact = HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330);
-        let vl805 = HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330);
-        let other_vendor = HwMatchKey::pci(0x8086, 0x3483, 0x0C_0330);
-        assert!(exact.matches(&vl805));
+        let exact = HwMatchKey::pci(0xABCD, 0x1234, 0x0C_0330);
+        let controller = HwMatchKey::pci(0xABCD, 0x1234, 0x0C_0330);
+        let other_vendor = HwMatchKey::pci(0x8086, 0x1234, 0x0C_0330);
+        assert!(exact.matches(&controller));
         assert!(!exact.matches(&other_vendor));
 
         // A class-wildcard bind key (vendor/device 0) binds any xHCI host,
         // whatever its vendor/device, but not a different class.
         let any_xhci = HwMatchKey::pci(0, 0, 0x0C_0330);
-        assert!(any_xhci.matches(&vl805));
+        assert!(any_xhci.matches(&controller));
         assert!(any_xhci.matches(&other_vendor));
-        assert!(!any_xhci.matches(&HwMatchKey::pci(0x1106, 0x3483, 0x0C_0300)));
+        assert!(!any_xhci.matches(&HwMatchKey::pci(0xABCD, 0x1234, 0x0C_0300)));
 
         // The wildcard is one-directional: a concrete *device* key never
         // widens — a device advertising vendor 0 does not match a bind key
@@ -4148,9 +4307,9 @@ mod tests {
         assert!(!usb.matches(&pci));
 
         // Compatible keys match byte-for-byte only.
-        let a = HwMatchKey::compatible(b"brcm,bcm2711-pcie").unwrap();
-        let same = HwMatchKey::compatible(b"brcm,bcm2711-pcie").unwrap();
-        let diff = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").unwrap();
+        let a = HwMatchKey::compatible(b"vendor,pcie").unwrap();
+        let same = HwMatchKey::compatible(b"vendor,pcie").unwrap();
+        let diff = HwMatchKey::compatible(b"vendor,sd-host").unwrap();
         assert!(a.matches(&same));
         assert!(!a.matches(&diff));
 
@@ -4639,7 +4798,7 @@ mod tests {
 
     #[test]
     fn bus_window_carries_its_translation() {
-        // The Pi 4 outbound `ranges`: CPU 0x6_0000_0000 -> PCIe
+        // An outbound `ranges` window: CPU 0x6_0000_0000 -> PCIe
         // 0xc000_0000, 1 GiB. The CPU base, length, and far-side base all
         // survive the round trip, and only this kind carries a non-zero
         // translation.
@@ -4658,7 +4817,7 @@ mod tests {
 
     #[test]
     fn translated_dma_viewport_carries_its_bus_base() {
-        // The Pi 4 inbound `dma-ranges`: PCIe base 0 views system memory,
+        // An inbound `dma-ranges` viewport: PCIe base 0 views system memory,
         // CPU reachability bounded at 0xc000_0000 (the low 3 GiB), 3 GiB
         // extent. The reachability bound is `base`/`len` (so the existing
         // DMA consumer is unchanged) and the far-side PCIe base rides
@@ -4838,7 +4997,7 @@ mod tests {
     #[test]
     fn only_a_window_from_the_bottom_of_memory_holds_every_block_below_its_top() {
         let coherence = crate::DmaCoherence::Unsnooped;
-        // A Pi 4 display engine: memory through [0, 1 GiB), the peripherals'
+        // A display engine: memory through [0, 1 GiB), the peripherals'
         // aperture through [0xFC00_0000, 0xFF80_0000).
         assert!(
             HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xC000_0000, coherence)
@@ -4899,7 +5058,7 @@ mod tests {
 
     #[test]
     fn a_translated_window_rebases_only_a_range_wholly_inside_its_cpu_side() {
-        // The legacy Pi 4 engines' peripheral window: CPU 0xfc00_0000 up to
+        // A peripheral window: CPU 0xfc00_0000 up to
         // 0xff80_0000, reached at bus 0x7c00_0000.
         let peripherals = HwResource::dma_translated(
             0xff80_0000,
@@ -5635,6 +5794,11 @@ mod tests {
             snapshot_nodes(&blob[..len - 1]).is_none(),
             "a header promising one more record than the buffer holds"
         );
+        let short = encode_snapshot(&mut blob, 1, &nodes[..5]);
+        assert!(
+            snapshot_nodes(&blob[..=short]).is_none(),
+            "a body longer than its header promises"
+        );
         // A count whose byte span overflows is refused before any arithmetic
         // on it can wrap.
         let mut overflowing = [0u8; HwTreeHeader::WIRE_LEN];
@@ -5672,6 +5836,34 @@ mod tests {
             survivors,
             nodes.len() - 1,
             "and every intact record behind it still is"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_keeps_its_header_and_the_records_it_has_not_walked() {
+        let nodes = usb_shaped_tree();
+        let mut blob = [0u8; HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN];
+        let len = encode_snapshot(&mut blob, 11, &nodes);
+        let mut snapshot = snapshot_nodes(&blob[..len]).expect("a well-formed snapshot reads");
+        assert_eq!(snapshot.header(), HwTreeHeader::new(11, 6));
+        assert_eq!(snapshot.records().len(), 6);
+        assert_eq!(snapshot.next().map(|node| node.id()), Some(0));
+        assert_eq!(snapshot.records().first(), Some(&nodes[1].to_le_bytes()));
+    }
+
+    #[test]
+    fn a_channel_names_its_endpoint_only_under_its_own_compatible() {
+        let mut channel = HwNode::new(2, 1, HwDeviceClass::Other);
+        channel.push_match_key(compatible(b"test,channel")).unwrap();
+        channel.push_resource(HwResource::endpoint(0x77)).unwrap();
+        assert_eq!(channel.channel_endpoint(b"test,channel"), Some(0x77));
+        assert_eq!(channel.channel_endpoint(b"test,other"), None);
+        let mut bare = HwNode::new(3, 1, HwDeviceClass::Other);
+        bare.push_match_key(compatible(b"test,channel")).unwrap();
+        assert_eq!(
+            bare.channel_endpoint(b"test,channel"),
+            None,
+            "never guessed at"
         );
     }
 

@@ -23,6 +23,7 @@ use tairix_controls::{
 };
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconKind;
+use tairix_path::{dir_name, leaf_name};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{
@@ -94,7 +95,7 @@ impl Chooser {
                             PictureItem::new(item.file.as_str(), IconKind::Image)
                         }
                         WallpaperOffer::InEffect(path) => {
-                            PictureItem::new(leaf(path.as_str()), IconKind::Image)
+                            PictureItem::new(leaf_name(path.as_str()), IconKind::Image)
                         }
                     });
                 }
@@ -221,7 +222,7 @@ impl WallpaperOffer<'_> {
         match self {
             Self::None => None,
             Self::Shipped { item, .. } => Some(&item.category),
-            Self::InEffect(path) => Some(parent(path.as_str())),
+            Self::InEffect(path) => Some(leaf_name(dir_name(path.as_str()))),
         }
     }
 
@@ -277,7 +278,7 @@ fn wallpaper_ladder<'a>(
             matches!(offer, WallpaperOffer::Shipped { path: shipped, .. } if shipped == path)
         });
         if !listed {
-            let category = Some(parent(path.as_str()));
+            let category = Some(leaf_name(dir_name(path.as_str())));
             let after = ladder
                 .iter()
                 .rposition(|offer| offer.section() == category)
@@ -286,16 +287,6 @@ fn wallpaper_ladder<'a>(
         }
     }
     ladder
-}
-
-/// The last segment of `path`.
-fn leaf(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-/// The name of the directory `path` sits in.
-fn parent(path: &str) -> &str {
-    path.rsplit('/').nth(1).unwrap_or("")
 }
 
 /// One picture the caller must ask the desktop to render.

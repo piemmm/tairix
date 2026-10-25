@@ -73,6 +73,10 @@ pub enum ParseError {
     /// the stream forms await the launch plumbing. All three fail closed so
     /// the parenthesised command is never misread as a filename.
     UnsupportedProcessSubstitution,
+    /// Command substitution (`$(…)`, `` `…` ``) or arithmetic expansion
+    /// (`$((…))`), which the shell does not perform: refused rather than read
+    /// as text, which would change what the command does.
+    UnsupportedSubstitution,
     /// A `{var}` dynamic-descriptor redirection whose variable does not hold
     /// a previously allocated descriptor number (for the `{var}>&-` /
     /// `{var}>&m` forms that reuse one).
@@ -95,13 +99,24 @@ pub enum ParseError {
     /// A pattern the matcher refused: a reversed range, an unknown class,
     /// or one past its size bounds.
     Pattern(GlobError),
-    /// An expansion would produce more argument text than any program can
-    /// be handed.
+    /// A `GLOBIGNORE` entry whose group holds a `/`: compared with a path a
+    /// component at a time, it could not hide the paths it names.
+    PatternGroupHoldsSlash,
+    /// An expansion would hold more than the largest argument block a
+    /// program can be handed.
     ExpansionTooLarge,
-    /// Filename generation could not read a directory for a reason other
-    /// than its absence or the caller's lack of access, so its result would
-    /// have been silently partial.
+    /// The heap refused what an expansion, or a pattern's match, needed, so
+    /// the line's words are unknown.
+    OutOfMemory,
+    /// Filename generation could not list a directory for a reason other
+    /// than its absence or the caller's lack of access, or its listing
+    /// failed once it had begun, so its result would have been silently
+    /// partial.
     UnreadableDirectory(Errno),
+    /// Filename generation could not learn what a path names for a reason
+    /// other than its absence or the caller's lack of access, so its result
+    /// would have been silently partial.
+    UnresolvablePath(Errno),
     /// Every word of a command expanded away, leaving no command for its
     /// redirections, or its place in a pipeline, to apply to.
     EmptyCommand,
@@ -117,8 +132,11 @@ impl ParseError {
             Self::NoMatch
             | Self::AmbiguousRedirectTarget
             | Self::Pattern(_)
+            | Self::PatternGroupHoldsSlash
             | Self::ExpansionTooLarge
+            | Self::OutOfMemory
             | Self::UnreadableDirectory(_)
+            | Self::UnresolvablePath(_)
             | Self::EmptyCommand => 1,
             _ => 2,
         }
@@ -139,6 +157,9 @@ impl fmt::Display for ParseError {
             Self::UnterminatedExpansion => "unterminated ${...} expansion",
             Self::UnsupportedCompound => "compound commands are not supported",
             Self::UnsupportedProcessSubstitution => "process substitution is not supported",
+            Self::UnsupportedSubstitution => {
+                "command substitution and arithmetic expansion are not supported"
+            }
             Self::BadDynamicFd => "{var} does not name an allocated descriptor",
             Self::UnexpectedToken => "unexpected token",
             Self::UnterminatedPatternGroup => "unterminated extended pattern group",
@@ -146,9 +167,14 @@ impl fmt::Display for ParseError {
             Self::NoMatch => "no match",
             Self::AmbiguousRedirectTarget => "ambiguous redirect",
             Self::Pattern(err) => return fmt::Display::fmt(err, f),
+            Self::PatternGroupHoldsSlash => "pattern group holds a `/`",
             Self::ExpansionTooLarge => "expansion exceeds the argument size limit",
+            Self::OutOfMemory => "out of memory",
             Self::UnreadableDirectory(errno) => {
                 return write!(f, "cannot read directory: {errno}");
+            }
+            Self::UnresolvablePath(errno) => {
+                return write!(f, "cannot look up path: {errno}");
             }
             Self::EmptyCommand => "command expanded to nothing",
         };

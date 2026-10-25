@@ -35,8 +35,7 @@ before each newline, `-T` prints TAB as `^I`, and `-v` prints other
 control bytes as `^X` and non-ASCII bytes in `M-` notation. `-e`,
 `-t`, and `-A` are the usual combinations `-vE`, `-vT`, and `-vET`.
 
-A source that cannot be read stops the command before any later
-source is touched; the bytes already written stay written.
+A source that cannot be read is reported and the next is still read.
 
 ## OPTIONS
 
@@ -73,8 +72,7 @@ source is touched; the bytes already written stay written.
 
 - `0` — every source was written.
 - `1` — a source could not be read, or the output could not be
-  delivered.
-- `2` — the command line was not understood.
+  delivered. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

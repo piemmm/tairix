@@ -45,7 +45,7 @@ Bindestrich entfernbar bleibt.
 - `0` — der Name wurde entfernt (oder die Kurzhilfe wurde geschrieben).
 - `1` — das Dateisystem hat die Entfernung abgelehnt, oder die Ausgabe
   ist fehlgeschlagen; der Grund steht auf der Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Eine nicht verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

@@ -21,12 +21,22 @@ Every partition kind UDF defines:
 - **metadata** partitions (UDF 2.50 and later), the file entries read through
   the metadata file or its mirror.
 
+A node's id is the address of its ICB, which writes, truncations and renames
+leave where it lies, so the id lasts as long as the node
+(`NodeIdentity::Stable`); it is also the number `stat` reports. Writes,
+truncations and punched holes take the file's id, and the name operations
+take a `(dir, name)` pair. A directory's parent is the one its parent
+descriptor names, the root naming itself.
+
 File entries and extended file entries, embedded data, short and long
 allocation descriptors, allocation extent descriptor chains and unrecorded
 extents (which read as holes) are followed, each chain and indirection
 bounded so a hostile disc cannot loop it. Hard links share a node and its
 link count; symbolic links read back as their path; names are OSTA
-Compressed Unicode, matched exactly.
+Compressed Unicode, matched exactly. A name for a node of a kind this system
+has none for — a device, a pipe or a socket another system made — is not
+listed, looked up, removed or renamed, and a rename over it is refused, since
+nothing could judge its occupant; the name stays taken.
 
 ## What is written
 
@@ -40,14 +50,23 @@ from 1.02 to 2.60, was closed cleanly, and is not write-protected.
 `damaged`, below.
 
 Writing creates, extends, truncates, punches holes in, renames and removes
-files, directories and links, and records owners, groups and modes. A change
-that runs out of space part-way leaves the volume as it was: blocks are
-taken from the bitmap before anything that refers to them is rewritten, and
-given back on failure. A node's content — a directory's parent descriptor, a
-link's path — is recorded before its name is added, so a node that could not
-be filled is never named. A rename over an existing name points that name at
-the node where it lies, and a removal or rename rewrites descriptors in
-place, an embedded directory's inside its entry, so neither needs space.
+files, directories and links, and records owners, groups and modes. A new
+node is born with the owner, group and mode of the record it is created with,
+kept in its file entry's owner, group, permission word and ICB flags. A file
+entry has no place for a record's ACL entries or capability gate: a new node
+is born without them, and `set_security` refuses a record carrying either, or
+a POSIX ACL, rather than store part of it. A change that runs out of space
+part-way leaves the volume as it was: blocks are taken from the bitmap before
+anything that refers to them is rewritten, and given back on failure. A
+node's content — a directory's parent descriptor, a link's path — is
+recorded before its name is added, so a node that could not be filled is
+never named. A rename over an existing name points that name at the node
+where it lies, and a removal or rename rewrites descriptors in place, an
+embedded directory's inside its entry, so neither needs space. Freeing a
+node releases its entry block but leaves its bytes, which would still read
+as the node, so once the space bitmap is open every operation by an id whose
+entry block it holds free answers `NotFound`, until the block is taken
+again.
 
 The integrity descriptor is marked open before a change's first write and
 closed when the change is published: its space bitmap written back and the
@@ -57,13 +76,29 @@ firing for a volume that falls quiet; without a host, or with a host whose
 clock does not answer, every change is published as it ends. A change that
 fails after writing for any reason but space may be part-made, so the volume
 is marked `damaged`: writes are refused from then on, and the descriptor is
-left open, so the volume mounts read-only until it is checked. Removing a
-node frees its extended attribute file and its named streams with it.
+left open, so the volume mounts read-only until it is checked. A node's
+extended attribute file and named streams are freed with it.
 
 `Udf::format` lays out the recognition sequence, anchors at sector 256 and
 at the last sector, a main and a reserve descriptor sequence, the integrity
 descriptor, and one overwritable partition with a space bitmap, a file set
 and an empty root, recording any revision from 1.02 to 2.01.
+
+## Held nodes
+
+`pin` holds a node for the kernel: it checks the node is live and answers
+the node's own id. Holds are counted and `unpin` releases one; a hold the heap
+cannot record is refused as `OutOfMemory`. A held node's entry block is never
+freed, so its id cannot pass to another node. A held node that loses its last
+name — removed, or replaced by a rename — keeps its entry and extents, its
+link count recorded as 0, and the integrity descriptor counts it no more.
+Through its id it still reads and writes, truncates, and takes changes to its
+owner, mode and attributes, `node_info` counting no name, but it gains no name
+again; a directory so removed takes no entries, lists nothing and has no
+parent. Its last `unpin` frees it (`Unpinned::Freed`), and `release_pins`
+frees every such node at once. UDF keeps no orphan record, so a crash before
+that last unpin leaves the node's blocks allocated, with nothing naming them,
+until the volume is checked.
 
 ## Foreign metadata
 

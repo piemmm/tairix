@@ -88,8 +88,7 @@ mod program {
     const REQUEST_REFUSED: EventId = EventId(24_500);
 
     /// How long each reply wait parks for the firmware's answer: the ≈4 s the
-    /// ten-million-poll spin it replaces measured on metal, four times the
-    /// second Linux's firmware driver allows a property call.
+    /// ten-million-poll spin it replaces measured on metal.
     const REPLY_WINDOW_NS: u64 = 4_000_000_000;
 
     /// Bound on the number of in-flight requests the endpoint queues. The

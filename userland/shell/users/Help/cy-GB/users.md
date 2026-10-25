@@ -39,8 +39,10 @@ gorchmynion a deipir o fewn y sesiwn.
 
 ## EXIT STATUS
 
-- `0` — daeth y sesiwn i ben yn lân, neu dangoswyd y cymorth byr.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `0` — daeth y sesiwn i ben yn lân, argraffwyd y rhestriad, neu
+  dangoswyd y cymorth byr.
+- `1` — ni ellid darllen y rhestriad. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -132,8 +132,8 @@ pub const BOOT_FACTS_WIRE_LEN: usize = 16 + CPU_NAME_LEN;
 pub const CPU_NAME_LEN: usize = 48;
 
 /// The human-readable model name of the boot CPU, as discovered by the
-/// architecture port (`ARM Cortex-A72`, an x86 CPUID brand string,
-/// `SiFive U74-MC`, …).
+/// architecture port (a core name read from the CPU's identification
+/// registers or the tree's `cpu` node, an x86 CPUID brand string, …).
 ///
 /// A bounded, NUL-padded UTF-8 string of at most [`CPU_NAME_LEN`] bytes.
 /// The canonical form is enforced at construction and decode: no control

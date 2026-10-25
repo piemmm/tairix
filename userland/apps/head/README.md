@@ -47,7 +47,7 @@ head [-qvz] [-c [-]num[suffix]] [-n [-]num[suffix]] [--] [file...]
 
 - `0` — every file was printed (or the short help was written).
 - `1` — a file could not be read, or the output could not be delivered.
-- `2` — the command line was not understood.
+  A command line that was not understood exits `1` too.
 
 ## Stability
 

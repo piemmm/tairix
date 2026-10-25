@@ -8,9 +8,9 @@ in `lib/abi/src/time.rs` (`tairix_abi::time`).
 ## The types
 
 - [`Time64`] — an absolute instant: signed 64-bit seconds since the Unix
-  epoch plus a nanosecond field in `0..`[`NANOS_PER_SEC`]. It is TAIRiX's
-  equivalent of Linux's `timespec64` (seconds *and* nanoseconds), not a
-  seconds-only `time64_t`.
+  epoch plus a nanosecond field in `0..`[`NANOS_PER_SEC`]: a POSIX
+  `struct timespec` (seconds *and* nanoseconds) whose seconds are always
+  64-bit, not a seconds-only `time_t`.
 - [`Duration64`] — a span of time: signed 64-bit seconds plus the same
   canonical nanosecond field. [`Duration64::from_nanos`] splits a
   monotonic nanosecond count (e.g. nanoseconds since boot) exactly.

@@ -8,9 +8,12 @@
 //! allocator, and the syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
-//! `main` collects the inherited argument vector, parses it, and creates the
-//! operands through the kernel's `fs_mkdir` under the caller's attested
-//! identity. The reserved `-h`/`-?`/`--help` short-help switches render the
+//! `main` collects the inherited argument vector, parses it, and makes each
+//! operand through the shared tree seam (`tairix_rt::copy`), under the
+//! caller's attested identity: each directory made is held, its mode read
+//! back and set through it where `-m` or `-p` asks for bits the umask took
+//! away, and a `-p` ancestor's child made in it. The
+//! reserved `-h`/`-?`/`--help` short-help switches render the
 //! tool's own Help document through the shared engine. The tool binds only
 //! to its inherited descriptors, never a console device.
 //!
@@ -24,62 +27,34 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
 
-    use alloc::format;
-
-    use tairix_abi::{Errno, FileKind, OpenFlags};
     use tairix_help::BundleHelp;
-    use tairix_mkdir::{parse, run, Filesystem, USAGE};
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-    use tairix_rt::File;
-
-    /// The production [`Filesystem`] over the `fs_mkdir`/`fs_stat` syscalls.
-    struct RtFilesystem;
-
-    impl Filesystem for RtFilesystem {
-        fn mkdir(&self, path: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_mkdir(path.as_bytes());
-            if ret != 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
-        }
-
-        fn kind(&self, path: &str) -> Result<FileKind, Errno> {
-            // A resolve-only open: no read authority is requested, the
-            // handle is closed on drop, and only the metadata is learned.
-            let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
-            let stat = file.stat().map_err(Errno::from_syscall)?;
-            Ok(stat.kind)
-        }
-    }
-
-    /// Report a usage error: the banner on the standard error stream.
-    ///
-    /// Written verbatim: the banner already ends in a newline, and GNU
-    /// `mkdir` does not follow it with a blank line.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
+    use tairix_mkdir::{parse, run, MkdirError};
+    use tairix_rt::copy::WorkingDirectory;
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` on a filesystem or output failure,
-    /// `2` on a usage error (a malformed argument vector or an unrecognised
-    /// option).
+    /// Exit codes: `0` on success, `1` on a filesystem or output failure, a
+    /// mode not understood, or a command line not understood, as GNU's
+    /// `mkdir` ends.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("mkdir") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            // GNU's `mkdir` names a bad mode alone, without pointing at
+            // `--help`.
+            Err(err @ MkdirError::BadMode(_)) => {
+                write_stderr_line(format_args!("mkdir: {err}"));
+                return 1;
+            }
+            Err(err) => {
+                tairix_help::report_misuse("mkdir", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -87,13 +62,16 @@ mod program {
         match run(
             command,
             locale,
-            &RtFilesystem,
+            &WorkingDirectory,
+            tairix_rt::umask_get(),
             &BundleHelp::new("mkdir"),
             &Stdout,
+            &Stderr,
         ) {
-            Ok(()) => 0,
+            Ok(true) => 0,
+            Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("mkdir: {err}"));
+                write_stderr_line(format_args!("mkdir: {err}"));
                 1
             }
         }

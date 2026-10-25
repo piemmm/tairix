@@ -116,13 +116,16 @@ tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
 # host tests still drive the client over their own fake.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 
+[dev-dependencies]
+# The per-thread metering allocator the tests hold the live filter to.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The in-memory tree the operation tests list, probe and change as one
+# filesystem, and the miniature of the kernel's path resolution the test
+# filesystem answers the containment check with.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
 # The shared fake app-data service the preference registry's host tests drive
 # the client over: it speaks the real `appdata-v1` codec, so a test exercises
 # the wire the service actually answers rather than a mock of it.
-[dev-dependencies]
-# The shared miniature of the kernel's path resolution the test filesystem
-# answers the containment check with.
-tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
     "test-util",
 ] }

@@ -44,8 +44,8 @@ Mae `--` yn gorffen dosrannu opsiynau: mae pob ymresymiad diweddarach yn operand
 - `0` — disodlwyd y cyfrinair.
 - `1` — gwrthododd neu fethodd y gronfa'r disodli, roedd y ddau nodiad yn
   anghytuno, nid oedd hap ar gael, neu roedd y cofnod ar ffurf wallus;
-  argraffir y rheswm ar y gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  argraffir y rheswm ar y gwall safonol. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

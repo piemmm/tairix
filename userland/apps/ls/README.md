@@ -63,8 +63,9 @@ geometry attestation — an unattested console degrades to one-per-line
 rather than guessing.
 
 With no path operand `ls` lists the current directory. Short options may
-be combined (e.g. `-la`). `--` ends option parsing: every later argument
-is a path. The long format's link-count column is the count the
+be combined (e.g. `-la`), and a long option shortened to any unambiguous
+prefix (`--rev`). `--` ends option parsing: every later argument is a
+path. The long format's link-count column is the count the
 filesystem itself records (a format that keeps none answers `1`), and
 owner/group render as numeric ids — the GNU numeric fallback — because
 name resolution needs the capability-gated user database.
@@ -85,8 +86,10 @@ implemented, and which one is in force decides what every row is:
   show themselves.
 - `-L` resolves every link wherever it appears — which is also the only
   posture under which `-R` can walk into a directory a link names, so a
-  directory reached a second time through its own chain is reported
-  (`not listing already-listed directory`) and not descended.
+  directory reached a second time through its own chain is reported when its
+  turn comes (`<path>: not listing already-listed directory`, the path quoted
+  as GNU `ls` quotes it there: where a shell needs it, or where it holds a
+  `:`) and not descended — serious trouble, as in GNU.
 
 A path that cannot be inspected or read never ends the listing: the reason
 goes to standard error, that path is skipped, and the remaining operands
@@ -94,7 +97,8 @@ and entries are still listed. A skipped *entry* renders with its type
 letter and `?` for every cell a stat would have filled — never a
 fabricated zero. The exit status is the GNU grade: `0` when everything
 listed, `1` for a problem inside a listing, `2` for a command-line operand
-that could not be reached (or a usage error).
+that could not be reached, a directory `-R` reached again through a link,
+exhausted memory, or a usage error.
 
 ## A render machine, not a data source
 
@@ -148,13 +152,15 @@ binary embeds no help bytes (`plans/APPS.md` §6.1).
 
 ## Fail closed
 
-An unknown option is a `LsError::Usage` that inspects nothing. An
-operand (or a directory entry, when a per-entry stat is needed) that
-cannot be stat'd surfaces the underlying `Errno` as `LsError::Stat` and
-stops before any later operand. A directory that cannot be read is
-`LsError::Read`; a directory stream carrying a non-UTF-8 name (an
-ABI-contract violation) is refused whole rather than silently thinned. A
-failed terminal write is `LsError::Output`. A missing own-help tree
+An option `getopt` refuses (`LsError::Option`), or a value `ls` cannot
+read (`LsError::Usage`), inspects nothing: it is reported as `ls: reason`
+and `Try 'ls --help' for more information.`, exiting 2, as GNU's is. An
+operand that cannot be reached is reported (`ls: cannot access 'x': …`)
+and the rest still listed, exiting 2, and a directory or entry inside a
+listing that cannot be read is reported and passed, exiting 1, as GNU's
+are; a directory stream carrying a non-UTF-8 name (an ABI-contract
+violation) is refused whole rather than silently thinned. A failed
+terminal write is `LsError::Output`. A missing own-help tree
 degrades `-?` to the usage banner. There is no partial-guess path and no
 panic (`AGENTS.md` §2.9).
 

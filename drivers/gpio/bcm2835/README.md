@@ -1,16 +1,14 @@
 # `tairix-drv-gpio-bcm2835`
 
 Autoloaded user-space driver for the **BCM2835-family GPIO controller**: the
-Raspberry Pi 4's BCM2711 block and the Pi 3's BCM2835 block. Stability tier:
+Raspberry Pi 4's BCM2711 block. Stability tier:
 `experimental`.
 
 ## Supported hardware
 
 - `brcm,bcm2711-gpio`: fifty-eight lines.
-- `brcm,bcm2835-gpio`: fifty-four lines.
 
-It binds only through the discovery match (`BIND_KEYS`) and learns its line
-count from the bind key its node matched.
+It binds only through the discovery match (`BIND_KEYS`).
 
 ## Required capabilities
 
@@ -32,8 +30,10 @@ the driver never holds.
   (`plans/GPIO.md` G2). The selector is the binding's two cells, the line and
   its trigger (rising, falling, both, high, low). The line is set to input. A
   level line's detection is enabled only while its consumer waits and is
-  disabled as it fires; an edge line's detection stays enabled while held, and
-  an edge with no wait posted answers the next wait at once.
+  disabled as it fires. An edge line's is enabled by every wait and disabled
+  when an edge fires with no wait posted; that edge answers the next wait at
+  once, so a line that keeps firing wakes the driver at most once between
+  waits.
 - **`gpio-header-v1`** to system services holding `CAP_GPIO`
   (`plans/COOLING.md` CL2), served only where discovery states the node's
   `GpioHeaderLines`. A lent line is listed as free, routed to a peripheral,
@@ -50,20 +50,25 @@ an output returned to an input.
 - **Pulls are not set.** They are the board's wiring, stated by the
   firmware's `gpio=` lines; nothing here touches the pull registers.
 - **Edges are latched, not counted.** Several edges with no wait posted
-  answer one wait, as the one status bit per line allows.
+  answer one wait: the first masks the line until it, as the one status bit
+  per line allows.
 - **No asynchronous detection.** The asynchronous edge enables are cleared at
   bring-up and never set: every trigger uses the synchronous detectors.
 
 ## Testing
 
 Host tests drive the controller over a register model of the block: bring-up
-quiescing, the header's listing, claims and their refusals, polarity, holder
-checks, release with an ended holder, edge latching, a level that cannot
-storm, one holder per line across both kinds, attestation, an unbound bank,
-and reclaim from an ended consumer. QEMU does not model the BCM2711, so metal
+quiescing, the header's listing and the selects it reads, claims and their
+refusals, polarity, holder checks, release with an ended holder, edge
+latching and an edge that fires unwaited masked until the next wait, a level
+that cannot storm, the enables an interrupt reads, a line the block does not
+have, one holder per line across both kinds, attestation and a caller the
+kernel cannot attribute on either endpoint, an unbound bank, the header's
+calls a wake, and reclaim from an ended consumer. QEMU does not model the BCM2711, so metal
 acceptance is a fan on a Raspberry Pi 4 (`plans/COOLING.md`).
 
 ## References
 
 - BCM2711 ARM Peripherals §5 and BCM2835 ARM Peripherals §6.
-- The Linux `pinctrl-bcm2835` driver, for the bank-interrupt groups.
+- BCM2711 ARM Peripherals §5.1, for the bank-interrupt groups, and the
+  `brcm,bcm2835-gpio` binding (taken under BSD-2-Clause), for their order.

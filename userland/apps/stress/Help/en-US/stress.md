@@ -71,8 +71,8 @@ standard-information stream (fd 3).
 
 - `0` — the run completed (typed worker refusals are expected
   outcomes and do not fail it).
-- `1` — a worker failed outright, or the run could not be set up.
-- `2` — the command line was not understood.
+- `1` — a worker failed outright, or the run could not be set up. A
+  command line that was not understood exits `1` too.
 - `130` / `143` — `Ctrl-C` / `Terminate` ended the run, after the
   workers were torn down and the scratch files removed.
 

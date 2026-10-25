@@ -36,8 +36,7 @@ Nid yw `ps` yn cymryd operandau.
 
 - `0` — ysgrifennwyd y rhestriad.
 - `1` — gwrthododd neu fethodd y gwasanaeth, neu ni ellid cyflwyno'r
-  rhestriad.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  rhestriad. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

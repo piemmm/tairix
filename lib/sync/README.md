@@ -1,8 +1,9 @@
 # tairix-sync
 
 Shared `no_std` synchronisation primitives for TAIRiX: spin / MCS / RW
-locks, `SeqLock`, set-once `Once` / `OnceCell`, and `FnCell` — the published
-function pointer every callback seam installs through.
+locks, `SeqLock`, set-once `Once` / `OnceCell`, `FnCell` — the published
+function pointer every callback seam installs through — and `claims`, the
+lock-free lowest-free bit claim a vector or slot allocator keeps its map in.
 
 These primitives are foundational and free of any kernel dependency, so
 they live in `lib/` where every layer may consume them (`AGENTS.md` §6,
@@ -24,8 +25,8 @@ in the hand-written `unsafe`. Both are `ci` stages.
 ## Stability tier
 
 `stable` — the public surface (the lock types, their guards,
-`Once`/`OnceCell`, `FnCell`, and the `InterruptControl` seam) is consumed
-across the kernel, driver, userland and test trees.
+`Once`/`OnceCell`, `FnCell`, `claims`, and the `InterruptControl` seam) is
+consumed across the kernel, driver, userland and test trees.
 
 It depends on `core` alone, never `alloc` (and `loom` under the opt-in
 `--cfg loom` model-check build). That is deliberate and load-bearing: a

@@ -25,7 +25,9 @@ pub mod pwm;
 pub mod shaper;
 
 use tairix_abi::driver::audio::Rate;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the PWM block's registers, the DMA and clock endpoints its links name, the
@@ -51,12 +53,7 @@ const BIND_PRIORITY: u16 = 10;
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(PWM_AUDIO_COMPATIBLE) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(PWM_AUDIO_COMPATIBLE),
 )];
 
 /// The rate the jack runs at, for which the shaper's measured figures stand.

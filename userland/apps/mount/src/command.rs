@@ -4,9 +4,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::MountFlags;
+use tairix_util::getopt::{Arg, Opt, Order, Scan};
 
 use crate::error::MountError;
-use tairix_util::argv::option_value;
 
 /// One thing the `mount` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,10 +39,31 @@ pub struct MountRequest {
     pub flags: MountFlags,
 }
 
+/// What each of `mount`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    ReadOnly,
+    Types,
+    Options,
+    Help,
+}
+
+/// `mount`'s options and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('r', &["read-only"], Flag::ReadOnly),
+    Opt::valued('t', &["types"], Flag::Types),
+    Opt::valued('o', &["options"], Flag::Options),
+    Opt::flag('h', &["help"], Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]`:
+/// The grammar is `mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]`,
+/// read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, clustered, `-t`'s and `-o`'s value attached (`-text4`,
+/// `--types=ext4`) or the next argument, a long option by any unambiguous
+/// prefix, `--` ending them.
 ///
 /// * no operands — list the current mount table.
 /// * `SOURCE TARGET` — attach `SOURCE` at `TARGET`.
@@ -50,82 +71,31 @@ pub struct MountRequest {
 /// * `-t` / `--types` TYPE — the driver filesystem type.
 /// * `-o` / `--options` LIST — a comma-separated subset of `ro,rw,noexec`.
 /// * `-h` / `--help` — print the usage banner (wins immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-///
-/// `-r` may cluster with other toggles (`-ro …` is `-r -o …` only at the end
-/// of a cluster, since `-o` takes a value); `-t`/`-o` accept their value
-/// attached (`-text4`, `--types=ext4`) or as the following argument.
 ///
 /// # Errors
 ///
-/// [`MountError::Usage`] for an unrecognised option, a missing option value,
-/// or a number of operands other than zero or two (mount options given
-/// without operands are also a usage error — there is nothing to mount).
-/// [`MountError::BadOption`] for an unknown or empty `-o`/`-t` value.
+/// * [`MountError::Option`] — an option `getopt` refuses, in its words.
+/// * [`MountError::Usage`] — a number of operands other than zero or two,
+///   or mount options given without operands (there is nothing to mount).
+/// * [`MountError::BadOption`] — an unknown or empty `-o`/`-t` value.
 pub fn parse(args: &[&str]) -> Result<Command, MountError> {
     let mut flags = MountFlags::default();
     let mut fstype: Option<String> = None;
     let mut operands: Vec<String> = Vec::new();
-    let mut options_done = false;
     let mut saw_option = false;
 
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
-            }
-            if let Some(long) = arg.strip_prefix("--") {
-                let (name, inline) = match long.split_once('=') {
-                    Some((n, v)) => (n, Some(v)),
-                    None => (long, None),
-                };
-                match name {
-                    "help" => return Ok(Command::Help),
-                    "read-only" => {
-                        if inline.is_some() {
-                            return Err(MountError::Usage);
-                        }
-                        flags = flags.union(MountFlags::READ_ONLY);
-                    }
-                    "types" => fstype = Some(String::from(value(inline, args, &mut index)?)),
-                    "options" => {
-                        flags = flags.union(parse_options(value(inline, args, &mut index)?)?);
-                    }
-                    _ => return Err(MountError::Usage),
-                }
-                saw_option = true;
-                continue;
-            }
-            if let Some(rest) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                let mut chars = rest.chars();
-                while let Some(letter) = chars.next() {
-                    match letter {
-                        'h' => return Ok(Command::Help),
-                        'r' => flags = flags.union(MountFlags::READ_ONLY),
-                        't' => {
-                            let attached = chars.as_str();
-                            let inline = (!attached.is_empty()).then_some(attached);
-                            fstype = Some(String::from(value(inline, args, &mut index)?));
-                            break;
-                        }
-                        'o' => {
-                            let attached = chars.as_str();
-                            let inline = (!attached.is_empty()).then_some(attached);
-                            flags = flags.union(parse_options(value(inline, args, &mut index)?)?);
-                            break;
-                        }
-                        _ => return Err(MountError::Usage),
-                    }
-                }
-                saw_option = true;
-                continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        let arg = arg.map_err(MountError::Option)?;
+        saw_option |= matches!(arg, Arg::Opt(..));
+        match arg {
+            Arg::Operand(operand) => operands.push(String::from(operand)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::ReadOnly, _) => flags = flags.union(MountFlags::READ_ONLY),
+            Arg::Opt(Flag::Types, value) => fstype = value.map(String::from),
+            Arg::Opt(Flag::Options, value) => {
+                flags = flags.union(parse_options(value.unwrap_or_default())?);
             }
         }
-        operands.push(String::from(arg));
     }
 
     match operands.len() {
@@ -144,22 +114,6 @@ pub fn parse(args: &[&str]) -> Result<Command, MountError> {
         }
         _ => Err(MountError::Usage),
     }
-}
-
-/// Resolve the value of a value-taking option: the attached `inline` text
-/// when present, otherwise the following argument (which the caller's `index`
-/// is advanced past).
-///
-/// # Errors
-///
-/// [`MountError::Usage`] when neither an attached value nor a following
-/// argument is available.
-fn value<'a>(
-    inline: Option<&'a str>,
-    args: &[&'a str],
-    index: &mut usize,
-) -> Result<&'a str, MountError> {
-    option_value(inline, args, index).ok_or(MountError::Usage)
 }
 
 /// Parse a comma-separated `-o` option list into the [`MountFlags`] it sets.
@@ -195,7 +149,7 @@ fn parse_options(text: &str) -> Result<MountFlags, MountError> {
 mod tests {
     use super::{parse, Command, MountRequest};
     use crate::error::MountError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use tairix_abi::driver::filesystem::MountFlags;
 
     fn mount(source: &str, target: &str, fstype: Option<&str>, flags: MountFlags) -> Command {
@@ -304,16 +258,47 @@ mod tests {
         assert_eq!(parse(&["a", "b", "c"]), Err(MountError::Usage));
     }
 
-    #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "a", "b"]), Err(MountError::Usage));
-        assert_eq!(parse(&["--frob", "a", "b"]), Err(MountError::Usage));
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn missing_option_value_is_usage() {
-        assert_eq!(parse(&["-t"]), Err(MountError::Usage));
-        assert_eq!(parse(&["a", "b", "-o"]), Err(MountError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "a", "b"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frob", "a", "b"]),
+            "unrecognized option '--frob'"
+        );
+        assert_eq!(refused(&["-t"]), "option requires an argument -- 't'");
+        assert_eq!(
+            refused(&["a", "b", "-o"]),
+            "option requires an argument -- 'o'"
+        );
+        assert_eq!(
+            refused(&["--types"]),
+            "option '--types' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--read-only=1", "a", "b"]),
+            "option '--read-only' doesn't allow an argument"
+        );
+    }
+
+    /// `getopt_long` reads `mount --read --ty=ext4` as
+    /// `mount --read-only --types=ext4`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--read", "--ty=ext4", "dev", "/Storage/d"]),
+            Ok(mount(
+                "dev",
+                "/Storage/d",
+                Some("ext4"),
+                MountFlags::READ_ONLY
+            ))
+        );
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

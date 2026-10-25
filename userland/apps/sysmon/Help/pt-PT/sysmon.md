@@ -267,8 +267,8 @@ com graça). O armazenamento dos volumes montados não está restringido.
 ## EXIT STATUS
 
 - `0` — a sessão terminou com `q`, ou a ajuda breve foi mostrada.
-- `1` — o terminal falhou; o motivo é escrito na saída de erro.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — o terminal falhou; o motivo é escrito na saída de erro. Uma linha
+  de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

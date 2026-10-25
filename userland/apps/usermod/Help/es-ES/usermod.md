@@ -57,8 +57,8 @@ cuenta llamante no posea.
 
 - `0` — se hicieron todos los cambios pedidos.
 - `1` — la base rechazó o no pudo completar un cambio; el paso y la razón se
-  imprimen en la salida de error.
-- `2` — no se entendió la línea de órdenes.
+  imprimen en la salida de error. Una línea de órdenes no entendida también
+  termina con `1`.
 
 ## ENVIRONMENT
 

@@ -49,12 +49,51 @@ fn switches_and_clusters_parse() {
     );
 }
 
+/// GNU 9.4's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
 #[test]
-fn an_unknown_option_is_usage() {
-    assert_eq!(parse(&["-Q", "a"]), Err(StatError::Usage));
-    assert_eq!(parse(&["--nonsense", "a"]), Err(StatError::Usage));
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-Q", "a"]), "invalid option -- 'Q'");
+    assert_eq!(
+        refused(&["--nonsense", "a"]),
+        "unrecognized option '--nonsense'"
+    );
     // A value on a switch that takes none is a mistake, not a token to drop.
-    assert_eq!(parse(&["--terse=1", "a"]), Err(StatError::Usage));
+    assert_eq!(
+        refused(&["--terse=1", "a"]),
+        "option '--terse' doesn't allow an argument"
+    );
+    assert_eq!(
+        refused(&["--printf"]),
+        "option '--printf' requires an argument"
+    );
+    // The reserved help switches are `-?` and `--help` alone.
+    assert_eq!(refused(&["-h", "a"]), "invalid option -- 'h'");
+}
+
+/// GNU 9.4 reads `stat --deref --fi --ter a` as
+/// `stat --dereference --file-system --terse a`, and refuses `--f`, which
+/// begins both `--file-system` and `--format`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let options = Options {
+        subject: Subject::Filesystem,
+        dereference: true,
+        terse: true,
+        ..Options::DEFAULT
+    };
+    assert_eq!(
+        parse(&["--deref", "--fi", "--ter", "a"]),
+        Ok(describe(options, &["a"]))
+    );
+    assert_eq!(
+        refused(&["--f", "a"]),
+        "option '--f' is ambiguous; possibilities: '--file-system' '--format'"
+    );
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
 #[test]
@@ -110,7 +149,7 @@ fn a_format_value_may_be_inline_or_the_next_argument() {
         describe(formatted("%s", Trailer::Newline, Subject::File), &["a"])
     );
     // `-c` with nothing after it has no value to take.
-    assert_eq!(parse(&["-c"]), Err(StatError::Usage));
+    assert_eq!(refused(&["-c"]), "option requires an argument -- 'c'");
 }
 
 #[test]

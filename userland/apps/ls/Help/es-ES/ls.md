@@ -51,6 +51,18 @@ colgado se lista por tanto con normalidad; solo una postura que lo
 resuelva (`-L`, o `-H` para un operando) informa de un destino
 inalcanzable.
 
+Los nombres se entrecomillan para que los caracteres problemáticos sean
+visibles y puedan volver a pegarse en un shell sin riesgo: en una
+terminal el valor predeterminado es `shell-escape` (un nombre con
+espacios o metacaracteres se entrecomilla y los caracteres de control se
+muestran como escapes `$'…'`), y en otro caso es `literal` (los nombres
+tal cual). `-N`, `-Q`, `-b` y `--quoting-style` eligen el estilo, y `-q`
+muestra los caracteres de control como `?`. Con `-F` y `--file-type`, un
+nombre que contenga `*`, `=`, `>`, `@` o `|` se entrecomilla con los
+estilos de shell y ese carácter se escapa con `-Q` y `-b`, de modo que
+no puede pasar por un sufijo indicador. El `-F` de GNU deja un `*` sin
+marcar, así que allí un nombre que termine en uno parece un ejecutable.
+
 ## OPTIONS
 
 - `-t` — ordenar por la marca de tiempo mostrada, la más reciente
@@ -194,9 +206,12 @@ inalcanzable.
 ## EXIT STATUS
 
 - `0` — todos los operandos fueron listados.
-- `1` — un operando no pudo inspeccionarse o un directorio no pudo
-  leerse, o la salida no pudo entregarse.
-- `2` — la línea de comandos no fue comprendida.
+- `1` — un problema menor: una entrada o un subdirectorio dentro de un
+  listado no pudo inspeccionarse o leerse.
+- `2` — un problema grave: la línea de comandos no fue comprendida, un
+  operando no pudo inspeccionarse o leerse, `-R` volvió a llegar a un
+  directorio a través de un enlace, se agotó la memoria, o la salida no
+  pudo entregarse.
 
 ## ENVIRONMENT
 

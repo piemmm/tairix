@@ -92,7 +92,7 @@ p521 = { version = "=0.14.0", default-features = false, features = ["arithmetic"
 # pure-Rust FFDH crate exists; the group operation is one Montgomery modular
 # exponentiation over this audited bignum, the same shape as PBKDF2 over the
 # audited HMAC.
-crypto-bigint = { version = "=0.7.5", default-features = false, features = ["zeroize"] }
+crypto-bigint = { version = "=0.7.9", default-features = false, features = ["zeroize"] }
 # FIPS 203 ML-KEM, the post-quantum half of `mlkem768x25519-sha256` —
 # OpenSSH's current default key exchange. Key generation and encapsulation
 # are reached through their deterministic FIPS 203 forms, which take the

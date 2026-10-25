@@ -22,9 +22,9 @@ fel `Home:/`).
 
 Gyda `--ignore-fail-on-non-empty` nid yw gwrthodiad «cyfeiriadur heb
 fod yn wag» yn wall — mae'r operand (neu gerddediad `-p`) yn stopio
-yno. Ni oddefir unrhyw wrthodiad arall. Mae'r methiant gwirioneddol
-cyntaf yn atal y rhediad cyn unrhyw operand diweddarach. Mae `--` yn
-gorffen dosrannu opsiynau: mae pob ymresymiad diweddarach yn llwybr.
+yno. Ni oddefir unrhyw wrthodiad arall. Adroddir am operand na ellir ei
+ddileu a dilëir yr un nesaf o hyd. Mae `--` yn gorffen dosrannu
+opsiynau: mae pob ymresymiad diweddarach yn llwybr.
 
 ## OPTIONS
 
@@ -50,8 +50,7 @@ gorffen dosrannu opsiynau: mae pob ymresymiad diweddarach yn llwybr.
 - `0` — llwyddodd pob dileu (nid yw gwrthodiad a oddefir gan
   `--ignore-fail-on-non-empty` yn fethiant).
 - `1` — methiant system ffeiliau neu allbwn; argraffir y rheswm ar y
-  gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  gwall safonol. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

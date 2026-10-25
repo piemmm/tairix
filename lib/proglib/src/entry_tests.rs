@@ -195,7 +195,7 @@ fn a_bundle_path_admits_every_program_store_and_plain_nesting() {
 fn a_bundle_path_outside_a_program_store_is_refused() {
     for hostile in [
         "/System/Services/devmgr.app",
-        "/System/Drivers/storage/emmc2.app",
+        "/System/Drivers/storage/sd.app",
         "/Storage/usb0/Editor.app",
         "/Users/ada/Documents/Editor.app",
         "/Users/ada/Editor.app",

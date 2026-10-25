@@ -31,46 +31,31 @@ fn vfs_error_maps_to_the_documented_stable_errno() {
 
 #[test]
 fn a_real_missing_lookup_surfaces_enoent() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-
-    let err = vfs
-        .stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("absent")),
-            &mut fs,
-            FinalLink::Follow,
-        )
-        .map(|info| info.size)
-        .expect_err("a missing path fails");
-    assert_eq!(err.to_errno(), Errno::NotFound);
+    let vol = arxfs_volume(false);
+    assert_eq!(
+        vol.stat(ROOT.caller(), &vol_path("absent"), FinalLink::Follow)
+            .map(|info| info.size),
+        Err(Errno::NotFound)
+    );
 }
 
 #[test]
 fn a_real_permission_denial_surfaces_eacces() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let admin = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let admin = ROOT.caller();
 
-    vfs.create_via_secured(&admin, &vfs.cover(&vol_path("guarded")), &mut fs)
+    vol.create(admin, &vol_path("guarded"), new_file())
         .expect("create");
-    let node = root_node_id(&mut fs, b"guarded");
-    fs.set_security(node, NodeSecurity::new(0o600, 1000, 1000))
+    let node = vol.root_node(b"guarded");
+    vol.driver()
+        .set_security(node, NodeSecurity::new(0o600, OWNER.uid, OWNER.gid))
         .expect("make owner-only");
 
     let mut buf = [0u8; 4];
-    let stranger = cred(2000, 2000, &caps);
-    let err = vfs
-        .read_via_secured(
-            &stranger,
-            &vfs.cover(&vol_path("guarded")),
-            &mut fs,
-            0,
-            &mut buf,
-        )
-        .expect_err("a stranger is denied");
-    assert_eq!(err.to_errno(), Errno::PermissionDenied);
+    assert_eq!(
+        vol.read(STRANGER.caller(), &vol_path("guarded"), 0, &mut buf),
+        Err(Errno::PermissionDenied)
+    );
 }
 
 /// The three structural conflicts a real volume can raise reach user space
@@ -82,41 +67,28 @@ fn a_real_permission_denial_surfaces_eacces() {
 /// retry clears.
 #[test]
 fn each_structural_conflict_surfaces_its_own_errno() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("outer")), &mut fs)
-        .expect("mkdir outer");
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("outer/inner")), &mut fs)
-        .expect("mkdir inner");
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("spare")), &mut fs)
-        .expect("mkdir spare");
+    for dir in ["outer", "outer/inner", "spare"] {
+        vol.mkdir(owner, &vol_path(dir), new_dir())
+            .unwrap_or_else(|e| panic!("mkdir {dir}: {e:?}"));
+    }
 
-    let taken = vfs
-        .mkdir_via_secured(&owner, &vfs.cover(&vol_path("outer")), &mut fs)
+    let taken = vol
+        .mkdir(owner, &vol_path("outer"), new_dir())
         .expect_err("the name is taken");
-    let populated = vfs
-        .rename_via_secured(
-            &owner,
-            &vfs.cover_pair(&vol_path("spare"), &vol_path("outer")),
-            &mut fs,
-            tairix_abi::RenameFlags::empty(),
-        )
+    let populated = vol
+        .rename(owner, &vol_path("spare"), &vol_path("outer"))
         .expect_err("the destination still holds an entry");
-    let cycle = vfs
-        .rename_via_secured(
-            &owner,
-            &vfs.cover_pair(&vol_path("outer"), &vol_path("outer/inner/outer")),
-            &mut fs,
-            tairix_abi::RenameFlags::empty(),
-        )
+    let cycle = vol
+        .rename(owner, &vol_path("outer"), &vol_path("outer/inner/outer"))
         .expect_err("a directory cannot become its own descendant");
 
-    assert_eq!(taken.to_errno(), Errno::AlreadyExists);
-    assert_eq!(populated.to_errno(), Errno::NotEmpty);
-    assert_eq!(cycle.to_errno(), Errno::OutOfRange);
-    for errno in [taken.to_errno(), populated.to_errno(), cycle.to_errno()] {
+    assert_eq!(taken, Errno::AlreadyExists);
+    assert_eq!(populated, Errno::NotEmpty);
+    assert_eq!(cycle, Errno::OutOfRange);
+    for errno in [taken, populated, cycle] {
         assert_ne!(errno, Errno::WouldBlock, "no conflict invites a retry");
     }
 }

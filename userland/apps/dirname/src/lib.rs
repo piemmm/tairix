@@ -12,8 +12,8 @@
 //! treated the way POSIX treats `/`: it is never stripped into, so
 //! `dirname Home:/tools` is `Home:/` exactly as `dirname /tools` is `/`.
 //! Where the root prefix ends is decided by the shared path grammar's own
-//! rule (`tairix_path::alias_root_len`) — this tool carries no second
-//! path parser. Documented in the tool's `Help/` documents.
+//! rule (`tairix_path::dir_name`, over `tairix_path::alias_root_len`) — this
+//! tool carries no second path parser. Documented in the tool's `Help/` documents.
 //!
 //! # What this crate is
 //!
@@ -21,16 +21,15 @@
 //!
 //! * [`parse`] — the [`Command`] a command line names, with the GNU
 //!   option surface (`-z`/`--zero`, `NAME...`).
-//! * [`dirname_of`] — the POSIX directory-name algorithm over one
-//!   spelling.
 //! * [`output`] — the rendered result block for a parsed command.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`). It links only `lib/*` crates — `lib/path` and
-//! the `lib/help` engine used by the `Run` binary — never a kernel or
-//! driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
-//! production paths; nothing writes to fd 3 (`stdinfo`).
+//! `no_std` (with `alloc`). It links only `lib/*` crates — `lib/path`,
+//! `lib/util`'s command-line scanner, and the `lib/help` engine used by the
+//! `Run` binary — never a kernel or driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths; nothing writes to fd 3
+//! (`stdinfo`).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -42,11 +41,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_path::alias_root_len;
+use tairix_path::dir_name;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `dirname`'s own Help tree is
-/// unavailable.
+/// The usage banner the short-help switches print when `dirname`'s own
+/// Help tree is unavailable.
 pub const USAGE: &str = "usage: dirname [-z] name...";
 
 /// One thing the `dirname` tool can do.
@@ -70,8 +69,8 @@ pub enum Command {
 /// The failures [`parse`] reports, mirroring the GNU tool's diagnostics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DirnameError {
-    /// An unrecognised option.
-    Usage,
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// No `name` operand was given.
     MissingOperand,
 }
@@ -79,54 +78,53 @@ pub enum DirnameError {
 impl fmt::Display for DirnameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DirnameError::Usage => f.write_str("unrecognized option"),
+            DirnameError::Option(refusal) => write!(f, "{refusal}"),
             DirnameError::MissingOperand => f.write_str("missing operand"),
         }
     }
 }
 
+/// What each of `dirname`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Zero,
+    Help,
+}
+
+/// `dirname`'s options, as GNU's `dirname` spells them, and the reserved
+/// help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('z', &["zero"], Flag::Zero),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is the GNU `dirname` surface, `dirname [-z] name...`:
+/// The grammar is the GNU `dirname` surface, `dirname [-z] name...`, read as
+/// GNU's `getopt_long` reads it ([`Scan`]): options anywhere among the
+/// operands, clustered, a long one by any unambiguous prefix, `--` ending
+/// them, and a lone `-` an operand.
 ///
 /// * `-z` / `--zero` — terminate each result with NUL instead of newline.
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md §4; they win immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * short options bundle (`-zz` is `-z -z`); a lone `-` is an operand.
 /// * at least one `name` operand is required; any number is accepted.
-///
-/// Options and operands may be interleaved (the GNU permutation).
 ///
 /// # Errors
 ///
-/// * [`DirnameError::Usage`] — an unrecognised option.
+/// * [`DirnameError::Option`] — an option `getopt` refuses, in its words.
 /// * [`DirnameError::MissingOperand`] — no `name` was given.
 pub fn parse(args: &[&str]) -> Result<Command, DirnameError> {
     let mut zero = false;
     let mut names: Vec<String> = Vec::new();
-    let mut options_done = false;
 
-    for &arg in args {
-        if options_done {
-            names.push(String::from(arg));
-            continue;
-        }
-        match arg {
-            "--" => options_done = true,
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "--zero" => zero = true,
-            _ if arg.starts_with("--") => return Err(DirnameError::Usage),
-            _ if arg.len() > 1 && arg.starts_with('-') => {
-                for flag in arg[1..].chars() {
-                    match flag {
-                        'z' => zero = true,
-                        _ => return Err(DirnameError::Usage),
-                    }
-                }
-            }
-            _ => names.push(String::from(arg)),
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(DirnameError::Option)? {
+            Arg::Operand(name) => names.push(String::from(name)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Zero, _) => zero = true,
         }
     }
 
@@ -134,48 +132,6 @@ pub fn parse(args: &[&str]) -> Result<Command, DirnameError> {
         return Err(DirnameError::MissingOperand);
     }
     Ok(Command::Emit { names, zero })
-}
-
-/// The POSIX directory name of one path spelling.
-///
-/// The classic algorithm — strip trailing slashes, remove the last
-/// component, strip the slashes before it; a spelling with no remaining
-/// `/` has the parent `.`, and a parent that empties out is the root —
-/// with one TAIRiX extension: a `Name:/` alias root (decided by the
-/// shared grammar's [`alias_root_len`]) plays the role POSIX gives `/`,
-/// so `dirname_of("Home:/tools")` is `Home:/` exactly as
-/// `dirname_of("/tools")` is `/`. The surgery is purely lexical; nothing
-/// is resolved or normalised.
-#[must_use]
-pub fn dirname_of(name: &str) -> &str {
-    let root_len = alias_root_len(name).unwrap_or(0);
-    let rest = &name[root_len..];
-
-    let trimmed = rest.trim_end_matches('/');
-    if trimmed.is_empty() {
-        // Only a root (or nothing) remains: the alias root itself, `/`
-        // for an all-slash spelling, `.` for the empty one.
-        if root_len > 0 {
-            return &name[..root_len];
-        }
-        return if rest.is_empty() { "." } else { "/" };
-    }
-
-    let Some(slash) = trimmed.rfind('/') else {
-        // A single component: its parent is the root, or `.` for a
-        // relative spelling.
-        return if root_len > 0 { &name[..root_len] } else { "." };
-    };
-    let parent = trimmed[..slash].trim_end_matches('/');
-    if parent.is_empty() {
-        // The slashes before the last component reach the root.
-        return if root_len > 0 {
-            &name[..root_len]
-        } else {
-            &name[..1]
-        };
-    }
-    &name[..root_len + parent.len()]
 }
 
 /// The rendered output for a [`Command::Emit`]: each name's directory
@@ -186,7 +142,7 @@ pub fn output(names: &[String], zero: bool) -> Vec<u8> {
     let terminator = if zero { b'\0' } else { b'\n' };
     let mut out = Vec::new();
     for name in names {
-        out.extend_from_slice(dirname_of(name).as_bytes());
+        out.extend_from_slice(dir_name(name).as_bytes());
         out.push(terminator);
     }
     out
@@ -196,10 +152,10 @@ pub fn output(names: &[String], zero: bool) -> Vec<u8> {
 mod tests {
     extern crate std;
 
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
 
-    use super::{dirname_of, output, parse, Command, DirnameError};
+    use super::{output, parse, Command, DirnameError};
 
     fn emit(names: &[&str], zero: bool) -> Command {
         Command::Emit {
@@ -244,45 +200,28 @@ mod tests {
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "a"]), Err(DirnameError::Usage));
-        assert_eq!(parse(&["--frob", "a"]), Err(DirnameError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "a"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob", "a"]), "unrecognized option '--frob'");
         // A bundle with one bad flag is refused whole.
-        assert_eq!(parse(&["-zx", "a"]), Err(DirnameError::Usage));
+        assert_eq!(refused(&["-zx", "a"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--zero=x", "a"]),
+            "option '--zero' doesn't allow an argument"
+        );
     }
 
+    /// GNU 9.4 reads `dirname --z a` as `dirname --zero a`.
     #[test]
-    fn posix_directory_names() {
-        assert_eq!(dirname_of("/usr/lib"), "/usr");
-        assert_eq!(dirname_of("dir/file.txt"), "dir");
-        // No remaining slash: the parent is `.`.
-        assert_eq!(dirname_of("file"), ".");
-        assert_eq!(dirname_of("dir/"), ".");
-        // The parent empties out to the root.
-        assert_eq!(dirname_of("/file"), "/");
-        assert_eq!(dirname_of("/"), "/");
-        assert_eq!(dirname_of("///"), "/");
-        assert_eq!(dirname_of("//a"), "/");
-        // Slash runs collapse while trimming.
-        assert_eq!(dirname_of("a//b"), "a");
-        assert_eq!(dirname_of("a/b//"), "a");
-        // The empty spelling has the parent `.`.
-        assert_eq!(dirname_of(""), ".");
-    }
-
-    #[test]
-    fn alias_roots_behave_like_the_view_root() {
-        // The TAIRiX extension: `Name:/` plays the role of `/`.
-        assert_eq!(dirname_of("Home:/tools/x"), "Home:/tools");
-        assert_eq!(dirname_of("Home:/tools"), "Home:/");
-        assert_eq!(dirname_of("Home:/tools/"), "Home:/");
-        assert_eq!(dirname_of("Home:/"), "Home:/");
-        assert_eq!(dirname_of("Home://a"), "Home:/");
-        // A resource reference is not an alias root: plain lexical text.
-        assert_eq!(dirname_of("sys:random"), ".");
-        // A `:` after a `/` is an ordinary character.
-        assert_eq!(dirname_of("a/b:c"), "a");
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--z", "a"]), Ok(emit(&["a"], true)));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

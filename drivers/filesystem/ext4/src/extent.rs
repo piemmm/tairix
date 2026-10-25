@@ -30,7 +30,7 @@ pub(crate) const ROOT_CAPACITY: usize = (ROOT_LEN - HEADER) / ENTRY;
 /// The deepest tree the format allows.
 const MAX_DEPTH: u16 = 5;
 /// The logical blocks an extent tree maps, exclusive: its 32-bit space less
-/// the last block, whose extent Linux reads as one that wraps.
+/// the last block, so an extent's end (`ee_block + ee_len`) fits 32 bits.
 pub(crate) const LOGICAL_LIMIT: u64 = u32::MAX as u64;
 /// Longest initialised extent; an `ee_len` above it marks an unwritten one.
 const INIT_MAX: u32 = 32_768;

@@ -41,6 +41,12 @@
 //! every FAT mutation is mirrored across all FAT copies. No
 //! `unwrap`/`expect`/`panic!` and no `unsafe`.
 //!
+//! A file the kernel pins ([`FilesystemRead::pin`]) is reported under a token
+//! until its last unpin, since its own id is where its entry lies and a rename
+//! moves that; a removal deletes a pinned file's entry but keeps its chain
+//! until then. FAT records no owner or mode, so a create ignores the record it
+//! is given.
+//!
 //! # Capabilities
 //!
 //! Loading requires
@@ -55,12 +61,13 @@ use tairix_abi::driver::block::{Block, MAX_BLOCK_LEN};
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
     FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
-    NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
+    NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
 };
 use tairix_abi::fs::FS_NAME_MAX;
 use tairix_abi::time::{CivilTime, Time64};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
+use tairix_collections::RadixTree;
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4641_5433_3200_0001; // "FAT32" + index
@@ -147,51 +154,81 @@ const LFN_SEQUENCE_MASK: u8 = 0x1F;
 const LFN_CHAR_OFFSETS: [usize; LFN_UNITS_PER_ENTRY] =
     [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 
-/// `NodeId` bit carrying the directory flag (cluster numbers are 28-bit,
-/// so bit 28 is free).
+/// Bit of a directory's id carrying the directory flag: cluster numbers are
+/// 28-bit, so bit 28 is free.
 const NODE_DIR_FLAG: u64 = 1 << 28;
-/// `NodeId` validity bit, set on every live node so that no live node
-/// ever equals [`NodeId::NONE`] (`0`) — an empty file has cluster 0.
+/// Bit set on every directory's id, so none is [`NodeId::NONE`] whatever
+/// cluster a damaged entry records.
 const NODE_VALID_FLAG: u64 = 1 << 29;
-/// Bit position at which a regular file's size is packed into a
-/// `NodeId`.
-const NODE_SIZE_SHIFT: u64 = 32;
+/// Bit set on every file's id, whose other bits are its short entry's slot
+/// on the device; no directory's id sets it.
+const NODE_FILE_TAG: u64 = 1 << 63;
+/// Bit set on every pinned file's token, whose other bits are a number the
+/// mount never gives twice; no file's or directory's own id sets it.
+const NODE_TOKEN_TAG: u64 = 1 << 62;
 
-/// Pack a directory entry's identity into a self-describing [`NodeId`].
-fn pack_node(cluster: u32, is_dir: bool, size: u32) -> NodeId {
-    let mut raw = u64::from(cluster & FAT32_CLUSTER_MASK) | NODE_VALID_FLAG;
-    if is_dir {
-        raw |= NODE_DIR_FLAG;
-    } else {
-        raw |= u64::from(size) << NODE_SIZE_SHIFT;
+/// The id of the directory whose first cluster is `cluster`.
+fn dir_node(cluster: u32) -> NodeId {
+    NodeId::from_raw(NODE_VALID_FLAG | NODE_DIR_FLAG | u64::from(cluster & FAT32_CLUSTER_MASK))
+}
+
+/// The id of the file whose short entry lies at device byte `short_offset`.
+/// The entry holds the file's size, first cluster and stamps, so a write
+/// keeps the id, and a rename or a removal, which free the entry, do not.
+fn file_node(short_offset: u64) -> NodeId {
+    NodeId::from_raw(NODE_FILE_TAG | entry_slot(short_offset))
+}
+
+/// The slot of the device the 32-byte entry at device byte `short_offset`
+/// takes.
+fn entry_slot(short_offset: u64) -> u64 {
+    short_offset / DIR_ENTRY_LEN as u64
+}
+
+/// The token numbered `number`.
+fn token_node(number: u64) -> NodeId {
+    NodeId::from_raw(NODE_TOKEN_TAG | number)
+}
+
+/// What an id names, before the device is consulted.
+#[derive(Clone, Copy)]
+enum Named {
+    /// A directory, by its first cluster.
+    Dir(u32),
+    /// A file, by the device byte offset of its short entry.
+    File(u64),
+    /// A pinned file, by its token's number.
+    Pinned(u64),
+}
+
+/// What `node` names; `None` for an id no directory or file is given.
+fn named(node: NodeId) -> Option<Named> {
+    let raw = node.raw();
+    if raw & NODE_FILE_TAG != 0 {
+        return (raw & !NODE_FILE_TAG)
+            .checked_mul(DIR_ENTRY_LEN as u64)
+            .map(Named::File);
     }
-    NodeId::from_raw(raw)
-}
-
-/// First cluster encoded in a [`NodeId`].
-fn node_cluster(node: NodeId) -> u32 {
-    // The masked value spans at most 28 bits, so it always fits in `u32`.
-    u32::try_from(node.raw() & u64::from(FAT32_CLUSTER_MASK)).unwrap_or(0)
-}
-
-/// `node`, if [`pack_node`] could have made it: no live node is
-/// [`NodeId::NONE`] or lacks the validity bit.
-fn live_node(node: NodeId) -> Result<NodeId, DriverError> {
-    if node.raw() & NODE_VALID_FLAG == 0 {
-        return Err(DriverError::NotFound);
+    if raw & NODE_TOKEN_TAG != 0 {
+        return Some(Named::Pinned(raw & !NODE_TOKEN_TAG));
     }
-    Ok(node)
+    let flags = NODE_VALID_FLAG | NODE_DIR_FLAG;
+    let cluster = u32::try_from(raw & !flags)
+        .ok()
+        .filter(|&cluster| cluster <= FAT32_CLUSTER_MASK)?;
+    (raw & flags == flags).then_some(Named::Dir(cluster))
 }
 
-/// Whether a [`NodeId`] denotes a directory.
-fn node_is_dir(node: NodeId) -> bool {
-    node.raw() & NODE_DIR_FLAG != 0
-}
-
-/// File size encoded in a [`NodeId`] (`0` for directories).
-fn node_size(node: NodeId) -> u32 {
-    // The high 32 bits of a `u64` always fit in `u32`.
-    u32::try_from(node.raw() >> NODE_SIZE_SHIFT).unwrap_or(0)
+/// The first cluster of the directory `dir` names.
+///
+/// # Errors
+///
+/// [`DriverError::Unsupported`] for an id naming anything but a directory.
+fn cluster_of(dir: NodeId) -> Result<u32, DriverError> {
+    match named(dir) {
+        Some(Named::Dir(cluster)) => Ok(cluster),
+        _ => Err(DriverError::Unsupported),
+    }
 }
 
 /// Result of following one FAT chain link.
@@ -273,6 +310,23 @@ impl EntryStamps {
         stamps.written.copy_from_slice(&raw[22..26]);
         stamps
     }
+
+    /// The instants the stamps hold, read as UTC: the creation to the
+    /// hundredth, the last write, and the access date at midnight, FAT keeping
+    /// no time of day for it. FAT keeps no metadata-change stamp, so `changed`
+    /// is the epoch, as is any field that is no calendar date.
+    fn times(&self) -> NodeTimes {
+        NodeTimes {
+            created: dos_creation_to_time64(
+                le16(&self.created, 3),
+                le16(&self.created, 1),
+                self.created[0],
+            ),
+            modified: dos_datetime_to_time64(le16(&self.written, 2), le16(&self.written, 0)),
+            accessed: dos_datetime_to_time64(le16(&self.created, 5), 0),
+            changed: Time64::UNIX_EPOCH,
+        }
+    }
 }
 
 /// A single decoded directory entry. `name` holds the file name as
@@ -284,15 +338,7 @@ struct ParsedEntry {
     cluster: u32,
     size: u32,
     is_dir: bool,
-    /// The entry's timestamps decoded from the short entry's DOS date/time
-    /// fields: `created` from the creation date+time and its hundredths,
-    /// `modified` from the
-    /// last-write date+time, `accessed` from the last-access *date* (FAT
-    /// stores no access time-of-day, so it is that date at midnight UTC).
-    /// `changed` (ctime) is [`Time64::UNIX_EPOCH`]: FAT keeps no
-    /// metadata-change stamp. A field that is not a decodable calendar date
-    /// is [`Time64::UNIX_EPOCH`] (the documented "no stamp" value — never a
-    /// clamped or guessed date).
+    /// What [`EntryStamps::times`] reads from the stamps.
     times: NodeTimes,
     /// The same stamps as stored, for rewriting the entry without loss.
     stamps: EntryStamps,
@@ -383,6 +429,242 @@ pub struct Fat32<B: Block> {
     seek: Option<SeekHint>,
     /// The host the mount's stamps take their time from, once it has one.
     host: Option<&'static dyn VolumeHost>,
+    /// The kernel's holds on the mount's nodes.
+    pins: Pins,
+}
+
+/// The kernel's holds on a mount's nodes.
+///
+/// A directory keeps its id, its first cluster, while it is held, since a
+/// held directory's cluster is not freed. A file's own id is where its entry
+/// lies, which a rename moves, so a held file is reported under a token.
+/// Every table grows fallibly, so a hold that cannot be recorded is refused.
+#[derive(Default)]
+struct Pins {
+    /// Each pinned file, by its token's number.
+    files: RadixTree<PinnedFile>,
+    /// The number of each pinned file's token, by the device slot of the
+    /// entry naming it.
+    by_entry: RadixTree<u64>,
+    /// Each pinned directory, by its first cluster.
+    dirs: RadixTree<PinnedDir>,
+    /// The number the next token takes: none the mount has given before.
+    next: u64,
+}
+
+/// A pinned file: its holds, and where its facts are kept.
+struct PinnedFile {
+    holds: u32,
+    kept: KeptFile,
+}
+
+/// Where a pinned file's first cluster, size and stamps are kept.
+#[derive(Clone, Copy)]
+enum KeptFile {
+    /// In its short entry, at this device byte.
+    Entry(u64),
+    /// In the pin: a removal deleted its entry.
+    Nameless(Nameless),
+}
+
+/// What a pinned file's deleted entry held.
+#[derive(Clone, Copy)]
+struct Nameless {
+    /// Where the entry lay, which `stat` goes on reporting as its number.
+    last: u64,
+    cluster: u32,
+    size: u32,
+    stamps: EntryStamps,
+}
+
+/// A pinned directory: its holds and, once a removal deleted its entry, the
+/// stamps that entry held.
+struct PinnedDir {
+    holds: u32,
+    removed: Option<NodeTimes>,
+}
+
+impl Pins {
+    /// One more hold of the file whose short entry lies at `short_offset`.
+    fn pin_file(&mut self, short_offset: u64) -> Result<NodeId, DriverError> {
+        let slot = entry_slot(short_offset);
+        if let Some(&number) = self.by_entry.get(slot) {
+            return self.hold_file(number);
+        }
+        let number = self.next;
+        if number >= NODE_TOKEN_TAG {
+            return Err(DriverError::OutOfMemory);
+        }
+        self.files
+            .try_reserve_key(number)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        self.by_entry
+            .try_reserve_key(slot)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        let pin = PinnedFile {
+            holds: 1,
+            kept: KeptFile::Entry(short_offset),
+        };
+        self.files
+            .try_insert(number, pin)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        if self.by_entry.try_insert(slot, number).is_err() {
+            self.files.remove(number);
+            return Err(DriverError::OutOfMemory);
+        }
+        self.next = number + 1;
+        Ok(token_node(number))
+    }
+
+    /// One more hold of the pinned file numbered `number`.
+    fn hold_file(&mut self, number: u64) -> Result<NodeId, DriverError> {
+        let pin = self.files.get_mut(number).ok_or(DriverError::NotFound)?;
+        pin.holds = pin.holds.checked_add(1).ok_or(DriverError::OutOfMemory)?;
+        Ok(token_node(number))
+    }
+
+    /// One more hold of the directory at `cluster`.
+    fn pin_dir(&mut self, cluster: u32) -> Result<NodeId, DriverError> {
+        let key = u64::from(cluster);
+        if let Some(held) = self.dirs.get_mut(key) {
+            held.holds = held.holds.checked_add(1).ok_or(DriverError::OutOfMemory)?;
+        } else {
+            let held = PinnedDir {
+                holds: 1,
+                removed: None,
+            };
+            self.dirs
+                .try_insert(key, held)
+                .map_err(|_| DriverError::OutOfMemory)?;
+        }
+        Ok(dir_node(cluster))
+    }
+
+    /// Where the pinned file numbered `number` keeps its facts.
+    fn kept(&self, number: u64) -> Result<KeptFile, DriverError> {
+        self.files
+            .get(number)
+            .map(|pin| pin.kept)
+            .ok_or(DriverError::NotFound)
+    }
+
+    /// Release one hold of the pinned file numbered `number`: `None` while
+    /// others remain, else where the last left its facts.
+    fn unpin_file(&mut self, number: u64) -> Result<Option<KeptFile>, DriverError> {
+        let pin = self.files.get_mut(number).ok_or(DriverError::NotFound)?;
+        if pin.holds > 1 {
+            pin.holds -= 1;
+            return Ok(None);
+        }
+        let kept = pin.kept;
+        self.files.remove(number);
+        if let KeptFile::Entry(short_offset) = kept {
+            self.by_entry.remove(entry_slot(short_offset));
+        }
+        Ok(Some(kept))
+    }
+
+    /// Release one hold of the directory at `cluster`: [`Unpinned::Freed`]
+    /// asks for its chain to be freed.
+    fn unpin_dir(&mut self, cluster: u32) -> Result<Unpinned, DriverError> {
+        let key = u64::from(cluster);
+        let held = self.dirs.get_mut(key).ok_or(DriverError::NotFound)?;
+        if held.holds > 1 {
+            held.holds -= 1;
+            return Ok(Unpinned::Held);
+        }
+        let removed = held.removed.is_some();
+        self.dirs.remove(key);
+        Ok(if removed {
+            Unpinned::Freed
+        } else {
+            Unpinned::Released
+        })
+    }
+
+    /// Whether a pin holds what `entry` names.
+    fn holds(&self, entry: &ParsedEntry) -> bool {
+        if entry.is_dir {
+            self.dirs.contains_key(u64::from(entry.cluster))
+        } else {
+            self.by_entry.contains_key(entry_slot(entry.short_offset))
+        }
+    }
+
+    /// The stamps of the directory at `cluster` while a pin keeps it after a
+    /// removal.
+    fn removed(&self, cluster: u32) -> Option<NodeTimes> {
+        self.dirs
+            .get(u64::from(cluster))
+            .and_then(|held| held.removed)
+    }
+
+    /// The entry at `from` naming a pinned file has been written afresh at
+    /// `to`: its pin follows it, or, when that cannot be recorded, stays.
+    fn moved(&mut self, from: u64, to: u64) -> Result<(), DriverError> {
+        let Some(&number) = self.by_entry.get(entry_slot(from)) else {
+            return Ok(());
+        };
+        self.by_entry
+            .try_insert(entry_slot(to), number)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        self.by_entry.remove(entry_slot(from));
+        if let Some(pin) = self.files.get_mut(number) {
+            pin.kept = KeptFile::Entry(to);
+        }
+        Ok(())
+    }
+
+    /// A removal deleted `entry`: the pin of what it named keeps that.
+    fn unnamed(&mut self, entry: &ParsedEntry) {
+        if entry.is_dir {
+            if let Some(held) = self.dirs.get_mut(u64::from(entry.cluster)) {
+                held.removed = Some(entry.times);
+            }
+        } else if let Some(number) = self.by_entry.remove(entry_slot(entry.short_offset)) {
+            if let Some(pin) = self.files.get_mut(number) {
+                pin.kept = KeptFile::Nameless(Nameless {
+                    last: entry.short_offset,
+                    cluster: entry.cluster,
+                    size: entry.size,
+                    stamps: entry.stamps,
+                });
+            }
+        }
+    }
+
+    /// The nameless pinned file numbered `number` now has `cluster` and
+    /// `size`, and `written` as its last-write stamp when given.
+    fn renew(&mut self, number: u64, cluster: u32, size: u32, written: Option<[u8; 4]>) {
+        if let Some(PinnedFile {
+            kept: KeptFile::Nameless(kept),
+            ..
+        }) = self.files.get_mut(number)
+        {
+            kept.cluster = cluster;
+            kept.size = size;
+            if let Some(written) = written {
+                kept.stamps.written = written;
+            }
+        }
+    }
+}
+
+/// Where a file's first cluster, size and stamps are kept.
+#[derive(Clone, Copy)]
+enum Holder {
+    /// Its short entry, at this device byte.
+    Entry(u64),
+    /// The pin of a file a removal left nameless, by its token's number.
+    Pin(u64),
+}
+
+/// A file's first cluster and size, and where they are kept.
+#[derive(Clone, Copy)]
+struct FileFacts {
+    cluster: u32,
+    size: u32,
+    holder: Holder,
 }
 
 /// The volume's stable 16-byte identity, derived from the boot sector:
@@ -553,23 +835,15 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
     }
 
     let cluster = (u32::from(le16(raw, 20)) << 16) | u32::from(le16(raw, 26));
+    let stamps = EntryStamps::of(raw);
     ParsedEntry {
         name,
         name_len: len,
         cluster,
         size: le32(raw, 28),
         is_dir: raw[11] & ATTR_DIRECTORY != 0,
-        times: NodeTimes {
-            // Creation date (0x10) + time (0x0E) + hundredths (0x0D);
-            // last-write date (0x18) + time (0x16); last-access date (0x12),
-            // no time-of-day. FAT has no metadata-change (ctime) stamp, so
-            // `changed` is the epoch.
-            created: dos_creation_to_time64(le16(raw, 16), le16(raw, 14), raw[13]),
-            modified: dos_datetime_to_time64(le16(raw, 24), le16(raw, 22)),
-            accessed: dos_datetime_to_time64(le16(raw, 18), 0),
-            changed: Time64::UNIX_EPOCH,
-        },
-        stamps: EntryStamps::of(raw),
+        times: stamps.times(),
+        stamps,
         short_offset: 0,
         first: SlotPos::at(0),
         slot_span: 0,
@@ -806,6 +1080,15 @@ impl TailWindow {
     }
 }
 
+/// Where an entry was written: its first slot, the slots it took, and the
+/// device byte of its short entry.
+#[derive(Clone, Copy)]
+struct Placed {
+    first: SlotPos,
+    span: u64,
+    short_offset: u64,
+}
+
 /// A run of free slots a new entry can take.
 #[derive(Clone, Copy)]
 struct FreeRun {
@@ -1040,6 +1323,7 @@ impl<B: Block> Fat32<B> {
             identity,
             seek: None,
             host: None,
+            pins: Pins::default(),
         })
     }
 
@@ -1356,7 +1640,8 @@ impl<B: Block> Fat32<B> {
         &mut self,
         walk: &mut DirCursor,
     ) -> Result<Option<(SlotPos, RawEntry)>, DriverError> {
-        // A directory recording no cluster holds no slots, as Linux reads one.
+        // A directory recording no data cluster holds no slots: data clusters
+        // start at 2.
         if walk.pos.cluster < 2 {
             return Ok(None);
         }
@@ -1399,8 +1684,8 @@ impl<B: Block> Fat32<B> {
     }
 
     /// Write `raw` at `pos` and step past it, chaining a zeroed cluster on
-    /// when the directory's chain ends first.
-    fn put_slot(&mut self, pos: &mut SlotPos, raw: &RawEntry) -> Result<(), DriverError> {
+    /// when the directory's chain ends first; the device byte written at.
+    fn put_slot(&mut self, pos: &mut SlotPos, raw: &RawEntry) -> Result<u64, DriverError> {
         if !(2..=self.layout.max_cluster).contains(&pos.cluster) {
             return Err(DriverError::DeviceFault);
         }
@@ -1410,10 +1695,11 @@ impl<B: Block> Fat32<B> {
             pos.cluster = fresh;
             pos.intra = 0;
         }
-        self.dev.write(self.slot_byte(*pos), raw)?;
+        let at = self.slot_byte(*pos);
+        self.dev.write(at, raw)?;
         pos.intra += DIR_ENTRY_LEN as u64;
         pos.slot += 1;
-        Ok(())
+        Ok(at)
     }
 
     /// The 32-byte slot at device byte `byte`, read through the walk's held
@@ -1511,8 +1797,8 @@ impl<B: Block> Fat32<B> {
     }
 
     /// The bytes a node's data occupies: its chain, for a directory (whose
-    /// entry records no size), and the clusters its size needs, for a file,
-    /// as Linux reports it — walking a large file's chain per listed entry
+    /// entry records no size), and the clusters its size needs, for a file —
+    /// walking a large file's chain per listed entry
     /// would cost the listing the file's size.
     fn allocation(&mut self, cluster: u32, is_dir: bool, size: u32) -> Result<u64, DriverError> {
         let per_cluster = self.layout.bytes_per_cluster;
@@ -1525,10 +1811,35 @@ impl<B: Block> Fat32<B> {
         }
     }
 
-    /// Build the [`NodeId`] for a decoded directory entry.
+    /// The id of a decoded directory entry.
     fn entry_node(entry: &ParsedEntry) -> NodeId {
-        let size = if entry.is_dir { 0 } else { entry.size };
-        pack_node(entry.cluster, entry.is_dir, size)
+        if entry.is_dir {
+            dir_node(entry.cluster)
+        } else {
+            file_node(entry.short_offset)
+        }
+    }
+
+    /// The structural metadata of a decoded directory entry, its stamps
+    /// among them.
+    fn entry_info(&mut self, entry: &ParsedEntry) -> Result<NodeInfo, DriverError> {
+        Ok(NodeInfo {
+            kind: if entry.is_dir {
+                NodeKind::Directory
+            } else {
+                NodeKind::RegularFile
+            },
+            nlink: NodeInfo::SINGLE_NAME,
+            ino: Self::entry_node(entry).raw(),
+            size: if entry.is_dir {
+                0
+            } else {
+                u64::from(entry.size)
+            },
+            allocated: self.allocation(entry.cluster, entry.is_dir, entry.size)?,
+            times: entry.times,
+            content_gen: NodeInfo::NO_CONTENT_GEN,
+        })
     }
 }
 
@@ -1556,6 +1867,158 @@ impl<B: Block> Fat32<B> {
             }
         }
         Ok(None)
+    }
+
+    /// The live file whose short entry lies at device byte `short_offset`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] unless the place is a slot of the data
+    ///   region holding a file's short entry: an id outlives the entry a
+    ///   removal or a rename frees, and the slot may since hold anything.
+    /// * Whatever the device reports for a read.
+    fn file_at(&mut self, short_offset: u64) -> Result<ParsedEntry, DriverError> {
+        let data_end = self.cluster_byte(self.layout.max_cluster) + self.layout.bytes_per_cluster;
+        if short_offset < self.layout.data_start_byte
+            || short_offset > data_end - DIR_ENTRY_LEN as u64
+        {
+            return Err(DriverError::NotFound);
+        }
+        let mut raw = [0u8; DIR_ENTRY_LEN];
+        self.dev.read(short_offset, &mut raw)?;
+        // A long-name fragment carries the volume-label bit, so this refuses
+        // it with labels and directories.
+        if matches!(raw[0], END_OF_DIR | DELETED_ENTRY | b'.')
+            || raw[11] & (ATTR_VOLUME_ID | ATTR_DIRECTORY) != 0
+        {
+            return Err(DriverError::NotFound);
+        }
+        let mut entry = parse_short_entry(&raw);
+        entry.short_offset = short_offset;
+        Ok(entry)
+    }
+
+    /// The file `file` names: a live one, or a pinned one a removal left
+    /// nameless.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if `file` names a directory.
+    /// * [`DriverError::NotFound`] if it names no live file and no held one.
+    fn file(&mut self, file: NodeId) -> Result<FileFacts, DriverError> {
+        let short_offset = match named(file).ok_or(DriverError::NotFound)? {
+            Named::Dir(_) => return Err(DriverError::Unsupported),
+            Named::File(short_offset) => short_offset,
+            Named::Pinned(number) => match self.pins.kept(number)? {
+                KeptFile::Entry(short_offset) => short_offset,
+                KeptFile::Nameless(kept) => {
+                    return Ok(FileFacts {
+                        cluster: kept.cluster,
+                        size: kept.size,
+                        holder: Holder::Pin(number),
+                    });
+                }
+            },
+        };
+        let entry = self.file_at(short_offset)?;
+        Ok(FileFacts {
+            cluster: entry.cluster,
+            size: entry.size,
+            holder: Holder::Entry(short_offset),
+        })
+    }
+
+    /// Record `cluster` and `size` as the file's where `holder` keeps them,
+    /// and `written` as its last-write stamp when given.
+    fn set_extent(
+        &mut self,
+        holder: Holder,
+        cluster: u32,
+        size: u32,
+        written: Option<[u8; 4]>,
+    ) -> Result<(), DriverError> {
+        match holder {
+            Holder::Entry(short_offset) => {
+                self.set_entry_meta(short_offset, cluster, size, written)
+            }
+            Holder::Pin(number) => {
+                self.pins.renew(number, cluster, size, written);
+                Ok(())
+            }
+        }
+    }
+
+    /// Refuse the directory whose first cluster is `cluster` once that is no
+    /// longer allocated, as a removed directory's is: its id outlives it.
+    fn live_dir(&mut self, cluster: u32) -> Result<(), DriverError> {
+        if (2..=self.layout.max_cluster).contains(&cluster) && self.fat_entry(cluster)? != 0 {
+            Ok(())
+        } else {
+            Err(DriverError::NotFound)
+        }
+    }
+
+    /// The first cluster of the directory `dir` names, which takes entries.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] for an id naming anything but a
+    ///   directory.
+    /// * [`DriverError::NotFound`] for a removed directory, its cluster freed
+    ///   or kept by a pin.
+    fn entries_dir(&mut self, dir: NodeId) -> Result<u32, DriverError> {
+        let cluster = cluster_of(dir)?;
+        if self.pins.removed(cluster).is_some() {
+            return Err(DriverError::NotFound);
+        }
+        self.live_dir(cluster)?;
+        Ok(cluster)
+    }
+
+    /// The kind of the node `node` names, live or held.
+    fn node_kind(&mut self, node: NodeId) -> Result<NodeKind, DriverError> {
+        match named(node).ok_or(DriverError::NotFound)? {
+            Named::Dir(cluster) => {
+                if self.pins.removed(cluster).is_none() {
+                    self.live_dir(cluster)?;
+                }
+                Ok(NodeKind::Directory)
+            }
+            Named::File(_) | Named::Pinned(_) => self.file(node).map(|_| NodeKind::RegularFile),
+        }
+    }
+
+    /// The structural metadata of the directory at `cluster`: one a pin keeps
+    /// after a removal has no name, and the stamps its entry held.
+    fn dir_info(&mut self, cluster: u32) -> Result<NodeInfo, DriverError> {
+        let (nlink, times) = if let Some(times) = self.pins.removed(cluster) {
+            (0, times)
+        } else {
+            self.live_dir(cluster)?;
+            (NodeInfo::SINGLE_NAME, self.dir_times(cluster)?)
+        };
+        Ok(NodeInfo {
+            kind: NodeKind::Directory,
+            nlink,
+            ino: dir_node(cluster).raw(),
+            size: 0,
+            allocated: self.allocation(cluster, true, 0)?,
+            times,
+            content_gen: NodeInfo::NO_CONTENT_GEN,
+        })
+    }
+
+    /// The structural metadata of a pinned file a removal left nameless.
+    fn nameless_info(&mut self, kept: &Nameless) -> Result<NodeInfo, DriverError> {
+        Ok(NodeInfo {
+            kind: NodeKind::RegularFile,
+            nlink: 0,
+            ino: file_node(kept.last).raw(),
+            size: u64::from(kept.size),
+            allocated: self.allocation(kept.cluster, false, kept.size)?,
+            times: kept.stamps.times(),
+            content_gen: NodeInfo::NO_CONTENT_GEN,
+        })
     }
 
     /// Patch the first-cluster and size fields of the short entry at
@@ -1825,13 +2288,10 @@ impl<B: Block> Fat32<B> {
         name: &[u8],
         kind: NodeKind,
     ) -> Result<NodeId, DriverError> {
-        if !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
+        let dir_cluster = self.entries_dir(dir)?;
         if name.is_empty() || name.len() > MAX_NAME_BYTES {
             return Err(DriverError::LengthOutOfRange);
         }
-        let dir_cluster = node_cluster(dir);
         if self.find_child(dir_cluster, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
@@ -1846,22 +2306,25 @@ impl<B: Block> Fat32<B> {
             0
         };
         let attr = if is_dir { ATTR_DIRECTORY } else { 0x20 };
-        if let Err(e) = self.write_dir_entry(dir_cluster, name, attr, child_cluster, 0, stamps) {
-            // Reclaim the directory cluster if naming the entry failed, so a
-            // rejected create leaves no orphaned chain behind.
-            if is_dir && child_cluster >= 2 {
-                let _ = self.free_chain(child_cluster);
+        match self.write_dir_entry(dir_cluster, name, attr, child_cluster, 0, stamps) {
+            Ok(_) if is_dir => Ok(dir_node(child_cluster)),
+            Ok(placed) => Ok(file_node(placed.short_offset)),
+            Err(e) => {
+                // Reclaim the directory cluster if naming the entry failed, so
+                // a rejected create leaves no orphaned chain behind.
+                if is_dir && child_cluster >= 2 {
+                    let _ = self.free_chain(child_cluster);
+                }
+                Err(e)
             }
-            return Err(e);
         }
-        Ok(pack_node(child_cluster, is_dir, 0))
     }
 
     /// Encode `name` as a run of directory slots — the long-name fragments
     /// followed by the 8.3 short entry pointing at `cluster`/`size` with
-    /// attribute `attr` — in a free run of `dir_cluster`. Shared by
-    /// [`Self::create_child`] and [`Self::rename_child`] so the long-name
-    /// encoding lives in one place.
+    /// attribute `attr` — in a free run of `dir_cluster`, answering where it
+    /// lies. Shared by [`Self::create_child`] and [`Self::rename_child`] so
+    /// the long-name encoding lives in one place.
     fn write_dir_entry(
         &mut self,
         dir_cluster: u32,
@@ -1870,7 +2333,7 @@ impl<B: Block> Fat32<B> {
         cluster: u32,
         size: u32,
         stamps: EntryStamps,
-    ) -> Result<(), DriverError> {
+    ) -> Result<Placed, DriverError> {
         let mut units = [0u16; MAX_LONG_NAME_UNITS];
         let unit_count = encode_utf16le(name, &mut units).ok_or(DriverError::LengthOutOfRange)?;
         if unit_count == 0 {
@@ -1918,75 +2381,51 @@ impl<B: Block> Fat32<B> {
             let entry = Self::build_lfn_entry(&units[..unit_count], seq, phys == 0, checksum);
             self.put_slot(&mut pos, &entry)?;
         }
-        self.put_slot(
+        let short_offset = self.put_slot(
             &mut pos,
             &Self::build_short_entry(&short, attr, cluster, size, stamps),
-        )
+        )?;
+        Ok(Placed {
+            first: run.start,
+            span: total_slots,
+            short_offset,
+        })
     }
 
     /// Shared implementation of [`FilesystemWrite::write_at`].
-    fn write_file(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        if !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
-        let dir_cluster = node_cluster(dir);
-        let entry = self
-            .find_child(dir_cluster, name)?
-            .ok_or(DriverError::NotFound)?;
-        if entry.is_dir {
-            return Err(DriverError::Unsupported);
-        }
+    fn write_file(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        let facts = self.file(file)?;
         if data.is_empty() {
             return Ok(0);
         }
         let end = offset
             .checked_add(data.len() as u64)
             .ok_or(DriverError::LengthOutOfRange)?;
-        let old_size = u64::from(entry.size);
+        let old_size = u64::from(facts.size);
         let bpc = self.layout.bytes_per_cluster;
         let needed = end.div_ceil(bpc);
-        let first = self.ensure_chain(entry.cluster, needed)?;
+        let first = self.ensure_chain(facts.cluster, needed)?;
         if offset > old_size {
             self.zero_range(first, old_size, offset - old_size)?;
         }
         self.write_data(first, offset, data)?;
         let new_size =
             u32::try_from(old_size.max(end)).map_err(|_| DriverError::LengthOutOfRange)?;
-        self.set_entry_meta(
-            entry.short_offset,
-            first,
-            new_size,
-            Some(self.written_now()),
-        )?;
+        self.set_extent(facts.holder, first, new_size, Some(self.written_now()))?;
         Ok(data.len())
     }
 
     /// Shared implementation of [`FilesystemWrite::truncate`].
-    fn truncate_file(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        if !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
-        let dir_cluster = node_cluster(dir);
-        let entry = self
-            .find_child(dir_cluster, name)?
-            .ok_or(DriverError::NotFound)?;
-        if entry.is_dir {
-            return Err(DriverError::Unsupported);
-        }
-        let old_size = u64::from(entry.size);
+    fn truncate_file(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        let facts = self.file(file)?;
+        let old_size = u64::from(facts.size);
         if size == old_size {
             // A truncation that keeps the length is still the open that
             // truncates a file, and is stamped as one.
-            return self.set_entry_meta(
-                entry.short_offset,
-                entry.cluster,
-                entry.size,
+            return self.set_extent(
+                facts.holder,
+                facts.cluster,
+                facts.size,
                 Some(self.written_now()),
             );
         }
@@ -1996,14 +2435,13 @@ impl<B: Block> Fat32<B> {
         if size < old_size {
             let needed = size.div_ceil(bpc);
             if needed == 0 {
-                if entry.cluster >= 2 {
-                    self.free_chain(entry.cluster)?;
+                if facts.cluster >= 2 {
+                    self.free_chain(facts.cluster)?;
                 }
-                self.set_entry_meta(entry.short_offset, 0, 0, Some(self.written_now()))?;
-                return Ok(());
+                return self.set_extent(facts.holder, 0, 0, Some(self.written_now()));
             }
             // Walk to the new last cluster, sever and free the remainder.
-            let mut cluster = entry.cluster;
+            let mut cluster = facts.cluster;
             for _ in 0..needed - 1 {
                 match self.next_cluster(cluster)? {
                     ChainStep::Next(next) => cluster = next,
@@ -2014,32 +2452,24 @@ impl<B: Block> Fat32<B> {
                 self.free_chain(tail)?;
             }
             self.set_fat(cluster, FAT32_EOC_WRITE)?;
-            self.set_entry_meta(
-                entry.short_offset,
-                entry.cluster,
+            self.set_extent(
+                facts.holder,
+                facts.cluster,
                 new_size,
                 Some(self.written_now()),
             )?;
         } else {
             let needed = size.div_ceil(bpc);
-            let first = self.ensure_chain(entry.cluster, needed)?;
+            let first = self.ensure_chain(facts.cluster, needed)?;
             self.zero_range(first, old_size, size - old_size)?;
-            self.set_entry_meta(
-                entry.short_offset,
-                first,
-                new_size,
-                Some(self.written_now()),
-            )?;
+            self.set_extent(facts.holder, first, new_size, Some(self.written_now()))?;
         }
         Ok(())
     }
 
     /// Shared implementation of [`FilesystemWrite::remove`].
     fn remove_child(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
-        if !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
-        let dir_cluster = node_cluster(dir);
+        let dir_cluster = self.entries_dir(dir)?;
         let entry = self
             .find_child(dir_cluster, name)?
             .ok_or(DriverError::NotFound)?;
@@ -2049,10 +2479,21 @@ impl<B: Block> Fat32<B> {
                 return Err(DriverError::DirectoryNotEmpty);
             }
         }
-        if entry.cluster >= 2 {
+        self.unlink(&entry)
+    }
+
+    /// Delete `entry` and free what it names, unless a pin holds that: then
+    /// it is kept, nameless, until the last unpin frees it.
+    fn unlink(&mut self, entry: &ParsedEntry) -> Result<(), DriverError> {
+        let held = self.pins.holds(entry);
+        if !held && entry.cluster >= 2 {
             self.free_chain(entry.cluster)?;
         }
-        self.delete_entry_slots(entry.first, entry.slot_span)
+        self.delete_entry_slots(entry.first, entry.slot_span)?;
+        if held {
+            self.pins.unnamed(entry);
+        }
+        Ok(())
     }
 
     /// Mark the `span` slots from `first` deleted: one logical entry's
@@ -2072,19 +2513,57 @@ impl<B: Block> Fat32<B> {
     /// The cluster of `dir_cluster`'s parent, read from its `..` entry
     /// (which stores `0` for the root).
     fn dir_parent_cluster(&mut self, dir_cluster: u32) -> Result<u32, DriverError> {
+        self.dotdot(dir_cluster)?.ok_or(DriverError::DeviceFault)
+    }
+
+    /// The parent `dir_cluster`'s `..` entry names, or `None` where that
+    /// entry is no well-formed `..`.
+    fn dotdot(&mut self, dir_cluster: u32) -> Result<Option<u32>, DriverError> {
         let mut raw = [0u8; DIR_ENTRY_LEN];
         self.dev.read(
             self.cluster_byte(dir_cluster) + DIR_ENTRY_LEN as u64,
             &mut raw,
         )?;
         if raw[..11] != *b"..         " || raw[11] & ATTR_DIRECTORY == 0 {
-            return Err(DriverError::DeviceFault);
+            return Ok(None);
         }
-        match (u32::from(le16(&raw, 20)) << 16) | u32::from(le16(&raw, 26)) {
-            0 => Ok(self.layout.root_cluster),
-            cluster if (2..=self.layout.max_cluster).contains(&cluster) => Ok(cluster),
-            _ => Err(DriverError::DeviceFault),
+        Ok(
+            match (u32::from(le16(&raw, 20)) << 16) | u32::from(le16(&raw, 26)) {
+                0 => Some(self.layout.root_cluster),
+                cluster if (2..=self.layout.max_cluster).contains(&cluster) => Some(cluster),
+                _ => None,
+            },
+        )
+    }
+
+    /// The stamps of directory `cluster`, which its entry in its parent
+    /// holds, as a listing of the parent reports them. The root, which no
+    /// entry names, has none; nor has a directory whose `..` is damaged or
+    /// names a parent not holding it, since a stat degrades rather than fails
+    /// over stamps it cannot reach.
+    fn dir_times(&mut self, cluster: u32) -> Result<NodeTimes, DriverError> {
+        if cluster == self.layout.root_cluster {
+            return Ok(NodeTimes::default());
         }
+        let Some(parent) = self.dotdot(cluster)? else {
+            return Ok(NodeTimes::default());
+        };
+        let mut walk = DirCursor::at(parent);
+        while let Some((_, raw)) = self.next_slot(&mut walk)? {
+            match raw[0] {
+                END_OF_DIR => break,
+                DELETED_ENTRY | b'.' => continue,
+                _ => {}
+            }
+            // A long-name fragment carries the volume-label bit too.
+            if raw[11] & (ATTR_VOLUME_ID | ATTR_DIRECTORY) == ATTR_DIRECTORY {
+                let entry = parse_short_entry(&raw);
+                if entry.cluster == cluster {
+                    return Ok(entry.times);
+                }
+            }
+        }
+        Ok(NodeTimes::default())
     }
 
     /// Whether directory `candidate` is `ancestor` itself or lives anywhere
@@ -2127,7 +2606,10 @@ impl<B: Block> Fat32<B> {
     /// the source entry, so the file's data clusters are never touched. A
     /// destination matching the source's own name is that entry re-spelled.
     /// Across directories a moved directory's `..` is repointed at the new
-    /// parent.
+    /// parent. A moved file takes the id of its new entry's place, and a pin
+    /// of it follows it there; a directory keeps its first cluster, and so its
+    /// id. A replaced destination a pin holds is kept, nameless, as a removal
+    /// keeps it.
     /// Replacement of an existing destination is therefore best-effort
     /// rather than atomic, matching the non-transactional create/remove
     /// paths the on-disk format allows.
@@ -2138,17 +2620,14 @@ impl<B: Block> Fat32<B> {
         dst_dir: NodeId,
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
-        if !node_is_dir(src_dir) || !node_is_dir(dst_dir) {
-            return Err(DriverError::Unsupported);
-        }
+        let src_cluster = self.entries_dir(src_dir)?;
+        let dst_cluster = self.entries_dir(dst_dir)?;
         if dst_name.is_empty() || dst_name.len() > MAX_NAME_BYTES {
             return Err(DriverError::LengthOutOfRange);
         }
         if dst_name == b"." || dst_name == b".." {
             return Err(DriverError::Unsupported);
         }
-        let src_cluster = node_cluster(src_dir);
-        let dst_cluster = node_cluster(dst_dir);
         let src_entry = self
             .find_child(src_cluster, src_name)?
             .ok_or(DriverError::NotFound)?;
@@ -2189,14 +2668,11 @@ impl<B: Block> Fat32<B> {
                     return Err(DriverError::DirectoryNotEmpty);
                 }
             }
-            if d.cluster >= 2 {
-                self.free_chain(d.cluster)?;
-            }
-            self.delete_entry_slots(d.first, d.slot_span)?;
+            self.unlink(&d)?;
         }
 
         // Link the moved node under its new name, then unlink the source.
-        self.write_dir_entry(
+        let placed = self.write_dir_entry(
             dst_cluster,
             dst_name,
             attr,
@@ -2204,6 +2680,11 @@ impl<B: Block> Fat32<B> {
             src_entry.size,
             src_entry.stamps,
         )?;
+        if let Err(err) = self.pins.moved(src_entry.short_offset, placed.short_offset) {
+            // The file's pin cannot follow it, so it keeps its old entry.
+            self.delete_entry_slots(placed.first, placed.span)?;
+            return Err(err);
+        }
         self.delete_entry_slots(src_entry.first, src_entry.slot_span)?;
 
         // Repoint the moved directory's `..` at its new parent cluster.
@@ -2222,7 +2703,7 @@ impl<B: Block> Fat32<B> {
 
 impl<B: Block> FilesystemRead for Fat32<B> {
     fn root(&self) -> NodeId {
-        pack_node(self.layout.root_cluster, true, 0)
+        dir_node(self.layout.root_cluster)
     }
 
     fn name_matching(&self) -> NameMatching {
@@ -2230,67 +2711,47 @@ impl<B: Block> FilesystemRead for Fat32<B> {
     }
 
     fn node_identity(&self) -> NodeIdentity {
+        // A pin, and its last unpin, change the id a file is reported under,
+        // and a rename moves its entry.
         NodeIdentity::ContentDerived
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
-        let node = live_node(node)?;
-        let allocated = self.allocation(node_cluster(node), node_is_dir(node), node_size(node))?;
-        // FAT stores timestamps only in the *parent's* directory entry, not
-        // in anything addressable by the packed node identity, so a stat by
-        // node cannot report them: `read_dir` is the one path that carries a
-        // FAT node's real stamps. Reporting the epoch here is the honest
-        // "not addressable by node" answer, never a fabricated wall time.
-        if node_is_dir(node) {
-            Ok(NodeInfo {
-                kind: NodeKind::Directory,
-                nlink: NodeInfo::SINGLE_NAME,
-                size: 0,
-                allocated,
-                times: NodeTimes::default(),
-                content_gen: NodeInfo::NO_CONTENT_GEN,
-            })
-        } else {
-            Ok(NodeInfo {
-                kind: NodeKind::RegularFile,
-                nlink: NodeInfo::SINGLE_NAME,
-                size: u64::from(node_size(node)),
-                allocated,
-                times: NodeTimes::default(),
-                content_gen: NodeInfo::NO_CONTENT_GEN,
-            })
-        }
+        let short_offset = match named(node).ok_or(DriverError::NotFound)? {
+            Named::Dir(cluster) => return self.dir_info(cluster),
+            Named::File(short_offset) => short_offset,
+            Named::Pinned(number) => match self.pins.kept(number)? {
+                KeptFile::Entry(short_offset) => short_offset,
+                KeptFile::Nameless(kept) => return self.nameless_info(&kept),
+            },
+        };
+        let entry = self.file_at(short_offset)?;
+        self.entry_info(&entry)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
-        if !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
-        if name.is_empty() || name.len() > MAX_NAME_BYTES {
+        let dir_cluster = cluster_of(dir)?;
+        if name.is_empty()
+            || name.len() > MAX_NAME_BYTES
+            || self.pins.removed(dir_cluster).is_some()
+        {
             return Err(DriverError::NotFound);
         }
-        let mut cursor = DirCursor::at(node_cluster(dir));
-        while let Some(entry) = self.next_entry(&mut cursor)? {
-            if entry.name[..entry.name_len].eq_ignore_ascii_case(name) {
-                return Ok(Self::entry_node(&entry));
-            }
-        }
-        Err(DriverError::NotFound)
+        self.find_child(dir_cluster, name)?
+            .map(|entry| self.reported(&entry))
+            .ok_or(DriverError::NotFound)
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
-        let file = live_node(file)?;
-        if node_is_dir(file) {
-            return Err(DriverError::Unsupported);
-        }
-        let size = u64::from(node_size(file));
+        let facts = self.file(file)?;
+        let size = u64::from(facts.size);
         if buf.is_empty() || offset >= size {
             return Ok(0);
         }
         let want = core::cmp::min(buf.len() as u64, size - offset);
         let want = usize::try_from(want).map_err(|_| DriverError::LengthOutOfRange)?;
 
-        let first = node_cluster(file);
+        let first = facts.cluster;
         if first < 2 {
             return Err(DriverError::DeviceFault);
         }
@@ -2338,18 +2799,16 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         _after: &[u8],
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError> {
-        if !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
+        let dir_cluster = cluster_of(dir)?;
         // The cursor is a logical slot index, resolved by walking this
         // directory's own chain, so no cursor reaches outside it. Slots never
         // move while in use — a deletion marks its slots in place and an
         // insertion takes a free run — so an entry present throughout a
         // listing is reached exactly once.
-        if cursor >= u64::from(MAX_DIR_SLOTS) {
+        if cursor >= u64::from(MAX_DIR_SLOTS) || self.pins.removed(dir_cluster).is_some() {
             return Ok(());
         }
-        let mut walk = DirCursor::at(node_cluster(dir));
+        let mut walk = DirCursor::at(dir_cluster);
         // A resumed batch starts on the slot its last entry took, to see
         // what holds it now.
         let resumed = cursor > 0;
@@ -2360,6 +2819,84 @@ impl<B: Block> FilesystemRead for Fat32<B> {
             return Ok(());
         }
         self.list_from(&mut walk, visit)
+    }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        let cluster = match named(dir).ok_or(DriverError::NotFound)? {
+            Named::Dir(cluster) => cluster,
+            Named::File(_) | Named::Pinned(_) => return Err(DriverError::Unsupported),
+        };
+        if cluster == self.layout.root_cluster {
+            return Ok(self.root());
+        }
+        if self.pins.removed(cluster).is_some() {
+            return Err(DriverError::NotFound);
+        }
+        self.live_dir(cluster)?;
+        self.dir_parent_cluster(cluster).map(dir_node)
+    }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        match named(node).ok_or(DriverError::NotFound)? {
+            Named::Dir(cluster) => {
+                if !self.pins.dirs.contains_key(u64::from(cluster)) {
+                    self.live_dir(cluster)?;
+                }
+                self.pins.pin_dir(cluster)
+            }
+            Named::File(short_offset) => {
+                if !self.pins.by_entry.contains_key(entry_slot(short_offset)) {
+                    self.file_at(short_offset)?;
+                }
+                self.pins.pin_file(short_offset)
+            }
+            Named::Pinned(number) => self.pins.hold_file(number),
+        }
+    }
+
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        match named(pinned).ok_or(DriverError::NotFound)? {
+            Named::Dir(cluster) => {
+                let unpinned = self.pins.unpin_dir(cluster)?;
+                if unpinned == Unpinned::Freed {
+                    self.free_chain(cluster)?;
+                }
+                Ok(unpinned)
+            }
+            Named::File(_) => Err(DriverError::NotFound),
+            Named::Pinned(number) => match self.pins.unpin_file(number)? {
+                None => Ok(Unpinned::Held),
+                Some(KeptFile::Entry(_)) => Ok(Unpinned::Released),
+                Some(KeptFile::Nameless(kept)) => {
+                    if kept.cluster >= 2 {
+                        self.free_chain(kept.cluster)?;
+                    }
+                    Ok(Unpinned::Freed)
+                }
+            },
+        }
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        self.pins.by_entry.clear();
+        let files = core::mem::take(&mut self.pins.files);
+        let dirs = core::mem::take(&mut self.pins.dirs);
+        let mut freed = Ok(());
+        for (_, pin) in &files {
+            if let KeptFile::Nameless(kept) = pin.kept {
+                if kept.cluster >= 2 {
+                    freed = freed.and(self.free_chain(kept.cluster));
+                }
+            }
+        }
+        for (key, held) in &dirs {
+            if held.removed.is_some() {
+                // Every key is a cluster `pin_dir` widened.
+                let cluster = u32::try_from(key).map_err(|_| DriverError::DeviceFault);
+                freed = freed.and(cluster.and_then(|cluster| self.free_chain(cluster)));
+            }
+        }
+        freed
     }
 }
 
@@ -2372,25 +2909,9 @@ impl<B: Block> Fat32<B> {
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError> {
         while let Some(entry) = self.next_entry(walk)? {
-            let info = NodeInfo {
-                kind: if entry.is_dir {
-                    NodeKind::Directory
-                } else {
-                    NodeKind::RegularFile
-                },
-                nlink: NodeInfo::SINGLE_NAME,
-                size: if entry.is_dir {
-                    0
-                } else {
-                    u64::from(entry.size)
-                },
-                allocated: self.allocation(entry.cluster, entry.is_dir, entry.size)?,
-                times: entry.times,
-                content_gen: NodeInfo::NO_CONTENT_GEN,
-            };
             let listed = DirEntry {
-                node: Self::entry_node(&entry),
-                info,
+                node: self.reported(&entry),
+                info: self.entry_info(&entry)?,
                 next_cursor: walk.pos.slot,
             };
             if visit(&listed, &entry.name[..entry.name_len]) == DirVisit::Stop {
@@ -2399,25 +2920,35 @@ impl<B: Block> Fat32<B> {
         }
         Ok(())
     }
+
+    /// The id `entry` is reported under: the token of a pinned file, else its
+    /// own.
+    fn reported(&self, entry: &ParsedEntry) -> NodeId {
+        match self.pins.by_entry.get(entry_slot(entry.short_offset)) {
+            Some(&number) if !entry.is_dir => token_node(number),
+            _ => Self::entry_node(entry),
+        }
+    }
 }
 
 impl<B: Block> FilesystemWrite for Fat32<B> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        self.create_child(dir, name, kind)
-    }
-
-    fn write_at(
+    fn create(
         &mut self,
         dir: NodeId,
         name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        self.write_file(dir, name, offset, data)
+        kind: NodeKind,
+        _record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
+        // FAT keeps no owner or mode, so the record has nowhere to go.
+        self.create_child(dir, name, kind)
     }
 
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        self.truncate_file(dir, name, size)
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        self.write_file(file, offset, data)
+    }
+
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        self.truncate_file(file, size)
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
@@ -2449,11 +2980,11 @@ impl<B: Block> FilesystemSecurity for Fat32<B> {
         // FAT32 stores no owner, mode, ACL, or capability gate, so every
         // node reports the one record an ownerless format stands in with;
         // the mount policy is what grants a foreign volume's users access.
-        Ok(NodeSecurity::unrecorded(self.node_info(node)?.kind))
+        Ok(NodeSecurity::unrecorded(self.node_kind(node)?))
     }
 
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
-        self.node_info(node).map(|_| false)
+        self.node_kind(node).map(|_| false)
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
@@ -2461,11 +2992,6 @@ impl<B: Block> FilesystemSecurity for Fat32<B> {
         // security record. Storing a silently-lossy record is forbidden,
         // so the write is refused whole (fail closed).
         Err(DriverError::Unsupported)
-    }
-
-    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
-        // FAT32 records no owner: a new node is owned as every node is.
-        self.node_info(node).map(|_| ())
     }
 }
 

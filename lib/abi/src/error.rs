@@ -389,8 +389,8 @@ pub enum Errno {
     /// second name for a directory outright so the tree stays a tree — the
     /// property that makes physical `..` resolution well-defined.
     ///
-    /// Linux answers a directory `link()` with `EPERM` for historical
-    /// reasons (a sufficiently privileged caller once could). TAIRiX has no
+    /// POSIX answers a directory `link()` with `EPERM`, for a caller without
+    /// the privilege an implementation may grant to make one. TAIRiX has no
     /// ambient root and no capability grants it, so reporting a *permission*
     /// refusal would imply a principal who could succeed; the honest answer
     /// is that the object's kind forecloses the operation.
@@ -433,17 +433,17 @@ pub enum Errno {
     /// will finish with it.
     Deadlock = 46,
 
-    /// The object a handle was part-way through is no longer the one its
-    /// path names, so the operation cannot continue where it stopped.
+    /// The handle no longer reaches what it named.
     ///
-    /// Reported by `fs_readdir` when the directory the listing began on was
-    /// removed or replaced since its last batch, even by one that took its
-    /// number, so one directory's position is never applied to another. A
-    /// directory renamed away with nothing in its place is
-    /// [`NotFound`](Self::NotFound). Restarting the listing
-    /// (`ReaddirFrom::Start`) reads whatever the path names now.
-    /// Distinct from [`NotFound`](Self::NotFound): something may well be at
-    /// the path, it is just not what the handle was reading.
+    /// A file descriptor answers it once its volume was detached by force,
+    /// recovered or re-inserted, or its view mount left the table: it stays
+    /// bound to the object it opened and never reaches whatever stands at its
+    /// path now. A block request, a display buffer and a volume attach answer
+    /// it when the generation or publication they were made for has been
+    /// replaced, and a removal or a move whose [`crate::NodeExpect`] the name
+    /// no longer meets answers it with nothing changed. Distinct from
+    /// [`NotFound`](Self::NotFound): something may well be at the path, it is
+    /// just not what the handle reached or the caller expected.
     Stale = 47,
     /// The bus has no periodic bandwidth left for what was asked of it.
     ///

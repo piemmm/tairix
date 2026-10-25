@@ -130,7 +130,7 @@ fn device_to_memory_waits_for_reads_and_increments_the_destination() {
 
 #[test]
 fn a_buffer_above_four_gibibytes_is_named_through_its_top_byte() {
-    let high = 0x8_4000_0000;
+    let high = 0x4_4000_0000;
     let model = Model::pi4();
     model.own(3, high, u64::from(PERIOD * PERIODS));
     let store = model.store();
@@ -138,7 +138,7 @@ fn a_buffer_above_four_gibibytes_is_named_through_its_top_byte() {
     let channel = running(&mut engine, 3, PLAIN, high, M2D);
     let block = model.loaded(3)[0];
     assert_eq!(block.source, high);
-    assert_eq!(block.source_info & 0xFF, 0x08);
+    assert_eq!(block.source_info & 0xFF, 0x04);
     model.advance(3, 3 * PERIOD + 8);
     assert_eq!(channel.position(), Ok(3 * PERIOD + 8));
 }
@@ -149,7 +149,7 @@ fn an_address_past_the_engines_reach_is_refused() {
     let store = model.store();
     let mut engine = Bcm2711Dma::new(&model, &store).expect("whole channels");
     let channel = engine.channel(1).expect("channel");
-    let beyond = 1 << 36;
+    let beyond = 1 << 35;
     assert_eq!(
         channel.prepare(&line(PLAIN), &transfer(beyond, M2D)),
         Err(DriverError::OutOfRange)

@@ -6,8 +6,9 @@
 //! anything is read out, so a table that is wrong anywhere is refused whole
 //! and never half-applied.
 //!
-//! Reference: ACPI Specification 6.5, *Virtual I/O Translation Table*; the
-//! endpoint arithmetic is the one Linux's `drivers/acpi/viot.c` applies.
+//! Reference: ACPI Specification 6.5, §5.2.32 *Virtual I/O Translation
+//! Table*; a PCI range's endpoint is `((segment − segment start) << 16) +
+//! (BDF − BDF start) + endpoint start` (ACPI 6.5 §5.2.32.3, PCI Range Node).
 
 use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT_ID};
 use tairix_arch_api::{DiscoveryError, HwNodeSink};

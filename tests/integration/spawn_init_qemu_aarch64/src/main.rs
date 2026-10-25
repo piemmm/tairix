@@ -1,5 +1,5 @@
-//! `plans/PI.md` P6c-3 QEMU integration test: boot the aarch64 (Raspberry
-//! Pi 4) `tairix-kernel` pipeline on the `virt` board, spawn PID 1 (`init`)
+//! `plans/PI.md` P6c-3 QEMU integration test: boot the aarch64
+//! `tairix-kernel` pipeline on the `virt` board, spawn PID 1 (`init`)
 //! into EL0, and report success to QEMU once `init` traps back.
 //!
 //! ## What this test asserts

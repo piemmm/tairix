@@ -39,6 +39,13 @@ informativo en el flujo de información estándar (fd 3); nunca cambia la
 salida ni el estado de salida. Un archivo que no se puede leer se informa
 en la salida de error y la ejecución continúa con el siguiente archivo.
 
+En un terminal, cada nombre que muestra la salida se entrecomilla donde
+un shell lo necesitaría, y cualquier carácter de control u otro carácter
+invisible que haya en él se escribe como secuencia de escape, de modo
+que un nombre no puede controlar ni reordenar la pantalla; GNU lo
+muestra sin cambios. Una tubería o un archivo recibe el nombre byte a
+byte.
+
 ## OPTIONS
 
 - `-c, --bytes <num>` — mostrar los últimos `num` bytes de cada archivo;
@@ -71,7 +78,7 @@ en la salida de error y la ejecución continúa con el siguiente archivo.
 
 - `0` — se mostró cada archivo (o se escribió la ayuda breve).
 - `1` — no se pudo leer un archivo, o no se pudo entregar la salida.
-- `2` — no se entendió la línea de órdenes.
+  Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

@@ -9,12 +9,12 @@
 //!
 //! x2APIC mode is entered only alongside interrupt remapping in extended
 //! mode, which alone can name its 32-bit destinations, or where firmware
-//! handed over in it; Linux makes the same choice, x2APIC without remapping
-//! being architecturally unsupported on bare metal.
+//! handed over in it: VT-d interrupt remapping is a prerequisite for x2APIC
+//! mode (Intel SDM Vol. 3A §13.12.6).
 //!
 //! References:
-//! * Intel SDM Volume 3A, Chapter 11 ("Advanced Programmable
-//!   Interrupt Controller (APIC)").
+//! * Intel SDM Volume 3A (order number 325384-093), Chapter 13 ("Advanced
+//!   Programmable Interrupt Controller (APIC)").
 //! * Intel 82093AA I/O Advanced Programmable Interrupt Controller
 //!   data sheet (the "IO-APIC" reference).
 
@@ -459,9 +459,9 @@ pub fn local_commands(destinations: impl IntoIterator<Item = u32>, low: u32) {
     let x2apic = x2apic();
     if x2apic {
         // A write to an x2APIC register is not serialising: without the
-        // fence an IPI can overtake the stores its target is sent to read,
-        // as Linux's `weak_wrmsr_fence` guards against. One fence orders
-        // them before every command after it.
+        // fence an IPI can overtake the stores its target is sent to read
+        // (Intel SDM Vol. 3A §13.12.3: MFENCE;LFENCE before the WRMSR). One
+        // fence orders them before every command after it.
         // SAFETY: `mfence; lfence` only orders this CPU's accesses.
         unsafe { core::arch::asm!("mfence", "lfence", options(nostack, preserves_flags)) };
     }

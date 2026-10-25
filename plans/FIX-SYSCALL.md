@@ -17,7 +17,7 @@ Read first (§15.18): `plans/WIRING.md` (Arch HAL parity), `plans/PI.md`
 
 ## Goal / invariants
 
-The correct model — the one Linux uses and the one that survives review:
+The correct model — the one that survives review:
 
 1. **Device interrupts are ENABLED for the body of every syscall**, on
    every Tier-1 target. Enable once, uniformly, in the arch trap glue —

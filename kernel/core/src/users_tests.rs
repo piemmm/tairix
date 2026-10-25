@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, NodeTimes,
+    NodeSecurity, NodeTimes, Unpinned,
 };
 use tairix_abi::{CapabilityId, DriverError};
 use tairix_users::{
@@ -79,6 +79,7 @@ impl FilesystemRead for MockRoot {
             ROOT | SYSTEM | SECURITY => Ok(NodeInfo {
                 kind: NodeKind::Directory,
                 nlink: 2,
+                ino: node.raw(),
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
@@ -91,6 +92,7 @@ impl FilesystemRead for MockRoot {
                     NodeKind::RegularFile
                 },
                 nlink: 1,
+                ino: USERS,
                 size: self.reported_size,
                 allocated: self.reported_size,
                 times: NodeTimes::default(),
@@ -107,6 +109,16 @@ impl FilesystemRead for MockRoot {
             (SECURITY, b"Users") if self.present => Ok(NodeId::from_raw(USERS)),
             (ROOT | SYSTEM | SECURITY, _) => Err(DriverError::NotFound),
             _ => Err(DriverError::Unsupported),
+        }
+    }
+
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        match dir.raw() {
+            ROOT | SYSTEM => Ok(NodeId::from_raw(ROOT)),
+            SECURITY => Ok(NodeId::from_raw(SYSTEM)),
+            USERS if self.present && self.is_dir => Ok(NodeId::from_raw(SECURITY)),
+            USERS if self.present => Err(DriverError::Unsupported),
+            _ => Err(DriverError::NotFound),
         }
     }
 
@@ -133,6 +145,18 @@ impl FilesystemRead for MockRoot {
         _after: &[u8],
         _visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError> {
+        Ok(())
+    }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.node_info(node).map(|_| node)
+    }
+
+    fn unpin(&mut self, _pinned: NodeId) -> Result<Unpinned, DriverError> {
+        Ok(Unpinned::Released)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
 }

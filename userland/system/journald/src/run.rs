@@ -139,7 +139,7 @@ mod program {
             // Ensure the per-stream directory exists. An `AlreadyExists`
             // return is the steady-state case and is not an error; any other
             // failure is surfaced.
-            let mkdir = tairix_rt::fs_mkdir(dir.as_bytes());
+            let mkdir = tairix_rt::fs_mkdir(dir.as_bytes(), tairix_abi::fs::FS_NEW_DIR_MODE);
             if mkdir < 0 {
                 let err = Errno::from_syscall(mkdir);
                 if err != Errno::AlreadyExists {
@@ -147,7 +147,8 @@ mod program {
                 }
             }
 
-            let file = tairix_rt::create_new(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let file = tairix_rt::create_new(path.as_bytes(), tairix_abi::fs::FS_NEW_FILE_MODE)
+                .map_err(Errno::from_syscall)?;
             let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
             if written != bytes.len() {
                 return Err(Errno::NoSpace);

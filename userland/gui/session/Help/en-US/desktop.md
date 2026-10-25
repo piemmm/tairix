@@ -33,7 +33,7 @@ never displaces a running session.
 ## EXIT STATUS
 
 - `0` — the short help was served.
-- `2` — the command line was not understood.
+- `1` — the command line was not understood.
 - any other non-zero code — the session could not start (no seat, no
   display service) or ended (the seat lease was lost); the reason is
   written to standard error.

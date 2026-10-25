@@ -77,8 +77,8 @@ gwybodaeth safonol gynghorol (fd 3).
 
 - `0` — cwblhawyd y rhediad (mae gwrthodiadau teipiedig y gweithwyr
   yn ganlyniadau disgwyliedig ac nid ydynt yn ei fethu).
-- `1` — methodd gweithiwr go iawn, neu ni ellid paratoi'r rhediad.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — methodd gweithiwr go iawn, neu ni ellid paratoi'r rhediad. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 - `130` / `143` — daeth `Ctrl-C` / `Terminate` â'r rhediad i ben, ar
   ôl datgymalu'r gweithwyr a dileu'r ffeiliau gwaith.
 

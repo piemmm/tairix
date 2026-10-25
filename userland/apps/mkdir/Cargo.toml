@@ -30,13 +30,15 @@ name = "tairix-mkdir-run"
 path = "src/run.rs"
 
 [dependencies]
-# The frozen user/kernel vocabulary: `Errno` for every seam refusal and
-# `FileKind` for the `-p` existing-directory decision.
+# The frozen user/kernel vocabulary: `Errno` for every seam refusal.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared tree seam: the operand's directory opened by path, each
+# directory made held, and a `-p` ancestor's child made in it.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
 # The `Output` stream the engine writes through.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
-# The one path-spelling grammar: `Path::prefix` spells each ancestor of an
-# operand, so `-p` walks parents without a second path parser.
+# The one path-spelling grammar: `steps` reads an operand's levels and how
+# each is spelled, so `-p` walks them without a second path parser.
 tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
@@ -53,6 +55,11 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # syscall-backed own-bundle `HelpSource` (`BundleHelp`), shared by every
 # command app.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+
+[dev-dependencies]
+# The shared in-memory tree, with its attacker hook, the engine's tests run
+# against.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

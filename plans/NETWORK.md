@@ -745,8 +745,9 @@ improvement, not test scaffolding):
   root controller and bounds it against its source count; a discovered
   value, never a board constant, host-tested). Fifth foundation in place: **the
   in-kernel bootstrap-floor driver catalogue is now per-architecture.**
-  `driver_catalog::IN_KERNEL_DRIVERS`/`IN_KERNEL_DRIVER_COUNT`/`EMMC2_PATH`
-  and `build.rs`'s signed-manifest set are gated on `kernel_isa`: the floor is
+  `driver_catalog::IN_KERNEL_DRIVERS`/`IN_KERNEL_DRIVER_COUNT` and their
+  signed manifests are generated per target from the instruction sets each
+  floor driver's own `Floor.toml` names: the floor is
   virtio-blk on every target, and the BCM2711 EMMC2 SD-host driver is floor
   **only on aarch64** (`tairix-drv-storage-emmc2` is now an aarch64-only
   runtime dependency). This fixed a live §2.20 defect — the Pi-only EMMC2
@@ -1196,7 +1197,7 @@ the whole is too large for one change and each leaves the tree working.
   checksum plus a per-frame TX offload descriptor when the egress
   interface negotiated `NetOffloads::TX_CSUM_TCP` and the segment is a
   single unfragmented frame. `checksum::Checksum::partial` is the folded
-  uncomplemented pseudo sum (Linux `CHECKSUM_PARTIAL`); `ChecksumMode`
+  uncomplemented pseudo sum (virtio-net's `NEEDS_CSUM` form, virtio 1.2 §5.1.6.2); `ChecksumMode`
   threads Full/Partial through `tcp::write_with_checksum`; `TxOffload`
   (`None`/`PartialChecksum{csum_start,csum_offset}`) rides on
   `StackOutput.frames` (now `Vec<TxFrame>`), threaded through
@@ -1241,8 +1242,7 @@ the whole is too large for one change and each leaves the tree working.
 - `Stack::send_tcp(dest, meta, payload, gso_size, now)` emits the
   super-segment as one IP packet — never IP-fragmented, never MTU-refused
   — tagged `TxOffload::TcpSegment`. The TCP checksum is the **length-0**
-  pseudo-header partial (`ChecksumMode::PartialGso`; Linux
-  `CHECKSUM_PARTIAL` for GSO), so the device adds each split segment's own
+  pseudo-header partial (`ChecksumMode::PartialGso`), so the device adds each split segment's own
   length. `TSO_MAX_PAYLOAD` bounds the one IP packet to the 16-bit length
   field for either family.
 - `virtio_net` negotiates `VIRTIO_NET_F_HOST_TSO4` **and** `TSO6` (both,
@@ -2102,10 +2102,10 @@ device-support crate (§2.22). Key facts for the next worker:
   (`kernel/arch/aarch64/src/platform.rs`) emitted the *raw* device-tree
   `interrupts` cell as the IRQ resource instead of the GICv2 INTID
   (`gic_intid_from_cells`: SPI + 32, PPI + 16). No driver read it before — the
-  virtio-MMIO nodes get their line from `hwdiscovery`'s `slot_irq`, EMMC2 from
-  `root_unlock::emmc2_spi`, the VL805 from a driver-minted resource — but
-  GENET parks on it, so it would have bound INTID 157 instead of 189 and never
-  woken. Now mapped through the one shared decoder; an unrepresentable
+  virtio-MMIO nodes get their line from `hwdiscovery`'s `slot_irq`, the VL805
+  from a driver-minted resource — but GENET and the EMMC2 floor bind it, so
+  GENET would have bound INTID 157 instead of 189 and never woken. Now mapped
+  through the one shared decoder; an unrepresentable
   specifier is dropped, never guessed.
 - **The DMA constraint** is read from the GENET's **parent bus** `dma-ranges`
   (`/scb`, `0..0xfc00_0000` on the Pi 4), because Devicetree Spec v0.4 §2.3.9
@@ -2117,7 +2117,7 @@ device-support crate (§2.22). Key facts for the next worker:
   for *any* node that carries it (`mac-address` first, then
   `local-mac-address`), never a board special case; an all-zero or
   wrong-length property is ignored.
-- **Fixture**: `raspi_like_arm` grew the `/scb` bus and the
+- **Fixture**: the aarch64 port's `raspi_like_arm` grew the `/scb` bus and the
   `ethernet@7d580000` node (both SPIs, the board MAC, the `mdio@e14` child),
   so discovery is proven to emit a Network node at CPU-physical `0xfd58_0000`
   with INTIDs 189/190, the SCB aperture, and the MAC.
@@ -2383,8 +2383,8 @@ opposite ("cannot re-fire in a storm"), which is why the defect survived.
   moves either counter, so the two cannot fall out of step. This is why the
   device's
   own completion threshold is programmed at its most responsive (GENET
-  writes `MBUF_DONE_THRESH = 1` on both rings, ring timer disarmed, as
-  Linux's `bcmgenet` does). Programmed, never inherited: it is the
+  writes `MBUF_DONE_THRESH = 1` on both rings, ring timer disarmed).
+  Programmed, never inherited: it is the
   comparison that raises the source, and a reset default of zero is
   satisfied permanently — a level condition draining cannot clear, and so
   a storm no masking can end.
@@ -2567,8 +2567,7 @@ arise.
   partial checksum must never reach the wire.
 - **Segmentation** — the GENET has no segmentation engine, so the driver
   splits the super-frame itself through `lib/net::txoffload::TcpSegmenter`
-  and hands each wire segment to the checksum engine (the shape Linux's
-  `net/core/tso.c` gives `mvneta`/`fec`). The segmenter is device-
+  and hands each wire segment to the checksum engine. The segmenter is device-
   independent, host-tested arithmetic — per-segment IP length and
   identification, IPv4 header checksum, TCP sequence, `FIN`/`PSH` on the
   last segment and `CWR` on the first, and the pseudo-header partial

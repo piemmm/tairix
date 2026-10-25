@@ -4,6 +4,10 @@
 //!
 //! Every response is decoded fail-closed: a header naming another response
 //! type, or a body shorter than its type implies, is the device's error.
+//!
+//! The device may answer a command before it has run it unless the command
+//! is fenced (§5.7.6.7): the driver fences every command it sends on the
+//! control queue, and an answer that does not carry its fence is a fault.
 
 use tairix_abi::driver::display::DamageRect;
 use tairix_abi::DriverError;
@@ -36,6 +40,10 @@ pub const EVENT_DISPLAY: u32 = 1;
 pub const CONFIG_EVENTS_READ: usize = 0;
 /// Byte offset of the device configuration's events the driver clears.
 pub const CONFIG_EVENTS_CLEAR: usize = 4;
+
+/// The header flag asking the device to answer a command only once it has
+/// run it, echoing the command's fence.
+const FLAG_FENCE: u32 = 1;
 
 /// The control queue's index.
 pub const CONTROL_QUEUE: u16 = 0;
@@ -215,8 +223,9 @@ pub fn update_cursor(scanout: u32, at: (u32, u32), id: u32, hot: (u32, u32)) -> 
 }
 
 /// Move scanout `scanout`'s pointer, resource `id` with its hot spot `hot`, to
-/// `at`. A device takes any cursor command's resource as whether the pointer
-/// is shown, so a move names the one shown, as Linux's driver sends it.
+/// `at`. The specification has a device ignore all but a move's position
+/// (virtio 1.2 §5.7.6), but QEMU's takes its resource as whether the pointer
+/// is shown, so a move names the one shown.
 #[must_use]
 pub fn move_cursor(scanout: u32, at: (u32, u32), id: u32, hot: (u32, u32)) -> Request {
     cursor(Command::MoveCursor, scanout, at, id, hot)
@@ -237,6 +246,31 @@ fn cursor(
     request.put(HEADER_LEN + 20, hot_x);
     request.put(HEADER_LEN + 24, hot_y);
     request
+}
+
+/// Fence the request whose header is `header` with `id`: the device answers
+/// it only once it has run it, echoing `id`.
+pub fn fence(header: &mut [u8; HEADER_LEN], id: u64) {
+    header[4..8].copy_from_slice(&FLAG_FENCE.to_le_bytes());
+    header[8..16].copy_from_slice(&id.to_le_bytes());
+}
+
+/// Whether `response` answers the command fenced with `id`.
+///
+/// # Errors
+///
+/// [`DriverError::DeviceFault`] for an answer that does not carry the fence:
+/// it does not say the command has run.
+pub fn fenced(response: &[u8], id: u64) -> Result<(), DriverError> {
+    let echoed = response
+        .get(8..16)
+        .and_then(|word| <[u8; 8]>::try_from(word).ok())
+        .map(u64::from_le_bytes);
+    if read32(response, 4)? & FLAG_FENCE != 0 && echoed == Some(id) {
+        Ok(())
+    } else {
+        Err(DriverError::DeviceFault)
+    }
 }
 
 fn read32(bytes: &[u8], at: usize) -> Result<u32, DriverError> {

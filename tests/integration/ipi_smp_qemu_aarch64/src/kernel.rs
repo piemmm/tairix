@@ -24,7 +24,7 @@ const NO_CPU: u32 = u32::MAX;
 /// Dense id of the first secondary core this test starts.
 const SECONDARY_CPU: CpuId = 1;
 
-/// Number of CPUs in the Raspberry Pi 4-shaped QEMU topology.
+/// Number of CPUs in the four-CPU QEMU topology.
 const CPU_COUNT: CpuId = 4;
 
 /// The GIC's slot for each of this test's CPUs.

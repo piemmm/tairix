@@ -41,9 +41,9 @@ unlike GNU `sleep` — it has no `--version` option.
 ## EXIT STATUS
 
 - `0` — the interval elapsed, or a requested short help was written.
-- `1` — writing the short help failed.
-- `2` — the command line was not understood (an unknown option, a missing
-  operand, or an invalid time interval).
+- `1` — writing the short help failed. A command line that was not
+  understood (an unknown option, a missing operand, or an invalid time
+  interval) exits `1` too.
 
 ## ENVIRONMENT
 

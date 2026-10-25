@@ -5,8 +5,8 @@
 //!
 //! Aliasing follows the PCI Express to PCI/PCI-X Bridge Specification rev. 1.0
 //! §2.3. Isolation follows ACS (PCI Express Base Specification rev. 5.0
-//! §6.12) the way Linux's IOMMU grouping applies it, with no device-specific
-//! exceptions: a function the rules cannot prove isolated is grouped.
+//! §6.12) with no device-specific exceptions: a function the rules cannot
+//! prove isolated is grouped.
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -288,7 +288,8 @@ impl Function {
     }
 
     /// Whether ACS keeps its peers from reaching it, and it them, below the
-    /// unit — Linux's `pci_acs_enabled`. A conventional function shares its
+    /// unit (PCI Express Base Specification rev. 5.0 §6.12). A conventional
+    /// function shares its
     /// bus with every other on it; bridges to and from conventional PCI and
     /// event collectors may never implement ACS; a port must enforce it; and
     /// any other function needs it only when it shares a slot.
@@ -493,11 +494,11 @@ impl Topology {
         self.parents[usize::from(bus)]
     }
 
-    /// Each function joins, as Linux's `pci_device_group` has it, the
+    /// Each function joins the
     /// furthest device its DMA cannot be told apart from — the topmost bridge
     /// that tags it, then every bridge above whose path to the root lacks
     /// ACS — and that device, sharing a slot without ACS, joins its
-    /// siblings that lack it too. Then, beyond Linux, it joins every function
+    /// siblings that lack it too. Then it joins every function
     /// below an open bus above it ([`Self::open_buses`]): a port that does not
     /// redirect its requests up lets them reach its siblings' windows, which
     /// grouping by the path alone would miss. A physical function joins every
@@ -643,8 +644,8 @@ impl Topology {
 /// What one bus's path to the root decides for every function on it.
 #[derive(Copy, Clone, Default)]
 struct Reach {
-    /// The bridge forwarding to the bus and every bridge above it isolate:
-    /// Linux's `pci_acs_path_enabled` from that bridge to the root.
+    /// The bridge forwarding to the bus and every bridge above it, up to the
+    /// root, isolate.
     isolated: bool,
     /// The bridge nearest the root that tags the bus's DMA.
     alias: Option<usize>,

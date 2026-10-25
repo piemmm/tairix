@@ -1,6 +1,7 @@
 //! The write-back flusher kthread: the kernel task that publishes a volume
 //! whose batched filesystem transaction has aged out
-//! (`plans/ARXFS-WRITEBACK.md` §10).
+//! (`plans/ARXFS-WRITEBACK.md` §10), and tells each driver of the pins its
+//! descriptors let go where its lock could not be waited for.
 //!
 //! The policy — which volume is due, in what order, and what a failed
 //! publish means — is arch-neutral and lives in
@@ -56,14 +57,16 @@ pub fn start(ctx: &'static (dyn InitSpawnCtx + Sync), audit: &'static (dyn Sink 
     }
 }
 
-/// Park until the soonest deadline any mounted volume published, publish
-/// every volume that is due, and repeat — for the life of the system.
+/// Park until the soonest deadline any mounted volume published, or until a
+/// dropped descriptor's pin awaits its release; reap and publish every volume
+/// that is due, and repeat — for the life of the system.
 ///
-/// The park is registered *before* it is taken, so a deadline published in
-/// the window between the scan and the park is not slept through: the
-/// scheduler's wake-pending token re-readies a task whose wake arrived before
-/// it committed. With nothing dirty the flusher registers no deadline,
-/// which arms no timer at all, so an idle machine takes no wakeups.
+/// The park is registered *before* it is taken, so a deadline published or a
+/// release queued in the window between the scan and the park is not slept
+/// through: the scheduler's wake-pending token re-readies a task whose wake
+/// arrived before it committed. With nothing dirty and nothing released the
+/// flusher registers no deadline, which arms no timer at all, so an idle
+/// machine takes no wakeups.
 fn flusher(yielder: &mut dyn YieldHandle, audit: &'static (dyn Sink + Sync)) {
     // Prove the park works before any driver is allowed to defer against it.
     let Some(parker) = Parker::current() else {

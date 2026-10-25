@@ -69,9 +69,9 @@ compris (par défaut 60 pour IPv4 et 80 pour IPv6).
 
 - `0` — le tracé s'est déroulé, qu'il ait atteint l'hôte ou non (ou l'aide
   courte a été écrite).
-- `2` — la ligne de commande n'a pas été comprise, la cible ne s'est pas
-  résolue, la socket n'a pas pu être ouverte, ou une sonde n'a pas pu être
-  envoyée.
+- `1` — la ligne de commande n'a pas été comprise.
+- `2` — la cible ne s'est pas résolue, la socket n'a pas pu être ouverte,
+  ou une sonde n'a pas pu être envoyée.
 
 ## ENVIRONMENT
 

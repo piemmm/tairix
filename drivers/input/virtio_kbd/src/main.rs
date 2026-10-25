@@ -7,8 +7,8 @@
 //! both buses QEMU can present: the single-aperture virtio-MMIO keyboard
 //! and its virtio-mouse pointer sibling on `-M virt` (aarch64/riscv64), and
 //! the scattered virtio-**PCI** `virtio-keyboard-pci` / `virtio-mouse-pci`
-//! on a PC (x86_64); the metal Pi 4 keyboard is the USB
-//! `drivers/input/usb_kbd`. One driver instance is spawned per discovered
+//! on a PC (x86_64); a USB keyboard is
+//! `drivers/input/usb_kbd`'s. One driver instance is spawned per discovered
 //! virtio-input node, and each instance serves whatever event stream its
 //! own device produces — the bind table cannot know whether a node is a
 //! keyboard or a mouse, so every instance runs both producers and the

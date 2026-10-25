@@ -35,11 +35,12 @@
 //!
 //! # Fail closed
 //!
-//! An unrecognised option, a missing operand, or a malformed `-w`/`-E`
-//! value is [`FlockError::Usage`] and **nothing is locked and nothing is
-//! run**. A lock that cannot be taken under `-n` or `-w` exits with the
-//! conflict code rather than running the command, so a script can never
-//! mistake "I could not get the lock" for "the command succeeded".
+//! An option `getopt` refuses ([`FlockError::Option`]), a missing operand,
+//! or a malformed `-w`/`-E` value ([`FlockError::Usage`]) means **nothing is
+//! locked and nothing is run**. A lock that cannot be taken under `-n` or
+//! `-w` exits with the conflict code rather than running the command, so a
+//! script can never mistake "I could not get the lock" for "the command
+//! succeeded".
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -53,10 +54,11 @@ use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_util::quote::quote_if_needed;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+use tairix_util::quote::quote_subject;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `flock`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `flock`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: flock [options] file command [argument...]
 
@@ -72,9 +74,6 @@ The lock covers the whole file and is held for as long as the command runs.
 `--` ends option parsing. Exit status is the command's own, or the conflict
 code when the lock could not be taken.
 ";
-
-/// Exit status for a usage error: nothing was locked and nothing ran.
-pub const EXIT_USAGE: i32 = 2;
 
 /// Exit status for a command word that resolved to nothing, matching the
 /// shell's own spelling for it.
@@ -140,6 +139,9 @@ pub struct Command<'a> {
 /// Why a run could not proceed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FlockError {
+    /// An option `getopt` refuses, worded as it words it; nothing was
+    /// locked and nothing ran.
+    Option(Refusal),
     /// The command line was malformed; nothing was locked and nothing ran.
     Usage,
     /// The lock could not be taken, for a reason waiting would not fix.
@@ -157,15 +159,16 @@ pub enum FlockError {
 impl fmt::Display for FlockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("bad usage"),
             Self::Lock(err) => write!(f, "cannot lock: {err}"),
             Self::NotFound(word) => {
-                write!(f, "{word}: command not found", word = quote_if_needed(word))
+                write!(f, "{word}: command not found", word = quote_subject(word))
             }
             Self::NotExecutable(word) => write!(
                 f,
                 "{word}: command not executable",
-                word = quote_if_needed(word)
+                word = quote_subject(word)
             ),
             Self::Run(err) => write!(f, "cannot run: {err}"),
             Self::Output => f.write_str("cannot write output"),
@@ -178,7 +181,7 @@ impl FlockError {
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Usage => EXIT_USAGE,
+            Self::Option(_) | Self::Usage => tairix_help::MISUSE,
             Self::NotFound(_) => EXIT_NOT_FOUND,
             Self::NotExecutable(_) => EXIT_NOT_EXECUTABLE,
             Self::Lock(_) | Self::Run(_) | Self::Output => 1,
@@ -223,19 +226,45 @@ pub trait Session {
 
 pub use tairix_util::output::Output;
 
-/// Parse an argument vector into a [`Command`].
+/// What each of `flock`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Shared,
+    Exclusive,
+    Nonblock,
+    Timeout,
+    ConflictCode,
+    Verbose,
+    Help,
+}
+
+/// `flock`'s options, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('s', &["shared"], Flag::Shared),
+    Opt::flag('x', &["exclusive"], Flag::Exclusive),
+    Opt::flag('n', &["nonblock", "nb"], Flag::Nonblock),
+    Opt::valued('w', &["timeout", "wait"], Flag::Timeout),
+    Opt::valued('E', &["conflict-code"], Flag::ConflictCode),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// Parse the arguments after the command word into a [`Command`].
 ///
-/// The vector is the inherited one, so element 0 is the program name and is
-/// skipped. Option parsing follows the GNU conventions the sibling tools
-/// use: clustered short flags (`-sn`), a `-w5` or `-w 5` value, `--long` and
-/// `--long=value` forms, and `--` ending option parsing so a file or command
-/// beginning with a dash stays reachable.
+/// The line is read as GNU's `getopt_long` reads it ([`Scan`]): clustered
+/// short flags (`-sn`), a value attached (`-w5`, `--timeout=5`) or following
+/// (`-w 5`), a long option by any unambiguous prefix, and `--` ending the
+/// options so a file or command beginning with a dash stays reachable. The
+/// first operand ends them too: the command's own arguments reach it
+/// verbatim. A help switch is honoured once the line has been read.
 ///
 /// # Errors
 ///
-/// [`FlockError::Usage`] for an unrecognised option, a missing or malformed
-/// value, a missing file, or a missing command word.
-pub fn parse<'a>(argv: &[&'a str]) -> Result<Command<'a>, FlockError> {
+/// * [`FlockError::Option`] — an option `getopt` refuses, in its words.
+/// * [`FlockError::Usage`] — a malformed value, a missing file, or a
+///   missing command word.
+pub fn parse<'a>(argv: &'a [&'a str]) -> Result<Command<'a>, FlockError> {
     let mut command = Command {
         help: false,
         mode: Mode::Exclusive,
@@ -246,52 +275,20 @@ pub fn parse<'a>(argv: &[&'a str]) -> Result<Command<'a>, FlockError> {
         argv: Vec::new(),
     };
     let mut operands: Vec<&'a str> = Vec::new();
-    let mut rest = argv.iter().skip(1);
-    let mut only_operands = false;
-
-    while let Some(&arg) = rest.next() {
-        // Everything after the first operand is the command and its own
-        // arguments, which must reach the command verbatim — `flock lock ls
-        // -l` passes `-l` to `ls`, it does not mean anything to `flock`.
-        if only_operands || !operands.is_empty() {
-            operands.push(arg);
-            continue;
-        }
-        match arg {
-            "--" => only_operands = true,
-            "-?" | "-h" | "--help" => command.help = true,
-            "-s" | "--shared" => command.mode = Mode::Shared,
-            "-x" | "--exclusive" => command.mode = Mode::Exclusive,
-            "-n" | "--nonblock" | "--nb" => command.wait = Wait::Never,
-            "-v" | "--verbose" => command.verbose = true,
-            "-w" | "--timeout" | "--wait" => {
-                let value = rest.next().ok_or(FlockError::Usage)?;
-                command.wait = Wait::Until(parse_seconds(value)?);
+    // `flock lock ls -l` passes `-l` to `ls`: it means nothing to `flock`.
+    for arg in Scan::new(OPTIONS, argv, Order::OperandsEnd) {
+        match arg.map_err(FlockError::Option)? {
+            Arg::Operand(operand) => operands.push(operand),
+            Arg::Opt(Flag::Help, _) => command.help = true,
+            Arg::Opt(Flag::Shared, _) => command.mode = Mode::Shared,
+            Arg::Opt(Flag::Exclusive, _) => command.mode = Mode::Exclusive,
+            Arg::Opt(Flag::Nonblock, _) => command.wait = Wait::Never,
+            Arg::Opt(Flag::Verbose, _) => command.verbose = true,
+            Arg::Opt(Flag::Timeout, value) => {
+                command.wait = Wait::Until(parse_seconds(value.ok_or(FlockError::Usage)?)?);
             }
-            "-E" | "--conflict-code" => {
-                let value = rest.next().ok_or(FlockError::Usage)?;
-                command.conflict_code = parse_code(value)?;
-            }
-            _ => {
-                if let Some(value) = arg.strip_prefix("--timeout=") {
-                    command.wait = Wait::Until(parse_seconds(value)?);
-                } else if let Some(value) = arg.strip_prefix("--conflict-code=") {
-                    command.conflict_code = parse_code(value)?;
-                } else if let Some(value) = arg.strip_prefix("-w") {
-                    command.wait = Wait::Until(parse_seconds(value)?);
-                } else if let Some(value) = arg.strip_prefix("-E") {
-                    command.conflict_code = parse_code(value)?;
-                } else if arg.starts_with("--") {
-                    // An unrecognised long option is refused, never taken as
-                    // the file name: `flock --nonblok lock cmd` would
-                    // otherwise lock a file called `--nonblok` and run
-                    // `lock cmd`, silently doing something else entirely.
-                    return Err(FlockError::Usage);
-                } else if let Some(cluster) = short_cluster(arg) {
-                    apply_cluster(cluster, &mut command)?;
-                } else {
-                    operands.push(arg);
-                }
+            Arg::Opt(Flag::ConflictCode, value) => {
+                command.conflict_code = parse_code(value.ok_or(FlockError::Usage)?)?;
             }
         }
     }
@@ -306,35 +303,6 @@ pub fn parse<'a>(argv: &[&'a str]) -> Result<Command<'a>, FlockError> {
         return Err(FlockError::Usage);
     }
     Ok(command)
-}
-
-/// The flag letters of a clustered short option (`-sn`), or `None` when
-/// `arg` is not one.
-fn short_cluster(arg: &str) -> Option<&str> {
-    let rest = arg.strip_prefix('-')?;
-    if rest.is_empty() || arg.starts_with("--") {
-        return None;
-    }
-    Some(rest)
-}
-
-/// Apply each letter of a clustered short option.
-///
-/// Only the value-free flags cluster: `-w` and `-E` take an operand, so a
-/// cluster naming one is a usage error rather than a silent guess about
-/// where the value went.
-fn apply_cluster(cluster: &str, command: &mut Command<'_>) -> Result<(), FlockError> {
-    for letter in cluster.chars() {
-        match letter {
-            's' => command.mode = Mode::Shared,
-            'x' => command.mode = Mode::Exclusive,
-            'n' => command.wait = Wait::Never,
-            'v' => command.verbose = true,
-            '?' | 'h' => command.help = true,
-            _ => return Err(FlockError::Usage),
-        }
-    }
-    Ok(())
 }
 
 /// Parse a `-w` operand: whole seconds, converted to the nanoseconds the

@@ -58,6 +58,7 @@
 //! [`PortRegistry`]: tairix_kernel_ipc::PortRegistry
 
 use alloc::boxed::Box;
+use alloc::collections::btree_map::Entry;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -65,6 +66,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use tairix_abi::fs::{FD_CWD, FS_INITIAL_UMASK};
 use tairix_abi::hwtree::{GrantedResource, HwResource, HwResourceKind};
 use tairix_abi::{
     DescriptorTable, Errno, LimitKind, OpenFlags, ProcId, ResourceLimit, STD_STREAM_COUNT,
@@ -78,7 +80,7 @@ use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_sync::{OnceCell, RwLock};
 
 use crate::filelock::OwnerId;
-use crate::fs::Listing;
+use crate::fs::{Authority, Cwd, FrozenAuthority, Listing, NodeHandle, Opened, Projection};
 use crate::pipe::PipeEnd;
 use crate::procspace::ProcessSpace;
 use crate::pty::{PtyMasterEnd, PtySlaveEnd};
@@ -253,7 +255,7 @@ pub struct AddressSpaceRegistry {
     /// shares the exact per-process lifecycle — allocated on `fs_open`,
     /// released on `fs_close`, and reclaimed when the task exits — and is
     /// keyed by the same [`ProcessId`]. A task with no entry owns no open
-    /// files, so [`Self::open_file`] resolves to `None` (fail closed: a
+    /// files, so [`Self::open_file_entry`] resolves to `None` (fail closed: a
     /// task can only operate on a descriptor it actually opened). Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's handles.
@@ -272,18 +274,13 @@ pub struct AddressSpaceRegistry {
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's accounting.
     mapped_aspace_bytes: BTreeMap<ProcessId, u64>,
-    /// Each live task's current working directory, as a normalised absolute
-    /// path (the `/`-view spelling). Co-located with the address space for
-    /// the same reason as [`Self::streams`]: it shares the exact per-process
-    /// lifecycle — inherited from the spawner at spawn, changed by `fs_chdir`,
-    /// and dropped when the task exits — and is keyed by the same [`ProcessId`].
-    /// A task with no entry resolves to the root `/` via [`Self::cwd`], so a
-    /// process whose directory was never established resolves relative paths
-    /// against the root rather than failing (a sensible, fail-safe default;
-    /// the root is the least-privileged starting point). Dropped at
-    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
-    /// task's directory.
-    cwds: BTreeMap<ProcessId, String>,
+    /// Each live task's working directory and file mode creation mask:
+    /// inherited from the spawner at spawn, changed by `fs_chdir` and
+    /// `fs_umask`, and dropped at [`withdraw`](Self::withdraw) so a reused id
+    /// inherits neither. A task with no entry stands at the view root under
+    /// [`FS_INITIAL_UMASK`], which is where PID 1 starts: the root is the
+    /// least-privileged place to resolve a relative path from.
+    fs: BTreeMap<ProcessId, ProcessFs>,
     /// Each live task's demand-paged file mappings (the regions `file_map`
     /// reserves and the fault path backs), keyed by region base. Co-located
     /// with the address space for the same reason as [`Self::open_files`]:
@@ -367,26 +364,21 @@ pub struct AddressSpaceRegistry {
     load_bases: BTreeMap<ProcessId, u64>,
 }
 
-/// What one live demand-paged file mapping of a task reads: the file behind
-/// it and the mapping-time identity the fault path reads under.
+/// What one live demand-paged file mapping of a task reads: the node behind
+/// it, held so the mapping outlives an unlink and a close, and where in the
+/// file the region starts.
 ///
 /// The reserved user-virtual extent is the registry's own key for the record,
-/// so it is not repeated here. `offset` is the page-aligned file byte offset
-/// of the region's first page. `uid` and `caps` are the caller's
-/// kernel-attested owner and effective capability snapshot at map time — the
-/// same authority model as an open descriptor, so a later capability
-/// revocation affects new mappings, not pages an existing mapping still
-/// faults in (exactly as it does not retract an open descriptor).
+/// so it is not repeated here. The handle keeps the descriptor's authority, so
+/// a fault reads as the descriptor would: as the process's live identity for
+/// its own descriptor, as the captured identity of a conferred or granted one.
 #[derive(Clone, Debug)]
 pub struct FileRegion {
-    /// Absolute path of the mapped file, as resolved at open time.
-    pub path: String,
+    /// The mapped node, with the authority of the descriptor it was mapped
+    /// from.
+    pub handle: NodeHandle,
     /// Page-aligned byte offset into the file of the region's first page.
     pub offset: u64,
-    /// The mapping caller's kernel-attested owning user id.
-    pub uid: u32,
-    /// The mapping caller's effective capability set at map time.
-    pub caps: CapabilitySet,
 }
 
 /// One live task's reserved user-stack span: the structural bound the
@@ -574,47 +566,8 @@ impl FaultLocality {
     }
 }
 
-/// A filesystem object delegated by another process, carrying the
-/// **grantor's** captured authority (`plans/CAPABILITY_USE.md` CU6 — the
-/// file picker's one-shot hand-off, and the spawn wiring of
-/// `plans/SPAWN.md` SP10).
-///
-/// Captured from the grantor's kernel-attested identity — never from
-/// anything the recipient supplies — so every later operation on the
-/// descriptor is re-authorised through the secured VFS under exactly the
-/// authority the grantor held, no more. The recipient's own identity and
-/// capability set never enter the check: the delegation *is* the authority,
-/// established by the grantor's user-mediated choice.
-///
-/// Two grantors mint one: `fd_grant`, whose hand-off is attenuated by mode
-/// and by extent, and the spawn wiring, where a parent confers its own
-/// unattenuated reach over a descriptor it already holds.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DelegatedFile {
-    /// The resolved absolute path the grantor's descriptor named.
-    pub path: String,
-    /// The grantor's uid, the identity every VFS re-check runs under.
-    pub uid: u32,
-    /// The grantor's effective capability set at grant time.
-    pub caps: CapabilitySet,
-    /// The highest file length the holder may write or truncate this
-    /// delegation to, or [`None`] for the grantor's own unbounded reach.
-    ///
-    /// An `fd_grant` delegation attenuates by extent as well as by mode, and
-    /// always carries `Some`: the grant refuses a writable delegation with no
-    /// ceiling (and pins a read-only one at zero), so an unbounded writable
-    /// *grant* is not representable. That is what lets a service hand a caller
-    /// direct, full-speed access to a file it owns without also handing it the
-    /// ability to fill the volume.
-    ///
-    /// A spawn wire carries `None`, because the parent is passing on a
-    /// descriptor it already holds rather than attenuating one: a shell
-    /// redirecting a child's output into a file confers the reach it has, and
-    /// any finite ceiling here would be a limit nothing asked for.
-    pub write_ceiling: Option<u64>,
-}
-
-/// What a descriptor resolves to: a filesystem path or a typed resource.
+/// What a descriptor resolves to: a node, the catalog, or a typed resource or
+/// stream.
 ///
 /// A descriptor's number is unique per process regardless of what backs it,
 /// so both filesystem opens ([`SyscallNumber::FS_OPEN`](tairix_abi::SyscallNumber))
@@ -622,14 +575,15 @@ pub struct DelegatedFile {
 /// ([`SyscallNumber::RESOURCE_OPEN`](tairix_abi::SyscallNumber)) draw from the
 /// single `OpenFileTable` allocator; the backing records which subsystem
 /// serves the handle's reads and writes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum OpenBacking {
-    /// A filesystem object at the given absolute path. The path is stored,
-    /// not a driver inode pointer, because the filesystem is owned by the
-    /// disk-owning service the handle ops route to; the kernel re-resolves
-    /// and re-authorises the path through the secured VFS on every operation
-    /// under the caller's real credentials (no cached authority).
-    Path(String),
+    /// A node of a mounted volume, bound to it for the descriptor's life: a
+    /// rename, a new file at its old name and the loss of its last name all
+    /// leave the descriptor on the object it opened.
+    Node(NodeHandle),
+    /// A view mount no volume serves — the catalog of attached volumes: a
+    /// directory nothing is stored in.
+    Catalog(Arc<Projection>),
     /// A typed non-filesystem resource (`plans/ALIAS.md`), resolved and
     /// authorised once at open time; its reads and writes route to the named
     /// kernel subsystem rather than the VFS.
@@ -640,12 +594,6 @@ pub enum OpenBacking {
     /// releases it and wakes the peer side — the [`PipeEnd`] handle owns
     /// that bookkeeping.
     Pipe(PipeEnd),
-    /// A filesystem object delegated one-shot by another process
-    /// (`fd_grant`/`fd_redeem`), operated on under the **grantor's**
-    /// captured identity rather than the holder's. Handed on, it keeps that
-    /// first grantor's authority ([`OpenFile::handed_on`]), so delegated
-    /// authority never widens and no chain forms.
-    Delegated(DelegatedFile),
     /// The master end of a kernel pseudo-terminal (`plans/PTY.md`): the
     /// terminal emulator's handle. A read drains the slave's cooked output;
     /// a write feeds the input discipline. Cloning the entry registers one
@@ -658,6 +606,30 @@ pub enum OpenBacking {
     /// mode); a write is cooked (`ONLCR`) onto the output. The slave is a
     /// *tty* for `stream_input_mode`/`terminal_size`/`console_foreground`.
     PtySlave(PtySlaveEnd),
+}
+
+impl OpenBacking {
+    /// The backing a fresh open's answer becomes: the opener's own descriptor
+    /// on the node it reached, or on the catalog.
+    #[must_use]
+    pub fn opened(opened: Opened) -> Self {
+        match opened {
+            Opened::Node {
+                node,
+                projection,
+                opened_as,
+                at_floor,
+                ..
+            } => Self::Node(NodeHandle {
+                node,
+                projection,
+                authority: Authority::Holder,
+                opened_as,
+                at_floor,
+            }),
+            Opened::Catalog(projection) => Self::Catalog(projection),
+        }
+    }
 }
 
 /// A readable stream end borrowed in place for the wait-set readiness peek:
@@ -699,7 +671,7 @@ enum WriteStreamEnd<'a> {
 #[derive(Debug)]
 pub struct Description {
     /// Bytes from the start, advanced by the sequential stream operations
-    /// for a path-backed entry. Positional `fs_read`/`fs_write` never touch
+    /// for a node-backed entry. Positional `fs_read`/`fs_write` never touch
     /// it; pipe and resource backings have no position and ignore it.
     cursor: AtomicU64,
     /// This description's advisory-lock identity. Minted eagerly so a lock
@@ -723,9 +695,9 @@ pub struct Description {
 ///
 /// The registry collects the waiters under its own lock and releases it
 /// before this wakes them, so the scheduler's locks are never taken while
-/// the lock registry's is held. Waking from a drop that runs under the
-/// address-space registry's write lock is the discipline a closing pipe end
-/// already follows.
+/// the lock registry's is held. A description is dropped with no
+/// address-space lock held: the registry hands every entry it removes back to
+/// its caller.
 impl Drop for Description {
     fn drop(&mut self) {
         if !crate::filelock::locks_present() {
@@ -755,17 +727,6 @@ pub struct OpenFile {
     description: Arc<Description>,
 }
 
-/// Two entries are equal when they name the same backing with the same
-/// flags. The description is deliberately not part of equality: it is
-/// mutable per-description state, not part of what the descriptor *is*.
-impl PartialEq for OpenFile {
-    fn eq(&self, other: &Self) -> bool {
-        self.backing == other.backing && self.flags == other.flags
-    }
-}
-
-impl Eq for OpenFile {}
-
 impl OpenFile {
     /// A fresh entry over `backing` with `flags`: a new open file
     /// description, its stream cursor at the start and its own lock owner.
@@ -783,94 +744,103 @@ impl OpenFile {
         }
     }
 
-    /// The path this descriptor can hand on as a **fresh** delegation
-    /// captured under its holder's own authority, and [`None`] when it
-    /// cannot be captured that way.
-    ///
-    /// Only a plain filesystem file the holder opened itself qualifies. A
-    /// pipe, pty, or resource carries an authority model of its own, and a
-    /// directory's authority is a listing and a namespace to open through,
-    /// rather than a byte range. A delegation declines too, but only because
-    /// re-capturing one under its *holder* would exercise it as the holder
-    /// rather than as the grantor; passing it on unchanged is legitimate and
-    /// is [`handed_on`](Self::handed_on)'s business.
-    ///
-    /// This is the one definition of that question, shared by `fd_grant`'s
-    /// one-shot hand-off and the spawn conferral, so the two can never
-    /// disagree about what may be captured.
+    /// The node this descriptor is bound to, or `None` for every other
+    /// backing.
     #[must_use]
-    pub fn delegatable_path(&self) -> Option<&str> {
+    pub fn node(&self) -> Option<&NodeHandle> {
         match &self.backing {
-            OpenBacking::Path(path) if !self.flags.contains(OpenFlags::DIRECTORY) => Some(path),
-            OpenBacking::Path(_)
+            OpenBacking::Node(handle) => Some(handle),
+            OpenBacking::Catalog(_)
             | OpenBacking::Resource(_)
             | OpenBacking::Pipe(_)
-            | OpenBacking::Delegated(_)
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }
     }
 
-    /// The delegation this descriptor may be handed on as — a plain file
-    /// captured under the holder's own `uid`/`caps`, or a delegation the
-    /// holder was itself given, passed on unchanged.
-    ///
-    /// Passing one on keeps the **first** grantor's captured authority, so a
-    /// relay can never widen what it was handed and no chain forms for a
-    /// later reader to have to follow: the minted record is the one the
-    /// relayer held. That is what lets the desktop hand an application's
-    /// chosen document to a live instance of another application without the
-    /// document ever being opened under the desktop's own, larger authority.
-    ///
-    /// `None` for everything [`delegatable_path`](Self::delegatable_path)
-    /// declines for an authority-model reason of its own: a pipe, a pty, a
-    /// resource, or a directory.
+    /// The node this descriptor reaches as its holder — one the holder opened
+    /// itself — or `None`: a descriptor conferred at spawn or granted acts as
+    /// the identity frozen into it, which an operation run as the holder must
+    /// not borrow.
     #[must_use]
-    pub fn handed_on(&self, uid: u32, caps: CapabilitySet) -> Option<DelegatedFile> {
-        match &self.backing {
-            OpenBacking::Delegated(file) => Some(file.clone()),
-            _ => self.delegatable_path().map(|path| DelegatedFile {
-                path: String::from(path),
-                uid,
-                caps,
-                write_ceiling: None,
-            }),
-        }
+    pub fn own_node(&self) -> Option<&NodeHandle> {
+        self.node()
+            .filter(|handle| matches!(handle.authority, Authority::Holder))
     }
 
-    /// This descriptor as a spawned child holds it: a plain file's path
-    /// backing re-expressed as a delegation under the spawning parent's `uid`
-    /// and `caps`, sharing the same open file description.
+    /// The file this descriptor may be granted on as, acting as user `uid`
+    /// with `caps` when it is the holder's own, writable up to `ceiling`
+    /// bytes: a new handle on the same node, never a directory.
     ///
-    /// A path backing is re-resolved and re-authorised on every operation
-    /// under *whoever holds it*, so a plain clone would have the child
-    /// exercise its parent's file under the child's own identity — which a
-    /// child that deliberately requests no filesystem capability does not
-    /// have, and which a child holding more than its parent should not get.
+    /// A descriptor that was itself conferred or granted is passed on with the
+    /// identity frozen into it, so a relay can never widen what it was handed
+    /// and no chain forms for a later reader to follow; a grant it carries
+    /// keeps the smaller of the two ceilings. A pipe, pty, resource, catalog or
+    /// directory has an authority model of its own and is `None`.
+    #[must_use]
+    pub fn handed_on(&self, uid: u32, caps: CapabilitySet, ceiling: u64) -> Option<NodeHandle> {
+        if self.flags.contains(OpenFlags::DIRECTORY) {
+            return None;
+        }
+        let handle = self.node()?;
+        let frozen = match &handle.authority {
+            Authority::Holder => FrozenAuthority {
+                uid,
+                caps,
+                grant: None,
+            },
+            Authority::Frozen(frozen) => frozen.clone(),
+        };
+        let held = frozen.grant.as_ref().and_then(|grant| grant.write_ceiling);
+        let write_ceiling = Some(held.map_or(ceiling, |held| held.min(ceiling)));
+        Some(NodeHandle {
+            node: handle.node.clone(),
+            projection: Arc::clone(&handle.projection),
+            authority: Authority::Frozen(FrozenAuthority {
+                grant: Some(crate::fs::Grant { write_ceiling }),
+                ..frozen
+            }),
+            opened_as: Arc::clone(&handle.opened_as),
+            at_floor: handle.at_floor,
+        })
+    }
+
+    /// This descriptor as a spawned child holds it: the same open file
+    /// description, with a file the parent opened itself acting as the
+    /// parent's `uid` and `caps` captured here.
     ///
-    /// Everything [`delegatable_path`](Self::delegatable_path) declines is
-    /// cloned unchanged, each for its own reason. A delegation is never
-    /// re-captured: widening one to the parent's reach would let a spawn
-    /// launder authority its holder was never given. A pipe, pty, and
-    /// resource have authority models of their own that do not read the
-    /// holder's identity. And a directory stays a path, so conferring can
-    /// never turn a listing into a byte delegation no matter who calls it —
-    /// the spawn wire refuses a directory outright before reaching here.
+    /// A file acts as its holder's live identity, so a plain clone would have
+    /// the child exercise its parent's file as the child — which a child that
+    /// deliberately requests no filesystem capability does not have, and
+    /// which a child holding more than its parent should not get.
     ///
-    /// A conferred descriptor is consequently not a lock or watch subject,
-    /// exactly as a granted one is not: those re-resolve under the holder's
-    /// own identity, which a delegation deliberately does not have.
+    /// Everything else is cloned unchanged, each for its own reason. A
+    /// conferred or granted descriptor is never re-captured: widening one to
+    /// the parent's reach would let a spawn launder authority its holder was
+    /// never given. A pipe, pty, resource and catalog have authority models of
+    /// their own that do not read the holder's identity. And a directory stays
+    /// the child's own, so conferring can never turn a listing into a
+    /// delegation — the spawn wire refuses a directory outright before
+    /// reaching here.
     #[must_use]
     pub fn conferred_to_child(&self, uid: u32, caps: CapabilitySet) -> Self {
-        let Some(path) = self.delegatable_path() else {
+        let Some(handle) = self
+            .own_node()
+            .filter(|_| !self.flags.contains(OpenFlags::DIRECTORY))
+        else {
             return self.clone();
         };
         Self {
-            backing: OpenBacking::Delegated(DelegatedFile {
-                path: String::from(path),
-                uid,
-                caps,
-                write_ceiling: None,
+            backing: OpenBacking::Node(NodeHandle {
+                node: handle.node.clone(),
+                projection: Arc::clone(&handle.projection),
+                authority: Authority::Frozen(FrozenAuthority {
+                    uid,
+                    caps,
+                    grant: None,
+                }),
+                opened_as: Arc::clone(&handle.opened_as),
+                at_floor: handle.at_floor,
             }),
             flags: self.flags,
             description: Arc::clone(&self.description),
@@ -878,7 +848,7 @@ impl OpenFile {
     }
 
     /// The pipe end this descriptor holds, or `None` when it is backed by
-    /// a path or resource.
+    /// a node or resource.
     #[must_use]
     pub fn pipe(&self) -> Option<&PipeEnd> {
         match &self.backing {
@@ -925,41 +895,23 @@ impl OpenFile {
         self.description.lock_owner
     }
 
-    /// The absolute filesystem path this descriptor resolves to **under the
-    /// holder's own credentials**, or `None` when it has none.
-    ///
-    /// A delegated backing answers `None`: it names a path, but that path is
-    /// operated on under a captured identity — the `fd_grant` grantor's, or
-    /// the parent's on a descriptor conferred at spawn — so an operation that
-    /// would run it under the holder's own must not see it. An operation that
-    /// handles both reaches for the authority rather than the path, and the
-    /// name says which of the two this is.
-    #[must_use]
-    pub fn own_path(&self) -> Option<&str> {
-        match &self.backing {
-            OpenBacking::Path(path) => Some(path),
-            OpenBacking::Resource(_)
-            | OpenBacking::Pipe(_)
-            | OpenBacking::Delegated(_)
-            | OpenBacking::PtyMaster(_)
-            | OpenBacking::PtySlave(_) => None,
-        }
-    }
-
-    /// Where this descriptor points, held by user `holder`: reached as the
-    /// holder for a path it opened, and as the captured identity for a
-    /// delegation. `None` for what is stored nowhere — a pipe, pty or
-    /// resource.
+    /// Where this descriptor points, held by user `holder`: the path it was
+    /// opened as, which a later rename can leave stale, and the user it acts
+    /// as — the holder for its own, the frozen identity for one conferred or
+    /// granted. `None` for what is stored nowhere — a pipe, pty or resource.
     #[must_use]
     pub fn location(&self, holder: u32) -> Option<FileLocation> {
         match &self.backing {
-            OpenBacking::Path(path) => Some(FileLocation {
-                path: path.clone(),
-                uid: holder,
+            OpenBacking::Node(handle) => Some(FileLocation {
+                path: String::from(&*handle.opened_as),
+                uid: match &handle.authority {
+                    Authority::Holder => holder,
+                    Authority::Frozen(frozen) => frozen.uid,
+                },
             }),
-            OpenBacking::Delegated(file) => Some(FileLocation {
-                path: file.path.clone(),
-                uid: file.uid,
+            OpenBacking::Catalog(projection) => Some(FileLocation {
+                path: crate::fs::spell(projection.path().components()).ok()?,
+                uid: holder,
             }),
             OpenBacking::Resource(_)
             | OpenBacking::Pipe(_)
@@ -1017,17 +969,128 @@ impl OpenFile {
     }
 
     /// The resource this descriptor resolves to, or `None` when it is backed
-    /// by a filesystem path or pipe.
+    /// by a node, the catalog, or a stream.
     #[must_use]
     pub fn resource(&self) -> Option<ResourceBacking> {
         match &self.backing {
             OpenBacking::Resource(backing) => Some(*backing),
-            OpenBacking::Path(_)
+            OpenBacking::Node(_)
+            | OpenBacking::Catalog(_)
             | OpenBacking::Pipe(_)
-            | OpenBacking::Delegated(_)
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }
+    }
+}
+
+/// A descriptor promised to an open that changes the filesystem before it can
+/// record one, so a refusal at the `open-files` bound comes before the change
+/// rather than after it. [`keep`](Self::keep) records into it; dropped unkept,
+/// it gives the descriptor back.
+#[must_use = "a promise dropped unkept gives its descriptor back"]
+pub struct FdPromise<'a> {
+    registry: &'a RwLock<AddressSpaceRegistry>,
+    task: ProcessId,
+    kept: bool,
+}
+
+impl<'a> FdPromise<'a> {
+    /// Promise `task`, the kernel-trusted caller, one more descriptor.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LimitExceeded`] at the task's `open-files` soft bound, its
+    /// promises in flight counted.
+    pub fn new(registry: &'a RwLock<AddressSpaceRegistry>, task: ProcessId) -> Result<Self, Errno> {
+        registry.write().promise_fd(task)?;
+        Ok(Self {
+            registry,
+            task,
+            kept: false,
+        })
+    }
+
+    /// Record `opened`, with the `flags` it was opened with, in the promised
+    /// descriptor, answering its number.
+    ///
+    /// # Errors
+    ///
+    /// A [`Refused`] holding the opened node, released once the registry's
+    /// lock is, when the number space has run out or the task is gone.
+    pub fn keep(mut self, opened: Opened, flags: OpenFlags) -> Result<u32, Refused> {
+        self.kept = true;
+        self.registry.write().keep_fd(self.task, opened, flags)
+    }
+}
+
+impl Drop for FdPromise<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.registry.write().withdraw_promise(self.task);
+        }
+    }
+}
+
+/// A descriptor the table had no room for, handed back so whatever it holds
+/// is released once the registry's lock is: bind the answer before `?`.
+#[derive(Debug)]
+pub struct Refused {
+    errno: Errno,
+    _backing: OpenBacking,
+}
+
+impl Refused {
+    /// Why the table refused it.
+    #[must_use]
+    pub const fn errno(&self) -> Errno {
+        self.errno
+    }
+}
+
+impl From<Refused> for Errno {
+    fn from(refused: Refused) -> Self {
+        refused.errno
+    }
+}
+
+/// A process's filesystem context: where its relative paths start, and what
+/// its creates withhold.
+#[derive(Clone, Debug)]
+pub struct ProcessFs {
+    /// The working directory, held by node.
+    cwd: Cwd,
+    /// The file mode creation mask, within the permission bits.
+    umask: u32,
+}
+
+impl ProcessFs {
+    /// What a process whose context was never established has.
+    fn initial() -> Self {
+        Self {
+            cwd: Cwd::Root,
+            umask: FS_INITIAL_UMASK,
+        }
+    }
+}
+
+/// What [`AddressSpaceRegistry::withdraw`] took from a process, released by
+/// the caller once the registry's lock is: closing a descriptor can wake
+/// another task, release a lock, or queue its node's pin for release.
+#[must_use]
+pub struct Withdrawn {
+    present: bool,
+    _files: Option<OpenFileTable>,
+    _regions: Option<RangeMap<u64, FileRegion>>,
+    _delegations: Option<TaskFdDelegations>,
+    _granted: Vec<PendingFdDelegation>,
+    _fs: Option<ProcessFs>,
+}
+
+impl Withdrawn {
+    /// Whether the registry held anything for the process.
+    #[must_use]
+    pub fn was_present(&self) -> bool {
+        self.present
     }
 }
 
@@ -1044,32 +1107,66 @@ impl OpenFile {
 #[derive(Default)]
 struct OpenFileTable {
     by_fd: BTreeMap<u32, OpenFile>,
+    /// No number from [`STD_STREAM_COUNT`] up to this one is free, so the
+    /// search for the lowest free number starts here: opening file after file
+    /// costs a lookup each, not a walk over every descriptor already held.
+    free_from: u32,
+    /// Descriptors promised to opens still changing the filesystem, held
+    /// against the table's bound so recording one is never refused for it.
+    promised: u64,
 }
 
 impl OpenFileTable {
-    /// Allocate the lowest free descriptor number at or above
-    /// [`STD_STREAM_COUNT`].
+    /// The `N` lowest free descriptor numbers at or above
+    /// [`STD_STREAM_COUNT`], for a table whose `open-files` soft bound is
+    /// `limit`. Nothing is recorded, so a refusal leaves the table holding
+    /// what it held.
     ///
-    /// Returns [`Errno::OutOfRange`] only when every descriptor number up to
-    /// [`u32::MAX`] is in use — a genuine exhaustion of the descriptor space,
+    /// # Errors
+    ///
+    /// [`Errno::LimitExceeded`] when `N` more would carry the table, the
+    /// standard streams and the descriptors promised to opens in flight
+    /// included, past `limit`; [`Errno::OutOfRange`] only when the numbers
+    /// below [`FD_CWD`], which names the working directory and no
+    /// descriptor, run out — a genuine exhaustion of the descriptor space,
     /// not a hand-picked ceiling.
-    fn alloc_fd(&self) -> Result<u32, Errno> {
-        // `STD_STREAM_COUNT` (4) fits a u32 with room to spare; the checked
-        // conversion makes that explicit rather than truncating.
-        let mut candidate = u32::try_from(STD_STREAM_COUNT).map_err(|_| Errno::OutOfRange)?;
-        for &fd in self.by_fd.keys() {
-            if fd < candidate {
-                continue;
-            }
-            if fd > candidate {
-                break;
-            }
-            // `fd == candidate`: this number is taken, try the next. Saturate
-            // at the top of the descriptor space and fail closed below rather
-            // than wrapping back into the reserved range.
-            candidate = candidate.checked_add(1).ok_or(Errno::OutOfRange)?;
+    fn alloc_fds<const N: usize>(&mut self, limit: u64) -> Result<[u32; N], Errno> {
+        let wanted = u64::try_from(N).map_err(|_| Errno::OutOfRange)?;
+        let held = u64::try_from(self.by_fd.len()).map_err(|_| Errno::OutOfRange)?;
+        if held.saturating_add(self.promised).saturating_add(wanted) > limit {
+            return Err(Errno::LimitExceeded);
         }
-        Ok(candidate)
+        let first = u32::try_from(STD_STREAM_COUNT).map_err(|_| Errno::OutOfRange)?;
+        let from = self.free_from.max(first);
+        let mut taken = self.by_fd.range(from..).map(|(&fd, _)| fd).peekable();
+        let mut free = (from..FD_CWD).filter(|fd| taken.next_if_eq(fd).is_none());
+        let mut numbers = [0u32; N];
+        for number in &mut numbers {
+            *number = free.next().ok_or(Errno::OutOfRange)?;
+        }
+        // Nothing below the lowest is free, whether or not the caller records
+        // these numbers.
+        if let Some(&lowest) = numbers.first() {
+            self.free_from = lowest;
+        }
+        Ok(numbers)
+    }
+
+    /// Record `file` at `fd`, handing back what stood there.
+    fn record(&mut self, fd: u32, file: OpenFile) -> Option<OpenFile> {
+        if fd == self.free_from {
+            self.free_from = fd.saturating_add(1);
+        }
+        self.by_fd.insert(fd, file)
+    }
+
+    /// Remove the descriptor at `fd`, handing it back.
+    fn remove(&mut self, fd: u32) -> Option<OpenFile> {
+        let removed = self.by_fd.remove(&fd)?;
+        if usize::try_from(fd).is_ok_and(|number| number >= STD_STREAM_COUNT) {
+            self.free_from = self.free_from.min(fd);
+        }
+        Some(removed)
     }
 }
 
@@ -1161,7 +1258,6 @@ struct TaskFdDelegations {
 /// could otherwise be redeemed by whoever draws that number next. The
 /// instance is minted once and never reissued, so the recorded value admits
 /// exactly the process the grantor chose.
-#[derive(Clone, PartialEq, Eq)]
 struct PendingFdDelegation {
     /// What redeeming it hands over.
     conveys: Conveyed,
@@ -1174,18 +1270,62 @@ struct PendingFdDelegation {
 }
 
 /// What a pending delegation hands its recipient.
-#[derive(Clone, PartialEq, Eq)]
 enum Conveyed {
     /// A descriptor on the file.
     File {
-        /// The path and the grantor's captured authority every later
-        /// operation on the redeemed descriptor is re-authorised under.
-        file: DelegatedFile,
+        /// The node, acting as the grantor's frozen identity with the grant's
+        /// ceiling.
+        handle: NodeHandle,
         /// The read/write access the grantor's own descriptor carried.
         flags: OpenFlags,
     },
     /// Where the grantor's descriptor points, and nothing to reach it with.
     Location(FileLocation),
+}
+
+impl PendingFdDelegation {
+    /// Whether this is pending to `recipient` from `grantor`, instance
+    /// `grantor_instance`.
+    fn between(&self, recipient: ProcId, grantor: ProcessId, grantor_instance: ProcId) -> bool {
+        self.recipient == recipient
+            && self.grantor == grantor
+            && self.grantor_instance == grantor_instance
+    }
+}
+
+impl Conveyed {
+    /// Whether this delegates `file` with `flags`: the same node, by its
+    /// registration and pinned id, acting as the same identity under the same
+    /// ceiling, with the same access — never compared by pointer or by the
+    /// spelling it was opened as.
+    fn delegates(&self, file: &NodeHandle, flags: OpenFlags) -> bool {
+        match self {
+            Self::File {
+                handle,
+                flags: held,
+            } => {
+                *held == flags
+                    && handle.node.instance() == file.node.instance()
+                    && handle.node.pinned() == file.node.pinned()
+                    && same_authority(&handle.authority, &file.authority)
+            }
+            Self::Location(_) => false,
+        }
+    }
+}
+
+/// Whether two authorities act as one identity with one grant ceiling.
+fn same_authority(a: &Authority, b: &Authority) -> bool {
+    match (a, b) {
+        (Authority::Holder, Authority::Holder) => true,
+        (Authority::Frozen(a), Authority::Frozen(b)) => {
+            a.uid == b.uid
+                && a.caps == b.caps
+                && a.grant.as_ref().map(|grant| grant.write_ceiling)
+                    == b.grant.as_ref().map(|grant| grant.write_ceiling)
+        }
+        _ => false,
+    }
 }
 
 /// Where a descriptor points: the absolute path it names, and the user it
@@ -1208,7 +1348,7 @@ pub struct FileLocation {
 /// without it a donor can drive an unbounded allocation in a victim's
 /// address-space record by repeating one delegation syscall. A grant matches
 /// on its live resource exactly, never on coverage, and a revoked one never
-/// absorbs a fresh grant; a file delegation matches whole.
+/// absorbs a fresh grant; a file delegation matches on what it conveys.
 ///
 /// Linear over a table whose length is, by virtue of this very check, the
 /// number of *distinct* authorities the task holds — a handful for a driver,
@@ -1316,7 +1456,7 @@ impl AddressSpaceRegistry {
             next_driver_generation: 1,
             open_files: BTreeMap::new(),
             mapped_aspace_bytes: BTreeMap::new(),
-            cwds: BTreeMap::new(),
+            fs: BTreeMap::new(),
             file_regions: BTreeMap::new(),
             anon_regions: BTreeMap::new(),
             stack_spans: BTreeMap::new(),
@@ -1460,14 +1600,15 @@ impl AddressSpaceRegistry {
             .is_some()
     }
 
-    /// Withdraw `task`'s entry, returning `true` if one was present.
+    /// Withdraw `task`'s entry, handing back what it held for the caller to
+    /// release once this registry's lock is.
     ///
     /// Idempotent: withdrawing a task with no entry (e.g. a kernel task
-    /// that never had a user address space, or a double `exit`) is a
-    /// no-op that returns `false`. The task's standard-stream descriptor
-    /// table is dropped at the same time so a reused id never inherits a
-    /// dead task's streams (fail closed).
-    pub fn withdraw(&mut self, task: ProcessId) -> bool {
+    /// that never had a user address space, or a double `exit`) takes
+    /// nothing. The task's standard-stream descriptor table is dropped at the
+    /// same time so a reused id never inherits a dead task's streams (fail
+    /// closed).
+    pub fn withdraw(&mut self, task: ProcessId) -> Withdrawn {
         // The leader thread's own per-thread records go with the process:
         // every *other* thread withdrew its own on the way out
         // ([`Self::withdraw_thread`]), and the leader never withdraws
@@ -1484,18 +1625,14 @@ impl AddressSpaceRegistry {
         let had_live_space = self.live_spaces.remove(&task).is_some();
         self.release_node(task);
         let had_node = self.loaded_nodes.remove(&task).is_some();
-        let had_files = self.open_files.remove(&task).is_some();
+        let files = self.open_files.remove(&task);
         let had_anon = self.mapped_aspace_bytes.remove(&task).is_some();
-        let had_cwd = self.cwds.remove(&task).is_some();
-        let had_file_regions = self.file_regions.remove(&task).is_some();
+        let fs = self.fs.remove(&task);
+        let regions = self.file_regions.remove(&task);
         let had_anon_regions = self.anon_regions.remove(&task).is_some();
         let had_load_base = self.load_bases.remove(&task).is_some();
-        let had_fd_delegations = self.fd_delegations.remove(&task).is_some();
-        // A cold pass rather than a reverse index, as for endpoint grants: an
-        // index would be a second record to keep in step with this one.
-        for pending in self.fd_delegations.values_mut() {
-            pending.by_handle.retain(|_, held| held.grantor != task);
-        }
+        let delegations = self.fd_delegations.remove(&task);
+        let granted = self.withdraw_granted(task);
         let had_task = self.tasks.remove(&task).is_some();
         // Reclaim post-condition (debug-only tripwire): every per-process map
         // has just had `task` removed, so no map may still hold it. A
@@ -1510,21 +1647,66 @@ impl AddressSpaceRegistry {
             "aspace: withdraw left task {task:?} in the {:?} map (reused-id debris or map corruption)",
             self.stale_task_entry(task)
         );
-        had_task
+        let present = had_task
             || had_pin
             || had_streams
             || had_limits
             || had_grants
             || had_live_space
             || had_node
-            || had_files
+            || files.is_some()
             || had_anon
-            || had_cwd
-            || had_file_regions
+            || fs.is_some()
+            || regions.is_some()
             || had_anon_regions
             || had_stack_span
             || had_load_base
-            || had_fd_delegations
+            || delegations.is_some();
+        Withdrawn {
+            present,
+            _files: files,
+            _regions: regions,
+            _delegations: delegations,
+            _granted: granted,
+            _fs: fs,
+        }
+    }
+
+    /// Take every pending delegation `grantor` minted to another process.
+    ///
+    /// A cold pass rather than a reverse index, as for endpoint grants: an
+    /// index would be a second record to keep in step with this one. Where
+    /// the heap cannot hold them for the caller they are released here: a
+    /// pending grant holds no open description, so its release takes only
+    /// its node's release queue.
+    fn withdraw_granted(&mut self, grantor: ProcessId) -> Vec<PendingFdDelegation> {
+        let minted = self
+            .fd_delegations
+            .values()
+            .map(|pending| {
+                pending
+                    .by_handle
+                    .values()
+                    .filter(|held| held.grantor == grantor)
+                    .count()
+            })
+            .sum();
+        let mut granted = Vec::new();
+        if granted.try_reserve_exact(minted).is_err() {
+            for pending in self.fd_delegations.values_mut() {
+                pending.by_handle.retain(|_, held| held.grantor != grantor);
+            }
+            return granted;
+        }
+        for pending in self.fd_delegations.values_mut() {
+            granted.extend(
+                pending
+                    .by_handle
+                    .extract_if(.., |_, held| held.grantor == grantor)
+                    .map(|(_, held)| held),
+            );
+        }
+        granted
     }
 
     /// Drop every **per-thread** record `thread` held: today its user-stack
@@ -1533,8 +1715,8 @@ impl AddressSpaceRegistry {
     /// Called when one thread of a multi-threaded process exits, and by
     /// [`withdraw`](Self::withdraw) for the process's leader. Process-scoped
     /// state (the address space, streams, limits, grants, open files, cwd,
-    /// mappings) deliberately survives: it belongs to the process and its
-    /// remaining threads still need it.
+    /// umask, mappings) deliberately survives: it belongs to the process and
+    /// its remaining threads still need it.
     ///
     /// Returns whether anything was recorded for `thread`, so an idempotent
     /// second teardown is distinguishable from the first.
@@ -1588,8 +1770,8 @@ impl AddressSpaceRegistry {
         if self.mapped_aspace_bytes.contains_key(&task) {
             return Some("mapped_aspace_bytes");
         }
-        if self.cwds.contains_key(&task) {
-            return Some("cwds");
+        if self.fs.contains_key(&task) {
+            return Some("fs");
         }
         if self.file_regions.contains_key(&task) {
             return Some("file_regions");
@@ -2203,33 +2385,65 @@ impl AddressSpaceRegistry {
         self.streams.get(&task).copied().unwrap_or_default()
     }
 
-    /// Establish `task`'s current working directory, a normalised absolute
-    /// path.
+    /// Establish `task`'s working directory, handing back the one it replaces
+    /// for the caller to release once this registry's lock is.
     ///
-    /// Called by the spawner to inherit the parent's directory into a child,
-    /// and by the `fs_chdir` handler once a target directory has been
-    /// resolved and authorised. Replacing an existing value is permitted, as
-    /// for [`Self::set_streams`]. A task whose directory is never established
-    /// resolves to the root `/` via [`Self::cwd`].
-    pub fn set_cwd(&mut self, task: ProcessId, cwd: String) {
-        self.cwds.insert(task, cwd);
+    /// Called by the `fs_chdir` handler once a target directory has been
+    /// resolved, authorised and pinned. A task whose directory is never
+    /// established stands at the view root via [`Self::cwd`].
+    pub fn set_cwd(&mut self, task: ProcessId, cwd: Cwd) -> Option<Cwd> {
+        match self.fs.entry(task) {
+            Entry::Occupied(mut held) => Some(core::mem::replace(&mut held.get_mut().cwd, cwd)),
+            Entry::Vacant(vacant) => {
+                vacant.insert(ProcessFs {
+                    cwd,
+                    umask: FS_INITIAL_UMASK,
+                });
+                None
+            }
+        }
     }
 
-    /// Resolve `task`'s current working directory, or the root `/` when none
-    /// is established.
+    /// `task`'s file mode creation mask, or [`FS_INITIAL_UMASK`] when none is
+    /// established.
+    #[must_use]
+    pub fn umask(&self, task: ProcessId) -> u32 {
+        self.fs.get(&task).map_or(FS_INITIAL_UMASK, |fs| fs.umask)
+    }
+
+    /// Set `task`'s file mode creation mask to `mask`, which the caller has
+    /// bounded to the permission bits, answering the mask it replaces.
+    pub fn set_umask(&mut self, task: ProcessId, mask: u32) -> u32 {
+        let fs = self.fs.entry(task).or_insert_with(ProcessFs::initial);
+        core::mem::replace(&mut fs.umask, mask)
+    }
+
+    /// Give `child` the mask `parent` has, and the working directory `start`
+    /// names or else `parent`'s, shared and pinning nothing new, as a spawn
+    /// does; handing back what `child` held for the caller to release once
+    /// this registry's lock is.
+    pub fn inherit_fs(
+        &mut self,
+        parent: ProcessId,
+        child: ProcessId,
+        start: Option<Cwd>,
+    ) -> Option<ProcessFs> {
+        let umask = self.umask(parent);
+        let cwd = start.unwrap_or_else(|| self.cwd(parent));
+        self.fs.insert(child, ProcessFs { cwd, umask })
+    }
+
+    /// `task`'s working directory, or the view root when none is
+    /// established: a clone sharing its pin, for a caller to resolve from and
+    /// release once this registry's lock is.
     ///
-    /// The `copy_path_in` resolver consults this to turn a caller's relative
-    /// path into an absolute one, and the `fs_getcwd` handler returns it. An
-    /// unregistered task (a kernel task, or one withdrawn on `exit`) resolves
-    /// to the root — a safe default that grants no authority of its own,
-    /// since every subsequent resolution is still authorised against the
+    /// An unregistered task (a kernel task, or one withdrawn on `exit`)
+    /// stands at the root — a safe default that grants no authority of its
+    /// own, since every resolution from it is still authorised against the
     /// caller's real credentials.
     #[must_use]
-    pub fn cwd(&self, task: ProcessId) -> String {
-        self.cwds
-            .get(&task)
-            .cloned()
-            .unwrap_or_else(|| String::from("/"))
+    pub fn cwd(&self, task: ProcessId) -> Cwd {
+        self.fs.get(&task).map_or(Cwd::Root, |fs| fs.cwd.clone())
     }
 
     /// Establish `task`'s full effective resource-limit set.
@@ -2563,33 +2777,45 @@ impl AddressSpaceRegistry {
     ///
     /// Called by the `file_map` handler *after* the producer has reserved
     /// the region, so every record names address space the task actually
-    /// holds. The record carries the mapping-time identity (uid + effective
-    /// capability snapshot) the fault path pages under — the same authority
-    /// model as an open descriptor, resolved once at map time. The `task`
-    /// argument is the kernel-trusted caller id.
+    /// holds. The record carries the node and the descriptor's authority,
+    /// which the fault path pages under. The `task` argument is the
+    /// kernel-trusted caller id.
     ///
     /// # Errors
     ///
     /// [`RangeError`] when the extent covers nothing, does not fit the
-    /// address space, or intersects a mapping the task already holds. A
-    /// reservation that overlaps a live one is refused rather than recorded:
-    /// two records over the same address would make a fault's backing, and a
-    /// release's extent, a choice between them.
+    /// address space, or intersects a mapping the task already holds, with
+    /// the region handed back for the caller to release once this registry's
+    /// lock is. A reservation that overlaps a live one is refused rather than
+    /// recorded: two records over the same address would make a fault's
+    /// backing, and a release's extent, a choice between them.
     pub fn record_file_region(
         &mut self,
         task: ProcessId,
         base: u64,
         pages: u64,
         region: FileRegion,
-    ) -> Result<(), RangeError> {
-        let extent = Self::page_extent(base, pages)?;
-        let refused = self
+    ) -> Result<(), (RangeError, FileRegion)> {
+        let extent = match Self::page_extent(base, pages) {
+            Ok(extent) => extent,
+            Err(err) => return Err((err, region)),
+        };
+        if self
+            .file_regions
+            .get(&task)
+            .is_some_and(|regions| regions.overlapping(extent.clone()).next().is_some())
+        {
+            return Err((RangeError::Overlap, region));
+        }
+        // Neither refusal can follow: a page extent spans at least a page, and
+        // nothing held overlaps it.
+        let recorded = self
             .file_regions
             .entry(task)
             .or_default()
             .insert(extent, region);
-        self.drop_empty_regions(task);
-        refused
+        debug_assert!(recorded.is_ok(), "a checked extent is recorded");
+        Ok(())
     }
 
     /// Whether `task` holds a file mapping of exactly `(base, len)`.
@@ -2854,29 +3080,70 @@ impl AddressSpaceRegistry {
         [file_end, anon_end, stack_top].into_iter().flatten().max()
     }
 
-    /// Open a file/directory descriptor for `task`, recording the resolved
-    /// absolute `path` and the `flags` it was opened with, and return the
-    /// freshly allocated descriptor number (at or above [`STD_STREAM_COUNT`]).
-    ///
-    /// Called by the `fs_open` handler *after* it has resolved and authorised
-    /// `path` through the secured VFS under the caller's real credentials, so
-    /// this records an already-checked handle; it grants no authority of its
-    /// own. The number is the lowest free descriptor, so a process that opens
-    /// and closes many files reuses numbers rather than exhausting the space.
-    /// The `task` argument is the kernel-trusted caller id, never a
-    /// caller-supplied value.
+    /// Promise `task` one more descriptor, held against its `open-files`
+    /// bound, for an open that changes the filesystem before it can record
+    /// one; [`FdPromise`] keeps or withdraws it.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] only when `task` already holds every descriptor
-    /// number up to [`u32::MAX`] (genuine exhaustion, fail closed).
-    pub fn open_file(
+    /// [`Errno::LimitExceeded`] when the table, its promises included, is at
+    /// the bound.
+    fn promise_fd(&mut self, task: ProcessId) -> Result<(), Errno> {
+        let limit = self.open_files_limit(task);
+        let table = self.open_files.entry(task).or_default();
+        let held = u64::try_from(table.by_fd.len()).map_err(|_| Errno::OutOfRange)?;
+        if held.saturating_add(table.promised) >= limit {
+            return Err(Errno::LimitExceeded);
+        }
+        table.promised += 1;
+        Ok(())
+    }
+
+    /// Record what an `fs_open` reached, with the `flags` it was opened
+    /// with, in the descriptor promised to `task`, answering its number (the
+    /// lowest free, at or above [`STD_STREAM_COUNT`]). The promise already
+    /// stood against the bound, so only the number space running out refuses
+    /// it.
+    ///
+    /// Called after the secured VFS resolved, authorised and pinned the node
+    /// under the caller's real credentials, so this records an already-checked
+    /// handle and grants no authority of its own.
+    ///
+    /// # Errors
+    ///
+    /// A [`Refused`] holding the opened node: [`Errno::OutOfRange`] when the
+    /// task holds every descriptor number below [`FD_CWD`], and
+    /// [`Errno::NotFound`] for a task whose table is gone.
+    fn keep_fd(
         &mut self,
         task: ProcessId,
-        path: String,
+        opened: Opened,
         flags: OpenFlags,
-    ) -> Result<u32, Errno> {
-        self.open_backed(task, OpenBacking::Path(path), flags)
+    ) -> Result<u32, Refused> {
+        let backing = OpenBacking::opened(opened);
+        let Some(table) = self.open_files.get_mut(&task) else {
+            return Err(Refused {
+                errno: Errno::NotFound,
+                _backing: backing,
+            });
+        };
+        table.promised -= 1;
+        match table.alloc_fds::<1>(u64::MAX) {
+            Ok([fd]) => {
+                table.record(fd, OpenFile::new(backing, flags));
+                Ok(fd)
+            }
+            Err(errno) => Err(Refused {
+                errno,
+                _backing: backing,
+            }),
+        }
+    }
+
+    fn withdraw_promise(&mut self, task: ProcessId) {
+        if let Some(table) = self.open_files.get_mut(&task) {
+            table.promised -= 1;
+        }
     }
 
     /// Open a descriptor for `task` backed by the resolved resource
@@ -2886,39 +3153,49 @@ impl AddressSpaceRegistry {
     /// Called by the `resource_open` handler *after* it has parsed and
     /// resolved the reference and confirmed the caller's authority, so this
     /// records an already-checked handle; it grants no authority of its own.
-    /// It shares the one `OpenFileTable` allocator with [`Self::open_file`]
-    /// so a resource descriptor's number cannot collide with a file's. The
-    /// `task` argument is the kernel-trusted caller id.
+    /// It draws from the one `OpenFileTable` allocator and `open-files` bound
+    /// a file's descriptor does ([`FdPromise`]), so a resource descriptor's
+    /// number cannot collide with a file's. The `task` argument is the
+    /// kernel-trusted caller id.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] only when `task` already holds every descriptor
-    /// number up to [`u32::MAX`] (genuine exhaustion, fail closed).
+    /// A [`Refused`] holding the backing: [`Errno::LimitExceeded`] at the
+    /// task's `open-files` soft bound, and [`Errno::OutOfRange`] when the
+    /// numbers below [`FD_CWD`] run out.
     pub fn open_resource(
         &mut self,
         task: ProcessId,
         backing: ResourceBacking,
         flags: OpenFlags,
-    ) -> Result<u32, Errno> {
-        self.open_backed(task, OpenBacking::Resource(backing), flags)
+    ) -> Result<u32, Refused> {
+        let backing = OpenBacking::Resource(backing);
+        let limit = self.open_files_limit(task);
+        let table = self.open_files.entry(task).or_default();
+        match table.alloc_fds::<1>(limit) {
+            Ok([fd]) => {
+                table.record(fd, OpenFile::new(backing, flags));
+                Ok(fd)
+            }
+            Err(errno) => Err(Refused {
+                errno,
+                _backing: backing,
+            }),
+        }
     }
 
-    /// Allocate the lowest free descriptor for `task` and record `backing`
-    /// with `flags`.
-    ///
-    /// The single insertion point shared by [`Self::open_file`] and
-    /// [`Self::open_resource`], so every descriptor — whatever backs it —
-    /// comes from one allocator and one number space.
-    fn open_backed(
-        &mut self,
-        task: ProcessId,
-        backing: OpenBacking,
-        flags: OpenFlags,
-    ) -> Result<u32, Errno> {
-        let table = self.open_files.entry(task).or_default();
-        let fd = table.alloc_fd()?;
-        table.by_fd.insert(fd, OpenFile::new(backing, flags));
-        Ok(fd)
+    /// The `open-files` soft bound `task`'s table is held to.
+    fn open_files_limit(&self, task: ProcessId) -> u64 {
+        self.limits(task).get(LimitKind::OpenFiles).soft
+    }
+
+    /// How many descriptors `task` holds, the standard streams wired into its
+    /// table included: its `open-files` usage.
+    #[must_use]
+    pub fn open_file_count(&self, task: ProcessId) -> u64 {
+        self.open_files.get(&task).map_or(0, |table| {
+            u64::try_from(table.by_fd.len()).unwrap_or(u64::MAX)
+        })
     }
 
     /// Mint a one-shot file delegation **to** `recipient`, returning the
@@ -2926,7 +3203,7 @@ impl AddressSpaceRegistry {
     /// (`fd_grant`, `plans/CAPABILITY_USE.md` CU6).
     ///
     /// Called by the `fd_grant` handler *after* it has resolved the
-    /// grantor's own descriptor and captured the grantor's identity into
+    /// grantor's own descriptor and frozen the grantor's identity into
     /// `file`, so this records an already-checked delegation; it grants no
     /// authority of its own. The handle follows the [`Self::mint_grant`]
     /// discipline — idempotent (re-granting a delegation still pending
@@ -2934,7 +3211,9 @@ impl AddressSpaceRegistry {
     /// meaningful only when presented by `recipient` itself
     /// ([`Self::redeem_fd_delegation`] is keyed by the kernel-trusted
     /// caller id, so another task presenting the same numeric value
-    /// resolves to nothing).
+    /// resolves to nothing). `file` is cloned only when a fresh delegation
+    /// is recorded, so nothing the caller hands in is released under this
+    /// registry's lock.
     ///
     /// `instance` is the process instance the grantor named, recorded so
     /// redemption admits that process and no later holder of `recipient`.
@@ -2953,13 +3232,22 @@ impl AddressSpaceRegistry {
         instance: ProcId,
         grantor: ProcessId,
         grantor_instance: ProcId,
-        file: DelegatedFile,
+        file: &NodeHandle,
         flags: OpenFlags,
     ) -> Result<u64, Errno> {
-        self.mint_pending(
-            recipient,
+        let entry = self.fd_delegations.entry(recipient).or_default();
+        if let Some(handle) = existing_handle(&entry.by_handle, |held| {
+            held.between(instance, grantor, grantor_instance) && held.conveys.delegates(file, flags)
+        }) {
+            return Ok(handle);
+        }
+        Self::mint_pending(
+            entry,
             PendingFdDelegation {
-                conveys: Conveyed::File { file, flags },
+                conveys: Conveyed::File {
+                    handle: file.clone(),
+                    flags,
+                },
                 recipient: instance,
                 grantor,
                 grantor_instance,
@@ -2982,8 +3270,15 @@ impl AddressSpaceRegistry {
         grantor_instance: ProcId,
         location: FileLocation,
     ) -> Result<u64, Errno> {
-        self.mint_pending(
-            recipient,
+        let entry = self.fd_delegations.entry(recipient).or_default();
+        if let Some(handle) = existing_handle(&entry.by_handle, |held| {
+            held.between(instance, grantor, grantor_instance)
+                && matches!(&held.conveys, Conveyed::Location(told) if *told == location)
+        }) {
+            return Ok(handle);
+        }
+        Self::mint_pending(
+            entry,
             PendingFdDelegation {
                 conveys: Conveyed::Location(location),
                 recipient: instance,
@@ -2993,25 +3288,22 @@ impl AddressSpaceRegistry {
         )
     }
 
+    /// Record `pending` in a recipient's table, which held no delegation
+    /// conveying the same.
+    ///
+    /// A delegation still pending conveys exactly one right: "open this node
+    /// as this frozen identity", or "know where it is". Re-granting it while
+    /// the first is unredeemed adds nothing — descriptors here carry no
+    /// position (every read names its own offset), so a second identical
+    /// descriptor would be indistinguishable from the first — and letting it
+    /// append would let a grantor grow the recipient's kernel-side table
+    /// without limit by repeating one call, so the callers hand back the
+    /// pending handle instead. Once redeemed the entry is consumed, so a later
+    /// grant of the same file legitimately mints afresh.
     fn mint_pending(
-        &mut self,
-        recipient: ProcessId,
+        entry: &mut TaskFdDelegations,
         pending: PendingFdDelegation,
     ) -> Result<u64, Errno> {
-        let entry = self.fd_delegations.entry(recipient).or_default();
-        // A delegation still pending conveys exactly one right: "open this
-        // path under this captured authority", or "know where it is".
-        // Re-granting it while the first is unredeemed adds nothing —
-        // descriptors here carry no position (every read names its own
-        // offset), so a second identical descriptor would be
-        // indistinguishable from the first — and letting it append would let
-        // a grantor grow the recipient's kernel-side table without limit by
-        // repeating one call. Hand back the pending handle instead; once
-        // redeemed the entry is consumed, so a later grant of the same file
-        // legitimately mints afresh.
-        if let Some(handle) = existing_handle(&entry.by_handle, |held| *held == pending) {
-            return Ok(handle);
-        }
         let charged = entry
             .by_handle
             .values()
@@ -3034,10 +3326,12 @@ impl AddressSpaceRegistry {
     ///
     /// One-shot with fail-closed atomicity: the delegation is consumed
     /// only when the descriptor allocation succeeds, so a refused
-    /// redemption (descriptor-space exhaustion) leaves the grant intact
-    /// for a retry after the holder closes descriptors, and a redeemed
-    /// handle can never be redeemed twice. `task` and `instance` are both
-    /// the kernel-trusted caller identity, never caller-supplied values.
+    /// redemption (the `open-files` bound, or descriptor-space exhaustion)
+    /// leaves the grant intact for a retry after the holder closes
+    /// descriptors, and a redeemed handle can never be redeemed twice. The
+    /// delegated node moves into the new descriptor, so nothing is released
+    /// under this registry's lock. `task` and `instance` are both the
+    /// kernel-trusted caller identity, never caller-supplied values.
     ///
     /// `instance` is what makes the delegation land on the process the
     /// grantor chose: a task id is redrawn once its task is gone, so a
@@ -3056,6 +3350,8 @@ impl AddressSpaceRegistry {
     ///   instance of `task`'s number, or minted by other than `from` —
     ///   forgery and staleness both answer exactly like absence, so the
     ///   handle space leaks nothing, and the delegation stays pending).
+    /// * [`Errno::LimitExceeded`] — `task` holds its `open-files` soft bound
+    ///   of descriptors; the grant stays pending.
     /// * [`Errno::OutOfRange`] — descriptor-space exhaustion, or a handle
     ///   telling a location rather than delegating a file; the grant stays
     ///   pending.
@@ -3066,18 +3362,29 @@ impl AddressSpaceRegistry {
         handle: u64,
         from: Option<ProcId>,
     ) -> Result<u32, Errno> {
-        let Conveyed::File { file, flags } = self
-            .pending_for(task, instance, handle, from)?
-            .conveys
-            .clone()
+        let Conveyed::File { flags, .. } = self.pending_for(task, instance, handle, from)?.conveys
         else {
             return Err(Errno::OutOfRange);
         };
-        let fd = self.open_backed(task, OpenBacking::Delegated(file), flags)?;
-        // The allocation succeeded; consume the grant (one-shot). The
-        // entry provably exists — it was read above under the same
-        // exclusive borrow — so the removes cannot miss.
-        self.consume_pending(task, handle);
+        let limit = self.open_files_limit(task);
+        let [fd] = self
+            .open_files
+            .entry(task)
+            .or_default()
+            .alloc_fds::<1>(limit)?;
+        // The entry provably exists — it was read above under the same
+        // exclusive borrow — and conveys a file, so this cannot miss.
+        let Some(PendingFdDelegation {
+            conveys: Conveyed::File { handle: node, .. },
+            ..
+        }) = self.consume_pending(task, handle)
+        else {
+            return Err(Errno::NotFound);
+        };
+        self.open_files
+            .entry(task)
+            .or_default()
+            .record(fd, OpenFile::new(OpenBacking::Node(node), flags));
         Ok(fd)
     }
 
@@ -3110,15 +3417,20 @@ impl AddressSpaceRegistry {
             return Err(Errno::OutOfRange);
         };
         if location.uid != uid {
-            self.consume_pending(task, handle);
+            // A location holds only its path, which is released at once.
+            drop(self.consume_pending(task, handle));
             return Err(Errno::PermissionDenied);
         }
         if location.path.len() > cap {
             return Err(Errno::BufferTooSmall);
         }
-        let path = location.path.clone();
-        self.consume_pending(task, handle);
-        Ok(path)
+        match self.consume_pending(task, handle) {
+            Some(PendingFdDelegation {
+                conveys: Conveyed::Location(location),
+                ..
+            }) => Ok(location.path),
+            _ => Err(Errno::NotFound),
+        }
     }
 
     /// The delegation `handle` minted to `task`'s `instance`, by `from` where
@@ -3141,39 +3453,42 @@ impl AddressSpaceRegistry {
             .ok_or(Errno::NotFound)
     }
 
-    fn consume_pending(&mut self, task: ProcessId, handle: u64) {
-        if let Some(entry) = self.fd_delegations.get_mut(&task) {
-            entry.by_handle.remove(&handle);
-        }
+    /// Remove the delegation `handle` minted to `task`, handing it back.
+    fn consume_pending(&mut self, task: ProcessId, handle: u64) -> Option<PendingFdDelegation> {
+        self.fd_delegations
+            .get_mut(&task)?
+            .by_handle
+            .remove(&handle)
     }
 
     /// Create a pipe for `task`, allocating a read-end and a write-end
     /// descriptor in its open table, and return `(read_fd, write_fd)`
     /// (`plans/SPAWN.md` SP10).
     ///
-    /// Both descriptors draw from the same allocator as
-    /// [`Self::open_file`] / [`Self::open_resource`]. All-or-nothing: if
-    /// the second descriptor cannot be allocated the first is released
-    /// (its dropped end closes the side, so the pipe never leaks a
-    /// half-open pair). The `task` argument is the kernel-trusted caller
-    /// id.
+    /// Both descriptors draw from the same allocator and bound as
+    /// [`FdPromise`] / [`Self::open_resource`]. Both numbers are
+    /// found before the pipe is made, so a refusal makes nothing. The `task`
+    /// argument is the kernel-trusted caller id.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] only on genuine descriptor-space exhaustion
-    /// (fail closed).
+    /// [`Errno::LimitExceeded`] when two more descriptors would carry `task`
+    /// past its `open-files` soft bound; [`Errno::OutOfRange`] on genuine
+    /// descriptor-space exhaustion (fail closed).
     pub fn open_pipe(&mut self, task: ProcessId) -> Result<(u32, u32), Errno> {
+        let limit = self.open_files_limit(task);
+        let table = self.open_files.entry(task).or_default();
+        let [read_fd, write_fd] = table.alloc_fds::<2>(limit)?;
         let (read_end, write_end) = crate::pipe::Pipe::create();
-        let read_fd = self.open_backed(task, OpenBacking::Pipe(read_end), OpenFlags::READ)?;
-        match self.open_backed(task, OpenBacking::Pipe(write_end), OpenFlags::WRITE) {
-            Ok(write_fd) => Ok((read_fd, write_fd)),
-            Err(err) => {
-                // Unwind the half-built pair: dropping the read entry
-                // closes its end through the handle's own release path.
-                self.close_file(task, read_fd);
-                Err(err)
-            }
-        }
+        table.record(
+            read_fd,
+            OpenFile::new(OpenBacking::Pipe(read_end), OpenFlags::READ),
+        );
+        table.record(
+            write_fd,
+            OpenFile::new(OpenBacking::Pipe(write_end), OpenFlags::WRITE),
+        );
+        Ok((read_fd, write_fd))
     }
 
     /// Create a pseudo-terminal of geometry `size` for `task`, allocating a
@@ -3183,43 +3498,39 @@ impl AddressSpaceRegistry {
     /// Both descriptors are opened `READ | WRITE`: the master both writes
     /// keystrokes and reads the slave's output, and the slave both reads
     /// input and writes program output (so the one slave descriptor can be
-    /// wired behind a child's fd 0, 1, and 2). Both draw from the same
-    /// allocator [`Self::open_pipe`] uses. All-or-nothing: if the second
-    /// descriptor cannot be allocated the first is released (its dropped
-    /// end closes the side, so the pty never leaks a half-open pair). The
-    /// `task` argument is the kernel-trusted caller id.
+    /// wired behind a child's fd 0, 1, and 2). Both draw from the allocator
+    /// and bound [`Self::open_pipe`] uses, and both numbers are found before
+    /// the pty is made, so a refusal makes nothing. The `task` argument is
+    /// the kernel-trusted caller id.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] only on genuine descriptor-space exhaustion
-    /// (fail closed).
+    /// As [`Self::open_pipe`].
     pub fn open_pty(
         &mut self,
         task: ProcessId,
         size: tairix_abi::TerminalSize,
     ) -> Result<(u32, u32), Errno> {
+        let limit = self.open_files_limit(task);
+        let table = self.open_files.entry(task).or_default();
+        let [master_fd, slave_fd] = table.alloc_fds::<2>(limit)?;
         let (master, slave) = crate::pty::Pty::create(size);
         let rw = OpenFlags::READ.union(OpenFlags::WRITE);
-        let master_fd = self.open_backed(task, OpenBacking::PtyMaster(master), rw)?;
-        match self.open_backed(task, OpenBacking::PtySlave(slave), rw) {
-            Ok(slave_fd) => Ok((master_fd, slave_fd)),
-            Err(err) => {
-                // Unwind the half-built pair: dropping the master entry
-                // closes its end through the handle's own release path.
-                self.close_file(task, master_fd);
-                Err(err)
-            }
-        }
+        table.record(master_fd, OpenFile::new(OpenBacking::PtyMaster(master), rw));
+        table.record(slave_fd, OpenFile::new(OpenBacking::PtySlave(slave), rw));
+        Ok((master_fd, slave_fd))
     }
 
     /// Install `file` as `task`'s **standard-stream** open entry at `fd`
     /// (one of fd 0–3) — the spawn wiring path placing a cloned parent
     /// descriptor behind a child's standard stream (`plans/SPAWN.md`
-    /// SP10). Anything already at `fd` is replaced (and, for a pipe end,
-    /// released through its handle's drop).
+    /// SP10) — and hand back the entry it replaces, for the caller to release
+    /// once this registry's lock is.
     ///
-    /// A non-standard `fd` is refused: ordinary descriptors are allocated,
-    /// never installed, so the one allocator keeps owning the ≥ 4 space.
+    /// Not held to the `open-files` bound, though it counts against it: the
+    /// spawner decides what a child starts with. A non-standard `fd` is
+    /// refused: ordinary descriptors are allocated, never installed, so the
+    /// one allocator keeps owning the ≥ 4 space.
     ///
     /// # Errors
     ///
@@ -3229,30 +3540,25 @@ impl AddressSpaceRegistry {
         task: ProcessId,
         fd: u32,
         file: OpenFile,
-    ) -> Result<(), Errno> {
+    ) -> Result<Option<OpenFile>, Errno> {
         if fd as usize >= STD_STREAM_COUNT {
             return Err(Errno::OutOfRange);
         }
-        self.open_files
-            .entry(task)
-            .or_default()
-            .by_fd
-            .insert(fd, file);
-        Ok(())
+        Ok(self.open_files.entry(task).or_default().record(fd, file))
     }
 
-    /// Resolve `task`'s open descriptor `fd` to its recorded path and flags,
-    /// or `None` if `fd` is not one of `task`'s open descriptors (fail
+    /// Resolve `task`'s open descriptor `fd` to its recorded backing and
+    /// flags, or `None` if `fd` is not one of `task`'s open descriptors (fail
     /// closed).
     ///
     /// Returns a clone so the caller (a handle op such as `fs_read`) holds no
     /// borrow of the registry across the filesystem operation it then routes
     /// to; the clone shares the entry's open-file description (cursor, pipe
-    /// end). `None` covers an unopened descriptor, a standard-stream number
-    /// with no wired entry (only spawn wiring records fd 0–3 here), and a
-    /// descriptor opened by a *different* task —
-    /// the `task` argument is the kernel-trusted caller id, so one process
-    /// cannot reach another's open file by guessing a number.
+    /// end) and its node. `None` covers an unopened descriptor, a
+    /// standard-stream number with no wired entry (only spawn wiring records
+    /// fd 0–3 here), and a descriptor opened by a *different* task — the
+    /// `task` argument is the kernel-trusted caller id, so one process cannot
+    /// reach another's open file by guessing a number.
     #[must_use]
     pub fn open_file_entry(&self, task: ProcessId, fd: u32) -> Option<OpenFile> {
         self.open_files.get(&task)?.by_fd.get(&fd).cloned()
@@ -3453,17 +3759,15 @@ impl AddressSpaceRegistry {
         entry.pty_master().map(PtyMasterEnd::pty)
     }
 
-    /// Release `task`'s open descriptor `fd`, returning `true` if it was
-    /// open.
+    /// Remove `task`'s open descriptor `fd`, handing it back for the caller
+    /// to release once this registry's lock is.
     ///
     /// Idempotent and fail-closed: closing a descriptor `task` does not hold
     /// (an unopened number, a standard stream, or another task's descriptor)
-    /// is a no-op returning `false`, never an error or a panic. The `task`
-    /// argument is the kernel-trusted caller id.
-    pub fn close_file(&mut self, task: ProcessId, fd: u32) -> bool {
-        self.open_files
-            .get_mut(&task)
-            .is_some_and(|table| table.by_fd.remove(&fd).is_some())
+    /// takes nothing, never an error or a panic. The `task` argument is the
+    /// kernel-trusted caller id.
+    pub fn close_file(&mut self, task: ProcessId, fd: u32) -> Option<OpenFile> {
+        self.open_files.get_mut(&task)?.remove(fd)
     }
 
     /// Resolve `task` to the `(address space, physical map)` pair the
@@ -3506,6 +3810,7 @@ impl AddressSpaceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::driver::filesystem::NodeKind;
     use tairix_kernel_mem::{
         AddressSpace, Frame, HostPageTable, MapFlags, Page, PhysAddr, SimPhysMap, VirtAddr,
         PAGE_SIZE,
@@ -3727,7 +4032,7 @@ mod tests {
         reg.register(ProcessId(1), user_space(1, 1), sim()).unwrap();
         reg.register(ProcessId(2), user_space(1, 2), sim()).unwrap();
 
-        assert!(reg.withdraw(ProcessId(1)));
+        assert!(reg.withdraw(ProcessId(1)).was_present());
         assert!(!reg.contains(ProcessId(1)));
         assert!(reg.resolve(ProcessId(1)).is_none());
         assert!(reg.contains(ProcessId(2)));
@@ -3755,7 +4060,7 @@ mod tests {
             "a refusal records nothing"
         );
 
-        assert!(reg.withdraw(ProcessId(2)));
+        assert!(reg.withdraw(ProcessId(2)).was_present());
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
         reg.admit_driver(ProcessId(3), 9, crate::iommu::DmaPath::Untranslated)
             .expect("the node is free once its driver is down");
@@ -3804,7 +4109,7 @@ mod tests {
             Some(4)
         );
 
-        assert!(reg.withdraw(ProcessId(2)));
+        assert!(reg.withdraw(ProcessId(2)).was_present());
         reg.admit_driver(ProcessId(3), 9, crate::iommu::DmaPath::Untranslated)
             .expect("the node is free once its driver is down");
         assert_eq!(
@@ -3856,14 +4161,14 @@ mod tests {
         // The earlier driver's teardown finishing must not free the node its
         // successor now holds.
         reg.release_node(ProcessId(2));
-        assert!(reg.withdraw(ProcessId(2)));
+        assert!(reg.withdraw(ProcessId(2)).was_present());
         assert_eq!(
             reg.admit_driver(ProcessId(4), 9, crate::iommu::DmaPath::Untranslated),
             Err(Errno::Busy),
             "the successor still holds the node"
         );
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
-        assert!(reg.withdraw(ProcessId(3)));
+        assert!(reg.withdraw(ProcessId(3)).was_present());
         reg.admit_driver(ProcessId(4), 9, crate::iommu::DmaPath::Untranslated)
             .expect("free again once the successor is down");
     }
@@ -3871,11 +4176,11 @@ mod tests {
     #[test]
     fn withdrawing_unknown_task_is_a_noop() {
         let mut reg = AddressSpaceRegistry::new();
-        assert!(!reg.withdraw(ProcessId(42)));
+        assert!(!reg.withdraw(ProcessId(42)).was_present());
         reg.register(ProcessId(1), user_space(1, 1), sim()).unwrap();
         // Double withdraw: the second call finds nothing.
-        assert!(reg.withdraw(ProcessId(1)));
-        assert!(!reg.withdraw(ProcessId(1)));
+        assert!(reg.withdraw(ProcessId(1)).was_present());
+        assert!(!reg.withdraw(ProcessId(1)).was_present());
     }
 
     #[test]
@@ -3883,7 +4188,7 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         reg.register(ProcessId(5), user_space(1, 10), sim())
             .unwrap();
-        assert!(reg.withdraw(ProcessId(5)));
+        assert!(reg.withdraw(ProcessId(5)).was_present());
         // A new task reusing the same id (after the old one exited) can
         // register again — withdrawal fully clears the slot.
         reg.register(ProcessId(5), user_space(3, 30), sim())
@@ -3914,7 +4219,7 @@ mod tests {
         reg.set_streams(ProcessId(4), DescriptorTable::standard());
         // Withdrawing a task with streams but no address space still
         // reports the slot was present and clears the table.
-        assert!(reg.withdraw(ProcessId(4)));
+        assert!(reg.withdraw(ProcessId(4)).was_present());
         assert_eq!(reg.streams(ProcessId(4)), DescriptorTable::closed());
     }
 
@@ -3931,7 +4236,7 @@ mod tests {
         assert_eq!(reg.stale_task_entry(ProcessId(8)), Some("streams"));
         // Reclaim must leave nothing behind: this is exactly the
         // post-condition `withdraw` asserts, exercised explicitly.
-        assert!(reg.withdraw(ProcessId(8)));
+        assert!(reg.withdraw(ProcessId(8)).was_present());
         assert_eq!(reg.stale_task_entry(ProcessId(8)), None);
     }
 
@@ -3940,7 +4245,7 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         reg.register(ProcessId(3), user_space(1, 1), sim()).unwrap();
         assert_eq!(reg.stale_task_entry(ProcessId(3)), Some("tasks"));
-        assert!(reg.withdraw(ProcessId(3)));
+        assert!(reg.withdraw(ProcessId(3)).was_present());
         assert_eq!(reg.stale_task_entry(ProcessId(3)), None);
     }
 
@@ -3948,9 +4253,13 @@ mod tests {
     fn stream_read_member_admits_only_the_owners_pipe_read_end() {
         let mut reg = AddressSpaceRegistry::new();
         let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pipe minted");
-        let file_fd = reg
-            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
-            .expect("file opened");
+        let file_fd = open_file(
+            &mut reg,
+            ProcessId(2),
+            opened("/Storage/x"),
+            OpenFlags::READ,
+        )
+        .expect("file opened");
         // Only the caller's own pipe read end qualifies.
         assert!(reg.stream_read_member(ProcessId(2), read_fd));
         // A write end, a path-backed descriptor, an unopened number, and
@@ -3960,7 +4269,7 @@ mod tests {
         assert!(!reg.stream_read_member(ProcessId(2), 999));
         assert!(!reg.stream_read_member(ProcessId(3), read_fd));
         // A closed descriptor stops qualifying.
-        assert!(reg.close_file(ProcessId(2), read_fd));
+        assert!(reg.close_file(ProcessId(2), read_fd).is_some());
         assert!(!reg.stream_read_member(ProcessId(2), read_fd));
     }
 
@@ -3985,7 +4294,7 @@ mod tests {
         // Closing every write end leaves the member ready for its EOF
         // read (drop the local clone too — each holds a live end).
         drop(end);
-        assert!(reg.close_file(ProcessId(2), write_fd));
+        assert!(reg.close_file(ProcessId(2), write_fd).is_some());
         assert!(reg.stream_readable(ProcessId(2), read_fd));
     }
 
@@ -4018,7 +4327,7 @@ mod tests {
         // Every slave end closed leaves the master ready for its EOF read
         // (drop the local clone too — each holds a live end).
         drop(slave);
-        assert!(reg.close_file(ProcessId(2), slave_fd));
+        assert!(reg.close_file(ProcessId(2), slave_fd).is_some());
         assert!(reg.stream_readable(ProcessId(2), master_fd));
     }
 
@@ -4026,9 +4335,13 @@ mod tests {
     fn stream_write_member_admits_only_the_owners_writable_stream_end() {
         let mut reg = AddressSpaceRegistry::new();
         let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pipe minted");
-        let file_fd = reg
-            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::WRITE)
-            .expect("file opened");
+        let file_fd = open_file(
+            &mut reg,
+            ProcessId(2),
+            opened("/Storage/x"),
+            OpenFlags::WRITE,
+        )
+        .expect("file opened");
         // Only the caller's own pipe write end qualifies.
         assert!(reg.stream_write_member(ProcessId(2), write_fd));
         // A read end, a path-backed descriptor, an unopened number, and
@@ -4045,7 +4358,7 @@ mod tests {
         assert!(reg.stream_write_member(ProcessId(2), slave_fd));
         assert!(!reg.stream_write_member(ProcessId(3), master_fd));
         // A closed descriptor stops qualifying.
-        assert!(reg.close_file(ProcessId(2), write_fd));
+        assert!(reg.close_file(ProcessId(2), write_fd).is_some());
         assert!(!reg.stream_write_member(ProcessId(2), write_fd));
     }
 
@@ -4080,7 +4393,7 @@ mod tests {
         // Every read end closed leaves the member ready so the woken writer
         // fails `BrokenPipe` instead of waiting on a stream nothing drains.
         drop(read_end);
-        assert!(reg.close_file(ProcessId(2), read_fd));
+        assert!(reg.close_file(ProcessId(2), read_fd).is_some());
         assert!(reg.stream_writable(ProcessId(2), write_fd));
     }
 
@@ -4109,31 +4422,145 @@ mod tests {
         assert_eq!(reg.stream_write_wait_key(ProcessId(3), write_fd), None);
     }
 
+    /// A working directory held by node, labelled with the path it was
+    /// reached by.
+    fn dir_at(volume: &Arc<crate::fs::VolumeNodes>, pinned: u64, path: &str) -> Cwd {
+        Cwd::Dir(crate::test_bundle::node_handle(
+            crate::test_bundle::opened_node(volume, pinned, NodeKind::Directory, path),
+        ))
+    }
+
+    /// The path a working directory was reached by, `/` for the view root.
+    fn label(cwd: &Cwd) -> String {
+        match cwd {
+            Cwd::Root => String::from("/"),
+            Cwd::Dir(handle) => String::from(&*handle.opened_as),
+            Cwd::Catalog(catalog) => {
+                crate::fs::spell(catalog.path().components()).expect("spelled")
+            }
+        }
+    }
+
     #[test]
     fn unset_cwd_resolves_to_the_root() {
         let reg = AddressSpaceRegistry::new();
-        // A task whose working directory was never established resolves to
-        // the root, the safe least-privileged default.
-        assert_eq!(reg.cwd(ProcessId(9)), "/");
+        // A task whose working directory was never established stands at the
+        // view root, the safe least-privileged default.
+        assert!(matches!(reg.cwd(ProcessId(9)), Cwd::Root));
     }
 
     #[test]
     fn set_cwd_then_resolve_returns_the_directory() {
+        let volume = crate::test_bundle::test_volume();
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(ProcessId(2), String::from("/Users/bob"));
-        assert_eq!(reg.cwd(ProcessId(2)), "/Users/bob");
+        assert!(reg
+            .set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users"))
+            .is_none());
+        let replaced = reg.set_cwd(ProcessId(2), dir_at(&volume, 2, "/Users/bob"));
+        assert_eq!(
+            replaced.as_ref().map(label).as_deref(),
+            Some("/Users"),
+            "the replaced directory is handed back to be released"
+        );
+        assert_eq!(label(&reg.cwd(ProcessId(2))), "/Users/bob");
         // A different task is unaffected and stays at the root default.
-        assert_eq!(reg.cwd(ProcessId(3)), "/");
+        assert!(matches!(reg.cwd(ProcessId(3)), Cwd::Root));
     }
 
     #[test]
     fn withdraw_clears_the_working_directory() {
+        let volume = crate::test_bundle::test_volume();
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(ProcessId(4), String::from("/Storage/data"));
+        reg.set_cwd(ProcessId(4), dir_at(&volume, 1, "/Storage/data"));
         // Withdrawing a task with a cwd but no address space still reports
         // the slot was present and resets it to the root.
-        assert!(reg.withdraw(ProcessId(4)));
-        assert_eq!(reg.cwd(ProcessId(4)), "/");
+        assert!(reg.withdraw(ProcessId(4)).was_present());
+        assert!(matches!(reg.cwd(ProcessId(4)), Cwd::Root));
+    }
+
+    #[test]
+    fn a_working_directory_holds_its_node_through_its_pin_alone() {
+        let volume = crate::test_bundle::test_volume();
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_cwd(ProcessId(2), dir_at(&volume, 7, "/Users/bob"));
+        assert_eq!(volume.outstanding(), 1);
+        // Reading it, and a child inheriting it, share the one pin.
+        let read = reg.cwd(ProcessId(2));
+        assert!(reg.inherit_fs(ProcessId(2), ProcessId(5), None).is_none());
+        let inherited = reg.cwd(ProcessId(5));
+        assert_eq!(volume.outstanding(), 1, "a clone pins nothing new");
+        let (Cwd::Dir(parent), Cwd::Dir(child)) = (&read, &inherited) else {
+            panic!("both hold the directory");
+        };
+        assert_eq!(parent.node, child.node);
+    }
+
+    #[test]
+    fn no_descriptor_is_numbered_as_the_working_directory() {
+        // Only the number just below the working-directory word is free, so a
+        // pair cannot be found and a single one is that number.
+        let mut table = OpenFileTable {
+            free_from: FD_CWD - 1,
+            ..OpenFileTable::default()
+        };
+        assert_eq!(table.alloc_fds::<2>(u64::MAX), Err(Errno::OutOfRange));
+        assert_eq!(table.alloc_fds::<1>(u64::MAX), Ok([FD_CWD - 1]));
+    }
+
+    #[test]
+    fn an_unestablished_process_creates_under_the_initial_umask() {
+        let reg = AddressSpaceRegistry::new();
+        assert_eq!(reg.umask(ProcessId(9)), 0o022);
+    }
+
+    #[test]
+    fn set_umask_answers_the_mask_it_replaces_and_keeps_the_directory() {
+        let volume = crate::test_bundle::test_volume();
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users/bob"));
+        assert_eq!(reg.set_umask(ProcessId(2), 0o077), FS_INITIAL_UMASK);
+        assert_eq!(reg.set_umask(ProcessId(2), 0o027), 0o077);
+        assert_eq!(reg.umask(ProcessId(2)), 0o027);
+        assert_eq!(label(&reg.cwd(ProcessId(2))), "/Users/bob");
+        // A mask set first leaves the directory at the root, and another
+        // process keeps the initial mask.
+        assert_eq!(reg.set_umask(ProcessId(3), 0o007), FS_INITIAL_UMASK);
+        assert!(matches!(reg.cwd(ProcessId(3)), Cwd::Root));
+        assert_eq!(reg.umask(ProcessId(4)), FS_INITIAL_UMASK);
+    }
+
+    #[test]
+    fn a_child_inherits_its_parents_directory_and_umask() {
+        let volume = crate::test_bundle::test_volume();
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_cwd(ProcessId(2), dir_at(&volume, 1, "/Users/bob"));
+        reg.set_umask(ProcessId(2), 0o077);
+        assert!(reg.inherit_fs(ProcessId(2), ProcessId(5), None).is_none());
+        assert_eq!(label(&reg.cwd(ProcessId(5))), "/Users/bob");
+        assert_eq!(reg.umask(ProcessId(5)), 0o077);
+        // A directory the spawn names replaces the parent's; the mask is
+        // still inherited.
+        let named = dir_at(&volume, 2, "/Users/ada");
+        assert!(reg
+            .inherit_fs(ProcessId(2), ProcessId(7), Some(named))
+            .is_none());
+        assert_eq!(label(&reg.cwd(ProcessId(7))), "/Users/ada");
+        assert_eq!(reg.umask(ProcessId(7)), 0o077);
+        // A parent with nothing established hands down the root and the
+        // initial mask.
+        assert!(reg.inherit_fs(ProcessId(8), ProcessId(6), None).is_none());
+        assert!(matches!(reg.cwd(ProcessId(6)), Cwd::Root));
+        assert_eq!(reg.umask(ProcessId(6)), FS_INITIAL_UMASK);
+    }
+
+    #[test]
+    fn withdraw_clears_the_umask() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.set_umask(ProcessId(4), 0o077);
+        assert_eq!(reg.stale_task_entry(ProcessId(4)), Some("fs"));
+        assert!(reg.withdraw(ProcessId(4)).was_present());
+        assert_eq!(reg.umask(ProcessId(4)), FS_INITIAL_UMASK);
+        assert_eq!(reg.stale_task_entry(ProcessId(4)), None);
     }
 
     #[test]
@@ -4151,7 +4578,7 @@ mod tests {
         let set = reg.limits(ProcessId(2));
         assert_eq!(set.get(LimitKind::Processes), lo);
         // Every other kind stays at the default policy.
-        assert_eq!(set.get(LimitKind::OpenStreams), ResourceLimit::UNLIMITED);
+        assert_eq!(set.get(LimitKind::OpenFiles), ResourceLimit::UNLIMITED);
         // A different task is unaffected and stays at the default policy.
         assert_eq!(reg.limits(ProcessId(3)), LimitSet::DEFAULT);
     }
@@ -4206,7 +4633,7 @@ mod tests {
         // Withdraw clears the mark, so a reused id starts unpinned and
         // the withdraw reports state was dropped.
         reg.set_pinned(ProcessId(3));
-        assert!(reg.withdraw(ProcessId(3)));
+        assert!(reg.withdraw(ProcessId(3)).was_present());
         assert!(!reg.is_pinned(ProcessId(3)));
     }
 
@@ -4279,7 +4706,7 @@ mod tests {
         // Unpin and exit both drop out of the aggregate.
         reg.clear_pinned(ProcessId(2));
         assert_eq!(reg.pinned_total_bytes(), 2 * PAGE_SIZE as u64);
-        reg.withdraw(ProcessId(1));
+        drop(reg.withdraw(ProcessId(1)));
         assert_eq!(reg.pinned_total_bytes(), 0);
     }
 
@@ -4293,7 +4720,7 @@ mod tests {
         );
         // Withdrawing a task with limits but no address space still reports
         // the slot was present and resets it to the default policy.
-        assert!(reg.withdraw(ProcessId(4)));
+        assert!(reg.withdraw(ProcessId(4)).was_present());
         assert_eq!(reg.limits(ProcessId(4)), LimitSet::DEFAULT);
     }
 
@@ -4331,7 +4758,7 @@ mod tests {
         );
         // Once withdrawn the task receives nothing, so no grant table is
         // recreated for a later task that draws the same id.
-        assert!(reg.withdraw(ProcessId(11)));
+        assert!(reg.withdraw(ProcessId(11)).was_present());
         assert_eq!(
             reg.delegate_grant(
                 ProcessId(2),
@@ -4677,7 +5104,7 @@ mod tests {
 
         let space = Arc::new(ProcessSpace::for_test(crate::procspace::host_test_space!()));
         reg.set_live_space(ProcessId(2), &space);
-        assert!(reg.withdraw(ProcessId(2)));
+        assert!(reg.withdraw(ProcessId(2)).was_present());
         assert!(reg.live_space(ProcessId(2)).is_none());
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
     }
@@ -4755,7 +5182,7 @@ mod tests {
         // Withdrawing a task with grants but no address space still reports
         // the slot was present and clears the grants (reclaimed on
         // exit).
-        assert!(reg.withdraw(ProcessId(4)));
+        assert!(reg.withdraw(ProcessId(4)).was_present());
         assert_eq!(reg.grant(ProcessId(4), handle), None);
     }
 
@@ -4862,6 +5289,59 @@ mod tests {
         assert_eq!(reg.grant(ProcessId(2), revoked), None);
     }
 
+    /// A writable descriptor its holder opened on node 1 of a volume of its
+    /// own.
+    fn node_file(path: &str) -> OpenFile {
+        OpenFile::new(OpenBacking::opened(opened(path)), OpenFlags::WRITE)
+    }
+
+    /// What an `fs_open` of `path` answers, reaching node 1 of a volume of
+    /// its own.
+    fn opened(path: &str) -> Opened {
+        crate::test_bundle::opened_node(
+            &crate::test_bundle::test_volume(),
+            1,
+            NodeKind::RegularFile,
+            path,
+        )
+    }
+
+    /// Record `opened` for `task` as `fs_open` does: promise the descriptor,
+    /// then keep the promise.
+    fn open_file(
+        reg: &mut AddressSpaceRegistry,
+        task: ProcessId,
+        opened: Opened,
+        flags: OpenFlags,
+    ) -> Result<u32, Refused> {
+        match reg.promise_fd(task) {
+            Ok(()) => reg.keep_fd(task, opened, flags),
+            Err(errno) => Err(Refused {
+                errno,
+                _backing: OpenBacking::opened(opened),
+            }),
+        }
+    }
+
+    /// A grant of the node `volume` pinned as `pinned`, opened as `path`,
+    /// frozen as user 1000 holding nothing, read-only.
+    fn granted(volume: &Arc<crate::fs::VolumeNodes>, pinned: u64, path: &str) -> NodeHandle {
+        let mut handle = crate::test_bundle::node_handle(crate::test_bundle::opened_node(
+            volume,
+            pinned,
+            NodeKind::RegularFile,
+            path,
+        ));
+        handle.authority = Authority::Frozen(FrozenAuthority {
+            uid: 1000,
+            caps: CapabilitySet::empty(),
+            grant: Some(crate::fs::Grant {
+                write_ceiling: Some(0),
+            }),
+        });
+        handle
+    }
+
     /// A distinct instance for each process number, as a grantor's own.
     fn instance_of(process: ProcessId) -> ProcId {
         let mut raw = [0x60u8; tairix_abi::PROC_ID_LEN];
@@ -4879,12 +5359,8 @@ mod tests {
     #[test]
     fn a_bound_redemption_takes_only_the_named_grantors_delegation() {
         let mut reg = AddressSpaceRegistry::new();
-        let file = DelegatedFile {
-            path: String::from("/Users/ada/Documents/report.txt"),
-            uid: 1000,
-            caps: CapabilitySet::empty(),
-            write_ceiling: Some(0),
-        };
+        let volume = crate::test_bundle::test_volume();
+        let file = granted(&volume, 1, "/Users/ada/Documents/report.txt");
         let deputy = ProcId::from_raw([0xD0u8; tairix_abi::PROC_ID_LEN]);
         let (owner, stranger) = (ProcessId(12), ProcessId(13));
         let handle = reg
@@ -4893,7 +5369,7 @@ mod tests {
                 deputy,
                 owner,
                 instance_of(owner),
-                file,
+                &file,
                 OpenFlags::READ,
             )
             .expect("mints");
@@ -4920,15 +5396,13 @@ mod tests {
     /// descriptors here carry no position, so a second identical entry
     /// conveys nothing the first does not. Once redeemed the entry is
     /// consumed, so a later grant of the same file legitimately mints afresh.
+    /// A right is its node, identity and access, never the spelling it was
+    /// opened as.
     #[test]
     fn regranting_a_pending_delegation_returns_the_pending_handle() {
         let mut reg = AddressSpaceRegistry::new();
-        let file = DelegatedFile {
-            path: String::from("/Users/ada/Documents/report.txt"),
-            uid: 1000,
-            caps: CapabilitySet::empty(),
-            write_ceiling: Some(0),
-        };
+        let volume = crate::test_bundle::test_volume();
+        let file = granted(&volume, 1, "/Users/ada/Documents/report.txt");
         let who = ProcId::from_raw([0x2Au8; tairix_abi::PROC_ID_LEN]);
         let grantor = ProcessId(3);
         let first = reg
@@ -4937,7 +5411,7 @@ mod tests {
                 who,
                 grantor,
                 instance_of(grantor),
-                file.clone(),
+                &file,
                 OpenFlags::READ,
             )
             .expect("mints");
@@ -4948,27 +5422,35 @@ mod tests {
                     who,
                     grantor,
                     instance_of(grantor),
-                    file.clone(),
+                    &file,
                     OpenFlags::READ
                 ),
                 Ok(first),
                 "repetition must not append a second pending delegation"
             );
         }
+        let renamed = granted(&volume, 1, "/Users/ada/Documents/renamed.txt");
+        assert_eq!(
+            reg.mint_fd_delegation(
+                ProcessId(2),
+                who,
+                grantor,
+                instance_of(grantor),
+                &renamed,
+                OpenFlags::READ
+            ),
+            Ok(first),
+            "the same node under another spelling is the same right"
+        );
         // A different file is a distinct right and mints its own handle.
-        let other = DelegatedFile {
-            path: String::from("/Users/ada/Documents/other.txt"),
-            uid: 1000,
-            caps: CapabilitySet::empty(),
-            write_ceiling: Some(0),
-        };
+        let other = granted(&volume, 2, "/Users/ada/Documents/other.txt");
         assert_ne!(
             reg.mint_fd_delegation(
                 ProcessId(2),
                 who,
                 grantor,
                 instance_of(grantor),
-                other,
+                &other,
                 OpenFlags::READ
             ),
             Ok(first)
@@ -4989,7 +5471,7 @@ mod tests {
             who,
             grantor,
             instance_of(grantor),
-            file,
+            &file,
             OpenFlags::READ,
         );
         assert_ne!(renewed, Ok(first));
@@ -5006,12 +5488,8 @@ mod tests {
     #[test]
     fn a_delegation_is_redeemable_only_by_the_instance_it_names() {
         let mut reg = AddressSpaceRegistry::new();
-        let file = DelegatedFile {
-            path: String::from("/Users/ada/Documents/report.txt"),
-            uid: 1000,
-            caps: CapabilitySet::empty(),
-            write_ceiling: Some(0),
-        };
+        let volume = crate::test_bundle::test_volume();
+        let file = granted(&volume, 1, "/Users/ada/Documents/report.txt");
         let chosen = ProcId::from_raw([0xA1u8; tairix_abi::PROC_ID_LEN]);
         let newcomer = ProcId::from_raw([0xB2u8; tairix_abi::PROC_ID_LEN]);
         let handle = reg
@@ -5020,7 +5498,7 @@ mod tests {
                 chosen,
                 ProcessId(8),
                 instance_of(ProcessId(8)),
-                file,
+                &file,
                 OpenFlags::READ,
             )
             .expect("mints");
@@ -5052,11 +5530,13 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let recipient = ProcessId(2);
         let who = ProcId::from_raw([0x2Cu8; tairix_abi::PROC_ID_LEN]);
-        let file = |n: usize| DelegatedFile {
-            path: alloc::format!("/Users/ada/Documents/{n}.txt"),
-            uid: 1000,
-            caps: CapabilitySet::empty(),
-            write_ceiling: Some(0),
+        let volume = crate::test_bundle::test_volume();
+        let file = |n: usize| {
+            granted(
+                &volume,
+                u64::try_from(n).expect("a small index") + 1,
+                &alloc::format!("/Users/ada/Documents/{n}.txt"),
+            )
         };
         let (flood, honest) = (ProcessId(3), ProcessId(4));
         let first = reg
@@ -5065,7 +5545,7 @@ mod tests {
                 who,
                 flood,
                 instance_of(flood),
-                file(0),
+                &file(0),
                 OpenFlags::READ,
             )
             .expect("mints");
@@ -5075,7 +5555,7 @@ mod tests {
                 who,
                 flood,
                 instance_of(flood),
-                file(n),
+                &file(n),
                 OpenFlags::READ,
             )
             .expect("within the bound");
@@ -5087,7 +5567,7 @@ mod tests {
                 who,
                 flood,
                 instance_of(flood),
-                file(past),
+                &file(past),
                 OpenFlags::READ
             ),
             Err(Errno::LimitExceeded)
@@ -5099,7 +5579,7 @@ mod tests {
                 who,
                 flood,
                 instance_of(flood),
-                file(0),
+                &file(0),
                 OpenFlags::READ
             ),
             Ok(first)
@@ -5110,7 +5590,7 @@ mod tests {
                 who,
                 honest,
                 instance_of(honest),
-                file(0),
+                &file(0),
                 OpenFlags::READ
             )
             .is_ok());
@@ -5125,7 +5605,7 @@ mod tests {
                 who,
                 flood,
                 instance_of(flood),
-                file(past),
+                &file(past),
                 OpenFlags::READ
             )
             .is_ok());
@@ -5138,12 +5618,8 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let recipient = ProcessId(2);
         let who = ProcId::from_raw([0x2Du8; tairix_abi::PROC_ID_LEN]);
-        let file = |path: &str| DelegatedFile {
-            path: String::from(path),
-            uid: 1000,
-            caps: CapabilitySet::empty(),
-            write_ceiling: Some(0),
-        };
+        let volume = crate::test_bundle::test_volume();
+        let file = |pinned: u64, path: &str| granted(&volume, pinned, path);
         let (gone, staying) = (ProcessId(3), ProcessId(4));
         let dropped = reg
             .mint_fd_delegation(
@@ -5151,7 +5627,7 @@ mod tests {
                 who,
                 gone,
                 instance_of(gone),
-                file("/a"),
+                &file(1, "/a"),
                 OpenFlags::READ,
             )
             .expect("mints");
@@ -5161,7 +5637,7 @@ mod tests {
                 who,
                 staying,
                 instance_of(staying),
-                file("/b"),
+                &file(2, "/b"),
                 OpenFlags::READ,
             )
             .expect("mints");
@@ -5171,8 +5647,15 @@ mod tests {
             reg.stale_task_entry(gone),
             Some("fd_delegations (as grantor)")
         );
-        reg.withdraw(gone);
+        let withdrawn = reg.withdraw(gone);
         assert_eq!(reg.stale_task_entry(gone), None);
+        assert_eq!(
+            volume.outstanding(),
+            2,
+            "the withdrawn grant is the caller's to let go, once the lock is"
+        );
+        drop(withdrawn);
+        assert_eq!(volume.outstanding(), 1);
         assert_eq!(
             reg.redeem_fd_delegation(recipient, who, dropped, None),
             Err(Errno::NotFound)
@@ -5185,7 +5668,7 @@ mod tests {
                 who,
                 staying,
                 instance_of(staying),
-                file("/c"),
+                &file(3, "/c"),
                 OpenFlags::READ,
             )
             .expect("mints");
@@ -5196,7 +5679,7 @@ mod tests {
     fn reused_task_id_starts_from_an_empty_grant_set() {
         let mut reg = AddressSpaceRegistry::new();
         let old = reg.mint_grant(ProcessId(5), window());
-        assert!(reg.withdraw(ProcessId(5)));
+        assert!(reg.withdraw(ProcessId(5)).was_present());
         // A new task reusing the id mints from handle 1 again and never
         // inherits the dead task's grant.
         let fresh = reg.mint_grant(ProcessId(5), HwResource::mmio(0x3F20_0000, 0x1000));
@@ -5213,126 +5696,182 @@ mod tests {
     #[test]
     fn first_opened_descriptor_is_the_first_number_after_the_standard_streams() {
         let mut reg = AddressSpaceRegistry::new();
-        let fd = reg
-            .open_file(
-                ProcessId(2),
-                String::from("/System/Logs/a"),
-                OpenFlags::READ,
-            )
-            .expect("descriptor space is not exhausted");
+        let fd = open_file(
+            &mut reg,
+            ProcessId(2),
+            opened("/System/Logs/a"),
+            OpenFlags::READ,
+        )
+        .expect("descriptor space is not exhausted");
         // fd 0..3 are the reserved standard streams; the first file handle is 4.
         assert_eq!(fd, u32::try_from(STD_STREAM_COUNT).unwrap());
-        assert_eq!(
-            reg.open_file_entry(ProcessId(2), fd),
-            Some(OpenFile::new(
-                OpenBacking::Path(String::from("/System/Logs/a")),
-                OpenFlags::READ,
-            ))
-        );
+        let entry = reg.open_file_entry(ProcessId(2), fd).expect("recorded");
+        assert_eq!(entry.flags, OpenFlags::READ);
+        assert!(entry
+            .own_node()
+            .is_some_and(|node| &*node.opened_as == "/System/Logs/a"));
     }
 
     #[test]
     fn a_resource_descriptor_shares_the_one_number_space_with_files() {
         let mut reg = AddressSpaceRegistry::new();
         // A file takes the first descriptor after the standard streams.
-        let file = reg
-            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
-            .expect("fits");
+        let file = open_file(
+            &mut reg,
+            ProcessId(2),
+            opened("/Storage/x"),
+            OpenFlags::READ,
+        )
+        .expect("fits");
         // A resource open draws the *next* number from the same allocator, so
         // a resource fd can never collide with a file fd.
         let res = reg
             .open_resource(ProcessId(2), ResourceBacking::Random, OpenFlags::READ)
             .expect("fits");
         assert_eq!((file, res), (4, 5));
-        assert_eq!(
-            reg.open_file_entry(ProcessId(2), res).map(|f| f.backing),
-            Some(OpenBacking::Resource(ResourceBacking::Random))
-        );
-        // The resource handle exposes its resource, not a path.
+        // The resource handle exposes its resource, not a node.
         assert_eq!(
             reg.open_file_entry(ProcessId(2), res)
                 .and_then(|f| f.resource()),
             Some(ResourceBacking::Random)
         );
-        assert_eq!(
-            reg.open_file_entry(ProcessId(2), res)
-                .and_then(|f| f.own_path().map(String::from)),
-            None
-        );
+        assert!(reg
+            .open_file_entry(ProcessId(2), res)
+            .is_some_and(|f| f.node().is_none()));
     }
 
     #[test]
     fn an_unopened_descriptor_resolves_to_none() {
         let reg = AddressSpaceRegistry::new();
-        assert_eq!(reg.open_file_entry(ProcessId(9), 4), None);
+        assert!(reg.open_file_entry(ProcessId(9), 4).is_none());
         // A standard-stream number is never recorded in the open-file table.
-        assert_eq!(reg.open_file_entry(ProcessId(9), 0), None);
+        assert!(reg.open_file_entry(ProcessId(9), 0).is_none());
     }
 
     #[test]
     fn open_descriptor_is_owner_bound_against_forgery() {
         let mut reg = AddressSpaceRegistry::new();
-        let fd = reg
-            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
-            .expect("fits");
+        let fd = open_file(
+            &mut reg,
+            ProcessId(2),
+            opened("/Storage/x"),
+            OpenFlags::READ,
+        )
+        .expect("fits");
         // A *different* task passing the same number reaches nothing — one
         // process cannot read another's open file by guessing the descriptor.
-        assert_eq!(reg.open_file_entry(ProcessId(3), fd), None);
-        assert_eq!(
-            reg.open_file_entry(ProcessId(2), fd)
-                .and_then(|f| f.own_path().map(String::from)),
-            Some(String::from("/Storage/x"))
-        );
+        assert!(reg.open_file_entry(ProcessId(3), fd).is_none());
+        assert!(reg.open_file_entry(ProcessId(2), fd).is_some_and(|f| f
+            .own_node()
+            .is_some_and(|node| &*node.opened_as == "/Storage/x")));
     }
 
     #[test]
     fn closing_a_descriptor_frees_it_and_close_is_idempotent() {
         let mut reg = AddressSpaceRegistry::new();
-        let fd = reg
-            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
-            .expect("fits");
-        assert!(reg.close_file(ProcessId(2), fd));
-        assert_eq!(reg.open_file_entry(ProcessId(2), fd), None);
+        let fd = open_file(
+            &mut reg,
+            ProcessId(2),
+            opened("/Storage/x"),
+            OpenFlags::READ,
+        )
+        .expect("fits");
+        assert!(reg.close_file(ProcessId(2), fd).is_some());
+        assert!(reg.open_file_entry(ProcessId(2), fd).is_none());
         // Closing again, or closing an unopened number, is a fail-closed no-op.
-        assert!(!reg.close_file(ProcessId(2), fd));
-        assert!(!reg.close_file(ProcessId(2), 999));
+        assert!(reg.close_file(ProcessId(2), fd).is_none());
+        assert!(reg.close_file(ProcessId(2), 999).is_none());
         // Closing another task's descriptor number is refused.
-        assert!(!reg.close_file(ProcessId(3), fd));
+        assert!(reg.close_file(ProcessId(3), fd).is_none());
     }
 
     #[test]
     fn the_lowest_free_descriptor_is_reused_after_a_close() {
         let mut reg = AddressSpaceRegistry::new();
-        let a = reg
-            .open_file(ProcessId(2), String::from("/a"), OpenFlags::READ)
-            .expect("fits");
-        let b = reg
-            .open_file(ProcessId(2), String::from("/b"), OpenFlags::READ)
-            .expect("fits");
-        let c = reg
-            .open_file(ProcessId(2), String::from("/c"), OpenFlags::READ)
-            .expect("fits");
+        let a = open_file(&mut reg, ProcessId(2), opened("/a"), OpenFlags::READ).expect("fits");
+        let b = open_file(&mut reg, ProcessId(2), opened("/b"), OpenFlags::READ).expect("fits");
+        let c = open_file(&mut reg, ProcessId(2), opened("/c"), OpenFlags::READ).expect("fits");
         assert_eq!((a, b, c), (4, 5, 6));
         // Free the middle one; the next open reuses the lowest free number.
-        assert!(reg.close_file(ProcessId(2), b));
-        let reused = reg
-            .open_file(ProcessId(2), String::from("/d"), OpenFlags::READ)
-            .expect("fits");
+        assert!(reg.close_file(ProcessId(2), b).is_some());
+        let reused =
+            open_file(&mut reg, ProcessId(2), opened("/d"), OpenFlags::READ).expect("fits");
         assert_eq!(reused, 5);
+    }
+
+    /// The search that starts where the last one ended still finds the lowest
+    /// free numbers, whatever order descriptors open, pair up and close in,
+    /// the standard streams' own comings and goings included.
+    #[test]
+    fn every_allocation_takes_the_lowest_free_numbers() {
+        let mut reg = AddressSpaceRegistry::new();
+        let task = ProcessId(2);
+        let mut held = alloc::collections::BTreeSet::new();
+        let lowest_free = |taken: &alloc::collections::BTreeSet<u32>| {
+            (4..FD_CWD)
+                .find(|fd| !taken.contains(fd))
+                .expect("numbers remain")
+        };
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..2048 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            match state % 5 {
+                0 => {
+                    let expected = lowest_free(&held);
+                    assert!(matches!(
+                        reg.open_resource(task, ResourceBacking::Random, OpenFlags::READ),
+                        Ok(fd) if fd == expected
+                    ));
+                    held.insert(expected);
+                }
+                1 => {
+                    let read_fd = lowest_free(&held);
+                    held.insert(read_fd);
+                    let write_fd = lowest_free(&held);
+                    held.insert(write_fd);
+                    assert_eq!(reg.open_pipe(task), Ok((read_fd, write_fd)));
+                }
+                2 | 3 => {
+                    let nth = usize::try_from(state >> 32).expect("fits") % held.len().max(1);
+                    if let Some(&fd) = held.iter().nth(nth) {
+                        held.remove(&fd);
+                        assert!(reg.close_file(task, fd).is_some());
+                    }
+                }
+                _ => {
+                    let stream = u32::try_from(state >> 60).expect("fits") % 4;
+                    if reg.close_file(task, stream).is_none() {
+                        assert!(reg
+                            .install_std_entry(task, stream, node_file("/tty"))
+                            .is_ok_and(|replaced| replaced.is_none()));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     fn withdraw_reclaims_every_open_descriptor() {
         let mut reg = AddressSpaceRegistry::new();
-        let fd = reg
-            .open_file(ProcessId(4), String::from("/Storage/x"), OpenFlags::READ)
-            .expect("fits");
-        assert!(reg.withdraw(ProcessId(4)));
-        assert_eq!(reg.open_file_entry(ProcessId(4), fd), None);
+        let fd = open_file(
+            &mut reg,
+            ProcessId(4),
+            opened("/Storage/x"),
+            OpenFlags::READ,
+        )
+        .expect("fits");
+        assert!(reg.withdraw(ProcessId(4)).was_present());
+        assert!(reg.open_file_entry(ProcessId(4), fd).is_none());
         // A reused id starts from an empty descriptor set, back at 4.
-        let fresh = reg
-            .open_file(ProcessId(4), String::from("/Storage/y"), OpenFlags::READ)
-            .expect("fits");
+        let fresh = open_file(
+            &mut reg,
+            ProcessId(4),
+            opened("/Storage/y"),
+            OpenFlags::READ,
+        )
+        .expect("fits");
         assert_eq!(fresh, u32::try_from(STD_STREAM_COUNT).unwrap());
     }
 
@@ -5354,11 +5893,9 @@ mod tests {
         let (read_end, write_end) = (read.pipe().expect("pipe"), write.pipe().expect("pipe"));
         assert!(read_end.same_pipe(write_end));
         // The pair is owner-bound like every descriptor.
-        assert_eq!(reg.open_file_entry(ProcessId(3), read_fd), None);
+        assert!(reg.open_file_entry(ProcessId(3), read_fd).is_none());
         // A later open draws the next number from the same allocator.
-        let next = reg
-            .open_file(ProcessId(2), String::from("/x"), OpenFlags::READ)
-            .expect("fits");
+        let next = open_file(&mut reg, ProcessId(2), opened("/x"), OpenFlags::READ).expect("fits");
         assert_eq!(next, 6);
     }
 
@@ -5373,7 +5910,7 @@ mod tests {
         let write_end = write.pipe().expect("pipe").clone();
         // Dropping the read entry (close) leaves no reader: the writer
         // observes broken-pipe through the shared object.
-        assert!(reg.close_file(ProcessId(2), read_fd));
+        assert!(reg.close_file(ProcessId(2), read_fd).is_some());
         assert_eq!(write_end.try_write(b"x"), WriteStep::Broken);
     }
 
@@ -5390,29 +5927,114 @@ mod tests {
         // surviving reader observes end-of-stream (nothing leaks).
         reg.register(ProcessId(2), user_space(1, 7), sim())
             .expect("register");
-        assert!(reg.withdraw(ProcessId(2)));
+        assert!(reg.withdraw(ProcessId(2)).was_present());
         assert_eq!(read_end.try_read(&mut [0u8; 4]), ReadStep::Eof);
     }
 
     #[test]
     fn install_std_entry_accepts_only_standard_slots() {
         let mut reg = AddressSpaceRegistry::new();
-        let entry = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
-        assert_eq!(
-            reg.install_std_entry(ProcessId(2), 1, entry.clone()),
-            Ok(())
+        let entry = node_file("/log");
+        assert!(reg
+            .install_std_entry(ProcessId(2), 1, entry.clone())
+            .is_ok_and(|replaced| replaced.is_none()));
+        let installed = reg.open_file_entry(ProcessId(2), 1).expect("installed");
+        assert_eq!(installed.lock_owner(), entry.lock_owner());
+        let replaced = reg
+            .install_std_entry(ProcessId(2), 1, node_file("/other"))
+            .expect("a standard slot");
+        assert!(
+            replaced.is_some_and(|old| old.lock_owner() == entry.lock_owner()),
+            "the replaced entry is handed back to be released"
         );
-        assert_eq!(reg.open_file_entry(ProcessId(2), 1), Some(entry.clone()));
         // The reserved standard range is the only installable space.
-        assert_eq!(
+        assert!(matches!(
             reg.install_std_entry(ProcessId(2), 4, entry),
             Err(Errno::OutOfRange)
+        ));
+    }
+
+    /// The `open-files` soft bound counts every descriptor the table holds,
+    /// the standard streams a spawner wired included, refuses the next one
+    /// without recording it, and spares the spawner's own installs.
+    #[test]
+    fn the_open_files_bound_refuses_the_next_descriptor_and_spares_the_streams() {
+        let mut reg = AddressSpaceRegistry::new();
+        let task = ProcessId(2);
+        reg.set_limit(
+            task,
+            LimitKind::OpenFiles,
+            ResourceLimit::new(2, 2).expect("well-formed"),
         );
+        for fd in 0..3 {
+            assert!(reg.install_std_entry(task, fd, node_file("/tty")).is_ok());
+        }
+        assert_eq!(reg.open_file_count(task), 3, "the streams are counted");
+        assert!(matches!(
+            open_file(&mut reg, task, opened("/Storage/x"), OpenFlags::READ),
+            Err(refused) if refused.errno() == Errno::LimitExceeded
+        ));
+        assert!(matches!(
+            reg.open_resource(task, ResourceBacking::Random, OpenFlags::READ),
+            Err(refused) if refused.errno() == Errno::LimitExceeded
+        ));
+        assert_eq!(reg.open_pipe(task), Err(Errno::LimitExceeded));
+        assert_eq!(reg.open_file_count(task), 3, "a refusal records nothing");
+        reg.set_limit(
+            task,
+            LimitKind::OpenFiles,
+            ResourceLimit::new(4, 4).expect("well-formed"),
+        );
+        assert_eq!(
+            reg.open_pipe(task),
+            Err(Errno::LimitExceeded),
+            "a pair takes two places or none"
+        );
+        assert!(
+            open_file(&mut reg, task, opened("/Storage/x"), OpenFlags::READ)
+                .is_ok_and(|fd| fd == 4)
+        );
+        assert_eq!(reg.open_file_count(task), 4);
+        assert!(reg.close_file(task, 0).is_some());
+        assert!(reg.close_file(task, 1).is_some());
+        assert_eq!(reg.open_pipe(task), Ok((5, 6)));
+    }
+
+    /// A redemption past the `open-files` bound leaves the grant pending for a
+    /// retry once the holder has closed a descriptor.
+    #[test]
+    fn a_redemption_past_the_open_files_bound_keeps_its_grant() {
+        let mut reg = AddressSpaceRegistry::new();
+        let task = ProcessId(2);
+        let who = ProcId::from_raw([0x2Eu8; tairix_abi::PROC_ID_LEN]);
+        let volume = crate::test_bundle::test_volume();
+        let handle = reg
+            .mint_fd_delegation(
+                task,
+                who,
+                ProcessId(3),
+                instance_of(ProcessId(3)),
+                &granted(&volume, 1, "/doc"),
+                OpenFlags::READ,
+            )
+            .expect("mints");
+        reg.set_limit(
+            task,
+            LimitKind::OpenFiles,
+            ResourceLimit::new(1, 1).expect("well-formed"),
+        );
+        assert!(reg.install_std_entry(task, 0, node_file("/tty")).is_ok());
+        assert_eq!(
+            reg.redeem_fd_delegation(task, who, handle, None),
+            Err(Errno::LimitExceeded)
+        );
+        assert!(reg.close_file(task, 0).is_some());
+        assert_eq!(reg.redeem_fd_delegation(task, who, handle, None), Ok(4));
     }
 
     #[test]
     fn cloned_entries_share_one_stream_cursor() {
-        let entry = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
+        let entry = node_file("/log");
         let dup = entry.clone();
         entry.advance_cursor(10);
         // The dup observes the shared description position (POSIX dup
@@ -5420,15 +6042,14 @@ mod tests {
         assert_eq!(dup.cursor(), 10);
         dup.advance_cursor(5);
         assert_eq!(entry.cursor(), 15);
-        // A fresh entry over the same backing has its own description.
-        let fresh = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
+        // A fresh entry over the same node has its own description.
+        let fresh = OpenFile::new(entry.backing.clone(), OpenFlags::WRITE);
         assert_eq!(fresh.cursor(), 0);
-        assert_eq!(fresh, entry, "equality names the backing, not the cursor");
     }
 
     #[test]
     fn cloned_entries_share_one_lock_owner_and_a_fresh_open_does_not() {
-        let entry = OpenFile::new(OpenBacking::Path(String::from("/db")), OpenFlags::WRITE);
+        let entry = node_file("/db");
         let dup = entry.clone();
         assert_eq!(
             entry.lock_owner(),
@@ -5436,7 +6057,7 @@ mod tests {
             "a duplicated or spawn-inherited handle shares the description's \
              locks rather than fighting them"
         );
-        let fresh = OpenFile::new(OpenBacking::Path(String::from("/db")), OpenFlags::WRITE);
+        let fresh = OpenFile::new(entry.backing.clone(), OpenFlags::WRITE);
         assert_ne!(
             entry.lock_owner(),
             fresh.lock_owner(),
@@ -5482,7 +6103,7 @@ mod tests {
     fn withdraw_drops_anon_accounting_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
         reg.charge_aspace_bytes(ProcessId(4), 0x8000);
-        assert!(reg.withdraw(ProcessId(4)));
+        assert!(reg.withdraw(ProcessId(4)).was_present());
         // A reused id never inherits the dead task's mapped-memory total.
         assert_eq!(reg.mapped_aspace_bytes(ProcessId(4)), 0);
     }
@@ -5491,10 +6112,8 @@ mod tests {
 
     fn file_region() -> FileRegion {
         FileRegion {
-            path: String::from("/big"),
+            handle: crate::test_bundle::node_handle(opened("/big")),
             offset: 0x1000,
-            uid: 7,
-            caps: CapabilitySet::from_words([0; 4]),
         }
     }
 
@@ -5539,7 +6158,7 @@ mod tests {
             .file_page_source(ProcessId(2), 0x10_2000)
             .expect("inside the first region");
         assert_eq!(offset, 0x1000 + 0x2000);
-        assert_eq!(region.path, "/big");
+        assert_eq!(&*region.handle.opened_as, "/big");
         // The second region resolves independently, from its own base.
         let (offset, _) = reg
             .file_page_source(ProcessId(2), 0x20_0000)
@@ -5556,22 +6175,26 @@ mod tests {
         // release's extent, a choice between them, so the second is refused
         // and the first is untouched.
         assert_eq!(
-            reg.record_file_region(ProcessId(2), 0x10_1000, 4, file_region()),
+            reg.record_file_region(ProcessId(2), 0x10_1000, 4, file_region())
+                .map_err(|(err, _)| err),
             Err(RangeError::Overlap)
         );
         assert_eq!(
-            reg.record_file_region(ProcessId(2), 0x10_0000, 1, file_region()),
+            reg.record_file_region(ProcessId(2), 0x10_0000, 1, file_region())
+                .map_err(|(err, _)| err),
             Err(RangeError::Overlap)
         );
         assert!(reg.file_region_exact(ProcessId(2), 0x10_0000, 0x4000));
         // An extent covering nothing, or one past the address space, is
         // refused too — and an abutting neighbour is not an overlap.
         assert_eq!(
-            reg.record_file_region(ProcessId(2), 0x20_0000, 0, file_region()),
+            reg.record_file_region(ProcessId(2), 0x20_0000, 0, file_region())
+                .map_err(|(err, _)| err),
             Err(RangeError::Empty)
         );
         assert_eq!(
-            reg.record_file_region(ProcessId(2), u64::MAX - 0xfff, 2, file_region()),
+            reg.record_file_region(ProcessId(2), u64::MAX - 0xfff, 2, file_region())
+                .map_err(|(err, _)| err),
             Err(RangeError::Empty)
         );
         record_file(&mut reg, ProcessId(2), 0x10_4000, 1);
@@ -5586,23 +6209,28 @@ mod tests {
         // withdrawn task would report a residual it does not have.
         let mut reg = AddressSpaceRegistry::new();
         assert_eq!(
-            reg.record_file_region(ProcessId(9), 0x10_0000, 0, file_region()),
+            reg.record_file_region(ProcessId(9), 0x10_0000, 0, file_region())
+                .map_err(|(err, _)| err),
             Err(RangeError::Empty)
         );
         assert_eq!(
             reg.record_anon_region(ProcessId(9), 0x20_0000, 0),
             Err(RangeError::Empty)
         );
-        assert!(!reg.withdraw(ProcessId(9)), "nothing was ever recorded");
+        assert!(
+            !reg.withdraw(ProcessId(9)).was_present(),
+            "nothing was ever recorded"
+        );
         // And once a record does land, a later refusal leaves it alone.
         record_file(&mut reg, ProcessId(9), 0x10_0000, 4);
         assert_eq!(
-            reg.record_file_region(ProcessId(9), 0x10_1000, 4, file_region()),
+            reg.record_file_region(ProcessId(9), 0x10_1000, 4, file_region())
+                .map_err(|(err, _)| err),
             Err(RangeError::Overlap)
         );
         assert!(reg.file_region_exact(ProcessId(9), 0x10_0000, 0x4000));
-        assert!(reg.withdraw(ProcessId(9)));
-        assert!(!reg.withdraw(ProcessId(9)));
+        assert!(reg.withdraw(ProcessId(9)).was_present());
+        assert!(!reg.withdraw(ProcessId(9)).was_present());
     }
 
     #[test]
@@ -5612,7 +6240,7 @@ mod tests {
         let removed = reg
             .remove_file_region(ProcessId(2), 0x10_0000)
             .expect("recorded");
-        assert_eq!(removed.path, "/big");
+        assert_eq!(&*removed.handle.opened_as, "/big");
         // Gone: neither an exact lookup, a covering lookup, nor a second
         // removal can see it.
         assert!(!reg.file_region_exact(ProcessId(2), 0x10_0000, 0x4000));
@@ -5628,7 +6256,7 @@ mod tests {
     fn withdraw_drops_file_regions_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
         record_file(&mut reg, ProcessId(5), 0x10_0000, 4);
-        assert!(reg.withdraw(ProcessId(5)));
+        assert!(reg.withdraw(ProcessId(5)).was_present());
         assert!(!reg.file_region_covers(ProcessId(5), 0x10_0000));
     }
 
@@ -5720,7 +6348,7 @@ mod tests {
     fn withdraw_drops_anon_regions_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
         record_anon(&mut reg, ProcessId(5), 0x20_0000, 4);
-        assert!(reg.withdraw(ProcessId(5)));
+        assert!(reg.withdraw(ProcessId(5)).was_present());
         assert!(!reg.anon_region_covers(ProcessId(5), 0x20_0000));
     }
 
@@ -5813,7 +6441,7 @@ mod tests {
     fn withdraw_drops_the_stack_span_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
         reg.set_stack_span(ProcessId(6), TaskId(6), stack_span());
-        assert!(reg.withdraw(ProcessId(6)));
+        assert!(reg.withdraw(ProcessId(6)).was_present());
         assert!(reg.stack_span(TaskId(6)).is_none());
         assert_eq!(reg.stack_committed_bytes(ProcessId(6)), 0);
     }
@@ -5908,7 +6536,7 @@ mod tests {
 
         // The process exits: everything goes, including the leader's own
         // per-thread records, so a reused id inherits nothing.
-        assert!(reg.withdraw(process));
+        assert!(reg.withdraw(process).was_present());
         assert!(reg.stack_span(TaskId(6)).is_none());
         assert!(reg.resolve(process).is_none());
         assert!(reg.load_base(process).is_none());
@@ -5937,7 +6565,7 @@ mod tests {
     fn withdraw_drops_the_load_base_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
         reg.set_load_base(ProcessId(6), 0x20_0000);
-        assert!(reg.withdraw(ProcessId(6)));
+        assert!(reg.withdraw(ProcessId(6)).was_present());
         assert!(reg.load_base(ProcessId(6)).is_none());
     }
 

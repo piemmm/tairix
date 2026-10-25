@@ -11,8 +11,9 @@ use tairix_abi::Errno;
 /// What a size probe of a named path learned, for the GNU output-width
 /// rule: regular files contribute their byte size to the column width,
 /// an existing non-regular node forces the wide (7-column) minimum, and
-/// an unprobeable path contributes nothing at all — exactly the three
-/// ways a `stat` outcome feeds GNU `wc`'s `compute_number_width`.
+/// an unprobeable path contributes nothing at all — the three cases GNU
+/// `wc` sizes its columns by (coreutils 9.4: `wc /etc/hostname` pads to 2,
+/// `wc /dev/null` and standard input to 7, a missing operand adds nothing).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SizeProbe {
     /// A regular file of this many bytes.

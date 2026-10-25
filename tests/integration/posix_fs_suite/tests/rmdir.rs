@@ -1,98 +1,80 @@
 //! `rmdir(2)` conformance: removing an empty directory, `ENOTEMPTY` for a
 //! populated one, `ENOTDIR` for a file, and `ENOENT`.
 //!
-//! The directory-only removal (`dir_only = true`) is the `rmdir` posture:
-//! the filesystem decides the node's kind atomically in the same walk that
+//! A removal under `UnlinkFlags::DIRECTORY` is the `rmdir` posture: the
+//! filesystem decides the node's kind atomically in the same walk that
 //! removes it, never a caller-side stat.
 
 use tairix_test_posix_fs_suite::*;
 
 #[test]
 fn rmdir_removes_an_empty_directory() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("empty")), &mut fs)
+    vol.mkdir(owner, &vol_path("empty"), new_dir())
         .expect("mkdir");
-    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("empty")), &mut fs, true)
+    vol.unlink(owner, &vol_path("empty"), UnlinkFlags::DIRECTORY)
         .expect("rmdir");
 
     assert_eq!(
-        vfs.stat_via_secured(
-            &owner,
-            &vfs.cover(&vol_path("empty")),
-            &mut fs,
-            FinalLink::Follow
-        )
-        .map(|info| info.kind),
-        Err(VfsError::NotFound)
+        vol.stat(owner, &vol_path("empty"), FinalLink::Follow)
+            .map(|info| info.kind),
+        Err(Errno::NotFound)
     );
 }
 
 #[test]
 fn rmdir_of_non_empty_directory_is_not_empty() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("populated")), &mut fs)
+    vol.mkdir(owner, &vol_path("populated"), new_dir())
         .expect("mkdir");
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("populated/child")), &mut fs)
+    vol.create(owner, &vol_path("populated/child"), new_file())
         .expect("create child");
 
     assert_eq!(
-        vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("populated")), &mut fs, true),
-        Err(VfsError::NotEmpty)
+        vol.unlink(owner, &vol_path("populated"), UnlinkFlags::DIRECTORY),
+        Err(Errno::NotEmpty)
     );
 }
 
 #[test]
 fn rmdir_succeeds_once_the_directory_is_emptied() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("d")), &mut fs)
-        .expect("mkdir");
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("d/child")), &mut fs)
+    vol.mkdir(owner, &vol_path("d"), new_dir()).expect("mkdir");
+    vol.create(owner, &vol_path("d/child"), new_file())
         .expect("create child");
-    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("d/child")), &mut fs, false)
+    vol.unlink(owner, &vol_path("d/child"), UnlinkFlags::empty())
         .expect("remove child");
-    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("d")), &mut fs, true)
+    vol.unlink(owner, &vol_path("d"), UnlinkFlags::DIRECTORY)
         .expect("rmdir once emptied");
 }
 
 #[test]
 fn rmdir_of_a_file_is_not_a_directory() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
+    let vol = arxfs_volume(false);
+    let owner = ROOT.caller();
 
-    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs)
+    vol.create(owner, &vol_path("plain"), new_file())
         .expect("create");
     assert_eq!(
-        vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs, true),
-        Err(VfsError::NotADirectory)
+        vol.unlink(owner, &vol_path("plain"), UnlinkFlags::DIRECTORY),
+        Err(Errno::NotADirectory)
     );
     // The refused removal left the file untouched.
-    vfs.stat_via_secured(
-        &owner,
-        &vfs.cover(&vol_path("plain")),
-        &mut fs,
-        FinalLink::Follow,
-    )
-    .expect("file survives");
+    vol.stat(owner, &vol_path("plain"), FinalLink::Follow)
+        .expect("file survives");
 }
 
 #[test]
 fn rmdir_missing_directory_is_not_found() {
-    let (vfs, mut fs) = arxfs_backed_vfs(false);
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-
+    let vol = arxfs_volume(false);
     assert_eq!(
-        vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("nope")), &mut fs, true),
-        Err(VfsError::NotFound)
+        vol.unlink(ROOT.caller(), &vol_path("nope"), UnlinkFlags::DIRECTORY),
+        Err(Errno::NotFound)
     );
 }

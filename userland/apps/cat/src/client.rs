@@ -2,17 +2,19 @@
 //! optionally line-numbered — to the terminal.
 
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_util::output::Carried;
 
 use crate::command::{Command, Numbering, Render, Source};
 use crate::error::CatError;
 use crate::io::{FileSource, Input, Output};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `cat`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `cat`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: cat [-AbeEnstTuv] [--] [file...]";
 
 /// `cat`'s own command word: the short-help switches render its own Help
@@ -33,11 +35,13 @@ const READ_CHUNK: usize = 4096;
 /// Sources are read in order; numbering (when enabled) is continuous across
 /// every source, exactly like the POSIX tool.
 ///
+/// A source that cannot be read ([`CatError::Read`]) is reported on `err` as
+/// `cat: name: reason` and the next is still read, as GNU's are, answering
+/// `Ok(false)` at the end; every source read answers `Ok(true)`.
+///
 /// # Errors
 ///
-/// * [`CatError::Read`] — a source could not be read; carries the
-///   underlying [`Errno`] (e.g. [`Errno::NotFound`]).
-/// * [`CatError::Output`] — writing the terminal failed.
+/// [`CatError::Output`] — writing the terminal or a diagnostic failed.
 pub fn run(
     command: Command,
     locale: Option<&str>,
@@ -45,17 +49,20 @@ pub fn run(
     stdin: &dyn Input,
     help: &dyn HelpSource,
     out: &dyn Output,
-) -> Result<(), CatError> {
+    err: &dyn Output,
+) -> Result<bool, CatError> {
     match command {
-        Command::Help => short_help(locale, help, out),
+        Command::Help => short_help(locale, help, out).map(|()| true),
         Command::Concat { render, sources } => {
             let mut emitter = Emitter::new(render);
+            let mut carried = Carried::new(err, OWN_WORD);
             for source in &sources {
-                match source {
-                    Source::Stdin => pump(|buf| stdin.read(buf), &mut emitter, out)?,
+                let pumped = match source {
+                    Source::Stdin => pump("-", |buf| stdin.read(buf), &mut emitter, out),
                     Source::Path(path) => {
                         let mut offset: u64 = 0;
                         pump(
+                            path,
                             |buf| {
                                 let read = files.read(path, offset, buf)?;
                                 offset = offset.saturating_add(read as u64);
@@ -63,11 +70,12 @@ pub fn run(
                             },
                             &mut emitter,
                             out,
-                        )?;
+                        )
                     }
-                }
+                };
+                carried.absorb(pumped)?;
             }
-            Ok(())
+            Ok(carried.clean())
         }
     }
 }
@@ -89,13 +97,17 @@ fn short_help(
 
 /// Drain one source — calling `fill` for successive chunks until it reports
 /// end-of-stream (`0`) — feeding each chunk through `emitter` to `out`.
-fn pump<F>(mut fill: F, emitter: &mut Emitter, out: &dyn Output) -> Result<(), CatError>
+fn pump<F>(name: &str, mut fill: F, emitter: &mut Emitter, out: &dyn Output) -> Result<(), CatError>
 where
     F: FnMut(&mut [u8]) -> Result<usize, Errno>,
 {
+    let unread = |errno| CatError::Read {
+        source: String::from(name),
+        errno,
+    };
     let mut buf = [0u8; READ_CHUNK];
     loop {
-        let read = fill(&mut buf).map_err(CatError::Read)?;
+        let read = fill(&mut buf).map_err(unread)?;
         if read == 0 {
             return Ok(());
         }
@@ -103,7 +115,7 @@ where
         // malformed; refuse it rather than index out of bounds.
         let chunk = buf
             .get(..read)
-            .ok_or(CatError::Read(Errno::LengthOutOfRange))?;
+            .ok_or_else(|| unread(Errno::LengthOutOfRange))?;
         emitter.emit(chunk, out)?;
     }
 }
@@ -391,13 +403,26 @@ mod tests {
         Source::Path(String::from(name))
     }
 
+    /// The engine, answering what it reported on its error stream when it
+    /// did not run clean: an unreadable source is reported and the next
+    /// still read.
     fn run_cat(
         command: Command,
         files: &dyn FileSource,
         stdin: &dyn Input,
         out: &Recorder,
-    ) -> Result<(), CatError> {
-        run(command, None, files, stdin, &NoHelp, out)
+    ) -> Result<(), String> {
+        let err = Recorder::new();
+        match run(command, None, files, stdin, &NoHelp, out, &err) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(err.text()),
+            Err(fatal) => Err(alloc::format!("cat: {fatal}\n")),
+        }
+    }
+
+    /// `failure` as the tool reports it.
+    fn shown(failure: &CatError) -> Result<(), String> {
+        Err(alloc::format!("cat: {failure}\n"))
     }
 
     #[test]
@@ -411,9 +436,10 @@ mod tests {
                 &fs,
                 &StdinFixture::empty(),
                 &OneDoc,
-                &out
+                &out,
+                &Recorder::new()
             ),
-            Ok(())
+            Ok(true)
         );
         let text = out.text();
         assert!(
@@ -434,9 +460,10 @@ mod tests {
                 &fs,
                 &StdinFixture::empty(),
                 &NoHelp,
-                &out
+                &out,
+                &Recorder::new()
             ),
-            Ok(())
+            Ok(true)
         );
         let mut expected = String::from(USAGE);
         expected.push('\n');
@@ -592,15 +619,19 @@ mod tests {
                 &StdinFixture::empty(),
                 &out
             ),
-            Err(CatError::Read(Errno::NotFound))
+            shown(&CatError::Read {
+                source: String::from("absent"),
+                errno: Errno::NotFound
+            })
         );
     }
 
     #[test]
-    fn a_read_error_stops_before_later_sources() {
+    fn an_unreadable_source_is_named_and_the_next_still_read() {
+        // GNU 9.4: `cat missing h` writes `cat: missing: …`, then `h`, and
+        // exits 1.
         let fs = MapFs::new().with("a", b"A\n");
         let out = Recorder::new();
-        // The missing first file aborts; "a" is never read.
         assert_eq!(
             run_cat(
                 concat(plain(), vec![path("absent"), path("a")]),
@@ -608,9 +639,12 @@ mod tests {
                 &StdinFixture::empty(),
                 &out
             ),
-            Err(CatError::Read(Errno::NotFound))
+            shown(&CatError::Read {
+                source: String::from("absent"),
+                errno: Errno::NotFound
+            })
         );
-        assert_eq!(out.text(), "");
+        assert_eq!(out.text(), "A\n");
     }
 
     #[test]
@@ -624,7 +658,10 @@ mod tests {
                 &StdinFixture::empty(),
                 &out
             ),
-            Err(CatError::Output(Errno::NotFound))
+            Err(alloc::format!(
+                "cat: {}\n",
+                CatError::Output(Errno::NotFound)
+            ))
         );
     }
 

@@ -40,6 +40,8 @@ tairix-theme = { path = "../theme", version = "=0.0.0" }
 # The queue a document application's saves are written on, and the spelling
 # an untrusted name is stated in.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The one rule for a hidden character.
+tairix-visible = { path = "../visible", version = "=0.0.0" }
 
 [features]
 default = ["rt"]

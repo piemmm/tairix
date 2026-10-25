@@ -1,93 +1,98 @@
 # `tairix-chown` — change file owner and group
 
-Stage 6 deliverable (`AGENTS.md` §3 `userland/apps/`). `chown` applies an
-ownership change to each of its file operands. The owner operand is
-`OWNER`, `OWNER:GROUP`, or `:GROUP`, where `OWNER` and `GROUP` are
-**decimal** user/group ids: `OWNER` changes only the owning user,
-`:GROUP` only the owning group, and `OWNER:GROUP` both. With `-R` a
-directory operand is changed and then its contents are changed
-recursively. This is the POSIX model, restricted to numeric ids.
-
-The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `tairix-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`chown` gives each file operand the owner and group an `[OWNER][:[GROUP]]`
+operand names, or those of a `--reference` file, with GNU's command line.
+It ships as the `/System/Commands/chown.app` bundle. The crate is `no_std`
+(with `alloc`), has no `unsafe`, and no `unwrap`/`expect`/`panic!` in
+production paths; it depends only on `lib/*` crates.
 
 ## Usage
 
 ```
-chown [-cfRv] [--] OWNER[:GROUP] file...
+chown [OPTION]... [OWNER][:[GROUP]] file...
+chown [OPTION]... --reference=RFILE file...
 
-  -R, --recursive       change files and directories recursively
-  -c, --changes         report only files whose ownership actually changed
-  -v, --verbose         report every file processed
-  -f, --silent, --quiet suppress most error messages
-  -h, --help            show the usage banner
+  -c, --changes          report only files whose ownership actually changed
+  -f, --silent, --quiet  suppress most error messages
+  -v, --verbose          report every file processed
+      --dereference      change what a symbolic link names
+  -h, --no-dereference   change a symbolic link itself
+      --from=CURRENT_OWNER:CURRENT_GROUP
+                         change only a file owned as this says
+      --reference=RFILE  use RFILE's owner and group
+  -R, --recursive        change files and directories recursively
+  -H                     with -R, follow a link operand naming a directory
+  -L                     with -R, follow every link (refused)
+  -P                     with -R, follow no link (the default)
+  -?, --help             show the short help
+      --version          show the version
 ```
 
-An owner spec and at least one file are required. `--` ends option
-parsing: every later argument is an operand. POSIX `chown` spells
-recursive `-R`; a bare `-r` is not an option.
+Options may stand anywhere among the operands, a long one shortened to any
+unambiguous prefix; `--` ends them. The later of `-c`/`-v`, of
+`--dereference`/`-h`, and of `-H`/`-L`/`-P` wins.
 
-## The owner grammar
+## The owner operand
 
-`OWNER` and `GROUP` are decimal ids. The accepted forms are:
+`OWNER` changes the user, `OWNER:GROUP` both, `:GROUP` the group, and an
+empty operand or `:` neither. `OWNER:` also gives an owner named by name its
+login group. A field is looked up in the account or group directory first
+and read as a decimal number only when nothing has that name; a leading `+`
+makes it a number without the lookup. Without a `:`, a `.` separates the
+fields, with GNU's warning, unless the whole operand names an account. Every
+name is read before any file is touched: an unknown name, an unreadable
+directory or an unreadable reference changes nothing.
 
-- `OWNER` — change only the owning user, leaving the group.
-- `OWNER:GROUP` — change both.
-- `:GROUP` — change only the owning group.
+The login group `OWNER:` gives is the one the account directory lists for
+that account, so it is read in the same lookup as the owner.
 
-A name (rather than a numeric id) is not accepted: TAIRiX has no
-name-to-id seam in this tool, so resolving names would be interface creep
-(`AGENTS.md` §2.4). An empty spec, a bare `:`, and a trailing-colon
-`OWNER:` (which on POSIX systems means "the user's login group", and has
-no meaning without a name database) are all rejected rather than guessed
-(`AGENTS.md` §2.1).
+## Links and walks
 
-## An ownership-changing machine, not a data source
+Without `-R` a link operand changes what it names, or under `-h` the link
+itself. With `-R` a link met in the tree is changed itself and never
+followed, or under `--dereference` left alone with what it names; a link
+named as an operand is changed itself (`-P`), what it names under
+`--dereference`, or walked under `-H` when it names a directory. `-L` under
+`-R` is refused, since a walk never follows a link it meets. Each directory
+is changed after its contents, so giving one away cannot shut the walk out
+of it.
 
-`run` asks the injected filesystem seam for each operand's kind, applies
-the new owner, and walks each directory `-R` must descend (changing the
-directory before its contents). The operations that reach the outside
-world are injected seams, mirroring the other userland crates (`cat`'s
-`FileSource`, `ls`'s `Listing`, `rm`'s `Removal`, `cp`'s and `mv`'s
-`FileSystem`, `chmod`'s `FileSystem`):
+## Seams
 
-- `FileSystem` — learn a path's kind, set its owner, and read a
-  directory's entries (for `-R`). A child's kind is carried in its
-  directory entry, so the recursion never re-inspects it.
-- `Output` — write the usage banner and the `-c`/`-v` change reports
-  (`chown` is otherwise silent on
-  success).
+`run` reaches the system only through:
 
-On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, owner-spec, and recursion
-decision is testable without a kernel.
+- `tairix_fscopy::tree::Roots` — operands opened and trees walked through the
+  directories it holds, each change made through the descriptor the node's
+  old owner was read from (`tairix_rt::copy::WorkingDirectory` when running,
+  the fixture's `Tree` in tests);
+- `Accounts` — the ungated account and group directories, each account
+  listed with its login group;
+- `Output`, and `lib/help`'s `HelpSource` for the bundle's own `Help/` tree.
+
+## Capabilities
+
+`CAP_CONSOLE_WRITE`, `CAP_FS_ACCESS`, and `CAP_FS_CHOWN`, which the kernel
+asks of a change that gives a node to another account or to a group the
+caller is not in. Without it an account may still give a file it owns to one
+of its own groups; every other change is refused by the kernel and reported.
 
 ## Fail closed
 
-An unknown option or a missing operand is a `ChownError::Usage` that
-changes nothing; an owner operand that is not a valid
-`OWNER`/`OWNER:GROUP`/`:GROUP` spec is a `ChownError::BadOwner`. An
-operand that cannot be inspected surfaces the underlying `Errno` as
-`ChownError::Stat`; an owner that cannot be applied is
-`ChownError::Apply`; a directory whose entries cannot be read during a
-recursive descent is `ChownError::Read`. The first failure stops the run
-before any later operand, and there is no panic (`AGENTS.md` §2.9).
+A refused option, a missing operand, and `-L` under `-R` are reported with
+`Try 'chown --help' for more information.`. A node that cannot be reached,
+listed or changed is reported in GNU's words and the rest are still
+changed; under `-v` a refused change is followed by `failed to change
+ownership of … from … to …` and an unreachable node by `failed to change
+ownership of … to …`. The run exits 1 when anything failed.
 
 ## Tests
 
-`cargo test -p tairix-chown` drives the parser and the engine against an
-in-memory tree and a recording output: the command grammar (every owner
-form, the recursive flag, the `-r`-is-not-recursive and unknown-option
-refusals, `--`, the too-few-operands and bad-owner paths), the owner-spec
-parser (the three valid forms, the empty/`:`/trailing-colon refusals, and
-the non-decimal / overflow / multi-colon refusals), an owner-only change
-leaving the group, an owner:group change, a group-only change leaving the
-user, several files, a non-recursive directory change leaving its
-contents alone, a recursive change touching the directory before its
-contents, and the missing-operand / stat / apply / read-during-recursion
-fail-closed paths.
+`cargo test -p tairix-chown` drives the parser, the owner grammar and the
+engine against `lib/fscopy`'s in-memory tree: GNU's option matrix, names
+and numbers, `OWNER:`, the `.` separator, `--from`, `--reference`, every
+link case, the order a tree is changed in, the fail-closed paths, and
+attacker-hook sweeps that swap a name for a link before each seam call in
+turn and prove no change leaves the tree.
 
 See [`docs/src/userland/utilities.md`](../../../docs/src/userland/utilities.md)
-for the full subsystem documentation.
+for the full documentation.

@@ -56,9 +56,10 @@ mod program {
         fn replace(&mut self, which: SystemConfigFile, text: &str) -> Result<(), Errno> {
             // The image lays out the service's directories; it may not make one.
             tairix_rt::replace_file(
-                which.path().as_bytes(),
+                which.path(),
                 text.as_bytes(),
                 ParentDir::Existing,
+                tairix_abi::fs::FS_NEW_FILE_MODE,
             )
         }
     }

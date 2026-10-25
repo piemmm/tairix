@@ -59,9 +59,9 @@ Administratorkonto trägt. Die einzige Domäne auf der Verbindung ist `local`.
 
 - `0` — der Befehl ist vollständig gelaufen (oder die Kurzhilfe wurde
   geschrieben).
-- `1` — der Erkennungsdienst hat die Anfrage abgelehnt oder läuft nicht.
-- `2` — die Befehlszeile wurde nicht verstanden, oder die Ausgabe konnte nicht
-  geschrieben werden.
+- `1` — der Erkennungsdienst hat die Anfrage abgelehnt oder läuft nicht. Eine
+  nicht verstandene Befehlszeile endet ebenfalls mit `1`.
+- `2` — die Ausgabe konnte nicht geschrieben werden.
 
 ## ENVIRONMENT
 

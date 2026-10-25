@@ -38,10 +38,9 @@
 //! # Target
 //!
 //! `target = 1.25 × max × util`, quantised up to the mechanism's step and
-//! clamped to its range. The quarter of headroom is the one Linux's
-//! `schedutil` uses: a CPU that is *fully* busy at some rate has no way to
-//! say how much faster it would like to be, so the governor must overshoot to
-//! find out.
+//! clamped to its range. The quarter of headroom is there because a CPU
+//! that is *fully* busy at some rate has no way to say how much faster it
+//! would like to be, so the governor must overshoot to find out.
 //!
 //! # A wake is not a reason to go fast; a launch is
 //!
@@ -269,8 +268,8 @@ mod tests {
     use super::{fold, proportional_hz, target_hz, RESPONSE_WINDOW_NS, UTIL_ONE};
     use tairix_abi::cpufreq::CpuFreqLimits;
 
-    /// A Pi 4B: 600 MHz to 1.5 GHz in 100 MHz steps.
-    fn pi4() -> CpuFreqLimits {
+    /// A 600 MHz to 1.5 GHz range in 100 MHz steps.
+    fn stepped_range() -> CpuFreqLimits {
         CpuFreqLimits::new(600_000_000, 1_500_000_000, 100_000_000).expect("a real range")
     }
 
@@ -358,17 +357,17 @@ mod tests {
 
     #[test]
     fn a_saturated_machine_asks_for_everything() {
-        assert_eq!(proportional_hz(&pi4(), UTIL_ONE), 1_500_000_000);
+        assert_eq!(proportional_hz(&stepped_range(), UTIL_ONE), 1_500_000_000);
     }
 
     #[test]
     fn an_idle_machine_asks_for_the_minimum() {
-        assert_eq!(proportional_hz(&pi4(), 0), 600_000_000);
+        assert_eq!(proportional_hz(&stepped_range(), 0), 600_000_000);
     }
 
     #[test]
     fn a_partly_busy_machine_asks_for_a_whole_step_in_range() {
-        let limits = pi4();
+        let limits = stepped_range();
         for percent in 0..=100u64 {
             let hz = proportional_hz(&limits, UTIL_ONE * percent / 100);
             assert!(
@@ -387,7 +386,10 @@ mod tests {
     fn the_headroom_overshoots_a_measured_rate() {
         // Half-busy on a 1.5 GHz part is 750 MHz of work; the quarter of
         // headroom asks for 937.5 MHz, which rounds up to the 1 GHz step.
-        assert_eq!(proportional_hz(&pi4(), UTIL_ONE / 2), 1_000_000_000);
+        assert_eq!(
+            proportional_hz(&stepped_range(), UTIL_ONE / 2),
+            1_000_000_000
+        );
     }
 
     #[test]
@@ -395,12 +397,15 @@ mod tests {
         // 41% of 1.5 GHz with headroom is 768.75 MHz: between the 700 and
         // 800 MHz steps. Under-delivering a rate the workload has already
         // shown it needs is the worse error.
-        assert_eq!(proportional_hz(&pi4(), UTIL_ONE * 41 / 100), 800_000_000);
+        assert_eq!(
+            proportional_hz(&stepped_range(), UTIL_ONE * 41 / 100),
+            800_000_000
+        );
     }
 
     #[test]
     fn a_launch_boost_asks_for_the_maximum_however_idle_the_machine_looks() {
-        let limits = pi4();
+        let limits = stepped_range();
         assert_eq!(target_hz(&limits, 0, true), limits.max_hz);
         assert_eq!(target_hz(&limits, 0, false), limits.min_hz);
     }
@@ -413,7 +418,7 @@ mod tests {
         // the minimum once the headroom and the clamp are applied — which is
         // why no utilisation threshold was added: the rate was pinned by a
         // wake boost that never let this arithmetic run.
-        let limits = pi4();
+        let limits = stepped_range();
         for percent in [1u64, 2, 5, 10] {
             let util = UTIL_ONE * percent / 100;
             assert_eq!(

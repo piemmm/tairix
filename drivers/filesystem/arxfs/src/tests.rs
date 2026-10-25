@@ -19,6 +19,11 @@ use tairix_fsmeta::preset;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_writeback::TestVolumeHost;
 
+// The records nodes are created with where a test does not examine the record.
+const FILE_RECORD: Security = Security::new(0o644, 0, 0);
+const DIR_RECORD: Security = Security::new(0o755, 0, 0);
+const LINK_RECORD: Security = Security::new(0o777, 0, 0);
+
 /// In-memory block device. Optionally drops writes once a budget is reached,
 /// modelling a power loss mid-commit: a dropped write simply never reaches the
 /// platter, and the driver's in-memory state is discarded by re-opening from
@@ -538,10 +543,11 @@ fn open_read_only_reads_back_committed_content() {
     // back through the ordinary read path (the design-B `/System` mount).
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![0x5Cu8; 1500];
-    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(1500));
+    assert_eq!(fs.write_at(file, 0, &body), Ok(1500));
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING)
@@ -559,24 +565,25 @@ fn a_read_only_mount_refuses_every_mutation_fail_closed() {
     // leaves the existing content intact.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"file", 0, b"original"), Ok(8));
+    assert_eq!(fs.write_at(file, 0, b"original"), Ok(8));
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING)
         .expect("read-only mount");
     let root = ro.root();
     assert_eq!(
-        ro.create(root, b"new", NodeKind::RegularFile),
+        ro.create(root, b"new", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::ReadOnly)
     );
     assert_eq!(
-        ro.write_at(root, b"file", 0, b"clobber!"),
+        ro.write_at(file, 0, b"clobber!"),
         Err(DriverError::ReadOnly)
     );
     assert_eq!(ro.remove(root, b"file"), Err(DriverError::ReadOnly));
-    assert_eq!(ro.truncate(root, b"file", 0), Err(DriverError::ReadOnly));
+    assert_eq!(ro.truncate(file, 0), Err(DriverError::ReadOnly));
     // The inherent mutators (not part of a `Filesystem*` trait) fail closed
     // too — they must early-deny, not rely on the `commit` backstop after
     // dirtying the device.
@@ -608,10 +615,10 @@ fn a_read_only_mount_never_writes_the_device() {
     // node) and must still refuse before touching the device.
     let mut authored = fmt(512, 256, 32);
     let authored_root = authored.root();
-    authored
-        .create(authored_root, b"x", NodeKind::RegularFile)
+    let x = authored
+        .create(authored_root, b"x", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(authored.write_at(authored_root, b"x", 0, b"payload"), Ok(7));
+    assert_eq!(authored.write_at(x, 0, b"payload"), Ok(7));
     let bytes = authored.into_block().expect("the volume closes").bytes();
     let before = bytes.clone();
     let mut ro = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING)
@@ -623,7 +630,7 @@ fn a_read_only_mount_never_writes_the_device() {
     let root = ro.root();
     let node = ro.lookup(root, b"x").expect("the authored file exists");
     let _ = listed(&mut ro, root, 0, &[]);
-    let _ = ro.create(root, b"z", NodeKind::RegularFile);
+    let _ = ro.create(root, b"z", NodeKind::RegularFile, &FILE_RECORD);
     let _ = ro.reflink(root, b"x", b"y");
     let _ = ro.set_security(node, Security::new(0o600, 0, 0));
     let after = ro.into_block().expect("the volume closes").bytes();
@@ -646,10 +653,11 @@ fn open_rejects_an_unformatted_device() {
 fn create_write_read_back_and_survive_remount() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![0xABu8; 9000];
-    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(9000));
+    assert_eq!(fs.write_at(file, 0, &body), Ok(9000));
     let node = fs.lookup(root, b"file").expect("lookup");
     assert_eq!(fs.node_info(node).expect("info").size, 9000);
 
@@ -690,10 +698,11 @@ fn extent_tree_backs_large_files() {
     // replaced Stage 1's 12-direct + single-indirect map (no fixed cap).
     let mut fs = fmt(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"big", NodeKind::RegularFile)
+    let big = fs
+        .create(root, b"big", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![0xCDu8; 512 * 200];
-    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(big, 0, &body), Ok(body.len()));
     let node = fs.lookup(root, b"big").expect("lookup");
     let mut back = alloc::vec![0u8; body.len()];
     let mut done = 0;
@@ -713,9 +722,10 @@ fn extent_tree_backs_large_files() {
 fn nested_directories_and_listing() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"sub", NodeKind::Directory).expect("mkdir");
+    fs.create(root, b"sub", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
     let sub = fs.lookup(root, b"sub").expect("lookup sub");
-    fs.create(sub, b"inner", NodeKind::RegularFile)
+    fs.create(sub, b"inner", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create inner");
     let inner = fs.lookup(sub, b"inner").unwrap();
     assert_eq!(fs.node_info(inner).unwrap().size, 0);
@@ -728,11 +738,12 @@ fn nested_directories_and_listing() {
 fn truncate_keeps_the_surviving_prefix() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![7u8; 4096];
-    fs.write_at(root, b"f", 0, &body).expect("write");
-    fs.truncate(root, b"f", 2048).expect("truncate");
+    fs.write_at(f, 0, &body).expect("write");
+    fs.truncate(f, 2048).expect("truncate");
     let node = fs.lookup(root, b"f").unwrap();
     assert_eq!(fs.node_info(node).unwrap().size, 2048);
     let mut back = alloc::vec![0u8; 2048];
@@ -744,24 +755,25 @@ fn truncate_keeps_the_surviving_prefix() {
 fn fail_closed_extremes() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"dup", NodeKind::RegularFile)
+    fs.create(root, b"dup", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(
-        fs.create(root, b"dup", NodeKind::RegularFile),
+        fs.create(root, b"dup", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::AlreadyExists)
     );
     assert_eq!(
-        fs.create(root, b"", NodeKind::RegularFile),
+        fs.create(root, b"", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
     let oversize = alloc::vec![b'x'; NAME_MAX + 1];
     assert_eq!(
-        fs.create(root, &oversize, NodeKind::RegularFile),
+        fs.create(root, &oversize, NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
-    fs.create(root, b"d", NodeKind::Directory).expect("mkdir");
+    fs.create(root, b"d", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
     let d = fs.lookup(root, b"d").unwrap();
-    fs.create(d, b"child", NodeKind::RegularFile)
+    fs.create(d, b"child", NodeKind::RegularFile, &FILE_RECORD)
         .expect("child");
     assert_eq!(fs.remove(root, b"d"), Err(DriverError::DirectoryNotEmpty));
     assert_eq!(fs.remove(root, b"nope"), Err(DriverError::NotFound));
@@ -777,13 +789,10 @@ fn remove_reclaims_space_so_allocation_resumes() {
     let mut idx = 0;
     loop {
         let name = alloc::format!("f{idx}");
-        if fs
-            .create(root, name.as_bytes(), NodeKind::RegularFile)
-            .is_err()
-        {
+        let Ok(file) = fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD) else {
             break;
-        }
-        match fs.write_at(root, name.as_bytes(), 0, &body) {
+        };
+        match fs.write_at(file, 0, &body) {
             Ok(_) => {
                 last = name;
                 idx += 1;
@@ -796,12 +805,10 @@ fn remove_reclaims_space_so_allocation_resumes() {
     assert!(!last.is_empty(), "at least one file should have landed");
     fs.remove(root, last.as_bytes())
         .expect("remove frees space");
-    fs.create(root, b"after", NodeKind::RegularFile)
+    let after = fs
+        .create(root, b"after", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create after free");
-    assert_eq!(
-        fs.write_at(root, b"after", 0, &alloc::vec![1u8; 512]),
-        Ok(512)
-    );
+    assert_eq!(fs.write_at(after, 0, &alloc::vec![1u8; 512]), Ok(512));
 }
 
 #[test]
@@ -810,7 +817,7 @@ fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
     let mut fs = fmt(512, 256, 32).at(Some(at(1_800_000_000)));
     let root = fs.root();
     let file = fs
-        .create(root, b"f", NodeKind::RegularFile)
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let made = fs.node_info(file).expect("info").times;
     assert_eq!(
@@ -825,7 +832,7 @@ fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
     );
 
     fs = fs.at(Some(at(1_800_000_100)));
-    fs.write_at(root, b"f", 0, b"data").expect("write");
+    fs.write_at(file, 0, b"data").expect("write");
     let written = fs.node_info(file).expect("info").times;
     assert_eq!(written.created, at(1_800_000_000));
     assert_eq!(
@@ -849,13 +856,13 @@ fn with_no_time_to_give_a_stamp_is_the_no_stamp_value() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let file = fs
-        .create(root, b"f", NodeKind::RegularFile)
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
 
     // The clock is lost: what is changed now has no known time, so the stamp
     // says so rather than keeping the last time it was known.
     fs = fs.at(None);
-    fs.write_at(root, b"f", 0, b"data").expect("write");
+    fs.write_at(file, 0, b"data").expect("write");
     let times = fs.node_info(file).expect("info").times;
     assert_eq!(times.created, fixed_clock());
     assert_eq!(
@@ -863,7 +870,7 @@ fn with_no_time_to_give_a_stamp_is_the_no_stamp_value() {
         (Time64::UNIX_EPOCH, Time64::UNIX_EPOCH)
     );
     let made_unknown = fs
-        .create(root, b"g", NodeKind::RegularFile)
+        .create(root, b"g", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(
         fs.node_info(made_unknown).expect("info").times.created,
@@ -883,7 +890,7 @@ fn a_volume_with_no_host_stamps_nothing() {
     .expect("format");
     let root = fs.root();
     let file = fs
-        .create(root, b"f", NodeKind::RegularFile)
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let times = fs.node_info(file).expect("info").times;
     assert_eq!(
@@ -910,7 +917,7 @@ fn timestamps_round_trip_extreme_values() {
     .expect("format")
     .at(Some(old));
     let root = fs.root();
-    fs.create(root, b"t", NodeKind::RegularFile)
+    fs.create(root, b"t", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"t").unwrap();
     let times = fs.node_info(node).unwrap().times;
@@ -941,7 +948,7 @@ fn superblock_ring_selects_the_highest_committed_generation() {
     let root = fs.root();
     for i in 0..8 {
         let name = alloc::format!("g{i}");
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
     let bytes = fs.into_block().expect("the volume closes").bytes();
@@ -960,11 +967,13 @@ fn crash_at_every_write_count_during_commit_never_tears() {
     // committed in full" or "it did not commit at all" — never a torn middle.
     let mut base = fmt(512, 256, 32);
     let root = base.root();
-    base.create(root, b"keep", NodeKind::RegularFile)
+    let keep_file = base
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create keep");
-    base.write_at(root, b"keep", 0, b"baseline")
+    base.write_at(keep_file, 0, b"baseline")
         .expect("write keep");
-    base.create(root, b"new", NodeKind::RegularFile)
+    let new_file = base
+        .create(root, b"new", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create new");
     let baseline = base.into_block().expect("the volume closes").bytes();
 
@@ -972,9 +981,8 @@ fn crash_at_every_write_count_during_commit_never_tears() {
         let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 256);
         dev.write_budget = Some(budget);
         let mut fs = ARXFS::open(dev, TEST_KEYING).expect("baseline opens");
-        let root = fs.root();
         // The single transaction may be cut short at `budget` writes.
-        let _ = fs.write_at(root, b"new", 0, b"freshdata");
+        let _ = fs.write_at(new_file, 0, b"freshdata");
         let bytes = fs.into_block().expect("the volume closes").bytes();
 
         // Re-open from the (possibly torn) image: it must mount, and the
@@ -1057,7 +1065,7 @@ fn inode_tree_grows_and_shrinks_across_many_inodes() {
     let count = 400u32;
     for i in 0..count {
         let name = alloc::format!("f{i:04}");
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
     assert!(
@@ -1104,7 +1112,8 @@ fn file_with_many_noncontiguous_extents_round_trips() {
     // many records — enough to split past one node.
     let mut fs = fmt(512, 4096, 64);
     let root = fs.root();
-    fs.create(root, b"sparse", NodeKind::RegularFile)
+    let sparse = fs
+        .create(root, b"sparse", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     // Each run fills exactly one data block, so the stride is the data-block
     // *content* capacity (the block minus its crypto trailer), not the raw
@@ -1116,7 +1125,7 @@ fn file_with_many_noncontiguous_extents_round_trips() {
         let val = i.wrapping_add(1);
         let block = alloc::vec![val; cap_bytes];
         let off = u64::from(i) * 2 * cap;
-        assert_eq!(fs.write_at(root, b"sparse", off, &block), Ok(cap_bytes));
+        assert_eq!(fs.write_at(sparse, off, &block), Ok(cap_bytes));
     }
     let node = fs.lookup(root, b"sparse").expect("lookup");
     let ino = u32::try_from(node.raw()).unwrap();
@@ -1155,10 +1164,11 @@ fn large_contiguous_write_collapses_to_few_extents() {
     // map keeps it to one record, not one per block.
     let mut fs = fmt(4096, 4096, 64);
     let root = fs.root();
-    fs.create(root, b"big", NodeKind::RegularFile)
+    let big = fs
+        .create(root, b"big", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = incompressible(4096 * 64);
-    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(big, 0, &body), Ok(body.len()));
     let node = fs.lookup(root, b"big").expect("lookup");
     let ino = u32::try_from(node.raw()).unwrap();
     let inode = fs.read_inode(ino).expect("inode");
@@ -1167,10 +1177,11 @@ fn large_contiguous_write_collapses_to_few_extents() {
 
     // The compressible variant instead stores one bounded compressed extent
     // per whole cluster (plus the raw tail), never one record per block.
-    fs.create(root, b"zip", NodeKind::RegularFile)
+    let zip = fs
+        .create(root, b"zip", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create zip");
     let body = alloc::vec![0x7Eu8; 4096 * 64];
-    assert_eq!(fs.write_at(root, b"zip", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(zip, 0, &body), Ok(body.len()));
     let cap = fs.data_capacity();
     let blocks = (body.len() as u64).div_ceil(cap);
     let clusters = blocks / COMPRESS_CLUSTER_BLOCKS;
@@ -1201,15 +1212,17 @@ fn free_space_rebuild_matches_authoritative_extents() {
     let root = fs.root();
     for i in 0u8..40 {
         let name = alloc::format!("d{i}");
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+        let file = fs
+            .create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         let body = alloc::vec![i; 4096 * 3];
-        fs.write_at(root, name.as_bytes(), 0, &body).expect("write");
+        fs.write_at(file, 0, &body).expect("write");
     }
-    fs.create(root, b"sparse", NodeKind::RegularFile)
+    let sparse = fs
+        .create(root, b"sparse", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create sparse");
     for i in 0..30u64 {
-        fs.write_at(root, b"sparse", i * 4096 * 2, &alloc::vec![9u8; 4096])
+        fs.write_at(sparse, i * 4096 * 2, &alloc::vec![9u8; 4096])
             .expect("sparse write");
     }
     for i in (0u8..40).step_by(3) {
@@ -1240,9 +1253,10 @@ fn metadata_bit_flip_is_detected_and_repaired_from_the_companion() {
     // repair the primary on disk (`docs/src/filesystem/arxfs-spec.md` §8).
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"f", 0, b"hello").expect("write");
+    fs.write_at(f, 0, b"hello").expect("write");
     let target = fs.inode_tree_root;
     assert_ne!(target, 0, "the volume has an inode tree");
 
@@ -1278,9 +1292,10 @@ fn both_metadata_copies_corrupted_fails_closed() {
     // and never trusting the corrupt bytes.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"f", 0, b"hello").expect("write");
+    fs.write_at(f, 0, b"hello").expect("write");
     let target = fs.inode_tree_root;
     assert_ne!(target, 0);
 
@@ -1302,7 +1317,7 @@ fn corrupting_one_superblock_copy_still_mounts_via_the_mirror() {
     // companion and repairs it.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    fs.create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let bs = 512usize;
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
@@ -1324,10 +1339,11 @@ fn crash_during_multiblock_extent_write_never_tears() {
     // contents or fully the old, never a torn mix.
     let mut base = fmt(512, 512, 32);
     let root = base.root();
-    base.create(root, b"f", NodeKind::RegularFile)
+    let f = base
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let old = alloc::vec![0xAAu8; 512 * 24];
-    base.write_at(root, b"f", 0, &old).expect("seed write");
+    base.write_at(f, 0, &old).expect("seed write");
     let baseline = base.into_block().expect("the volume closes").bytes();
     let new = alloc::vec![0x55u8; 512 * 24];
 
@@ -1335,8 +1351,7 @@ fn crash_during_multiblock_extent_write_never_tears() {
         let mut dev = MemBlock::from_bytes(baseline.clone(), 512, 512);
         dev.write_budget = Some(budget);
         let mut fs = ARXFS::open(dev, TEST_KEYING).expect("baseline opens");
-        let root = fs.root();
-        let _ = fs.write_at(root, b"f", 0, &new);
+        let _ = fs.write_at(f, 0, &new);
         let bytes = fs.into_block().expect("the volume closes").bytes();
 
         let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 512), TEST_KEYING)
@@ -1374,7 +1389,7 @@ fn wrong_volume_key_refuses_the_mount() {
     // master key fails to authenticate, so `open` fails closed with
     // `PermissionDenied` — never a panic, never a misread.
     let mut fs = fmt(512, 256, 32);
-    fs.create(fs.root(), b"f", NodeKind::RegularFile)
+    fs.create(fs.root(), b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
@@ -1448,9 +1463,10 @@ fn no_plaintext_filename_or_data_at_rest() {
     };
     let mut fs = fmt(512, 512, 32);
     let root = fs.root();
-    fs.create(root, name, NodeKind::RegularFile)
+    let file = fs
+        .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(file, 0, &payload), Ok(payload.len()));
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
     assert!(
@@ -1471,9 +1487,10 @@ fn filename_and_data_round_trip_through_encryption_across_remount() {
     let payload = alloc::vec![0xC3u8; 512 * 5 + 17];
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, name, NodeKind::RegularFile)
+    let file = fs
+        .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(file, 0, &payload), Ok(payload.len()));
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING).expect("remount");
@@ -1498,10 +1515,11 @@ fn bit_flip_in_encrypted_data_is_detected() {
     // the AEAD authenticator on read — a failed decrypt fails closed, never returning mis-decrypted bytes.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = alloc::vec![0x77u8; 300];
-    assert_eq!(fs.write_at(root, b"f", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(f, 0, &payload), Ok(payload.len()));
     let node = fs.lookup(root, b"f").expect("lookup");
     let ino = u32::try_from(node.raw()).unwrap();
     let inode = fs.read_inode(ino).expect("read inode");
@@ -1563,11 +1581,13 @@ fn data_block_integrity_layers_are_distinct_and_fail_closed() {
             .stamped();
         let root = fs.root();
         for name in [b"f".as_slice(), b"g"] {
-            fs.create(root, name, NodeKind::RegularFile)
+            fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
                 .expect("create");
         }
-        assert_eq!(fs.write_at(root, b"f", 0, &[0x77u8; 300]), Ok(300));
-        assert_eq!(fs.write_at(root, b"g", 0, &[0x55u8; 300]), Ok(300));
+        let f = fs.lookup(root, b"f").expect("lookup");
+        assert_eq!(fs.write_at(f, 0, &[0x77u8; 300]), Ok(300));
+        let g = fs.lookup(root, b"g").expect("lookup");
+        assert_eq!(fs.write_at(g, 0, &[0x55u8; 300]), Ok(300));
         let phys = data_block_phys(&mut fs, b"f", 0);
         let other = data_block_phys(&mut fs, b"g", 0);
         let csum_off = fs.phys_checksum_offset();
@@ -1638,12 +1658,15 @@ fn identical_content_shares_a_logical_hash_distinct_content_differs() {
     let mut other = block.clone();
     other[0] ^= 0x01;
     for name in [b"a".as_slice(), b"b", b"c"] {
-        fs.create(root, name, NodeKind::RegularFile)
+        fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
-    assert_eq!(fs.write_at(root, b"a", 0, &block), Ok(full));
-    assert_eq!(fs.write_at(root, b"b", 0, &block), Ok(full));
-    assert_eq!(fs.write_at(root, b"c", 0, &other), Ok(full));
+    let a = fs.lookup(root, b"a").expect("lookup");
+    assert_eq!(fs.write_at(a, 0, &block), Ok(full));
+    let b = fs.lookup(root, b"b").expect("lookup");
+    assert_eq!(fs.write_at(b, 0, &block), Ok(full));
+    let c = fs.lookup(root, b"c").expect("lookup");
+    assert_eq!(fs.write_at(c, 0, &other), Ok(full));
 
     let stored_hash = |fs: &mut ARXFS<MemBlock>, name: &[u8]| -> [u8; LOGICAL_HASH_LEN] {
         let phys = data_block_phys(fs, name, 0);
@@ -1688,10 +1711,11 @@ fn integrity_survives_remount_and_a_cow_rewrite() {
     // with freshly sealed integrity trailers.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let mut expected = alloc::vec![0x33u8; 1500];
-    assert_eq!(fs.write_at(root, b"f", 0, &expected), Ok(expected.len()));
+    assert_eq!(fs.write_at(f, 0, &expected), Ok(expected.len()));
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING).expect("remount");
@@ -1699,7 +1723,7 @@ fn integrity_survives_remount_and_a_cow_rewrite() {
     assert_eq!(read_all(&mut fs, node, expected.len()), expected);
 
     let patch = alloc::vec![0x99u8; 600];
-    assert_eq!(fs.write_at(fs.root(), b"f", 100, &patch), Ok(patch.len()));
+    assert_eq!(fs.write_at(node, 100, &patch), Ok(patch.len()));
     expected[100..700].copy_from_slice(&patch);
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
@@ -1779,9 +1803,10 @@ fn single_block_records_are_stored_raw_and_round_trip() {
         (b"r".as_slice(), incompressible(cap)),
         (b"c", alloc::vec![0x41u8; cap]),
     ] {
-        fs.create(root, name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        assert_eq!(fs.write_at(root, name, 0, &payload), Ok(payload.len()));
+        assert_eq!(fs.write_at(file, 0, &payload), Ok(payload.len()));
         let phys = data_block_phys(&mut fs, name, 0);
         assert_eq!(
             stored_form_at(&mut fs, phys),
@@ -1802,11 +1827,12 @@ fn compressible_cluster_frees_blocks_and_round_trips_across_remount_and_cow() {
     // cluster back to per-block records and still reads back correctly.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = as_usize(fs.data_capacity());
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
 
     let (start, ext) = extent_of(&mut fs, b"c", 0);
     assert_eq!(start, 0, "the compressed extent is cluster-aligned");
@@ -1852,7 +1878,7 @@ fn compressible_cluster_frees_blocks_and_round_trips_across_remount_and_cow() {
     // ordinary per-block records and the file still verifies.
     let patch = incompressible(cap);
     let at = u64::try_from(cap).unwrap();
-    assert_eq!(fs.write_at(fs.root(), b"c", at, &patch), Ok(patch.len()));
+    assert_eq!(fs.write_at(node, at, &patch), Ok(patch.len()));
     let mut expected = payload.clone();
     expected[cap..cap * 2].copy_from_slice(&patch);
     let (_, ext) = extent_of(&mut fs, b"c", 1);
@@ -1879,10 +1905,11 @@ fn integrity_faults_on_a_compressed_cluster_fail_closed() {
     // both.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
     let (_, ext) = extent_of(&mut fs, b"c", 0);
     assert!(ext.compressed, "the cluster is stored compressed");
 
@@ -2017,11 +2044,12 @@ fn all_zero_cluster_write_becomes_holes_not_a_compressed_extent() {
     // maps nothing at all (a compressed extent would still cost blocks).
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"z", NodeKind::RegularFile)
+    let z = fs
+        .create(root, b"z", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let len = as_usize(fs.data_capacity() * COMPRESS_CLUSTER_BLOCKS);
     let zeros = alloc::vec![0u8; len];
-    assert_eq!(fs.write_at(root, b"z", 0, &zeros), Ok(len));
+    assert_eq!(fs.write_at(z, 0, &zeros), Ok(len));
     let ino = file_ino(&mut fs, b"z");
     assert_eq!(mapped_block_count(&mut fs, ino), 0, "zeroes map nothing");
     assert_reads_all_zero(&mut fs, b"z", len);
@@ -2037,10 +2065,11 @@ fn unaligned_and_sub_cluster_writes_store_per_block() {
     let cap = fs.data_capacity();
     let payload = compressible_cluster(&fs);
 
-    fs.create(root, b"u", NodeKind::RegularFile)
+    let u = fs
+        .create(root, b"u", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create u");
     assert_eq!(
-        fs.write_at(root, b"u", cap, &payload),
+        fs.write_at(u, cap, &payload),
         Ok(payload.len()),
         "cluster-sized write, one block off alignment"
     );
@@ -2058,10 +2087,11 @@ fn unaligned_and_sub_cluster_writes_store_per_block() {
     assert_eq!(fs.read_at(node, cap, &mut got), Ok(payload.len()));
     assert_eq!(got, payload);
 
-    fs.create(root, b"s", NodeKind::RegularFile)
+    let s = fs
+        .create(root, b"s", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create s");
     let small = &payload[..as_usize(cap) * 3];
-    assert_eq!(fs.write_at(root, b"s", 0, small), Ok(small.len()));
+    assert_eq!(fs.write_at(s, 0, small), Ok(small.len()));
     let (_, ext) = extent_of(&mut fs, b"s", 0);
     assert!(!ext.compressed, "a sub-cluster file stores per block");
 }
@@ -2072,16 +2102,17 @@ fn truncate_into_a_compressed_cluster_decomposes_and_keeps_the_prefix() {
     // tail, and preserves the surviving prefix byte-exactly.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"t", NodeKind::RegularFile)
+    let t = fs
+        .create(root, b"t", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"t", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(t, 0, &payload), Ok(payload.len()));
     let (_, ext) = extent_of(&mut fs, b"t", 0);
     assert!(ext.compressed, "starts compressed");
 
     let keep = as_usize(cap * 5 + 17);
-    fs.truncate(root, b"t", cap * 5 + 17).expect("truncate");
+    fs.truncate(t, cap * 5 + 17).expect("truncate");
     let node = fs.lookup(root, b"t").expect("lookup");
     assert_eq!(fs.node_info(node).expect("info").size, (keep) as u64);
     let ino = file_ino(&mut fs, b"t");
@@ -2105,11 +2136,12 @@ fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
     let root = fs.root();
     // Baseline after `create`: the directory block the new entry grew stays
     // with the directory, so the file's own storage is what must return.
-    fs.create(root, b"w", NodeKind::RegularFile)
+    let w = fs
+        .create(root, b"w", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let before_write = fs.committed_free_count();
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"w", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(w, 0, &payload), Ok(payload.len()));
     let (_, first) = extent_of(&mut fs, b"w", 0);
     assert!(first.compressed);
 
@@ -2118,10 +2150,7 @@ fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
     for byte in &mut second_payload {
         *byte = byte.wrapping_add(1);
     }
-    assert_eq!(
-        fs.write_at(root, b"w", 0, &second_payload),
-        Ok(second_payload.len())
-    );
+    assert_eq!(fs.write_at(w, 0, &second_payload), Ok(second_payload.len()));
     let node = fs.lookup(root, b"w").expect("lookup");
     assert_eq!(
         read_all(&mut fs, node, second_payload.len()),
@@ -2165,11 +2194,12 @@ fn reflink_shares_a_compressed_cluster_and_diverges_on_write() {
     // copy-on-writes it while the other still reads the original bytes.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"src", NodeKind::RegularFile)
+    let src = fs
+        .create(root, b"src", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = as_usize(fs.data_capacity());
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"src", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(src, 0, &payload), Ok(payload.len()));
     let (_, ext) = extent_of(&mut fs, b"src", 0);
     assert!(ext.compressed);
 
@@ -2187,7 +2217,7 @@ fn reflink_shares_a_compressed_cluster_and_diverges_on_write() {
     // Diverge: a partial write to the clone decomposes and copies, leaving
     // the source's compressed cluster intact.
     let patch = incompressible(cap);
-    assert_eq!(fs.write_at(root, b"dup", 0, &patch), Ok(patch.len()));
+    assert_eq!(fs.write_at(node_dup, 0, &patch), Ok(patch.len()));
     let mut expected = payload.clone();
     expected[..cap].copy_from_slice(&patch);
     let node_dup = fs.lookup(root, b"dup").expect("lookup dup");
@@ -2209,17 +2239,18 @@ fn rebuild_scrub_and_check_agree_on_a_compressed_volume() {
     let mut fs = fmt(512, 512, 32);
     let root = fs.root();
     let cap = fs.data_capacity();
-    fs.create(root, b"mix", NodeKind::RegularFile)
+    let mix = fs
+        .create(root, b"mix", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"mix", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(mix, 0, &payload), Ok(payload.len()));
     // A raw tail block and a hole beyond it.
     let tail = incompressible(as_usize(cap));
     assert_eq!(
-        fs.write_at(root, b"mix", cap * COMPRESS_CLUSTER_BLOCKS, &tail),
+        fs.write_at(mix, cap * COMPRESS_CLUSTER_BLOCKS, &tail),
         Ok(tail.len())
     );
-    fs.truncate(root, b"mix", cap * (COMPRESS_CLUSTER_BLOCKS + 8))
+    fs.truncate(mix, cap * (COMPRESS_CLUSTER_BLOCKS + 8))
         .expect("extend with a hole");
     let live = fs.used_blocks();
 
@@ -2302,14 +2333,16 @@ fn byte_verify_before_share_refuses_to_merge_unequal_data() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
 
     let content_a = alloc::vec![0x11u8; cap];
     let content_b = alloc::vec![0x22u8; cap];
-    assert_eq!(fs.write_at(root, b"b", 0, &content_b), Ok(cap));
+    assert_eq!(fs.write_at(b, 0, &content_b), Ok(cap));
     let pb = data_block_phys(&mut fs, b"b", 0);
     let b_ino = file_ino(&mut fs, b"b");
 
@@ -2332,7 +2365,7 @@ fn byte_verify_before_share_refuses_to_merge_unequal_data() {
         },
     );
 
-    assert_eq!(fs.write_at(root, b"a", 0, &content_a), Ok(cap));
+    assert_eq!(fs.write_at(a, 0, &content_a), Ok(cap));
     let pa = data_block_phys(&mut fs, b"a", 0);
     assert_ne!(
         pa, pb,
@@ -2353,13 +2386,15 @@ fn overwriting_one_sharer_copies_on_write_and_leaves_the_other() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let original = alloc::vec![0x5Au8; cap];
-    assert_eq!(fs.write_at(root, b"a", 0, &original), Ok(cap));
-    assert_eq!(fs.write_at(root, b"b", 0, &original), Ok(cap));
+    assert_eq!(fs.write_at(a, 0, &original), Ok(cap));
+    assert_eq!(fs.write_at(b, 0, &original), Ok(cap));
 
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(data_block_phys(&mut fs, b"b", 0), shared, "they share");
@@ -2367,7 +2402,7 @@ fn overwriting_one_sharer_copies_on_write_and_leaves_the_other() {
 
     // Overwrite "a"; it must copy-on-write off the shared chunk.
     let replacement = alloc::vec![0xA5u8; cap];
-    assert_eq!(fs.write_at(root, b"a", 0, &replacement), Ok(cap));
+    assert_eq!(fs.write_at(a, 0, &replacement), Ok(cap));
     let pa = data_block_phys(&mut fs, b"a", 0);
     assert_ne!(pa, shared, "the writer copied on write");
     assert_eq!(
@@ -2394,10 +2429,11 @@ fn reflink_shares_chunks_until_one_side_is_written() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"src", NodeKind::RegularFile)
+    let src = fs
+        .create(root, b"src", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create src");
     let body = incompressible(cap * 3);
-    assert_eq!(fs.write_at(root, b"src", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(src, 0, &body), Ok(body.len()));
 
     let dst = fs.reflink(root, b"src", b"dst").expect("reflink");
     assert_eq!(fs.node_info(dst).expect("info").size, body.len() as u64);
@@ -2417,7 +2453,7 @@ fn reflink_shares_chunks_until_one_side_is_written() {
     // Writing the middle block of the clone diverges only that block.
     let patch = alloc::vec![0x7Eu8; cap];
     let at = u64::try_from(cap).unwrap();
-    assert_eq!(fs.write_at(root, b"dst", at, &patch), Ok(cap));
+    assert_eq!(fs.write_at(dst_node, at, &patch), Ok(cap));
     assert_ne!(
         data_block_phys(&mut fs, b"dst", 1),
         data_block_phys(&mut fs, b"src", 1),
@@ -2444,13 +2480,15 @@ fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x42u8; cap];
-    assert_eq!(fs.write_at(root, b"a", 0, &body), Ok(cap));
-    assert_eq!(fs.write_at(root, b"b", 0, &body), Ok(cap));
+    assert_eq!(fs.write_at(a, 0, &body), Ok(cap));
+    assert_eq!(fs.write_at(b, 0, &body), Ok(cap));
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(chunk_count(&mut fs), 1, "one shared chunk recorded");
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
@@ -2474,9 +2512,10 @@ fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
         "a fresh mount starts with an empty dedupe cache"
     );
     // The reclaimed space is reusable.
-    fs.create(fs.root(), b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(fs.root(), b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create c");
-    assert_eq!(fs.write_at(fs.root(), b"c", 0, &body), Ok(cap));
+    assert_eq!(fs.write_at(c, 0, &body), Ok(cap));
 }
 
 #[test]
@@ -2490,9 +2529,10 @@ fn the_dedupe_cache_warms_from_writes_rather_than_a_mount_time_walk() {
     let cap = as_usize(fs.data_capacity());
     let body = alloc::vec![0x3Cu8; cap];
     for name in [b"a".as_slice(), b"b"] {
-        fs.create(root, name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+        assert_eq!(fs.write_at(file, 0, &body), Ok(cap));
     }
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
@@ -2502,9 +2542,10 @@ fn the_dedupe_cache_warms_from_writes_rather_than_a_mount_time_walk() {
     let root = fs.root();
     assert_eq!(chunk_count(&mut fs), 1, "the shared chunk survives");
 
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create c");
-    assert_eq!(fs.write_at(root, b"c", 0, &body), Ok(cap));
+    assert_eq!(fs.write_at(c, 0, &body), Ok(cap));
     let warmed = data_block_phys(&mut fs, b"c", 0);
     assert_ne!(
         warmed, shared,
@@ -2517,9 +2558,10 @@ fn the_dedupe_cache_warms_from_writes_rather_than_a_mount_time_walk() {
     );
 
     // That write warmed the cache, so the next identical write shares it.
-    fs.create(root, b"d", NodeKind::RegularFile)
+    let d = fs
+        .create(root, b"d", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create d");
-    assert_eq!(fs.write_at(root, b"d", 0, &body), Ok(cap));
+    assert_eq!(fs.write_at(d, 0, &body), Ok(cap));
     assert_eq!(
         data_block_phys(&mut fs, b"d", 0),
         warmed,
@@ -2541,9 +2583,10 @@ fn dedupe_is_scoped_to_the_encryption_domain() {
     let cap = as_usize(fs.data_capacity());
     let body = alloc::vec![0x6Du8; cap];
     for name in [b"a".as_slice(), b"b"] {
-        fs.create(root, name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+        assert_eq!(fs.write_at(file, 0, &body), Ok(cap));
     }
     let shared = data_block_phys(&mut fs, b"a", 0);
     let record = fs.chunk_get(shared).expect("chunk get").expect("shared");
@@ -2586,9 +2629,10 @@ fn integrity_and_compression_hold_on_a_shared_chunk() {
     }
     body.truncate(cap);
     for name in [b"a".as_slice(), b"b"] {
-        fs.create(root, name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        assert_eq!(fs.write_at(root, name, 0, &body), Ok(cap));
+        assert_eq!(fs.write_at(file, 0, &body), Ok(cap));
     }
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
@@ -2746,10 +2790,11 @@ fn a_retained_cluster_serves_repeat_reads_without_the_transform_pipeline() {
     // only have come from the cache.
     let (counts, mut fs) = cached_fmt();
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
     assert_eq!(
         CacheCounts::read(&counts.puts),
         0,
@@ -2787,10 +2832,11 @@ fn a_retained_cluster_serves_repeat_reads_without_the_transform_pipeline() {
 fn overwriting_a_cluster_invalidates_its_retained_plaintext() {
     let (counts, mut fs) = cached_fmt();
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
     let node = fs.lookup(root, b"c").expect("lookup");
     assert_eq!(read_chunked(&mut fs, node, payload.len()), payload);
 
@@ -2800,7 +2846,7 @@ fn overwriting_a_cluster_invalidates_its_retained_plaintext() {
     for byte in &mut second {
         *byte = byte.wrapping_add(1);
     }
-    assert_eq!(fs.write_at(root, b"c", 0, &second), Ok(second.len()));
+    assert_eq!(fs.write_at(node, 0, &second), Ok(second.len()));
     assert!(
         CacheCounts::read(&counts.invalidations) >= 1,
         "freeing the superseded run invalidated the entry"
@@ -2816,10 +2862,11 @@ fn overwriting_a_cluster_invalidates_its_retained_plaintext() {
 fn truncating_into_a_cluster_invalidates_its_retained_plaintext() {
     let (counts, mut fs) = cached_fmt();
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
     let node = fs.lookup(root, b"c").expect("lookup");
     assert_eq!(read_chunked(&mut fs, node, payload.len()), payload);
 
@@ -2827,7 +2874,7 @@ fn truncating_into_a_cluster_invalidates_its_retained_plaintext() {
     // freed, so the retained whole-cluster plaintext must go with it.
     let cap = as_usize(fs.data_capacity());
     let keep = cap * 8;
-    fs.truncate(root, b"c", u64::try_from(keep).unwrap())
+    fs.truncate(node, u64::try_from(keep).unwrap())
         .expect("truncate");
     assert!(
         CacheCounts::read(&counts.invalidations) >= 1,
@@ -2844,17 +2891,20 @@ fn truncating_into_a_cluster_invalidates_its_retained_plaintext() {
 fn a_failed_mutation_purges_the_retained_plaintext() {
     let (counts, mut fs) = cached_fmt();
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
     let node = fs.lookup(root, b"c").expect("lookup");
     assert_eq!(read_chunked(&mut fs, node, payload.len()), payload);
 
     // A refused mutation rolls its transaction back; the rollback returns
     // this transaction's blocks to the pool without per-block frees, so
     // the whole cache is purged (fail closed).
-    assert!(fs.create(root, b"bad/name", NodeKind::RegularFile).is_err());
+    assert!(fs
+        .create(root, b"bad/name", NodeKind::RegularFile, &FILE_RECORD)
+        .is_err());
     assert!(
         CacheCounts::read(&counts.purges) >= 1,
         "the rollback purged the cache"
@@ -2873,10 +2923,11 @@ fn a_reflink_shared_cluster_keeps_its_retained_plaintext() {
     // valid and keeps serving the surviving referrer.
     let (counts, mut fs) = cached_fmt();
     let root = fs.root();
-    fs.create(root, b"src", NodeKind::RegularFile)
+    let src_file = fs
+        .create(root, b"src", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"src", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(src_file, 0, &payload), Ok(payload.len()));
     fs.reflink(root, b"src", b"dst").expect("reflink");
     let src = fs.lookup(root, b"src").expect("src");
     assert_eq!(read_chunked(&mut fs, src, payload.len()), payload);
@@ -2914,10 +2965,11 @@ fn a_wrong_sized_cache_entry_fails_closed_instead_of_stalling() {
 
     let mut fs = fmt(512, 256, 32).with_cluster_cache(alloc::boxed::Box::new(LyingCache));
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = compressible_cluster(&fs);
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
     let node = fs.lookup(root, b"c").expect("lookup");
     let mut out = [0u8; 512];
     assert_eq!(
@@ -3025,27 +3077,31 @@ fn populated() -> ARXFS<MemBlock> {
     let mut fs = fmt(4096, 512, 128);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"plain", NodeKind::RegularFile)
+    let plain = fs
+        .create(root, b"plain", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create plain");
     let body = alloc::vec![0x24u8; cap + 100];
-    fs.write_at(root, b"plain", 0, &body).expect("write plain");
+    fs.write_at(plain, 0, &body).expect("write plain");
 
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let shared_body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &shared_body).expect("write a");
-    fs.write_at(root, b"b", 0, &shared_body).expect("write b");
+    fs.write_at(a, 0, &shared_body).expect("write a");
+    fs.write_at(b, 0, &shared_body).expect("write b");
 
     fs.reflink(root, b"plain", b"clone").expect("reflink");
 
-    fs.create(root, b"dir", NodeKind::Directory)
+    fs.create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
         .expect("create dir");
     let dir = fs.lookup(root, b"dir").expect("lookup dir");
-    fs.create(dir, b"nested", NodeKind::RegularFile)
+    let nested = fs
+        .create(dir, b"nested", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create nested");
-    fs.write_at(dir, b"nested", 0, b"nested file")
+    fs.write_at(nested, 0, b"nested file")
         .expect("write nested");
     fs
 }
@@ -3141,10 +3197,11 @@ fn scrub_classifies_data_block_physical_and_logical_faults() {
     {
         let mut fs = fmt(4096, 256, 64);
         let root = fs.root();
-        fs.create(root, b"f", NodeKind::RegularFile)
+        let f = fs
+            .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         let body = alloc::vec![0x33u8; 400];
-        fs.write_at(root, b"f", 0, &body).expect("write");
+        fs.write_at(f, 0, &body).expect("write");
         let phys = data_block_phys(&mut fs, b"f", 0);
         let mut bytes = fs.into_block().expect("the volume closes").bytes();
         bytes[as_usize(phys) * bs] ^= 0x01;
@@ -3161,10 +3218,11 @@ fn scrub_classifies_data_block_physical_and_logical_faults() {
     {
         let mut fs = fmt(4096, 256, 64);
         let root = fs.root();
-        fs.create(root, b"f", NodeKind::RegularFile)
+        let f = fs
+            .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         let body = alloc::vec![0x44u8; 400];
-        fs.write_at(root, b"f", 0, &body).expect("write");
+        fs.write_at(f, 0, &body).expect("write");
         let phys = data_block_phys(&mut fs, b"f", 0);
         let csum_off = fs.phys_checksum_offset();
         let hash_off = fs.logical_hash_offset();
@@ -3190,13 +3248,15 @@ fn scrub_detects_and_corrects_a_refcount_divergence() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
 
@@ -3300,13 +3360,16 @@ fn an_unlisted_claim_raises_the_refcount_to_the_counted_truth() {
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
     for name in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
-        fs.create(root, name, NodeKind::RegularFile)
+        fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
-    fs.write_at(root, b"c", 0, &alloc::vec![0x11u8; cap])
+    let a_file = fs.lookup(root, b"a").expect("lookup");
+    fs.write_at(a_file, 0, &body).expect("write a");
+    let b_file = fs.lookup(root, b"b").expect("lookup");
+    fs.write_at(b_file, 0, &body).expect("write b");
+    let c_file = fs.lookup(root, b"c").expect("lookup");
+    fs.write_at(c_file, 0, &alloc::vec![0x11u8; cap])
         .expect("write c");
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
@@ -3348,12 +3411,14 @@ fn a_block_claimed_twice_with_no_chunk_record_is_reported() {
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
     for name in [b"a".as_slice(), b"c".as_slice()] {
-        fs.create(root, name, NodeKind::RegularFile)
+        fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
-    fs.write_at(root, b"a", 0, &alloc::vec![0x22u8; cap])
+    let a = fs.lookup(root, b"a").expect("lookup");
+    fs.write_at(a, 0, &alloc::vec![0x22u8; cap])
         .expect("write a");
-    fs.write_at(root, b"c", 0, &alloc::vec![0x33u8; cap])
+    let c = fs.lookup(root, b"c").expect("lookup");
+    fs.write_at(c, 0, &alloc::vec![0x33u8; cap])
         .expect("write c");
     let lone = data_block_phys(&mut fs, b"a", 0);
     assert!(fs.chunk_get(lone).expect("get").is_none(), "not shared yet");
@@ -3382,7 +3447,7 @@ fn a_block_claimed_twice_with_no_chunk_record_is_reported() {
 fn an_inode_above_the_high_water_mark_fails_the_check_closed() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
-    fs.create(root, b"live", NodeKind::RegularFile)
+    fs.create(root, b"live", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let beyond = u32::try_from(fs.next_ino).expect("inode numbers are 32-bit") + 5;
     let node = fs.lookup(root, b"live").expect("look up");
@@ -3412,13 +3477,15 @@ fn a_chunk_record_beyond_the_last_block_is_removed() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     let record = fs.chunk_get(shared).expect("get").expect("shared");
 
@@ -3450,13 +3517,15 @@ fn a_chunk_record_no_extent_claims_is_removed() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     let record = fs.chunk_get(shared).expect("get").expect("shared");
 
@@ -3496,9 +3565,10 @@ fn a_windowed_reconcile_reaches_the_same_report_as_a_single_window() {
     let cap = as_usize(fs.data_capacity());
     let body = alloc::vec![0x71u8; cap];
     for name in [b"a".as_slice(), b"b".as_slice()] {
-        fs.create(root, name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        fs.write_at(root, name, 0, &body).expect("write");
+        fs.write_at(file, 0, &body).expect("write");
     }
     let shared = data_block_phys(&mut fs, b"a", 0);
     let record = fs.chunk_get(shared).expect("get").expect("shared");
@@ -3570,13 +3640,10 @@ fn a_volume_with_no_room_for_a_scratch_array_says_so() {
     let mut idx = 0;
     loop {
         let name = alloc::format!("f{idx}");
-        if fs
-            .create(root, name.as_bytes(), NodeKind::RegularFile)
-            .is_err()
-        {
+        let Ok(file) = fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD) else {
             break;
-        }
-        match fs.write_at(root, name.as_bytes(), 0, &body) {
+        };
+        match fs.write_at(file, 0, &body) {
             Ok(_) => idx += 1,
             Err(DriverError::NoSpace) => break,
             Err(e) => panic!("unexpected {e:?}"),
@@ -3587,12 +3654,13 @@ fn a_volume_with_no_room_for_a_scratch_array_says_so() {
     // Then take the last of it a block at a time, until only the reserve and
     // what ordinary allocation can no longer use are left.
     let mut at = 0;
-    while fs.write_at(root, b"f0", at, &[0x11]).is_ok() {
+    let f0 = fs.lookup(root, b"f0").expect("lookup");
+    while fs.write_at(f0, at, &[0x11]).is_ok() {
         at += 512;
         assert!(at < 1 << 20, "never ran out of space");
     }
     assert_eq!(
-        fs.create(root, b"one-more", NodeKind::RegularFile),
+        fs.create(root, b"one-more", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::NoSpace),
         "ordinary space is spent"
     );
@@ -3600,8 +3668,7 @@ fn a_volume_with_no_room_for_a_scratch_array_says_so() {
     // writes take, so no run is left outside the reserve for a scratch array.
     fs.set_allocation_class(AllocationClass::System);
     while fs.has_ordinary_space().expect("writable") {
-        fs.write_at(root, b"f0", at, &[0x11])
-            .expect("the system writes on");
+        fs.write_at(f0, at, &[0x11]).expect("the system writes on");
         at += 512;
     }
     fs.set_allocation_class(AllocationClass::Ordinary);
@@ -3662,13 +3729,15 @@ fn a_pass_that_counted_no_claims_reports_a_divergence_without_writing() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     let record = fs.chunk_get(shared).expect("get").expect("shared");
     fs.begin().expect("begin");
@@ -3860,13 +3929,15 @@ fn a_read_only_mount_never_trims() {
 fn a_directory_scan_reused_across_directories_reads_each_ones_entries() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
-    fs.create(root, b"d1", NodeKind::Directory).expect("d1");
-    fs.create(root, b"d2", NodeKind::Directory).expect("d2");
+    fs.create(root, b"d1", NodeKind::Directory, &DIR_RECORD)
+        .expect("d1");
+    fs.create(root, b"d2", NodeKind::Directory, &DIR_RECORD)
+        .expect("d2");
     let d1 = fs.lookup(root, b"d1").expect("d1");
     let d2 = fs.lookup(root, b"d2").expect("d2");
-    fs.create(d1, b"only-in-one", NodeKind::RegularFile)
+    fs.create(d1, b"only-in-one", NodeKind::RegularFile, &FILE_RECORD)
         .expect("x");
-    fs.create(d2, b"only-in-two", NodeKind::RegularFile)
+    fs.create(d2, b"only-in-two", NodeKind::RegularFile, &FILE_RECORD)
         .expect("y");
 
     let d1_ino = fs.ino_of(d1).expect("ino");
@@ -3949,13 +4020,15 @@ fn scrub_detects_and_corrects_a_reverse_reference_divergence() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
 
     let mut referrers = fs.reverse_refs(shared).expect("reverse refs");
@@ -3983,13 +4056,15 @@ fn scrub_accounts_a_shared_chunk_once_and_respects_the_domain() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
     let before = fs.chunk_get(shared).expect("get").expect("shared");
@@ -4086,13 +4161,15 @@ fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
     let mut fs = fmt(4096, 512, 128);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
 
@@ -4104,7 +4181,7 @@ fn invariants_hold_across_scrub_remount_and_cow_rewrite() {
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), TEST_KEYING).expect("reopen");
     let replacement = alloc::vec![0xA5u8; cap];
-    fs.write_at(root, b"a", 0, &replacement).expect("rewrite a");
+    fs.write_at(a, 0, &replacement).expect("rewrite a");
     let pa = data_block_phys(&mut fs, b"a", 0);
     assert_ne!(pa, shared, "the writer copied on write");
     assert_eq!(
@@ -4245,7 +4322,7 @@ fn check_reclaims_an_orphaned_inode() {
     // (`docs/src/filesystem/arxfs-spec.md` §12).
     let mut fs = fmt(4096, 512, 128);
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    fs.create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create keep");
 
     // Inject an orphan: allocate an inode and never link it into any directory.
@@ -4287,13 +4364,15 @@ fn check_corrects_a_refcount_divergence_and_reports_what_it_cannot_fix() {
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
     let body = alloc::vec![0x5Au8; cap];
-    fs.write_at(root, b"a", 0, &body).expect("write a");
-    fs.write_at(root, b"b", 0, &body).expect("write b");
+    fs.write_at(a, 0, &body).expect("write a");
+    fs.write_at(b, 0, &body).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(fs.data_refcount(shared).expect("refcount"), 2);
 
@@ -4330,10 +4409,10 @@ fn check_reports_an_unrepairable_data_block_it_cannot_fix() {
     // ignored or pretended fixed.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"f", 0, &alloc::vec![0x33u8; 400])
-        .expect("write");
+    fs.write_at(f, 0, &alloc::vec![0x33u8; 400]).expect("write");
     let phys = data_block_phys(&mut fs, b"f", 0);
     let bs = 4096usize;
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
@@ -4393,9 +4472,10 @@ fn rescue_discovers_a_root_and_extracts_files_from_a_damaged_ring() {
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
     let body = incompressible(cap + cap / 2); // two logical blocks
-    fs.create(root, b"doc", NodeKind::RegularFile)
+    let doc = fs
+        .create(root, b"doc", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"doc", 0, &body).expect("write");
+    fs.write_at(doc, 0, &body).expect("write");
     let doc_node = fs.lookup(root, b"doc").expect("lookup");
     let doc_ino = u32::try_from(doc_node.raw()).unwrap();
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
@@ -4450,9 +4530,10 @@ fn rescue_never_emits_a_block_that_fails_integrity() {
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
     let body = incompressible(2 * cap); // exactly two logical blocks
-    fs.create(root, b"doc", NodeKind::RegularFile)
+    let doc = fs
+        .create(root, b"doc", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"doc", 0, &body).expect("write");
+    fs.write_at(doc, 0, &body).expect("write");
     let doc_node = fs.lookup(root, b"doc").expect("lookup");
     let doc_ino = u32::try_from(doc_node.raw()).unwrap();
     let bad_phys = data_block_phys(&mut fs, b"doc", 1);
@@ -4715,12 +4796,14 @@ fn trim_never_discards_a_block_still_shared_by_dedupe() {
     let mut fs = fmt_discard(512, 1, 0);
     let root = fs.root();
     let payload = alloc::vec![0x33u8; 64];
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
-    fs.write_at(root, b"a", 0, &payload).expect("write a");
-    fs.write_at(root, b"b", 0, &payload).expect("write b");
+    fs.write_at(a, 0, &payload).expect("write a");
+    fs.write_at(b, 0, &payload).expect("write b");
     let shared = data_block_phys(&mut fs, b"a", 0);
     assert_eq!(
         shared,
@@ -4755,13 +4838,14 @@ fn the_discard_queue_is_transient_across_a_remount() {
     let mut fs = fmt_discard(512, 1, 0);
     let root = fs.root();
     let keep = alloc::vec![0x21u8; 80];
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    let keep_file = fs
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create keep");
-    fs.write_at(root, b"keep", 0, &keep).expect("write keep");
-    fs.create(root, b"gone", NodeKind::RegularFile)
+    fs.write_at(keep_file, 0, &keep).expect("write keep");
+    let gone = fs
+        .create(root, b"gone", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create gone");
-    fs.write_at(root, b"gone", 0, &[0x9au8; 80])
-        .expect("write gone");
+    fs.write_at(gone, 0, &[0x9au8; 80]).expect("write gone");
     fs.remove(root, b"gone").expect("remove gone");
     assert!(
         fs.pending_discard_count() > 0,
@@ -5013,7 +5097,7 @@ fn a_read_only_health_pass_returns_its_reading_and_stores_no_baseline() {
 fn a_read_only_volume_with_a_damaged_mirror_classifies_degraded() {
     let mut fs = fmt_health(512, DeviceHealth::Available(healthy_snapshot(0, 0)));
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fs.health(&GrantAll, &NullSink)
         .expect("establish a baseline");
@@ -5055,9 +5139,10 @@ fn health_baseline_survives_a_crash_during_its_update() {
     // committed in full or the previous one remains selected.
     let mut base = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
     let root = base.root();
-    base.create(root, b"keep", NodeKind::RegularFile)
+    let keep_file = base
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create keep");
-    base.write_at(root, b"keep", 0, b"baseline")
+    base.write_at(keep_file, 0, b"baseline")
         .expect("write keep");
     base.health(&GrantAll, &NullSink)
         .expect("establish baseline");
@@ -5130,25 +5215,28 @@ fn crash_baseline() -> alloc::vec::Vec<u8> {
     .expect("format crash baseline")
     .stamped();
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    let keep = fs
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create keep");
-    fs.write_at(root, b"keep", 0, CRASH_KEEP)
-        .expect("write keep");
-    fs.create(root, b"victim", NodeKind::RegularFile)
+    fs.write_at(keep, 0, CRASH_KEEP).expect("write keep");
+    let victim = fs
+        .create(root, b"victim", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create victim");
-    fs.write_at(root, b"victim", 0, b"victim-data-block")
+    fs.write_at(victim, 0, b"victim-data-block")
         .expect("write victim");
-    fs.create(root, b"big", NodeKind::RegularFile)
+    let big_file = fs
+        .create(root, b"big", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create big");
     let big = alloc::vec![0x07u8; CRASH_BS as usize * 2];
-    fs.write_at(root, b"big", 0, &big).expect("write big");
-    fs.create(root, b"src", NodeKind::RegularFile)
+    fs.write_at(big_file, 0, &big).expect("write big");
+    let src = fs
+        .create(root, b"src", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create src");
-    fs.write_at(root, b"src", 0, b"reflink-source-content")
+    fs.write_at(src, 0, b"reflink-source-content")
         .expect("write src");
-    fs.create(root, b"target", NodeKind::RegularFile)
+    fs.create(root, b"target", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create target");
-    fs.create(root, b"dir", NodeKind::Directory)
+    fs.create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
         .expect("create dir");
     fs.into_block().expect("the volume closes").bytes()
 }
@@ -5254,7 +5342,7 @@ fn crash_replay_at_every_commit_step_for_create_write_truncate() {
         Publish::PerOperation,
         |fs| {
             let root = fs.root();
-            let _ = fs.create(root, b"fresh", NodeKind::RegularFile);
+            let _ = fs.create(root, b"fresh", NodeKind::RegularFile, &FILE_RECORD);
         },
         |fs, b| match file_size(fs, b"fresh") {
             None | Some(0) => {}
@@ -5269,7 +5357,8 @@ fn crash_replay_at_every_commit_step_for_create_write_truncate() {
         Publish::PerOperation,
         |fs| {
             let root = fs.root();
-            let _ = fs.write_at(root, b"target", 0, b"freshdata");
+            let target = fs.lookup(root, b"target").expect("lookup");
+            let _ = fs.write_at(target, 0, b"freshdata");
         },
         |fs, b| match file_size(fs, b"target") {
             Some(0) => {}
@@ -5289,7 +5378,8 @@ fn crash_replay_at_every_commit_step_for_create_write_truncate() {
         Publish::PerOperation,
         |fs| {
             let root = fs.root();
-            let _ = fs.truncate(root, b"big", u64::from(CRASH_BS));
+            let big = fs.lookup(root, b"big").expect("lookup");
+            let _ = fs.truncate(big, u64::from(CRASH_BS));
         },
         |fs, b| {
             let size = file_size(fs, b"big").expect("big always survives");
@@ -5428,15 +5518,20 @@ fn crash_replay_at_every_step_of_a_batch_publishes_all_of_it_or_none() {
         |fs| {
             all_ran.set(false);
             let root = fs.root();
+            let keep = fs.lookup(root, b"keep").expect("lookup");
+            let target = fs.lookup(root, b"target").expect("lookup");
             // The first data change of a mount commits on its own, so the
             // batch measured is the one that follows it.
-            if fs.write_at(root, b"keep", 0, CRASH_KEEP).is_err() {
+            if fs.write_at(keep, 0, CRASH_KEEP).is_err() {
                 return;
             }
-            if fs.create(root, b"fresh", NodeKind::RegularFile).is_err() {
+            if fs
+                .create(root, b"fresh", NodeKind::RegularFile, &FILE_RECORD)
+                .is_err()
+            {
                 return;
             }
-            if fs.write_at(root, b"target", 0, b"freshdata").is_err() {
+            if fs.write_at(target, 0, b"freshdata").is_err() {
                 return;
             }
             if fs.remove(root, b"victim").is_err() {
@@ -5539,26 +5634,29 @@ fn corruption_baseline() -> (alloc::vec::Vec<u8>, CorruptionTargets, alloc::vec:
     let cap = as_usize(fs.data_capacity());
 
     let keep_body = alloc::vec![0x6Bu8; cap + 50];
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    let keep = fs
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create keep");
-    fs.write_at(root, b"keep", 0, &keep_body)
-        .expect("write keep");
+    fs.write_at(keep, 0, &keep_body).expect("write keep");
 
     let shared = alloc::vec![0x5Au8; cap];
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create b");
-    fs.write_at(root, b"a", 0, &shared).expect("write a");
-    fs.write_at(root, b"b", 0, &shared).expect("write b");
+    fs.write_at(a, 0, &shared).expect("write a");
+    fs.write_at(b, 0, &shared).expect("write b");
     fs.reflink(root, b"a", b"aclone").expect("reflink");
 
-    fs.create(root, b"dir", NodeKind::Directory)
+    fs.create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
         .expect("create dir");
     let dir = fs.lookup(root, b"dir").expect("lookup dir");
-    fs.create(dir, b"nested", NodeKind::RegularFile)
+    let nested = fs
+        .create(dir, b"nested", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create nested");
-    fs.write_at(dir, b"nested", 0, b"nested file")
+    fs.write_at(nested, 0, b"nested file")
         .expect("write nested");
 
     // A bounded scrub pauses mid-pass, persisting a scrub-progress record.
@@ -5783,10 +5881,10 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
     // (`docs/src/filesystem/arxfs-spec.md` §12).
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"f", 0, &alloc::vec![0x42u8; 300])
-        .expect("write");
+    fs.write_at(f, 0, &alloc::vec![0x42u8; 300]).expect("write");
     let phys = data_block_phys(&mut fs, b"f", 0);
     let bs = 512usize;
     let base = as_usize(phys) * bs;
@@ -5833,13 +5931,14 @@ fn volatile_volume(publish: Publish) -> (ARXFS<MemBlock>, u64) {
         .stamped(),
     );
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    let keep = fs
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create keep");
-    fs.write_at(root, b"keep", 0, CRASH_KEEP)
-        .expect("write keep");
-    fs.create(root, b"new", NodeKind::RegularFile)
+    fs.write_at(keep, 0, CRASH_KEEP).expect("write keep");
+    fs.create(root, b"new", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create new");
-    fs.create(root, b"pad", NodeKind::RegularFile)
+    let pad = fs
+        .create(root, b"pad", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create pad");
     // Fill the ring, so the slot the next commit overwrites already holds a
     // decodable older one. That is what makes the primary copy — the one a
@@ -5850,7 +5949,7 @@ fn volatile_volume(publish: Publish) -> (ARXFS<MemBlock>, u64) {
     // writes would otherwise all join one.
     let mut at = 0u64;
     while fs.ring_pos < RING_SLOTS {
-        fs.write_at(root, b"pad", at, b"x").expect("pad");
+        fs.write_at(pad, at, b"x").expect("pad");
         FilesystemWrite::flush(&mut fs).expect("pad sync");
         at += 1;
     }
@@ -5880,8 +5979,9 @@ const VOLATILE_PAYLOAD: &[u8] = &[0x5A; 3 * CRASH_BS as usize + 17];
 fn a_commit_keeps_map_pages_in_ram_until_sync() {
     let (mut fs, slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
+    let new_file = fs.lookup(root, b"new").expect("lookup");
     assert_eq!(
-        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        fs.write_at(new_file, 0, VOLATILE_PAYLOAD),
         Ok(VOLATILE_PAYLOAD.len())
     );
     let companion = ARXFS::<MemBlock>::companion(slot);
@@ -5913,8 +6013,9 @@ fn a_power_loss_after_a_commit_leaves_prior_or_new_whatever_it_drops() {
     for kept in 0..4u8 {
         let (mut fs, slot) = volatile_volume(Publish::PerOperation);
         let root = fs.root();
+        let new_file = fs.lookup(root, b"new").expect("lookup");
         assert_eq!(
-            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+            fs.write_at(new_file, 0, VOLATILE_PAYLOAD),
             Ok(VOLATILE_PAYLOAD.len())
         );
         let comp = ARXFS::<MemBlock>::companion(slot);
@@ -5971,14 +6072,16 @@ fn a_power_loss_after_a_batchs_commit_publishes_all_of_it_or_none() {
         let host = TestVolumeHost::leaked(0);
         let (mut fs, slot) = volatile_volume(Publish::AsOneBatch(host));
         let root = fs.root();
+        let new_file = fs.lookup(root, b"new").expect("lookup");
         assert_eq!(
-            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+            fs.write_at(new_file, 0, VOLATILE_PAYLOAD),
             Ok(VOLATILE_PAYLOAD.len())
         );
-        fs.create(root, b"second", NodeKind::RegularFile)
+        let second_file = fs
+            .create(root, b"second", NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         assert_eq!(
-            fs.write_at(root, b"second", 0, CRASH_KEEP),
+            fs.write_at(second_file, 0, CRASH_KEEP),
             Ok(CRASH_KEEP.len())
         );
         assert!(
@@ -5988,7 +6091,7 @@ fn a_power_loss_after_a_batchs_commit_publishes_all_of_it_or_none() {
         // The window elapses, so the next operation publishes the batch it
         // joined — the whole of it, behind one barrier.
         host.set_now(PAST_EVERY_WINDOW);
-        fs.create(root, b"tick", NodeKind::RegularFile)
+        fs.create(root, b"tick", NodeKind::RegularFile, &FILE_RECORD)
             .expect("the aged batch publishes");
 
         let comp = ARXFS::<MemBlock>::companion(slot);
@@ -6048,7 +6151,8 @@ fn a_crash_after_a_forced_commit_keeps_no_more_than_was_reported() {
     let mut fs =
         floor_bounded(fmt(CRASH_BS, CRASH_BC, 64)).with_volume_host(TestVolumeHost::volume(), host);
     let root = fs.root();
-    fs.create(root, b"batched", NodeKind::RegularFile)
+    let batched = fs
+        .create(root, b"batched", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     FilesystemWrite::flush(&mut fs).expect("start from a published volume");
 
@@ -6062,12 +6166,7 @@ fn a_crash_after_a_forced_commit_keeps_no_more_than_was_reported() {
     while reported < body.len() {
         let take = slice.min(body.len() - reported);
         let written = fs
-            .write_at(
-                root,
-                b"batched",
-                reported as u64,
-                &body[reported..reported + take],
-            )
+            .write_at(batched, reported as u64, &body[reported..reported + take])
             .expect("a bounded write still stores bytes");
         assert!(written > 0, "the ceiling must never stall a writer");
         reported += written;
@@ -6096,7 +6195,7 @@ fn a_crash_after_a_forced_commit_keeps_no_more_than_was_reported() {
     // The rest of the body lands, and the whole of it reads back.
     while reported < body.len() {
         let written = fs
-            .write_at(root, b"batched", reported as u64, &body[reported..])
+            .write_at(batched, reported as u64, &body[reported..])
             .expect("a bounded write still stores bytes");
         assert!(written > 0);
         reported += written;
@@ -6116,8 +6215,9 @@ fn a_barrier_that_faults_publishes_nothing_and_leaves_no_transaction_behind() {
     let (mut fs, slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     fs.block_mut().fail_flush = true;
+    let new_file = fs.lookup(root, b"new").expect("lookup");
     assert_eq!(
-        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        fs.write_at(new_file, 0, VOLATILE_PAYLOAD),
         Err(DriverError::DeviceFault)
     );
     let held = fs.block_mut().volatile_blocks();
@@ -6128,7 +6228,7 @@ fn a_barrier_that_faults_publishes_nothing_and_leaves_no_transaction_behind() {
     );
     // The device recovers; the next operation is the only one that commits.
     fs.block_mut().fail_flush = false;
-    fs.write_at(root, b"new", 0, b"second").expect("write");
+    fs.write_at(new_file, 0, b"second").expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs =
@@ -6164,8 +6264,9 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
         let root = fs.root();
         let old_root = fs.root_phys;
         fs.block_mut().write_faults.insert(faulted);
+        let new_file = fs.lookup(root, b"new").expect("lookup");
         assert_eq!(
-            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+            fs.write_at(new_file, 0, VOLATILE_PAYLOAD),
             Err(DriverError::DeviceFault)
         );
         assert!(
@@ -6174,7 +6275,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
              (faulted {faulted})"
         );
         assert_eq!(
-            fs.write_at(root, b"new", 0, b"again"),
+            fs.write_at(new_file, 0, b"again"),
             Err(DriverError::ReadOnly),
             "a frozen handle accepts no further mutation"
         );
@@ -6255,7 +6356,8 @@ fn a_failed_commit_on_a_maintenance_pass_restores_the_published_roots() {
     );
     fs.block_mut().fail_flush = false;
     let root = fs.root();
-    fs.write_at(root, b"new", 0, b"after").expect("write");
+    let new_file = fs.lookup(root, b"new").expect("lookup");
+    fs.write_at(new_file, 0, b"after").expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let fs =
@@ -6280,8 +6382,9 @@ fn the_dirty_set_holds_nothing_between_operations() {
     let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     assert_eq!(fs.dirty.len(), 0, "a synced volume stages nothing");
+    let new_file = fs.lookup(root, b"new").expect("lookup");
     assert_eq!(
-        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        fs.write_at(new_file, 0, VOLATILE_PAYLOAD),
         Ok(VOLATILE_PAYLOAD.len())
     );
     assert_eq!(fs.dirty.len(), 0, "a commit drains the set it filled");
@@ -6294,7 +6397,7 @@ fn the_dirty_set_holds_nothing_between_operations() {
     fs.block_mut().writes = 0;
     fs.block_mut().write_fault_after = Some(1);
     assert_eq!(
-        fs.write_at(root, b"new", 0, &[0x11; 4 * CRASH_BS as usize]),
+        fs.write_at(new_file, 0, &[0x11; 4 * CRASH_BS as usize]),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(
@@ -6317,7 +6420,7 @@ fn the_dirty_set_holds_nothing_between_operations() {
     fs.block_mut().write_fault_after = None;
     fs.block_mut().fail_flush = true;
     assert_eq!(
-        fs.write_at(root, b"new", 0, b"barrier"),
+        fs.write_at(new_file, 0, b"barrier"),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(
@@ -6338,8 +6441,9 @@ fn the_map_turns_its_clean_stamp_dirty_durably_before_its_first_page_write() {
         fs.map_is_stamped_clean(),
         "the fixture's sync left the map stamped clean"
     );
+    let new_file = fs.lookup(root, b"new").expect("lookup");
     assert_eq!(
-        fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD),
+        fs.write_at(new_file, 0, VOLATILE_PAYLOAD),
         Ok(VOLATILE_PAYLOAD.len())
     );
     let start = fs.map_region_start();
@@ -6377,8 +6481,8 @@ fn a_failed_sync_rebuilds_every_partially_persisted_map() {
             let old_used = fs.used_blocks();
             let old_free = fs.committed_free_count();
             let root = fs.root();
-            fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
-                .expect("write");
+            let new_file = fs.lookup(root, b"new").expect("lookup");
+            fs.write_at(new_file, 0, VOLATILE_PAYLOAD).expect("write");
             let new_used = fs.used_blocks();
             let new_free = fs.committed_free_count();
             let map_start = fs.map_region_start();
@@ -6448,13 +6552,13 @@ fn a_failed_sync_rebuilds_every_partially_persisted_map() {
 fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
     let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
-    fs.create(root, b"taken", NodeKind::RegularFile)
+    fs.create(root, b"taken", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let before_used = fs.used_blocks();
     let before_free = fs.committed_free_count();
 
     assert_eq!(
-        fs.create(root, b"taken", NodeKind::RegularFile),
+        fs.create(root, b"taken", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::AlreadyExists),
         "a name already taken must be refused"
     );
@@ -6480,7 +6584,7 @@ fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
     );
 
     // And the volume is still writable and correct afterwards.
-    fs.create(root, b"fresh", NodeKind::RegularFile)
+    fs.create(root, b"fresh", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create after a refusal");
     FilesystemWrite::flush(&mut fs).expect("sync");
     let expected_used = fs.used_blocks();
@@ -6498,8 +6602,8 @@ fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
 fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
     let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
-    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
-        .expect("write");
+    let new_file = fs.lookup(root, b"new").expect("lookup");
+    fs.write_at(new_file, 0, VOLATILE_PAYLOAD).expect("write");
     let before_used = fs.used_blocks();
     let before_free = fs.committed_free_count();
     let old_root = fs.root_phys;
@@ -6509,7 +6613,7 @@ fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
     // `prepare_deferred_frees` has already marked them free.
     fs.block_mut().fail_flush = true;
     assert_eq!(
-        fs.write_at(root, b"new", 0, b"replacement"),
+        fs.write_at(new_file, 0, b"replacement"),
         Err(DriverError::DeviceFault)
     );
     fs.block_mut().fail_flush = false;
@@ -6546,8 +6650,8 @@ fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
 fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
     let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
-    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
-        .expect("write");
+    let new_file = fs.lookup(root, b"new").expect("lookup");
+    fs.write_at(new_file, 0, VOLATILE_PAYLOAD).expect("write");
     fs.block_mut().fail_flush = true;
     assert_eq!(
         FilesystemWrite::flush(&mut fs),
@@ -6560,7 +6664,7 @@ fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
     let report = fs.check(&GrantAll, &NullSink).expect("same-handle check");
     assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
     assert!(!fs.allocator().expect("allocator").needs_rebuild);
-    fs.write_at(root, b"new", 1, b"after recovery")
+    fs.write_at(new_file, 1, b"after recovery")
         .expect("same-handle write");
     let expected_used = fs.used_blocks();
     let expected_free = fs.committed_free_count();
@@ -6577,8 +6681,8 @@ fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
 fn a_failed_sync_rebuilds_before_same_handle_growth() {
     let (mut fs, _slot) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
-    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
-        .expect("write");
+    let new_file = fs.lookup(root, b"new").expect("lookup");
+    fs.write_at(new_file, 0, VOLATILE_PAYLOAD).expect("write");
     fs.block_mut().fail_flush = true;
     assert_eq!(
         FilesystemWrite::flush(&mut fs),
@@ -6679,11 +6783,12 @@ fn sparse_ten_mib_zero_file_allocates_no_data_payload() {
     // exists for the sparse range.
     let mut fs = fmt(4096, 4096, 256);
     let root = fs.root();
-    fs.create(root, b"zero", NodeKind::RegularFile)
+    let zero = fs
+        .create(root, b"zero", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let size = 10 * 1024 * 1024usize;
     let zeros = alloc::vec![0u8; size];
-    assert_eq!(fs.write_at(root, b"zero", 0, &zeros), Ok(size));
+    assert_eq!(fs.write_at(zero, 0, &zeros), Ok(size));
 
     let ino = file_ino(&mut fs, b"zero");
     assert_eq!(
@@ -6723,15 +6828,16 @@ fn sparse_write_nonzero_into_hole_splits_around_data() {
     // the extent map stays ordered and non-overlapping.
     let mut fs = fmt(512, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
     let capu = as_usize(cap);
 
     // A 8-block hole, then a single non-zero block at logical block 4.
-    fs.truncate(root, b"f", cap * 8).expect("extend");
+    fs.truncate(f, cap * 8).expect("extend");
     let patch = alloc::vec![0xABu8; capu];
-    assert_eq!(fs.write_at(root, b"f", cap * 4, &patch), Ok(capu));
+    assert_eq!(fs.write_at(f, cap * 4, &patch), Ok(capu));
 
     let ino = file_ino(&mut fs, b"f");
     assert_eq!(
@@ -6761,18 +6867,19 @@ fn sparse_overwrite_data_with_zeroes_frees_only_when_unshared() {
     // retained, so the reflink keeps seeing the old data.
     let mut fs = fmt(512, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
     let capu = as_usize(cap);
     let body = alloc::vec![0x33u8; capu];
-    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(capu));
+    assert_eq!(fs.write_at(f, 0, &body), Ok(capu));
 
     fs.reflink(root, b"f", b"snap").expect("reflink");
 
     // Overwrite the single data block with zeroes: it becomes a hole.
     let zeros = alloc::vec![0u8; capu];
-    assert_eq!(fs.write_at(root, b"f", 0, &zeros), Ok(capu));
+    assert_eq!(fs.write_at(f, 0, &zeros), Ok(capu));
 
     let f_ino = file_ino(&mut fs, b"f");
     assert_eq!(
@@ -6798,10 +6905,11 @@ fn sparse_truncate_up_creates_a_hole() {
     // new range return zeroes and no data blocks are allocated.
     let mut fs = fmt(512, 256, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
-    fs.truncate(root, b"f", cap * 6).expect("truncate up");
+    fs.truncate(f, cap * 6).expect("truncate up");
 
     let ino = file_ino(&mut fs, b"f");
     assert_eq!(
@@ -6821,7 +6929,8 @@ fn sparse_truncate_down_frees_data_but_not_holes() {
     // followed by a hole shrinks correctly either way.
     let mut fs = fmt(512, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
     let capu = as_usize(cap);
@@ -6831,8 +6940,8 @@ fn sparse_truncate_down_frees_data_but_not_holes() {
     for byte in &mut body[capu..] {
         *byte = 0x45;
     }
-    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(capu * 2));
-    fs.truncate(root, b"f", cap * 8).expect("extend with hole");
+    assert_eq!(fs.write_at(f, 0, &body), Ok(capu * 2));
+    fs.truncate(f, cap * 8).expect("extend with hole");
 
     let ino = file_ino(&mut fs, b"f");
     assert_eq!(
@@ -6843,7 +6952,7 @@ fn sparse_truncate_down_frees_data_but_not_holes() {
     let free_before = fs.committed_free_count();
 
     // Shrink to drop the hole only: data blocks remain, no free needed.
-    fs.truncate(root, b"f", cap * 2).expect("drop hole");
+    fs.truncate(f, cap * 2).expect("drop hole");
     assert_eq!(
         mapped_block_count(&mut fs, ino),
         2,
@@ -6851,7 +6960,7 @@ fn sparse_truncate_down_frees_data_but_not_holes() {
     );
 
     // Shrink into the data: the freed data block returns to the free pool.
-    fs.truncate(root, b"f", cap).expect("drop a data block");
+    fs.truncate(f, cap).expect("drop a data block");
     assert_eq!(mapped_block_count(&mut fs, ino), 1, "one data block freed");
     assert!(
         fs.committed_free_count() > free_before,
@@ -6865,7 +6974,8 @@ fn sparse_reflink_preserves_holes_without_dedupe_chunks() {
     // dedupe chunk for any zero range (a zero range is never a chunk).
     let mut fs = fmt(512, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
     let capu = as_usize(cap);
@@ -6873,9 +6983,9 @@ fn sparse_reflink_preserves_holes_without_dedupe_chunks() {
     // not one deduped chunk), a hole between, then a trailing hole.
     let patch0 = alloc::vec![0x6Cu8; capu];
     let patch5 = alloc::vec![0x6Du8; capu];
-    assert_eq!(fs.write_at(root, b"f", 0, &patch0), Ok(capu));
-    assert_eq!(fs.write_at(root, b"f", cap * 5, &patch5), Ok(capu));
-    fs.truncate(root, b"f", cap * 8).expect("trailing hole");
+    assert_eq!(fs.write_at(f, 0, &patch0), Ok(capu));
+    assert_eq!(fs.write_at(f, cap * 5, &patch5), Ok(capu));
+    fs.truncate(f, cap * 8).expect("trailing hole");
 
     let chunks_before = chunk_count(&mut fs);
     fs.reflink(root, b"f", b"clone").expect("reflink");
@@ -6914,14 +7024,14 @@ fn sparse_scrub_and_check_validate_metadata_only() {
     // nothing for the integrity layers to fault on.
     let mut fs = fmt(4096, 512, 128);
     let root = fs.root();
-    fs.create(root, b"sparse", NodeKind::RegularFile)
+    let sparse = fs
+        .create(root, b"sparse", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
     let capu = as_usize(cap);
     let patch = alloc::vec![0x77u8; capu];
-    assert_eq!(fs.write_at(root, b"sparse", cap * 3, &patch), Ok(capu));
-    fs.truncate(root, b"sparse", cap * 16)
-        .expect("trailing hole");
+    assert_eq!(fs.write_at(sparse, cap * 3, &patch), Ok(capu));
+    fs.truncate(sparse, cap * 16).expect("trailing hole");
 
     let report = scrub_full(&mut fs);
     assert_eq!(
@@ -6954,10 +7064,11 @@ fn sparse_all_zero_bypasses_compression_but_nonzero_constant_compresses() {
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
 
-    fs.create(root, b"zero", NodeKind::RegularFile)
+    let zero = fs
+        .create(root, b"zero", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create zero");
     let zeros = alloc::vec![0u8; cap];
-    assert_eq!(fs.write_at(root, b"zero", 0, &zeros), Ok(cap));
+    assert_eq!(fs.write_at(zero, 0, &zeros), Ok(cap));
     let zero_ino = file_ino(&mut fs, b"zero");
     assert_eq!(
         mapped_block_count(&mut fs, zero_ino),
@@ -6965,10 +7076,11 @@ fn sparse_all_zero_bypasses_compression_but_nonzero_constant_compresses() {
         "an all-zero record creates no physical (zstd or raw) payload"
     );
 
-    fs.create(root, b"ff", NodeKind::RegularFile)
+    let ff_file = fs
+        .create(root, b"ff", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create ff");
     let ff = alloc::vec![0xFFu8; cap];
-    assert_eq!(fs.write_at(root, b"ff", 0, &ff), Ok(cap));
+    assert_eq!(fs.write_at(ff_file, 0, &ff), Ok(cap));
     let ff_phys = data_block_phys(&mut fs, b"ff", 0);
     assert_eq!(
         stored_form_at(&mut fs, ff_phys),
@@ -6991,10 +7103,11 @@ fn names_up_to_255_bytes_round_trip() {
     let root = fs.root();
     let name = alloc::vec![b'n'; NAME_MAX];
     assert_eq!(name.len(), 255);
-    fs.create(root, &name, NodeKind::RegularFile)
+    let file = fs
+        .create(root, &name, NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a 255-byte name");
     let body = alloc::vec![0x9u8; 1000];
-    assert_eq!(fs.write_at(root, &name, 0, &body), Ok(1000));
+    assert_eq!(fs.write_at(file, 0, &body), Ok(1000));
 
     let (_, listed_name) = first_listed(&mut fs, root, 0, &[])
         .expect("read_dir")
@@ -7016,7 +7129,7 @@ fn a_name_longer_than_255_bytes_is_rejected() {
     let root = fs.root();
     let too_long = alloc::vec![b'x'; NAME_MAX + 1];
     assert_eq!(
-        fs.create(root, &too_long, NodeKind::RegularFile),
+        fs.create(root, &too_long, NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
 }
@@ -7037,25 +7150,30 @@ fn names_use_the_ext4_charset_rejecting_only_slash_and_nul() {
         b"\xff\xfe",           // arbitrary high bytes
     ];
     for name in legal {
-        fs.create(root, name, NodeKind::RegularFile)
+        fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .unwrap_or_else(|e| panic!("ext4-legal name {name:?} rejected: {e:?}"));
         assert!(fs.lookup(root, name).is_ok(), "{name:?} must be present");
     }
     // The two forbidden bytes and the two reserved names.
     assert_eq!(
-        fs.create(root, b"a/b", NodeKind::RegularFile),
+        fs.create(root, b"a/b", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::Unsupported)
     );
     assert_eq!(
-        fs.create(root, &[b'a', 0u8, b'b'], NodeKind::RegularFile),
+        fs.create(
+            root,
+            &[b'a', 0u8, b'b'],
+            NodeKind::RegularFile,
+            &FILE_RECORD
+        ),
         Err(DriverError::Unsupported)
     );
     assert_eq!(
-        fs.create(root, b".", NodeKind::RegularFile),
+        fs.create(root, b".", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::Unsupported)
     );
     assert_eq!(
-        fs.create(root, b"..", NodeKind::RegularFile),
+        fs.create(root, b"..", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::Unsupported)
     );
 }
@@ -7065,11 +7183,11 @@ fn names_are_case_sensitive() {
     // names are compared byte-for-byte, so casing distinguishes entries.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
-    fs.create(root, b"File", NodeKind::RegularFile)
+    fs.create(root, b"File", NodeKind::RegularFile, &FILE_RECORD)
         .expect("File");
-    fs.create(root, b"file", NodeKind::RegularFile)
+    fs.create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("file");
-    fs.create(root, b"FILE", NodeKind::RegularFile)
+    fs.create(root, b"FILE", NodeKind::RegularFile, &FILE_RECORD)
         .expect("FILE");
     let a = fs.lookup(root, b"File").expect("File");
     let b = fs.lookup(root, b"file").expect("file");
@@ -7091,7 +7209,8 @@ fn directory_entries_span_multiple_blocks_on_a_512_byte_volume() {
         b"alpha", b"bravo", b"charlie", b"delta", b"echo", b"foxtrot",
     ];
     for n in names {
-        fs.create(root, n, NodeKind::RegularFile).expect("create");
+        fs.create(root, n, NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
     }
     for n in names {
         assert!(fs.lookup(root, n).is_ok(), "{n:?} must be present");
@@ -7107,13 +7226,10 @@ fn fill_until_no_space(fs: &mut ARXFS<MemBlock>) {
     let mut idx = 0u64;
     loop {
         let name = alloc::format!("fill{idx}");
-        if fs
-            .create(root, name.as_bytes(), NodeKind::RegularFile)
-            .is_err()
-        {
+        let Ok(file) = fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD) else {
             break;
-        }
-        match fs.write_at(root, name.as_bytes(), 0, &body) {
+        };
+        match fs.write_at(file, 0, &body) {
             Ok(_) => idx += 1,
             Err(DriverError::NoSpace) => break,
             Err(e) => panic!("unexpected {e:?}"),
@@ -7129,10 +7245,11 @@ fn grow_extends_a_mounted_volume_online() {
     // intact; the larger size is durable.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    let keep = fs
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![0x33u8; 4096];
-    assert_eq!(fs.write_at(root, b"keep", 0, &body), Ok(4096));
+    assert_eq!(fs.write_at(keep, 0, &body), Ok(4096));
     assert_eq!(fs.total_blocks, 256);
     fill_until_no_space(&mut fs);
 
@@ -7143,10 +7260,11 @@ fn grow_extends_a_mounted_volume_online() {
     assert_eq!(fs.total_blocks, 1024);
 
     // The grown space is immediately usable, without a remount.
-    fs.create(root, b"after_grow", NodeKind::RegularFile)
+    let after_grow = fs
+        .create(root, b"after_grow", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create after grow");
     assert_eq!(
-        fs.write_at(root, b"after_grow", 0, &body),
+        fs.write_at(after_grow, 0, &body),
         Ok(4096),
         "the new blocks are allocatable"
     );
@@ -7201,8 +7319,8 @@ fn the_transaction_private_tracker_is_sparse_not_one_entry_per_block() {
     // set bounded by the transaction's working set, never a dense structure
     // sized to the whole device. The previous `vec![false; total_blocks]`
     // allocated one byte per device block, so a real multi-GB volume's mount
-    // ballooned to tens of MiB and exhausted the kernel heap (the Raspberry
-    // Pi 4 eMMC2 boot OOM); a sparse set scales with the work, not the disk.
+    // ballooned to tens of MiB and exhausted the kernel heap (a metal
+    // boot OOM); a sparse set scales with the work, not the disk.
     let mut fs = fmt(512, 4096, 32);
     assert_eq!(fs.total_blocks, 4096);
     // A freshly formatted (and committed) volume holds no private blocks: the
@@ -7216,10 +7334,11 @@ fn the_transaction_private_tracker_is_sparse_not_one_entry_per_block() {
     // touches private, then clears them at commit — so between operations the
     // tracker is empty and never approaches the device block count.
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![0xA5u8; 4000];
-    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(4000));
+    assert_eq!(fs.write_at(f, 0, &body), Ok(4000));
     assert!(
         fs.allocator().expect("writable").txn_private.is_empty(),
         "a committed transaction clears its private-block set"
@@ -7231,7 +7350,7 @@ fn the_allocation_map_costs_a_bounded_cache_not_one_entry_per_block() {
     // Regression: mounting must never cost memory proportional to the device.
     // The first form allocated a dense `Vec<u64>` bitmap at mount, so a real
     // multi-GB eMMC volume's mount alone exhausted the bounded kernel heap
-    // (the Raspberry Pi 4 boot OOM); the sparse used-set that replaced it
+    // (a metal boot OOM); the sparse used-set that replaced it
     // still grew with the blocks in use. The paged on-disk map costs a fixed
     // cache of region blocks, whatever the volume size or the working set.
     let mut fs = fmt(512, 65536, 32);
@@ -7256,10 +7375,11 @@ fn the_allocation_map_costs_a_bounded_cache_not_one_entry_per_block() {
     // A committed write grows the used set by only the blocks the file
     // occupies, and the resident cache stays bounded.
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![0xA5u8; 4000];
-    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(4000));
+    assert_eq!(fs.write_at(f, 0, &body), Ok(4000));
     assert!(
         fs.used_blocks().len() < before.len() + 64,
         "a small write must add only a handful of used blocks"
@@ -7324,10 +7444,11 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
 
     // Serve real I/O: create a file, write several blocks, read them back.
     let root = fs.root();
-    fs.create(root, b"big", NodeKind::RegularFile)
+    let big = fs
+        .create(root, b"big", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create on a huge volume");
     let body = alloc::vec![0xC3u8; 200_000];
-    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(200_000));
+    assert_eq!(fs.write_at(big, 0, &body), Ok(200_000));
     let node = fs.lookup(root, b"big").expect("lookup");
     let mut back = alloc::vec![0u8; 200_000];
     assert_eq!(fs.read_at(node, 0, &mut back), Ok(200_000));
@@ -7438,9 +7559,10 @@ fn one_freed_run_of_any_length_costs_the_discard_queue_one_entry() {
 fn rename_within_directory_moves_a_file_preserving_contents() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"a", 0, b"hello"), Ok(5));
+    assert_eq!(fs.write_at(a, 0, b"hello"), Ok(5));
     fs.rename(root, b"a", root, b"b").expect("rename");
     assert_eq!(fs.lookup(root, b"a"), Err(DriverError::NotFound));
     let node = fs.lookup(root, b"b").expect("dst present");
@@ -7453,7 +7575,7 @@ fn rename_within_directory_moves_a_file_preserving_contents() {
 fn rename_self_is_a_noop() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"a", NodeKind::RegularFile)
+    fs.create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fs.rename(root, b"a", root, b"a").expect("noop");
     assert!(fs.lookup(root, b"a").is_ok());
@@ -7473,14 +7595,16 @@ fn rename_missing_source_fails_closed() {
 fn rename_across_directories_moves_a_file() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"src", NodeKind::Directory)
+    fs.create(root, b"src", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir src");
-    fs.create(root, b"dst", NodeKind::Directory)
+    fs.create(root, b"dst", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir dst");
     let src = fs.lookup(root, b"src").unwrap();
     let dst = fs.lookup(root, b"dst").unwrap();
-    fs.create(src, b"f", NodeKind::RegularFile).expect("create");
-    assert_eq!(fs.write_at(src, b"f", 0, b"data"), Ok(4));
+    let f = fs
+        .create(src, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    assert_eq!(fs.write_at(f, 0, b"data"), Ok(4));
     fs.rename(src, b"f", dst, b"g").expect("rename across");
     assert_eq!(fs.lookup(src, b"f"), Err(DriverError::NotFound));
     let node = fs.lookup(dst, b"g").expect("moved");
@@ -7493,10 +7617,14 @@ fn rename_across_directories_moves_a_file() {
 fn rename_overwrites_an_existing_regular_file() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"a", NodeKind::RegularFile).unwrap();
-    fs.create(root, b"b", NodeKind::RegularFile).unwrap();
-    assert_eq!(fs.write_at(root, b"a", 0, b"AAAA"), Ok(4));
-    assert_eq!(fs.write_at(root, b"b", 0, b"BB"), Ok(2));
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    assert_eq!(fs.write_at(a, 0, b"AAAA"), Ok(4));
+    assert_eq!(fs.write_at(b, 0, b"BB"), Ok(2));
     fs.rename(root, b"a", root, b"b").expect("overwrite");
     assert_eq!(fs.lookup(root, b"a"), Err(DriverError::NotFound));
     let node = fs.lookup(root, b"b").unwrap();
@@ -7509,10 +7637,13 @@ fn rename_overwrites_an_existing_regular_file() {
 fn rename_replaces_an_empty_directory() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"a", NodeKind::Directory).unwrap();
-    fs.create(root, b"b", NodeKind::Directory).unwrap();
+    fs.create(root, b"a", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
+    fs.create(root, b"b", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     let a = fs.lookup(root, b"a").unwrap();
-    fs.create(a, b"x", NodeKind::RegularFile).unwrap();
+    fs.create(a, b"x", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
     fs.rename(root, b"a", root, b"b")
         .expect("dir over empty dir");
     assert_eq!(fs.lookup(root, b"a"), Err(DriverError::NotFound));
@@ -7524,8 +7655,10 @@ fn rename_replaces_an_empty_directory() {
 fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile).unwrap();
-    fs.create(root, b"dir", NodeKind::Directory).unwrap();
+    fs.create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    fs.create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     assert_eq!(
         fs.rename(root, b"file", root, b"dir"),
         Err(DriverError::Unsupported)
@@ -7534,9 +7667,11 @@ fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
         fs.rename(root, b"dir", root, b"file"),
         Err(DriverError::Unsupported)
     );
-    fs.create(root, b"dir2", NodeKind::Directory).unwrap();
+    fs.create(root, b"dir2", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     let dir2 = fs.lookup(root, b"dir2").unwrap();
-    fs.create(dir2, b"child", NodeKind::RegularFile).unwrap();
+    fs.create(dir2, b"child", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
     assert_eq!(
         fs.rename(root, b"dir", root, b"dir2"),
         Err(DriverError::DirectoryNotEmpty)
@@ -7547,13 +7682,17 @@ fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
 fn rename_moves_a_directory_across_parents_and_repoints_dotdot() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"p1", NodeKind::Directory).unwrap();
-    fs.create(root, b"p2", NodeKind::Directory).unwrap();
+    fs.create(root, b"p1", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
+    fs.create(root, b"p2", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     let p1 = fs.lookup(root, b"p1").unwrap();
     let p2 = fs.lookup(root, b"p2").unwrap();
-    fs.create(p1, b"d", NodeKind::Directory).unwrap();
+    fs.create(p1, b"d", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     let d = fs.lookup(p1, b"d").unwrap();
-    fs.create(d, b"leaf", NodeKind::RegularFile).unwrap();
+    fs.create(d, b"leaf", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
     fs.rename(p1, b"d", p2, b"d").expect("move dir");
     assert_eq!(fs.lookup(p1, b"d"), Err(DriverError::NotFound));
     let moved = fs.lookup(p2, b"d").expect("moved dir");
@@ -7565,9 +7704,11 @@ fn rename_moves_a_directory_across_parents_and_repoints_dotdot() {
 fn rename_refuses_moving_a_directory_into_its_own_subtree() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"a", NodeKind::Directory).unwrap();
+    fs.create(root, b"a", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     let a = fs.lookup(root, b"a").unwrap();
-    fs.create(a, b"b", NodeKind::Directory).unwrap();
+    fs.create(a, b"b", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     let b = fs.lookup(a, b"b").unwrap();
     assert_eq!(
         fs.rename(root, b"a", b, b"a"),
@@ -7580,10 +7721,38 @@ fn rename_refuses_moving_a_directory_into_its_own_subtree() {
 }
 
 #[test]
+fn parent_answers_a_directorys_dotdot() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let outer = fs
+        .create(root, b"outer", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
+    let inner = fs
+        .create(outer, b"inner", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
+    assert_eq!(fs.parent(inner), Ok(outer));
+    assert_eq!(fs.parent(outer), Ok(root));
+    assert_eq!(fs.parent(root), Ok(root), "the root answers itself");
+
+    fs.rename(outer, b"inner", root, b"moved")
+        .expect("move dir");
+    assert_eq!(fs.parent(inner), Ok(root), "a move repoints `..`");
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    assert_eq!(fs.parent(file), Err(DriverError::Unsupported));
+
+    fs.remove(root, b"moved")
+        .expect("remove the empty directory");
+    assert_eq!(fs.parent(inner), Err(DriverError::NotFound));
+}
+
+#[test]
 fn rename_rejects_bad_destination_name() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"a", NodeKind::RegularFile).unwrap();
+    fs.create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
     assert_eq!(
         fs.rename(root, b"a", root, b""),
         Err(DriverError::LengthOutOfRange)
@@ -7631,7 +7800,7 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
 fn attributes_round_trip_across_namespaces_and_remount() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    fs.create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"file").expect("lookup");
 
@@ -7688,7 +7857,7 @@ fn attributes_round_trip_across_namespaces_and_remount() {
 fn attribute_keys_are_case_sensitive() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"f").expect("lookup");
     fs.set_attr(node, b"user.Name", b"upper").expect("set");
@@ -7707,7 +7876,7 @@ fn attribute_keys_are_case_sensitive() {
 fn attribute_grammar_and_bounds_fail_closed() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"f").expect("lookup");
 
@@ -7760,7 +7929,7 @@ fn attribute_set_that_overflows_the_block_fails_closed_and_leaves_prior_intact()
     // closed with NoSpace and leave the previously-stored attribute intact.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"f").expect("lookup");
     fs.set_attr(node, b"user.keep", b"safe").expect("set small");
@@ -7782,7 +7951,7 @@ fn attribute_set_that_overflows_the_block_fails_closed_and_leaves_prior_intact()
 fn attributes_are_encrypted_at_rest() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"f").expect("lookup");
     let marker_key = b"user.secretmarkerkey";
@@ -7804,7 +7973,7 @@ fn attributes_are_encrypted_at_rest() {
 fn a_read_only_mount_refuses_attribute_mutation() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"f").expect("lookup");
     fs.set_attr(node, b"user.k", b"v").expect("set");
@@ -7834,7 +8003,7 @@ fn setting_an_attribute_is_one_transaction_and_crash_replay_never_tears() {
     // attribute block.
     let mut base = fmt(512, 256, 32);
     let root = base.root();
-    base.create(root, b"f", NodeKind::RegularFile)
+    base.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = base.lookup(root, b"f").expect("lookup");
     base.set_attr(node, b"user.a", b"aaa").expect("set a");
@@ -7871,7 +8040,7 @@ fn removing_a_file_frees_its_attribute_block() {
     // clean remount proves the block was reclaimed exactly once.
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"victim", NodeKind::RegularFile)
+    fs.create(root, b"victim", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"victim").expect("lookup");
     fs.set_attr(node, b"user.a", b"value").expect("set");
@@ -7880,7 +8049,7 @@ fn removing_a_file_frees_its_attribute_block() {
 
     for i in 0..32u32 {
         let name = alloc::format!("t{i}");
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         let n = fs.lookup(root, name.as_bytes()).expect("lookup");
         fs.set_attr(n, b"user.tag", b"x").expect("set");
@@ -7893,7 +8062,7 @@ fn removing_a_file_frees_its_attribute_block() {
     // slow leak of attribute blocks.
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), TEST_KEYING).expect("reopen");
     let root = fs.root();
-    fs.create(root, b"again", NodeKind::RegularFile)
+    fs.create(root, b"again", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let n = fs.lookup(root, b"again").expect("lookup");
     fs.set_attr(n, b"user.a", b"value").expect("set");
@@ -7916,10 +8085,10 @@ fn fs_free_count_after_reopen(bytes: alloc::vec::Vec<u8>) -> u64 {
 fn reflink_copies_attributes_independently() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"src", NodeKind::RegularFile)
+    fs.create(root, b"src", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let src = fs.lookup(root, b"src").expect("lookup");
-    assert_eq!(fs.write_at(root, b"src", 0, b"body"), Ok(4));
+    assert_eq!(fs.write_at(src, 0, b"body"), Ok(4));
     fs.set_attr(src, b"user.tag", b"orig").expect("set");
 
     let dst = fs.reflink(root, b"src", b"copy").expect("reflink");
@@ -7963,7 +8132,7 @@ fn acorn_preset_metadata_round_trips_through_the_store() {
     let (load, exec) = preset::acorn::encode_typed(0xFFF, 0x12_3456_789A).expect("encode typed");
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"doc", NodeKind::RegularFile)
+    fs.create(root, b"doc", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"doc").expect("lookup");
 
@@ -7998,19 +8167,19 @@ fn acorn_preset_metadata_round_trips_through_the_store() {
 fn node_info_reports_mapped_extent_allocation() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    fs.create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let node = fs.lookup(root, b"file").expect("lookup");
     // No extent tree yet: nothing is allocated.
     assert_eq!(fs.node_info(node).expect("info").allocated, 0);
 
     let body = alloc::vec![7u8; 1500];
-    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(1500));
+    assert_eq!(fs.write_at(node, 0, &body), Ok(1500));
     // Each data block carries the crypto, compression-descriptor, and
     // integrity trailers, so 1500 bytes span four 512-byte blocks.
     assert_eq!(fs.node_info(node).expect("info").allocated, 4 * 512);
 
-    fs.truncate(root, b"file", 100).expect("truncate");
+    fs.truncate(node, 100).expect("truncate");
     // The freed tail leaves one mapped block.
     assert_eq!(fs.node_info(node).expect("info").allocated, 512);
 }
@@ -8034,10 +8203,11 @@ fn stats_report_tracks_allocation() {
 
     // Writing data consumes free blocks; the report tracks the allocator.
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![7u8; 1500];
-    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(1500));
+    assert_eq!(fs.write_at(file, 0, &body), Ok(1500));
     let after = fs.stats().expect("stats");
     assert!(
         after.free_blocks < before.free_blocks,
@@ -8087,12 +8257,15 @@ fn counted_dir_fixture(files: u32) -> (ARXFS<CountingBlock>, NodeId) {
     )
     .expect("format");
     let root = fs.root();
-    let dir = fs.create(root, b"docs", NodeKind::Directory).expect("dir");
+    let dir = fs
+        .create(root, b"docs", NodeKind::Directory, &DIR_RECORD)
+        .expect("dir");
     for i in 0..files {
         let name = alloc::format!("f{i}.txt").into_bytes();
-        fs.create(dir, &name, NodeKind::RegularFile)
+        let file = fs
+            .create(dir, &name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        fs.write_at(dir, &name, 0, b"hello world").expect("write");
+        fs.write_at(file, 0, b"hello world").expect("write");
     }
     fs.flush().expect("flush");
     let bytes = fs.into_block().expect("the volume closes").bytes();
@@ -8152,7 +8325,7 @@ fn a_listing_resumed_across_changes_lists_each_lasting_entry_once() {
             let gone = alloc::format!("f{}.txt", (step * 3) % FILES).into_bytes();
             let _ = fs.remove(dir, &gone);
             let late = alloc::format!("late{step}.txt").into_bytes();
-            fs.create(dir, &late, NodeKind::RegularFile)
+            fs.create(dir, &late, NodeKind::RegularFile, &FILE_RECORD)
                 .expect("create");
         }
     }
@@ -8255,9 +8428,10 @@ fn counted_file_fixture() -> (ARXFS<CountingBlock>, NodeId, alloc::vec::Vec<u8>)
     let body = incompressible(RUN_FIXTURE_BYTES);
     let mut fs = fmt(4096, 4096, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(f, 0, &body), Ok(body.len()));
     FilesystemWrite::flush(&mut fs).expect("sync");
     let mut fs = ARXFS::open(
         counting(
@@ -8342,9 +8516,10 @@ fn a_wounded_block_inside_a_coalesced_run_fails_the_read_closed() {
     let body = incompressible(RUN_FIXTURE_BYTES);
     let mut fs = fmt(4096, 4096, 64);
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(f, 0, &body), Ok(body.len()));
     let interior = 5u64;
     assert!(
         interior < u64::try_from(RUN_FIXTURE_BLOCKS).unwrap(),
@@ -8379,14 +8554,15 @@ fn a_compressed_cluster_read_asks_the_device_once_for_its_stored_run() {
     // is fetched in one request instead of one per stored block.
     let mut fs = fmt(4096, 4096, 64);
     let root = fs.root();
-    fs.create(root, b"c", NodeKind::RegularFile)
+    let c = fs
+        .create(root, b"c", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     // A cluster that compresses, but not to a single block: half noise, half
     // constant padding, so its stored run genuinely spans several blocks.
     let logical = as_usize(fs.data_capacity() * COMPRESS_CLUSTER_BLOCKS);
     let mut payload = incompressible(logical / 2);
     payload.resize(logical, b'.');
-    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
     FilesystemWrite::flush(&mut fs).expect("sync");
     let (_, ext) = extent_of(&mut fs, b"c", 0);
     assert!(
@@ -8423,8 +8599,9 @@ fn a_compressed_cluster_read_asks_the_device_once_for_its_stored_run() {
 #[test]
 fn a_commit_and_a_sync_each_barrier_once() {
     let (mut fs, dir) = counted_dir_fixture(1);
+    let f0_txt = fs.lookup(dir, b"f0.txt").expect("lookup");
     fs.block_mut().flushes = 0;
-    fs.write_at(dir, b"f0.txt", 0, b"the mount's first change")
+    fs.write_at(f0_txt, 0, b"the mount's first change")
         .expect("write");
     assert_eq!(
         fs.block_mut().flushes,
@@ -8432,8 +8609,7 @@ fn a_commit_and_a_sync_each_barrier_once() {
         "the mount's first change also flushes the slot naming its stride"
     );
     fs.block_mut().flushes = 0;
-    fs.write_at(dir, b"f0.txt", 0, b"durable payload")
-        .expect("write");
+    fs.write_at(f0_txt, 0, b"durable payload").expect("write");
     assert_eq!(
         fs.block_mut().flushes,
         1,
@@ -8459,6 +8635,7 @@ fn a_commit_and_a_sync_each_barrier_once() {
 #[test]
 fn a_clean_check_costs_no_barrier_and_its_following_sync_the_transition() {
     let (mut fs, dir) = counted_dir_fixture(1);
+    let f0_txt = fs.lookup(dir, b"f0.txt").expect("lookup");
     assert!(fs.map_is_stamped_clean(), "the fixture starts clean");
     fs.block_mut().flushes = 0;
     let report = fs.check(&GrantAll, &NullSink).expect("check");
@@ -8476,11 +8653,10 @@ fn a_clean_check_costs_no_barrier_and_its_following_sync_the_transition() {
     );
     // A second sync has no transition left to pay for. The mount's first
     // change pays once for its stride, so it is made before counting.
-    fs.write_at(dir, b"f0.txt", 0, b"first")
-        .expect("first write");
+    fs.write_at(f0_txt, 0, b"first").expect("first write");
     FilesystemWrite::flush(&mut fs).expect("sync");
     fs.block_mut().flushes = 0;
-    fs.write_at(dir, b"f0.txt", 0, b"x").expect("write");
+    fs.write_at(f0_txt, 0, b"x").expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
     assert_eq!(
         fs.block_mut().flushes,
@@ -8516,10 +8692,10 @@ fn synced_volume(files: u8) -> (alloc::vec::Vec<u8>, BTreeSet<u64>, u64) {
     let root = fs.root();
     for i in 0..files {
         let name = alloc::format!("f{i}").into_bytes();
-        fs.create(root, &name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, &name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        fs.write_at(root, &name, 0, &alloc::vec![i; 9000])
-            .expect("write");
+        fs.write_at(file, 0, &alloc::vec![i; 9000]).expect("write");
     }
     FilesystemWrite::flush(&mut fs).expect("sync");
     let used = fs.used_blocks();
@@ -8580,9 +8756,10 @@ fn a_volume_that_was_not_synced_rebuilds_its_map_at_the_next_mount() {
     let (bytes, _, _) = synced_volume(24);
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 2048), TEST_KEYING).expect("reopen");
     let root = fs.root();
-    fs.create(root, b"extra", NodeKind::RegularFile)
+    let extra = fs
+        .create(root, b"extra", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"extra", 0, &alloc::vec![7u8; 9000])
+    fs.write_at(extra, 0, &alloc::vec![7u8; 9000])
         .expect("write");
     let live = fs.used_blocks();
     let free = fs.committed_free_count();
@@ -8633,13 +8810,11 @@ fn a_read_only_mount_builds_no_allocation_state_at_all() {
     // Every mutating path fails closed.
     let root = fs.root();
     assert_eq!(
-        fs.create(root, b"nope", NodeKind::RegularFile),
+        fs.create(root, b"nope", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::ReadOnly)
     );
-    assert_eq!(
-        fs.write_at(root, b"f0", 0, b"nope"),
-        Err(DriverError::ReadOnly)
-    );
+    let f0 = fs.lookup(root, b"f0").expect("lookup");
+    assert_eq!(fs.write_at(f0, 0, b"nope"), Err(DriverError::ReadOnly));
     assert_eq!(fs.remove(root, b"f0"), Err(DriverError::ReadOnly));
     assert!(matches!(
         fs.trim(&GrantAll, &NullSink),
@@ -8663,9 +8838,10 @@ fn the_allocation_map_region_stays_reserved_under_churn() {
     let root = fs.root();
     for i in 0..40u8 {
         let name = alloc::format!("f{i}").into_bytes();
-        fs.create(root, &name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, &name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        let _ = fs.write_at(root, &name, 0, &alloc::vec![i; 900]);
+        let _ = fs.write_at(file, 0, &alloc::vec![i; 900]);
     }
     for i in (0..40u8).step_by(2) {
         let name = alloc::format!("f{i}").into_bytes();
@@ -8696,10 +8872,11 @@ fn growing_past_the_region_relays_the_map_and_keeps_the_volume_sound() {
     // longer, which relays it. Content and allocation must survive that.
     let mut fs = fmt(512, 3000, 64);
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    let keep = fs
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = alloc::vec![0x5Au8; 4000];
-    fs.write_at(root, b"keep", 0, &body).expect("write");
+    fs.write_at(keep, 0, &body).expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
     let small_region = fs.map_region_blocks();
 
@@ -8720,9 +8897,10 @@ fn growing_past_the_region_relays_the_map_and_keeps_the_volume_sound() {
     let mut back = alloc::vec![0u8; 4000];
     assert_eq!(fs.read_at(node, 0, &mut back), Ok(4000));
     assert_eq!(back, body);
-    fs.create(root, b"after", NodeKind::RegularFile)
+    let after = fs
+        .create(root, b"after", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create after grow");
-    assert_eq!(fs.write_at(root, b"after", 0, &body), Ok(4000));
+    assert_eq!(fs.write_at(after, 0, &body), Ok(4000));
     let live = fs.used_blocks();
 
     FilesystemWrite::flush(&mut fs).expect("sync");
@@ -8744,7 +8922,7 @@ fn a_created_link_reports_its_kind_and_target_length() {
     let root = fs.root();
     let target = b"/System/Commands/ls.app";
     let node = fs
-        .create_link(root, b"alias", target)
+        .create_link(root, b"alias", target, &LINK_RECORD)
         .expect("create the link");
 
     let info = fs.node_info(node).expect("stat the link");
@@ -8764,7 +8942,7 @@ fn a_links_target_survives_a_remount() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let target = b"../relative/with/../dots";
-    fs.create_link(root, b"alias", target)
+    fs.create_link(root, b"alias", target, &LINK_RECORD)
         .expect("create the link");
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
@@ -8785,7 +8963,7 @@ fn a_maximum_length_target_round_trips_across_several_blocks() {
     let root = fs.root();
     let target = alloc::vec![b'x'; FS_SYMLINK_MAX];
     let node = fs
-        .create_link(root, b"long", &target)
+        .create_link(root, b"long", &target, &LINK_RECORD)
         .expect("create a maximum-length link");
     let mut out = alloc::vec![0u8; FS_SYMLINK_MAX];
     assert_eq!(fs.read_link(node, &mut out), Ok(FS_SYMLINK_MAX));
@@ -8794,12 +8972,12 @@ fn a_maximum_length_target_round_trips_across_several_blocks() {
     // One byte more is refused, and nothing is left behind.
     let over = alloc::vec![b'x'; FS_SYMLINK_MAX + 1];
     assert_eq!(
-        fs.create_link(root, b"over", &over),
+        fs.create_link(root, b"over", &over, &LINK_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
     assert_eq!(fs.lookup(root, b"over"), Err(DriverError::NotFound));
     assert_eq!(
-        fs.create_link(root, b"empty", b""),
+        fs.create_link(root, b"empty", b"", &LINK_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
 }
@@ -8811,19 +8989,16 @@ fn a_link_is_never_byte_readable_and_never_byte_writable() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create_link(root, b"alias", b"/target")
+        .create_link(root, b"alias", b"/target", &LINK_RECORD)
         .expect("create the link");
 
     let mut buf = [0u8; 8];
     assert_eq!(fs.read_at(node, 0, &mut buf), Err(DriverError::Unsupported));
     assert_eq!(
-        fs.write_at(root, b"alias", 0, b"clobber"),
+        fs.write_at(node, 0, b"clobber"),
         Err(DriverError::Unsupported)
     );
-    assert_eq!(
-        fs.truncate(root, b"alias", 0),
-        Err(DriverError::Unsupported)
-    );
+    assert_eq!(fs.truncate(node, 0), Err(DriverError::Unsupported));
     // A reflink clones data blocks into a fresh regular file, which would
     // silently turn the link into a file holding its target's text.
     assert_eq!(
@@ -8842,12 +9017,12 @@ fn create_refuses_a_link_kind_and_read_link_refuses_a_non_link() {
     let root = fs.root();
     // A link carries a target `create` has nowhere to put.
     assert_eq!(
-        fs.create(root, b"alias", NodeKind::Symlink),
+        fs.create(root, b"alias", NodeKind::Symlink, &LINK_RECORD),
         Err(DriverError::Unsupported)
     );
     assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
 
-    fs.create(root, b"file", NodeKind::RegularFile)
+    fs.create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a file");
     let file = fs.lookup(root, b"file").expect("lookup");
     let mut out = [0u8; 16];
@@ -8860,7 +9035,7 @@ fn read_link_refuses_an_undersized_buffer_rather_than_truncating() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create_link(root, b"alias", b"/a/long/enough/target")
+        .create_link(root, b"alias", b"/a/long/enough/target", &LINK_RECORD)
         .expect("create the link");
     let mut small = [0u8; 4];
     assert_eq!(
@@ -8874,7 +9049,7 @@ fn read_link_refuses_an_undersized_buffer_rather_than_truncating() {
 fn a_link_is_listed_as_a_link_and_its_blocks_are_accounted_as_data() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create_link(root, b"alias", &alloc::vec![b'y'; 1200])
+    fs.create_link(root, b"alias", &alloc::vec![b'y'; 1200], &LINK_RECORD)
         .expect("create a multi-block link");
 
     let (entry, _) = first_listed(&mut fs, root, 0, &[])
@@ -8909,7 +9084,7 @@ fn a_link_is_listed_as_a_link_and_its_blocks_are_accounted_as_data() {
 fn a_link_renames_and_replaces_like_any_other_name() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create_link(root, b"alias", b"/target")
+    fs.create_link(root, b"alias", b"/target", &LINK_RECORD)
         .expect("create the link");
     fs.rename(root, b"alias", root, b"moved")
         .expect("rename the link");
@@ -8919,7 +9094,7 @@ fn a_link_renames_and_replaces_like_any_other_name() {
 
     // A rename may replace a link with a file and a file with a link: both
     // are non-directories, so the kind-compatibility rule permits it.
-    fs.create(root, b"plain", NodeKind::RegularFile)
+    fs.create(root, b"plain", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a file");
     fs.rename(root, b"plain", root, b"moved")
         .expect("a file replaces a link");
@@ -8937,11 +9112,11 @@ fn a_volume_declares_the_symlink_feature_only_once_it_holds_a_link() {
     let mut fs = fmt(512, 256, 32);
     assert_eq!(fs.incompat, 0);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    fs.create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a file");
     assert_eq!(fs.incompat, 0, "an ordinary file declares nothing");
 
-    fs.create_link(root, b"alias", b"/target")
+    fs.create_link(root, b"alias", b"/target", &LINK_RECORD)
         .expect("create the link");
     assert_eq!(fs.incompat, superblock::INCOMPAT_SYMLINKS);
 
@@ -8957,10 +9132,10 @@ fn a_refused_link_creation_leaves_the_feature_undeclared() {
     // must take it back with the rest of the state.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    fs.create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a file");
     assert_eq!(
-        fs.create_link(root, b"file", b"/target"),
+        fs.create_link(root, b"file", b"/target", &LINK_RECORD),
         Err(DriverError::AlreadyExists)
     );
     assert_eq!(fs.incompat, 0);
@@ -9011,7 +9186,7 @@ fn check_widens_a_declared_feature_set_that_understates_the_volume() {
     // misread by a link-unaware reader, so the offline check declares it.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create_link(root, b"alias", b"/target")
+    fs.create_link(root, b"alias", b"/target", &LINK_RECORD)
         .expect("create the link");
     // Understate the volume, exactly as a driver defect would.
     fs.incompat = 0;
@@ -9032,7 +9207,7 @@ fn scrub_verifies_a_links_target_blocks_as_data() {
     // integrity pipeline rather than treating it as mirrored metadata.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create_link(root, b"alias", &alloc::vec![b'z'; 1200])
+    fs.create_link(root, b"alias", &alloc::vec![b'z'; 1200], &LINK_RECORD)
         .expect("create a multi-block link");
 
     let report = fs
@@ -9056,10 +9231,11 @@ fn rescue_counts_a_link_rather_than_extracting_its_target_as_file_bytes() {
     // would recreate the link as a regular file holding the target's text.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"file", NodeKind::RegularFile)
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a file");
-    assert_eq!(fs.write_at(root, b"file", 0, b"payload"), Ok(7));
-    fs.create_link(root, b"alias", b"/target")
+    assert_eq!(fs.write_at(file, 0, b"payload"), Ok(7));
+    fs.create_link(root, b"alias", b"/target", &LINK_RECORD)
         .expect("create the link");
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
@@ -9094,7 +9270,7 @@ fn rescue_counts_a_link_rather_than_extracting_its_target_as_file_bytes() {
 fn an_unreadable_primary_superblock_slot_mounts_from_its_companion() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"witness", NodeKind::RegularFile)
+    fs.create(root, b"witness", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let bytes = fs.into_block().expect("the volume closes").bytes();
     // The committed slot's primary block cannot be read at all.
@@ -9109,7 +9285,7 @@ fn an_unreadable_primary_superblock_slot_mounts_from_its_companion() {
 fn an_unreadable_primary_transaction_root_mounts_from_its_companion() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"witness", NodeKind::RegularFile)
+    fs.create(root, b"witness", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let root_phys = fs.root_phys;
     let bytes = fs.into_block().expect("the volume closes").bytes();
@@ -9127,7 +9303,7 @@ fn an_unreadable_primary_transaction_root_mounts_from_its_companion() {
 fn an_unrepairable_primary_transaction_root_still_mounts_from_its_companion() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"witness", NodeKind::RegularFile)
+    fs.create(root, b"witness", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let root_phys = fs.root_phys;
     let bytes = fs.into_block().expect("the volume closes").bytes();
@@ -9153,11 +9329,11 @@ fn an_unrepairable_primary_transaction_root_still_mounts_from_its_companion() {
 fn a_mount_never_rewrites_a_superseded_root_from_its_companion() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"first", NodeKind::RegularFile)
+    fs.create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let superseded = fs.root_phys;
     let superseded_generation = fs.generation;
-    fs.create(root, b"second", NodeKind::RegularFile)
+    fs.create(root, b"second", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_ne!(fs.root_phys, superseded);
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
@@ -9189,7 +9365,7 @@ fn a_mount_never_rewrites_a_superseded_root_from_its_companion() {
 fn a_mount_repairs_the_root_it_chose_and_records_the_repair() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"witness", NodeKind::RegularFile)
+    fs.create(root, b"witness", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let root_phys = as_usize(fs.root_phys) * 512;
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
@@ -9215,10 +9391,10 @@ fn a_mount_repairs_the_root_it_chose_and_records_the_repair() {
 fn a_mount_repairs_the_slot_it_chose_and_no_other() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"first", NodeKind::RegularFile)
+    fs.create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let older = as_usize(slot_block((fs.ring_pos - 1) % RING_SLOTS)) * 512;
-    fs.create(root, b"second", NodeKind::RegularFile)
+    fs.create(root, b"second", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let chosen = as_usize(slot_block((fs.ring_pos - 1) % RING_SLOTS)) * 512;
     assert_ne!(older, chosen);
@@ -9246,7 +9422,7 @@ fn a_mount_repairs_the_slot_it_chose_and_no_other() {
 fn a_read_only_mount_records_a_bad_root_copy_and_writes_nothing() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"witness", NodeKind::RegularFile)
+    fs.create(root, b"witness", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let root_phys = as_usize(fs.root_phys) * 512;
     let mut bytes = fs.into_block().expect("the volume closes").bytes();
@@ -9268,7 +9444,7 @@ fn a_read_only_mount_records_a_bad_root_copy_and_writes_nothing() {
 fn an_unreadable_primary_metadata_block_reads_from_its_companion() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"witness", NodeKind::RegularFile)
+    fs.create(root, b"witness", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let inode_tree_root = fs.inode_tree_root;
     let bytes = fs.into_block().expect("the volume closes").bytes();
@@ -9288,9 +9464,9 @@ fn a_hard_link_is_a_second_name_for_one_inode() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
-    fs.write_at(root, b"first", 0, b"shared bytes")
+    fs.write_at(node, 0, b"shared bytes")
         .expect("write through the first name");
 
     fs.link(root, b"second", node).expect("add a second name");
@@ -9304,8 +9480,9 @@ fn a_hard_link_is_a_second_name_for_one_inode() {
         .expect("read through the node");
     assert_eq!(&out[..read], b"shared bytes");
 
+    let second = fs.lookup(root, b"second").expect("lookup");
     // A write through the *second* name reaches the same bytes.
-    fs.write_at(root, b"second", 0, b"rewritten   ")
+    fs.write_at(second, 0, b"rewritten   ")
         .expect("write through the second name");
     let read = fs.read_at(node, 0, &mut out[..12]).expect("read back");
     assert_eq!(&out[..read], b"rewritten   ");
@@ -9318,9 +9495,9 @@ fn unlinking_one_name_keeps_the_other_readable_and_its_blocks_allocated() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
-    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    fs.write_at(node, 0, b"payload").expect("write");
     fs.link(root, b"second", node).expect("add a second name");
     let with_both = fs.stats().expect("stats").free_blocks;
 
@@ -9354,9 +9531,9 @@ fn the_link_count_survives_a_remount_and_the_rebuilt_free_map_agrees() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
-    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    fs.write_at(node, 0, b"payload").expect("write");
     fs.link(root, b"second", node).expect("add a second name");
 
     let live = fs.stats().expect("stats").free_blocks;
@@ -9379,7 +9556,7 @@ fn a_hard_link_to_a_directory_is_refused_and_creates_nothing() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let dir = fs
-        .create(root, b"dir", NodeKind::Directory)
+        .create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
         .expect("create a directory");
     assert_eq!(fs.link(root, b"alias", dir), Err(DriverError::Unsupported));
     assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
@@ -9391,9 +9568,9 @@ fn a_hard_link_over_a_taken_name_is_refused_and_changes_nothing() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
-    fs.create(root, b"taken", NodeKind::RegularFile)
+    fs.create(root, b"taken", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the occupant");
     assert_eq!(
         fs.link(root, b"taken", node),
@@ -9410,7 +9587,7 @@ fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let link = fs
-        .create_link(root, b"alias", b"/target")
+        .create_link(root, b"alias", b"/target", &LINK_RECORD)
         .expect("create the symbolic link");
     fs.link(root, b"alias2", link).expect("a second name");
     let second = fs.lookup(root, b"alias2").expect("the second name");
@@ -9429,7 +9606,7 @@ fn a_volume_declares_the_hardlink_feature_only_once_it_holds_one() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
     assert_eq!(fs.incompat, 0, "an ordinary file declares nothing");
 
@@ -9446,9 +9623,9 @@ fn a_volume_holding_both_link_kinds_declares_both() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
-    fs.create_link(root, b"sym", b"/target")
+    fs.create_link(root, b"sym", b"/target", &LINK_RECORD)
         .expect("create the symbolic link");
     fs.link(root, b"second", node).expect("add a second name");
     assert_eq!(
@@ -9464,7 +9641,7 @@ fn a_refused_hard_link_leaves_the_feature_undeclared() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
     assert_eq!(
         fs.link(root, b"first", node),
@@ -9483,7 +9660,7 @@ fn check_corrects_a_link_count_that_disagrees_with_the_names_on_disk() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
     fs.link(root, b"second", node).expect("add a second name");
 
@@ -9511,16 +9688,16 @@ fn check_leaves_correct_link_counts_alone_for_every_kind() {
     // entries — so a sound volume must need no correction at all.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"dir", NodeKind::Directory)
+    fs.create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
         .expect("create a directory");
     let nested = fs.lookup(root, b"dir").expect("the directory");
-    fs.create(nested, b"inner", NodeKind::Directory)
+    fs.create(nested, b"inner", NodeKind::Directory, &DIR_RECORD)
         .expect("create a nested directory");
     let file = fs
-        .create(root, b"file", NodeKind::RegularFile)
+        .create(root, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create a file");
     fs.link(root, b"file2", file).expect("a second name");
-    fs.create_link(root, b"sym", b"/target")
+    fs.create_link(root, b"sym", b"/target", &LINK_RECORD)
         .expect("create a symbolic link");
 
     let report = fs.check(&GrantAll, &NullSink).expect("check");
@@ -9535,9 +9712,9 @@ fn scrub_verifies_a_twice_named_inode_once() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
-    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    fs.write_at(node, 0, b"payload").expect("write");
     let before = fs
         .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
         .expect("scrub");
@@ -9559,9 +9736,9 @@ fn rescue_extracts_a_twice_named_inode_once() {
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     let node = fs
-        .create(root, b"first", NodeKind::RegularFile)
+        .create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the file");
-    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    fs.write_at(node, 0, b"payload").expect("write");
     fs.link(root, b"second", node).expect("add a second name");
     let ino = u32::try_from(node.raw()).expect("inode number");
 
@@ -9598,7 +9775,7 @@ fn deep_inode_tree(count: u32) -> (ARXFS<MemBlock>, Vec<u64>) {
     let mut keys = Vec::new();
     for i in 0..count {
         let name = alloc::format!("f{i}");
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         keys.push(fs.lookup(root, name.as_bytes()).expect("lookup").raw());
     }
@@ -9720,8 +9897,9 @@ fn a_walk_seeks_to_a_key_a_gap_and_past_the_end() {
     // the cut. A seek into a gap resumes at the next run that exists.
     let root = fs.root();
     let cap = fs.data_capacity();
+    let f0 = fs.lookup(root, b"f0").expect("lookup");
     for run in 0..60u64 {
-        assert_eq!(fs.write_at(root, b"f0", run * 4 * cap, &[0x11]), Ok(1));
+        assert_eq!(fs.write_at(f0, run * 4 * cap, &[0x11]), Ok(1));
     }
     let ino = file_ino(&mut fs, b"f0");
     let inode = fs.read_inode(ino).expect("inode");
@@ -9842,7 +10020,7 @@ fn a_tree_whose_shape_is_impossible_is_refused_rather_than_walked_forever() {
     let root = fs.root();
     for i in 0..4u32 {
         let name = alloc::format!("g{i}");
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+        fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
     let mut leaf = [0u8; MAX_BLOCK_LEN];
@@ -9996,10 +10174,11 @@ fn a_mutation_costs_the_same_stack_whatever_the_tree_depth() {
     let mut shallow = fmt(512, 1 << 16, 64);
     let mut deep = fmt(512, 1 << 16, 64);
     let root = shallow.root();
-    shallow
-        .create(root, b"f", NodeKind::RegularFile)
+    let shallow_file = shallow
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    deep.create(root, b"f", NodeKind::RegularFile)
+    let deep_file = deep
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = shallow.data_capacity();
     let shallow_level = fragment(&mut shallow, b"f", 4);
@@ -10014,16 +10193,15 @@ fn a_mutation_costs_the_same_stack_whatever_the_tree_depth() {
     // whole tree and, in the deep case, may split on the way back up.
     let at = |runs: u64| runs * 2 * cap;
     let (wrote, shallow_insert) =
-        stack_cost(&mut shallow, |fs| fs.write_at(root, b"f", at(4), &[0x5A]));
+        stack_cost(&mut shallow, |fs| fs.write_at(shallow_file, at(4), &[0x5A]));
     assert_eq!(wrote, Ok(1));
-    let (wrote, deep_insert) =
-        stack_cost(&mut deep, |fs| fs.write_at(root, b"f", at(900), &[0x5A]));
+    let (wrote, deep_insert) = stack_cost(&mut deep, |fs| fs.write_at(deep_file, at(900), &[0x5A]));
     assert_eq!(wrote, Ok(1));
 
     // Then a remove of the whole map, which is where the rebalance lives.
-    let (out, shallow_remove) = stack_cost(&mut shallow, |fs| fs.truncate(root, b"f", 0));
+    let (out, shallow_remove) = stack_cost(&mut shallow, |fs| fs.truncate(shallow_file, 0));
     assert_eq!(out, Ok(()));
-    let (out, deep_remove) = stack_cost(&mut deep, |fs| fs.truncate(root, b"f", 0));
+    let (out, deep_remove) = stack_cost(&mut deep, |fs| fs.truncate(deep_file, 0));
     assert_eq!(out, Ok(()));
 
     // A step that recursed would carry at least the node it is editing into
@@ -10052,8 +10230,9 @@ fn a_mutation_costs_the_same_stack_whatever_the_tree_depth() {
 fn fragment(fs: &mut ARXFS<MemBlock>, name: &[u8], runs: u64) -> u32 {
     let root = fs.root();
     let cap = fs.data_capacity();
+    let file = fs.lookup(root, name).expect("lookup");
     for run in 0..runs {
-        assert_eq!(fs.write_at(root, name, run * 2 * cap, &[0x5A]), Ok(1));
+        assert_eq!(fs.write_at(file, run * 2 * cap, &[0x5A]), Ok(1));
     }
     let ino = file_ino(fs, name);
     let inode = fs.read_inode(ino).expect("inode");
@@ -10067,13 +10246,14 @@ fn fragment(fs: &mut ARXFS<MemBlock>, name: &[u8], runs: u64) -> u32 {
 fn free_after_discard(runs: u64, discard: Discard) -> (u64, u64, u32) {
     let mut fs = fmt(512, 8192, 64);
     let root = fs.root();
-    fs.create(root, b"frag", NodeKind::RegularFile)
+    let frag = fs
+        .create(root, b"frag", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fs.commit().expect("commit");
     let after_create = fs.committed_free_count();
     let level = fragment(&mut fs, b"frag", runs);
     match discard {
-        Discard::Truncate => fs.truncate(root, b"frag", 0).expect("truncate"),
+        Discard::Truncate => fs.truncate(frag, 0).expect("truncate"),
         Discard::Remove => fs.remove(root, b"frag").expect("remove"),
     }
     (fs.committed_free_count(), after_create, level)
@@ -10121,8 +10301,9 @@ fn rebuilding_free_space_over_a_deep_tree_reproduces_the_live_map() {
     let (mut fs, _) = deep_inode_tree(200);
     let root = fs.root();
     let cap = fs.data_capacity();
+    let f0 = fs.lookup(root, b"f0").expect("lookup");
     for run in 0..200u64 {
-        assert_eq!(fs.write_at(root, b"f0", run * 2 * cap, &[0xA5]), Ok(1));
+        assert_eq!(fs.write_at(f0, run * 2 * cap, &[0xA5]), Ok(1));
     }
     fs.commit().expect("commit");
     let live = fs.used_blocks();
@@ -10189,7 +10370,7 @@ fn operations_join_one_transaction_until_something_closes_it() {
     let mut fs = fmt_batched(512, 512, 32);
     let root = fs.root();
     for name in [b"one".as_slice(), b"two", b"three"] {
-        fs.create(root, name, NodeKind::RegularFile)
+        fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
     // Nothing has published: a remount of the device as it stands finds the
@@ -10219,7 +10400,7 @@ fn one_batch_costs_one_commit_where_three_operations_cost_three() {
     let start = batched.generation;
     for name in [b"one".as_slice(), b"two", b"three"] {
         batched
-            .create(root, name, NodeKind::RegularFile)
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
     batched.flush().expect("sync");
@@ -10234,7 +10415,7 @@ fn one_batch_costs_one_commit_where_three_operations_cost_three() {
     let start = per_op.generation;
     for name in [b"one".as_slice(), b"two", b"three"] {
         per_op
-            .create(root, name, NodeKind::RegularFile)
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
     assert_eq!(
@@ -10248,13 +10429,13 @@ fn one_batch_costs_one_commit_where_three_operations_cost_three() {
 fn an_operation_after_the_window_publishes_the_transaction_it_would_have_joined() {
     let (mut fs, host) = fmt_batched_with_host(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"early", NodeKind::RegularFile)
+    fs.create(root, b"early", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let published = fs.generation;
     // Time passes past the window; the next operation must not extend the
     // transaction it joins.
     host.set_now(PAST_EVERY_WINDOW);
-    fs.create(root, b"late", NodeKind::RegularFile)
+    fs.create(root, b"late", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(
         fs.generation,
@@ -10271,16 +10452,17 @@ fn an_operation_after_the_window_publishes_the_transaction_it_would_have_joined(
 fn a_refused_operation_leaves_the_batch_it_joined_intact() {
     let mut fs = fmt_batched(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"kept", NodeKind::RegularFile)
+    let kept = fs
+        .create(root, b"kept", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"kept", 0, b"payload"), Ok(7));
+    assert_eq!(fs.write_at(kept, 0, b"payload"), Ok(7));
     // An ordinary refusal part-way through a joined operation.
     assert_eq!(
-        fs.create(root, b"kept", NodeKind::RegularFile),
+        fs.create(root, b"kept", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::AlreadyExists)
     );
     assert_eq!(
-        fs.write_at(root, b"absent", 0, b"nothing"),
+        fs.write_at(NodeId::NONE, 0, b"nothing"),
         Err(DriverError::NotFound)
     );
     fs.flush().expect("sync");
@@ -10291,10 +10473,6 @@ fn a_refused_operation_leaves_the_batch_it_joined_intact() {
     let mut back = [0u8; 7];
     assert_eq!(disk.read_at(node, 0, &mut back), Ok(7));
     assert_eq!(&back, b"payload");
-    assert_eq!(
-        disk.lookup(disk_root, b"absent"),
-        Err(DriverError::NotFound)
-    );
     assert_eq!(
         disk.check(&GrantAll, &NullSink).expect("check").structure,
         StructureVerdict::Sound,
@@ -10309,11 +10487,13 @@ fn an_operation_that_runs_out_of_space_leaves_the_batch_it_joined_readable() {
     // successful must survive it, byte for byte.
     let mut fs = fmt_batched(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"kept", NodeKind::RegularFile)
+    let kept = fs
+        .create(root, b"kept", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = incompressible(4096);
-    assert_eq!(fs.write_at(root, b"kept", 0, &body), Ok(4096));
-    fs.create(root, b"greedy", NodeKind::RegularFile)
+    assert_eq!(fs.write_at(kept, 0, &body), Ok(4096));
+    let greedy = fs
+        .create(root, b"greedy", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     // Fill the volume until one write runs out of space part-way through,
     // after it has already allocated and rewritten tree blocks the batch's
@@ -10322,7 +10502,7 @@ fn an_operation_that_runs_out_of_space_leaves_the_batch_it_joined_readable() {
     let mut at = 0u64;
     let mut refused = false;
     for _ in 0..64 {
-        match fs.write_at(root, b"greedy", at, &chunk) {
+        match fs.write_at(greedy, at, &chunk) {
             Ok(written) => at += written as u64,
             Err(DriverError::NoSpace) => {
                 refused = true;
@@ -10351,14 +10531,15 @@ fn an_operation_that_runs_out_of_space_leaves_the_batch_it_joined_readable() {
 fn an_unsynced_batch_is_lost_whole_and_leaves_the_prior_state_sound() {
     let mut fs = fmt_batched(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"durable", NodeKind::RegularFile)
+    let durable = fs
+        .create(root, b"durable", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"durable", 0, b"safe"), Ok(4));
+    assert_eq!(fs.write_at(durable, 0, b"safe"), Ok(4));
     fs.flush().expect("sync");
     // A second batch that never closes.
-    fs.create(root, b"volatile", NodeKind::RegularFile)
+    fs.create(root, b"volatile", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"durable", 0, b"lost"), Ok(4));
+    assert_eq!(fs.write_at(durable, 0, b"lost"), Ok(4));
 
     let mut disk = reopen_device(&mut fs, 512, 512);
     let disk_root = disk.root();
@@ -10407,7 +10588,7 @@ fn every_barrier_requiring_operation_publishes_the_open_transaction_first() {
         (b"c", &|fs| fs.check(&GrantAll, &NullSink).map(|_| ())),
         (b"d", &|fs| fs.health(&GrantAll, &NullSink).map(|_| ())),
     ] {
-        fs.create(root, name, NodeKind::RegularFile)
+        fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create joins the open transaction");
         assert!(fs.schedule.is_open(), "the transaction stayed open");
         run(&mut fs).expect("the maintenance pass runs");
@@ -10428,7 +10609,7 @@ fn every_barrier_requiring_operation_publishes_the_open_transaction_first() {
 fn growing_a_volume_publishes_the_open_transaction_first() {
     let mut fs = fmt_batched(512, 256, 32);
     let root = fs.root();
-    fs.create(root, b"before", NodeKind::RegularFile)
+    fs.create(root, b"before", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert!(fs.schedule.is_open());
     fs.block_mut().enlarge_to(512);
@@ -10444,7 +10625,7 @@ fn growing_a_volume_publishes_the_open_transaction_first() {
 fn handing_the_volume_on_publishes_the_open_transaction() {
     let mut fs = fmt_batched(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"handed", NodeKind::RegularFile)
+    fs.create(root, b"handed", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut disk =
@@ -10458,7 +10639,7 @@ fn handing_the_volume_on_publishes_the_open_transaction() {
 fn a_commit_that_loses_reported_operations_freezes_the_handle() {
     let mut fs = fmt_batched(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"reported", NodeKind::RegularFile)
+    fs.create(root, b"reported", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(fs.schedule.acknowledged(), 1);
     // The device stops taking writes before the batch can be published.
@@ -10470,7 +10651,7 @@ fn a_commit_that_loses_reported_operations_freezes_the_handle() {
          accepting writes"
     );
     assert_eq!(
-        fs.create(root, b"more", NodeKind::RegularFile),
+        fs.create(root, b"more", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::ReadOnly)
     );
     // The volume itself is untouched: the abandoned batch published nothing.
@@ -10493,11 +10674,11 @@ fn no_operation_leaves_its_savepoint_installed_behind_it() {
     // caller's changes against a snapshot nothing will unwind to.
     let mut fs = fmt_batched(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"one", NodeKind::RegularFile)
+    fs.create(root, b"one", NodeKind::RegularFile, &FILE_RECORD)
         .expect("a successful operation");
     assert!(!fs.dirty.operation_running());
     assert_eq!(
-        fs.create(root, b"one", NodeKind::RegularFile),
+        fs.create(root, b"one", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::AlreadyExists),
         "a refused operation"
     );
@@ -10520,15 +10701,16 @@ fn a_long_batch_of_mixed_operations_and_refusals_publishes_a_sound_volume() {
     let body = incompressible(3000);
     for round in 0..8u8 {
         let name = [b'f', b'0' + round];
-        fs.create(root, &name, NodeKind::RegularFile)
+        let file = fs
+            .create(root, &name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        assert_eq!(fs.write_at(root, &name, 0, &body), Ok(body.len()));
+        assert_eq!(fs.write_at(file, 0, &body), Ok(body.len()));
         assert_eq!(
-            fs.create(root, &name, NodeKind::RegularFile),
+            fs.create(root, &name, NodeKind::RegularFile, &FILE_RECORD),
             Err(DriverError::AlreadyExists),
             "a refusal part-way through the batch"
         );
-        fs.truncate(root, &name, 512).expect("truncate");
+        fs.truncate(file, 512).expect("truncate");
         assert_eq!(
             fs.remove(root, b"absent"),
             Err(DriverError::NotFound),
@@ -10566,13 +10748,15 @@ fn a_commit_that_loses_nothing_reported_leaves_the_handle_writable() {
     // caller is told its operation failed, and the volume carries on.
     let mut fs = fmt(512, 512, 32);
     let root = fs.root();
-    fs.create(root, b"first", NodeKind::RegularFile)
+    fs.create(root, b"first", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fs.block_mut().write_fault_after = Some(0);
-    assert!(fs.create(root, b"second", NodeKind::RegularFile).is_err());
+    assert!(fs
+        .create(root, b"second", NodeKind::RegularFile, &FILE_RECORD)
+        .is_err());
     fs.block_mut().write_fault_after = None;
     assert!(!fs.read_only, "no reported operation was lost");
-    fs.create(root, b"third", NodeKind::RegularFile)
+    fs.create(root, b"third", NodeKind::RegularFile, &FILE_RECORD)
         .expect("the handle still serves writes");
 }
 
@@ -10598,9 +10782,10 @@ fn deleting_a_contiguous_file_defers_one_run_not_one_entry_per_block() {
     let cap = as_usize(fs.data_capacity());
     let blocks = 600usize;
     let body = incompressible(cap * blocks);
-    fs.create(root, b"big", NodeKind::RegularFile)
+    let big = fs
+        .create(root, b"big", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"big", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(big, 0, &body), Ok(body.len()));
     fs.flush()
         .expect("publish the file so its blocks are committed");
 
@@ -10670,9 +10855,10 @@ fn releasing_a_run_frees_the_unshared_blocks_and_keeps_the_shared_one() {
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
     let body = incompressible(cap * 4);
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"a", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(a, 0, &body), Ok(body.len()));
 
     let ino = file_ino(&mut fs, b"a");
     let inode = fs.read_inode(ino).expect("inode");
@@ -10684,9 +10870,10 @@ fn releasing_a_run_frees_the_unshared_blocks_and_keeps_the_shared_one() {
 
     // A second file holding a byte-identical copy of block 1 dedupes onto
     // `a`'s physical block, so exactly one block of the run is shared.
-    fs.create(root, b"share", NodeKind::RegularFile)
+    let share = fs
+        .create(root, b"share", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"share", 0, &body[cap..cap * 2]), Ok(cap));
+    assert_eq!(fs.write_at(share, 0, &body[cap..cap * 2]), Ok(cap));
     let shared = ext.phys + 1;
     assert_eq!(
         fs.data_refcount(shared).expect("refcount"),
@@ -10866,16 +11053,23 @@ fn pending_deletes(fs: &mut ARXFS<MemBlock>) -> Vec<u64> {
         .collect()
 }
 
+/// The lowest inode the pending-delete set names, if any.
+fn first_pending(fs: &mut ARXFS<MemBlock>) -> Option<u32> {
+    pending_deletes(fs)
+        .first()
+        .map(|&ino| u32::try_from(ino).expect("an inode number"))
+}
+
 /// A bounded volume holding a witness file and a fragmented file of
 /// [`SPANNING_EXTENTS`] single-block extents, committed.
 fn spanning_delete_volume() -> ARXFS<MemBlock> {
     let mut fs = floor_bounded(fmt(512, 1 << 14, 64));
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    let keep = fs
+        .create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the witness");
-    fs.write_at(root, b"keep", 0, b"witness")
-        .expect("write the witness");
-    fs.create(root, b"frag", NodeKind::RegularFile)
+    fs.write_at(keep, 0, b"witness").expect("write the witness");
+    fs.create(root, b"frag", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fragment(&mut fs, b"frag", SPANNING_EXTENTS);
     fs.flush().expect("publish the fixture");
@@ -11016,6 +11210,25 @@ fn a_stale_handle_cannot_give_a_pending_node_a_new_name() {
 }
 
 #[test]
+fn a_stale_handle_cannot_write_a_pending_node() {
+    // No name reaches a node the set names, so bytes stored through a stale id
+    // could never be read back: the node is refused as a freed one is.
+    let mut fs = spanning_delete_volume();
+    let root = fs.root();
+    let stale = fs.lookup(root, b"frag").expect("lookup");
+
+    fs.begin().expect("begin");
+    fs.remove_inner(root, b"frag").expect("detach the name");
+    assert_eq!(pending_deletes(&mut fs), alloc::vec![stale.raw()]);
+    assert_eq!(fs.write_at(stale, 0, b"x"), Err(DriverError::NotFound));
+    assert_eq!(fs.truncate(stale, 0), Err(DriverError::NotFound));
+    assert_eq!(fs.punch(stale, 0, 1), Err(DriverError::NotFound));
+    assert_eq!(fs.parent(stale), Err(DriverError::NotFound));
+    fs.drain_pending_deletes().expect("drain");
+    assert_eq!(fs.write_at(stale, 0, b"x"), Err(DriverError::NotFound));
+}
+
+#[test]
 fn a_truncate_that_outruns_its_transaction_is_only_ever_a_shorter_file() {
     // Freeing a tail upward from the cut would leave, after a crash, a file of
     // its original length with holes where its data had been. Freeing downward
@@ -11026,20 +11239,21 @@ fn a_truncate_that_outruns_its_transaction_is_only_ever_a_shorter_file() {
     let cap = as_usize(fs.data_capacity());
     // Two files written a block at a time in turn, so each block of "a" has a
     // physical neighbour belonging to "b" and no two extents of "a" merge.
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.create(root, b"b", NodeKind::RegularFile)
+    let b = fs
+        .create(root, b"b", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = incompressible(cap * as_usize(SPANNING_EXTENTS));
     for blk in 0..as_usize(SPANNING_EXTENTS) {
         let at = (blk * cap) as u64;
-        for name in [b"a".as_slice(), b"b".as_slice()] {
+        for file in [a, b] {
             let mut done = 0usize;
             while done < cap {
                 let n = fs
                     .write_at(
-                        root,
-                        name,
+                        file,
                         at + done as u64,
                         &body[blk * cap + done..(blk + 1) * cap],
                     )
@@ -11097,9 +11311,9 @@ fn a_check_reclaims_an_orphan_through_the_pending_set() {
     // freed inside the check's own transaction.
     let mut fs = floor_bounded(fmt(512, 1 << 14, 64));
     let root = fs.root();
-    fs.create(root, b"keep", NodeKind::RegularFile)
+    fs.create(root, b"keep", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create the witness");
-    fs.create(root, b"orphan", NodeKind::RegularFile)
+    fs.create(root, b"orphan", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fragment(&mut fs, b"orphan", SPANNING_EXTENTS);
     fs.flush().expect("publish");
@@ -11127,16 +11341,63 @@ fn a_check_reclaims_an_orphan_through_the_pending_set() {
 }
 
 #[test]
+fn a_check_reclaims_an_orphaned_directory_its_own_entries_cannot_name_again() {
+    // An orphaned directory still holds its `.`, its `..` and its entries. Read
+    // as names, they gave the orphans back the counts the pass had just cleared,
+    // and the drain then kept every one of them for good.
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    let lost = fs
+        .create(root, b"lost", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let inside = fs
+        .create(lost, b"inside", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let deeper = fs
+        .create(lost, b"deeper", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let orphans = [lost, inside, deeper].map(|node| u32::try_from(node.raw()).expect("an inode"));
+
+    // Detach the directory without touching anything else, as damage would.
+    let mut dir = fs.read_inode(ROOT_INO).expect("root inode");
+    fs.begin().expect("begin");
+    fs.remove_entry(&mut dir, ROOT_INO, b"lost")
+        .expect("drop the entry");
+    fs.write_inode(ROOT_INO, &dir).expect("write the root");
+    fs.end_operation().expect("publish");
+
+    let report = check_full(&mut fs);
+    assert_eq!(
+        (report.orphaned_inodes, report.orphans_reclaimed),
+        (3, 3),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.link_counts_corrected, 1,
+        "only the root's count, which still held the lost `..`"
+    );
+    assert!(pending_deletes(&mut fs).is_empty());
+    for ino in orphans {
+        assert_eq!(fs.read_inode(ino), Err(DriverError::NotFound), "{ino}");
+    }
+    assert_eq!(fs.node_info(root).expect("stat").nlink, 2);
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(fs.used_blocks(), live);
+}
+
+#[test]
 fn the_reclaim_never_frees_a_node_a_name_still_reaches() {
     // Only a damaged volume can name a live node in the set — the name's
     // removal and the entry are one transaction — but if one does, the reclaim
     // must lose the space rather than the data.
     let mut fs = fmt(512, 8192, 64);
     let root = fs.root();
-    fs.create(root, b"live", NodeKind::RegularFile)
+    let live_file = fs
+        .create(root, b"live", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = incompressible(2000);
-    fs.write_at(root, b"live", 0, &body).expect("write");
+    fs.write_at(live_file, 0, &body).expect("write");
     fs.commit().expect("commit");
     let ino = file_ino(&mut fs, b"live");
 
@@ -11154,6 +11415,426 @@ fn the_reclaim_never_frees_a_node_a_name_still_reaches() {
     assert_eq!(fs.used_blocks(), live);
 }
 
+/// A published volume holding `name`, a regular file of `records` whole data
+/// records of incompressible bytes, and the file and its bytes.
+fn written_file_volume(name: &[u8], records: usize) -> (ARXFS<MemBlock>, NodeId, Vec<u8>) {
+    let mut fs = fmt(512, 8192, 64);
+    let root = fs.root();
+    let file = fs
+        .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let body = incompressible(records * as_usize(fs.data_capacity()));
+    fs.write_all(file, 0, &body).expect("write");
+    fs.flush().expect("publish the fixture");
+    (fs, file, body)
+}
+
+/// Blocks the data of `node` occupies.
+fn data_blocks(fs: &mut ARXFS<MemBlock>, node: NodeId) -> u64 {
+    fs.node_info(node).expect("stat").allocated / 512
+}
+
+#[test]
+fn a_held_file_keeps_its_space_past_its_last_name_until_its_last_unpin() {
+    let (mut fs, file, body) = written_file_volume(b"open", 16);
+    let root = fs.root();
+    let ino = file_ino(&mut fs, b"open");
+    let blocks = data_blocks(&mut fs, file);
+    let free_named = fs.committed_free_count();
+    let pinned = fs.pin(file).expect("pin");
+    assert_eq!(pinned, file, "the pinned id is the inode number");
+
+    fs.remove(root, b"open").expect("unlink");
+    fs.flush().expect("publish");
+    let free_held = fs.committed_free_count();
+    assert!(
+        free_held < free_named + blocks,
+        "nothing came back with the name: {free_held} free against {free_named}"
+    );
+    assert_eq!(fs.lookup(root, b"open"), Err(DriverError::NotFound));
+    assert_eq!(
+        pending_deletes(&mut fs),
+        alloc::vec![u64::from(ino)],
+        "the set is the record a crash leaves"
+    );
+    assert_eq!(fs.node_info(pinned).expect("stat").nlink, 0);
+    assert_eq!(read_all(&mut fs, pinned, body.len()), body);
+
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    fs.flush().expect("publish");
+    assert!(pending_deletes(&mut fs).is_empty());
+    assert_eq!(fs.read_inode(ino), Err(DriverError::NotFound));
+    assert!(
+        fs.committed_free_count() >= free_held + blocks,
+        "the last unpin gave the {blocks} data blocks back"
+    );
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(
+        fs.used_blocks(),
+        live,
+        "no block was leaked or double-freed"
+    );
+}
+
+#[test]
+fn a_nameless_held_file_takes_writes_truncates_and_record_changes() {
+    let (mut fs, file, _) = written_file_volume(b"open", 2);
+    let root = fs.root();
+    let pinned = fs.pin(file).expect("pin");
+    fs.remove(root, b"open").expect("unlink");
+
+    fs.write_all(pinned, 0, b"still writable")
+        .expect("write a nameless held file");
+    assert_eq!(read_all(&mut fs, pinned, 14), b"still writable");
+    fs.truncate(pinned, 5).expect("truncate");
+    assert_eq!(fs.node_info(pinned).expect("stat").size, 5);
+    fs.punch(pinned, 0, 1).expect("punch");
+    assert_eq!(read_all(&mut fs, pinned, 5), b"\0till");
+    fs.set_security(pinned, Security::new(0o600, 9, 9))
+        .expect("change its record");
+    assert_eq!(fs.security(pinned), Ok(Security::new(0o600, 9, 9)));
+    fs.set_attr(pinned, b"user.comment", b"kept")
+        .expect("set an attribute");
+    let mut value = [0u8; 8];
+    assert_eq!(
+        fs.get_attr(pinned, b"user.comment", &mut value),
+        Ok(Some(4))
+    );
+    assert_eq!(fs.node_info(pinned).expect("stat").nlink, 0);
+    assert_eq!(
+        fs.link(root, b"back", pinned),
+        Err(DriverError::NotFound),
+        "a nameless node takes no new name"
+    );
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    assert_eq!(fs.node_info(pinned), Err(DriverError::NotFound));
+}
+
+#[test]
+fn holds_count_and_only_the_last_unpin_lets_a_node_go() {
+    let (mut fs, file, body) = written_file_volume(b"twice", 4);
+    let root = fs.root();
+    let first = fs.pin(file).expect("pin");
+    let second = fs.pin(file).expect("pin again");
+    assert_eq!(first, second, "every hold of one node answers one id");
+    fs.remove(root, b"twice").expect("unlink");
+    assert_eq!(fs.unpin(first), Ok(Unpinned::Held));
+    assert_eq!(
+        read_all(&mut fs, second, body.len()),
+        body,
+        "the other hold keeps it"
+    );
+    assert_eq!(fs.unpin(second), Ok(Unpinned::Freed));
+    assert_eq!(
+        fs.unpin(second),
+        Err(DriverError::NotFound),
+        "no hold is left"
+    );
+    assert_eq!(fs.unpin(root), Err(DriverError::NotFound), "never held");
+    assert_eq!(
+        fs.pin(NodeId::from_raw(u64::MAX)),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn a_held_node_keeps_its_id_and_its_data_through_renames() {
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    let outer = fs
+        .create(root, b"outer", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let file = fs
+        .create(outer, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, b"follows its node").expect("write");
+    let pinned = fs.pin(file).expect("pin");
+    fs.rename(outer, b"f", outer, b"g")
+        .expect("rename the node");
+    fs.rename(root, b"outer", root, b"moved")
+        .expect("rename its parent");
+    let moved = fs.lookup(root, b"moved").expect("lookup");
+    assert_eq!(moved, outer);
+    assert_eq!(
+        fs.lookup(moved, b"g"),
+        Ok(pinned),
+        "a lookup answers the pinned id"
+    );
+    let listing = listed(&mut fs, moved, 0, &[]).expect("list");
+    assert_eq!(listing.len(), 1);
+    assert_eq!(listing[0].0.node, pinned, "and so does a listing");
+    assert_eq!(read_all(&mut fs, pinned, 16), b"follows its node");
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Released), "it keeps a name");
+    assert!(pending_deletes(&mut fs).is_empty());
+}
+
+#[test]
+fn a_rename_over_a_held_file_keeps_it_until_its_last_unpin() {
+    let (mut fs, file, body) = written_file_volume(b"old", 4);
+    let root = fs.root();
+    let replacement = fs
+        .create(root, b"new", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(replacement, 0, b"replacement").expect("write");
+    let pinned = fs.pin(file).expect("pin");
+    fs.rename(root, b"new", root, b"old")
+        .expect("rename over the held file");
+    assert_eq!(fs.lookup(root, b"old"), Ok(replacement));
+    assert_eq!(fs.node_info(pinned).expect("stat").nlink, 0);
+    assert_eq!(
+        read_all(&mut fs, pinned, body.len()),
+        body,
+        "the replaced file is kept for its hold"
+    );
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    assert_eq!(fs.node_info(pinned), Err(DriverError::NotFound));
+    assert!(pending_deletes(&mut fs).is_empty());
+}
+
+#[test]
+fn a_removed_held_directory_takes_no_entries_and_its_last_unpin_frees_it() {
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    let dir = fs
+        .create(root, b"gone", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let ino = file_ino(&mut fs, b"gone");
+    let pinned = fs.pin(dir).expect("pin");
+    let root_links = fs.node_info(root).expect("stat").nlink;
+    fs.remove(root, b"gone").expect("rmdir");
+    assert_eq!(
+        fs.node_info(root).expect("stat").nlink,
+        root_links - 1,
+        "its `..` left the parent's count"
+    );
+    assert_eq!(fs.node_info(pinned).expect("stat").nlink, 0);
+    assert_eq!(fs.lookup(pinned, b"x"), Err(DriverError::NotFound));
+    assert_eq!(fs.parent(pinned), Err(DriverError::NotFound));
+    assert_eq!(listed(&mut fs, pinned, 0, &[]), Ok(Vec::new()));
+    assert_eq!(
+        fs.create(pinned, b"x", NodeKind::RegularFile, &FILE_RECORD),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.create(pinned, b"d", NodeKind::Directory, &DIR_RECORD),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.create_link(pinned, b"l", b"/f", &LINK_RECORD),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(fs.link(pinned, b"h", file), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.rename(root, b"f", pinned, b"f"),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.lookup(root, b"f"),
+        Ok(file),
+        "the refused rename moved nothing"
+    );
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    assert_eq!(fs.read_inode(ino), Err(DriverError::NotFound));
+    assert!(pending_deletes(&mut fs).is_empty());
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(fs.used_blocks(), live);
+}
+
+#[test]
+fn release_pins_frees_every_nameless_held_node() {
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    let kept = fs
+        .create(root, b"kept", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let mut nameless = Vec::new();
+    for name in [&b"a"[..], b"b"] {
+        let file = fs
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
+        fs.write_all(file, 0, name).expect("write");
+        nameless.push(fs.pin(file).expect("pin"));
+        fs.remove(root, name).expect("unlink");
+    }
+    fs.pin(kept).expect("pin");
+    fs.pin(kept).expect("pin again");
+    assert_eq!(pending_deletes(&mut fs).len(), 2);
+
+    assert_eq!(fs.release_pins(), Ok(()));
+    assert!(
+        pending_deletes(&mut fs).is_empty(),
+        "each nameless node went"
+    );
+    for node in nameless {
+        assert_eq!(fs.node_info(node), Err(DriverError::NotFound));
+    }
+    assert_eq!(
+        fs.unpin(kept),
+        Err(DriverError::NotFound),
+        "every hold went"
+    );
+    assert_eq!(fs.lookup(root, b"kept"), Ok(kept), "a named node stays");
+}
+
+#[test]
+fn a_drain_leaves_a_held_node_for_its_last_unpin() {
+    let (mut fs, file, body) = written_file_volume(b"open", 4);
+    let root = fs.root();
+    let other = fs
+        .create(root, b"other", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(other, 0, b"plain").expect("write");
+    let pinned = fs.pin(file).expect("pin");
+    fs.remove(root, b"open").expect("unlink the held file");
+    fs.remove(root, b"other")
+        .expect("unlink a file nothing holds");
+    fs.drain_pending_deletes().expect("drain");
+    assert_eq!(
+        pending_deletes(&mut fs),
+        alloc::vec![pinned.raw()],
+        "only the held node stays pending"
+    );
+    assert_eq!(fs.node_info(other), Err(DriverError::NotFound));
+    assert_eq!(read_all(&mut fs, pinned, body.len()), body);
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    assert!(pending_deletes(&mut fs).is_empty());
+}
+
+#[test]
+fn a_held_node_a_crash_leaves_unlinked_is_drained_by_the_next_mount() {
+    let (mut fs, file, _) = written_file_volume(b"open", 16);
+    let root = fs.root();
+    let ino = file_ino(&mut fs, b"open");
+    let blocks = data_blocks(&mut fs, file);
+    fs.pin(file).expect("pin");
+    fs.remove(root, b"open").expect("unlink");
+    let free_held = fs.committed_free_count();
+
+    // The driver goes without an unpin: no hold outlives it.
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+    let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 8192), TEST_KEYING).expect("remount");
+    assert!(
+        pending_deletes(&mut fs).is_empty(),
+        "the mount finished the delete the hold deferred"
+    );
+    assert_eq!(fs.read_inode(ino), Err(DriverError::NotFound));
+    assert!(
+        fs.committed_free_count() >= free_held + blocks,
+        "and the space came back"
+    );
+    let live = fs.used_blocks();
+    fs.rebuild_free_space().expect("rebuild");
+    assert_eq!(fs.used_blocks(), live);
+}
+
+#[test]
+fn a_pending_node_no_hold_keeps_is_not_found_to_every_call() {
+    // A stale id once read a node awaiting its reclaim (D1443).
+    let mut fs = spanning_delete_volume();
+    let root = fs.root();
+    let stale = fs.lookup(root, b"frag").expect("lookup");
+
+    fs.begin().expect("begin");
+    fs.remove_inner(root, b"frag").expect("detach the name");
+    assert_eq!(pending_deletes(&mut fs), alloc::vec![stale.raw()]);
+    let mut buf = [0u8; 16];
+    assert_eq!(fs.node_info(stale), Err(DriverError::NotFound));
+    assert_eq!(fs.read_at(stale, 0, &mut buf), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.seek_region(stale, 0, SeekRegion::Data),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(fs.security(stale), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.set_security(stale, FILE_RECORD),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.get_attr(stale, b"user.comment", &mut buf),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(fs.list_attr(stale, 0, &mut buf), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.pin(stale),
+        Err(DriverError::NotFound),
+        "a node no name reaches cannot be held"
+    );
+    fs.drain_pending_deletes().expect("drain");
+    assert!(pending_deletes(&mut fs).is_empty());
+}
+
+#[test]
+fn a_check_leaves_held_nameless_nodes_and_their_parent_alone() {
+    let mut fs = fmt(512, 4096, 64);
+    let root = fs.root();
+    let dir = fs
+        .create(root, b"gone", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let held_dir = fs.pin(dir).expect("pin the directory");
+    let held_file = fs.pin(file).expect("pin the file");
+    fs.remove(root, b"gone").expect("rmdir");
+    fs.remove(root, b"f").expect("unlink");
+    let root_links = fs.node_info(root).expect("stat").nlink;
+
+    let report = check_full(&mut fs);
+    assert_eq!(
+        (
+            report.orphaned_inodes,
+            report.orphans_reclaimed,
+            report.link_counts_corrected
+        ),
+        (0, 0, 0),
+        "a hold is not damage: {report:?}"
+    );
+    assert_eq!(fs.node_info(root).expect("stat").nlink, root_links);
+    assert_eq!(fs.node_info(held_dir).expect("stat").nlink, 0);
+    assert_eq!(fs.unpin(held_dir), Ok(Unpinned::Freed));
+    assert_eq!(fs.unpin(held_file), Ok(Unpinned::Freed));
+    assert!(pending_deletes(&mut fs).is_empty());
+}
+
+#[test]
+fn create_stores_the_whole_record_it_is_given() {
+    let mut fs = fmt(512, 1024, 32);
+    let root = fs.root();
+    let mut file_record = Security::new(0o640, 1000, 100);
+    file_record.required_cap = Some(CapabilityId::AUDIT_READ);
+    file_record
+        .push_acl(AclEntry {
+            subject: AclSubject::User(1001),
+            perms: 0b100,
+        })
+        .expect("an entry");
+    let dir_record = Security::new(0o2770, 1000, 100);
+    let link_record = Security::new(0o777, 1000, 100);
+    fs.create(root, b"file", NodeKind::RegularFile, &file_record)
+        .expect("create");
+    fs.create(root, b"dir", NodeKind::Directory, &dir_record)
+        .expect("mkdir");
+    fs.create_link(root, b"link", b"/file", &link_record)
+        .expect("symlink");
+
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+    let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 1024), TEST_KEYING).expect("reopen");
+    let root = fs.root();
+    for (name, record) in [
+        (&b"file"[..], file_record),
+        (b"dir", dir_record),
+        (b"link", link_record),
+    ] {
+        let node = fs.lookup(root, name).expect("lookup");
+        assert_eq!(fs.security(node), Ok(record), "{name:?}");
+    }
+}
+
 /// The content generation of the node `name` names in the root directory.
 fn content_gen(fs: &mut ARXFS<MemBlock>, name: &[u8]) -> u64 {
     let node = fs.lookup(fs.root(), name).expect("lookup");
@@ -11168,7 +11849,8 @@ fn content_gen(fs: &mut ARXFS<MemBlock>, name: &[u8]) -> u64 {
 fn a_content_generation_moves_with_the_data_and_nothing_else() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"a", NodeKind::RegularFile)
+    let a = fs
+        .create(root, b"a", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let created = content_gen(&mut fs, b"a");
     assert_ne!(
@@ -11176,15 +11858,14 @@ fn a_content_generation_moves_with_the_data_and_nothing_else() {
         NodeInfo::NO_CONTENT_GEN,
         "a file keeps a generation"
     );
-    fs.write_at(root, b"a", 0, b"first").expect("write");
+    fs.write_at(a, 0, b"first").expect("write");
     let written = content_gen(&mut fs, b"a");
     assert!(written > created, "a write is a new version");
-    fs.truncate(root, b"a", 2).expect("truncate");
+    fs.truncate(a, 2).expect("truncate");
     let truncated = content_gen(&mut fs, b"a");
     assert!(truncated > written, "a truncate is a new version");
-    fs.truncate(root, b"a", 2)
-        .expect("truncate to the same size");
-    assert_eq!(fs.write_at(root, b"a", 1, b""), Ok(0));
+    fs.truncate(a, 2).expect("truncate to the same size");
+    assert_eq!(fs.write_at(a, 1, b""), Ok(0));
     assert_eq!(
         content_gen(&mut fs, b"a"),
         truncated,
@@ -11209,13 +11890,15 @@ fn a_content_generation_moves_with_the_data_and_nothing_else() {
         "a second name is one node"
     );
 
-    fs.create(root, b"d", NodeKind::RegularFile)
+    fs.create(root, b"d", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.create_link(root, b"l", b"b").expect("symlink");
+    fs.create_link(root, b"l", b"b", &LINK_RECORD)
+        .expect("symlink");
     let others = [content_gen(&mut fs, b"d"), content_gen(&mut fs, b"l")];
     assert!(others.iter().all(|gen| *gen > truncated), "{others:?}");
     assert_ne!(others[0], others[1], "two files never share a version");
-    fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    fs.create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
     assert_eq!(content_gen(&mut fs, b"dir"), NodeInfo::NO_CONTENT_GEN);
 }
 
@@ -11227,8 +11910,8 @@ fn a_content_generation_moves_with_the_data_and_nothing_else() {
 fn a_freed_block_is_held_until_the_slot_that_freed_it_is_durable() {
     let (mut fs, _) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
-    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
-        .expect("write");
+    let new_file = fs.lookup(root, b"new").expect("lookup");
+    fs.write_at(new_file, 0, VOLATILE_PAYLOAD).expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
     let (_, extent) = extent_of(&mut fs, b"new", 0);
     let freed = extent.phys..extent.phys + extent.stored;
@@ -11240,7 +11923,8 @@ fn a_freed_block_is_held_until_the_slot_that_freed_it_is_durable() {
         );
         assert!(!fs.is_used(block), "and it is free on the committed volume");
     }
-    fs.write_at(root, b"pad", 0, b"y").expect("a later commit");
+    let pad = fs.lookup(root, b"pad").expect("lookup");
+    fs.write_at(pad, 0, b"y").expect("a later commit");
     for block in freed {
         assert!(
             !fs.bit_used(block).expect("read the map"),
@@ -11257,9 +11941,10 @@ fn a_delete_makes_room_for_the_very_next_write_on_a_full_volume() {
     let (mut fs, _) = volatile_volume(Publish::PerOperation);
     let root = fs.root();
     let len = VOLATILE_PAYLOAD.len();
-    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
-        .expect("write");
-    fs.create(root, b"fill", NodeKind::RegularFile)
+    let new_file = fs.lookup(root, b"new").expect("lookup");
+    fs.write_at(new_file, 0, VOLATILE_PAYLOAD).expect("write");
+    let fill = fs
+        .create(root, b"fill", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create fill");
     // Unique and incompressible, so every block costs a block: neither dedupe
     // nor compression can make room the delete did not.
@@ -11275,15 +11960,15 @@ fn a_delete_makes_room_for_the_very_next_write_on_a_full_volume() {
             .collect()
     };
     let mut end = 0u64;
-    let full = loop {
-        match fs.write_at(root, b"fill", end, &noise(end)) {
+    let refusal = loop {
+        match fs.write_at(fill, end, &noise(end)) {
             Ok(stored) => end += stored as u64,
             refused => break refused,
         }
     };
-    assert_eq!(full, Err(DriverError::NoSpace), "the volume is full");
+    assert_eq!(refusal, Err(DriverError::NoSpace), "the volume is full");
     fs.remove(root, b"new").expect("remove");
-    assert_eq!(fs.write_at(root, b"fill", end, &noise(end)), Ok(len));
+    assert_eq!(fs.write_at(fill, end, &noise(end)), Ok(len));
 }
 
 /// A mount's stride is on the medium before its first change returns, even on
@@ -11293,13 +11978,14 @@ fn a_delete_makes_room_for_the_very_next_write_on_a_full_volume() {
 fn a_mounts_stride_survives_a_power_cut_after_its_first_change() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"x", NodeKind::RegularFile)
+    let x = fs
+        .create(root, b"x", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let image = fs.into_block().expect("the volume closes").bytes();
 
     let device = MemBlock::from_bytes(image, 4096, 512).with_volatile_cache();
     let mut fs = ARXFS::open(device, TEST_KEYING).expect("mount").stamped();
-    fs.write_at(root, b"x", 0, b"seen").expect("first write");
+    fs.write_at(x, 0, b"seen").expect("first write");
     let seen = content_gen(&mut fs, b"x");
     fs.block_mut().power_loss(|_| false);
     let crashed = fs.block_mut().bytes();
@@ -11307,7 +11993,7 @@ fn a_mounts_stride_survives_a_power_cut_after_its_first_change() {
     let mut fs = ARXFS::open(MemBlock::from_bytes(crashed, 4096, 512), TEST_KEYING)
         .expect("remount")
         .stamped();
-    fs.write_at(root, b"x", 0, b"after the cut").expect("write");
+    fs.write_at(x, 0, b"after the cut").expect("write");
     let after = content_gen(&mut fs, b"x");
     assert!(
         after > seen,
@@ -11323,7 +12009,8 @@ fn a_mounts_stride_survives_a_power_cut_after_its_first_change() {
 fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
     let mut fs = fmt(4096, 512, 64);
     let root = fs.root();
-    fs.create(root, b"x", NodeKind::RegularFile)
+    let x = fs
+        .create(root, b"x", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let image = fs.into_block().expect("the volume closes").bytes();
 
@@ -11332,12 +12019,11 @@ fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
         .expect("mount")
         .stamped()
         .with_volume_host(TestVolumeHost::volume(), host);
-    fs.write_at(root, b"x", 0, b"durable").expect("first write");
+    fs.write_at(x, 0, b"durable").expect("first write");
     let durable = content_gen(&mut fs, b"x");
     // Committed before the write returned: the stride is on the device.
     let committed = fs.block_mut().bytes();
-    fs.write_at(root, b"x", 0, b"seen, then lost")
-        .expect("second write");
+    fs.write_at(x, 0, b"seen, then lost").expect("second write");
     let seen = content_gen(&mut fs, b"x");
     assert!(seen > durable);
     // Power lost with the second write still in the open transaction.
@@ -11352,8 +12038,7 @@ fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
         durable,
         "the volume rolled back"
     );
-    fs.write_at(root, b"x", 0, b"after the crash")
-        .expect("write");
+    fs.write_at(x, 0, b"after the crash").expect("write");
     let after = content_gen(&mut fs, b"x");
     assert!(
         after > seen,

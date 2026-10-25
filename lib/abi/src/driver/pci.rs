@@ -275,8 +275,8 @@ pub trait PciBus: Bus {
     /// returning the resolved PCIe-bus base.
     ///
     /// Firmware normally programs a function's BARs, but when the OS
-    /// resets and re-enumerates the host bridge (the BCM2711 PCIe
-    /// bring-up) a downstream function's BAR address bits read zero: the
+    /// resets and re-enumerates the host bridge a downstream function's BAR
+    /// address bits read zero: the
     /// BAR is sized and typed but carries no base, so mapping it would
     /// target physical address 0 and be refused. Assigning resources
     /// from the bridge's outbound window is the PCI core's job. A BAR
@@ -379,8 +379,8 @@ pub trait PciBus: Bus {
     ///
     /// The non-virtio counterpart of
     /// [`MsixBus::route_msix`](super::msix::MsixBus::route_msix) for a
-    /// function that advertises the legacy MSI capability rather than MSI-X
-    /// (the Pi 4's VL805 xHCI host): the kernel's interrupt controller mints
+    /// function that advertises the legacy MSI capability rather than MSI-X:
+    /// the kernel's interrupt controller mints
     /// the opaque [`MsiMessage`] (doorbell address + data), and this writes
     /// it into the capability's Message-Address/Message-Data registers, then
     /// sets MSI Enable with Multiple-Message-Enable cleared (exactly one
@@ -505,8 +505,8 @@ mod tests {
                 return Err(DriverError::BufferTooSmall);
             }
             out[0] = BusDevice {
-                vendor: 0x1106,
-                device: 0x3483,
+                vendor: 0xABCD,
+                device: 0x1234,
                 class: 0x0C03,
                 reserved0: 0,
                 address: 0x0001_0000,
@@ -586,7 +586,7 @@ mod tests {
             // the node with placeholder id/parent the publish path
             // overwrites.
             let mut node = HwNode::new(0, crate::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
-            node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_30))
+            node.push_match_key(HwMatchKey::pci(0xABCD, 0x1234, 0x0C_03_30))
                 .map_err(|_| DriverError::DeviceFault)?;
             Ok(node)
         }

@@ -32,13 +32,13 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags};
+    use tairix_abi::fs::DirEntries;
     use tairix_abi::Errno;
-    use tairix_du::{parse, run, Entry, Metadata, Walk, USAGE};
+    use tairix_du::{parse, run, Entry, FinalLink, Metadata, Walk};
+    use tairix_hash::{BuildSipHash13, HashSeed};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_rt::File;
@@ -51,11 +51,9 @@ mod program {
     struct RtWalk;
 
     impl Walk for RtWalk {
-        fn stat(&self, path: &str) -> Result<Metadata, Errno> {
-            // A resolve-only open: no read authority is requested, the
-            // handle is closed on drop, and only the metadata is learned.
+        fn stat(&self, path: &str, link: FinalLink) -> Result<Metadata, Errno> {
             let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
+                File::open(path.as_bytes(), link.resolve_only()).map_err(Errno::from_syscall)?;
             let stat = file.stat().map_err(Errno::from_syscall)?;
             Ok(Metadata {
                 kind: stat.kind,
@@ -95,22 +93,17 @@ mod program {
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` when a path was diagnosed or the
-    /// output failed, `2` on a usage error (a malformed argument vector or
-    /// an unrecognised option).
+    /// Exit codes: `0` on success, `1` when a path was diagnosed, the
+    /// output failed, or the command line was not understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("du") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("du: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("du", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -123,11 +116,12 @@ mod program {
             &BundleHelp::new("du"),
             &Stdout,
             &Stderr,
+            BuildSipHash13::with_seed(tairix_rt::hash_seed().unwrap_or(HashSeed::UNKEYED)),
         ) {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("du: {err}"));
+                write_stderr_line(format_args!("du: {err}"));
                 1
             }
         }

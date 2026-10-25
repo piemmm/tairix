@@ -277,8 +277,7 @@ des volumes montés n'est pas restreint.
 
 - `0` — la session s'est terminée par `q`, ou l'aide brève a été affichée.
 - `1` — le terminal a échoué ; la raison est écrite sur la sortie
-  d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+  d'erreur. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

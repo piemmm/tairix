@@ -68,9 +68,8 @@ avisado em vez de correr sem o bloqueio que pediu.
   não executou.
 - `1` — o bloqueio não pôde ser tomado por uma razão que esperar não
   resolveria, ou o comando não pôde ser executado; a razão é impressa na
-  saída de erro.
-- `2` — a linha de comandos não foi compreendida; nada foi bloqueado nem
-  executado.
+  saída de erro. Uma linha de comandos não compreendida também termina com
+  `1`, sem nada bloqueado nem executado.
 - `126` — o comando foi encontrado mas não pôde ser executado.
 - `127` — o comando não foi encontrado.
 

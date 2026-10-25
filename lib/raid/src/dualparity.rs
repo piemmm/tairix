@@ -110,8 +110,8 @@ impl<B: Block> DualParityMember<B> {
     }
 
     /// A slot the array is *defined* to have but which currently holds no
-    /// device ([`MemberState::Absent`]) — the equivalent of a Linux md
-    /// "removed" slot. Pass one per missing member when assembling.
+    /// device ([`MemberState::Absent`]). Pass one per missing member when
+    /// assembling.
     #[must_use]
     pub const fn absent() -> Self {
         Self {

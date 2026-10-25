@@ -28,12 +28,22 @@ Un chemin illisible est signalé sur la sortie d'erreur standard et le
 parcours continue avec le reste ; un répertoire illisible ne
 contribue rien plutôt qu'une somme partielle devinée.
 
-Un fichier atteint par plus d'un nom est compté **une seule fois**, donc
-son stockage n'est pas signalé deux fois ; `-l` compte au contraire
-chaque nom. `-x` (un seul système de fichiers) n'est pas encore
-disponible ; les variables d'environnement de la famille
-`DU_BLOCK_SIZE` ne sont pas lues — l'échelle est choisie par les
-options seules.
+Un lien symbolique est compté pour lui-même, sauf si `-H` ou `-L`
+demande de le suivre. Tout ce qui est rencontré une deuxième fois — un
+autre nom d'un fichier déjà compté, un opérande répété ou situé à
+l'intérieur d'un autre, un répertoire que `-L` atteint deux fois — est
+omis, sans ligne propre, donc son stockage n'est pas signalé deux fois ;
+`-l` compte au contraire chaque rencontre. `-x` (un seul système de
+fichiers) n'est pas encore disponible ; les variables d'environnement de
+la famille `DU_BLOCK_SIZE` ne sont pas lues — l'échelle est choisie par
+les options seules.
+
+Sur un terminal, chaque nom affiché par la sortie est mis entre
+guillemets là où un shell l'exigerait, et tout caractère de contrôle ou
+autre caractère invisible qu'il contient est écrit sous forme de
+séquence d'échappement, si bien qu'un nom ne peut ni commander l'écran
+ni le réorganiser ; GNU l'affiche inchangé. Un tube, un fichier ou la
+sortie de `-0` reçoit le nom octet pour octet.
 
 ## OPTIONS
 
@@ -50,6 +60,11 @@ options seules.
   sous-répertoires.
 - `-l, --count-links` — compter un fichier portant plusieurs noms une
   fois par nom au lieu d'une seule.
+- `-L, --dereference` — suivre chaque lien symbolique.
+- `-H, -D, --dereference-args` — ne suivre que les liens symboliques
+  nommés comme opérandes.
+- `-P, --no-dereference` — ne suivre aucun lien symbolique (la valeur
+  par défaut).
 - `--apparent-size` — mesurer les longueurs apparentes en octets, pas
   le stockage alloué.
 - `-b, --bytes` — taille apparente en octets simples
@@ -79,8 +94,7 @@ options seules.
 - `0` — chaque opérande a été parcouru (ou l'aide courte a été
   écrite).
 - `1` — un chemin n'a pas pu être lu, ou la sortie n'a pas pu être
-  délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+  délivrée. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

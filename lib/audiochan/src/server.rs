@@ -391,6 +391,17 @@ impl<A: Audio> AudioChannelServer<A> {
         }))
     }
 
+    /// Forget `endpoint`'s attachment and keep its configuration: the region
+    /// it named is being let go.
+    pub fn unattach(&mut self, endpoint: u16) {
+        if let Some(configured) = Self::slot_index(endpoint)
+            .ok()
+            .and_then(|slot| self.endpoints[slot].as_mut())
+        {
+            configured.attached = None;
+        }
+    }
+
     /// Whether any endpoint has a region attached — the serve loop's test for
     /// "is there anywhere to put frames at all".
     #[must_use]

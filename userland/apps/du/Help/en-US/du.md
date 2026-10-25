@@ -25,10 +25,19 @@ A path that cannot be read is reported on standard error and the walk
 continues with what remains; an unreadable directory contributes
 nothing rather than a guessed partial sum.
 
-A file reached through more than one name is counted **once**, so its
-storage is not reported twice; `-l` counts every name instead. `-x` (one
-file system) is not yet available; the `DU_BLOCK_SIZE`-family environment
+A symbolic link counts as itself unless `-H` or `-L` says to follow it.
+Anything met a second time — another name for a file already counted,
+an operand repeated or lying inside another, a directory `-L` reaches
+twice — is left out, with no row of its own, so its storage is not
+reported twice; `-l` counts every sighting instead. `-x` (one file
+system) is not yet available; the `DU_BLOCK_SIZE`-family environment
 variables are not read — the scale is selected by options alone.
+
+On a terminal, each name the output shows is quoted where a shell would
+need it, and any control or other invisible character in it is written
+as an escape, so a name cannot command or rearrange the screen; GNU
+shows it unchanged. A pipe, a file, or `-0` output receives the name
+byte for byte.
 
 ## OPTIONS
 
@@ -42,6 +51,10 @@ variables are not read — the scale is selected by options alone.
   subdirectories.
 - `-l, --count-links` — count a multiply-named file once per name
   instead of once.
+- `-L, --dereference` — follow every symbolic link.
+- `-H, -D, --dereference-args` — follow only the symbolic links named
+  as operands.
+- `-P, --no-dereference` — follow no symbolic link (the default).
 - `--apparent-size` — measure apparent byte lengths, not allocated
   storage.
 - `-b, --bytes` — apparent size in single bytes (`--apparent-size`
@@ -68,8 +81,7 @@ variables are not read — the scale is selected by options alone.
 
 - `0` — every operand was walked (or the short help was written).
 - `1` — a path could not be read, or the output could not be
-  delivered.
-- `2` — the command line was not understood.
+  delivered. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

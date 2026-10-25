@@ -152,7 +152,8 @@ live guest boots. What it guarantees:
   boots do: `with_app_store` / `with_users_db` / `with_users_admin` /
   `with_filesystem` / `with_volumes` / `with_volume_service`.
 - `kernel/tairix-kernel/src/x86_64/root_unlock.rs` is the port's unlock
-  admission (`spawn_if_present` at the init seam, `virtio_blk_unlock`):
+  admission (`spawn_if_present` at the init seam, running the shared
+  `unlock_orchestrate::spawn_unlock` over the port's `UnlockPort`):
   it brings the bound virtio-blk-PCI root up over `mechanism_one` +
   `provision_virtio_pci`, routes the device's interrupt through **MSI-X**
   (binding the discovered PCI Interrupt-Line GSI, reusing its boot-assigned

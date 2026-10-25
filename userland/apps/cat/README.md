@@ -55,7 +55,8 @@ cat [-AbeEnstTuv] [--] [file...]
   -h, -?                  show this command's own short help
 ```
 
-Short options bundle as in the GNU tool (`-nE` is `-n -E`).
+Short options bundle as in the GNU tool (`-nE` is `-n -E`), and a long
+option may be shortened to any unambiguous prefix (`--squ`).
 
 With no file operand, or when a file operand is `-`, `cat` reads standard
 input. `--` ends option parsing: every later argument is a file path.
@@ -87,11 +88,13 @@ decision is testable without a kernel.
 
 ## Fail closed
 
-An unknown option is a `CatError::Usage` that reads nothing. A source
-that cannot be read surfaces the underlying `Errno` as `CatError::Read`
-and stops before any later source — so a missing file never leaves a
-half-written stream growing. A failed terminal write is
-`CatError::Output`. There is no partial-guess path and no panic
+An option `getopt` refuses is a `CatError::Option` that reads nothing,
+reported as `cat: reason` and `Try 'cat --help' for more information.`
+with exit 1, as GNU's is. A source that cannot be read surfaces the
+underlying `Errno` as `CatError::Read`, reported as `cat: name: reason`
+while the next source is still read, the run exiting 1, as GNU's does. A
+failed terminal write is
+`CatError::Output`, which ends the run. There is no partial-guess path and no panic
 (`AGENTS.md` §2.9); a seam that reports more bytes than the read buffer
 holds is refused rather than indexed out of bounds.
 

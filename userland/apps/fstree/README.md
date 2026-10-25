@@ -36,8 +36,9 @@ Stability tier: **experimental**.
   Destinations are parsed by the shared `lib/path` grammar and Tab
   completes them through the shared `lib/complete` engine; a transfer
   onto itself or into its own subtree is refused before any I/O; a move
-  renames atomically on one volume and falls back to copy-then-remove
-  across volumes; an existing target file pauses the operation for a
+  renames atomically on one volume, and across volumes copies, then
+  removes only what it copied unchanged, keeping and naming an entry
+  changed meanwhile; an existing target file pauses the operation for a
   per-file overwrite/skip/cancel answer; a failure mid-copy removes the
   partial target and surfaces the errno. `.` repeats the last operation
   on the current selection.
@@ -105,11 +106,13 @@ elapsed wait advances the walk one bounded tick (never a busy poll). A
 terminal resize is handled by the loop itself, never as a key: the window
 takes the new geometry and the pane split, page height, and scroll are
 re-derived from it.
-The operations planner/executor (`src/ops.rs`) validates before any I/O
-and drives a resumable work stack that reads directories incrementally
-and pauses on each overwrite conflict, so the per-file question runs
-through the same key loop. A refused step fails closed onto the message
-line and never disturbs consistent state. The `Run` binary (`src/run.rs`)
+The operations planner (`src/ops.rs`) validates before any I/O and starts
+the shared engine's operation (`lib/fscopy`), which reaches every entry by
+name from a directory it holds and pauses on each overwrite conflict, so
+the per-file question runs through the same key loop. An operation started
+on a listed or tagged entry carries the node the listing showed, and leaves a
+name that has come to hold another. A refused step fails
+closed onto the message line and never disturbs consistent state. The `Run` binary (`src/run.rs`)
 wires the seams to the kernel-authorised `fs_*` syscalls and the
 inherited standard streams; it holds no ambient authority and names no
 console device.
@@ -127,10 +130,10 @@ acts on the **name**, never on what the name points at:
 - **Move** and **delete** act on the link. `fs_unlink` and `fs_rename` keep
   the name as typed, so what the link named survives untouched.
 - A **link already at a destination** is a real loss, so the overwrite
-  question says so (`… exists as a symbolic link`) and an approved
-  replacement *removes* the link before creating the new object. That is what
-  keeps a create or truncate — both of which follow a final link — from acting
-  on whatever the link pointed at, anywhere on the volume. A directory is
+  question says so (`… exists as a symbolic link`). An approved replacement
+  is built beside it under a staging name and renamed over it once whole,
+  only while it is the link asked about, so nothing is ever written through
+  the link, and a failure on the way leaves it as it was. A directory is
   never transferred onto a link: a link is a leaf however it resolves.
 
 The destination probe is therefore a `NO_FOLLOW` stat: the name as typed. A

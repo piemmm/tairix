@@ -29,12 +29,9 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_help::BundleHelp;
-    use tairix_host::{parse, run, Command, Resolver, USAGE};
+    use tairix_host::{parse, run, Command, Resolver};
     use tairix_net::dns::{LookupType, Resolution};
     use tairix_resolver::{ResolveError, RtDnsTransport};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
@@ -72,19 +69,18 @@ mod program {
 
     /// Program entry point. Exit codes: `0` when an address was found (or the
     /// short help was written), `1` when the name resolved to no address (a
-    /// negative answer, a timeout, or a resolver failure), and `2` on a usage
-    /// error or an output failure.
+    /// negative answer, a timeout, or a resolver failure) or the command line
+    /// was not understood, and `2` when no DNS socket could be opened or the
+    /// output failed.
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("host") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("host: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("host", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -96,7 +92,7 @@ mod program {
                     run(command, locale, &mut resolver, &help, &Stdout, &Stderr)
                 }
                 Err(err) => {
-                    write_stderr_line(&format!("host: cannot open a DNS socket: {err}"));
+                    write_stderr_line(format_args!("host: cannot open a DNS socket: {err}"));
                     return 2;
                 }
             },
@@ -106,7 +102,7 @@ mod program {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("host: cannot write output: {err}"));
+                write_stderr_line(format_args!("host: cannot write output: {err}"));
                 2
             }
         }

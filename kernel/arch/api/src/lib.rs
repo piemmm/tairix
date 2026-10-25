@@ -105,7 +105,10 @@
 //! `performance.now()`) the `lib/cpuops` microbenchmark measures over,
 //! plus its [`cpucycles::conformance`] vertical. The **address-tag** slice,
 //! [`AddressTags`], is how a port tags TLB entries with their address space,
-//! so a switch keeps the outgoing space's entries.
+//! so a switch keeps the outgoing space's entries. The optional
+//! **message-interrupt multiplexer** slice, [`MsiMultiplexer`], is a root
+//! complex's bank of message vectors behind one parent line, with its
+//! [`msimux::conformance`] verticals.
 //!
 //! # Why `no_std` and dependency-light
 //!
@@ -142,6 +145,7 @@ pub mod gigapages;
 pub mod irq;
 pub mod memtag;
 pub mod mmu;
+pub mod msimux;
 pub mod percpu;
 pub mod platform;
 pub mod quiesce;
@@ -226,6 +230,8 @@ pub use smp::{conformance as smp_conformance, SecondaryBringup, SmpError};
 
 pub use tags::{conformance as tags_conformance, AddressTag, AddressTags, ParkRoot, MAX_USER_TAGS};
 pub use takeover::{conformance as takeover_conformance, MachineTakeover, TakeoverError};
+
+pub use msimux::{conformance as msimux_conformance, MsiMultiplexer, MsiMuxError, MsiMuxShape};
 
 pub use quiesce::{
     acknowledge as quiesce_acknowledge, publish_tables as quiesce_publish_tables, quiesce_others,

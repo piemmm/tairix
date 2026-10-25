@@ -7,16 +7,17 @@ use super::*;
 /// elsewhere, `records` records long.
 fn sparse_file(fs: &mut ARXFS<MemBlock>, name: &[u8], data: &[u64], records: u64) -> NodeId {
     let root = fs.root();
-    fs.create(root, name, NodeKind::RegularFile)
+    let file = fs
+        .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let cap = fs.data_capacity();
-    fs.truncate(root, name, cap * records).expect("extend");
+    fs.truncate(file, cap * records).expect("extend");
     for &record in data {
         // Distinct bytes per record, so dedupe cannot share them.
         let body = alloc::vec![u8::try_from(record % 250).expect("small") + 1; as_usize(cap)];
-        fs.write_at(root, name, cap * record, &body).expect("write");
+        fs.write_at(file, cap * record, &body).expect("write");
     }
-    fs.lookup(root, name).expect("lookup")
+    file
 }
 
 /// Every boundary a seek reports for `node`, walking data then holes from
@@ -95,8 +96,7 @@ fn a_punch_reads_as_zeros_releases_its_blocks_and_keeps_the_length() {
     let node = sparse_file(&mut fs, b"f", &[0, 1, 2, 3, 4, 5], 6);
     let ino = file_ino(&mut fs, b"f");
     let before = fs.stats().expect("stats").free_blocks;
-    let root = fs.root();
-    fs.punch(root, b"f", cap, 3 * cap).expect("punch");
+    fs.punch(node, cap, 3 * cap).expect("punch");
     assert_eq!(mapped_block_count(&mut fs, ino), 3);
     // The three data blocks, at least: copy-on-write metadata moves too.
     assert!(fs.stats().expect("stats").free_blocks >= before + 3);
@@ -124,11 +124,9 @@ fn a_punch_zeroes_the_partial_ends_in_place_and_merges_adjacent_holes() {
     let cap = fs.data_capacity();
     let node = sparse_file(&mut fs, b"f", &[0, 1, 3], 4);
     let ino = file_ino(&mut fs, b"f");
-    let root = fs.root();
     // From the middle of record 0 into the middle of record 1: record 0 keeps
     // its head, record 1 becomes all zeros and so a hole beside record 2's.
-    fs.punch(root, b"f", cap / 2, cap + cap / 2 + 3)
-        .expect("punch");
+    fs.punch(node, cap / 2, cap + cap / 2 + 3).expect("punch");
     let body = read_all(&mut fs, node, as_usize(4 * cap));
     let half = as_usize(cap / 2);
     assert!(body[..half].iter().all(|&b| b == 1));
@@ -137,8 +135,7 @@ fn a_punch_zeroes_the_partial_ends_in_place_and_merges_adjacent_holes() {
         .iter()
         .all(|&b| b == 0));
     assert_eq!(mapped_block_count(&mut fs, ino), 2);
-    fs.punch(root, b"f", 0, cap)
-        .expect("punch the rest of record 0");
+    fs.punch(node, 0, cap).expect("punch the rest of record 0");
     assert_eq!(fs.seek_region(node, 0, SeekRegion::Data), Ok(Some(3 * cap)));
     assert_eq!(mapped_block_count(&mut fs, ino), 1);
 }
@@ -150,23 +147,20 @@ fn a_punch_past_the_end_empty_or_on_a_hole_changes_nothing_it_should_not() {
     let node = sparse_file(&mut fs, b"f", &[0, 1], 3);
     let root = fs.root();
     // Spanning the end releases what the file holds and never grows it.
-    fs.punch(root, b"f", cap, u64::MAX - cap)
+    fs.punch(node, cap, u64::MAX - cap)
         .expect("punch to the end");
     assert_eq!(fs.node_info(node).expect("info").size, 3 * cap);
     assert_eq!(fs.seek_region(node, 0, SeekRegion::Hole), Ok(Some(cap)));
     let gen = fs.node_info(node).expect("info").content_gen;
-    fs.punch(root, b"f", 0, 0).expect("an empty punch");
-    fs.punch(root, b"f", 5 * cap, cap)
-        .expect("a punch past the end");
+    fs.punch(node, 0, 0).expect("an empty punch");
+    fs.punch(node, 5 * cap, cap).expect("a punch past the end");
     assert_eq!(fs.node_info(node).expect("info").content_gen, gen);
-    assert_eq!(
-        fs.punch(root, b"f", u64::MAX, 2),
-        Err(DriverError::OutOfRange)
-    );
-    assert_eq!(fs.punch(root, b"nope", 0, 1), Err(DriverError::NotFound));
-    let dir = fs.create(root, b"d", NodeKind::Directory).expect("mkdir");
-    let _ = dir;
-    assert_eq!(fs.punch(root, b"d", 0, 1), Err(DriverError::Unsupported));
+    assert_eq!(fs.punch(node, u64::MAX, 2), Err(DriverError::OutOfRange));
+    assert_eq!(fs.punch(NodeId::NONE, 0, 1), Err(DriverError::NotFound));
+    let dir = fs
+        .create(root, b"d", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    assert_eq!(fs.punch(dir, 0, 1), Err(DriverError::Unsupported));
 }
 
 #[test]
@@ -177,7 +171,7 @@ fn a_punch_keeps_a_reflinked_copy_and_frees_only_unshared_blocks() {
     let root = fs.root();
     let original = read_all(&mut fs, node, as_usize(2 * cap));
     fs.reflink(root, b"f", b"snap").expect("reflink");
-    fs.punch(root, b"f", 0, 2 * cap).expect("punch");
+    fs.punch(node, 0, 2 * cap).expect("punch");
     assert_eq!(fs.seek_region(node, 0, SeekRegion::Data), Ok(None));
     // Every block is still the snapshot's, so the snapshot still maps and
     // reads all of it.
@@ -187,20 +181,18 @@ fn a_punch_keeps_a_reflinked_copy_and_frees_only_unshared_blocks() {
     assert_eq!(read_all(&mut fs, snap, as_usize(2 * cap)), original);
     // Once no other file shares them, a punch frees them.
     let before = fs.stats().expect("stats").free_blocks;
-    fs.punch(root, b"snap", 0, 2 * cap)
-        .expect("punch the last referrer");
+    fs.punch(snap, 0, 2 * cap).expect("punch the last referrer");
     assert!(fs.stats().expect("stats").free_blocks >= before + 2);
 }
 
 #[test]
 fn a_punch_on_a_read_only_volume_is_refused() {
     let mut fs = fmt(512, 512, 64);
-    sparse_file(&mut fs, b"f", &[0], 1);
+    let node = sparse_file(&mut fs, b"f", &[0], 1);
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs =
         ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 512), TEST_KEYING).expect("open");
-    let root = fs.root();
-    assert_eq!(fs.punch(root, b"f", 0, 1), Err(DriverError::ReadOnly));
+    assert_eq!(fs.punch(node, 0, 1), Err(DriverError::ReadOnly));
 }
 
 #[test]
@@ -211,9 +203,7 @@ fn a_punch_over_many_extents_spans_bounded_transactions() {
     let data: Vec<u64> = (0..400).step_by(2).collect();
     let node = sparse_file(&mut fs, b"f", &data, 400);
     let ino = file_ino(&mut fs, b"f");
-    let root = fs.root();
-    fs.punch(root, b"f", 0, 400 * cap)
-        .expect("punch everything");
+    fs.punch(node, 0, 400 * cap).expect("punch everything");
     assert_eq!(mapped_block_count(&mut fs, ino), 0);
     assert_eq!(fs.seek_region(node, 0, SeekRegion::Data), Ok(None));
     // And the release survives a remount: the transactions were published.

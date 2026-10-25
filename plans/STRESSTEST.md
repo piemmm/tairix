@@ -706,13 +706,11 @@ implementation fixed):
   resolution and load gate, still fail-closed for a caller with no
   spawnable path). The worker argv codec lives in `worker.rs`
   (`["stress","--worker",kind,bytes,index,scratch]`, decoded fail-closed).
-- **Reconciliation — the secured VFS stamps creations.**
-  `MetaPolicy::stamp_creation` rewrites a freshly created node's
-  ownership to the creating caller's `(uid, gid)` under the `PerInode`
-  policy (mode/ACL/gate untouched, `Uniform` no-op): ARXFS's raw create
-  stamped the system user, which locked creators out of their own
-  private-mode files — the scratch tree under `$HOME/Library/stress`
-  depends on the fix.
+- **Reconciliation — a secured create is born its creator's.** A create
+  hands the driver the record the node is born with, owned by the creating
+  caller's uid and, outside a setgid directory, its gid.
+  The scratch tree under `$HOME/Library/stress` depends on it: a node born
+  system-owned would lock its creator out of a private-mode file.
 - **Reconciliation — orphans strand no zombies.** The one shared task
   reclaim gained `ProcessWait::parent_exited`: every row a dead parent
   owned goes — an unreaped zombie's returning its number — so an orphan's
@@ -753,7 +751,7 @@ implementation fixed):
   path — Interrupt 130, timeout 0, grace `Kill`, external kill reported,
   all-refused end, monitor policy, no phase regression), kernel host
   tests for the widened `@self` (plain spawn serves, no-path refusal),
-  `stamp_creation` (creator-owned file + directory), and
+  `creation_record` (creator-owned file + directory), and
   `parent_exited` (zombie drop, a running child's row dropped, no
   stranded zombie, sibling isolation, stop discard), and the
   `stress_qemu_aarch64` full-boot vertical reproduces the reported metal

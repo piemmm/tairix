@@ -223,3 +223,104 @@ fn the_system_grafts_write_under_the_system_class() {
     assert_eq!(class("/Users/ada/x"), AllocationClass::Ordinary);
     assert_eq!(class("/x"), AllocationClass::Ordinary);
 }
+
+/// Every boot service is loaded from `/System` before the root volume is
+/// unlocked, while only the `/System` driver is registered: the production
+/// layout serves its bundles then, and fails closed for the root's own paths.
+#[test]
+fn a_service_bundle_is_read_from_system_before_the_root_is_served() {
+    use alloc::boxed::Box;
+    use tairix_abi::driver::filesystem::NodeSecurity;
+    use tairix_abi::driver::filesystem::{FilesystemRead as _, FilesystemWrite as _, NodeKind};
+    use tairix_abi::driver::DriverHandle;
+    use tairix_abi::Errno;
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_core::fs::memfs::RwMockFs;
+    use tairix_kernel_core::fs::{At, FinalLink, Start};
+    use tairix_kernel_core::MountedFilesystemService;
+    use tairix_kernel_core::{FilesystemService as _, LateFilesystem, LateIdentity};
+    use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, UserId, UserRecord};
+
+    use super::SYSTEM_MOUNT_HANDLE;
+    use crate::kernel_fs::KernelFs;
+    use crate::test_support::NullSink;
+
+    const SERVICE: u32 = 600;
+    let shipped = NodeSecurity::new(0o755, 0, 0);
+    let mut system = RwMockFs::new();
+    let mut dir = system.root();
+    for name in [&b"Services"[..], b"svc.app"] {
+        dir = system
+            .create(dir, name, NodeKind::Directory, &shipped)
+            .expect("directory");
+    }
+    let run = system
+        .create(dir, b"Run", NodeKind::RegularFile, &shipped)
+        .expect("Run");
+    system.write_at(run, 0, b"R").expect("contents");
+
+    let cell: &'static LateFilesystem<Box<dyn KernelFs>> =
+        Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(system_vfs().expect("the production VFS builds"))
+        .expect("install");
+    let handle = DriverHandle::from_raw(SYSTEM_MOUNT_HANDLE).expect("handle");
+    cell.register(
+        handle,
+        Box::new(system),
+        "ARXFSSystem",
+        "arxfs",
+        [1; 16],
+        None,
+    )
+    .expect("register /System");
+    let mut identity = IdentityTableBuilder::new();
+    identity.push_group(GroupRecord {
+        gid: GroupId(SERVICE),
+    });
+    identity.push_user(UserRecord {
+        uid: UserId(SERVICE),
+        primary_gid: GroupId(SERVICE),
+        supplementary_gids: alloc::vec::Vec::new(),
+        capability_grants: CapabilitySet::empty(),
+    });
+    let identities: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identities
+        .install(identity.verify(&NullSink).expect("identity table"))
+        .expect("install identity");
+    let fs = MountedFilesystemService::new(cell, identities);
+    let caps = CapabilitySet::empty();
+    let at = |path| At {
+        start: Start::Root,
+        path,
+    };
+
+    let listed = fs
+        .readdir_bounded(
+            SERVICE,
+            &caps,
+            at("/System/Services/svc.app"),
+            FinalLink::Follow,
+            8,
+        )
+        .expect("the bundle lists");
+    assert_eq!(listed.len(), 1);
+    let mut buf = [0u8; 1];
+    assert_eq!(
+        fs.read_program(
+            SERVICE,
+            &caps,
+            at("/System/Services/svc.app/Run"),
+            0,
+            &mut buf
+        ),
+        Ok(1)
+    );
+    for path in ["/", "/Users", "/System/Logs", "/System/Settings"] {
+        assert_eq!(
+            fs.readdir_bounded(SERVICE, &caps, at(path), FinalLink::Follow, 8)
+                .map(|_| ()),
+            Err(Errno::NotImplemented),
+            "{path}"
+        );
+    }
+}

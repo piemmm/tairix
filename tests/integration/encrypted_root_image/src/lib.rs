@@ -44,7 +44,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use tairix_abi::driver::filesystem::{
+    FilesystemRead, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
+};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{
     EntropySource, Keying, UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME,
@@ -191,8 +193,13 @@ fn build_boot_partition(descriptor: Option<&[u8]>) -> Result<Vec<u8>, DriverErro
     let mut fs = Fat32::format(MemDisk::new(BOOT_PART_SECTORS), 0x0B00_7F1E)?;
     if let Some(descriptor) = descriptor {
         let root = fs.root();
-        fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)?;
-        let written = fs.write_at(root, ROOT_UNLOCK_NAME.as_bytes(), 0, descriptor)?;
+        let file = fs.create(
+            root,
+            ROOT_UNLOCK_NAME.as_bytes(),
+            NodeKind::RegularFile,
+            &NodeSecurity::created(NodeKind::RegularFile, 0, 0),
+        )?;
+        let written = fs.write_at(file, 0, descriptor)?;
         if written != descriptor.len() {
             return Err(DriverError::DeviceFault);
         }
@@ -224,10 +231,11 @@ fn build_system_partition(
             &mut FixtureEntropy { next: 3 },
         )?;
         let root = fs.root();
-        let security = fs.create(root, b"Security", NodeKind::Directory)?;
-        fs.create(security, b"Keys", NodeKind::Directory)?;
-        fs.create(security, b"Policy", NodeKind::Directory)?;
-        fs.create(root, b"Drivers", NodeKind::Directory)?;
+        let dir = NodeSecurity::created(NodeKind::Directory, 0, 0);
+        let security = fs.create(root, b"Security", NodeKind::Directory, &dir)?;
+        fs.create(security, b"Keys", NodeKind::Directory, &dir)?;
+        fs.create(security, b"Policy", NodeKind::Directory, &dir)?;
+        fs.create(root, b"Drivers", NodeKind::Directory, &dir)?;
         tairix_users::provision_default_dirs(&mut fs, root).map_err(|err| match err {
             tairix_users::ShapeError::Driver(err) => err,
             tairix_users::ShapeError::Occupied => DriverError::Unsupported,

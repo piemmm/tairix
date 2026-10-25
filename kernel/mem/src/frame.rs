@@ -287,8 +287,9 @@ fn zone_of(zones: &[Zone], frame: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// The share of the usable RAM above a zone that it keeps back: Linux's
-/// default `lowmem_reserve_ratio`.
+/// The share of the usable RAM above a zone that it keeps back: a 256th,
+/// enough that ordinary allocations never take the last of a low zone a
+/// device needs, little enough to cost a large machine almost nothing.
 const ZONE_RESERVE_RATIO: usize = 256;
 
 /// The most of its own frames a zone keeps back, as a share, so a small low

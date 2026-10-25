@@ -234,10 +234,10 @@ y se indica el rechazo.
 - `0` — se completó la lista, el valor, la ayuda breve o el cambio.
 - `1` — los ajustes no se pudieron leer o cambiar (por ejemplo, quien
   llama no puede cambiar los ajustes de la máquina, o no puede leer sus
-  ajustes de red), o la salida no se pudo entregar.
-- `2` — la línea de órdenes no se entendió, la clave es desconocida, el
-  valor está fuera del conjunto de la clave, o el cambio dejaría
-  incoherente la configuración de red.
+  ajustes de red), la clave es desconocida, el valor está fuera del
+  conjunto de la clave, el cambio dejaría incoherente la configuración
+  de red, o la salida no se pudo entregar. Una línea de órdenes no
+  entendida también termina con `1`.
 
 ## ENVIRONMENT
 

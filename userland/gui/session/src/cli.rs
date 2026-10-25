@@ -6,9 +6,10 @@
 //! short-help switches, and anything outside it is a usage error (fail
 //! closed), never a guess.
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when the bundle's own Help tree is
-/// unavailable.
+use core::fmt;
+
+/// The usage banner the short-help switches print when the bundle's own
+/// Help tree is unavailable.
 pub const USAGE: &str = "usage: desktop [-h | -?]";
 
 /// One thing the desktop session component can do.
@@ -28,6 +29,14 @@ pub enum Command {
 pub enum CliError {
     /// The command line was not understood.
     Usage,
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Usage => f.write_str("command line not understood"),
+        }
+    }
 }
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
@@ -55,6 +64,8 @@ pub fn parse(args: &[&str]) -> Result<Command, CliError> {
 mod tests {
     extern crate std;
 
+    use alloc::string::ToString;
+
     use super::{parse, CliError, Command};
 
     #[test]
@@ -75,6 +86,7 @@ mod tests {
         assert_eq!(parse(&["--frob"]), Err(CliError::Usage));
         assert_eq!(parse(&["operand"]), Err(CliError::Usage));
         assert_eq!(parse(&["operand", "-h"]), Err(CliError::Usage));
+        assert_eq!(CliError::Usage.to_string(), "command line not understood");
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

@@ -36,8 +36,9 @@ ignored**, because there is no honest implementation of them here:
 | `-o`, `--close` | Same descriptor form; closing the handle would release the very lock the command needs held. |
 | `-c` | Runs its argument through a shell. Spelled explicitly as `flock file elsh -c '…'`, which does not hide which shell runs. |
 
-Asking for any of them is a usage error (exit `2`), so a script is told
-rather than run without the lock it asked for.
+Asking for any of them is a usage error (exit `1`, with
+`Try 'flock --help' for more information.`), so a script is told rather
+than run without the lock it asked for.
 
 ## Capabilities
 

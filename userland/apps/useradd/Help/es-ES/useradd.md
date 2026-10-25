@@ -58,8 +58,8 @@ operando.
 - `0` — la cuenta fue creada.
 - `1` — la base de datos rechazó la creación o esta falló (por ejemplo
   una capacidad ausente, un identificador duplicado o un grupo
-  desconocido); el motivo se imprime en el error estándar.
-- `2` — la línea de órdenes no se entendió.
+  desconocido); el motivo se imprime en el error estándar. Una línea
+  de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

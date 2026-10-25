@@ -84,8 +84,8 @@ sylfaenol.
 
 - `0` — llwyddodd y cais (neu ysgrifennwyd y cymorth).
 - `1` — gwrthodwyd gallu, ni ddatryswyd enw, gwrthododd y cyfansoddwr y
-  cais, neu ni ellid ysgrifennu'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  cais, neu ni ellid ysgrifennu'r allbwn. Mae llinell orchymyn na
+  ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -32,9 +32,7 @@ moves up to 32 bytes through eight data registers and carries its own framing
 unless a further command continues the message or a repeated START follows —
 so the bus issues a repeated START before any message. Every chunk after a
 message's first continues it, so a message longer than one command is never
-re-addressed part way (Linux's `i2c-brcmstb` re-addresses the last chunk of
-any message but the last, which only a write longer than 32 bytes before a
-further message exposes).
+re-addressed part way.
 
 The bus runs at the fastest of the controller's eight fixed clocks — 375,
 390, 187.5 and 200 kHz, each also halved — at or below the speed its node
@@ -49,11 +47,11 @@ then idles it and selects its four-byte data registers and its clock.
 
 ## Waiting on the bus
 
-The tree wires the controller no interrupt (Linux drives it by polling), so
+The tree wires the controller no interrupt, so
 each command's completion is read after sleeping the command's time on the
 wire, on a one-shot timer, and again each such interval while a target
 stretches the clock. A command that shows no completion within its time on
-the wire and a one-second stall, the Linux I²C core's default, gives the
+the wire and a one-second stall (`lib/i2cbus`) gives the
 transaction up and idles the controller. A refusal names the message it ended
 in, since each command belongs to one.
 
@@ -75,6 +73,7 @@ The endpoint's records are `lib/i2cbus`'s (`docs/src/lib/i2cbus.md`).
 
 ## References
 
-- Linux `drivers/i2c/busses/i2c-brcmstb.c`.
+- Broadcom publishes no description of the controller; its register
+  interface is held to the on-metal run (`plans/PI.md`).
 - VESA Enhanced Display Data Channel (E-DDC) Standard.
 - `plans/I2C.md` I9, `plans/SOUND.md` SND19i.

@@ -6,7 +6,7 @@
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 
 use crate::cache_control::{CacheClass, CacheControl};
-use crate::fs::memfs::RwMockFs;
+use crate::fs::memfs::{RwMockFs, SYSTEM_RECORD};
 use crate::fs::{BoundedReadError, VfsError};
 use crate::syscfg::{load_and_apply_system_config, read_image_system_config};
 use crate::test_sink::TestSink;
@@ -19,39 +19,54 @@ const REJECTED: u32 = 4111;
 /// with `bytes`, owned by `uid 0` so the bootstrap reader can traverse and
 /// read it (mirroring the mkimage-authored skeleton).
 fn planted(bytes: &[u8]) -> RwMockFs {
-    let mut fs = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    let mut fs = RwMockFs::new();
     fs.set_root_security(NodeSecurity::new(0o755, 0, 0));
     let root = fs.root();
     let system = fs
-        .create(root, b"System", NodeKind::Directory)
+        .create(root, b"System", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("System");
     let settings = fs
-        .create(system, b"Settings", NodeKind::Directory)
+        .create(system, b"Settings", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("Settings");
     let config = fs
-        .create(settings, b"Configuration", NodeKind::Directory)
+        .create(
+            settings,
+            b"Configuration",
+            NodeKind::Directory,
+            &SYSTEM_RECORD,
+        )
         .expect("Configuration");
-    fs.create(config, b"system.conf", NodeKind::RegularFile)
+    let file = fs
+        .create(
+            config,
+            b"system.conf",
+            NodeKind::RegularFile,
+            &SYSTEM_RECORD,
+        )
         .expect("system.conf");
-    fs.write_at(config, b"system.conf", 0, bytes)
-        .expect("write system.conf");
+    fs.write_at(file, 0, bytes).expect("write system.conf");
     fs
 }
 
 /// A root with the `/System/Settings/Configuration` tree but **no**
 /// `system.conf` file (a fresh install).
 fn without_config() -> RwMockFs {
-    let mut fs = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    let mut fs = RwMockFs::new();
     fs.set_root_security(NodeSecurity::new(0o755, 0, 0));
     let root = fs.root();
     let system = fs
-        .create(root, b"System", NodeKind::Directory)
+        .create(root, b"System", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("System");
     let settings = fs
-        .create(system, b"Settings", NodeKind::Directory)
+        .create(system, b"Settings", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("Settings");
-    fs.create(settings, b"Configuration", NodeKind::Directory)
-        .expect("Configuration");
+    fs.create(
+        settings,
+        b"Configuration",
+        NodeKind::Directory,
+        &SYSTEM_RECORD,
+    )
+    .expect("Configuration");
     fs
 }
 
@@ -145,19 +160,29 @@ fn applying_off_then_a_default_store_re_enables() {
 /// A read-only `/System` volume carrying the image's `system.conf` with
 /// `bytes`, where the boot reads it.
 fn image_volume(bytes: &[u8]) -> RwMockFs {
-    let mut fs = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    let mut fs = RwMockFs::new();
     fs.set_root_security(NodeSecurity::new(0o755, 0, 0));
     let root = fs.root();
     let defaults = fs
-        .create(root, b"Defaults", NodeKind::Directory)
+        .create(root, b"Defaults", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("Defaults");
     let config = fs
-        .create(defaults, b"Configuration", NodeKind::Directory)
+        .create(
+            defaults,
+            b"Configuration",
+            NodeKind::Directory,
+            &SYSTEM_RECORD,
+        )
         .expect("Configuration");
-    fs.create(config, b"system.conf", NodeKind::RegularFile)
+    let file = fs
+        .create(
+            config,
+            b"system.conf",
+            NodeKind::RegularFile,
+            &SYSTEM_RECORD,
+        )
         .expect("system.conf");
-    fs.write_at(config, b"system.conf", 0, bytes)
-        .expect("write system.conf");
+    fs.write_at(file, 0, bytes).expect("write system.conf");
     fs
 }
 

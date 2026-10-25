@@ -21,6 +21,21 @@ fn table(entries: &[LineEntry]) -> LineTable {
 }
 
 #[test]
+fn every_polarity_is_listed_once() {
+    for byte in 0..=u8::MAX {
+        let listed = Polarity::ALL
+            .iter()
+            .filter(|polarity| **polarity as u8 == byte)
+            .count();
+        assert_eq!(
+            listed,
+            usize::from(Polarity::from_u8(byte).is_some()),
+            "{byte}"
+        );
+    }
+}
+
+#[test]
 fn a_span_names_exactly_its_lines() {
     let pi = HeaderLines::span(2, 27);
     assert_eq!(pi.len(), 26);

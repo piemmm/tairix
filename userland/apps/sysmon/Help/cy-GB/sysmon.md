@@ -256,8 +256,8 @@ raslon). Nid yw storfa'r cyfrolau sydd wedi'u mowntio wedi'i chyfyngu.
 ## EXIT STATUS
 
 - `0` — daeth y sesiwn i ben â `q`, neu dangoswyd y cymorth byr.
-- `1` — methodd y derfynell; ysgrifennir y rheswm i'r allbwn gwall.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — methodd y derfynell; ysgrifennir y rheswm i'r allbwn gwall. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

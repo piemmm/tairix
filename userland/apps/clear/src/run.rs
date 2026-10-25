@@ -35,21 +35,18 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when the clear sequence was written (or short help
-    /// served), `1` when the terminal cannot clear or the write failed, `2`
-    /// on a usage error.
+    /// served), `1` when the terminal cannot clear, the write failed, or the
+    /// command line was not understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("clear") else {
+            return tairix_help::MISUSE;
         };
         match parse(&arguments) {
             Ok(Command::Run) => {}
             Ok(Command::Help) => return tairix_help::print_own_short_help("clear", Some(USAGE)),
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
+            Err(err) => {
+                tairix_help::report_misuse("clear", &err);
+                return tairix_help::MISUSE;
             }
         }
 

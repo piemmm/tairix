@@ -12,13 +12,13 @@
 //! — exactly the fresh datum the stale pre-silence sample cannot give.
 //!
 //! This module is the register-level access for that read, in the shape the
-//! rest of the port already uses ([`crate::brcm_msi`], [`crate::gic`]): the
+//! rest of the port already uses ([`crate::gic`]): the
 //! register offsets, the unlock/validity/assembly logic, and the honest
 //! "did we get a valid sample" decision are **pure functions unit-tested on
 //! the host** through the `DebugMmio` seam, while the real MMIO reads are
 //! the freestanding `VolatileDebugMmio` over a **discovered** per-CPU
 //! debug-component base — never a baked-in board constant. Per-CPU bases
-//! are installed once at boot from the device tree (the Linux
+//! are installed once at boot from the device tree (the
 //! `arm,coresight-cpu-debug` binding); a platform whose tree does not
 //! describe the debug components installs none and the sampler honestly
 //! reports [`tairix_arch_api::RemotePcSample::Unsupported`] (fail closed).
@@ -119,7 +119,7 @@ pub const fn assemble_pc(lo: u32, hi: u32) -> u64 {
 /// `VolatileDebugMmio` performs real reads/writes at a discovered
 /// debug-component base, while host tests drive an in-memory mock, so the
 /// unlock → capability → validity → capture ordering is unit-tested without
-/// hardware (the same shape as [`crate::brcm_msi::MsiMmio`]).
+/// hardware (the same shape as [`crate::gic::GicMmio`]).
 pub trait DebugMmio {
     /// Read the 32-bit external-debug register at byte `offset` from this
     /// PE's debug-component base.

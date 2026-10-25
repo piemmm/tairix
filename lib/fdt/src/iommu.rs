@@ -1,6 +1,6 @@
-//! The IOMMU binding's per-unit and per-master facts (Linux
-//! `Documentation/devicetree/bindings/iommu/iommu.txt` and
-//! `reserved-memory/reserved-memory.yaml`): what marks a translation unit,
+//! The IOMMU binding's per-unit and per-master facts (dt-schema
+//! `iommu/iommu.yaml` and `reserved-memory/reserved-memory.yaml`, taken under
+//! BSD-2-Clause): what marks a translation unit,
 //! which id an `iommus` specifier names its master by, and the windows a
 //! master's reserved-memory regions ask its translation to keep.
 

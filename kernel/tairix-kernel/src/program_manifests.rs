@@ -1199,6 +1199,15 @@ mod tests {
     const PURE_TOOL_REQUEST: &[CapabilityId] =
         &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
+    // `chown` gives a node to another account, or to a group its caller is
+    // not in, only under CAP_FS_CHOWN; without it a caller still gives a node
+    // it owns to one of its own groups.
+    const CHOWN_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::FS_CHOWN,
+    ];
+
     // `configure` reads the machine configuration and its own Help/
     // (CAP_FS_ACCESS), asks the settings service to change either document
     // and to read the closed network one (CAP_SETTINGS_WRITE), and hands a
@@ -1649,6 +1658,7 @@ mod tests {
         ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("cat", ProgramKind::Command, CAT_MANIFEST),
         ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("chown", ProgramKind::Command, CHOWN_TOOL_REQUEST),
         ("cinder", ProgramKind::Application, COMPANION_APP_REQUEST),
         ("clear", ProgramKind::Command, CLEAR_MANIFEST),
         ("confd", ProgramKind::Service, CONFD_MANIFEST),

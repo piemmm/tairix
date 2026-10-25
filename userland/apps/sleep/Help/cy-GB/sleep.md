@@ -44,9 +44,9 @@ linyn o'r fath, felly — yn wahanol i GNU `sleep` — nid oes ganddo'r opsiwn
 
 - `0` — aeth y cyfnod heibio, neu ysgrifennwyd cymorth byr a ofynnwyd
   amdano.
-- `1` — methodd ysgrifennu'r cymorth byr.
-- `2` — ni ddeallwyd y llinell orchymyn (opsiwn anhysbys, operand ar goll,
-  neu gyfnod amser annilys).
+- `1` — methodd ysgrifennu'r cymorth byr. Mae llinell orchymyn na
+  ddeallwyd (opsiwn anhysbys, operand ar goll, neu gyfnod amser annilys)
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

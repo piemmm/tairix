@@ -16,8 +16,8 @@
 //! `Run` binary wires them to the kernel.
 //!
 //! References: BCM2835 ARM Peripherals, section 6.3, for the generators the
-//! PCM and PWM clocks share with the general-purpose ones; Linux
-//! `drivers/clk/bcm/clk-bcm2835.c` for the PLL registers.
+//! PCM and PWM clocks share with the general-purpose ones; QEMU's BCM2835
+//! CPRMAN model (GPL-2.0-or-later) for the PLL registers.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -33,7 +33,9 @@ mod cprman_tests;
 #[cfg(test)]
 mod model;
 
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+};
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the register window, the controller's endpoint, and the log its decisions
@@ -54,12 +56,7 @@ const BIND_PRIORITY: u16 = 10;
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(CPRMAN_COMPATIBLE) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(CPRMAN_COMPATIBLE),
 )];
 
 /// Handle marker [`register`] returns; the host re-issues its own. `"CLK1"`.

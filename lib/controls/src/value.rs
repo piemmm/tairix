@@ -344,6 +344,13 @@ impl Slider {
         self.value
     }
 
+    /// Whether the knob is being dragged: from the press that takes it to
+    /// the release or cancel that settles it.
+    #[must_use]
+    pub fn is_dragging(&self) -> bool {
+        *self.dragging
+    }
+
     /// Set the slider's value (e.g. after the owner commits a change), clamped
     /// into range and to any cap, and onto the nearest stop.
     pub fn set_value(&mut self, value: u16) {

@@ -120,3 +120,45 @@ fn an_edid_response_carries_no_more_than_it_holds() {
     bytes[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&2048u32.to_le_bytes());
     assert_eq!(edid(&bytes), Err(DriverError::DeviceFault));
 }
+
+#[test]
+fn a_fenced_request_asks_for_its_answer_once_it_has_run() {
+    let mut header = [0xAA; HEADER_LEN];
+    fence(&mut header, 0x0102_0304_0506_0708);
+    assert_eq!(
+        word(&header, 4),
+        1,
+        "VIRTIO_GPU_FLAG_FENCE and no other flag"
+    );
+    assert_eq!(
+        u64::from_le_bytes(header[8..16].try_into().expect("a fence")),
+        0x0102_0304_0506_0708
+    );
+    assert_eq!(header[..4], [0xAA; 4], "the type is left as it was");
+    assert_eq!(header[16..], [0xAA; 8], "the context is left as it was");
+}
+
+#[test]
+fn only_an_answer_carrying_its_fence_says_the_command_has_run() {
+    let mut answer = [0u8; HEADER_LEN];
+    answer[..4].copy_from_slice(&0x1100u32.to_le_bytes());
+    assert_eq!(
+        fenced(&answer, 9),
+        Err(DriverError::DeviceFault),
+        "no fence"
+    );
+    answer[4..8].copy_from_slice(&1u32.to_le_bytes());
+    answer[8..16].copy_from_slice(&8u64.to_le_bytes());
+    assert_eq!(
+        fenced(&answer, 9),
+        Err(DriverError::DeviceFault),
+        "another fence"
+    );
+    answer[8..16].copy_from_slice(&9u64.to_le_bytes());
+    assert_eq!(fenced(&answer, 9), Ok(()));
+    assert_eq!(
+        fenced(&answer[..12], 9),
+        Err(DriverError::DeviceFault),
+        "cut short"
+    );
+}

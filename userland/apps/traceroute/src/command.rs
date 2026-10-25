@@ -9,7 +9,7 @@ use core::num::NonZeroU8;
 use tairix_abi::net::SOCKET_MAX_DATAGRAM;
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_net::trace::{MAX_IN_FLIGHT, MAX_PROBES_PER_HOP};
-use tairix_util::argv::option_value;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 use tairix_util::seconds::parse_seconds;
 
@@ -58,10 +58,8 @@ pub struct Config {
 /// Why an argument vector was not a valid `traceroute` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// An option that is not part of the surface.
-    UnknownOption(String),
-    /// A value-taking option was given without its value.
-    MissingValue(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A value did not parse, or lies outside its range.
     InvalidValue {
         /// The option, or `packetlen`.
@@ -80,8 +78,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
-            Self::MissingValue(opt) => write!(f, "option {opt} requires a value", opt = quote(opt)),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::InvalidValue { option, value } => {
                 write!(
                     f,
@@ -133,118 +130,113 @@ impl Default for Builder {
     }
 }
 
+/// What each of `traceroute`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Ipv4,
+    Ipv6,
+    Icmp,
+    /// A probe method this traceroute does not send, by the letter it is
+    /// refused under.
+    OtherMethod(&'static str),
+    First,
+    MaxHops,
+    Queries,
+    SimQueries,
+    Wait,
+    Numeric,
+    Help,
+}
+
+/// `traceroute`'s options, as Linux `traceroute` spells them, and the reserved
+/// help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::letter('4', Takes::Nothing, Flag::Ipv4),
+    Opt::letter('6', Takes::Nothing, Flag::Ipv6),
+    Opt::flag('I', &["icmp"], Flag::Icmp),
+    Opt::flag('U', &["udp"], Flag::OtherMethod("-U")),
+    Opt::flag('T', &["tcp"], Flag::OtherMethod("-T")),
+    Opt {
+        short: Some('M'),
+        long: &["module"],
+        takes: Takes::Attached,
+        means: Flag::OtherMethod("-M"),
+    },
+    Opt::valued('f', &["first"], Flag::First),
+    Opt::valued('m', &["max-hops"], Flag::MaxHops),
+    Opt::valued('q', &["queries"], Flag::Queries),
+    Opt::valued('N', &["sim-queries"], Flag::SimQueries),
+    Opt::valued('w', &["wait"], Flag::Wait),
+    Opt::letter('n', Takes::Nothing, Flag::Numeric),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse an argument vector (without the program name).
+///
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among the
+/// operands, clustered, a value attached or the next argument, a long option by
+/// any unambiguous prefix, `--` ending them. The help switches (`-?`,
+/// `--help`) answer at once. The operands are the target, then the packet
+/// length.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] naming the offending argument; the caller reports it with
-/// the usage banner and exits `2`.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::UnsupportedMethod`] — `-U`, `-T` or `-M`: a probe method
+///   other than ICMP echo.
+/// * [`ParseError::InvalidValue`] — a value or packet length that does not
+///   parse or lies outside its range, the option named by its letter, or a
+///   first hop beyond the last.
+/// * [`ParseError::MissingTarget`] — no target.
+/// * [`ParseError::ExtraOperand`] — a third operand.
+///
+/// The caller reports each, then where the help is, and exits `1`.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut builder = Builder::default();
-    let mut options_ended = false;
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i];
-        i += 1;
-        if options_ended || arg == "-" || !arg.starts_with('-') {
-            operand(&mut builder, arg)?;
-        } else if arg == "--" {
-            options_ended = true;
-        } else if let Some(long) = arg.strip_prefix("--") {
-            if parse_long(&mut builder, long, arg, args, &mut i)? {
-                return Ok(Command::Help);
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(word) => operand(&mut builder, word)?,
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::OtherMethod(option), _) => {
+                return Err(ParseError::UnsupportedMethod(String::from(option)))
             }
-        } else if parse_short(&mut builder, &arg[1..], args, &mut i)? {
-            return Ok(Command::Help);
+            Arg::Opt(flag, value) => builder.set(flag, value.unwrap_or_default())?,
         }
     }
     build(builder)
 }
 
-/// Parse one `--long` option, answering whether it asked for help.
-fn parse_long(
-    builder: &mut Builder,
-    long: &str,
-    original: &str,
-    args: &[&str],
-    i: &mut usize,
-) -> Result<bool, ParseError> {
-    let (key, inline) = match long.split_once('=') {
-        Some((key, value)) => (key, Some(value)),
-        None => (long, None),
-    };
-    let flag = match key {
-        "help" => return Ok(true),
-        "icmp" => return Ok(false),
-        "udp" | "tcp" | "module" => {
-            return Err(ParseError::UnsupportedMethod(original.to_string()))
-        }
-        "first" => 'f',
-        "max-hops" => 'm',
-        "queries" => 'q',
-        "sim-queries" => 'N',
-        "wait" => 'w',
-        _ => return Err(ParseError::UnknownOption(original.to_string())),
-    };
-    let value = option_value(inline, args, i)
-        .ok_or_else(|| ParseError::MissingValue(format!("--{key}")))?;
-    apply_value(builder, flag, &format!("--{key}"), value)?;
-    Ok(false)
-}
-
-/// Parse one short-option cluster, answering whether it asked for help.
-fn parse_short(
-    builder: &mut Builder,
-    flags: &str,
-    args: &[&str],
-    i: &mut usize,
-) -> Result<bool, ParseError> {
-    for (pos, flag) in flags.char_indices() {
+impl Builder {
+    /// Apply the option `flag` names, with the value it took, naming the option
+    /// by its letter in any refusal.
+    fn set(&mut self, flag: Flag, value: &str) -> Result<(), ParseError> {
+        let invalid = |option: &str| ParseError::InvalidValue {
+            option: option.to_string(),
+            value: value.to_string(),
+        };
         match flag {
-            '?' => return Ok(true),
-            '4' => builder.family = Some(NetAddrFamily::V4),
-            '6' => builder.family = Some(NetAddrFamily::V6),
-            'n' => builder.numeric = true,
-            'I' => {}
-            'U' | 'T' | 'M' => return Err(ParseError::UnsupportedMethod(format!("-{flag}"))),
-            'f' | 'm' | 'q' | 'N' | 'w' => {
-                let rest = &flags[pos + flag.len_utf8()..];
-                let attached = (!rest.is_empty()).then_some(rest);
-                let value = option_value(attached, args, i)
-                    .ok_or_else(|| ParseError::MissingValue(format!("-{flag}")))?;
-                apply_value(builder, flag, &format!("-{flag}"), value)?;
-                return Ok(false);
+            Flag::Ipv4 => self.family = Some(NetAddrFamily::V4),
+            Flag::Ipv6 => self.family = Some(NetAddrFamily::V6),
+            Flag::Numeric => self.numeric = true,
+            Flag::First => self.first_hop = bounded(value, u8::MAX).ok_or_else(|| invalid("-f"))?,
+            Flag::MaxHops => {
+                self.max_hops = bounded(value, u8::MAX).ok_or_else(|| invalid("-m"))?;
             }
-            other => return Err(ParseError::UnknownOption(format!("-{other}"))),
+            Flag::Queries => {
+                self.queries = bounded(value, MAX_PROBES_PER_HOP).ok_or_else(|| invalid("-q"))?;
+            }
+            Flag::SimQueries => {
+                self.sim_queries = bounded(value, MAX_IN_FLIGHT).ok_or_else(|| invalid("-N"))?;
+            }
+            Flag::Wait => {
+                self.wait_ns = parse_seconds(value)
+                    .filter(|&wait| wait > 0)
+                    .ok_or_else(|| invalid("-w"))?;
+            }
+            Flag::Icmp | Flag::OtherMethod(_) | Flag::Help => {}
         }
+        Ok(())
     }
-    Ok(false)
-}
-
-/// Apply a value-taking option, named `option` in any refusal.
-fn apply_value(
-    builder: &mut Builder,
-    flag: char,
-    option: &str,
-    value: &str,
-) -> Result<(), ParseError> {
-    let invalid = || ParseError::InvalidValue {
-        option: option.to_string(),
-        value: value.to_string(),
-    };
-    match flag {
-        'f' => builder.first_hop = bounded(value, u8::MAX).ok_or_else(invalid)?,
-        'm' => builder.max_hops = bounded(value, u8::MAX).ok_or_else(invalid)?,
-        'q' => builder.queries = bounded(value, MAX_PROBES_PER_HOP).ok_or_else(invalid)?,
-        'N' => builder.sim_queries = bounded(value, MAX_IN_FLIGHT).ok_or_else(invalid)?,
-        'w' => {
-            builder.wait_ns = parse_seconds(value)
-                .filter(|&wait| wait > 0)
-                .ok_or_else(invalid)?;
-        }
-        _ => return Err(invalid()),
-    }
-    Ok(())
 }
 
 /// `value` as a count in `1..=max`.

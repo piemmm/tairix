@@ -3,6 +3,8 @@
 use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::argv::{BadWord, WordMiss};
+use tairix_util::getopt::Refusal;
 use tairix_util::quote::{quote, quote_if_needed};
 
 /// Why a `tail` invocation did not complete.
@@ -14,10 +16,8 @@ use tairix_util::quote::{quote, quote_if_needed};
 /// operand, exactly as the GNU tool does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TailError {
-    /// An unrecognised long option; carries the token.
-    UnknownLong(String),
-    /// An unrecognised short option; carries the flag character.
-    UnknownShort(char),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// The `-n`/`--lines` value was not a valid count; carries the text.
     InvalidLines(String),
     /// The `-c`/`--bytes` value was not a valid count; carries the text.
@@ -26,9 +26,9 @@ pub enum TailError {
     /// an option anywhere but as the first argument, e.g. `tail -q -5`;
     /// carries the offending character.
     InvalidTrailing(char),
-    /// `-c`/`-n` (or their long forms) were given without a value; carries
-    /// the option's spelling for the diagnostic.
-    MissingValue(&'static str),
+    /// The `--follow` value named no one of `descriptor`, `name`; carries
+    /// how, and the text.
+    BadFollow(WordMiss, String),
     /// `--pid` was given a value that is not a valid process id; carries the
     /// text.
     InvalidPid(String),
@@ -46,14 +46,7 @@ pub enum TailError {
 impl fmt::Display for TailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => {
-                write!(f, "unrecognized option {token}", token = quote(token))
-            }
-            Self::UnknownShort(flag) => write!(
-                f,
-                "invalid option -- {}",
-                quote(flag.encode_utf8(&mut [0; 4]))
-            ),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::InvalidLines(text) => {
                 write!(f, "invalid number of lines: {text}", text = quote(text))
             }
@@ -65,13 +58,16 @@ impl fmt::Display for TailError {
                 "invalid trailing option -- {}",
                 quote_if_needed(flag.encode_utf8(&mut [0; 4]))
             ),
-            Self::MissingValue(option) => {
-                write!(
-                    f,
-                    "option {option} requires an argument",
-                    option = quote(option)
-                )
-            }
+            Self::BadFollow(miss, word) => write!(
+                f,
+                "{}",
+                BadWord {
+                    miss: *miss,
+                    word,
+                    option: "--follow",
+                    choices: &crate::command::FOLLOW_MODES,
+                }
+            ),
             Self::InvalidPid(text) => write!(f, "invalid PID: {text}", text = quote(text)),
             Self::InvalidSleep(text) => {
                 write!(f, "invalid number of seconds: {text}", text = quote(text))

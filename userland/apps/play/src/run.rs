@@ -59,7 +59,7 @@ mod program {
     use tairix_sandbox::audiodecode::AudioDecodeService;
     use tairix_sandbox::rt::{serve_session_stdio, session_worker_role};
     use tairix_termcap::{from_term, TermType};
-    use tairix_util::quote::quote_if_needed;
+    use tairix_util::quote::{quote_if_needed, quote_subject};
 
     const DECODER_READ: u64 = 1;
     const DECODER_WRITE: u64 = 2;
@@ -87,11 +87,9 @@ mod program {
     /// The grid a terminal whose size the kernel cannot attest is drawn in.
     const FALLBACK: Size = Size::new(24, 80);
 
-    /// Exit statuses: every file played, something was not played, or the
-    /// command line was refused.
+    /// Exit statuses: every file played, or something was not played.
     const PLAYED: i32 = 0;
     const NOT_PLAYED: i32 = 1;
-    const USAGE_ERROR: i32 = 2;
 
     /// The tokens the playback loop's wait-set reports the engine's sources
     /// under.
@@ -252,7 +250,7 @@ mod program {
                         if shown {
                             hide(&mut screen);
                         }
-                        write_stderr_line(&format!("play: the interface stopped: {errno}"));
+                        write_stderr_line(format_args!("play: the interface stopped: {errno}"));
                         return;
                     }
                 }
@@ -401,9 +399,8 @@ mod program {
             serve_session_stdio(&mut AudioDecodeService::new());
             return PLAYED;
         }
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return USAGE_ERROR;
+        let Some(arguments) = tairix_help::arguments("play") else {
+            return tairix_help::MISUSE;
         };
         match parse(&arguments) {
             Ok(Command::Help) => tairix_help::print_own_short_help("play", Some(USAGE)),
@@ -417,9 +414,8 @@ mod program {
             Ok(Command::ListDevices) => list_devices(),
             Ok(Command::Play(options)) => play(&options),
             Err(err) => {
-                write_stderr_line(&format!("play: {err}"));
-                write_stderr_line(USAGE);
-                USAGE_ERROR
+                tairix_help::report_misuse("play", &err);
+                tairix_help::MISUSE
             }
         }
     }
@@ -448,7 +444,7 @@ mod program {
         let sinks = match sinks() {
             Ok(sinks) => sinks,
             Err(err) => {
-                write_stderr_line(&format!(
+                write_stderr_line(format_args!(
                     "play: the audio service could not list its sinks: {err}"
                 ));
                 return NOT_PLAYED;
@@ -492,7 +488,7 @@ mod program {
                 session.finish()
             }
             Err(reason) => {
-                write_stderr_line(&format!("play: {reason}"));
+                write_stderr_line(format_args!("play: {reason}"));
                 NOT_PLAYED
             }
         }
@@ -650,7 +646,7 @@ mod program {
                     let _ = StdInfo.write_all(&report::opened(&file, link, &info));
                     if self.verbose && !deferred {
                         self.clear_progress();
-                        write_stderr_line(&format!(
+                        write_stderr_line(format_args!(
                             "play: {}: {}",
                             report::naming(&file, link),
                             report::describe(&info)
@@ -661,7 +657,7 @@ mod program {
                 Note::Skipped { why, .. } | Note::Cut { why, .. } => {
                     let whole = matches!(note, Note::Skipped { .. });
                     let _ = StdInfo.write_all(&report::left_out(&file, why, whole));
-                    let line = format!("play: {file}: {why}", file = quote_if_needed(&file));
+                    let line = format!("play: {file}: {why}", file = quote_subject(&file));
                     if !deferred {
                         self.clear_progress();
                         write_stderr_line(&line);
@@ -692,7 +688,7 @@ mod program {
             let _ = StdInfo.write_all(&report::summary(self.engine.status(), self.rate, outcome));
             match outcome {
                 Outcome::Failed(failure) => {
-                    write_stderr_line(&format!("play: {failure}"));
+                    write_stderr_line(format_args!("play: {failure}"));
                     NOT_PLAYED
                 }
                 Outcome::Played | Outcome::Stopped if self.diagnostics.is_empty() => PLAYED,
@@ -718,7 +714,7 @@ mod program {
             engine.on_control(now, Control::TogglePause);
         }
         if let Err(err) = tairix_rt::stop_self() {
-            write_stderr_line(&format!("play: could not stop: {err}"));
+            write_stderr_line(format_args!("play: could not stop: {err}"));
         }
         if playing {
             engine.on_control(tairix_rt::clock_get(), Control::TogglePause);

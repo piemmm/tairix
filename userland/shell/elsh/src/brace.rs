@@ -23,6 +23,26 @@ enum Kind {
     Double,
 }
 
+impl Kind {
+    /// How `segment` was quoted, and its text.
+    fn of(segment: &Segment) -> (Self, &str) {
+        match segment {
+            Segment::Expandable(text) => (Self::Unquoted, text.as_str()),
+            Segment::Literal(text) => (Self::Literal, text.as_str()),
+            Segment::QuotedExpandable(text) => (Self::Double, text.as_str()),
+        }
+    }
+
+    /// A segment of `text` quoted this way.
+    fn segment(self, text: String) -> Segment {
+        match self {
+            Self::Unquoted => Segment::Expandable(text),
+            Self::Literal => Segment::Literal(text),
+            Self::Double => Segment::QuotedExpandable(text),
+        }
+    }
+}
+
 /// One character of a word, or (`ch: None`) an empty quoted run, which marks
 /// the word quoted though it adds no text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,11 +71,7 @@ pub(crate) fn expand(word: &Word, budget: &mut Budget) -> Result<Vec<Word>, Pars
         closes: closes(&units),
         units: &units,
     };
-    let mut out = Vec::new();
-    for units in scanner.expand(0..units.len(), budget)? {
-        out.push(unflatten(&units));
-    }
-    Ok(out)
+    scanner.expand(0..units.len(), budget)
 }
 
 /// For each unquoted `{`, the index of the unquoted `}` that closes it.
@@ -80,11 +96,7 @@ fn closes(units: &[Unit]) -> Vec<Option<usize>> {
 fn flatten(word: &Word) -> Vec<Unit> {
     let mut units = Vec::new();
     for segment in word {
-        let (kind, text) = match segment {
-            Segment::Expandable(text) => (Kind::Unquoted, text),
-            Segment::Literal(text) => (Kind::Literal, text),
-            Segment::QuotedExpandable(text) => (Kind::Double, text),
-        };
+        let (kind, text) = Kind::of(segment);
         if text.is_empty() {
             units.push(Unit { ch: None, kind });
         }
@@ -93,35 +105,55 @@ fn flatten(word: &Word) -> Vec<Unit> {
     units
 }
 
-fn unflatten(units: &[Unit]) -> Word {
-    let mut word: Word = Vec::new();
-    for unit in units {
-        let same = matches!(
-            (word.last(), unit.kind),
-            (Some(Segment::Expandable(_)), Kind::Unquoted)
-                | (Some(Segment::Literal(_)), Kind::Literal)
-                | (Some(Segment::QuotedExpandable(_)), Kind::Double)
-        );
-        if !same {
-            word.push(match unit.kind {
-                Kind::Unquoted => Segment::Expandable(String::new()),
-                Kind::Literal => Segment::Literal(String::new()),
-                Kind::Double => Segment::QuotedExpandable(String::new()),
-            });
-        }
-        if let (
-            Some(ch),
-            Some(
-                Segment::Expandable(text)
-                | Segment::Literal(text)
-                | Segment::QuotedExpandable(text),
-            ),
-        ) = (unit.ch, word.last_mut())
-        {
-            text.push(ch);
+/// The word `units` spell, each run of one quoting a segment, as the lexer
+/// spells it, charged at what it holds.
+fn spell(units: &[Unit], budget: &mut Budget) -> Result<Word, ParseError> {
+    let runs = units.chunk_by(|a, b| a.kind == b.kind);
+    let mut word = budget.list(runs.clone().count())?;
+    for run in runs {
+        let Some(&Unit { kind, .. }) = run.first() else {
+            continue;
+        };
+        let len: usize = run
+            .iter()
+            .filter_map(|unit| unit.ch)
+            .map(char::len_utf8)
+            .sum();
+        let mut text = budget.string(len)?;
+        text.extend(run.iter().filter_map(|unit| unit.ch));
+        word.push(kind.segment(text));
+    }
+    Ok(word)
+}
+
+/// `parts` spelled one after another as one word, a run of one quoting that
+/// crosses from one part into the next kept one segment, charged at what it
+/// holds.
+fn join(parts: [&[Segment]; 3], budget: &mut Budget) -> Result<Word, ParseError> {
+    let pieces = parts.into_iter().flatten().map(Kind::of);
+    let mut runs = 0;
+    let mut last = None;
+    for (kind, _) in pieces.clone() {
+        if last != Some(kind) {
+            runs += 1;
+            last = Some(kind);
         }
     }
-    word
+    let mut word = budget.list(runs)?;
+    let mut pieces = pieces.peekable();
+    while let Some((kind, first)) = pieces.next() {
+        let more: usize = pieces
+            .clone()
+            .map_while(|(next, text)| (next == kind).then_some(text.len()))
+            .sum();
+        let mut text = budget.string(first.len() + more)?;
+        text.push_str(first);
+        while let Some((_, next)) = pieces.next_if(|(next, _)| *next == kind) {
+            text.push_str(next);
+        }
+        word.push(kind.segment(text));
+    }
+    Ok(word)
 }
 
 /// A flattened word and its matched braces.
@@ -132,20 +164,17 @@ struct Scanner<'a> {
 
 impl Scanner<'_> {
     /// The words the units in `span` expand to. Every word made is charged
-    /// to `budget`, the intermediate ones included, so neither the work nor
+    /// to `budget` at what it holds — its text, its segments and its place
+    /// in a list — the intermediate ones included, so neither the work nor
     /// the memory an expansion takes can outgrow the bound.
-    fn expand(
-        &self,
-        span: Range<usize>,
-        budget: &mut Budget,
-    ) -> Result<Vec<Vec<Unit>>, ParseError> {
+    fn expand(&self, span: Range<usize>, budget: &mut Budget) -> Result<Vec<Word>, ParseError> {
         let Some((open, close, alternatives)) = self.first_expression(span.start, span.end) else {
-            let units = &self.units[span];
-            budget.charge(units.len())?;
-            return Ok(alloc::vec![units.to_vec()]);
+            let mut words = budget.list(1)?;
+            words.push(spell(&self.units[span], budget)?);
+            return Ok(words);
         };
         let joined = Joiner {
-            preamble: &self.units[span.start..open],
+            preamble: spell(&self.units[span.start..open], budget)?,
             tails: self.expand(close + 1..span.end, budget)?,
         };
         let mut out = Vec::new();
@@ -159,14 +188,7 @@ impl Scanner<'_> {
             }
             Alternatives::Sequence(sequence) => {
                 for spelling in sequence.spellings() {
-                    let middle: Vec<Unit> = spelling
-                        .chars()
-                        .map(|ch| Unit {
-                            ch: Some(ch),
-                            kind: Kind::Unquoted,
-                        })
-                        .collect();
-                    joined.push(&middle, &mut out, budget)?;
+                    joined.push(&[Segment::Expandable(spelling)], &mut out, budget)?;
                 }
             }
         }
@@ -233,27 +255,22 @@ impl Scanner<'_> {
 
 /// What surrounds a brace expression: the text before it, and the words the
 /// text after it expands to.
-struct Joiner<'a> {
-    preamble: &'a [Unit],
-    tails: Vec<Vec<Unit>>,
+struct Joiner {
+    preamble: Word,
+    tails: Vec<Word>,
 }
 
-impl Joiner<'_> {
+impl Joiner {
     /// One word per tail, with `middle` between the preamble and the tail.
     fn push(
         &self,
-        middle: &[Unit],
-        out: &mut Vec<Vec<Unit>>,
+        middle: &[Segment],
+        out: &mut Vec<Word>,
         budget: &mut Budget,
     ) -> Result<(), ParseError> {
         for tail in &self.tails {
-            let len = self.preamble.len() + middle.len() + tail.len();
-            budget.charge(len)?;
-            let mut word = Vec::with_capacity(len);
-            word.extend_from_slice(self.preamble);
-            word.extend_from_slice(middle);
-            word.extend_from_slice(tail);
-            out.push(word);
+            let word = join([self.preamble.as_slice(), middle, tail.as_slice()], budget)?;
+            budget.push(out, word)?;
         }
         Ok(())
     }

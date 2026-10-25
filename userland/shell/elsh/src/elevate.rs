@@ -268,4 +268,19 @@ mod tests {
         assert_eq!(status, Some(1));
         assert!(fixture.console.stderr().contains("elevate:"));
     }
+
+    #[test]
+    fn the_prompt_and_a_cooling_refusal_quote_the_account_name() {
+        let elevator = ScriptedElevator::new(
+            "hunter2",
+            Err(Denied::Cooling(tairix_abi::time::Duration64::from_nanos(1))),
+        );
+        let mut fixture = Fixture::with_elevator(&elevator);
+        assert_eq!(fixture.run(&["elevate", "ro ot", "/p"]), Some(1));
+        assert_eq!(fixture.console.stdout(), "Password for 'ro ot': ");
+        assert_eq!(
+            fixture.console.stderr(),
+            "elevate: too many attempts for 'ro ot'; try again in 1 s\n"
+        );
+    }
 }

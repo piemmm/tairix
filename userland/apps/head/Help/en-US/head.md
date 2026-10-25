@@ -27,6 +27,11 @@ the GNU tool.
 A file that cannot be read is reported on standard error and the run
 continues with the next file.
 
+On a terminal, each name the output shows is quoted where a shell would
+need it, and any control or other invisible character in it is written
+as an escape, so a name cannot command or rearrange the screen; GNU
+shows it unchanged. A pipe or a file receives the name byte for byte.
+
 ## OPTIONS
 
 - `-c, --bytes <num>` — print the first `num` bytes of each file; with
@@ -51,7 +56,7 @@ continues with the next file.
 
 - `0` — every file was printed (or the short help was written).
 - `1` — a file could not be read, or the output could not be delivered.
-- `2` — the command line was not understood.
+  A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

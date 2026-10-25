@@ -31,6 +31,13 @@ no fluxo de informação padrão (fd 3); nunca altera a saída nem o estado
 de saída. Um ficheiro que não pode ser lido é reportado na saída de erro
 e a execução continua com o ficheiro seguinte.
 
+Num terminal, cada nome que a saída mostra é posto entre aspas onde uma
+shell precisaria delas, e qualquer carácter de controlo ou outro
+carácter invisível nele contido é escrito como sequência de escape, de
+modo que um nome não consegue comandar nem reordenar o ecrã; o GNU
+mostra-o sem alterações. Um pipe ou um ficheiro recebe o nome byte a
+byte.
+
 ## OPTIONS
 
 - `-c, --bytes <num>` — imprimir os últimos `num` bytes de cada ficheiro;
@@ -62,7 +69,7 @@ e a execução continua com o ficheiro seguinte.
 
 - `0` — cada ficheiro foi impresso (ou a ajuda breve foi escrita).
 - `1` — um ficheiro não pôde ser lido, ou a saída não pôde ser entregue.
-- `2` — a linha de comandos não foi compreendida.
+  Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

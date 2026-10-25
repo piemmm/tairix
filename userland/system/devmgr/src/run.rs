@@ -454,7 +454,7 @@ mod program {
     /// rather than handed on as a truncated prefix that might parse as a
     /// valid — but partial — document.
     fn read_vfs_config(path: &str, out: &mut [u8]) -> Result<Option<usize>, Errno> {
-        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
+        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ, 0);
         if ret < 0 {
             return match Errno::from_syscall(ret) {
                 Errno::NotFound | Errno::NotImplemented => Ok(None),

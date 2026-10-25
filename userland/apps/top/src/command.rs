@@ -1,9 +1,11 @@
 //! The parsed shape of a `top` command line.
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::TopError;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `top`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `top`'s own Help tree
+/// is unavailable.
 pub const USAGE: &str = "usage: top [-d secs.tenths] [-h | -?]";
 
 /// The default refresh delay in tenths of a second: GNU `top`'s 3.0 s.
@@ -33,49 +35,51 @@ pub enum Command {
     Help,
 }
 
+/// What each of `top`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Delay,
+    Help,
+}
+
+/// `top`'s option, as GNU `top` spells it, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('d', &["delay"], Flag::Delay),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `top [-d secs.tenths] [-h | -?]`:
+/// The grammar is `top [-d secs.tenths] [-h | -?]`, read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options clustered, a value attached
+/// (`-d5`, `--delay=5`) or the next argument, a long option by any
+/// unambiguous prefix, `--` ending them.
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md §4; they win immediately).
-/// * `-d secs.tenths` / `-dsecs.tenths` / `--delay secs.tenths` /
-///   `--delay=secs.tenths` — the refresh interval between automatic
-///   redisplays, exactly GNU `top`'s `-d, --delay` spellings. Seconds with
-///   an optional fraction; only the first fractional digit (tenths) is
-///   kept, as in GNU `top`. A zero delay is clamped to the 0.1 s minimum
-///   rather than busy-looping.
-/// * anything else — a [`TopError::Usage`] error. The viewer takes no
-///   operands; its scope and navigation are keys pressed inside the
-///   session.
+/// * `-d secs.tenths` / `--delay secs.tenths` — the refresh interval between
+///   automatic redisplays, exactly GNU `top`'s `-d, --delay` spellings.
+///   Seconds with an optional fraction; only the first fractional digit
+///   (tenths) is kept, as in GNU `top`. A zero delay is clamped to the 0.1 s
+///   minimum rather than busy-looping. The last one given wins.
+/// * an operand — a [`TopError::Usage`] error. The viewer takes none; its
+///   scope and navigation are keys pressed inside the session.
 ///
 /// # Errors
 ///
-/// [`TopError::Usage`] for any input outside the grammar above, including a
-/// missing or malformed delay value.
+/// * [`TopError::Option`] — an option `getopt` refuses, in its words.
+/// * [`TopError::Usage`] — an operand, or a malformed delay value.
 pub fn parse(args: &[&str]) -> Result<Command, TopError> {
     let mut delay_tenths = DEFAULT_DELAY_TENTHS;
-    let mut rest = args;
-    while let Some((&arg, tail)) = rest.split_first() {
-        match arg {
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "-d" | "--delay" => {
-                let (&value, tail) = tail.split_first().ok_or(TopError::Usage)?;
-                delay_tenths = parse_delay_tenths(value)?;
-                rest = tail;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(TopError::Option)? {
+            Arg::Operand(_) => return Err(TopError::Usage),
+            Arg::Opt(Flag::Delay, value) => {
+                delay_tenths = parse_delay_tenths(value.unwrap_or_default())?;
             }
-            _ => {
-                let value = if let Some(attached) = arg.strip_prefix("--delay=") {
-                    attached
-                } else if let Some(attached) = arg.strip_prefix("-d") {
-                    attached
-                } else {
-                    return Err(TopError::Usage);
-                };
-                delay_tenths = parse_delay_tenths(value)?;
-                rest = tail;
-            }
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
     }
     Ok(Command::Run { delay_tenths })
@@ -98,6 +102,7 @@ fn parse_delay_tenths(value: &str) -> Result<u32, TopError> {
 mod tests {
     use super::{parse, Command, DEFAULT_DELAY_TENTHS, MIN_DELAY_TENTHS};
     use crate::error::TopError;
+    use alloc::string::{String, ToString};
 
     fn run(delay_tenths: u32) -> Command {
         Command::Run { delay_tenths }
@@ -146,7 +151,7 @@ mod tests {
 
     #[test]
     fn malformed_delays_are_usage_errors() {
-        assert_eq!(parse(&["-d"]), Err(TopError::Usage));
+        assert_eq!(refused(&["-d"]), "option requires an argument -- 'd'");
         assert_eq!(parse(&["-d", ""]), Err(TopError::Usage));
         assert_eq!(parse(&["-d", "."]), Err(TopError::Usage));
         assert_eq!(parse(&["-d", "abc"]), Err(TopError::Usage));
@@ -156,10 +161,34 @@ mod tests {
     }
 
     #[test]
-    fn any_other_argument_is_usage() {
-        assert_eq!(parse(&["-x"]), Err(TopError::Usage));
-        assert_eq!(parse(&["--frob"]), Err(TopError::Usage));
+    fn an_operand_is_usage() {
         assert_eq!(parse(&["operand"]), Err(TopError::Usage));
+    }
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--delay"]),
+            "option '--delay' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--help=x"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// `getopt_long` reads `top --del=5` as `top --delay=5`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--del=5"]), Ok(run(50)));
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     /// Every locale's `OPTIONS` section documents exactly the switches this

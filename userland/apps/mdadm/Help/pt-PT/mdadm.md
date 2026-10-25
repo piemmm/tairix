@@ -86,8 +86,8 @@ informação padrão (fd 3). É opcional e nunca altera a saída principal.
 
 - `0` — o pedido teve sucesso (ou a ajuda foi escrita).
 - `1` — uma capacidade foi recusada, um nome não foi resolvido, o
-  compositor recusou o pedido, ou a saída não pôde ser escrita.
-- `2` — a linha de comandos não foi compreendida.
+  compositor recusou o pedido, ou a saída não pôde ser escrita. Uma
+  linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

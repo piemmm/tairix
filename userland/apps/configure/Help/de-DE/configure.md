@@ -237,11 +237,11 @@ werden; sie wird daher gespeichert und die Ablehnung genannt.
 - `0` — Auflistung, Wert, Kurzhilfe oder Änderung wurden abgeschlossen.
 - `1` — die Einstellungen konnten nicht gelesen oder geändert werden
   (z. B. darf der Aufrufer die Einstellungen des Rechners nicht ändern
-  oder seine Netzwerkeinstellungen nicht lesen) oder die Ausgabe konnte
-  nicht zugestellt werden.
-- `2` — die Befehlszeile wurde nicht verstanden, der Schlüssel ist
-  unbekannt, der Wert liegt außerhalb der Menge des Schlüssels, oder die
-  Änderung würde die Netzwerkkonfiguration widersprüchlich hinterlassen.
+  oder seine Netzwerkeinstellungen nicht lesen), der Schlüssel ist
+  unbekannt, der Wert liegt außerhalb der Menge des Schlüssels, die
+  Änderung würde die Netzwerkkonfiguration widersprüchlich hinterlassen,
+  oder die Ausgabe konnte nicht zugestellt werden. Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

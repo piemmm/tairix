@@ -39,7 +39,7 @@ tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
 tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 # The reclaimable-memory model behind the production filesystem cache the
-# `link_service_round_trip` tail stands the real service stack up over.
+# `link_vfs_round_trip` tail drives.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
@@ -85,7 +85,7 @@ tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
 tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 # The reclaimable-memory model behind the production filesystem cache the
-# `link_service_round_trip` tail stands the real service stack up over.
+# `link_vfs_round_trip` tail drives.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
@@ -126,7 +126,7 @@ tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0", features = ["host-tests"] }
 tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 # The reclaimable-memory model behind the production filesystem cache the
-# `link_service_round_trip` tail stands the real service stack up over.
+# `link_vfs_round_trip` tail drives.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

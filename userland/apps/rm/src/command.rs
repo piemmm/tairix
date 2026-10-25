@@ -3,6 +3,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::RmError;
 
 /// When the tool asks before removing.
@@ -70,94 +72,79 @@ pub enum Command {
     Help,
 }
 
+/// What each of `rm`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Recursive,
+    Force,
+    Dir,
+    Verbose,
+    Interactive,
+    /// `-I`.
+    InteractiveOnce,
+    PreserveRoot,
+    NoPreserveRoot,
+    Help,
+}
+
+/// `rm`'s options, as GNU's `rm` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('r', &["recursive"], Flag::Recursive),
+    Opt::letter('R', Takes::Nothing, Flag::Recursive),
+    Opt::flag('f', &["force"], Flag::Force),
+    Opt::flag('d', &["dir"], Flag::Dir),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('i', &["interactive"], Flag::Interactive),
+    Opt::letter('I', Takes::Nothing, Flag::InteractiveOnce),
+    Opt::long(&["preserve-root"], Takes::Nothing, Flag::PreserveRoot),
+    Opt::long(&["no-preserve-root"], Takes::Nothing, Flag::NoPreserveRoot),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// The only spelling `--no-preserve-root` is accepted in.
+const NO_PRESERVE_ROOT: &str = "--no-preserve-root";
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is the GNU `rm` surface,
-/// `rm [-dfiIrRv] [--] file...`:
-///
-/// * `-r` / `-R` / `--recursive` — remove directories and their contents.
-/// * `-f` / `--force` — ignore non-existent operands; never prompt.
-/// * `-d` / `--dir` — remove empty directories without `-r`.
-/// * `-i` / `--interactive` — prompt before every removal.
-/// * `-I` — prompt once before removing more than three operands, or
-///   before a recursive removal.
-/// * `-v` / `--verbose` — report each removal.
-/// * `--preserve-root` — refuse to remove `/` (the default).
-/// * `--no-preserve-root` — allow removing `/`.
-/// * `-h` / `--help` — print the usage banner (wins immediately).
-/// * `--` — end option parsing; every later argument is a path.
-/// * any other `-…` — a [`RmError::Usage`] error (fail closed; never a
-///   silently ignored token).
-/// * anything else (including the bare `-`) — a path.
-///
-/// Short options may be combined into one argument (e.g. `-rf` is
-/// `-r -f`); an unrecognised letter anywhere in such a cluster is a usage
-/// error. As in the GNU tool, the later of `-f` / `-i` / `-I` wins: `-f`
-/// cancels prompting and a prompt flag cancels `-f`.
+/// The grammar is the GNU `rm` surface, `rm [-dfiIrRv] [--] file...`, read
+/// as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among the
+/// operands, clustered, a long one by any unambiguous prefix but
+/// `--no-preserve-root`, which GNU accepts only in full, `--` ending them.
+/// The help switches (`-h`, `-?`, `--help`) answer at once. As in the GNU
+/// tool, the later of `-f` / `-i` / `-I` wins: `-f` cancels prompting and a
+/// prompt flag cancels `-f`.
 ///
 /// # Errors
 ///
-/// [`RmError::Usage`] for any unrecognised option before `--`, or when no
-/// path operand is given without `-f`.
+/// * [`RmError::Option`] — an option `getopt` refuses, in its words.
+/// * [`RmError::AbbreviatedNoPreserveRoot`] — `--no-preserve-root`
+///   abbreviated.
+/// * [`RmError::Usage`] — no path operand without `-f`.
 pub fn parse(args: &[&str]) -> Result<Command, RmError> {
     let mut options = Options::DEFAULT;
     let mut paths = Vec::new();
-    let mut options_done = false;
-    for &arg in args {
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
-            }
-            if let Some(name) = arg.strip_prefix("--") {
-                match name {
-                    "recursive" => options.recursive = true,
-                    "force" => {
-                        options.force = true;
-                        options.interactive = Interactive::Never;
-                    }
-                    "dir" => options.dir = true,
-                    "verbose" => options.verbose = true,
-                    "interactive" => {
-                        options.interactive = Interactive::Always;
-                        options.force = false;
-                    }
-                    "preserve-root" => options.preserve_root = true,
-                    "no-preserve-root" => options.preserve_root = false,
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(RmError::Usage),
+    // GNU accepts `--no-preserve-root` only in full. `rm` takes no option
+    // value, so the arguments before `--` naming it are the ones the scan
+    // reads, in its order.
+    let mut no_preserve_root = args
+        .iter()
+        .take_while(|arg| **arg != "--")
+        .filter(|arg| arg.len() > 2 && NO_PRESERVE_ROOT.starts_with(**arg));
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(RmError::Option)? {
+            Arg::Operand(path) => paths.push(String::from(path)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::NoPreserveRoot, _) => {
+                if no_preserve_root.next() != Some(&NO_PRESERVE_ROOT) {
+                    return Err(RmError::AbbreviatedNoPreserveRoot);
                 }
-                continue;
+                options.preserve_root = false;
             }
-            // A short-option cluster is a leading `-` followed by at least one
-            // letter (the bare `-` is a path, not an option).
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for letter in letters.chars() {
-                    match letter {
-                        'r' | 'R' => options.recursive = true,
-                        'f' => {
-                            options.force = true;
-                            options.interactive = Interactive::Never;
-                        }
-                        'd' => options.dir = true,
-                        'v' => options.verbose = true,
-                        'i' => {
-                            options.interactive = Interactive::Always;
-                            options.force = false;
-                        }
-                        'I' => {
-                            options.interactive = Interactive::Once;
-                            options.force = false;
-                        }
-                        'h' | '?' => return Ok(Command::Help),
-                        _ => return Err(RmError::Usage),
-                    }
-                }
-                continue;
-            }
+            Arg::Opt(flag, _) => options.set(flag),
         }
-        paths.push(String::from(arg));
     }
     if paths.is_empty() && !options.force {
         return Err(RmError::Usage);
@@ -165,11 +152,36 @@ pub fn parse(args: &[&str]) -> Result<Command, RmError> {
     Ok(Command::Remove { options, paths })
 }
 
+impl Options {
+    /// Apply the flag `flag` names.
+    fn set(&mut self, flag: Flag) {
+        match flag {
+            Flag::Recursive => self.recursive = true,
+            Flag::Force => {
+                self.force = true;
+                self.interactive = Interactive::Never;
+            }
+            Flag::Dir => self.dir = true,
+            Flag::Verbose => self.verbose = true,
+            Flag::Interactive => {
+                self.interactive = Interactive::Always;
+                self.force = false;
+            }
+            Flag::InteractiveOnce => {
+                self.interactive = Interactive::Once;
+                self.force = false;
+            }
+            Flag::PreserveRoot => self.preserve_root = true,
+            Flag::NoPreserveRoot | Flag::Help => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse, Command, Interactive, Options};
     use crate::error::RmError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
     fn remove_with(options: Options, paths: &[&str]) -> Command {
@@ -358,11 +370,65 @@ mod tests {
         }
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "a"]), Err(RmError::Usage));
-        assert_eq!(parse(&["--frobnicate", "a"]), Err(RmError::Usage));
-        assert_eq!(parse(&["-rx", "a"]), Err(RmError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "a"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frobnicate", "a"]),
+            "unrecognized option '--frobnicate'"
+        );
+        // A bundle with one bad flag is refused whole.
+        assert_eq!(refused(&["-rx", "a"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--force=1", "a"]),
+            "option '--force' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `rm --rec --verb d` as `rm --recursive --verbose d`, and
+    /// refuses `--no-preserve-root` abbreviated.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--rec", "--verb", "d"]),
+            Ok(remove_with(
+                Options {
+                    recursive: true,
+                    verbose: true,
+                    ..Options::DEFAULT
+                },
+                &["d"],
+            ))
+        );
+        for args in [
+            ["--no", "/"],
+            ["--no-preserve-roo", "/"],
+            ["--no-preserve-root", "--no-pres"],
+        ] {
+            assert_eq!(
+                refused(&args),
+                "you may not abbreviate the --no-preserve-root option",
+                "{args:?}"
+            );
+        }
+        // An earlier refusal is still the one reported, as getopt reads in
+        // order; after `--` the spelling is an operand.
+        assert_eq!(refused(&["-x", "--no", "a"]), "invalid option -- 'x'");
+        assert_eq!(
+            parse(&["--no-preserve-root", "--", "--no"]),
+            Ok(remove_with(
+                Options {
+                    preserve_root: false,
+                    ..Options::DEFAULT
+                },
+                &["--no"],
+            ))
+        );
     }
 
     #[test]

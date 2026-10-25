@@ -478,6 +478,8 @@ tairix-kernel-ipc = { path = "../../kernel/ipc", version = "=0.0.0" }
 # `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
 # the endpoint marker compares the exact on-wire spelling.
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
+# The one rule for a hidden character.
+tairix-visible = { path = "../../lib/visible", version = "=0.0.0" }
 # The shared reclaimable-memory model and the structured-log sink trait:
 # the AW3 pointer script builds a real `DesktopShell`, which owns the
 # seat's rasterised-asset caches, so it must hand that shell the same

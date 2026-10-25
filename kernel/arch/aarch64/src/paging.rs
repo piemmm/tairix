@@ -1315,9 +1315,7 @@ impl<const CAPACITY: usize> PageTablePool<CAPACITY> {
     /// them back *cacheable* (`TCR_VALUE` IRGN0/ORGN0) the instant
     /// translation enables — any stale line the firmware left over the
     /// pool's addresses would then shadow the real descriptors on real
-    /// silicon (cache-less QEMU cannot show it). The same residue
-    /// hazard is why Linux's `head.S` invalidates its idmap tables to
-    /// `PoC` before `__enable_mmu`. Fail-closed: the whole fixed-size
+    /// silicon (cache-less QEMU cannot show it). Fail-closed: the whole fixed-size
     /// pool is swept (one pass over 64 KiB at boot — off every hot
     /// path), not just the slots handed out so far.
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -2247,9 +2245,9 @@ pub(crate) fn invalidate_range_inner_shareable(start_vaddr: u64, pages: usize) {
     }
 }
 
-/// Past this many pages one whole-domain invalidation is cheaper than a
-/// `tlbi` each, every one a broadcast each PE must answer: Linux's
-/// `MAX_DVM_OPS` (`arch/arm64/include/asm/tlbflush.h`). It also bounds a
+/// Past this many pages one whole-domain invalidation is taken to be cheaper
+/// than a `tlbi` each, every one a broadcast each PE must answer; any ceiling
+/// is correct, only the cost moves. It also bounds a
 /// sparse unmap's span, which would otherwise cost a broadcast per page of
 /// its gaps.
 const RANGE_INVALIDATION_CEILING: usize = 512;

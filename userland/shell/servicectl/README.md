@@ -16,8 +16,8 @@ servicectl stop SERVICE    stop a running service (and its dependents) gracefull
 servicectl -h | -?         this tool's own short help
 ```
 
-Exit status follows the coreutils shape: `0` applied, `1` refused or the
-endpoint unreachable, `2` a command line that was not understood.
+Exit status follows the coreutils shape: `0` applied, `1` refused, the
+endpoint unreachable, or a command line that was not understood.
 
 ## Why there is no capability check here
 

@@ -33,7 +33,6 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
     use core::cell::RefCell;
 
@@ -42,7 +41,7 @@ mod program {
     use tairix_help::BundleHelp;
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout};
     use tairix_rt::File;
-    use tairix_wc::{parse, run, FileSource, Input, SizeProbe, USAGE};
+    use tairix_wc::{parse, run, FileSource, Input, SizeProbe};
 
     /// The production [`FileSource`]: the kernel-authorised `fs_*` view of
     /// the filesystem. It adds no authority — every path resolution,
@@ -111,22 +110,18 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when every input was counted (or the short help was
-    /// written), `1` when an input failed or output could not be delivered,
-    /// `2` on a usage error (a malformed argument vector, an unrecognised
-    /// option, or an invalid option value).
+    /// written), `1` when an input failed, output could not be delivered, or
+    /// the command line was not understood (a malformed argument vector, an
+    /// unrecognised option, or an invalid option value).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("wc") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("wc: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("wc", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -144,7 +139,7 @@ mod program {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("wc: {err}"));
+                write_stderr_line(format_args!("wc: {err}"));
                 1
             }
         }

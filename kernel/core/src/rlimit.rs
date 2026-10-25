@@ -93,6 +93,19 @@ pub const fn default_file_lock_records(installed_memory_bytes: u64) -> u64 {
     derived_bound(installed_memory_bytes, 64 << 10, MIN_FILE_LOCK_RECORDS)
 }
 
+/// The smallest `LimitKind::OpenFiles` bound.
+const MIN_OPEN_FILES: u64 = 1024;
+
+/// The default `LimitKind::OpenFiles` policy: one descriptor per 64 KiB of RAM
+/// (16384 on a 1 GiB board).
+///
+/// Each descriptor pins its node and holds its description in the kernel
+/// heap, so the bound keeps one process from holding a large share of either.
+#[must_use]
+pub const fn default_open_files(installed_memory_bytes: u64) -> u64 {
+    derived_bound(installed_memory_bytes, 64 << 10, MIN_OPEN_FILES)
+}
+
 /// The smallest `LimitKind::DirWatches` bound: room for a file manager's
 /// windows and a desktop on the smallest board.
 const MIN_DIR_WATCHES: u64 = 64;
@@ -195,6 +208,10 @@ impl LimitSet {
             (
                 LimitKind::PinnedMemoryBytes,
                 default_pinned_limit_bytes(installed_memory_bytes),
+            ),
+            (
+                LimitKind::OpenFiles,
+                default_open_files(installed_memory_bytes),
             ),
             (
                 LimitKind::FileLocks,
@@ -322,9 +339,10 @@ pub fn authorize_set(
 mod tests {
     use super::{
         authorize_set, default_dir_watches, default_file_lock_records, default_ipc_queue_bytes,
-        default_pinned_limit_bytes, default_wait_set_members, default_wait_sets, LimitSet,
-        DEFAULT_STACK_LIMIT_BYTES, MIN_DIR_WATCHES, MIN_FILE_LOCK_RECORDS, MIN_IPC_QUEUE_BYTES,
-        MIN_WAIT_SETS, MIN_WAIT_SET_MEMBERS,
+        default_open_files, default_pinned_limit_bytes, default_wait_set_members,
+        default_wait_sets, LimitSet, DEFAULT_STACK_LIMIT_BYTES, MIN_DIR_WATCHES,
+        MIN_FILE_LOCK_RECORDS, MIN_IPC_QUEUE_BYTES, MIN_OPEN_FILES, MIN_WAIT_SETS,
+        MIN_WAIT_SET_MEMBERS,
     };
     use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
@@ -343,6 +361,10 @@ mod tests {
         assert_eq!(default_file_lock_records(1 << 30), 16 << 10);
         assert_eq!(default_file_lock_records(16 << 20), MIN_FILE_LOCK_RECORDS);
         assert_eq!(default_file_lock_records(0), MIN_FILE_LOCK_RECORDS);
+        // One descriptor per 64 KiB, never below 1024.
+        assert_eq!(default_open_files(1 << 30), 16 << 10);
+        assert_eq!(default_open_files(32 << 20), MIN_OPEN_FILES);
+        assert_eq!(default_open_files(0), MIN_OPEN_FILES);
         // One watch per 2 MiB: 512 on a 1 GiB board, the floor on a tiny one.
         assert_eq!(default_dir_watches(1 << 30), 512);
         assert_eq!(default_dir_watches(16 << 30), 8 << 10);
@@ -362,6 +384,7 @@ mod tests {
         let set = LimitSet::derived_from_memory(1 << 30);
         for (kind, bound) in [
             (LimitKind::PinnedMemoryBytes, 128 << 20),
+            (LimitKind::OpenFiles, 16 << 10),
             (LimitKind::FileLocks, 16 << 10),
             (LimitKind::DirWatches, 512),
             (LimitKind::IpcQueueBytes, 64 << 20),
@@ -409,7 +432,7 @@ mod tests {
         set.set(LimitKind::Processes, lo);
         assert_eq!(set.get(LimitKind::Processes), lo);
         // Other kinds are untouched.
-        assert_eq!(set.get(LimitKind::OpenStreams), ResourceLimit::UNLIMITED);
+        assert_eq!(set.get(LimitKind::OpenFiles), ResourceLimit::UNLIMITED);
     }
 
     #[test]
@@ -510,12 +533,12 @@ mod tests {
         for held in limits() {
             for asked in limits() {
                 let mut set = LimitSet::DEFAULT;
-                set.set(LimitKind::OpenStreams, held);
+                set.set(LimitKind::OpenFiles, held);
                 set.set(LimitKind::Processes, held);
                 let lowered = set.lowered_by(
-                    &tairix_abi::SpawnLimits::INHERIT.lowering(LimitKind::OpenStreams, asked),
+                    &tairix_abi::SpawnLimits::INHERIT.lowering(LimitKind::OpenFiles, asked),
                 );
-                let got = lowered.get(LimitKind::OpenStreams);
+                let got = lowered.get(LimitKind::OpenFiles);
                 assert!(got.is_well_formed(), "{held:?} {asked:?}");
                 assert!(got.soft <= held.soft && got.soft <= asked.soft);
                 assert!(got.hard <= held.hard && got.hard <= asked.hard);

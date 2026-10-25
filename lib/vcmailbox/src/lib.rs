@@ -51,7 +51,9 @@ use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::pci::CLASS_USB_XHCI;
 use tairix_abi::time::MonotonicClock;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
+use tairix_abi::{
+    compatible_key, CapabilityId, DriverBindKey, DriverError, HwMatchKey, RegisterWindow,
+};
 
 #[cfg(test)]
 mod tests;
@@ -72,29 +74,26 @@ pub const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
 
 /// The real-time clock the Pi 5's PMIC carries, which is not memory-mapped:
 /// its driver may read the clock and set it.
-pub const RPI_RTC_KEY: HwMatchKey = match HwMatchKey::compatible(b"raspberrypi,rpi-rtc") {
-    Ok(key) => key,
-    Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-};
+pub const RPI_RTC_KEY: HwMatchKey = compatible_key!(b"raspberrypi,rpi-rtc");
 
 /// The firmware's clock interface: its driver may read the ARM clock's rates
 /// and set it.
-pub const FIRMWARE_CLOCKS_KEY: HwMatchKey =
-    match HwMatchKey::compatible(b"raspberrypi,firmware-clocks") {
-        Ok(key) => key,
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    };
+pub const FIRMWARE_CLOCKS_KEY: HwMatchKey = compatible_key!(b"raspberrypi,firmware-clocks");
+
+/// Device-tree `compatible` string of the BCM2711's second SD host (EMMC2),
+/// the Pi 4's SD card slot.
+pub const SD_HOST_COMPATIBLE: &[u8] = b"brcm,bcm2711-emmc2";
+
+/// The SD host, whose base clock and card supplies the firmware owns: its
+/// driver may read that clock and switch the supply lines its node names.
+pub const SD_HOST_KEY: HwMatchKey = compatible_key!(SD_HOST_COMPATIBLE);
 
 /// Device-tree `compatible` string of the display engine, the HVS.
 pub const DISPLAY_ENGINE_COMPATIBLE: &[u8] = b"brcm,bcm2711-hvs";
 
 /// The display engine the firmware drives until it is told not to: its
 /// driver may say the display is its own.
-pub const DISPLAY_ENGINE_KEY: HwMatchKey = match HwMatchKey::compatible(DISPLAY_ENGINE_COMPATIBLE) {
-    Ok(key) => key,
-    // A too-long literal fails const evaluation; this never runs.
-    Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-};
+pub const DISPLAY_ENGINE_KEY: HwMatchKey = compatible_key!(DISPLAY_ENGINE_COMPATIBLE);
 
 /// One HDMI output of the display engine, as the BCM2711 wires it.
 ///
@@ -163,13 +162,7 @@ const BIND_PRIORITY: u16 = 10;
 /// discovered mailbox node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(MAILBOX_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(MAILBOX_COMPATIBLE),
 )];
 
 /// The capabilities the mailbox service's signed bundle requests: the single
@@ -276,7 +269,8 @@ const TAG_GET_PITCH: u32 = 0x0004_0008;
 /// `VideoCore` can reload it (`plans/PI.md` P10).
 const TAG_NOTIFY_XHCI_RESET: u32 = 0x0003_0058;
 /// Tag: the ARM's display engine driver has taken the display over, so the
-/// firmware stops driving it (`RPI_FIRMWARE_NOTIFY_DISPLAY_DONE`; no values).
+/// firmware stops driving it (no values). The firmware wiki does not list it;
+/// the metal run records the firmware's answer (`plans/SOUND.md` `SND19q`).
 const TAG_NOTIFY_DISPLAY_DONE: u32 = 0x0003_0066;
 
 /// Firmware pixel-order value for BGR ([`DisplayFormat::Bgra8888`]).
@@ -927,7 +921,7 @@ pub struct Unconfirmed {
 ///
 /// The Pi 4's firmware leaves a value-less tag's code word as the request
 /// left it, as it does [`encode_gpio_state_write`]'s, so the message header
-/// is all it answers — and all Linux's `rpi_firmware_property` reads.
+/// is all it answers.
 ///
 /// # Errors
 ///
@@ -948,20 +942,20 @@ pub fn decode_display_done_response(words: &[u32; PROPERTY_WORDS]) -> Result<(),
 
 // --- Real-time clock registers -------------------------------------------
 
-/// `RPI_FIRMWARE_GET_RTC_REG`: read one register of the RTC the Pi 5's PMIC
+/// Read one register of the RTC the Pi 5's PMIC
 /// carries. The chip is not memory-mapped, so this property channel is the
 /// only route to it.
 const TAG_GET_RTC_REG: u32 = 0x0003_0087;
 
-/// `RPI_FIRMWARE_SET_RTC_REG`: write one register of the same RTC.
+/// Write one register of the same RTC.
 const TAG_SET_RTC_REG: u32 = 0x0003_8087;
 
 /// Which RTC register a get- or set-register exchange names.
 ///
 /// The firmware selects the register with the tag's first value word; the
 /// second carries the value. Only the two this crate's consumer needs are
-/// spelled. The discriminants are the firmware's own, in the order of the
-/// register enumeration Linux's `rtc-rpi` driver sends.
+/// spelled. The discriminants are the firmware's own selectors, which no
+/// public document lists; a Pi 5 confirms them (`plans/TIMESYNC.md` TS-4).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum RtcRegister {
@@ -1058,18 +1052,18 @@ pub fn decode_rtc_register_write_response(
 
 // --- Clock rates ----------------------------------------------------------
 
-/// `RPI_FIRMWARE_GET_CLOCK_RATE`: the rate a clock is running at now.
+/// *Get clock rate*: the rate a clock is running at now.
 const TAG_GET_CLOCK_RATE: u32 = 0x0003_0002;
 
-/// `RPI_FIRMWARE_GET_MAX_CLOCK_RATE`: the highest rate the firmware accepts
+/// *Get max clock rate*: the highest rate the firmware accepts
 /// for a clock.
 const TAG_GET_MAX_CLOCK_RATE: u32 = 0x0003_0004;
 
-/// `RPI_FIRMWARE_GET_MIN_CLOCK_RATE`: the lowest rate the firmware accepts
+/// *Get min clock rate*: the lowest rate the firmware accepts
 /// for a clock.
 const TAG_GET_MIN_CLOCK_RATE: u32 = 0x0003_0007;
 
-/// `RPI_FIRMWARE_SET_CLOCK_RATE`: ask the firmware to run a clock at a rate.
+/// *Set clock rate*: ask the firmware to run a clock at a rate.
 const TAG_SET_CLOCK_RATE: u32 = 0x0003_8002;
 
 /// The `skip setting turbo` word of a [`TAG_SET_CLOCK_RATE`] request, set so
@@ -1079,8 +1073,8 @@ const TAG_SET_CLOCK_RATE: u32 = 0x0003_8002;
 /// rate change, which moves the part to its turbo operating point — so a
 /// request to *lower* the ARM clock leaves it at the maximum, and a governor
 /// asking for the floor is silently answered with the ceiling.
-/// `clk-raspberrypi` declares the word (`raspberrypi_firmware_prop.disable_turbo`)
-/// but its initialiser leaves it clear.
+/// The firmware wiki's *Set clock rate* documents the word: setting the ARM
+/// clock above its default enables the other turbo settings unless it is 1.
 pub(crate) const SKIP_SETTING_TURBO: u32 = 1;
 
 /// Which clock a rate exchange names.
@@ -1088,8 +1082,8 @@ pub(crate) const SKIP_SETTING_TURBO: u32 = 1;
 /// The firmware owns every clock on the `SoC` and identifies each by this
 /// selector in the tag's first value word. Only the clocks this crate's
 /// consumers read are spelled; a selector with no caller would be surface
-/// with no reader. The discriminants are the firmware's own
-/// (`RPI_FIRMWARE_*_CLK_ID`), so they are not renumbered.
+/// with no reader. The discriminants are the firmware's own clock ids (the
+/// firmware wiki's *Mailbox property interface*), so they are not renumbered.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum FirmwareClock {
@@ -1127,7 +1121,7 @@ impl FirmwareClock {
     /// more than the firmware's own minimum: the HDMI blocks' registers stall
     /// the bus while their state-machine clock runs below 120 MHz, at zero
     /// most of all, and the firmware leaves it at zero on a board booted with
-    /// no monitor. Linux's `clk-raspberrypi` holds the same bound.
+    /// no monitor.
     #[must_use]
     pub const fn least_hz(self) -> u64 {
         match self {
@@ -1178,8 +1172,8 @@ pub fn encode_clock_rate_query(
 /// Encode a request to run `clock` at `rate_hz`.
 ///
 /// Three value words — selector, rate, and the skip-setting-turbo flag —
-/// which is the request length the tag documents and the shape
-/// `clk-raspberrypi` sends.
+/// which is the twelve-byte request the firmware wiki's *Set clock rate*
+/// documents.
 /// Supplying only the first two both under-declares the value buffer and
 /// leaves the turbo word clear, which is how a request to lower the ARM clock
 /// came to be answered with the ceiling.
@@ -1302,11 +1296,13 @@ pub fn set_clock_rate(
 /// select, among others).
 pub const FIRMWARE_GPIO_COMPATIBLE: &[u8] = b"raspberrypi,firmware-gpio";
 
-/// Where the firmware's GPIO tags number the expander's lines from (Linux's
-/// `RPI_EXP_GPIO_BASE`): expander line `n` is firmware GPIO `128 + n`.
+/// Where the firmware's GPIO tags number the expander's lines from: expander
+/// line `n` is firmware GPIO `128 + n` (FreeBSD's `raspberrypi_gpio.c`,
+/// BSD-2-Clause).
 const FIRMWARE_GPIO_BASE: u32 = 128;
 
-/// `RPI_FIRMWARE_SET_GPIO_STATE`: drive one expander output high or low.
+/// *Set GPIO state* (FreeBSD's `bcm2835_firmware.h`, BSD-2-Clause): drive
+/// one expander output high or low.
 const TAG_SET_GPIO_STATE: u32 = 0x0003_8041;
 
 /// Encode a request driving expander `line` to `high`.
@@ -1324,8 +1320,7 @@ pub fn encode_gpio_state_write(line: u8, high: bool) -> [u32; PROPERTY_WORDS] {
 /// Validate the firmware's answer to [`encode_gpio_state_write`].
 ///
 /// The firmware reports the switch by overwriting the GPIO word with a
-/// status, zero on success — the one part of its answer Linux's
-/// `gpio-raspberrypi-exp` reads. Its per-tag code word is not relied on: the
+/// status, zero on success. Its per-tag code word is not relied on: the
 /// Pi 4's firmware leaves it zero, with no response bit and no length. A
 /// request never carries a zero there (the firmware numbers expander lines
 /// from 128), so a firmware that ignored the tag still fails.
@@ -1385,8 +1380,8 @@ const STATUS_EMPTY: u32 = 1 << 30;
 /// Status bit: the mailbox is full (no room to write).
 const STATUS_FULL: u32 = 1 << 31;
 
-/// Configuration bit: interrupt while mailbox 0 holds a word (Linux's
-/// `ARM_MC_IHAVEDATAIRQEN`).
+/// Configuration bit: interrupt while mailbox 0 holds a word (FreeBSD's
+/// `bcm2835_mbox.c`, BSD-2-Clause: `CONFIG_DATA_IRQ`).
 const CONFIG_DATA_IRQ: u32 = 1 << 0;
 
 /// The ARM→VC property-tags channel number.

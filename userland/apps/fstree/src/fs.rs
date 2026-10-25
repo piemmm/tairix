@@ -4,16 +4,22 @@
 //! through this trait. The `Run` binary implements it over the
 //! kernel-authorised `fs_*` syscalls (every per-inode and mount check stays
 //! kernel-side, and a refusal comes back as the frozen [`Errno`] the model
-//! surfaces on its message line); the tests implement it over an in-memory
-//! tree, so the whole session is drivable without a kernel.
+//! surfaces on its message line); the tests implement it over in-memory
+//! trees, so the whole session is drivable without a kernel. A copy, move or
+//! removal is only started here: the shared engine carries it out through
+//! the directories it holds.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
-use tairix_abi::{Errno, FileId, FileKind, RenameFlags};
+use tairix_abi::{Errno, FileId, FileKind};
+use tairix_fscopy::op::{OpError, Verb};
+use tairix_fscopy::{Landing, Unresolved};
 use tairix_procinfo::VolumeBytes;
+
+use crate::ops::Run;
 
 /// One directory entry as the listing reports it: exactly the fields the
 /// kernel's `fs_readdir` stream carries per entry, so a listing never costs
@@ -25,6 +31,9 @@ pub struct FsEntry {
     /// The entry's **own** kind, as the stream reports it: a symbolic link
     /// arrives as [`FileKind::Symlink`], never as what it names.
     pub kind: FileKind,
+    /// The node the stream names, or [`FileId::NONE`] where it names none
+    /// (a mount point): an operation started on the entry refuses another.
+    pub id: FileId,
     /// Apparent length in bytes; `0` for a directory.
     pub size: u64,
     /// Last contents-modification instant as the mounted format stores it;
@@ -49,10 +58,11 @@ pub struct VolumeInfo {
 }
 
 /// The filesystem operations the landed stages perform: listings, the
-/// volume list, the mode editor's stat/set pair, and the mutating
-/// operations the file commands drive (probe, streamed read/write with the
-/// hole-aware seek, create, mkdir, unlink, rename). Later stages extend this
-/// trait in place together with the callers they introduce.
+/// volume list, the mode and attribute editors' reads and writes, the
+/// viewers' and searches' streamed read, the destination probe and
+/// containment check the planner asks, `mkdir`, and the start of a copy,
+/// move or removal. Later stages extend this trait in place together with
+/// the callers they introduce.
 pub trait Fs {
     /// List every entry of the directory `path`, in any order (the model
     /// sorts them).
@@ -139,63 +149,24 @@ pub trait Fs {
 
     /// The [`FileKind`] of the entry `path` **names** — a resolve-only stat
     /// that does *not* follow a final symbolic link — used to probe a
-    /// destination before any I/O.
-    ///
-    /// Keeping the final link is what makes the probe safe: a link already
-    /// sitting at a destination must be seen as the link it is, because
-    /// creating or truncating "through" it would act on whatever it points
-    /// at, anywhere on the volume. Following it here would hand an attacker
-    /// who can plant a name inside a destination tree a redirect for every
-    /// later write.
+    /// destination before an operation is planned.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the filesystem raises; [`Errno::NotFound`] means the
-    /// path is absent, which the operations treat as "free to create".
+    /// path is absent, which the planner treats as "free to create".
     fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno>;
 
-    /// `path` as the kernel resolves it — each link followed and each `..`
-    /// applied to the directories walked — its last component allowed to be
-    /// absent, so a copy can tell whether it lands inside its own source.
+    /// Where the directory `dir` stands to the directory `src`, judged by
+    /// the shared containment check from the directories themselves, every
+    /// link on the way to either followed: [`Landing::Same`] for the source
+    /// itself, [`Landing::Within`] beneath it at any depth, else
+    /// [`Landing::Apart`].
     ///
     /// # Errors
     ///
-    /// The resolution's refusal.
-    fn canonical(&mut self, path: &str) -> Result<String, Errno>;
-
-    /// The identity of the node `path` names, a final link not followed.
-    ///
-    /// # Errors
-    ///
-    /// The probe's refusal.
-    fn identity(&mut self, path: &str) -> Result<FileId, Errno>;
-
-    /// The target the symbolic link at `path` stores, verbatim.
-    ///
-    /// The final component is never followed — the call is about the link —
-    /// and the target comes back exactly as stored, still unresolved, which
-    /// is what recreating the link at a new name needs.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises; [`Errno::OutOfRange`] when `path`
-    /// names anything but a symbolic link, and [`Errno::NotSupported`] on a
-    /// mount whose format stores no links.
-    fn read_link(&mut self, path: &str) -> Result<String, Errno>;
-
-    /// Create a symbolic link at `path` whose stored target is `target`.
-    ///
-    /// `target` is stored verbatim and never resolved, so recreating a link
-    /// elsewhere reproduces exactly the spelling the original held. A new
-    /// link never replaces an existing name: an occupied `path` is
-    /// [`Errno::AlreadyExists`], so a caller that means to replace one
-    /// removes it first.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
-    /// taken name, [`Errno::NotSupported`] on a format that stores no links.
-    fn create_link(&mut self, target: &str, path: &str) -> Result<(), Errno>;
+    /// The side whose directory could not be opened or identified.
+    fn landing(&mut self, src: &str, dir: &str) -> Result<Landing, Unresolved>;
 
     /// Read up to `buf.len()` bytes of the file at `path` from `offset`,
     /// returning the count read (`0` at end of file). A short read (fewer
@@ -206,93 +177,33 @@ pub trait Fs {
     /// Any [`Errno`] the filesystem raises while reading.
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
 
-    /// The length in bytes of the file at `path`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises.
-    fn size(&mut self, path: &str) -> Result<u64, Errno>;
-
-    /// Where the next region of `region`'s kind begins at or after `offset`
-    /// in the file at `path`, `None` when none does before its end.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises; [`Errno::NotSupported`] where the
-    /// backing keeps no word on its holes.
-    fn next_region(
-        &mut self,
-        path: &str,
-        offset: u64,
-        region: SeekRegion,
-    ) -> Result<Option<u64>, Errno>;
-
-    /// Create (or truncate to empty) the regular file at `path`, ready to
-    /// be written from offset `0`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises while creating.
-    fn create(&mut self, path: &str) -> Result<(), Errno>;
-
-    /// Write every byte of `bytes` to the file at `path` from `offset`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises while writing; a partial write
-    /// is an error.
-    fn write(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<(), Errno>;
-
-    /// Set the length of the file at `path` to `len`: bytes past what was
-    /// written read as zeros.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises.
-    fn set_len(&mut self, path: &str, len: u64) -> Result<(), Errno>;
-
-    /// Create the directory at `path`.
+    /// Create the directory at `path`, born with `mode` less the umask.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::AlreadyExists`].
-    fn mkdir(&mut self, path: &str) -> Result<(), Errno>;
+    fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno>;
 
-    /// Remove the non-directory entry `path` names — the name as typed, so
-    /// removing a symbolic link removes the *link* and never what it names.
+    /// Start copying or moving `src`, a path and the node it was listed as,
+    /// to `target`: the directories holding them opened by path, and every
+    /// entry beneath reached by name from one held, as the shared engine
+    /// carries it out.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises while removing.
-    fn remove_file(&mut self, path: &str) -> Result<(), Errno>;
+    /// The refusal opening either directory, naming its path.
+    fn transfer(
+        &mut self,
+        verb: Verb,
+        src: (&str, FileId),
+        target: &str,
+    ) -> Result<Box<dyn Run>, OpError>;
 
-    /// Remove the **empty** directory at `path`.
+    /// Start removing `path`, a path and the node it was listed as, and
+    /// everything beneath a directory.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — a non-empty directory is the
-    /// kernel's refusal to surface, never silently recursed into.
-    fn remove_dir(&mut self, path: &str) -> Result<(), Errno>;
-
-    /// Rename `src` to `dst` atomically within one volume, or report
-    /// [`RenameOutcome::CrossDevice`] when the two paths live on different
-    /// volumes so the caller can fall back to copy-then-remove. An occupied
-    /// `dst` is replaced unless `flags` refuses it.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises for a non-boundary failure —
-    /// [`Errno::AlreadyExists`] for an occupied `dst` under
-    /// [`RenameFlags::NO_REPLACE`].
-    fn rename(&mut self, src: &str, dst: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno>;
-}
-
-/// What a [`Fs::rename`] achieved: the atomic rename, or the honest
-/// cross-volume report that drives the copy-then-remove fallback.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum RenameOutcome {
-    /// The entry was renamed atomically.
-    Renamed,
-    /// `src` and `dst` live on different volumes; nothing was changed.
-    CrossDevice,
+    /// The refusal opening the directory holding it.
+    fn remove(&mut self, path: (&str, FileId)) -> Result<Box<dyn Run>, OpError>;
 }

@@ -133,8 +133,8 @@ kommen in späteren Stufen des Plans dieses Werkzeugs.
 
 - `0` — die Sitzung endete durch das `q` des Benutzers.
 - `1` — das Startverzeichnis konnte nicht aufgelistet werden, oder der
-  Terminalpfad schlug fehl.
-- `2` — die Argumente konnten nicht verstanden werden.
+  Terminalpfad schlug fehl. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`.
 
 ## SEE ALSO
 

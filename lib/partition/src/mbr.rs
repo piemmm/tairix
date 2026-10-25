@@ -16,7 +16,7 @@ use crate::{Partition, PartitionTable, PartitionType};
 
 /// MBR partition-type byte for a FAT32 partition addressed via LBA.
 ///
-/// The platform firmware (e.g. the Raspberry Pi GPU bootloader) scans the
+/// The platform firmware scans the
 /// four primary entries for a FAT partition and reads the firmware files
 /// from it; [`encode`] writes the boot partition with this type.
 pub const PART_TYPE_FAT32_LBA: u8 = 0x0c;

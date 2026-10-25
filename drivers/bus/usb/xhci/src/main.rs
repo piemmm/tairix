@@ -1172,7 +1172,7 @@ mod program {
                 interfaces.deliver_streams(live);
             }
             // A teardown can leave the controller halted with a latched Host
-            // System Error on the Pi 4 VL805, and a faulted controller raises
+            // System Error on some controllers, and a faulted controller raises
             // no further interrupt (xHCI §4.24.1). Only a teardown pays for
             // the register read; an attempt that failed is retried off the
             // grace timer, never on every pass.

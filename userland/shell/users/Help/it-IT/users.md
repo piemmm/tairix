@@ -40,9 +40,10 @@ comandi digitati dentro la sessione.
 
 ## EXIT STATUS
 
-- `0` — la sessione è terminata in modo pulito, oppure è stata mostrata
-  la guida breve.
-- `2` — la riga di comando non è stata compresa.
+- `0` — la sessione è terminata in modo pulito, l'elenco è stato
+  stampato, oppure è stata mostrata la guida breve.
+- `1` — l'elenco non si è potuto leggere. Anche una riga di comando non
+  compresa termina con `1`.
 
 ## ENVIRONMENT
 

@@ -56,6 +56,13 @@ dispositivo, así que `%d` es ese id en decimal y `%D` en hexadecimal;
 comparar el `%d` de dos archivos sigue respondiendo exactamente a «¿están
 en un mismo volumen?».
 
+En un terminal, cada nombre que muestra la salida se entrecomilla donde
+un shell lo necesitaría, y cualquier carácter de control u otro carácter
+invisible que haya en él se escribe como secuencia de escape, de modo
+que un nombre no puede controlar ni reordenar la pantalla; GNU lo
+muestra sin cambios. Una tubería o un archivo recibe el nombre byte a
+byte.
+
 ## OPTIONS
 
 - `-L, --dereference` — describir lo que nombra un enlace simbólico, en
@@ -80,9 +87,9 @@ en un mismo volumen?».
 ## EXIT STATUS
 
 - `0` — se describió cada operando (o se escribió la ayuda breve).
-- `1` — al menos un operando no se pudo leer, o la salida falló.
-- `2` — no se entendió la línea de órdenes, o su formato nombraba una
-  directiva que este sistema no puede servir.
+- `1` — al menos un operando no se pudo leer, o la salida falló. Una
+  línea de órdenes no entendida, o cuyo formato nombraba una directiva
+  que este sistema no puede servir, también termina con `1`.
 
 ## ENVIRONMENT
 

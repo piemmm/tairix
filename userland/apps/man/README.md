@@ -46,7 +46,7 @@ man [-h | -?] <command> [topic]
 
 `--` ends option parsing. A trailing `.app` on the word names the bundle
 directly (`man top.app` shows `top`'s page). Exit codes: `0` page shown,
-`1` command/document not found or delivery failed, `2` usage error.
+`1` command/document not found, delivery failed, or a usage error.
 
 ## Locale selection
 

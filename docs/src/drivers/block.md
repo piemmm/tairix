@@ -641,10 +641,10 @@ a park. A spinning contender would then burn its whole quantum waiting on a
 holder that is not running — or deadlock a single CPU outright — whereas the
 `SleepLock` parks the contender and wakes it when the holder releases. The
 layer is generic over any `Block` and names no device or architecture, so every
-port shares the one definition (§2.2 / §2.20). The aarch64 root-unlock tail
-(`finish_unlock`) wraps its brought-up virtio-blk or EMMC2 device in a
-`SharedBlock` and drives both the `/System` autoload and the interactive unlock
-through concurrent handles rather than borrowing then moving the one device.
+port shares the one definition (§2.2 / §2.20). The shared root-unlock tail
+(`finish_unlock`) wraps the floor device a port brought up in a `SharedBlock`
+and drives both the `/System` autoload and the interactive unlock through
+concurrent handles rather than borrowing then moving the one device.
 
 The floor's disk is additionally wrapped in a `MeteredBlock`
 (`tairix_kernel_core::fs::blkmeter`) *innermost* — below the whole-disk block
@@ -683,17 +683,12 @@ during boot. `DriverStoreService<B>` (`tairix_kernel::shared_block`) owns the
 boot disk's `SharedBlock` and hands out a fresh read-only window
 (`SharedBlockHandle`) for each `/System` read.
 
-It keeps the mount alive **without promoting the device backing to `'static`**.
-The aarch64 root-unlock kthread is a *never-returning* kernel service
-(`AGENTS.md` §17.1 — "a continuous service never returns"): because
-`finish_unlock` receives the brought-up device by value while its backing (the
-DMA pool, MMIO map, IRQ waiter, and virtio host, or the EMMC2 register-window
-map) stays on the still-suspended `virtio_blk_unlock` / `emmc2_unlock` frame,
-making `finish_unlock` never return keeps that whole bring-up call chain
-suspended on the kthread's coroutine stack. The borrowed backing therefore
-stays live for free, and the proven IRQ-wait / cooperative-yield device-driving
-model is unchanged (`AGENTS.md` §2.17 — no security or correctness regression
-on a metal-confirmed path).
+The disk is the system's for life, so its bring-up leaks the device's backing —
+the register map, the DMA pool and host, the IRQ waiter — to `'static`, and the
+root-unlock kthread is a *never-returning* kernel service (`AGENTS.md` §17.1 —
+"a continuous service never returns"): `finish_unlock` takes the brought-up
+device by value and never returns, so the device outlives every window handed
+out over it.
 
 After running the boot autoload and the root unlock through two
 concurrent windows, logging the outcome, and releasing the console-0 gate to
@@ -731,15 +726,26 @@ match, never by a kernel guess (§18.5):
 The virtio-blk and EMMC2 drivers are part of the **bootstrap floor** (`AGENTS.md`
 §18.6): the storage path must be up before the signed driver store under
 `/System/Drivers/` is reachable, so the volume that holds the store can be
-read. They are therefore compiled in and registered in the kernel binary's
-`driver_catalog::IN_KERNEL_DRIVERS` floor registry (virtio-blk for the QEMU
-`virt` / x86_64 root, EMMC2 for the Raspberry Pi 4 SD card), each paired
-with the driver crate's own `BIND_KEYS` and a build-signed manifest. The
-floor binds by discovery-match through the same shared `lib/devmatch`
-policy the user-space `devmgr` uses — the in-kernel match and the
-user-space match can never diverge (§2.2) — and is signature-verified and
-capability-gated alike (§18.6). The floor only ever shrinks toward the
-store, never grows.
+read. A floor driver declares itself in a `Floor.toml` beside its crate's
+`Cargo.toml`, one quoted string per key:
+
+| Key        | Value |
+|------------|-------|
+| `bring-up` | `virtio`: the port provisions the transport and the kernel opens the device as a virtio disk. `host`: the kernel lends the driver a host over its node's own resources and calls the crate's `floor::open`. |
+| `isas`     | The instruction sets whose kernel holds it, space-separated. |
+| `bind`     | The crate's `BIND_KEYS` restated for the build to sign, space-separated: `compatible:<string>@<priority>`, `virtio:<id>@<priority>`, or `pci:`/`usb:<vendor>:<device>:<class>@<priority>` with the vendor, device and class in hex. |
+| `reason`   | Why it sits below the store, in one line. |
+
+The kernel's `build.rs` walks `drivers/` for the declarations and generates
+each target's `driver_catalog::IN_KERNEL_DRIVERS` table, so the floor is listed
+nowhere by hand. An entry takes the crate's own `FLOOR_PATH`, `BIND_KEYS` and
+`register`, and a `host` driver's `floor::open` and `floor::DMA_CARVES`, beside
+the build-signed manifest; the build fails when the manifest's bind table is
+not the crate's. The floor binds by discovery-match through the same shared
+`lib/devmatch` policy the user-space `devmgr` uses — the in-kernel match and
+the user-space match can never diverge (§2.2) — and is signature-verified and
+capability-gated alike (§18.6). The floor only ever shrinks toward the store,
+never grows.
 
 ### Raspberry Pi 4 EMMC2 (SDHCI)
 
@@ -762,15 +768,18 @@ proven by reading block 0 at its own timing:
 UHS-I is attempted only where the board can switch the card's I/O rail *and*
 cycle its power, because a card that has switched to 1.8 V returns to 3.3 V
 only by losing power. On the Pi 4 both rails are lines of the firmware's GPIO
-expander (`VDD_SD_IO_SEL`, `SD_PWR_ON`), which the kernel resolves from the
-EMMC2 node's `vqmmc-supply` and `vmmc-supply` (`tairix_arch_aarch64::sd_supply`)
-and drives over the VideoCore mailbox. Bring-up first selects 3.3 V, as a card
+expander (`VDD_SD_IO_SEL`, `SD_PWR_ON`): the aarch64 discovery reads them from
+the EMMC2 node's `vqmmc-supply` and `vmmc-supply` and states them on the node
+as its I/O and power rails (`HwNode::io_rail`, `HwNode::power_rail`), with the
+levels and the settling, start-up and off-on times the regulators declare, and
+the driver switches them over the firmware channel the kernel lends it, which
+answers it those two lines alone. Bring-up first selects 3.3 V, as a card
 powers up; a board whose supply refuses even that runs the card at 3.3 V. A
 failure in a rung's own steps steps
 down, power-cycling the card first when it had left 3.3 V; a card that never
 answers identification is power-cycled once and retried. The BCM2711 offers
-DDR50 without sampling-clock tuning, so a UHS-I card runs DDR50, as it does
-under Linux; the driver performs no tuning, so a mode needing it is never
+DDR50 without sampling-clock tuning, so a UHS-I card runs DDR50; the driver
+performs no tuning, so a mode needing it is never
 chosen.
 
 **Transfers.** ADMA2 moves up to 256 KiB per command through a data staging
@@ -800,13 +809,14 @@ none again and the staging is withheld for the kernel's DMA quarantine. A card
 whose state recovery could not prove is asked with `CMD13` before its next
 data command, and aborted or awaited back into `tran` within three rounds.
 
-**Diagnostics.** QEMU models no EMMC2, so the UART log is the metal signal.
-A failed bring-up logs the `BringUpStage` it stalled at and the `DriverError`
-as the `stage=` and `error=` fields of the unlock service's
-`EventId(4139)` line. A successful one logs `root-unlock: emmc2 link` on the
-same event with `mode`, `clock_hz`, `base_clock_hz`, `signal_mv`, `cmd23`,
-`dma`, and the stage and error of any speed or DMA fallback, at `Warn` when
-either fell back. The engine also reports each step it takes as a
+**Diagnostics.** QEMU models no EMMC2, so the UART log is the metal signal,
+and the driver records it on the log the kernel hands `floor::open`. A failed
+bring-up logs `emmc2: bring-up failed` (`EventId(24941)`) with the
+`BringUpStage` it stalled at and the `DriverError` as its `stage` and `error`
+fields. A successful one logs `emmc2: link` (`EventId(24940)`) with `mode`,
+`clock_hz`, `base_clock_hz`, `signal_mv`, `cmd23`, `dma`, and the stage and
+error of any speed or DMA fallback, at `Warn` when either fell back. The
+engine also reports each step it takes as a
 `trace::Trace` record; no kernel host records them, and the bring-up tests
 read them to check the steps.
 
@@ -816,15 +826,16 @@ is decoded as the controller presents the R2 response — CRC stripped and
 right-aligned — so `CSD_STRUCTURE` is read at `RESP3[23:22]` and `C_SIZE` at
 `RESP1[29:8]`. Only SDHC/SDXC (CSD v2) cards are supported.
 
-The driver is wired into the root-unlock path
-(`crate::aarch64::root_unlock::emmc2_unlock`): it admits the driver through
-the signed load gate, maps the node's register window under `CAP_MMIO_MAP`,
-binds and arms the controller's GIC SPI (`emmc2_spi`), carves the staging from
-a `CAP_MEM_DMA`-gated pool, borrows the firmware's services for the bring-up
-alone, and feeds the card to the shared `finish_unlock` tail. The kernel is
-the mailbox's only user then — the `vcmailbox` service is loaded from the
-store this bring-up reaches — and drops the transport before that store is
-served.
+The kernel opens the card through the driver's `floor::open`
+(`floor_mmio::bring_up_host_floor`). Having admitted the driver at the signed
+load gate, it claims the node, binds and arms the controller's one wired GIC
+line, carves the staging inside the node's DMA window from a
+`CAP_MEM_DMA`-gated pool, and lends the driver a host that maps only the
+node's own register window under `CAP_MMIO_MAP`, with the firmware channel
+for the bring-up alone; the card then feeds the shared `finish_unlock` tail.
+The kernel is the mailbox's only user then — the `vcmailbox` service is
+loaded from the store this bring-up reaches — and drops the channel before
+that store is served.
 
 ### USB mass storage (BOT / CBI / UAS) — `drivers/storage/usb_msd`
 

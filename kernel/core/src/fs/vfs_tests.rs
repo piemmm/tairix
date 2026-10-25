@@ -319,6 +319,27 @@ fn capability_gated_node_cannot_be_unlinked_without_the_capability() {
 }
 
 #[test]
+fn a_sticky_directory_lets_only_the_entry_s_or_its_own_owner_remove_a_name() {
+    let mut vfs = default_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let (writer, other) = (cred(7, 7, &caps), cred(8, 8, &caps));
+    vfs.mkdir(&admin, &p("/Users/drop"), Mode::from_bits(0o1777))
+        .expect("mkdir");
+    for name in ["/Users/drop/a", "/Users/drop/b"] {
+        vfs.create_file(&writer, &p(name), Mode::from_bits(0o644), Vec::new())
+            .expect("a writer of the drop folder creates");
+    }
+    assert_eq!(
+        vfs.remove(&other, &p("/Users/drop/a"), false),
+        Err(VfsError::PermissionDenied),
+        "another writer may not remove it"
+    );
+    assert_eq!(vfs.remove(&writer, &p("/Users/drop/a"), false), Ok(()));
+    assert_eq!(vfs.remove(&admin, &p("/Users/drop/b"), false), Ok(()));
+}
+
+#[test]
 fn capability_gated_empty_directory_cannot_be_removed_without_the_capability() {
     let mut vfs = default_vfs();
     let caps = CapabilitySet::empty();

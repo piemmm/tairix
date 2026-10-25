@@ -56,8 +56,8 @@ Operand.
 - `1` — die Datenbank hat die Anlage abgelehnt oder sie ist
   fehlgeschlagen (etwa eine fehlende Berechtigung, eine doppelte Kennung
   oder eine unbekannte Gruppe); der Grund wird auf der
-  Standardfehlerausgabe ausgegeben.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Standardfehlerausgabe ausgegeben. Eine nicht verstandene Befehlszeile
+  endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

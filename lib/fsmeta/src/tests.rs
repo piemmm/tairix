@@ -16,6 +16,19 @@ use crate::{
 // --- key grammar ---------------------------------------------------------
 
 #[test]
+fn a_character_that_hides_or_reorders_text_is_escaped_too() {
+    assert_eq!(attr::text_value("rlo\u{202e}gpj".as_bytes()), None);
+    assert_eq!(
+        attr::display_value("rlo\u{202e}gpj".as_bytes()),
+        "rlo\\xe2\\x80\\xaegpj"
+    );
+    assert_eq!(
+        attr::display_value("caf\u{e9}\u{200b}".as_bytes()),
+        "caf\u{e9}\\xe2\\x80\\x8b"
+    );
+}
+
+#[test]
 fn every_namespace_round_trips_its_name() {
     for ns in Namespace::ALL {
         assert_eq!(Namespace::from_name(ns.as_str()), Some(ns));

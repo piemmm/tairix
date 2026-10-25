@@ -33,8 +33,8 @@ reçoit que la restauration de la discipline d'entrée.
 ## EXIT STATUS
 
 - `0` — le terminal a été restauré.
-- `1` — la sortie n'a pas pu être délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+- `1` — la sortie n'a pas pu être délivrée. Une ligne de commande non
+  comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

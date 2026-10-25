@@ -1,7 +1,7 @@
 //! Host tests for `audioctl`: the command line, and each command against a
 //! fake audio service and System Information API.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -20,6 +20,7 @@ use tairix_audio::target::{AudioTarget, TargetError};
 use tairix_audio::volume::LevelError;
 use tairix_help::{HelpSource, SourceError};
 use tairix_procinfo::{Output, Transport, AUDIO_DEVICE_HEADER, AUDIO_STREAM_HEADER};
+use tairix_util::getopt::Refusal;
 
 use super::{parse, run, Command, Failure, Sound, UsageError, USAGE};
 
@@ -246,11 +247,11 @@ fn a_malformed_command_line_says_what_is_wrong_with_it() {
         ),
         (
             &["devices", "-x"],
-            UsageError::UnknownOption(String::from("-x")),
+            UsageError::Option(Refusal::UnknownShort('x')),
         ),
         (
             &["devices", "-a"],
-            UsageError::UnknownOption(String::from("-a")),
+            UsageError::Option(Refusal::UnknownShort('a')),
         ),
         (&["level"], UsageError::Missing("a device")),
         (&["level", "audio:sink/1"], UsageError::Missing("a level")),
@@ -439,4 +440,42 @@ fn help_documents_the_parser_switches() {
         let pinned: Vec<&str> = SWITCHES.iter().map(|(key, _)| *key).collect();
         assert_eq!(documented, pinned, "{locale}/audioctl.md");
     }
+}
+
+/// `getopt`'s words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+/// A refused option is worded as GNU's `getopt` words it.
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-Q"]), "invalid option -- 'Q'");
+    // A bundle with one bad letter is refused whole.
+    assert_eq!(refused(&["streams", "-aQ"]), "invalid option -- 'Q'");
+    assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+    assert_eq!(
+        refused(&["streams", "--all=yes"]),
+        "option '--all' doesn't allow an argument"
+    );
+    // Another command refuses `streams`'s own option as it was spelled.
+    assert_eq!(
+        refused(&["devices", "--all"]),
+        "unrecognized option '--all'"
+    );
+    assert_eq!(
+        refused(&["mute", "--al", "1"]),
+        "unrecognized option '--al'"
+    );
+}
+
+/// `getopt_long` reads `--al` as `--all` and `--vers` as `--version`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(
+        parse(&["streams", "--al"]),
+        Ok(Command::Streams { all: true })
+    );
+    assert_eq!(parse(&["--vers"]), Ok(Command::Version));
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }

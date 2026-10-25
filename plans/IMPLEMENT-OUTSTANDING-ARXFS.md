@@ -154,7 +154,7 @@ their reason recorded there, not here:
   transaction span operations and gave it a per-device-class dirty-age window,
   but nothing in the system fired that window on a volume that went idle: ARXFS
   owns no thread, so between operations no one observed it. The expiry now lives
-  above the driver, where Linux puts it — one kernel task parking on the soonest
+  above the driver — one kernel task parking on the soonest
   deadline any mounted volume published, calling the existing `fs_sync` on each
   that is due. The driver *names* each deadline rather than the kernel inferring
   one, so the window policy has one definition and the notification sits at the

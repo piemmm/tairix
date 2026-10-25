@@ -25,14 +25,14 @@
 //!
 //! # Fail closed
 //!
-//! An unknown option or a number of operands other than one is a
-//! [`UnmountError::Usage`]. A name matching no mount, or a mount with no
-//! detachable volume identity (the boot volumes, the in-RAM bindings),
-//! is a typed error with its reason on standard error — never a guessed
-//! detach. A refused detach surfaces the kernel's exact `Errno`; when
-//! the volume is unavailable the tool adds the `--force` consequence to
-//! the diagnostic and emits an fd-3 `suggestion` record (additive,
-//! ignorable). There is no panic.
+//! An option `getopt` refuses is an [`UnmountError::Option`], in its words,
+//! and a number of operands other than one an [`UnmountError::Usage`]. A
+//! name matching no mount, or a mount with no detachable volume identity
+//! (the boot volumes, the in-RAM bindings), is a typed error with its reason
+//! on standard error — never a guessed detach. A refused detach surfaces the
+//! kernel's exact `Errno`; when the volume is unavailable the tool adds the
+//! `--force` consequence to the diagnostic and emits an fd-3 `suggestion`
+//! record (additive, ignorable). There is no panic.
 //!
 //! # Module map
 //!
@@ -44,8 +44,8 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`); the only dependencies are the audited
-//! `lib/abi`, `lib/help`, and `lib/procinfo` crates, so this userland
-//! tool never links a kernel or driver crate. No `unsafe`, and no
+//! `lib/abi`, `lib/help`, `lib/procinfo`, and `lib/util` crates, so this
+//! userland tool never links a kernel or driver crate. No `unsafe`, and no
 //! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
@@ -59,7 +59,7 @@ pub mod command;
 pub mod error;
 pub mod io;
 
-pub use client::{run, USAGE};
+pub use client::run;
 pub use command::{parse, Command};
 pub use error::UnmountError;
 pub use io::{Detacher, Output};

@@ -36,7 +36,7 @@ clear [-x]
 
 - `0` — the clear sequence was written (or short help served).
 - `1` — the terminal cannot clear, or the output could not be delivered.
-- `2` — the command line was not understood.
+  A command line that was not understood exits `1` too.
 
 ## Stability
 

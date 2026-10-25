@@ -5,7 +5,7 @@
 extern crate std;
 
 use alloc::borrow::ToOwned;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use std::collections::BTreeMap;
@@ -136,10 +136,31 @@ fn parse_accepts_no_operand_one_operand_and_help() {
 }
 
 #[test]
-fn parse_refuses_options_and_extra_operands() {
-    assert_eq!(parse(&["-x"]), Err(EditError::Usage));
-    assert_eq!(parse(&["--frobnicate"]), Err(EditError::Usage));
+fn parse_refuses_extra_operands() {
     assert_eq!(parse(&["a.txt", "b.txt"]), Err(EditError::Usage));
+}
+
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+    assert_eq!(
+        refused(&["--frobnicate"]),
+        "unrecognized option '--frobnicate'"
+    );
+    assert_eq!(
+        refused(&["--help=1"]),
+        "option '--help' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
 }
 
 #[test]

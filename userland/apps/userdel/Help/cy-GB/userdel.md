@@ -25,8 +25,7 @@ Mae `--` yn gorffen dosrannu opsiynau: mae pob ymresymiad diweddarach yn operand
 ## EXIT STATUS
 
 - `0` — dilëwyd y cyfrif.
-- `1` — gwrthododd neu fethodd y gronfa'r dileu (er enghraifft gallu coll, cyfrif anhysbys, neu'r gweinyddwr olaf); argraffir y rheswm ar y gwall safonol.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — gwrthododd neu fethodd y gronfa'r dileu (er enghraifft gallu coll, cyfrif anhysbys, neu'r gweinyddwr olaf); argraffir y rheswm ar y gwall safonol. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

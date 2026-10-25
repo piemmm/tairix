@@ -71,8 +71,9 @@ penynnau (rhagosodiad 60 ar gyfer IPv4 ac 80 ar gyfer IPv6).
 
 - `0` — rhedodd yr olrhain, p'un a gyrhaeddodd y gwesteiwr ai peidio (neu
   ysgrifennwyd y cymorth byr).
-- `2` — ni ddeallwyd y llinell orchymyn, ni ddatryswyd y targed, ni ellid
-  agor y soced, neu ni ellid anfon chwiliwr.
+- `1` — ni ddeallwyd y llinell orchymyn.
+- `2` — ni ddatryswyd y targed, ni ellid agor y soced, neu ni ellid anfon
+  chwiliwr.
 
 ## ENVIRONMENT
 

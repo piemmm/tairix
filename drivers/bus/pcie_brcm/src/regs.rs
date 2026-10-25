@@ -132,7 +132,7 @@ pub const PCIE_STATUS_PHYLINKUP_MASK: u32 = 0x10;
 /// `PCI_PRIMARY_BUS` (config-header byte offset `0x18`) in the root
 /// complex's own type-1 configuration header, which the brcm RC exposes
 /// at the controller register block's offset 0 (bus 0 reads/writes land
-/// directly there — the same direct access `mech_brcm` uses for bus 0).
+/// directly there — the same direct access `config_window` uses for bus 0).
 ///
 /// Until this register names the downstream bus, the root complex does
 /// not forward configuration transactions to it, so the VL805 at
@@ -161,7 +161,7 @@ pub const PRIMARY_BUS_SUBORDINATE_MASK: u32 = 0x00ff_0000;
 /// return the `0xdead_dead` abort poison) until the window is named.
 /// Programming it mirrors the bridge-window assignment a full PCI
 /// enumerator would perform, which the
-/// windowed `mech_brcm` accessor does not.
+/// windowed `config_window` accessor does not.
 pub const RC_CFG_MEMORY_BASE_LIMIT: usize = 0x20;
 /// Memory-base field within [`RC_CFG_MEMORY_BASE_LIMIT`] (`[15:4]`): holds
 /// address bits `[31:20]` of the window base; bits `[3:0]` are read-only 0.
@@ -183,7 +183,7 @@ pub const MEMORY_WINDOW_GRANULE_SHIFT: u32 = 20;
 /// secondary side only when its **own** Command register has Memory Space
 /// Enable set, and forwards a downstream device's DMA upstream only with
 /// Bus Master Enable set, so a full PCI enumerator enables both bits on
-/// every bridge; the windowed `mech_brcm`
+/// every bridge; the windowed `config_window`
 /// accessor does not, so the root-complex bring-up does it here.
 ///
 /// On the BCM2711's *integrated* root complex Memory Space Enable latches
@@ -221,7 +221,7 @@ pub const RC_SECONDARY_BUS: u8 = 1;
 /// would not reach more hardware (there is no on-board PCIe switch) and
 /// would let the root port forward configuration to buses that no device
 /// answers — a transaction the windowed accessor already refuses to
-/// issue (`tairix_pci::mechanism_brcm`), but the bridge bound is
+/// issue (`config_window`), but the bridge bound is
 /// kept honest to the topology too (no speculative
 /// width for a switch this platform does not have).
 pub const RC_SUBORDINATE_BUS: u8 = RC_SECONDARY_BUS;

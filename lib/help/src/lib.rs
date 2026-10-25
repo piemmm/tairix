@@ -74,9 +74,9 @@ pub use locale::{
     RawLoaded, Selection, SourceError, TagError, DEFAULT_LOCALE, MAX_DOCUMENT_NAME_LEN,
     MAX_LOCALE_DIRS, MAX_LOCALE_LEN, REQUIRED_LOCALES,
 };
-pub use own::own_short_help;
 #[cfg(feature = "rt")]
-pub use own::{print_own_short_help, user_locale, BundleHelp};
+pub use own::{arguments, print_own_short_help, report_misuse, user_locale, BundleHelp};
+pub use own::{own_short_help, TryHelp, MISUSE, UNREADABLE_ARGUMENTS};
 pub use render::{render_full, render_short, RenderCtx, Styling};
 
 #[cfg(test)]

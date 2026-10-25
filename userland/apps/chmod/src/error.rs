@@ -1,7 +1,12 @@
 //! The outcomes of running a `chmod` command.
 
+use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_fscopy::tree::RootRefusal;
+use tairix_util::getopt::Refusal;
+use tairix_util::output::Failure;
+use tairix_util::quote::quote;
 
 /// Why a `chmod` invocation did not complete.
 ///
@@ -9,44 +14,88 @@ use tairix_abi::Errno;
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChmodError {
-    /// The command line carried an unrecognised option, or named fewer than
-    /// two operands (`chmod` needs a mode and at least one file). The caller
-    /// should print [`crate::USAGE`]. Nothing is changed.
+    /// An option `getopt` refuses, worded as it words it. Nothing is
+    /// changed.
+    Option(Refusal),
+    /// The command line named fewer than two operands (`chmod` needs a mode
+    /// and at least one file). Nothing is changed.
     Usage,
-    /// The mode operand could not be parsed as an octal mode (one to four
-    /// octal digits) or a symbolic mode (`[ugoa]*[-+=][rwxXst]*`, clauses
-    /// separated by commas). Nothing is changed.
-    BadMode,
-    /// Inspecting an operand failed. Carries the underlying [`Errno`] — e.g.
-    /// [`Errno::NotFound`] for a missing file or [`Errno::PermissionDenied`]
-    /// when the caller may not reach it.
-    Stat(Errno),
-    /// Applying the new mode to a file failed. Carries the underlying
-    /// [`Errno`].
-    Apply(Errno),
-    /// Reading a directory's entries during a recursive (`-R`) descent failed.
-    /// Carries the underlying [`Errno`].
-    Read(Errno),
-    /// Writing the usage banner to the terminal failed. Carries the underlying
-    /// [`Errno`].
+    /// The mode operand, carried, reads as neither an octal mode nor a
+    /// symbolic one (`tairix_util::mode`). Nothing is changed.
+    BadMode(String),
+    /// Inspecting `path` failed — [`Errno::NotFound`] for a missing file,
+    /// [`Errno::PermissionDenied`] for one the caller may not reach.
+    Stat {
+        /// The path inspected.
+        path: String,
+        /// Why.
+        errno: Errno,
+    },
+    /// The operand `path` is a symbolic link naming nothing.
+    Dangling(String),
+    /// Under `--preserve-root`, the operand `path` reached the view root.
+    PreserveRoot(String),
+    /// Applying the new mode to `path` failed.
+    Apply {
+        /// The path changed.
+        path: String,
+        /// Why.
+        errno: Errno,
+    },
+    /// Opening or listing the directory `path` during a recursive (`-R`)
+    /// descent failed.
+    Read {
+        /// The directory read.
+        path: String,
+        /// Why.
+        errno: Errno,
+    },
+    /// Writing the usage banner, a report or a diagnostic to the terminal
+    /// failed.
     Output(Errno),
-    /// One or more operands failed under `-f`: the diagnostics were
-    /// suppressed and the run continued, but the failure still fails the
-    /// run. Carries no message — that is the point of `-f`.
-    Silenced,
+}
+
+impl Failure for ChmodError {
+    /// The command line or the terminal failing; a node's failure is carried
+    /// past.
+    fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            Self::Option(_) | Self::Usage | Self::BadMode(_) | Self::Output(_)
+        )
+    }
+
+    fn unreported(errno: Errno) -> Self {
+        Self::Output(errno)
+    }
 }
 
 impl fmt::Display for ChmodError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
-            Self::BadMode => f.write_str("invalid mode"),
-            Self::Stat(errno) => write!(f, "cannot access path: {errno}"),
-            Self::Apply(errno) => write!(f, "cannot change mode: {errno}"),
-            Self::Read(errno) => write!(f, "cannot read directory: {errno}"),
-            Self::Silenced => f.write_str("some operands failed (diagnostics suppressed by -f)"),
+            Self::BadMode(spec) => write!(f, "invalid mode: {}", quote(spec)),
+            Self::Stat { path, errno } => write!(f, "cannot access {}: {errno}", quote(path)),
+            Self::Dangling(path) => {
+                write!(f, "cannot operate on dangling symlink {}", quote(path))
+            }
+            Self::PreserveRoot(path) => write!(
+                f,
+                "{}",
+                RootRefusal {
+                    word: "chmod",
+                    path
+                }
+            ),
+            Self::Apply { path, errno } => {
+                write!(f, "changing permissions of {}: {errno}", quote(path))
+            }
+            Self::Read { path, errno } => {
+                write!(f, "cannot read directory {}: {errno}", quote(path))
+            }
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
     }

@@ -29,8 +29,8 @@ use crate::render::{
 };
 use crate::resolve::{resolve_array, resolve_device, resolve_members};
 
-/// The one-line usage banner, printed on a usage error and as the fallback
-/// when the bundled help document is unavailable.
+/// The one-line usage banner, printed as the fallback when the bundled help
+/// document is unavailable.
 pub const USAGE: &str = "usage: mdadm {--create --level=<L> --raid-devices=<n> [--chunk=<blocks>] \
      <device>... | --detail [<array>] | --examine | --add <array> <device> | \
      --remove <array> <device> | --stop <array>}";

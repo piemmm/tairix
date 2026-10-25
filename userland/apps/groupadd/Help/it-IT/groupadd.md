@@ -39,8 +39,8 @@ operando.
 - `0` — il gruppo è stato creato.
 - `1` — il registro ha rifiutato la creazione o questa è fallita (per
   esempio una capacità mancante o un identificatore duplicato); il
-  motivo è stampato sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+  motivo è stampato sull'errore standard. Anche una riga di comando
+  non compresa termina con `1`.
 
 ## ENVIRONMENT
 

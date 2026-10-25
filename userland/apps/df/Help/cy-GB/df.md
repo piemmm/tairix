@@ -71,8 +71,8 @@ gael eto.
 - `0` — cwmpasodd yr adroddiad bopeth a ofynnwyd (neu ysgrifennwyd y
   cymorth byr).
 - `1` — ni ellid adrodd am operand, ni adawodd yr hidlwyr ddim, neu
-  methodd yr ymholiad neu'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  methodd yr ymholiad neu'r allbwn. Mae llinell orchymyn na ddeallwyd
+  hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

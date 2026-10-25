@@ -34,8 +34,8 @@ error.
 
 - `0` — the name (or a requested short help) was written.
 - `1` — the identity read, the directory lookup, or the output failed,
-  or the directory holds no name for the user ID.
-- `2` — the command line was not understood.
+  or the directory holds no name for the user ID. A command line that was
+  not understood exits `1` too.
 
 ## ENVIRONMENT
 

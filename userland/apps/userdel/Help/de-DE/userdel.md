@@ -25,8 +25,7 @@ Die Datenbank entscheidet, was entfernt werden darf. Sie verweigert das Löschen
 ## EXIT STATUS
 
 - `0` — das Konto wurde gelöscht.
-- `1` — die Datenbank hat das Löschen verweigert oder es ist fehlgeschlagen (etwa eine fehlende Fähigkeit, ein unbekanntes Konto oder der letzte Administrator); der Grund erscheint auf der Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — die Datenbank hat das Löschen verweigert oder es ist fehlgeschlagen (etwa eine fehlende Fähigkeit, ein unbekanntes Konto oder der letzte Administrator); der Grund erscheint auf der Standardfehlerausgabe. Eine nicht verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

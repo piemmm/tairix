@@ -11,9 +11,10 @@ request every process system-wide, which the service gates on
 
 The crate is `no_std` (with `alloc`, used only by the test fixtures), has no
 `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md`
-§2.9). Its only dependencies are the audited `tairix-abi` crate and the
-shared `tairix-procinfo` client helpers, so it never links a kernel or
-driver crate (`AGENTS.md` §17.4).
+§2.9). Its only dependencies are the audited `tairix-abi` crate, the
+shared `tairix-procinfo` client helpers, the shared `tairix-help` engine,
+and the shared `tairix-util` command-line scanner, so it never links a
+kernel or driver crate (`AGENTS.md` §17.4).
 
 ## Usage
 
@@ -25,8 +26,9 @@ ps [-e | -A | --all]
   -h, --help  show the usage banner
 ```
 
-`ps` takes no file operands. `--` ends option parsing. An unknown option or
-any positional operand is a fail-closed `PsError::Usage`.
+`ps` takes no file operands. `--` ends option parsing. An option `getopt`
+refuses is a `PsError::Option`, worded as it words it, and any positional
+operand a fail-closed `PsError::Usage`.
 
 ## Shared with the `sysinfo` CLI
 
@@ -64,10 +66,11 @@ origin. On the host it is an inert stub, so the library stays fully testable.
 
 ## Fail closed
 
-An unknown option or a positional operand is a `PsError::Usage`. A denied
-global listing is `PsError::PermissionDenied`; any other transport failure
-or an undecodable reply is `PsError::Service`; a failed terminal write is
-`PsError::Output`. There is no panic (`AGENTS.md` §2.9).
+An option `getopt` refuses is a `PsError::Option`, worded as it words it,
+and a positional operand a `PsError::Usage`. A denied global listing is
+`PsError::PermissionDenied`; any other transport failure or an undecodable
+reply is `PsError::Service`; a failed terminal write is `PsError::Output`.
+There is no panic (`AGENTS.md` §2.9).
 
 ## Tests
 

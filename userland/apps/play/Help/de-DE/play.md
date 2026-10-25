@@ -76,8 +76,9 @@ vorzeitig beendete Datei und am Ende einen `summary`-Datensatz.
 ## EXIT STATUS
 
 - `0` — jede Datei wurde gespielt, oder die Wiedergabe wurde ohne Auslassung beendet.
-- `1` — eine Datei konnte nicht gespielt werden, oder die Wiedergabe konnte nicht weitergehen.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — eine Datei konnte nicht gespielt werden, oder die Wiedergabe konnte
+  nicht weitergehen. Eine nicht verstandene Befehlszeile endet ebenfalls mit
+  `1`.
 
 ## ENVIRONMENT
 

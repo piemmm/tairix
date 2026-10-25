@@ -51,7 +51,7 @@ pub trait AssembleMember<B: Block>: Sized {
     fn make_present(device: B, role: MemberRole) -> Self;
 
     /// Build an absent-slot member: a copy the array is defined to have but
-    /// which currently holds no device (a Linux md "removed" slot).
+    /// which currently holds no device.
     #[must_use]
     fn make_absent() -> Self;
 }

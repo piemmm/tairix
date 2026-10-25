@@ -13,4 +13,4 @@ The `i2c-v1` controller side (`plans/I2C.md` I1, I2). Stability tier:
   buffer a shared region granted to its client.
 
 Every I²C controller driver links it, so the protocol's rules are written
-once: `drivers/bus/i2c/bcm2835`.
+once.

@@ -344,9 +344,6 @@ pub struct Board {
 }
 
 impl Board {
-    /// A Raspberry Pi.
-    pub const RASPBERRY_PI: Self = Self { raspberry_pi: true };
-
     /// The board `platform` names.
     #[must_use]
     pub fn of(platform: &tairix_abi::sysinfo::PlatformCompatible) -> Self {
@@ -605,7 +602,6 @@ const TCP_IP_SETTINGS: &[&str] = &[
     MachineSetting::NetTcpEcn.label(),
 ];
 
-/// The Caching pane's setting labels.
 /// The Raspberry Pi pane's settable labels, which the search index reads.
 const RASPBERRY_PI_SETTINGS: &[&str] = &[
     MachineSetting::FanMode.label(),
@@ -615,6 +611,7 @@ const RASPBERRY_PI_SETTINGS: &[&str] = &[
     MachineSetting::FanHysteresis.label(),
 ];
 
+/// The Caching pane's setting labels.
 const CACHING_SETTINGS: &[&str] = &[
     MachineSetting::CacheAll.label(),
     MachineSetting::CacheFilesystem.label(),
@@ -1082,7 +1079,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
     CategoryRow {
         category: Category::RaspberryPi,
         label: "Raspberry Pi",
-        icon: IconKind::RaspberryPi,
+        icon: IconKind::BoardFan,
         group: Group::Machine,
         panes: &[PaneRow {
             pane: Pane::RaspberryPi,

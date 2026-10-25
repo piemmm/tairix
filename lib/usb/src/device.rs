@@ -199,14 +199,14 @@ pub(crate) const CONNECT_WINDOW_US: u64 = 500_000;
 /// still being brought up (the on-metal defect: typing during boot killed the
 /// whole controller). A command the controller *rejected* on its own state
 /// ([`CompletionCode::indicates_state_disagreement`]) never reached the device
-/// — the VL805 answers an Address Device issued into a port still settling out
+/// — a controller can answer an Address Device issued into a port still settling out
 /// of its reset that way. A device that answers with an error (STALL, babble)
 /// or a forged descriptor re-fails deterministically and is not retried.
 ///
-/// Every retry resets the port first, as Linux `hub_port_init` does on each
-/// of its `PORT_INIT_TRIES`: a device whose Address Device succeeded holds
-/// its address, so a fresh slot's `SET_ADDRESS`, sent to the default
-/// address, reaches it only once a reset has returned it to Default state. A
+/// Every retry resets the port first: a device whose Address Device succeeded
+/// holds its address, so a fresh slot's `SET_ADDRESS`, sent to the default
+/// address, reaches it only once a reset has returned it to Default state
+/// (USB 2.0 §9.1.1). A
 /// recovery bound, not a scalable capacity.
 pub(crate) const ENUM_ATTEMPTS: u32 = 4;
 
@@ -259,7 +259,7 @@ pub const EVENT_RING_SEGMENT_TRBS: usize = DMA_CHUNK_ALIGN / trb::TRB_LEN;
 const _: () = assert!(EVENT_RING_SEGMENT_TRBS >= EVENT_RING_SEGMENT_MIN_TRBS);
 
 /// Event ring segments laid out where the controller takes that many
-/// (`HCSPARAMS2` ERST Max; QEMU takes one, the VL805 eight).
+/// (`HCSPARAMS2` ERST Max; QEMU takes one, some controllers eight).
 ///
 /// An isochronous stream posts an event for every service interval and
 /// raises the interrupt once per slot, so a slot of
@@ -389,16 +389,16 @@ pub(crate) const PORT_RESET_POLLS: u32 = 40;
 ///
 /// Skipping it on the root-hub port is the metal defect this figure now
 /// covers on both tiers: a full-speed device addressed inside its recovery
-/// interval has the VL805 reject the Address Device with a Context State
+/// interval can have the controller reject the Address Device with a Context State
 /// Error, which killed the whole controller. A re-driven enumeration attempt
 /// ([`ENUM_ATTEMPTS`]) resets the port, so it is settled by this same
 /// interval.
 pub(crate) const PORT_RESET_SETTLE_US: u32 = 10_000;
 
 /// Bounded attempts for the hub-descriptor read
-/// ([`port::read_hub_topology`]): production stacks retry this
-/// exchange (Linux's hub driver issues it up to three times) because real
-/// hubs occasionally answer it wrongly once and honestly on the retry. A
+/// ([`port::read_hub_topology`]): a hub may answer it wrongly once and
+/// honestly on the retry, as a multi-drive enclosure's hub was seen to on
+/// metal. A
 /// fixed protocol retry budget, not a scalable capacity.
 const HUB_DESC_ATTEMPTS: u32 = 3;
 
@@ -626,7 +626,7 @@ struct Layout {
     /// [`Self::scratchpad_count`] is non-zero.
     scratchpad_pages: usize,
     /// Number of scratchpad buffers reserved (`HCSPARAMS2` Max Scratchpad
-    /// Buffers; the VL805 needs 31).
+    /// Buffers).
     scratchpad_count: usize,
     /// The controller page size each scratchpad buffer occupies.
     page_size: usize,
@@ -866,8 +866,8 @@ const INTERFACE_CLASS_AUDIO: u32 = 0x01;
 /// Specification Overview), held as the top byte of the 24-bit class triple.
 const INTERFACE_CLASS_MASS_STORAGE: u32 = 0x08;
 
-/// `bDeviceClass` of a USB hub (USB 2.0 §11.23.1). The Pi 4B's onboard
-/// `2109:3431` VIA Labs hub reports this, so the keyboard plugged into a
+/// `bDeviceClass` of a USB hub (USB 2.0 §11.23.1). A board's onboard hub
+/// reports this, so the keyboard plugged into a
 /// USB-A port is a device *downstream* of the hub, not on a root-hub
 /// port — reaching it requires walking the hub (`plans/PI.md`).
 const DEVICE_CLASS_HUB: u8 = 0x09;
@@ -887,9 +887,9 @@ const DESC_TYPE_SS_HUB: u8 = 0x2A;
 /// the port count.
 const SS_HUB_DESC_LEN: usize = 12;
 
-/// The USB 2.0 hub descriptor's fixed head plus its two port bitmaps at
-/// their smallest (USB 2.0 §11.23.2.1), the length Linux requests: a hub
-/// with more ports answers it short with its honest byte count.
+/// The USB 2.0 hub descriptor's seven fixed bytes plus both port bitmaps at
+/// the four bytes 31 ports need (USB 2.0 §11.23.2.1): a hub with fewer ports
+/// answers short, with its honest byte count.
 const HUB_DESC_REQUEST: usize = 15;
 
 /// What a hub class descriptor (USB 2.0 §11.23.2.1 / USB 3.2 §10.15.2.1)
@@ -1070,14 +1070,14 @@ const PORT_STATUS_LOW_SPEED: u16 = 1 << 9;
 const PORT_STATUS_HIGH_SPEED: u16 = 1 << 10;
 
 /// xHCI protocol speed ID for a full-speed device (§7.2.1 default speed
-/// IDs): the speed of the Pi 4B's keyboard behind the high-speed hub.
+/// IDs): the speed of a keyboard behind a high-speed hub.
 pub(crate) const SPEED_FULL: u8 = UsbSpeed::Full.as_u8();
 
 /// xHCI protocol speed ID for a low-speed device (§7.2.1).
 pub(crate) const SPEED_LOW: u8 = UsbSpeed::Low.as_u8();
 
 /// xHCI protocol speed ID for a high-speed device (§7.2.1): the speed of
-/// the Pi 4B's onboard hub.
+/// an onboard hub.
 pub(crate) const SPEED_HIGH: u8 = UsbSpeed::High.as_u8();
 
 /// xHCI protocol speed ID for a `SuperSpeed` device (§7.2.1).
@@ -1136,7 +1136,7 @@ impl DeviceDescriptor {
     /// Whether this device descriptor describes a USB hub (USB 2.0
     /// §11.23.1).
     ///
-    /// The Pi 4B's onboard `2109:3431` hub reports `bDeviceClass = 0x09`;
+    /// An onboard hub reports `bDeviceClass = 0x09`;
     /// a keyboard plugged into a USB-A port enumerates *downstream* of
     /// it, so the bring-up must walk the hub's ports rather than treat
     /// the enumerated device as the keyboard.
@@ -2160,8 +2160,7 @@ const EP_CTX_DEQUEUE_FLAGS: u64 = 0xF;
 /// its interrupt transfers otherwise.
 const SLOT_CTX_HUB: u32 = 1 << 26;
 /// Slot context dword 0 **Multi-TT** bit (§6.2.2): the hub exposes one
-/// transaction translator per port. The Pi 4B's onboard VIA hub is
-/// single-TT, so this stays clear.
+/// transaction translator per port. A single-TT hub leaves it clear.
 const SLOT_CTX_MTT: u32 = 1 << 25;
 /// Slot context dword 0 **Context Entries** field shift (§6.2.2): the index
 /// of the last valid endpoint context in the device context. Raised when an
@@ -2613,7 +2612,7 @@ struct DeviceState {
     /// is armed before. No longer than a report needs: a full/low-speed
     /// endpoint behind a high-speed hub faults with a Split Transaction Error
     /// when a transfer outruns the interval budget its transaction translator
-    /// scheduled (the Pi 4 keyboard behind its hub).
+    /// scheduled (a keyboard behind a hub).
     int_transfer: Option<u16>,
     /// The request [`Self::int_transfer`] was fixed from.
     int_request: u16,
@@ -3230,9 +3229,9 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
         // Reserve the controller's scratchpad buffers (xHCI §4.20): fill
         // the scratchpad pointer array with the device-visible base of
         // each page-aligned buffer, then point `DCBAA[0]` at that array.
-        // The VL805 reports 31 buffers and cannot execute a single command
+        // A controller reporting 31 buffers cannot execute a single command
         // without them — the very first Enable Slot produces no completion
-        // event (the Pi 4 `stage=2 completion=0` metal symptom). A
+        // event. A
         // controller reporting `0` skips this entirely.
         if layout.scratchpad_count > 0 {
             for index in 0..layout.scratchpad_count {
@@ -3499,7 +3498,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
         // Re-confirm ownership on the post-barrier snapshot, then verify the
         // entry has actually landed before consuming it. The read barrier
         // orders *this PE's* reads (body after cycle), but it cannot order the
-        // *controller's* writes into RAM: on the BCM2711 PCIe path the VL805's
+        // *controller's* writes into RAM: on a non-coherent PCIe path the controller's
         // 16-byte TRB write is not guaranteed to reach RAM atomically, so the
         // announcing cycle bit can become visible while the body is still the
         // zeroed initial state. A real event TRB never has type 0, so a
@@ -4676,8 +4675,8 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// (delegates to [`Xhci::controller_faulted`]).
     ///
     /// A faulted controller raises no further interrupts until it is reset, so
-    /// a downstream device's hot-plug and transfers go silent. The Pi 4 VL805
-    /// latches a Host System Error during a downstream-device hot-removal
+    /// a downstream device's hot-plug and transfers go silent. A controller may
+    /// latch a Host System Error during a downstream-device hot-removal
     /// teardown (after its Disable Slot completes), so the HCD checks this
     /// after servicing a wake and recovers with
     /// [`UsbHost::reset_and_reenumerate`]. A controller that would not stop a

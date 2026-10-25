@@ -14,9 +14,19 @@ own reason. A tool whose engine renders whole lines (`sysinfo`, `ps`,
 `whoami`) takes `lib/procinfo`'s line `Output`, which every byte stream is.
 
 Every name a tool puts in a diagnostic, a prompt or a `-v` report is written
-through `tairix_util::quote` — always quoted, hidden characters as `$'…'`
-escapes, as GNU's `quoteaf` writes it — so a name a foreign volume carries can
-neither hide nor rewrite what the terminal shows around it.
+through `tairix_util::quote`, every hidden character as a `$'…'` escape: a
+name inside a message's sentence is always quoted (`cannot open 'a b' for
+reading`), and a name a message leads with, before the `:` and its reason, is
+quoted where a shell would need it or where it holds a `:` of its own
+(`'a:b': not found`, `missing: not found`), as GNU's tools write them. A name
+a tool prints on standard output — `head`'s and `tail`'s headers, `du`'s and
+`wc`'s rows, `readlink`'s targets, `stat`'s `%n` — is escaped the same way at
+a terminal the kernel attests, as `ls` decides its default, and written byte
+for byte to a pipe, a file or a NUL-ended record. That is a deliberate
+departure from GNU, which prints those names raw; `wc` also quotes a name
+holding a line break in a pipe, as GNU 9.4 does. Either way a name a foreign
+volume carries can neither hide nor rewrite what the terminal shows around
+it.
 
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
@@ -158,8 +168,8 @@ the match.
   (`SysinfoError::PermissionDenied`) without inventing a parallel policy
   (`AGENTS.md` §2.2, §16.6).
 - An unknown subcommand, an unknown flag, or a stray trailing argument
-  is a `SysinfoError::Usage` that issues no query and prints the usage
-  banner.
+  is a `SysinfoError::Usage` that issues no query and exits `1` after
+  naming where the help is.
 - A reply that does not decode against `sysinfo-v1` — a truncated
   scalar, or a process page whose length is not a whole number of
   records — is a hard `SysinfoError::Service` error, never a
@@ -277,9 +287,10 @@ ungated `SELF_PROCESS_LIST`); `-e`/`-A`/`--all` request every process
 
 The crate is `no_std` (with `alloc`, used only by the test fixtures), has
 no `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
-(`AGENTS.md` §2.9). It depends only on the audited `tairix-abi` crate and
-the shared `tairix-procinfo` client helpers, so it never links a kernel
-or driver crate (`AGENTS.md` §17.4).
+(`AGENTS.md` §2.9). It depends only on the audited `tairix-abi` crate, the
+shared `tairix-procinfo` client helpers, the shared `tairix-help` engine,
+and the shared `tairix-util` command-line scanner, so it never links a
+kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Grammar
 
@@ -291,12 +302,13 @@ ps [-e | -A | --all] [-h | -?]
   -h, -?      show this help
 ```
 
-`ps` takes no file operands. `--` ends option parsing. An unknown option,
-an unknown letter inside a cluster, or any positional operand is a
-fail-closed `PsError::Usage`. The reserved `-h`/`-?` (and `--help`)
-switches render the tool's own short help from its bundle's `Help/` tree
-through the shared `lib/help` engine (`plans/APPS.md` §4), falling back
-to the built-in usage banner when the tree is unavailable.
+`ps` takes no file operands. `--` ends option parsing. An unknown option
+or an unknown letter inside a cluster is a `PsError::Option`, worded as
+GNU's `getopt` words it, and any positional operand a fail-closed
+`PsError::Usage`. The reserved `-h`/`-?` (and `--help`) switches render
+the tool's own short help from its bundle's `Help/` tree through the
+shared `lib/help` engine (`plans/APPS.md` §4), falling back to the
+built-in usage banner when the tree is unavailable.
 
 ### Shared with `sysinfo`
 
@@ -325,8 +337,9 @@ in tests they are in-memory fixtures.
 
 ### Fail closed
 
-- An unknown option or a positional operand is a `PsError::Usage` that
-  issues no query and prints the usage banner.
+- An option `getopt` refuses is a `PsError::Option` and a positional
+  operand a `PsError::Usage`; neither issues a query, and each is reported
+  with the pointer to `ps --help` (exit `1`).
 - A denied global listing is `PsError::PermissionDenied`; any other
   transport failure or a reply that does not decode against `sysinfo-v1`
   (a process page whose length is not a whole number of records) is a
@@ -437,9 +450,11 @@ the volume by probing; `mount` never guesses one (`AGENTS.md` §2.1).
 
 ### Fail closed
 
-- An unknown option, a missing option value, or a number of operands
-  other than zero or two is a `MountError::Usage`; mount options given
-  with no operands are also a usage error (there is nothing to mount).
+- An option `getopt` refuses (an unknown one, a missing value, a value
+  given to a flag) is a `MountError::Option`, worded as it words it.
+- A number of operands other than zero or two is a `MountError::Usage`;
+  mount options given with no operands are also a usage error (there is
+  nothing to mount).
 - An unknown or empty `-o`/`-t` value is a `MountError::BadOption`.
 - A listing transport failure or a reply that does not decode against
   `sysinfo-v1` is a hard `MountError::Service`, never a partially-rendered
@@ -481,7 +496,7 @@ the established `umount` behaviour (`AGENTS.md` §16.7).
 unmount [-f | --force] [--] NAME
 
   NAME          the volume to detach (catalog name or mount point)
-  -f, --force   force-unmount: discard retained uncommitted data
+  -f, --force   force-unmount: revoke open files, discard retained uncommitted data
   -?, --help    show the command's own short help
 ```
 
@@ -498,6 +513,10 @@ set, retracts the volume, and logs the data loss with its own event
 (`fs.hotplug.force_unmount`, carrying the discarded byte count and the
 reason a clean commit was impossible). On a healthy volume `--force`
 still commits cleanly; nothing is discarded when the flush succeeds.
+A volume a descriptor still holds a file of, or a process's working
+directory is on, refuses a plain detach too (`Busy`); `--force` then
+revokes the descriptors and working directories, which answer stale from
+then on, and the event carries how many it revoked.
 A verified re-insert needs no tool at all: a re-attached volume whose
 non-mutation is proven has its retained writes replayed by the kernel
 and returns to full service (`fs.hotplug.reinsert_replayed`).
@@ -509,7 +528,7 @@ an fd-3 `suggestion` record (`fs.volume_unavailable_force_required`,
 ### Fail closed
 
 - An unknown option or a number of operands other than one is a usage
-  error (exit `2`).
+  error (exit `1`).
 - A name matching no mount is `NotFound`; a matched mount with no
   detachable volume identity (the permanent boot volumes, the in-RAM
   view bindings) is `NotDetachable` — the tool never sends the kernel a
@@ -609,9 +628,10 @@ correctly empty).
   requires CAP_STORAGE_ADMIN`. Every other transport or decode failure
   is a typed service error and the composer's own refusal keeps its
   `Errno`.
-- Every diagnostic goes to standard error with a non-zero exit: `1` for
-  a runtime refusal (denied capability, unresolved name, composer
-  refusal, output failure), `2` for a command line that did not parse.
+- Every diagnostic goes to standard error with exit status `1`: a
+  runtime refusal (denied capability, unresolved name, composer refusal,
+  output failure), or a command line that did not parse, which is
+  followed by where the help is.
   No input panics.
 
 Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` + `CAP_SYSINFO_HW` +
@@ -683,20 +703,36 @@ name count, so a directory
 of *n* children
 costs one open and one listing — never *n* per-child open/stat/close
 round-trips, each a fresh full path resolution on an uncached,
-authenticated volume; only operands are stat'ed individually. An
-unreachable operand is diagnosed on standard error and the walk
-continues (exit `1`), an unreadable directory contributing nothing
-rather than a guessed partial sum. A file reached through more than one
-name is summed **once**, keyed on the identity the listing carries, and
-`-l`/`--count-links` is the GNU opt-out; only a non-directory whose name
-count exceeds one is remembered, so the seen-set holds the hard links the
-walk meets rather than one entry per node on the volume (`AGENTS.md`
-§24.1, §26.6), and a heap that cannot grow it — or a node whose backing
-offers no identity — makes the walk count every name and say so once on
-standard error rather than report a silently wrong total. `-x`
-awaits device identity (documented in the bundle's `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test
--p tairix-du` drives the parser (clusters, values, conflicts), the
-post-order accumulation, every option's rendering, the diagnosed-path
+authenticated volume; only operands, and the links `-L` follows, are
+stat'ed individually. A symbolic link counts as itself by default
+(`-P`); `-H`/`-D`/`--dereference-args` follow the links named as
+operands and `-L`/`--dereference` every link met, the last of them
+winning, as in GNU. An unreachable operand is diagnosed on standard
+error and the walk continues (exit `1`), an unreadable directory
+contributing nothing rather than a guessed partial sum; a link `-L`
+cannot follow because it names nothing is reported as GNU reports it,
+`du: cannot access 'x'`. A node met a second time — another name for a
+file, a repeated or nested operand, a node `-L` reaches twice — is left
+out entirely, no row and no bytes, keyed on the identity the listing
+carries in a set hashed under the process key (a hostile volume chooses
+the identities); `-l`/`--count-links` is the GNU opt-out and remembers
+nothing. Only what can be met twice is remembered — every node under
+`-L` or with more than one operand, otherwise just a file whose name
+count exceeds one — so a single operand's seen-set holds the hard links
+the walk meets rather than one entry per node on the volume (`AGENTS.md`
+§24.1, §26.6). Under `-L` a link leading back to a directory the walk is
+inside is never entered, even under `-l`. A heap that cannot grow the
+set — or a node whose backing offers no identity — makes the walk count
+every sighting and say so once on standard error rather than report a
+silently wrong total. `-x`
+awaits device identity (documented in the bundle's `Help/`). At an attested
+terminal a row's path is escaped (`quote::output_style`), never in `-0`
+output; see the top of this page. Manifest: `CAP_CONSOLE_WRITE` +
+`CAP_FS_ACCESS`. `cargo test
+-p tairix-du` drives the parser (clusters, values, conflicts, the link
+options' last-wins rule), the post-order accumulation, every option's
+rendering, repeated and nested operands, links counted as themselves or
+followed, a link cycle, a dangling link under `-L`, the diagnosed-path
 paths, and the thirteen-locale `OPTIONS` pinning against an in-memory
 tree fixture.
 
@@ -756,10 +792,11 @@ cat [-AbeEnstTuv] [--] [file...]
 | `-`              | standard input                                     |
 | *path*           | a file to read                                     |
 
-Short options bundle as in the GNU tool (`-nE` is `-n -E`). With no
-`path` (or `-`) operand the single source is standard input. Any other
-leading-dash argument before `--` is a `CatError::Usage` error, never a
-silently ignored token.
+The line is read as GNU's `getopt_long` reads it: short options bundle
+(`-nE` is `-n -E`), and a long option may be shortened to any unambiguous
+prefix (`--squ`). With no `path` (or `-`) operand the single source is
+standard input. Any other leading-dash argument before `--` is refused in
+`getopt`'s words (`CatError::Option`), never a silently ignored token.
 
 ### A stream/render machine, not a data source
 
@@ -795,11 +832,12 @@ leaving line feeds and tabs alone.
 
 ### Fail closed
 
-- An unrecognised option is a `CatError::Usage` that reads nothing.
+- An option `getopt` refuses is a `CatError::Option` that reads nothing:
+  `cat: reason`, then `Try 'cat --help' for more information.`, exit `1`.
 - A source that cannot be read surfaces the underlying `Errno` as
-  `CatError::Read` and stops before any later source (a missing file
-  among several aborts rather than skipping silently).
-- A failed terminal write is `CatError::Output`.
+  `CatError::Read`, reported as `cat: name: reason` while the next source
+  is still read, the run exiting 1, as GNU's does.
+- A failed terminal write is `CatError::Output`, which ends the run.
 - A seam that reports more bytes than the read buffer holds is refused
   (`CatError::Read`) rather than indexed out of bounds — no panic
   (`AGENTS.md` §2.9).
@@ -905,7 +943,7 @@ standard output. Manifest: `CAP_CONSOLE_WRITE` (the listing and short help),
 stack) — so an ordinary account lists the machine settings, and a change from
 anyone but an elevated administrator is refused with its reason (fail closed,
 nothing applied). Exit status: `0` success, `1` a read, change or output
-failure, `2` a usage error (unknown key / out-of-set value included).
+failure or a usage error (unknown key / out-of-set value included).
 
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
 
@@ -1001,32 +1039,40 @@ steps of INCREMENT (both defaulting to 1), with the full GNU surface —
 `-f`/`--format` (a printf-style floating-point format with one `%`
 directive of type `e`/`f`/`g`/`a`, validated with the GNU diagnostics),
 `-s`/`--separator`, and `-w`/`--equal-width` (mutually exclusive with
-`-f`) — and the GNU output rules. The default precision and the `-w`
-width are inferred from the operands' spellings exactly as GNU's
-`scan_arg` infers them; plain integer runs (including `1e1`/`0x14`
-spellings and an `inf` LAST) are generated in exact decimal string
-arithmetic, arbitrarily large; and the floating-point path prints the
-value one step past LAST when it renders equal to it (the GNU rounding
-rule). Option scanning matches GNU `seq`: no permutation, a leading
+`-f`) — and GNU 9.4's output rules, established by running it. The
+default precision is the most digits after the point FIRST or INCREMENT
+shows (an exponent moving the point), and the `-w` width is the wider of
+FIRST and LAST as spelt at that precision; an operand no fixed point shows
+(a hexadecimal fraction, `inf`) makes the format `%g`, which `-w` leaves
+unpadded. A sequence of integers (including `1e1`/`0x14` spellings) is
+computed exactly at any size, a fractional LAST bounding it by its floor
+or ceiling; any other is `FIRST + i × INCREMENT` in `f64`, and a value
+rounding carried just past LAST still prints when its number, as the
+format writes it, reads back as LAST and the value before it did not.
+Option scanning matches GNU `seq`: no permutation, a leading
 negative number is an operand, and the operand count, format, and
 `-f`/`-w` conflict are diagnosed in the GNU order. The `-f` renderer
 implements C-locale `%e`/`%f`/`%g`/`%a` semantics (flags `-+#0 '`,
 width, precision) so a format prints what C's `printf` prints for a
-`double`. One deliberate divergence, documented in the crate: GNU
-computes the floating-point path in `long double`, TAIRiX in `f64` —
-visibly, `%a` prints the C `double` spelling (`0x1.8p+0`) where glibc's
-`%La` normalisation spells the same value `0xcp-3`.
+`double`. Three deliberate divergences: GNU computes in `long double`,
+TAIRiX in `f64`, so `%a` prints the C `double` spelling (`0x1.8p+0`)
+where glibc's `%La` spells the same value `0xcp-3`; GNU prints a sequence
+of integers exactly only on a narrow path and otherwise from `long
+double`, wrongly past 64 bits, where TAIRiX is exact for all of them; and
+GNU lays out an uppercase hexadecimal exponent (`0X1P-1`) as an integer,
+printing `seq 0X1P-1 3` as `0 1 2 3` and `seq 0 0X1P-1 5` without end,
+where TAIRiX reads it as C does. A rejected directive's hidden characters
+are escaped in the diagnostic, where GNU prints them raw.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths. Its manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` (the short-help read) — within
-the session baseline. `cargo test -p tairix-seq` drives the number scan
-(decimal/hex/inf spellings, the width/precision algebra, single-step
-rounding to the subnormal and overflow edges), the format validation and
-renderer against glibc-verified outputs, the parser (GNU scan rules and
-diagnostic order), the generation engine (fast-path selection, exact
-big-integer runs, separators across the flush boundary, the extra-number
-rule), and the locale switch-drift pin.
+the session baseline. `cargo test -p tairix-seq` drives the operand
+layouts, the exact integers (carries, borrows, bounds, signed zero), the
+format grammar and its refusals, the parser (GNU scan rules and
+diagnostic order), the engine (separators across the flush boundary, the
+read-back rule), a differential corpus of GNU 9.4's answers, and the
+locale switch-drift pin.
 
 ## `printf` — format and print data (`userland/apps/printf`)
 
@@ -1049,10 +1095,12 @@ none; the per-conversion validity table is probe-pinned against GNU) —
 and a malformed escape are fatal, with output already rendered kept, as
 GNU keeps it. Floats render through the shared `tairix_util::cfloat`
 engine; `%q` is the shared quoting engine's shell-escape style
-(`tairix_util::quote::quote_if_needed`, GNU's `quotef`: bare/safe words,
+(`tairix_util::quote::quote_if_needed`, the form GNU `printf '%q'` writes: bare/safe words,
 `''`, `"it's"` double-quoting, `\'` splices, `$'\t\n'` control groups,
-octal-escaped bytes), with that engine's two documented departures — every
-hidden character escaped, and always the minimal quoting that reads back.
+octal-escaped bytes), with the two of that engine's departures that bear on
+`%q`: every hidden character escaped, and GNU's form kept save its two faults
+with a word holding a `'` that ends in an escape (a needless leading `''`, and
+a dropped `$` that stops the word reading back).
 
 Two deliberate divergences, documented in the bundle's help: floats
 compute in `f64` rather than `long double` (the `seq` precedent — a
@@ -1085,8 +1133,8 @@ One TAIRiX extension, shared by both: a `Name:/` alias root
 (`plans/DRIVES.md`) plays the role POSIX gives `/` — it is never
 stripped into, so `dirname Home:/tools` is `Home:/` exactly as
 `dirname /tools` is `/`. Where the root prefix ends is decided by the
-path grammar's own exported rule (`tairix_path::alias_root_len`), so
-neither tool carries a second path parser.
+path grammar's own exported rules (`tairix_path::leaf_name` and
+`tairix_path::dir_name`), so neither tool carries a second path parser.
 
 Both crates are `no_std` (with `alloc`), have no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; each manifest requests
@@ -1100,11 +1148,26 @@ suffix, and alias-root cases), and the locale switch-drift pins.
 
 `tairix-mkdir` and `tairix-rmdir` are the GNU coreutils directory tools
 (`plans/APPS.md` §12.1 Stage C store bundles). `mkdir` creates each
-operand through `fs_mkdir` (`-p`/`--parents` creates missing ancestors
-and tolerates an operand that is already a directory; `-v`/`--verbose`
-reports `mkdir: created directory 'dir'`); GNU's `-m`/`--mode` remains
-staged — its kernel prerequisite (`fs_set_mode`, syscall 74) now exists,
-and the flag lands with its own tests in its own change, never stubbed.
+operand with an exclusive directory create, `CREATE | DIRECTORY |
+EXCLUSIVE`, that answers the new directory open (`-p`/`--parents` creates
+missing ancestors and tolerates an operand that is already a directory;
+`-v`/`--verbose` reports `mkdir: created directory 'dir'`). A new
+directory is `a=rwx` less the umask, which the kernel applies.
+`-m`/`--mode` gives each operand made exactly the mode named — octal, or
+symbolic as `chmod` reads it (`tairix_util::mode`) from `a=rwx` —
+whatever the umask: the mode is read back and set where the kernel's falls
+short, keeping a set-group-ID bit inherited from the parent that the mode
+does not name, as GNU's does. A missing ancestor `-p` makes keeps its
+owner's write and search however the umask reads (`a=rwx` less the umask,
+`u+wx`), so its child can be made. The read and the set go through the
+directory the create answered held, never the name, so no other process can
+swap the name between the creation and the mode change, and `-p` makes each
+level in — or, where it exists, enters it from — the one before it, held,
+through the shared tree seam (`tairix_fscopy::tree`): a name swapped for a
+link between two levels cannot carry the walk elsewhere, a link among the
+operand's existing levels is passed through as a path walk passes it, and
+each `..` leaves the directory the walk reached. A mode
+that is no mode is `mkdir: invalid mode 'x'`, and nothing is made.
 `rmdir` removes each (empty) directory operand through
 the **directory-only** `fs_unlink` (`UnlinkFlags::DIRECTORY`): the
 filesystem decides the node's kind atomically in the same locked walk
@@ -1115,21 +1178,26 @@ directory with `Errno::NotEmpty`, which `--ignore-fail-on-non-empty`
 never asks to remove a bare root; `-v` reports the GNU-worded
 `rmdir: removing directory, 'dir'` attempt line.
 
-Both tools' `-p` walks spell each ancestor through the shared path
-grammar's own rule (`tairix_path::Path::prefix`), so alias-rooted
+Both tools' `-p` walks read an operand through the shared path grammar —
+`mkdir` its steps and how each is spelled (`tairix_path::steps`), `rmdir`
+each ancestor's spelling (`tairix_path::Path::prefix`) — so alias-rooted
 operands (`Home:/tools/bin`) walk correctly and neither tool carries a
-second path parser; an operand the grammar cannot parse is handed to
-the kernel whole, which stays the one validator.
+second path parser; an operand the grammar cannot read is handed to the
+kernel whole, which stays the one validator.
 
 Both crates are `no_std` (with `alloc`), have no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; each manifest requests
 `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operation per-inode.
 `cargo test -p tairix-mkdir -p tairix-rmdir` drives the parsers
-(switches, clusters, `--`, refusals), the engines over in-memory seams
-(ancestor walks, existing-directory tolerance, the tolerated non-empty
-refusal, first-failure-stops ordering, GNU `-v` wording), and the
-locale switch-drift pins.
+(switches, clusters, `--`, refusals, every spelling of `-m` and its last-wins
+rule), the engines over in-memory seams (ancestor walks, existing-directory
+tolerance, the tolerated non-empty refusal, a refused operand reported while
+the next is still made or removed, GNU `-v` wording, `-m` modes given exactly
+under the umask and in a set-group-ID parent, the `-p` parents' modes under
+umasks `0777`, `0277` and `0`, and a mode or a parent's fix-up reaching the
+directory made when its name is swapped straight after the creation), and
+the locale switch-drift pins.
 
 ## `link`, `unlink`, `readlink` — the minimal link commands (`userland/apps/{link,unlink,readlink}`)
 
@@ -1176,39 +1244,47 @@ value and the last one given wins. The resolution is the kernel's own
 check on every directory passed through, and the rule that a link cannot
 resolve outside what its mount projects. The tool *calls* it rather than
 walking links itself, because a copy disagreeing by one rule would print a
-path the kernel resolves differently.
+path the kernel resolves differently. At an attested terminal a printed path
+is escaped (`quote::output_style`), never in `-z` output; see the top of this
+page.
 
 Each is `no_std` (with `alloc`), has no `unsafe`, and requests
 `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` and no `CAP_CONSOLE_READ`, because none
 of them prompts. Each ships a thirteen-locale `Help/` tree and its own icon
 master, and each is host-provable against in-memory seams with no kernel.
 
-## `ln` — create symbolic links (`userland/apps/ln`)
+## `ln` — create links between files (`userland/apps/ln`)
 
 `tairix-ln` is the GNU coreutils `ln` (a `plans/SYMLINKS.md` S4 store
-bundle). It creates a symbolic link naming each target through
-`fs_symlink`, in every operand shape the GNU tool accepts: one operand
-links under the target's own name in the working directory; two make the
-second a directory to fill when it is one (or a link to one, unless `-n`)
-and the link's name otherwise; three or more require the last to be a
-directory; and `-t dir` makes every operand a target.
+bundle). It creates a link naming each target, in every operand shape the
+GNU tool accepts: one operand links under the target's own name in the
+working directory (named `./name`, as GNU names it); two make the second a
+directory to fill when it is one (or a link to one, unless `-n`) and the
+link's name otherwise; three or more require the last to be a directory
+(`target 'x': No such file or directory` or `Not a directory`, as GNU says,
+when it is not); and `-t dir` makes every operand a target (`failed to
+access 'dir'` when it is missing).
 
 **Both kinds of link are real.** Without `-s` the link is a hard one
 (`fs_link`): a second directory entry for the target's own inode, so both
 names reach one file and its storage survives until the last name goes.
 `-L` gives the second name to what a symbolic target *names*, `-P` — the
 default — links the target as spelled and follows no final link, and
-`-d`/`-F` accept a directory operand whose link is still refused
-`IsADirectory` (no principal may give a directory a second name). `-r`/`--relative` stores a symbolic link's target relative to
-the link's own directory. It asks the kernel to canonicalise the target and
-the link's directory (`fs_realpath`) and then spells the difference: two
-canonical paths hold no `..` and no link, so the arithmetic is exact, whereas
-the same arithmetic on the operands as typed would name a different node the
-moment a link were involved — the very collapse the resolver forbids. `-r`
-without `-s` is a usage error, because a hard link stores no target to make
-relative. One switch group stays refused for a reason that is not about links
-at all: `-b`/`-S`, because this workspace has no backup machinery (`cp`/`mv`
-omit them too). Every refusal is a usage error naming the switch; nothing is
+`-d`/`-F` accept a directory operand whose link is still refused (`x: hard
+link not allowed for directory`; no principal may give a directory a second
+name). A hard link's target is reached before its name is looked at, as GNU
+reaches it, so a missing one is `failed to access 'x'` whatever the name
+holds. With `-s` the link is a symbolic one (`fs_symlink`). `-r`/`--relative`
+stores a symbolic link's target relative to the link's own directory. It
+asks the kernel to canonicalise the target and the link's directory
+(`fs_realpath`) and then spells the difference: two canonical paths hold no
+`..` and no link, so the arithmetic is exact, whereas the same arithmetic on
+the operands as typed would name a different node the moment a link were
+involved — the very collapse the resolver forbids. `-r` without `-s` is a
+usage error, because a hard link stores no target to make relative. One
+switch group stays refused for a reason that is not about links at all:
+`-b`/`-S`, because this workspace has no backup machinery (`cp`/`mv` omit
+them too). Every refusal is a usage error naming the switch; nothing is
 silently ignored.
 
 The target is stored **verbatim** and never resolved: it may be relative,
@@ -1219,25 +1295,47 @@ and creating a link grants no authority over what it names — every later
 use is authorised component by component under the caller's own identity.
 
 A link name that is already taken is refused unless `-f` or `-i` says to
-replace it, and replacing it **removes** that name first: a create or
-truncate follows a final link, so leaving one in place would act on
-whatever it pointed at. A directory is never replaced. An unanswerable
-`-i` question is never consent, and the first failure stops the run before
-any later target, exactly as `cp` and `mv` do.
+replace it. The new link then takes the name's place in one step: it is made
+under a staging name beside the old one and renamed over it
+(`tairix_rt::replace_with_link`), so the name is never missing, a link that
+cannot be made leaves it as it was, and nothing travels through a link that
+was already there to whatever it points at. A directory is never replaced. A
+link that would take the place of the very file it names is refused as the
+same file (`'a' and 'a' are the same file`): a file forced onto its own entry
+however it is spelled (`./a`, `d/../a`, a link `-L` follows), or a symbolic
+link whose target, read from the link's own directory as the link will read
+it, is the file it replaces — reached through that name, or that file's only
+name. A name that already is the target's node is taken as linked, `-v`
+still reporting it. Two deliberate departures from GNU 9.4, both where GNU
+destroys the file: GNU reads a symbolic target from the working directory, so
+`ln -sf a d/a` replaces `d/a` with a link to itself, and after an `-i` consent
+GNU makes `ln -is a a` such a link too. An unanswerable `-i` question is never
+consent; a declined one skips that link and ends the run with status 1, as
+GNU's does; and a link that cannot be made is reported while the next is still
+made, the run exiting 1.
+
+Failures are worded as GNU words them: `failed to create symbolic link 'l'`,
+`failed to create hard link 'l' => 't'` (`'l'` alone for a taken name), and
+`-v` reports `'link' -> 'target'` for a symbolic link and `'link' =>
+'target'` for a hard one.
 
 ### Grammar
 
 ```
-ln -s [-finvT] [-t dir] [--] target... [link_name]
+ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]
 ```
 
 | Token            | Meaning                                            |
 |------------------|----------------------------------------------------|
-| `-s`, `--symbolic` | make symbolic links (required — see above)       |
-| `-f`, `--force`  | remove an existing link name, then create the link |
-| `-i`, `--interactive` | ask before removing an existing link name; later of `-f`/`-i` wins |
+| `-s`, `--symbolic` | make symbolic links rather than hard ones        |
+| `-r`, `--relative` | store a symbolic target relative to the link's directory (needs `-s`) |
+| `-L`, `--logical` | hard-link what a symbolic target names           |
+| `-P`, `--physical` | hard-link the target as spelled (the default)    |
+| `-d`, `-F`, `--directory` | accept a directory operand (its link still refused) |
+| `-f`, `--force`  | replace an existing link name with the new link    |
+| `-i`, `--interactive` | ask before replacing an existing link name; later of `-f`/`-i` wins |
 | `-n`, `--no-dereference` | treat a link-to-directory destination as the name it also is |
-| `-v`, `--verbose` | report each link as `'link' -> 'target'`           |
+| `-v`, `--verbose` | report each link as `'link' -> 'target'` (symbolic) or `'link' => 'target'` (hard) |
 | `-t dir`, `--target-directory=dir` | create every link in `dir`       |
 | `-T`, `--no-target-directory` | the destination is a link name (exactly two operands) |
 | `-h`, `-?`, `--help` | show the tool's short help (wins immediately)  |
@@ -1251,10 +1349,39 @@ authorises every path per-inode. Exit status is the GNU `ln` shape: `0`
 when every link was created, `1` otherwise (there is no separate usage
 status). `cargo test -p tairix-ln` drives the parser (every operand shape,
 clusters, `--`, the `-t`/`-T` contradiction, refusals) and the engine over
-in-memory seams (the four destination readings, the taken-name refusal,
-`-f`/`-i` replacement removing the name first, the never-replaced
-directory, the hard-link refusal touching nothing, and a format that
-stores no links reporting its permanent limit).
+an in-memory tree of names and node identities (the four destination
+readings and their refusals, the taken-name refusal, `-f`/`-i` replacement in
+one step, the never-replaced directory, the hard-link target reached first,
+the same-file refusals and the already-linked name, a declined question
+failing the run, and a format that stores no links reporting its permanent
+limit).
+
+## `tail` — output the last part of files (`userland/apps/tail`)
+
+`tairix-tail` is the GNU coreutils `tail` (`plans/APPS.md` §12.1 Stage C
+store bundle): the last 10 lines of each file operand (or standard input),
+with `==> file <==` headers between several. `-n`/`--lines` and
+`-c`/`--bytes` take the leading `+` "start at unit N" form, the plain "last
+N" form and GNU's multiplier suffixes; `-q`/`-v` decide the headers, `-z`
+NUL-delimits lines, and the obsolete first-argument `{+,-}COUNT[bcl]` form
+is read as GNU reads it. The last-N modes keep only the window the format
+needs (`tairix_util::tailwindow`: a byte ring for `-c N`, the last `N` lines
+for `-n N`), so memory stays constant per source; dropping leading content
+emits one advisory `omission` record on fd 3.
+
+Follow mode keeps each file open after the initial output and re-emits
+appended data, parking off-CPU on the kernel's file-change wait source (the
+`Watcher` seam) between emissions, never polling: `-f` follows the open node
+by descriptor, `-F` (`--follow=name --retry`) follows the name, watching its
+directory so a rotation reopens the new file, `--pid` ends the follow once
+that process dies, and `--sleep-interval`/`--max-unchanged-stats` pace the
+re-checks only those need. A file that cannot be read is diagnosed and the
+run continues, exiting 1. At an attested terminal a header's name is escaped
+(`quote::output_style`, through the `banner::Banners` `head` shares); see
+the top of this page. The manifest requests `CAP_CONSOLE_WRITE`,
+`CAP_CONSOLE_READ` and `CAP_FS_ACCESS`. `cargo test -p tairix-tail` drives
+the parser, the windows, the follow engine over an in-memory watcher, and
+the headers.
 
 ## `head` — output the first part of files (`userland/apps/head`)
 
@@ -1283,6 +1410,8 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; its manifest requests
 the console pair and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operand per-inode.
+At an attested terminal a header's name is escaped (`quote::output_style`,
+through the `banner::Banners` `tail` shares); see the top of this page.
 `cargo test -p tairix-head` drives the parser (counts, suffixes, the
 obsolete form, clusters, `--`, refusals), the engine over in-memory
 seams (chunked streams, headers, both elide modes including a
@@ -1299,7 +1428,9 @@ encoding-error byte counts as a byte, not a character) and
 `tairix_vt::char_width` definition, tabs advancing to 8-column stops)
 as the further selectors; counts always print in the fixed
 lines/words/chars/bytes/max-line order. `--total={auto,always,only,
-never}` (GNU `argmatch` prefix matching) controls the `total` row, and
+never}` (an unambiguous prefix accepted, and a refused word named ambiguous or
+invalid with the valid ones listed, as GNU `wc` does, through the shared
+`tairix_util::argv::choose`) controls the `total` row, and
 `--files0-from=F` reads the NUL-separated operand list from a file or
 standard input, refusing file operands alongside it and validating
 each record with its number.
@@ -1320,8 +1451,10 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths; its manifest requests
 the console pair and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operand per-inode.
+At an attested terminal a row's name is escaped (`quote::output_style`); a
+name holding a line break is quoted in a pipe too; see the top of this page.
 `cargo test -p tairix-wc` drives the parser (selectors, `--total`
-argmatch, `--files0-from` conflicts), the counter (chunk-boundary
+prefixes, `--files0-from` conflicts), the counter (chunk-boundary
 invariance, encoding errors, tab stops, wide characters), the client
 (width rules, totals, files0 records, error rows), and the locale
 switch-drift pins.
@@ -1334,11 +1467,13 @@ file operand (created if absent; overwritten, or appended with
 `-a`/`--append`), streaming in constant memory — one 4 KiB chunk fanned
 out to every still-live output — and stopping once no output remains.
 `--output-error[=MODE]` selects how a failed output is treated
-(`warn`, `warn-nopipe`, `exit`, `exit-nopipe`, matched with GNU
-`argmatch` prefixes; the value arrives only attached with `=`, and a
+(`warn`, `warn-nopipe`, `exit`, `exit-nopipe`, an unambiguous prefix accepted
+and a refused word named ambiguous or invalid with the valid ones listed, as
+GNU `tee` does, through the shared `tairix_util::argv::choose`; the value
+arrives only attached with `=`, and a
 bare `--output-error` — or `-p` — selects `warn-nopipe`). A failed
 output is diagnosed, dropped, and the run continues (or stops, under an
-`exit` mode), exactly as GNU `tee.c` nulls a failed descriptor; an
+`exit` mode), as the coreutils manual (§17.1) defines the modes; an
 unopenable file is likewise diagnosed and — only under an `exit` mode —
 immediately fatal. A `-` operand names a file called `-`, as in GNU.
 
@@ -1359,7 +1494,7 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 the console pair and `CAP_FS_ACCESS` — within the session baseline —
 and the secured VFS still authorises every operand per-inode.
 `cargo test -p tairix-tee` drives the parser (switches, bundles, the
-argmatch modes, `--`, refusals), the engine over in-memory seams
+mode prefixes, `--`, refusals), the engine over in-memory seams
 (fan-out, chunking, append vs overwrite, every mode × failure verdict,
 the no-output early stop, read errors), and the locale switch-drift
 pins.
@@ -1436,9 +1571,11 @@ decimal and `%D` in hex — the same value in two spellings, and comparing two
 files' `%d` still answers exactly "are these on one volume?".
 
 An operand that cannot be read is diagnosed on standard error, the remaining
-operands are still described, and the run exits non-zero. The crate is
-`no_std` (with `alloc`), has no `unsafe`, and requests `CAP_CONSOLE_WRITE` +
-`CAP_FS_ACCESS` and no `CAP_CONSOLE_READ`, because it never prompts.
+operands are still described, and the run exits non-zero. At an attested
+terminal `%n` is escaped (`quote::output_style`) while `%N` keeps its own
+quoting; see the top of this page. The crate is `no_std` (with `alloc`), has
+no `unsafe`, and requests `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` and no
+`CAP_CONSOLE_READ`, because it never prompts.
 
 ## `ls` — list directory contents (`userland/apps/ls`)
 
@@ -1549,10 +1686,12 @@ ls [-aABbCcdFfGgHhikILlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size
 | `--`             | end option parsing; every later argument is a path |
 | *path*           | a file or directory to list                        |
 
-With no `path` operand `ls` lists the current directory. Short options
-may be combined into one argument (e.g. `-la` is `-l -a`); an
-unrecognised letter anywhere in such a cluster is a `LsError::Usage`
-error. The bare `-` is a path named `-`, not an option.
+With no `path` operand `ls` lists the current directory. The line is read
+as GNU's `getopt_long` reads it: short options may be combined into one
+argument (e.g. `-la` is `-l -a`), a long option may be shortened to any
+unambiguous prefix (`--rev`), and an option it cannot read is refused in its
+words (`LsError::Option`), exit `2` with `Try 'ls --help' for more
+information.`, as GNU's is. The bare `-` is a path named `-`, not an option.
 
 ### Symbolic links
 
@@ -1580,12 +1719,15 @@ holding a dangling link useful. A skipped *entry* keeps the type letter the
 directory stream gave it and renders `?` for every cell a stat would have
 filled, never a fabricated zero. The exit status is the GNU grade: `0` when
 everything listed, `1` for a problem inside a listing, `2` for a command-line
-operand that could not be reached (or a usage error).
+operand that could not be reached, a directory `-R` reached again through a
+link, exhausted memory, or a usage error.
 
 Because `-L` is the only posture under which `-R` can walk into a directory a
 link names, the recursive walk carries the node identities of the directories
-it came through and reports `not listing already-listed directory` for one it
-reaches a second time, rather than following the loop until the path outgrows
+it came through and, when the turn of one it reached a second time comes,
+reports `<path>: not listing already-listed directory` — the path quoted as
+GNU `ls` quotes it there, where a shell needs it or it holds a `:` — as
+serious trouble (exit `2`), rather than following the loop until the path outgrows
 the kernel's bound.
 
 With `--color`, a link takes the shared scheme's link role (bold cyan, GNU's
@@ -1658,7 +1800,7 @@ otherwise, decided against the wall clock), `long-iso`, `full-iso`, or
 one shared civil-date breakdown (`tairix_fsmeta::calendar::CivilTime`).
 
 Names are quoted through the shared engine every command app writes names
-with (`tairix_util::quote`, GNU's `quotearg` styles), so awkward characters
+with (`tairix_util::quote`, GNU's `--quoting-style` styles), so awkward characters
 are visible and safe to paste back into a shell. `-N`
 (`--quoting-style=literal`) prints names verbatim, `-Q`
 (`--quoting-style=c`) uses C string quoting, `-b`
@@ -1679,9 +1821,11 @@ infrastructure. The default is resolved against the attested console:
 nongraphic characters as `?`. `-p` / `-F` / `--file-type` /
 `--indicator-style` append the indicator suffix after any closing quote — `/`
 after a directory, `@` after a link under `--file-type` and `-F`, and `*`
-after an executable under `-F` alone — and under `-F` and `--file-type` the
-C styles also escape each `*`, `=`, `>`, `@` and `|` in a name, so no name
-passes for a suffix; GNU 9.4 leaves `-F`'s own `*` unescaped. A `path:`
+after an executable under `-F` alone — and under `-F` and `--file-type` a
+name holding `*`, `=`, `>`, `@` or `|` is quoted by the shell styles and has
+that character escaped by the C styles, so no name passes for a suffix. That
+is a deliberate divergence: GNU 9.4 leaves `-F`'s own `*` unmarked, so there a
+name ending in one reads as an executable. A `path:`
 heading is quoted in the listing's style, any `:` in the path quoted too, as
 GNU quotes it.
 
@@ -1700,8 +1844,8 @@ not the sum of the rounded per-entry cells, matching GNU. `-l` and
 `-1`/`-C`/`-x`/`-m` (and the `--format=WORD` words) are one last-wins
 arrangement state, with GNU's rule that `-1` has no effect after `-l`.
 `-T` / `--tabsize` sets the column tab stop (default 8; `0` pads with
-spaces only), advancing between columns with tabs by a faithful port of
-GNU's `indent`. `--zero` ends every entry line and the `total` with NUL
+spaces only), advancing between columns with tabs where GNU `ls` places
+them. `--zero` ends every entry line and the `total` with NUL
 instead of a newline (headers and the inter-block separator keep the
 newline), and defaults to a single column, literal quoting, and shown
 control characters.
@@ -1728,19 +1872,22 @@ The **link-count column** sits between the mode string and the owner, as
 in the GNU tool, and reports the count the filesystem records — never one
 derived here. A row whose stat was refused renders it `?` like every
 other stat-derived cell. `-i` prefixes each entry (short and long) with
-its stable node number, right-aligned.
+its node number, right-aligned: the number its format gives the node, which
+a rename keeps wherever the format numbers its nodes (a FAT file's is where
+its entry lies, which a rename moves).
 
-Entries can be filtered out by name, following GNU's `file_ignored`
-order. `-B` / `--ignore-backups` drops names ending in `~` in every
+Entries can be filtered out by name, as the coreutils manual (§10.1.1)
+defines the filters. `-B` / `--ignore-backups` drops names ending in `~` in every
 dotfile mode (a direct suffix test — a backup is hidden even under `-a`,
 and no leading-`.` glob special case is needed). `-I` /
 `--ignore=PATTERN` (repeatable) drops names matching the glob in every
 mode, while `--hide=PATTERN` (repeatable) drops matches only when neither
 `-a` nor `-A` is given — an explicit "show hidden" wins over `--hide`, the
 GNU rule. Both patterns compile through the shared `lib/glob` matcher read
-as GNU's `fnmatch(FNM_PERIOD)` reads them, so a leading `.` is matched only
+as POSIX `fnmatch` with `FNM_PERIOD` reads them, so a leading `.` is matched only
 by a `.` in the pattern; a malformed pattern is a `LsError::Usage` error,
-never a filter that silently matches nothing. These filters are
+never a filter that silently matches nothing, and a match the heap cannot
+hold ends the listing with GNU's `memory exhausted` (exit `2`). These filters are
 applied silently — unlike the default dotfile filter, an explicitly
 requested one emits no omission record.
 
@@ -1756,14 +1903,14 @@ status — and nothing is emitted under `-a` or when nothing was hidden.
 
 ### Fail closed
 
-- An unrecognised option is a `LsError::Usage` that inspects nothing.
-- An operand (or a directory entry, when a per-entry stat is needed)
-  that cannot be stat'd surfaces the underlying `Errno` as
-  `LsError::Stat` and stops before any later operand (a missing operand
-  among several aborts rather than skipping silently).
-- A directory that cannot be read is `LsError::Read`; a directory
-  stream carrying a non-UTF-8 name (an ABI-contract violation) is
-  refused whole rather than silently thinned.
+- An option `getopt` refuses (`LsError::Option`), or a value `ls` cannot
+  read (`LsError::Usage`), inspects nothing.
+- An operand that cannot be reached is reported (`ls: cannot access 'x':
+  …`) and the remaining operands are still listed, the run exiting 2; a
+  directory or entry inside a listing that cannot be read is reported and
+  passed, exiting 1 — GNU's serious and minor trouble.
+- A directory stream carrying a non-UTF-8 name (an ABI-contract
+  violation) is refused whole rather than silently thinned.
 - A failed terminal write is `LsError::Output`.
 - A missing own-help tree degrades `-?` to the usage banner — never a
   fabricated page, never a failure.
@@ -1817,17 +1964,17 @@ a store read only the mounted read-only `/System` volume produces.
 ## `rm` — remove files and directories (`userland/apps/rm`)
 
 `tairix-rm` removes its operands in order (`AGENTS.md` §3). A
-non-directory operand — a regular file, a symbolic link (removed, never
-followed), a device node — is unlinked. A directory operand is removed
+non-directory operand — a regular file, or a symbolic link, removed as
+itself and never followed — is unlinked. A directory operand is removed
 only with `-r`, which removes its contents depth-first and then the
 directory itself; naming a directory without `-r` is an error. With `-f`
 an operand that does not exist is skipped rather than reported. This is
 the POSIX model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `tairix-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
+depends only on `lib/*` crates, so it never links a kernel or driver
+crate (`AGENTS.md` §17.4).
 
 ### Grammar
 
@@ -1843,76 +1990,135 @@ rm [-dfiIrRv] [--] file...
 | `-i`, `--interactive`   | prompt before every removal                        |
 | `-I`                    | prompt once before removing more than three operands, or before a recursive removal |
 | `-v`, `--verbose`       | report each removal                                |
-| `--preserve-root`       | refuse to remove `/` (the default)                 |
+| `--preserve-root`       | refuse to remove `/` recursively (the default)     |
 | `--no-preserve-root`    | allow removing `/`                                 |
 | `-h`, `--help`          | print the usage banner (wins immediately)          |
 | `--`                    | end option parsing; every later argument is a path |
 | *file*                  | a file or directory to remove                      |
 
 At least one file operand is required unless `-f` is given (an empty
-`rm -f` removes nothing and succeeds). Short options may be combined into
-one argument (e.g. `-rf` is `-r -f`); an unrecognised letter anywhere in
-such a cluster is a `RmError::Usage` error. The bare `-` is a path named
-`-`, not an option. As in the GNU tool, the later of `-f` / `-i` / `-I`
-wins: `-f` cancels prompting and a prompt flag cancels `-f`.
+`rm -f` removes nothing and succeeds). The line is read as GNU's
+`getopt_long` reads it: short options may be combined into one argument
+(e.g. `-rf` is `-r -f`), a long option may be shortened to any unambiguous
+prefix (`--rec`), and an option it cannot read is refused in its words
+(`RmError::Option`). `--no-preserve-root` alone is accepted only in full, as
+GNU accepts it; an abbreviation is `RmError::AbbreviatedNoPreserveRoot`. The
+bare `-` is a path named `-`, not an option. As in the GNU tool, the later
+of `-f` / `-i` / `-I` wins: `-f` cancels prompting and a prompt flag cancels
+`-f`.
 
 ### A removal machine, not a data source
 
-`run` asks the injected filesystem seam what each operand is, walks each
-directory `-r` must remove, and unlinks every reachable object. The
-operations that reach the outside world are injected seams, the same
-discipline as `ls`'s `Listing`/`Output`:
+`run` describes each operand, walks each directory `-r` must remove, and
+unlinks every reachable object. The operations that reach the outside
+world are injected seams:
 
-- `Removal` — learn a path's kind, read a directory's entries by index,
-  and remove a file or an emptied directory.
-- `Prompt` — ask the `-i`/`-I` confirmation questions; a declined
-  question skips the object (or the whole run for `-I`) without error,
-  and an unanswerable one fails closed — never treated as consent.
+- `Roots` — the shared tree seam (`tairix_fscopy::tree`): each operand
+  described — a final link read as itself — and unlinked by name in the
+  directory holding it; each tree walked through the directories the run
+  holds open, each entry reached by name from its own directory and never
+  through a link; and whether a file is write-protected asked of the
+  directory holding it (`fs_access` asking `WRITE` of the name itself,
+  answered as the caller).
+- `Prompt` — ask the confirmation questions in GNU's words, naming the
+  object's kind (`remove regular file`, `remove regular empty file`,
+  `remove symbolic link`, `remove directory`, and `descend into
+  directory` only for a directory that holds something), and say whether
+  its replies come from a terminal (`terminal_size(0)` answers); a
+  declined question keeps the object (or skips the whole run for `-I`)
+  without error, and an unanswerable one fails closed — never treated as
+  consent.
+
+Without `-f`, when standard input is a terminal, a file the caller may not
+write is asked about first, as GNU asks (`rm: remove write-protected regular
+file 'x'?`, `regular empty file` for an empty one), and removed only on a
+reply beginning `y` or `Y`; under `-i` the question it asks anyway names the
+protection. A link is never asked about, and a read-only volume is no
+protection of the file's (it refuses the removal itself). A protection that
+cannot be read is reported and the file kept, never removed unasked.
 - `Output` — write the usage banner and the `-v` `removed '…'` /
   `removed directory '…'` reports to the terminal (`rm` is otherwise
   silent on success).
 
-On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, recursion, prompting, and
+On a running system the tree seam is `tairix_rt::copy::WorkingDirectory`
+and the rest are console-backed; in tests the tree is `tairix_fscopy`'s
+in-memory fixture, so every parsing, recursion, race, prompting, and
 force decision is testable without a kernel. `--preserve-root` (the
-default) refuses the operand `/` outright; `-d` removes an empty
-directory without `-r`, surfacing the filesystem's own refusal of a full
-one.
+default) refuses a recursive removal of the view root however it is
+reached: a spelling of it (`/`, `//`, with GNU's `(same as '/')`) before
+anything is looked up, and any other directory operand — a volume's
+`id::` spelling, say — once it is held, by its identity. Without `-r` the
+root is a directory like any other. A root names no entry of a
+directory, so emptied it stays: `cannot remove`, the device busy. `-d`
+removes an empty directory without `-r`, surfacing the filesystem's own
+refusal of a full one.
 
 ### Recursion order
 
 `rm -r` removes a directory's contents depth-first — files and nested
 directories before the directory that holds them — so a parent is never
-unlinked while it still has children. Entries are read into a list before
-removal begins, so the walk does not depend on directory indices staying
-stable as objects disappear.
+unlinked while it still has children. Each directory's entries are read
+whole before any is removed, so the walk is not steered by what it
+removes. A link met in the tree is removed as itself; a subdirectory
+swapped for a link mid-walk is never descended and what it names is never
+touched, since the walk descends only through a directory it opens
+itself. A directory is removed only while its name still holds the node
+the walk emptied (`DIRECTORY | EXPECT_NODE`): one renamed into its place
+meanwhile is kept, and the refusal reported. A file is removed only while
+its name holds the node the listing, or a question, named
+(`EXPECT_NODE`), so a file swapped in after `-i` consented is kept. A directory one of whose
+entries stays — declined, or failed — is kept without asking or
+reporting, as GNU keeps every ancestor of what it could not remove.
 
 ### Fail closed
 
-- An unknown option, or no operand without `-f`, is a `RmError::Usage`
-  that removes nothing.
-- A directory named without `-r` is a `RmError::IsDirectory`.
-- An operand that cannot be inspected surfaces the underlying `Errno` as
-  `RmError::Stat`, and the run stops before any later operand. `-f` makes
-  a `NotFound` a silent no-op, but still surfaces any other errno (e.g.
-  `PermissionDenied`).
-- A directory that cannot be enumerated is `RmError::Read`.
-- A failed unlink is `RmError::Remove`.
+- An option `getopt` refuses (`RmError::Option`), or no operand without
+  `-f` (`RmError::Usage`), removes nothing and is reported as `rm: reason`
+  and `Try 'rm --help' for more information.`, exit `1`; an abbreviated
+  `--no-preserve-root` is reported alone, exit `1`, as GNU reports it.
+- A failed operand is reported in GNU's words — `rm: cannot remove 'x':
+  <reason>` — and the run goes on to the next, exiting 1 at the end, as
+  GNU's does. A directory named without `-r` is `RmError::IsDirectory`;
+  under `-r` or `-d` an operand whose last component is `.` or `..` is
+  refused before anything is looked up, as POSIX requires (`RmError::Dot`,
+  `refusing to remove '.' or '..' directory: skipping 'x'`), and without
+  them it is a directory like any other; an empty operand names nothing;
+  an operand that cannot be inspected is `RmError::Stat` (`-f` makes a
+  `NotFound` a silent no-op, but still reports any other errno, e.g.
+  `PermissionDenied`); a directory that cannot be enumerated is
+  `RmError::Read`, unless it is empty, when it is removed as GNU removes
+  it; a failed unlink is `RmError::Remove`; a recursive removal of the
+  view root under `--preserve-root` is `RmError::PreserveRoot`, in GNU's
+  two lines. A failure inside a tree is reported and the walk goes on
+  with its siblings.
+- A confirmation that cannot be read, or a terminal that refuses a
+  report, ends the run.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
 `cargo test -p tairix-rm` drives the parser and the removal engine
-against an in-memory tree and a recording output: the command grammar
-(every option, clustered short flags, `-`/`--`, the no-operand and
+against the shared in-memory tree and a recording output: the command
+grammar (every option, clustered short flags, `-`/`--`, the no-operand and
 usage-error paths), a single file, several files in order, the
 directory-without-`-r` refusal, recursive depth-first removal of a nested
 tree (asserting contents are unlinked before their directory), an empty
-directory, the missing-operand fail-closed path and the `-f` skip, the
-`-f`-does-not-mask-permission guarantee, a failure stopping before a
-later operand, the unreadable-directory and failed-unlink paths, and the
-trailing-slash path join.
+directory, the missing-operand path and the `-f` skip, the
+`-f`-does-not-mask-permission guarantee, a failed operand reported while
+the next is still removed, a failed entry reported while its siblings go
+and its ancestors stay, the unreadable-directory (empty and not) and
+failed-unlink paths, links removed as themselves, `.` and `..` refused
+before any lookup, a subdirectory swapped for a link before each seam call
+of the walk in turn leaving the link's target untouched, a directory
+renamed into an emptied one's name kept and reported, GNU's kind-naming
+`-i` questions and its silence over a declined entry's ancestors, the
+write-protected question at a terminal (and its absence under `-f`, without
+a terminal, and for a link or a directory), the root refused however
+spelled or reached by its identity, another root emptied and kept,
+`.`, `..` and an empty operand worded as GNU words them, a file swapped in
+after `-i` consented or during a walk kept, and `--no-preserve-root`
+naming the root's entries with one slash.
 
 ## `cp` — copy files and directories (`userland/apps/cp`)
 
@@ -1940,7 +2146,7 @@ cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
 | Token                     | Meaning                                            |
 |---------------------------|----------------------------------------------------|
 | `-r`, `-R`, `--recursive` | copy directories and their contents                |
-| `-f`, `--force`           | remove an unwritable destination and retry         |
+| `-f`, `--force`           | remove an unwritable destination and retry; put a link in an existing name's place |
 | `-i`, `--interactive`     | ask before overwriting an existing file            |
 | `-n`, `--no-clobber`      | never overwrite an existing file                   |
 | `-l`, `--link`            | a second name for the source's node, not a copy    |
@@ -1968,14 +2174,33 @@ verbatim, so a relative or dangling link survives the copy; and
 carries (`plans/SYMLINKS.md` S7), remembering only a node whose name count
 exceeds one — so the map holds the hard links a copy meets rather than one
 entry per node on the volume. Because a link is *created*, and a create never
-replaces a name, an occupied destination needs `-f` first; the byte copy
-truncates through its own create and needs none. `-a`/`--archive` and the
+replaces a name, an occupied destination needs `-f`, which puts the link in
+the name's place in one step — made under a staging name and renamed over it
+(`tairix_rt::replace_with_link`), so a link that cannot be made, or a source
+link that cannot be read, leaves the name as it was; the byte copy truncates
+through its own create and needs none. As GNU 9.4 judges them, a second name
+the destination already is (`cp -l a a`, or onto another of its names) is
+already made and reported by nothing, while a symbolic link put on the node it
+would name (`cp -s a a`, `cp -sf a h` with `h` another name of `a`, `cp -P sl
+sl`) is refused as the same file. `-a`/`--archive` and the
 other `--preserve` members are **refused**: `-a` is `-dR --preserve=all`,
 `--preserve=all` includes timestamps, and no syscall sets a timestamp, so
 honouring it would report a preservation that did not happen. `-dR` is the
-rest of `-a`. `--no-preserve` accepts `links`, `xattr`, `all`, and — as
-no-ops, since they are never preserved — `mode`, `ownership`, `timestamps`
-and `context`.
+rest of `-a`. `--no-preserve` accepts `links`, `xattr`, `mode`, `all`, and —
+as no-ops, since they are never preserved — `ownership`, `timestamps` and
+`context`.
+
+A new file is born with its source's permission bits, the set-ID and sticky
+bits dropped, less the umask the kernel applies — so a `0600` file's copy is
+`0600` and a `0777` one's `0755` under umask `022`, as GNU 9.4 makes them — and
+a destination that already exists keeps its own mode. A new directory takes
+its source's permission and sticky bits less the umask, and a setgid bit the
+directory it is made in passes down: it is made holding its owner's read,
+write and search — given them outright where the umask withheld any — so its
+entries can be copied in, and is given its own mode through the descriptor
+the walk holds once they are, so a `0500` source's copy ends `0500` as GNU
+9.4's does. `--no-preserve=mode` (or `all`) makes each new node `0666` or
+`0777` less the umask instead, as GNU's does.
 
 Extended attributes are **carried by default**, where GNU `cp` copies them
 only under `--preserve=xattr`: a RISC OS filetype or a Mac type and creator
@@ -1988,36 +2213,45 @@ What a destination cannot keep is left and reported once, after the run, as
 Links are followed as GNU follows them: an operand's link is followed unless
 `-r` is given, a link met inside a tree is reproduced, `-H` follows the
 operands' links only, `-L` every link, and the last of `-H`, `-L` and `-P`
-wins. `-l` gives a followed link's second name to what it names, linked by
-its resolved path because `fs_link` follows neither of its names.
+wins. A link followed inside a tree is followed from the directory the walk
+holds, never by its path again, so a name above it swapped meanwhile
+cannot redirect the copy. `-l` gives a followed link's second name to what
+it names, the link followed by `fs_link`'s `FOLLOW`; an operand's link is
+linked by its resolved path. `--preserve=links` gives a later source its
+second name through the directory of the first destination, only while
+that name still holds the node the copy made there.
 
 At least one source and a destination are required (fewer than two path
 operands is a `CpError::Usage`). Without `-t` the last path operand is
 the destination and the rest are the sources; with `-t` every operand is
 a source and the `-t` directory must exist. With more than one source
 the destination must be a directory (`-T` refuses more than one source).
-Short options may be combined into one argument (e.g. `-rf` is `-r -f`);
-an unrecognised letter anywhere in such a cluster is a `CpError::Usage`.
-The bare `-` is a path named `-`, not an option. As in the GNU tool, the
-later of `-i` / `-n` wins, `-t` takes its directory attached (`-tdir`)
-or as the next argument, and `-t` with `-T` is a usage error.
+The line is read as GNU's `getopt_long` reads it: short options may be
+combined into one argument (e.g. `-rf` is `-r -f`), a long option may be
+shortened to any unambiguous prefix (`--rec`), and an option it cannot read
+is refused in its words (`CpError::Option`). The bare `-` is a path named
+`-`, not an option. As in the GNU tool, the later of `-i` / `-n` wins, a
+required value follows its option attached (`-tdir`, `--sparse=never`) or as
+the next argument while `--preserve`'s optional one is only ever attached,
+and `-t` with `-T` is a usage error.
 
 ### A copy machine, not a data source
 
 `run` asks the injected filesystem seam what each source is, streams a
 regular file's bytes from source to destination, and walks each directory
 `-r` must reproduce. The operations that reach the outside world are
-injected seams, the same discipline as `rm`'s `Removal`/`Output`:
+injected seams, the same discipline as the other file tools':
 
-- `FileSystem` — learn a path's kind and identity, read a directory's
-  entries, and create directories and files (plus remove a destination
-  file for `-f`); a file's bytes are read and written through its
-  supertrait, the copy engine's by-path seam (`tairix_fscopy::PathFiles`),
-  and a path's resolution and each ancestor's identity through
-  `tairix_fscopy::Ancestry`.
+- `FileSystem` — the shared tree seam's `Roots` (`tairix_fscopy::tree`), which
+  opens an operand's directory or node and the directory holding it, every
+  child beneath reached by name from a directory held open, never through a
+  link; beside it an operand read or emptied for writing through its final
+  link as GNU's `cp` reads and writes one, a resolved spelling for `-l`, and
+  a link put in a name's place in one step for `-f`. A file's bytes are read
+  and written through the descriptors held.
 - `Prompt` — ask the `-i` overwrite question; a declined question skips
-  that copy without error, and an unanswerable one fails closed — never
-  treated as consent.
+  that copy and ends the run with status 1, as GNU 9.4's does, and an
+  unanswerable one fails closed — never treated as consent.
 - `Output` — write the usage banner and the `-v` `'src' -> 'dst'`
   reports to the terminal (`cp` is otherwise silent on success). Every name
   a report, prompt or diagnostic carries is quoted through
@@ -2038,39 +2272,55 @@ bytes where the source stores them and a hole where it keeps one
 its source's attributes too. A directory is reproduced by creating its
 destination — or merging into
 an existing one — then copying each entry, files and nested directories
-alike, under the destination. Entries are read into a list before the
-copy descends, so the walk does not depend on directory indices staying
-stable. The destination directory is created before its contents, so a
-parent always exists before a child is copied into it.
+alike, under the destination, through the shared walk
+(`tairix_fscopy::tree::walk`): each source and destination directory is held
+open and every entry reached by name from it, so a name swapped for a link
+meanwhile leads nowhere new, and inside a destination tree a link is never
+written through: a copy onto one is refused, `not writing through
+symbolic link 'x'`, and an existing file there is opened for writing
+alone, as GNU opens it. Entries are read into a list before the copy descends, so
+the walk does not depend on directory indices staying stable. The
+destination directory is created before its contents, so a parent always
+exists before a child is copied into it.
 
 A tree copy never copies itself. Before anything is written, a directory
-source whose destination resolves to the directory or inside it —
-compared by the path the kernel resolves the destination to and by the
-identity of each directory on that path, so neither a link, a `..` nor
-another spelling of the volume hides it (`tairix_fscopy::landing`) — is
-refused. While the copy runs, the walk keeps the identities of the source
+source whose destination is the directory or lies inside it — judged from
+the directories themselves, climbing from where the copy would write and
+comparing each directory's identity with the source's, so neither a link, a
+`..` nor another spelling of the volume hides it (`tairix_fscopy::landing`)
+— is refused. While the copy runs, the walk keeps the identities of the source
 and destination directories it is inside (`tairix_fscopy::Descent`, its
 depth's worth, never the tree's) and refuses to enter one again, so a
-directory moved into the source meanwhile, or a link leading back up, stops
-the copy rather than recursing without end.
+directory moved into the source meanwhile, or a link leading back up, is
+refused — reported, the walk going on with the rest — rather than recursed
+into without end. The walk leaves each directory it entered on every path
+out, a failed one included, so a later operand never meets a stale
+ancestry. A walk that ends early, at a failure that ends the run or a
+source directory that will not list, still gives each directory it made
+its own mode, deepest first.
 
 ### Force
 
 `-f` covers a destination that cannot be created (for example, an
-existing read-only file): the destination is removed and the create is
-retried exactly once. Without `-f`, a create failure surfaces as a
-`CpError::Create` and stops the run.
+existing read-only file): the destination is removed — only while its
+name still holds the node the copy looked at, so one swapped in after an
+`-i` question is kept — and the create is retried exactly once. Without `-f`, a create failure surfaces as a
+`CpError::Create`, reported while the rest are still copied.
 
 ### Fail closed
 
-- An unknown option, fewer than two operands, or more than one source
-  aimed at a non-directory destination is a `CpError::Usage` that copies
-  nothing.
+- An option `getopt` refuses is a `CpError::Option`, and fewer than two
+  operands or more than one source under `-T` a `CpError::Usage`; either
+  copies nothing and is reported as `cp: reason` and `Try 'cp --help' for
+  more information.`, exit `1`.
 - A directory source named without `-r` is a `CpError::IsDirectory`; a
   directory source whose destination already exists as a non-directory is
-  a `CpError::NotADirectory`.
+  a `CpError::Overwrite`.
 - A path that cannot be inspected is `CpError::Stat`, naming it with the
-  kernel's reason, and the run stops before any later operand.
+  kernel's reason. Each failure below is reported as `cp: <failure>` and
+  the rest are still copied — the rest of its directory too, as GNU's walk
+  goes on — and the run exits 1; only an unusable destination, a refused
+  prompt, a dead terminal or a record that cannot grow ends it.
 - A destination that is the source's own node — the same name, another
   name for it, or a link to it, compared by the identity a following probe
   reports, before any question is asked — is `CpError::SameFile` ("'a' and
@@ -2089,12 +2339,20 @@ retried exactly once. Without `-f`, a create failure surfaces as a
   the one an earlier operand made. A destination kept at the `-i` question or
   under `-n` is no copy of its source, so `--preserve=links` never links the
   source node's next name to it.
+- A source an earlier operand already named — the same directory entry,
+  however its directory is spelt (`cp f ./f d/`, `cp -r a a/ d/`) — is
+  skipped with GNU's warning ("source file 'f' specified more than once") and
+  the run goes on. The entry is the source's directory as the kernel resolves
+  it and its own name unfollowed, compared only when a node recurs, so a link
+  and what it leads to, or two hard links, are two sources, each copied in its
+  own right as GNU copies them.
 - An unreadable source is `CpError::Read`; an uncreatable destination is
   `CpError::Create`; a failed write is `CpError::Write`, each naming the
   path; an attribute the
   destination refuses under `--preserve=xattr`, or refuses for a reason that
-  is no attribute's, is `CpError::Attribute`, naming the key in its display
-  form, so a key's control bytes never reach the terminal.
+  is no attribute's, is `CpError::Attribute`, naming the key quoted as every
+  name is, so nothing a key holds can hide, reorder or command what the
+  terminal shows.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
@@ -2109,8 +2367,10 @@ directory under its base name, several files into a directory, the
 several-sources-to-a-non-directory `Usage` refusal, the
 directory-without-`-r` refusal, recursive reproduction of a nested tree,
 a recursive merge into an existing directory, the recursive-onto-a-file
-refusal, the missing-source fail-closed path, a failure stopping before a
-later source, the unreadable-source / uncreatable-destination /
+refusal, the missing-source fail-closed path, a failed source reported
+while the next is still copied, a failed entry reported while the rest of
+its directory is still copied, a failed directory leaving no ancestry for
+the next operand, the unreadable-source / uncreatable-destination /
 failed-write paths, the `-f` remove-and-retry recovery, the trailing-slash
 base-name join, a sparse file copied with its holes under each `--sparse`
 mode, attributes carried, refused and reported once, a destination that is
@@ -2121,8 +2381,11 @@ is written, the link-following postures and their last-wins rule, a hard
 link to a followed link naming what it names, a failure naming its path
 quoted, an operand never replacing what an earlier one copied into place, a
 destination kept at the `-i` question never linked to a source node's next
-name, an attribute key reported escaped, and the help document kept in step
-with the options.
+name, an attribute key reported quoted, a new copy taking its source's
+permission bits under the umask while an existing destination keeps its
+mode, `--no-preserve=mode`, a copied directory ending with its source's bits
+less the umask, a umask withholding the owner's write that still lets the
+copy fill it, and the help document kept in step with the options.
 
 ## `mv` — move (rename) files and directories (`userland/apps/mv`)
 
@@ -2145,43 +2408,44 @@ only `lib/*` crates — a cross-volume move copies through the shared engine
 ```
 mv [-finvT] [-t dir] [--] source... dest
 
-  -f, --force                never prompt
+  -f, --force                never prompt before overwriting
   -i, --interactive          ask before overwriting an existing destination
   -n, --no-clobber           never overwrite an existing destination
-  -v, --verbose              report each move (renamed 'src' -> 'dst', or
-                             copied 'src' -> 'dst' then removed 'src')
+  -v, --verbose              report each move (renamed 'src' -> 'dst', or,
+                             across volumes, each entry created, copied
+                             and removed)
   -t dir, --target-directory=dir
                              move every source into dir
   -T, --no-target-directory  treat dest as a normal file (one source)
   -h, --help                 show the usage banner
 ```
 
-At least one source and a destination are required. Short options may be
-combined (e.g. `-fn`). `--` ends option parsing: every later argument is
-a path. With more than one source the destination must be a directory
-(`-T` refuses more than one source; `-t`'s directory must exist).
-`-h`/`--help` wins immediately. As in the GNU tool, the last of `-f` /
-`-i` / `-n` wins; `-i` asks through the injected `Prompt` seam before
-replacing an existing destination — a declined question skips that move
-without error and an unanswerable one fails closed, never treated as
-consent.
+At least one source and a destination are required. The line is read as
+GNU's `getopt_long` reads it: short options may be combined (e.g. `-fn`), a
+long option shortened to any unambiguous prefix (`--verb`), and `-t`'s
+directory follows attached or as the next argument. `--` ends option
+parsing: every later argument is a path. With more than one source the
+destination must be a directory (`-T` refuses more than one source; `-t`'s
+directory must exist). `-h`/`--help` wins immediately. As in the GNU tool,
+the last of `-f` / `-i` / `-n` wins; `-i` asks through the injected
+`Prompt` seam before replacing an existing destination — a declined question
+skips that move and ends the run with status 1, as GNU 9.4's does, and an
+unanswerable one fails closed, never treated as consent. `-n` keeps an
+existing destination and says so, `mv: not replacing 'x'`, ending the run
+with status 1 as GNU's does.
 
 ### A move machine, not a data source
 
-`run` asks the injected filesystem seam what each source is, then asks it
-to `rename` the source onto its destination. A rename within one
-filesystem is atomic and is the whole operation. The operations that
-reach the outside world are injected seams, mirroring the other userland
-crates (`cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`, `cp`'s
-`FileSystem`):
+`run` looks at each source without following a link, then renames it onto
+its destination through the directories that hold the two names, opened
+from the working directory through the shared tree seam
+(`tairix_fscopy::tree`), and the rename moves only the node it looked at
+(`RenameFlags::EXPECT_NODE`). A rename within one filesystem is atomic and is
+the whole operation. Beside that seam the run reaches the outside world
+through injected seams, mirroring the other userland crates:
 
-- `FileSystem` — learn a path's kind, rename a path, read a directory's
-  entries, create directories and files (never replacing one), carry a
-  node's owner and mode, draw a staging name, commit what was written to the
-  disk, and remove files and directories; a file's bytes go through its
-  supertrait, the copy engine's by-path seam (`tairix_fscopy::PathFiles`),
-  and a path's resolution and each ancestor's identity through
-  `tairix_fscopy::Ancestry`.
+- `Staging` — draw the fresh name a move across volumes builds its copy
+  under.
 - `Prompt` — ask the `-i` question.
 - `Output` — write the usage banner and the `-v` reports, every name in
   them quoted through `tairix_util::quote`.
@@ -2192,36 +2456,55 @@ testable without a kernel.
 
 ### Cross-device relocation
 
-A rename cannot cross filesystems, so the `rename` seam reports that case as
-an explicit `RenameOutcome::CrossDevice` outcome rather than an overloaded
-`Errno`. `mv` then keeps the rename's promise by other means. GNU removes the
+A rename cannot cross filesystems, and the kernel says so with
+`Errno::CrossVolume`, having changed nothing. `mv` then keeps the rename's
+promise by other means. GNU removes the
 destination and copies over it, so a failure or a crash part way leaves
 neither the old destination nor a whole new one; here:
 
 1. The move is checked as the rename would be: a directory replaces only an
    empty directory, a non-directory never replaces a directory nor a
    directory a non-directory, and a directory never moves into its own
-   subtree — judged physically, by the resolved path and each ancestor's
-   identity, exactly as `cp` judges it.
-2. The copy is built beside the destination under a fresh staging name
+   subtree — judged from the directories themselves, by the identity of each
+   one above where the copy would write, exactly as `cp` judges it.
+2. The copy is made beside the destination under a fresh staging name
    (`<name>.<16 hex digits>.new`, the same rule `tairix_rt::replace_file`
    stages under, shortened to `.<16 hex digits>.new` when the name would
-   outgrow a component): a regular file through the shared copy engine with
-   its holes and extended attributes, a symbolic link recreated with the
-   target it stores (never followed), and a directory subtree depth-first,
-   each directory taking its mode only after its entries are in.
-3. The copy is committed to the disk, renamed onto the destination in one
-   step — the destination holds its old contents until that instant — and
-   committed again.
-4. Only then is the source removed, depth-first.
+   outgrow a component), owner-only — a file `0600`, a directory `0700`,
+   given those bits outright where the umask withheld any — and held open,
+   so a private tree is never readable under its staging name.
+3. It is filled through its descriptors: a regular file through the shared
+   copy engine with its holes and extended attributes, then its mode and
+   owner; a symbolic link recreated with the target it stores (never
+   followed), then its owner; a directory subtree through the shared walk,
+   descending each source directory it opened, each directory taking its
+   mode only after its entries are in. Every entry copied is recorded with
+   what it was when it was copied.
+4. The copy is committed to the disk, renamed onto the destination in one
+   step — only while the staging name still holds it, the destination
+   holding its old contents until that instant — and committed again.
+5. Only then are the copied entries removed, depth-first, each only while it
+   is what was copied (a directory only while it is the one copied, and
+   empty): an entry added or changed during the copy is kept where it is and
+   reported as `MvError::Changed`, and so is the directory holding it; a
+   directory kept only because an entry in it could not be removed, whose
+   refusal is reported, is kept without a word, as GNU keeps an ancestor of
+   what stays. A volume whose nodes carry no content generation, or whose
+   times are coarse (FAT keeps two-second ones), may not show a same-size
+   rewrite made within that grain, which is then removed as unchanged.
 
-A failure before the rename discards the staged copy and leaves both sides as
-they were, and a crash there leaves at most the staged copy beside them; a
-failure after it leaves the source in place beside a whole destination, so
-nothing is lost either way. Each node keeps its owner and
-mode wherever the destination volume keeps them; a file the mover may not
-give back to its owner becomes the mover's, without its set-user-ID and
-set-group-ID bits. Timestamps are not carried: no call sets a node's times.
+A failure before the rename discards the copy through the node it was built
+in — the staging name removed only while it still names that node — and
+leaves both sides as they were, and a crash there leaves at most the staged
+copy beside them; a failure after it leaves the source in place beside a
+whole destination, so nothing is lost either way. Each node keeps its mode
+and owner wherever the destination volume keeps them, the mode set first,
+while the copy is still the mover's: only a node's owner sets its mode. The
+system clears a file's set-ID bits as its owner changes, so a file given
+back to another owner arrives without them. One the mover may not give back
+becomes the mover's, in the source's group where the mover may keep it,
+without the set-user-ID bit, and without the set-group-ID bit unless its
+group was kept. Timestamps are not carried: no call sets a node's times.
 Attributes the destination cannot keep are left and reported once, as `cp`
 reports them.
 
@@ -2229,9 +2512,10 @@ reports them.
 
 `-n` never overwrites: a source whose destination already exists is skipped,
 and the rename itself refuses to replace (`RenameFlags::NO_REPLACE`), so a
-destination that appears between the check and the move is kept too. The skip
-is not a failure, so the exit status stays `0` — where GNU 9.4's `mv` reports
-it and exits `1` while its `cp -n` exits `0`. `-f` only cancels an earlier `-i`
+destination that appears between the check and the move is kept too. Each
+skip is reported as GNU 9.4's `mv` reports it, `mv: not replacing 'x'`, and
+ends the run with status `1` (GNU's `cp -n`, and `cp`'s, stay silent with
+status `0`). `-f` only cancels an earlier `-i`
 or `-n`: it never removes a destination, so it cannot destroy a directory or a
 node of the other kind that the rename would refuse to replace. Without
 either flag an existing destination is overwritten, the default POSIX
@@ -2239,11 +2523,15 @@ behaviour.
 
 ### Fail closed
 
-- An unknown option, fewer than two operands, or more than one source
-  aimed at a non-directory destination is an `MvError::Usage` that moves
-  nothing.
-- A path that cannot be inspected is `MvError::Stat`, naming it, and the run
-  stops before any later operand.
+- An option `getopt` refuses is an `MvError::Option`, and fewer than two
+  operands or more than one source under `-T` an `MvError::Usage`; either
+  moves nothing and is reported as `mv: reason` and `Try 'mv --help' for
+  more information.`, exit `1`.
+- A path that cannot be inspected is `MvError::Stat`, naming it. Each
+  failure below is reported as `mv: <failure>` and the next operand is
+  still moved, the run exiting 1, as GNU's does; an operand's own move is
+  all or nothing, so its first failure ends that operand alone, leaving
+  the walk's ancestry as it found it for the next.
 - A directory moved into its own subtree is `MvError::IntoItself`; a
   non-directory over a directory is `MvError::OverwriteDirectory` and a
   directory over a non-directory `MvError::OverwriteNonDirectory`, each in
@@ -2257,19 +2545,24 @@ behaviour.
   destination by its identity, so a case-folding volume or another spelling
   of the name does not hide it; a directory may still replace the empty one an
   earlier operand moved there.
+- A destination `-n` keeps is `MvError::NotReplaced` (`not replacing 'x'`).
 - A rename that fails for another reason is `MvError::Rename`.
 - During a cross-device relocation an unreadable source is
   `MvError::Read`, an uncreatable destination is `MvError::Create`, a
-  failed write or commit is `MvError::Write`, and a source that cannot be
-  removed after the move is `MvError::Remove`, each naming its path.
+  failed write or commit is `MvError::Write`, a copied entry that cannot be
+  removed after the move is `MvError::Remove`, and one that changed during
+  the copy is `MvError::Changed`, each naming its path.
+- A source or staged copy swapped since it was looked at is
+  `MvError::Rename` with the kernel's `Stale`, and nothing moves.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
 `cargo test -p tairix-mv` drives the parser and the move engine against
-an in-memory tree that applies the kernel's rename rules and records every
-call in order: the command grammar (every option, clustered short flags,
+the shared in-memory tree (`tairix_fscopy::fixture`), which applies the
+kernel's rename rules and whose attacker hook renames, replaces or relinks a
+name between two calls: the command grammar (every option, clustered short flags,
 `-`/`--`, the too-few-operands and unknown-option paths), a file renamed to a
 new path, a directory renamed, a file moved into a directory under its base
 name, several files into a directory, the several-sources-to-a-non-directory
@@ -2283,30 +2576,36 @@ staged copy is committed, a failed copy keeping the destination and a failed
 commit keeping the source, a staging name another holds refused and left
 alone, an operand never replacing what an earlier one moved into place, owner and mode carried with the set-ID bits
 dropped where ownership cannot be, a directory taking its mode after its
-entries, the `-v` reports, names quoted, an attribute key reported escaped,
-and the trailing-slash base-name join.
+entries, every staged node owner-only while it is filled, the `-v` reports,
+names quoted, an attribute key reported quoted, the trailing-slash base-name
+join, a source swapped after its look left where it is, and the races of a
+move across volumes: a staged copy moved aside behind a planted link never
+reaching what the link names, a staged file swapped for a link neither
+written through nor put in place, and what is added or appended during the
+copy kept and reported.
 
 ## `chmod` — change file mode bits (`userland/apps/chmod`)
 
 `tairix-chmod` applies a mode to each of its file operands (`AGENTS.md`
 §3). The mode is either an absolute octal value (`644`, `0755`, …) that
 replaces the permission bits outright, or a comma-separated list of
-symbolic clauses (`[ugoa]*[-+=][rwxXst]*`, e.g. `g+w`, `o-rx`, `a=rx`,
-`u+s`) that transform the file's current bits. With `-R` a directory
-operand is changed and then its contents are changed recursively. This is
-the POSIX model, and it is a building block of the §5.3 filesystem
-permission model.
+symbolic clauses (`g+w`, `o-rx`, `a=rx`, `u+s`, `g=u`, `=644`) that
+transform the file's current bits. With `-R` a directory operand is
+changed and then its contents are changed recursively. This is the POSIX
+model, and it is a building block of the §5.3 filesystem permission model.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependencies are the audited `tairix-abi` crate and the shared
-`lib/help` engine, so it never links a kernel or driver crate
-(`AGENTS.md` §17.4). The `Run` binary (`src/run.rs`, the store bundle's
-entry point) wires the production seams: a resolve-only `fs_open` +
-`fs_stat` learns each operand's kind and current bits, `fs_set_mode`
-(syscall 74) applies the change — the kernel enforces the owner-only
-rule, the mount flags, and every per-inode check — and the one shared
-batched `fs_readdir` listing feeds `-R`.
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
+depends only on `lib/*` crates — `tairix-abi`, the shared `lib/fscopy`
+tree seam, `lib/util` and the shared `lib/help` engine — so it never links
+a kernel or driver crate (`AGENTS.md` §17.4). The `Run` binary
+(`src/run.rs`, the store bundle's entry point) wires the production
+seams: `tairix_rt::copy::WorkingDirectory` opens each operand through its
+final link and reads and sets its mode through that one descriptor
+(`fs_stat`, then `fs_set_mode` with `EMPTY_PATH` — the kernel enforces the
+owner-only rule, the mount flags, and every per-inode check), and `-R`
+walks through the directories it holds open, each entry opened by name
+from its own directory, never through a link.
 
 ### Grammar
 
@@ -2317,184 +2616,280 @@ chmod [-cfRv] [--] MODE file...
   -c, --changes         report only files whose mode actually changed
   -v, --verbose         report every file processed
   -f, --silent, --quiet suppress most error messages
+  --preserve-root       with -R, refuse to change '/'
+  --no-preserve-root    treat '/' like any other directory (the default)
   -h, -?, --help        show this command's own short help
 ```
 
-A mode and at least one file are required. `--` ends option parsing:
-every later argument is an operand. POSIX `chmod` spells recursive `-R`;
-a bare `-r` is not an option. To set a mode that begins with `-`, write
-it without the dash (`a-w`) or end option parsing first
-(`chmod -- -w file`). `-h`/`-?`/`--help` wins immediately. The later of `-c`
+A mode and at least one file are required. The line is read as GNU's
+`getopt_long` reads it, so a long option may be shortened to any
+unambiguous prefix (`--rec`). `--` ends option parsing: every later
+argument is an operand. POSIX `chmod` spells recursive `-R`; a bare `-r`
+is not an option. To set a mode that begins with `-`, write it without the
+dash (`a-w`) or end option parsing first (`chmod -- -w file`).
+`-h`/`-?`/`--help` wins immediately. The later of `-c`
 / `-v` wins; the reports use the GNU wording (`mode of 'f' changed from
 0644 (rw-r--r--) to 0664 (rw-rw-r--)`, `mode of 'f' retained as …`).
-`-f` suppresses each failing operand's diagnostic and keeps going, then
-fails the whole run with the message-less `ChmodError::Silenced` — the
-exit status still reflects the failure.
+`-f` suppresses each failing operand's diagnostic; the run still exits 1.
 
 ### The mode grammar
 
-- **Octal**: one to four octal digits set the low twelve permission bits
-  (the `rwx` triples plus the setuid/setgid/sticky bits) outright; the
-  current mode is irrelevant.
-- **Symbolic**: comma-separated clauses, each `[ugoa]*[-+=][rwxXst]*`.
-  `u`/`g`/`o` select the owner/group/other field and `a` (or an omitted
-  who) selects all. `+` turns the bits on, `-` off, and `=` sets the
-  selected fields to exactly those bits. Permissions are `r`, `w`, `x`,
-  `X` (execute only for a directory or a file that already carries an
-  execute bit), `s` (setuid/setgid), and `t` (sticky). A clause may chain
-  several operator sections that share its who (e.g. `u+x-w`). An omitted
-  who is treated as `a` (TAIRiX has no per-process umask seam to honour,
-  so the `a` interpretation is exact, not umask-masked).
+The grammar is the shared [`tairix_util::mode`](../lib/util.md), which
+`mkdir -m` and the shell's `umask` read too.
+
+- **Octal**: octal digits, any number of them up to `7777`, set the low
+  twelve permission bits (the `rwx` triples plus the setuid/setgid/sticky
+  bits) outright.
+- **Symbolic**: comma-separated clauses, each
+  `[ugoa]*([-+=]([rwxXst]*|[ugo]))+` or `[-+=][0-7]+`. `u`/`g`/`o` select
+  the owner/group/other field and `a` selects all. `+` turns the bits on,
+  `-` off, and `=` sets the selected fields to exactly those bits.
+  Permissions are `r`, `w`, `x`, `X` (execute only for a directory or a
+  file that already carries an execute bit), `s` (setuid for the owner,
+  setgid for the group), `t` (sticky, for the other field), or a field's
+  bits copied (`g=u`); octal after an operator (`=644`) is taken as
+  written. A clause may chain several operator sections that share its who
+  (e.g. `u+x-w`). A clause naming no one changes every field but leaves
+  the bits the process's umask holds, as GNU's does — `-- -w` under umask
+  `022` turns off only the owner's write — though `=` still clears every
+  field first (`=r` gives `0444`). GNU 9.4 also accepts such a mode in an
+  option's place (`chmod -w f`) and then reports the bits the umask kept;
+  here the mode follows `--`, where GNU's changes them silently too.
+- **Directories**: the setuid and setgid bits of a directory stay as they
+  are unless the mode names them — `s`, octal after an operator, or an
+  octal value of five digits or more (`00755`) — so `chmod 755` keeps the
+  group inheritance a set-group-ID directory gives its entries.
 
 ### A mode-changing machine, not a data source
 
-`run` asks the injected filesystem seam for each operand's kind and
-current mode, computes the new mode, applies it, and walks each directory
-`-R` must descend (changing the directory before its contents). The
-operations that reach the outside world are injected seams, mirroring the
-other userland crates (`cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s
-`Removal`, `cp`'s and `mv`'s `FileSystem`):
+`run` opens each operand through its final link, reads its kind and
+current mode, computes the new mode and sets it through that same
+descriptor, and walks each directory `-R` must descend (changing the
+directory before its contents). The operations that reach the outside
+world are injected seams:
 
-- `FileSystem` — learn a path's kind and current mode, set its mode, and
-  read a directory's entries (for `-R`).
+- `Roots` — the shared tree seam (`tairix_fscopy::tree`), walked by its
+  shared node-by-node change (`each_node`): each operand opened through its
+  final link, a directory held as one so the walk descends the very node
+  changed; each entry of a tree opened by name from the directory the walk
+  holds, never through a link, and read and changed through that one
+  descriptor, a directory gone into only while its name still holds the
+  node changed. The process's umask is handed to `run` as a value, read
+  once.
 - `Output` — write the short help and the `-v`/`-c` reports to the
   terminal (`chmod` is otherwise silent on success).
 - `HelpSource` (from `lib/help`) — the bundle's own `Help/` tree, rendered
   by the `-h`/`-?`/`--help` switches through the one shared engine; the
   usage banner is only the fallback when no document can be served.
 
-On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, mode-algebra, and recursion
-decision is testable without a kernel.
+On a running system the tree seam is `tairix_rt::copy::WorkingDirectory`;
+in tests it is `tairix_fscopy`'s in-memory tree, so every parsing,
+mode-algebra, recursion and race decision is testable without a kernel.
 
 ### Fail closed
 
-- An unknown option or a missing operand is a `ChmodError::Usage` that
-  changes nothing.
-- A mode operand that is neither octal nor symbolic is a
-  `ChmodError::BadMode`.
-- An operand that cannot be inspected surfaces the underlying `Errno` as
-  `ChmodError::Stat`, and the run stops before any later operand.
-- A mode that cannot be applied is `ChmodError::Apply`; a directory whose
-  entries cannot be read during a recursive descent is `ChmodError::Read`.
+- An option `getopt` refuses (`ChmodError::Option`), a missing operand
+  (`ChmodError::Usage`), and a mode operand that is neither octal nor
+  symbolic (`ChmodError::BadMode`, `invalid mode: 'zzz'`) change nothing:
+  each is reported as
+  `chmod: reason` and `Try 'chmod --help' for more information.`, exit
+  `1`.
+- A failure is reported in GNU's words and the rest are still changed —
+  the rest of its directory too — the run exiting 1 at the end, as GNU's
+  does: a file that cannot be inspected is `ChmodError::Stat`
+  (`cannot access 'x': …`), a link operand naming nothing
+  `ChmodError::Dangling` (`cannot operate on dangling symlink 'x'`), a mode
+  that cannot be applied `ChmodError::Apply`
+  (`changing permissions of 'x': …`), a directory that cannot be opened
+  or listed during a recursive descent `ChmodError::Read`
+  (`cannot read directory 'x': …`), a directory whose name came to hold
+  another node once it was changed among them. Under `-v` a refused change
+  is followed on standard output by `failed to change mode of 'x' from … to
+  …`, and a file that could not be reached, operand or not, by `'x' could
+  not be accessed`, as GNU's are. Under `--preserve-root` a recursive
+  change reaching `/` — spelled so, or by its identity — is refused in
+  GNU's two lines (`ChmodError::PreserveRoot`).
+- A link operand changes what it names. A link met during a recursive
+  descent is left alone, with what it names — each entry is opened by
+  name from the directory the walk holds and read as itself, so a planted
+  link cannot carry the change outside the tree, and one swapped in after
+  the listing is met as a link too — and `-v` says `neither symbolic link
+  'x' nor referent has been changed` (`-c` says nothing: nothing changed).
+  Each mode is set through the descriptor it was read from, so no swap
+  between the read and the change can redirect it.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p tairix-chmod` drives the parser, the symbolic-mode
-algebra, and the move engine against an in-memory tree and a recording
-output: the command grammar (octal and symbolic modes, the recursive
-flag, the `-r`-is-not-recursive and unknown-option refusals, `--`,
-too-few-operands and bad-mode paths), the full mode algebra (`+`/`-`/`=`,
-omitted-who, conditional `X`, setuid/setgid/sticky, left-to-right clause
-application, empty-perm no-ops), an octal change, a symbolic change,
+`cargo test -p tairix-chmod` drives the parser and the engine against the
+shared in-memory tree and a recording output (the mode algebra is `tairix-util`'s
+own suite, its cases GNU 9.4's own answers): the command grammar (octal and
+symbolic modes, the recursive flag, the `-r`-is-not-recursive and
+unknown-option refusals, `--`, too-few-operands and bad-mode paths), a
+clause naming no one sparing the umask, a directory keeping its set-ID bits
+under an octal mode, an octal change, a symbolic change,
 several files, a non-recursive directory change leaving its contents
 alone, a recursive change touching the directory before its contents,
-per-node `X` resolution under recursion, the missing-operand / stat /
-apply / read-during-recursion fail-closed paths, and the short-help
-switches (the rendered own-document path and the usage-banner fallback).
+per-node `X` resolution under recursion, a link in the tree left alone
+(reported under `-v`, silent under `-c`), a link operand changing what it
+names, a dangling operand, an entry swapped for a link before each seam
+call of the walk in turn never carrying the change to what the link
+names, a directory swapped after its change not gone into, `/` refused
+however reached under `--preserve-root`, the missing-operand / stat /
+apply / read-during-recursion fail-closed paths, and the short-help switches (the rendered own-document
+path and the usage-banner fallback).
 
 ## `chown` — change file owner and group (`userland/apps/chown`)
 
-`tairix-chown` applies an ownership change to each of its file operands
-(`AGENTS.md` §3). The owner operand is `OWNER`, `OWNER:GROUP`, or
-`:GROUP`, where `OWNER` and `GROUP` are **decimal** user/group ids:
-`OWNER` changes only the owning user, `:GROUP` only the owning group, and
-`OWNER:GROUP` both. With `-R` a directory operand is changed and then its
-contents are changed recursively. This is the POSIX model, restricted to
-numeric ids, and it is a building block of the §5.3 filesystem permission
-model.
+`tairix-chown` gives each file operand the owner and group an
+`[OWNER][:[GROUP]]` operand names, or those of a `--reference` file, with
+GNU's command line. It is a `plans/APPS.md` command app registered at
+`/System/Commands/chown.app/Run`, requesting `CAP_CONSOLE_WRITE`,
+`CAP_FS_ACCESS`, and `CAP_FS_CHOWN` — the authority the kernel asks of a
+change that gives a node to another account or to a group the caller is not
+in. An account whose ceiling lacks it can still give a file it owns to one
+of its own groups; every other change is refused by the kernel and reported.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `tairix-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths. It depends only on `lib/*`
+crates.
 
 ### Grammar
 
 ```
-chown [-cfRv] [--] OWNER[:GROUP] file...
+chown [OPTION]... [OWNER][:[GROUP]] file...
+chown [OPTION]... --reference=RFILE file...
 
-  -R, --recursive       change files and directories recursively
-  -c, --changes         report only files whose ownership actually changed
-  -v, --verbose         report every file processed
-  -f, --silent, --quiet suppress most error messages
-  -h, --help            show the usage banner
+  -c, --changes          report only files whose ownership actually changed
+  -f, --silent, --quiet  suppress most error messages
+  -v, --verbose          report every file processed
+      --dereference      change what a symbolic link names
+  -h, --no-dereference   change a symbolic link itself
+      --no-preserve-root treat '/' like any other directory (the default)
+      --preserve-root    with -R, refuse to change '/'
+      --from=CURRENT_OWNER:CURRENT_GROUP
+                         change only a file owned as this says
+      --reference=RFILE  use RFILE's owner and group
+  -R, --recursive        change files and directories recursively
+  -H                     with -R, follow a link operand naming a directory
+  -L                     with -R, follow every link (refused)
+  -P                     with -R, follow no link (the default)
+  -?, --help             show this command's own short help
+      --version          show the version
 ```
 
-An owner spec and at least one file are required. `--` ends option
-parsing: every later argument is an operand. POSIX `chown` spells
-recursive `-R`; a bare `-r` is not an option. `-h`/`--help` wins
-immediately. The later of `-c` / `-v` wins; the reports use the GNU
-wording shaped by the owner spec (`changed ownership of 'f' from
-1000:100 to 0:0`, `changed group of 'f' from …`, `… retained as …`),
-reading each node's current owner through the seam's `Metadata` stat.
-`-f` suppresses each failing operand's diagnostic and keeps going, then
-fails the whole run with the message-less `ChownError::Silenced` — the
-exit status still reflects the failure.
+The line is read as GNU's `getopt_long` reads it: options anywhere among
+the operands, a long one by any unambiguous prefix (`--rec`), `--` ending
+them. `-?`, `--help` and `--version` answer at once; `-h` is GNU's
+`--no-dereference`, not help. The later of `-c`/`-v`, of
+`--dereference`/`-h`, and of `-H`/`-L`/`-P` wins, and `-H`, `-L` and `-P`
+do nothing without `-R`. Too few operands are `missing operand`, or
+`missing operand after 'alice'` when only an owner is given. `-L` under
+`-R` is refused before anything changes: a walk follows no link it meets,
+so the option could only be honoured in part.
 
-### The owner grammar
+### The owner operand
 
-`OWNER` and `GROUP` are decimal ids, in one of three forms:
+`tairix_chown::resolve` reads the operand once, before any file is touched:
 
-- `OWNER` — change only the owning user, leaving the group.
-- `OWNER:GROUP` — change both.
-- `:GROUP` — change only the owning group.
+- `OWNER` changes the user, `OWNER:GROUP` both, `:GROUP` only the group,
+  and an empty operand or `:` neither. `OWNER:` also gives an owner named by
+  name its login group; an owner given as a number keeps the group.
+- A field is looked up as a name first and read as a decimal number only
+  when nothing has that name, the order POSIX requires; a leading `+` makes
+  it a number without the lookup. `4294967295`, the word that leaves an id
+  unchanged, is no id — typed, listed for an account or a group, or held by
+  a `--reference` file.
+- Without a `:`, a `.` separates the fields — GNU's older spelling, answered
+  with `warning: '.' should be ':'` — unless the whole operand names an
+  account.
+- A name nothing lists is `invalid user: 'x'` or `invalid group: 'x'`,
+  naming the whole operand. A directory that cannot be read ends the run
+  rather than being taken for an absent name, so a number waits on it too
+  unless spelled with `+`.
 
-A name (rather than a numeric id) is not accepted: TAIRiX has no
-name-to-id seam in this tool, so resolving names would be interface creep
-(`AGENTS.md` §2.4). An empty spec, a bare `:`, and a trailing-colon
-`OWNER:` (which on POSIX systems means "the user's login group", and has
-no meaning without a name database) are all rejected rather than guessed
-(`AGENTS.md` §2.1).
+The directories are the ungated `USER_DIRECTORY` and `GROUP_DIRECTORY`
+System Information queries `stat` and `whoami` read. Each account is listed
+with its login group, as `/etc/passwd` lists it, so `OWNER:` takes the group
+from the same record that named the owner, whichever account that is.
 
-### An ownership-changing machine, not a data source
+`--from=CURRENT_OWNER:CURRENT_GROUP` takes the same operand, and a node is
+changed only when every id it names matches. `--reference=RFILE` takes the
+owner and group of what `RFILE` names, through a final link; one that cannot
+be read is `failed to get attributes of 'r': …` and changes nothing.
 
-`run` asks the injected filesystem seam for each operand's kind, applies
-the new owner, and walks each directory `-R` must descend (changing the
-directory before its contents, and reusing the kind carried in each
-directory entry so it re-inspects nothing). The operations that reach the
-outside world are injected seams, mirroring the other userland crates
-(`cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`, `cp`'s and
-`mv`'s `FileSystem`, `chmod`'s `FileSystem`):
+### Links and walks
 
-- `FileSystem` — learn a path's kind, set its owner, and read a
-  directory's entries (for `-R`).
-- `Output` — write the usage banner to the terminal (`chown` is silent on
-  success).
+- Without `-R`, a symbolic link operand changes what it names
+  (`--dereference`, the default) or, under `-h`, the link itself.
+- With `-R`, a link met inside the tree is changed itself and never
+  followed, so a link planted in a tree being given away cannot carry the
+  change out of it; under `--dereference` it is left alone with what it
+  names, and `-v` says `neither symbolic link 'x' nor referent has been
+  changed`.
+- With `-R`, a link named as an operand is changed itself (`-P`);
+  `--dereference` changes what it names without walking it, and `-H` walks
+  a directory it names.
+- Each directory is changed after its contents: holding `CAP_FS_CHOWN`
+  grants no reach into a directory, so one given away first could shut the
+  walk out of the rest of it.
 
-On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, owner-spec, and recursion
-decision is testable without a kernel.
+### A change through the node it read
+
+`run` reaches files only through the shared tree seam `tairix_fscopy::tree`
+([`lib/fscopy`](../lib/fscopy.md)): an operand is opened through
+`open_operand`, `Roots::open_node` or `Roots::open_dir` as the rules above
+say, and a tree is walked by `walk` through the directories it holds, each
+entry opened from its own directory by name. A node's current owner is read
+through the descriptor its change is made through, so `--from` judges the
+node it changes and a name swapped meanwhile cannot redirect the change. The
+other seams are `Accounts` (the directories above), `Output`, and
+`lib/help`'s `HelpSource`, the bundle's own `Help/` tree. Running, `Roots`
+is `tairix_rt::copy::WorkingDirectory`; in tests it is `lib/fscopy`'s
+in-memory fixture with its attacker hook.
 
 ### Fail closed
 
-- An unknown option or a missing operand is a `ChownError::Usage` that
-  changes nothing.
-- An owner operand that is not a valid `OWNER`/`OWNER:GROUP`/`:GROUP`
-  spec is a `ChownError::BadOwner`.
-- An operand that cannot be inspected surfaces the underlying `Errno` as
-  `ChownError::Stat`, and the run stops before any later operand.
-- An owner that cannot be applied is `ChownError::Apply`; a directory
-  whose entries cannot be read during a recursive descent is
-  `ChownError::Read`.
-
-There is no partial-guess path and no panic (`AGENTS.md` §2.9).
+- A refused option, a missing operand, and `-L` under `-R` change nothing:
+  each is reported as `chown: reason` and
+  `Try 'chown --help' for more information.`, exit `1`.
+- An owner, group or reference that cannot be read ends the run before any
+  change, exit `1`.
+- A node's failure is reported in GNU's words and the rest are still
+  changed, the run exiting `1`: `cannot access 'x': …` for one that cannot
+  be reached, `cannot operate on dangling symlink 'x'` for a link operand
+  naming nothing — GNU's `cannot dereference 'x': …`, not `chmod`'s
+  wording —, `changing ownership of 'x': …` (or `changing group of`)
+  for a refused change, and `cannot read directory 'x': …` for one `-R`
+  cannot open or list, operand or not, which is still changed itself.
+  Under `--preserve-root` a recursive change reaching `/` — spelled so, or
+  by its identity — is refused in GNU's two lines. Under `-v` a refused change
+  is followed by `failed to change ownership of 'x' from … to …` and an
+  unreachable node by `failed to change ownership of 'x' to …`.
+- Reports are GNU's `changed ownership of 'x' from alice:staff to root:root`,
+  `ownership of 'x' retained as …` and their `group` forms, each id by the
+  name the directory lists for it, else in decimal; each id is looked up
+  once a run.
+  `-f` suppresses each node's diagnostic, never the failed status.
 
 ### Tests
 
-`cargo test -p tairix-chown` drives the parser and the engine against an
-in-memory tree and a recording output: the command grammar (every owner
-form, the recursive flag, the `-r`-is-not-recursive and unknown-option
-refusals, `--`, the too-few-operands and bad-owner paths), the owner-spec
-parser (the three valid forms, the empty/`:`/trailing-colon refusals, and
-the non-decimal / overflow / multi-colon refusals), an owner-only change
-leaving the group, an owner:group change, a group-only change leaving the
-user, several files, a non-recursive directory change leaving its
-contents alone, a recursive change touching the directory before its
-contents, and the missing-operand / stat / apply / read-during-recursion
-fail-closed paths.
+`cargo test -p tairix-chown` drives the parser, the owner grammar and the
+engine against `lib/fscopy`'s in-memory tree, a directory fixture and a
+recording output: GNU's option matrix (each switch, the later of each pair
+winning, `-L` refused under `-R`, the missing-operand words, abbreviations,
+`--`), the owner grammar (names before numbers, `+`, `OWNER:` and the login
+group, `.` with its warning, empty and `:`, the unchanged word refused, an
+unreadable directory failing closed), the link cases (operand links with and
+without `-h`, links met in a walk changed themselves or, under
+`--dereference`, left alone, `-H` and `-P` on a link operand), `--from` and
+`--reference`, each directory changed after its contents, the fail-closed
+paths, names in reports, `/` refused however reached under
+`--preserve-root`, an operand that will not open to be listed still
+changed, and attacker-hook sweeps that swap a name for a link before each
+seam call in turn and prove no change leaves the tree and `--from` judges
+the node it changes.
 
 ## `getcap` — report a file's capability gate (`userland/apps/getcap`)
 
@@ -2507,9 +2902,9 @@ prints nothing for a file that has none, so a clean tree is silent. With
 It is the read-only companion of [`setcap`](#setcap--set-or-clear-a-files-capability-gate-userlandappssetcap).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `tairix-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
+depends only on `lib/*` crates, so it never links a kernel or driver
+crate (`AGENTS.md` §17.4).
 
 ### Grammar
 
@@ -2520,9 +2915,11 @@ getcap [-R] [--] file...
   -h, --help       show the usage banner
 ```
 
-At least one file is required. `--` ends option parsing: every later
-argument is an operand. `getcap` spells recursive `-R`; a bare `-r` is
-not an option. `-h`/`--help` wins immediately.
+At least one file is required. The line is read as GNU's `getopt_long`
+reads it, so a long option may be shortened to any unambiguous prefix
+(`--rec`). `--` ends option parsing: every later argument is an operand.
+`getcap` spells recursive `-R`; a bare `-r` is not an option.
+`-h`/`--help` wins immediately.
 
 ### Capability names
 
@@ -2535,45 +2932,58 @@ gate is never hidden (`AGENTS.md` §2.1).
 
 ### A reporter, not a policy point
 
-`run` asks the injected filesystem seam for each operand's kind and
-capability gate, renders the gated files, and walks each directory `-R`
+`run` opens each operand through its final link, reads its gate through
+that descriptor, renders the gated files, and walks each directory `-R`
 must descend (reporting the directory before its contents). The driver
 only *reports* the stored gate; `getcap` makes no permission decision
 (`AGENTS.md` §5.4 — the VFS is the policy point). The operations that
-reach the outside world are injected seams, mirroring the other userland
-crates:
+reach the outside world are injected seams:
 
-- `FileSystem` — learn a path's kind, read its capability gate, and read
-  a directory's entries (for `-R`).
+- `Roots` — the shared tree seam (`tairix_fscopy::tree`): each operand
+  opened through its final link; each tree walked through the directories
+  the run holds open, each entry opened by name from its own directory and
+  never through a link.
+- `Gates` — read the gate of a node the run holds, through that node.
 - `Output` — write the report and the usage banner to the terminal.
 
-On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, rendering, and recursion
-decision is testable without a kernel.
+No binary ships `getcap` yet: the kernel has no call that reads a node's
+gate (`plans/APPS.md` §12.1). The engine runs against `tairix_fscopy`'s
+in-memory tree in its tests, so every parsing, rendering, recursion and
+race decision is testable without a kernel.
 
 ### Fail closed
 
-- An unknown option or a missing operand is a `GetcapError::Usage` that
-  reports nothing.
-- An operand that cannot be inspected surfaces the underlying `Errno` as
-  `GetcapError::Stat`, and the run stops before any later operand.
-- A gate that cannot be read is `GetcapError::Query`; a directory whose
-  entries cannot be read during a recursive descent is `GetcapError::Read`;
-  a failed write is `GetcapError::Output`.
+- An option `getopt` refuses (`GetcapError::Option`, in its words) or a
+  missing operand (`GetcapError::Usage`) reports nothing.
+- An operand that cannot be opened surfaces the underlying `Errno` as
+  `GetcapError::Stat`, and one that is a link naming nothing is
+  `GetcapError::Dangling` (`cannot operate on dangling symlink 'x'`); a
+  gate that cannot be read is `GetcapError::Query`; a directory that
+  cannot be opened or listed during a recursive descent is
+  `GetcapError::Read`. Each is reported as `getcap: <failure>` and the
+  rest are still reported — the rest of its directory too — and the run
+  exits 1.
+- A link operand reports what it names. A link met during a recursive
+  descent — listed as one, or swapped in since — is left alone: what it
+  names lies outside the tree asked for, and no gate is read through it.
+- A failed write is `GetcapError::Output`, which ends the run.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p tairix-getcap` drives the parser and the engine against an
-in-memory tree and a recording output: the command grammar (the recursive
+`cargo test -p tairix-getcap` drives the parser and the engine against the
+shared in-memory tree and a recording output: the command grammar (the recursive
 flag, the `-r`-is-not-recursive and unknown-option refusals, `--`, and
 the no-operand path), a gated file reported by name, an ungated file
 producing no output, an unnamed in-range gate rendered numerically,
 several files reporting only the gated ones in order, a non-recursive
 directory report leaving its contents alone, a recursive report touching
-the directory before its contents, and the missing-operand / stat / query
-/ read-during-recursion fail-closed paths.
+the directory before its contents, a link in the tree left alone, a link
+operand reporting what it names, a dangling operand, an entry swapped for
+a link before each seam call of the walk in turn never read through, and
+the missing-operand / stat / query / read-during-recursion fail-closed
+paths.
 
 ## `setcap` — set or clear a file's capability gate (`userland/apps/setcap`)
 
@@ -2592,9 +3002,9 @@ a privileged operation; the filesystem seam refuses an attempt the caller
 is not authorised to make (it surfaces as `SetcapError::Apply`).
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
-only dependency is the audited `tairix-abi` crate, so it never links a
-kernel or driver crate (`AGENTS.md` §17.4).
+`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
+depends only on `lib/*` crates, so it never links a kernel or driver
+crate (`AGENTS.md` §17.4).
 
 ### Grammar
 
@@ -2605,9 +3015,11 @@ setcap [-R] [--] CAP file...
   -h, --help       show the usage banner
 ```
 
-A capability spec and at least one file are required. `--` ends option
-parsing: every later argument is an operand. `setcap` spells recursive
-`-R`; a bare `-r` is not an option. `-h`/`--help` wins immediately.
+A capability spec and at least one file are required. The line is read
+as GNU's `getopt_long` reads it, so a long option may be shortened to any
+unambiguous prefix (`--rec`). `--` ends option parsing: every later
+argument is an operand. `setcap` spells recursive `-R`; a bare `-r` is not
+an option. `-h`/`--help` wins immediately.
 
 ### The capability grammar
 
@@ -2625,47 +3037,61 @@ guessing): an unknown, mis-cased, or bare-numeric value is rejected as a
 
 ### A gate-setting machine, not a data source
 
-`run` asks the injected filesystem seam for each operand's kind, applies
-the new gate, and walks each directory `-R` must descend (changing the
-directory before its contents, and reusing the kind carried in each
-directory entry so it re-inspects nothing). The operations that reach the
-outside world are injected seams, mirroring `chmod`'s and `chown`'s
-`FileSystem`:
+`run` opens each operand through its final link, sets the new gate
+through that descriptor, and walks each directory `-R` must descend
+(changing the directory before its contents). The operations that reach
+the outside world are injected seams:
 
-- `FileSystem` — learn a path's kind, set its capability gate, and read a
-  directory's entries (for `-R`).
+- `Roots` — the shared tree seam (`tairix_fscopy::tree`): each operand
+  opened through its final link; each tree walked through the directories
+  the run holds open, each entry opened by name from its own directory,
+  never through a link, and changed through that one descriptor.
+- `Gates` — install or clear the gate of a node the run holds, through
+  that node.
 - `Output` — write the usage banner to the terminal (`setcap` is silent
   on success).
 
-On a running system these are syscall- and console-backed; in tests they
-are in-memory fixtures, so every parsing, cap-spec, and recursion
-decision is testable without a kernel.
+No binary ships `setcap` yet: the kernel has no call that sets a node's
+gate (`plans/APPS.md` §12.1). The engine runs against `tairix_fscopy`'s
+in-memory tree in its tests, so every parsing, cap-spec, recursion and
+race decision is testable without a kernel.
 
 ### Fail closed
 
-- An unknown option or a missing operand is a `SetcapError::Usage` that
-  changes nothing.
+- An option `getopt` refuses (`SetcapError::Option`, in its words) or a
+  missing operand (`SetcapError::Usage`) changes nothing.
 - A capability operand that is neither a known `CAP_*` name nor `-` is a
   `SetcapError::BadCapability`.
-- An operand that cannot be inspected surfaces the underlying `Errno` as
-  `SetcapError::Stat`, and the run stops before any later operand.
-- A gate that cannot be applied is `SetcapError::Apply`; a directory whose
-  entries cannot be read during a recursive descent is `SetcapError::Read`.
+- An operand that cannot be opened surfaces the underlying `Errno` as
+  `SetcapError::Stat`, and one that is a link naming nothing is
+  `SetcapError::Dangling` (`cannot operate on dangling symlink 'x'`); a
+  gate that cannot be applied is `SetcapError::Apply`; a directory that
+  cannot be opened or listed during a recursive descent is
+  `SetcapError::Read`. Each is reported as `setcap: <failure>` and the
+  rest are still changed — the rest of its directory too, a directory
+  whose own change failed still being descended into — and the run exits
+  1.
+- A link operand changes what it names. A link met during a recursive
+  descent — listed as one, or swapped in since — is left alone: what it
+  names lies outside the tree asked for, and no gate is set through it.
 
 There is no partial-guess path and no panic (`AGENTS.md` §2.9).
 
 ### Tests
 
-`cargo test -p tairix-setcap` drives the parser and the engine against an
-in-memory tree and a recording output: the command grammar (a named
+`cargo test -p tairix-setcap` drives the parser and the engine against the
+shared in-memory tree and a recording output: the command grammar (a named
 capability and the clearing `-`, the recursive flag, the
 `-r`-is-not-recursive and unknown-option refusals, `--`, the
 too-few-operands and bad-capability paths), the cap-spec parser (the
 named and `-` forms, and the unknown / mis-cased / numeric refusals), a
 named-capability install, a `-` clear, several files, a non-recursive
 directory change leaving its contents alone, a recursive change touching
-the directory before its contents, and the missing-operand / stat / apply
-/ read-during-recursion fail-closed paths.
+the directory before its contents, a link in the tree left alone, a link
+operand changing what it names, a dangling operand, an entry swapped for a
+link before each seam call of the walk in turn never carrying the gate,
+and the missing-operand / stat / apply / read-during-recursion
+fail-closed paths.
 
 ## `useradd` — create a user account (`userland/apps/useradd`)
 
@@ -2952,8 +3378,8 @@ man [-h | -?] <command> [topic]
 
 `-h`/`-?` render `man`'s own short help (through the same engine); `--`
 ends option parsing; a trailing `.app` names the bundle directly. Exit
-codes: `0` page shown, `1` command/document not found or delivery failed,
-`2` usage error.
+codes: `0` page shown, `1` command/document not found, delivery failed, or a
+usage error.
 
 ### One resolution, one engine
 

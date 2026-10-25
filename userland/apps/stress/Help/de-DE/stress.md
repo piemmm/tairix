@@ -79,8 +79,8 @@ auf dem beratenden Standard-Informationsstrom (fd 3) ausgegeben.
 - `0` — der Lauf wurde abgeschlossen (typisierte Ablehnungen der
   Arbeiter sind erwartete Ergebnisse und lassen ihn nicht scheitern).
 - `1` — ein Arbeiter ist tatsächlich gescheitert, oder der Lauf
-  konnte nicht eingerichtet werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  konnte nicht eingerichtet werden. Eine nicht verstandene Befehlszeile
+  endet ebenfalls mit `1`.
 - `130` / `143` — `Strg-C` / `Terminate` beendete den Lauf, nachdem
   die Arbeiter abgebaut und die Arbeitsdateien entfernt wurden.
 

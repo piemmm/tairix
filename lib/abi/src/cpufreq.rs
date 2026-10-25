@@ -11,8 +11,8 @@
 //!   target computed an IPC round trip after the work appeared would arrive
 //!   after the latency it exists to avoid.
 //! * A **user-space driver** owns the mechanism, because applying a rate is a
-//!   device operation — on a Raspberry Pi it is a `VideoCore` firmware
-//!   property exchange, elsewhere a register write or a power-controller
+//!   device operation — a firmware property exchange on one board,
+//!   elsewhere a register write or a power-controller
 //!   transaction. It declares its [`CpuFreqLimits`] through
 //!   [`crate::SyscallNumber::CPUFREQ_BIND`] and then blocks in
 //!   [`crate::SyscallNumber::CPUFREQ_WAIT`] until the target moves.
@@ -161,13 +161,13 @@ mod tests {
     use super::{CpuFreqLimits, CpuFreqTarget};
     use crate::error::Errno;
 
-    /// A Pi 4B's range: 600 MHz to 1.5 GHz in 100 MHz steps.
-    const PI4: Result<CpuFreqLimits, Errno> =
+    /// A 600 MHz to 1.5 GHz range in 100 MHz steps.
+    const STEPPED: Result<CpuFreqLimits, Errno> =
         CpuFreqLimits::new(600_000_000, 1_500_000_000, 100_000_000);
 
     #[test]
     fn limits_round_trip() {
-        let limits = PI4.expect("a real range");
+        let limits = STEPPED.expect("a real range");
         assert_eq!(CpuFreqLimits::from_bytes(&limits.to_le_bytes()), Ok(limits));
     }
 

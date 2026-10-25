@@ -28,6 +28,11 @@ use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::DriverKind;
 
+// The records nodes are created with where a test does not examine the record.
+pub(crate) const FILE_RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
+pub(crate) const DIR_RECORD: NodeSecurity = NodeSecurity::new(0o755, 0, 0);
+const LINK_RECORD: NodeSecurity = NodeSecurity::new(0o777, 0, 0);
+
 const FS_BLOCK: usize = 1024;
 const FS_BLOCK_COUNT: usize = 40;
 const IMG_LEN: usize = FS_BLOCK * FS_BLOCK_COUNT;
@@ -448,7 +453,7 @@ fn a_listing_resumed_across_changes_lists_each_lasting_entry_once() {
         .expect("an entry");
     assert_eq!(name, b"hello.txt");
     fs.remove(root, b"classic.bin").expect("remove");
-    fs.create(root, b"late.dat", NodeKind::RegularFile)
+    fs.create(root, b"late.dat", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let rest: Vec<Vec<u8>> = listed(&mut fs, root, first.next_cursor, &name)
         .expect("lists")
@@ -616,31 +621,44 @@ fn security_of_an_absent_node_is_not_found() {
 }
 
 #[test]
-fn a_created_node_takes_its_creators_owner_and_group() {
+fn a_created_node_takes_the_owner_group_and_mode_of_its_record() {
     // Wide enough to need both halves of each split id.
     let (uid, gid) = (0x0001_03E8, 0x0002_0064);
     let mut fs = mount();
     let root = fs.root();
-    let file = fs
-        .create(root, b"mine.txt", NodeKind::RegularFile)
+    let mut file_record = NodeSecurity::new(0o640, uid, gid);
+    // Neither has a place in an ext4 inode, so the node is born without them.
+    file_record.required_cap = Some(CapabilityId::AUDIT_READ);
+    file_record
+        .push_acl(SecurityAcl {
+            subject: SecuritySubject::User(7),
+            perms: 0b100,
+        })
+        .expect("an entry");
+    fs.create(root, b"mine.txt", NodeKind::RegularFile, &file_record)
         .expect("create");
-    let dir = fs
-        .create(root, b"mine", NodeKind::Directory)
-        .expect("mkdir");
-    fs.stamp_owner(file, uid, gid).expect("stamp the file");
-    fs.stamp_owner(dir, uid, gid).expect("stamp the folder");
+    fs.create(
+        root,
+        b"mine",
+        NodeKind::Directory,
+        &NodeSecurity::new(0o2750, uid, gid),
+    )
+    .expect("mkdir");
 
     let mut fs = remount(fs);
     let root = fs.root();
-    for (name, mode) in [(&b"mine.txt"[..], 0o644), (b"mine", 0o755)] {
+    for (name, kind, mode) in [
+        (&b"mine.txt"[..], NodeKind::RegularFile, 0o640),
+        (b"mine", NodeKind::Directory, 0o2750),
+    ] {
         let node = fs.lookup(root, name).expect("found after remount");
-        let sec = fs.security(node).expect("security");
-        assert_eq!((sec.uid, sec.gid, sec.mode), (uid, gid, mode));
+        assert_eq!(fs.node_info(node).expect("stat").kind, kind);
+        assert_eq!(
+            fs.security(node),
+            Ok(NodeSecurity::new(mode, uid, gid)),
+            "{name:?}"
+        );
     }
-    assert_eq!(
-        fs.stamp_owner(NodeId::NONE, uid, gid),
-        Err(DriverError::NotFound)
-    );
 }
 
 // --- Write surface (`FilesystemWrite`). ---
@@ -656,7 +674,7 @@ fn create_and_write_a_regular_file_round_trips() {
     let mut fs = mount();
     let root = fs.root();
     let file = fs
-        .create(root, b"new.txt", NodeKind::RegularFile)
+        .create(root, b"new.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(fs.node_info(file).expect("info").size, 0);
     assert_eq!(fs.lookup(root, b"new.txt"), Ok(file));
@@ -668,7 +686,7 @@ fn create_and_write_a_regular_file_round_trips() {
         *b = next;
         next = next.wrapping_add(1);
     }
-    let n = fs.write_at(root, b"new.txt", 0, &payload).expect("write");
+    let n = fs.write_at(file, 0, &payload).expect("write");
     assert_eq!(n, payload.len());
     assert_eq!(fs.node_info(file).expect("info").size, payload.len() as u64);
 
@@ -686,7 +704,7 @@ fn create_and_write_a_regular_file_round_trips() {
 fn create_then_appears_in_directory_listing() {
     let mut fs = mount();
     let root = fs.root();
-    fs.create(root, b"zeta.dat", NodeKind::RegularFile)
+    fs.create(root, b"zeta.dat", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let entries = listed(&mut fs, root, 0, &[]).expect("read_dir");
     let (entry, _) = entries
@@ -701,7 +719,7 @@ fn create_rejects_a_duplicate_name() {
     let mut fs = mount();
     let root = fs.root();
     assert_eq!(
-        fs.create(root, b"hello.txt", NodeKind::RegularFile),
+        fs.create(root, b"hello.txt", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::AlreadyExists)
     );
 }
@@ -711,7 +729,7 @@ fn create_in_a_regular_file_is_unsupported() {
     let mut fs = mount();
     let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
     assert_eq!(
-        fs.create(file, b"x", NodeKind::RegularFile),
+        fs.create(file, b"x", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::Unsupported)
     );
 }
@@ -721,15 +739,15 @@ fn create_rejects_an_invalid_name() {
     let mut fs = mount();
     let root = fs.root();
     assert_eq!(
-        fs.create(root, b"", NodeKind::RegularFile),
+        fs.create(root, b"", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
     assert_eq!(
-        fs.create(root, b"a/b", NodeKind::RegularFile),
+        fs.create(root, b"a/b", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
     assert_eq!(
-        fs.create(root, b"..", NodeKind::RegularFile),
+        fs.create(root, b"..", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::LengthOutOfRange)
     );
 }
@@ -738,10 +756,11 @@ fn create_rejects_an_invalid_name() {
 fn write_past_eof_leaves_a_sparse_hole() {
     let mut fs = mount();
     let root = fs.root();
-    fs.create(root, b"sparse.bin", NodeKind::RegularFile)
+    let sparse_bin = fs
+        .create(root, b"sparse.bin", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let tail = b"TAIL";
-    let n = fs.write_at(root, b"sparse.bin", 2000, tail).expect("write");
+    let n = fs.write_at(sparse_bin, 2000, tail).expect("write");
     assert_eq!(n, tail.len());
 
     let file = fs.lookup(root, b"sparse.bin").expect("found");
@@ -763,13 +782,14 @@ fn write_past_eof_leaves_a_sparse_hole() {
 fn truncate_shrink_then_grow() {
     let mut fs = mount();
     let root = fs.root();
-    fs.create(root, b"trunc.bin", NodeKind::RegularFile)
+    let trunc_bin = fs
+        .create(root, b"trunc.bin", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let payload = [0xABu8; 3 * FS_BLOCK];
-    fs.write_at(root, b"trunc.bin", 0, &payload).expect("write");
+    fs.write_at(trunc_bin, 0, &payload).expect("write");
 
     // Shrink to mid-first-block: the freed tail blocks return to the pool.
-    fs.truncate(root, b"trunc.bin", 100).expect("shrink");
+    fs.truncate(trunc_bin, 100).expect("shrink");
     let file = fs.lookup(root, b"trunc.bin").expect("found");
     assert_eq!(fs.node_info(file).expect("info").size, 100);
     let mut buf = [0u8; 200];
@@ -778,8 +798,7 @@ fn truncate_shrink_then_grow() {
     assert!(buf[..100].iter().all(|&b| b == 0xAB));
 
     // Grow back: the extension reads as zeros (sparse).
-    fs.truncate(root, b"trunc.bin", FS_BLOCK as u64)
-        .expect("grow");
+    fs.truncate(file, FS_BLOCK as u64).expect("grow");
     let mut big = [0xFFu8; FS_BLOCK];
     let n = fs.read_at(file, 0, &mut big).expect("read");
     assert_eq!(n, FS_BLOCK);
@@ -803,10 +822,11 @@ fn growth_marker(logical: u64) -> u8 {
 /// extent tree.
 fn grow_hello_into_depth1(fs: &mut Ext4<SizedBlock>) {
     let root = fs.root();
+    let hello_txt = fs.lookup(root, b"hello.txt").expect("lookup");
     for &logical in &GROWTH_LOGICALS {
         let block = [growth_marker(logical); FS_BLOCK];
         let n = fs
-            .write_at(root, b"hello.txt", logical * FS_BLOCK as u64, &block)
+            .write_at(hello_txt, logical * FS_BLOCK as u64, &block)
             .expect("sparse write grows the extent tree");
         assert_eq!(n, FS_BLOCK);
     }
@@ -855,9 +875,8 @@ fn truncating_a_depth1_extent_file_to_zero_frees_its_tree() {
     let mut fs = mount();
     grow_hello_into_depth1(&mut fs);
     let root = fs.root();
-    fs.truncate(root, b"hello.txt", 0)
-        .expect("truncate to zero");
     let file = fs.lookup(root, b"hello.txt").expect("found");
+    fs.truncate(file, 0).expect("truncate to zero");
     assert_eq!(fs.node_info(file).expect("info").size, 0);
 
     // The freed leaf + data blocks return to the pool: re-growing into a
@@ -885,9 +904,10 @@ fn removing_a_depth1_extent_file_frees_it() {
     assert_eq!(fs.lookup(root, b"hello.txt"), Err(DriverError::NotFound));
 
     // The inode and all of its data + leaf blocks are reusable afterwards.
-    fs.create(root, b"fresh.txt", NodeKind::RegularFile)
+    let fresh_txt = fs
+        .create(root, b"fresh.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create reuses the freed metadata");
-    fs.write_at(root, b"fresh.txt", 0, b"ok").expect("write");
+    fs.write_at(fresh_txt, 0, b"ok").expect("write");
     let mut fs = remount(fs);
     let file = fs.lookup(fs.root(), b"fresh.txt").expect("found");
     let mut buf = [0u8; 8];
@@ -900,7 +920,7 @@ fn create_a_directory_with_dot_and_dotdot() {
     let mut fs = mount();
     let root = fs.root();
     let dir = fs
-        .create(root, b"newdir", NodeKind::Directory)
+        .create(root, b"newdir", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir");
     assert_eq!(fs.node_info(dir).expect("info").kind, NodeKind::Directory);
 
@@ -909,7 +929,7 @@ fn create_a_directory_with_dot_and_dotdot() {
 
     // It accepts a child, which then resolves and lists.
     let child = fs
-        .create(dir, b"inner.txt", NodeKind::RegularFile)
+        .create(dir, b"inner.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(fs.lookup(dir, b"inner.txt"), Ok(child));
 
@@ -927,10 +947,11 @@ fn remove_a_file_frees_its_inode_for_reuse() {
 
     // The freed inode and blocks are reusable: creating + writing succeeds
     // and round-trips across a remount.
-    fs.create(root, b"again.txt", NodeKind::RegularFile)
+    let again_txt = fs
+        .create(root, b"again.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create reuses freed metadata");
     let body = b"reused";
-    fs.write_at(root, b"again.txt", 0, body).expect("write");
+    fs.write_at(again_txt, 0, body).expect("write");
 
     let mut fs = remount(fs);
     let file = fs.lookup(fs.root(), b"again.txt").expect("found");
@@ -957,21 +978,49 @@ fn remove_an_emptied_directory() {
 }
 
 #[test]
-fn write_to_a_directory_is_unsupported() {
+fn parent_answers_a_directorys_dot_dot() {
     let mut fs = mount();
     let root = fs.root();
-    assert_eq!(
-        fs.write_at(root, b"sub", 0, b"x"),
-        Err(DriverError::Unsupported)
-    );
+    let sub = fs.lookup(root, b"sub").expect("sub");
+    assert_eq!(fs.parent(sub), Ok(root));
+    assert_eq!(fs.parent(root), Ok(root), "the root answers itself");
+    let inner = fs
+        .create(sub, b"inner", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    assert_eq!(fs.parent(inner), Ok(sub));
+    let deep = fs.lookup(sub, b"deep.bin").expect("deep.bin");
+    assert_eq!(fs.parent(deep), Err(DriverError::Unsupported));
+
+    fs.remove(sub, b"inner").expect("rmdir");
+    assert_eq!(fs.parent(inner), Err(DriverError::NotFound));
 }
 
 #[test]
-fn write_to_a_missing_child_is_not_found() {
+fn write_to_a_directory_is_unsupported() {
     let mut fs = mount();
     let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("lookup");
+    assert_eq!(fs.write_at(sub, 0, b"x"), Err(DriverError::Unsupported));
+}
+
+#[test]
+fn a_write_through_an_id_naming_no_live_file_is_not_found() {
+    // A freed inode keeps its file type, so only its link count tells a stale
+    // id from a live file.
+    let mut fs = mount();
+    let root = fs.root();
+    let file = fs.lookup(root, b"hello.txt").expect("found");
+    fs.remove(root, b"hello.txt").expect("remove");
+    let free = fs.stats().expect("stats").free_blocks;
+    assert_eq!(fs.write_at(file, 0, b"stale"), Err(DriverError::NotFound));
+    assert_eq!(fs.truncate(file, 4096), Err(DriverError::NotFound));
     assert_eq!(
-        fs.write_at(root, b"absent", 0, b"x"),
+        fs.stats().expect("stats").free_blocks,
+        free,
+        "the freed inode took no block"
+    );
+    assert_eq!(
+        fs.write_at(NodeId::NONE, 0, b"x"),
         Err(DriverError::NotFound)
     );
 }
@@ -989,15 +1038,12 @@ fn mutation_is_refused_on_an_unsupported_feature_set() {
     );
     let mut fs = Ext4::open(SizedBlock::over(data)).expect("opens read-only");
     assert_eq!(fs.write_refusal(), Some("unsupported_feature"));
-    assert!(fs.lookup(fs.root(), b"hello.txt").is_ok());
+    let hello = fs.lookup(fs.root(), b"hello.txt").expect("still readable");
     assert_eq!(
-        fs.create(fs.root(), b"x", NodeKind::RegularFile),
+        fs.create(fs.root(), b"x", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::ReadOnly)
     );
-    assert_eq!(
-        fs.write_at(fs.root(), b"hello.txt", 0, b"x"),
-        Err(DriverError::ReadOnly)
-    );
+    assert_eq!(fs.write_at(hello, 0, b"x"), Err(DriverError::ReadOnly));
     assert_eq!(
         fs.remove(fs.root(), b"hello.txt"),
         Err(DriverError::ReadOnly)
@@ -1009,12 +1055,12 @@ fn create_exhausts_the_free_inodes() {
     let mut fs = mount();
     let root = fs.root();
     // The fixture leaves exactly two free inodes (15, 16).
-    fs.create(root, b"one", NodeKind::RegularFile)
+    fs.create(root, b"one", NodeKind::RegularFile, &FILE_RECORD)
         .expect("first");
-    fs.create(root, b"two", NodeKind::RegularFile)
+    fs.create(root, b"two", NodeKind::RegularFile, &FILE_RECORD)
         .expect("second");
     assert_eq!(
-        fs.create(root, b"three", NodeKind::RegularFile),
+        fs.create(root, b"three", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::NoSpace)
     );
 }
@@ -1268,16 +1314,16 @@ fn fill_to_no_space(fs: &mut Ext4<SizedBlock>, root: NodeId) -> u64 {
     let mut idx = 0usize;
     'outer: loop {
         let name = nth_name(idx);
-        match fs.create(root, &name, NodeKind::RegularFile) {
-            Ok(_) => {}
+        let file = match fs.create(root, &name, NodeKind::RegularFile, &FILE_RECORD) {
+            Ok(file) => file,
             Err(DriverError::NoSpace) => break,
             Err(e) => panic!("unexpected create error: {e:?}"),
-        }
+        };
         idx += 1;
         assert!(idx < 100, "exhausted test file names before filling");
         let mut size = 0u64;
         while size < FILL_FILE_CAP {
-            match fs.write_at(root, &name, size, &chunk) {
+            match fs.write_at(file, size, &chunk) {
                 Ok(n) => {
                     size += n as u64;
                     total += n as u64;
@@ -1323,9 +1369,10 @@ fn format_create_write_read_roundtrips_across_a_remount() {
     let body = b"a fresh ext4 volume, formatted in TAIRiX\n";
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    fs.create(root, b"hello.txt", NodeKind::RegularFile)
+    let hello_txt = fs
+        .create(root, b"hello.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    assert_eq!(fs.write_at(root, b"hello.txt", 0, body), Ok(body.len()));
+    assert_eq!(fs.write_at(hello_txt, 0, body), Ok(body.len()));
 
     // Remount from the same device and read the file back.
     let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("reopen");
@@ -1351,10 +1398,11 @@ fn stats_track_the_live_superblock_and_the_uuid_is_remount_stable() {
 
     // Allocating a file consumes blocks and an inode.
     let root = fs.root();
-    fs.create(root, b"stats.bin", NodeKind::RegularFile)
+    let stats_bin = fs
+        .create(root, b"stats.bin", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let body = [0xA5u8; 8192];
-    assert_eq!(fs.write_at(root, b"stats.bin", 0, &body), Ok(body.len()));
+    assert_eq!(fs.write_at(stats_bin, 0, &body), Ok(body.len()));
     let after = fs.stats().expect("stats");
     assert!(after.free_blocks < before.free_blocks);
     assert_eq!(after.files_free, before.files_free - 1);
@@ -1386,10 +1434,11 @@ fn format_data_region_fills_to_no_space_then_recovers() {
     // Freeing space lets allocation resume (NoSpace is not terminal):
     // removing a file frees its blocks, after which a write succeeds.
     fs.remove(root, &nth_name(0)).expect("remove");
-    fs.create(root, b"after", NodeKind::RegularFile)
+    let after = fs
+        .create(root, b"after", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create after free");
     let chunk = [0x11u8; 4096];
-    assert_eq!(fs.write_at(root, b"after", 0, &chunk), Ok(chunk.len()));
+    assert_eq!(fs.write_at(after, 0, &chunk), Ok(chunk.len()));
 }
 
 #[test]
@@ -1400,7 +1449,7 @@ fn format_inode_table_fills_to_no_space() {
     let mut created = 0usize;
     loop {
         let name = nth_name(created);
-        match fs.create(root, &name, NodeKind::RegularFile) {
+        match fs.create(root, &name, NodeKind::RegularFile, &FILE_RECORD) {
             Ok(_) => created += 1,
             Err(DriverError::NoSpace) => break,
             Err(e) => panic!("unexpected error exhausting inodes: {e:?}"),
@@ -1435,8 +1484,10 @@ fn format_spans_multiple_block_groups() {
 fn rename_within_directory_preserves_contents() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
-    fs.write_at(root, b"a.txt", 0, b"hello").unwrap();
+    let a_txt = fs
+        .create(root, b"a.txt", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    fs.write_at(a_txt, 0, b"hello").unwrap();
     fs.rename(root, b"a.txt", root, b"b.txt").expect("rename");
     assert_eq!(fs.lookup(root, b"a.txt"), Err(DriverError::NotFound));
     let node = fs.lookup(root, b"b.txt").expect("dst");
@@ -1461,10 +1512,16 @@ fn rename_across_directories_persists() {
         let mut fs =
             Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
         let root = fs.root();
-        let src = fs.create(root, b"src", NodeKind::Directory).unwrap();
-        let dst = fs.create(root, b"dst", NodeKind::Directory).unwrap();
-        fs.create(src, b"f.bin", NodeKind::RegularFile).unwrap();
-        fs.write_at(src, b"f.bin", 0, b"data").unwrap();
+        let src = fs
+            .create(root, b"src", NodeKind::Directory, &DIR_RECORD)
+            .unwrap();
+        let dst = fs
+            .create(root, b"dst", NodeKind::Directory, &DIR_RECORD)
+            .unwrap();
+        let f_bin = fs
+            .create(src, b"f.bin", NodeKind::RegularFile, &FILE_RECORD)
+            .unwrap();
+        fs.write_at(f_bin, 0, b"data").unwrap();
         fs.rename(src, b"f.bin", dst, b"g.bin").expect("move");
         fs.into_block().expect("commit")
     };
@@ -1483,10 +1540,14 @@ fn rename_across_directories_persists() {
 fn rename_overwrites_existing_file() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
-    fs.write_at(root, b"a.txt", 0, b"AAAA").unwrap();
-    fs.create(root, b"b.txt", NodeKind::RegularFile).unwrap();
-    fs.write_at(root, b"b.txt", 0, b"BB").unwrap();
+    let a_txt = fs
+        .create(root, b"a.txt", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    fs.write_at(a_txt, 0, b"AAAA").unwrap();
+    let b_txt = fs
+        .create(root, b"b.txt", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    fs.write_at(b_txt, 0, b"BB").unwrap();
     fs.rename(root, b"a.txt", root, b"b.txt")
         .expect("overwrite");
     assert_eq!(fs.lookup(root, b"a.txt"), Err(DriverError::NotFound));
@@ -1500,8 +1561,10 @@ fn rename_overwrites_existing_file() {
 fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    fs.create(root, b"f.txt", NodeKind::RegularFile).unwrap();
-    fs.create(root, b"d", NodeKind::Directory).unwrap();
+    fs.create(root, b"f.txt", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
+    fs.create(root, b"d", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     assert_eq!(
         fs.rename(root, b"f.txt", root, b"d"),
         Err(DriverError::Unsupported)
@@ -1510,8 +1573,11 @@ fn rename_refuses_kind_mismatch_and_nonempty_dir_target() {
         fs.rename(root, b"d", root, b"f.txt"),
         Err(DriverError::Unsupported)
     );
-    let d2 = fs.create(root, b"d2", NodeKind::Directory).unwrap();
-    fs.create(d2, b"child", NodeKind::RegularFile).unwrap();
+    let d2 = fs
+        .create(root, b"d2", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
+    fs.create(d2, b"child", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
     assert_eq!(
         fs.rename(root, b"d", root, b"d2"),
         Err(DriverError::DirectoryNotEmpty)
@@ -1524,11 +1590,19 @@ fn rename_moves_a_directory_across_parents() {
         let mut fs =
             Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
         let root = fs.root();
-        let p1 = fs.create(root, b"p1", NodeKind::Directory).unwrap();
-        let p2 = fs.create(root, b"p2", NodeKind::Directory).unwrap();
-        let d = fs.create(p1, b"d", NodeKind::Directory).unwrap();
-        fs.create(d, b"leaf.bin", NodeKind::RegularFile).unwrap();
-        fs.write_at(d, b"leaf.bin", 0, b"x").unwrap();
+        let p1 = fs
+            .create(root, b"p1", NodeKind::Directory, &DIR_RECORD)
+            .unwrap();
+        let p2 = fs
+            .create(root, b"p2", NodeKind::Directory, &DIR_RECORD)
+            .unwrap();
+        let d = fs
+            .create(p1, b"d", NodeKind::Directory, &DIR_RECORD)
+            .unwrap();
+        let leaf_bin = fs
+            .create(d, b"leaf.bin", NodeKind::RegularFile, &FILE_RECORD)
+            .unwrap();
+        fs.write_at(leaf_bin, 0, b"x").unwrap();
         fs.rename(p1, b"d", p2, b"d").expect("move dir");
         fs.into_block().expect("commit")
     };
@@ -1548,8 +1622,12 @@ fn rename_moves_a_directory_across_parents() {
 fn rename_refuses_moving_directory_into_its_subtree() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    let a = fs.create(root, b"a", NodeKind::Directory).unwrap();
-    let b = fs.create(a, b"b", NodeKind::Directory).unwrap();
+    let a = fs
+        .create(root, b"a", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
+    let b = fs
+        .create(a, b"b", NodeKind::Directory, &DIR_RECORD)
+        .unwrap();
     assert_eq!(
         fs.rename(root, b"a", b, b"a"),
         Err(DriverError::DirectoryCycle)
@@ -1564,7 +1642,8 @@ fn rename_refuses_moving_directory_into_its_subtree() {
 fn rename_rejects_bad_destination_name() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    fs.create(root, b"a.txt", NodeKind::RegularFile).unwrap();
+    fs.create(root, b"a.txt", NodeKind::RegularFile, &FILE_RECORD)
+        .unwrap();
     assert_eq!(
         fs.rename(root, b"a.txt", root, b""),
         Err(DriverError::LengthOutOfRange)
@@ -1632,17 +1711,17 @@ fn writing_grows_the_reported_allocation() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let file = fs
-        .create(root, b"grow.bin", NodeKind::RegularFile)
+        .create(root, b"grow.bin", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(fs.node_info(file).expect("info").allocated, 0);
     let payload = [7u8; FS_BLOCK + 1];
-    fs.write_at(root, b"grow.bin", 0, &payload).expect("write");
+    fs.write_at(file, 0, &payload).expect("write");
     // Two data blocks were allocated and recorded in `i_blocks`.
     assert_eq!(
         fs.node_info(file).expect("info").allocated,
         2 * FS_BLOCK as u64
     );
-    fs.truncate(root, b"grow.bin", 1).expect("truncate");
+    fs.truncate(file, 1).expect("truncate");
     // The freed tail block leaves the surviving one accounted.
     assert_eq!(fs.node_info(file).expect("info").allocated, FS_BLOCK as u64);
 }
@@ -1708,7 +1787,8 @@ fn inode_time_decodes_every_epoch_of_the_extended_layout() {
 
 #[test]
 fn a_stamp_after_2038_reads_as_its_own_year() {
-    // 2040-01-01T00:00:00Z as Linux writes it: the low word, whose top bit is
+    // 2040-01-01T00:00:00Z as the extra-epoch encoding stores it: the low
+    // word, whose top bit is
     // set, and epoch 1. Read as epoch-over-unsigned, it came back as 2176.
     assert_eq!(
         crate::decode_inode_time(2_208_988_800, Some(1)),
@@ -1772,7 +1852,7 @@ fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
     );
     let root = fs.root();
     let file = fs
-        .create(root, b"f", NodeKind::RegularFile)
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let made = fs.node_info(file).expect("info").times;
     assert_eq!(
@@ -1783,7 +1863,7 @@ fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
     assert_eq!((parent.modified, parent.changed), (t1, t1));
 
     fs = at(fs, Some(t2));
-    fs.write_at(root, b"f", 0, b"data").expect("write");
+    fs.write_at(file, 0, b"data").expect("write");
     let written = fs.node_info(file).expect("info").times;
     assert_eq!(
         (
@@ -1817,7 +1897,7 @@ fn with_no_time_to_give_ext4_records_no_stamp() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let file = fs
-        .create(root, b"f", NodeKind::RegularFile)
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let times = fs.node_info(file).expect("info").times;
     assert_eq!(
@@ -1832,7 +1912,7 @@ fn with_no_time_to_give_ext4_records_no_stamp() {
 
     // A time the record cannot hold is no stamp either, never a wrapped one.
     let mut fs = at(fs, Some(Time64::from_secs(1 << 40)));
-    fs.write_at(root, b"f", 0, b"data").expect("write");
+    fs.write_at(file, 0, b"data").expect("write");
     assert_eq!(
         fs.node_info(file).expect("info").times.modified,
         Time64::UNIX_EPOCH
@@ -1848,10 +1928,10 @@ fn a_freed_inode_records_when_it_went_or_the_marker_when_that_is_unknown() {
     );
     let root = fs.root();
     let dated = fs
-        .create(root, b"dated", NodeKind::RegularFile)
+        .create(root, b"dated", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let undated = fs
-        .create(root, b"undated", NodeKind::RegularFile)
+        .create(root, b"undated", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     fs.remove(root, b"dated").expect("remove");
     let mut fs = at(fs, None);
@@ -1871,7 +1951,7 @@ fn a_classic_record_keeps_whole_seconds_and_no_birth_time() {
     let mut fs = at(mount(), Some(stamp));
     let root = fs.root();
     let file = fs
-        .create(root, b"classic", NodeKind::RegularFile)
+        .create(root, b"classic", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let times = fs.node_info(file).expect("info").times;
     assert_eq!(times.modified, Time64::from_secs(1_900_000_000));
@@ -1901,6 +1981,7 @@ const SLOW_LINK_BLOCK: u32 = 15;
 fn plant_fast_symlink(img: &mut [u8], ino: u32, target: &[u8]) {
     let base = inode_offset(ino);
     set_le16(img, base, S_IFLNK | 0o777);
+    set_le16(img, base + 0x1A, default_links(S_IFLNK));
     set_le32(img, base + 0x04, u32c(target.len()));
     set_le32(img, base + 0x20, 0);
     let ib = base + I_BLOCK_OFFSET;
@@ -2010,11 +2091,11 @@ fn a_links_bytes_are_never_readable_and_a_link_is_never_creatable() {
     // rather than substituting a regular file holding the target's text.
     let root = fs.root();
     assert_eq!(
-        fs.create(root, b"alias", NodeKind::Symlink),
+        fs.create(root, b"alias", NodeKind::Symlink, &LINK_RECORD),
         Err(DriverError::Unsupported)
     );
     assert_eq!(
-        fs.create_link(root, b"alias", b"/target"),
+        fs.create_link(root, b"alias", b"/target", &LINK_RECORD),
         Err(DriverError::Unsupported)
     );
     assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
@@ -2060,7 +2141,7 @@ fn a_link_with_no_target_is_refused_as_corrupt() {
 
 /// Plant a second directory entry in the root naming inode `ino`, and record
 /// the higher `i_links_count` a real writer would have left behind — the
-/// shape of any ext4 volume Linux has made a hard link on.
+/// shape of any ext4 volume another writer has made a hard link on.
 fn plant_second_name(img: &mut [u8], name: &[u8], ino: u32) {
     let base = inode_offset(ino);
     let links = u16::from_le_bytes([img[base + 0x1A], img[base + 0x1A + 1]]);
@@ -2117,10 +2198,10 @@ fn unlinking_the_last_name_of_a_foreign_hard_link_frees_the_inode() {
     fs.remove(root, b"hello.alias").expect("drop the last name");
 
     // The inode is free again: a fresh create reuses it and round-trips.
-    fs.create(root, b"again.txt", NodeKind::RegularFile)
+    let again_txt = fs
+        .create(root, b"again.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create reuses the freed inode");
-    fs.write_at(root, b"again.txt", 0, b"reused")
-        .expect("write");
+    fs.write_at(again_txt, 0, b"reused").expect("write");
     let mut fs = remount(fs);
     let file = fs.lookup(fs.root(), b"again.txt").expect("found");
     let mut buf = [0u8; 16];
@@ -2289,9 +2370,10 @@ fn a_volume_of_128_byte_descriptors_reads_writes_and_remounts() {
     let mut buf = [0u8; 32];
     let n = fs.read_at(hello, 0, &mut buf).expect("read");
     assert_eq!(&buf[..n], b"wide descriptors\n");
-    fs.create(root, b"made", NodeKind::RegularFile)
+    let made_file = fs
+        .create(root, b"made", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"made", 0, b"here").expect("write");
+    fs.write_at(made_file, 0, b"here").expect("write");
 
     let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("remount");
     let root = fs.root();
@@ -2317,10 +2399,9 @@ fn a_commit_failing_before_the_medium_changes_takes_the_operation_back() {
     let mut fs = Ext4::open(device).expect("mount");
     let root = fs.root();
     let victim = fs
-        .create(root, b"victim", NodeKind::RegularFile)
+        .create(root, b"victim", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"victim", 0, b"still here")
-        .expect("write");
+    fs.write_at(victim, 0, b"still here").expect("write");
     let before = fs.stats().expect("stats");
     medium.borrow_mut().failing = Some(superblock_sectors());
     assert_eq!(fs.remove(root, b"victim"), Err(DriverError::DeviceFault));
@@ -2347,12 +2428,12 @@ fn a_torn_commit_on_an_unjournaled_volume_leaves_it_for_a_checker() {
     let table = inode_block(&mut fs, ROOT_INODE);
     medium.borrow_mut().failing = Some(sectors_of(&fs, table));
     assert_eq!(
-        fs.create(root, b"f", NodeKind::RegularFile),
+        fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(fs.write_refusal(), Some("commit_failed"));
     assert_eq!(
-        fs.create(root, b"g", NodeKind::RegularFile),
+        fs.create(root, b"g", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::ReadOnly),
         "a stopped handle takes no further operation"
     );
@@ -2380,7 +2461,7 @@ fn a_commit_torn_after_the_journal_holds_it_is_replayed_at_mount() {
     let table = inode_block(&mut fs, ROOT_INODE);
     medium.borrow_mut().failing = Some(sectors_of(&fs, table));
     assert_eq!(
-        fs.create(root, b"kept", NodeKind::Directory),
+        fs.create(root, b"kept", NodeKind::Directory, &DIR_RECORD),
         Err(DriverError::DeviceFault),
         "the home write failed"
     );
@@ -2399,7 +2480,7 @@ fn a_commit_torn_after_the_journal_holds_it_is_replayed_at_mount() {
         4,
         "., lost+found, kept"
     );
-    fs.create(kept, b"inside", NodeKind::RegularFile)
+    fs.create(kept, b"inside", NodeKind::RegularFile, &FILE_RECORD)
         .expect("writable");
     let mut fs = remount(fs);
     assert!(fs.lookup(kept, b"inside").is_ok());
@@ -2433,7 +2514,7 @@ fn a_replay_that_changes_the_geometry_reads_the_volume_afresh() {
     let table = inode_block(&mut fs, ROOT_INODE);
     medium.borrow_mut().failing = Some(sectors_of(&fs, table));
     assert_eq!(
-        fs.create(root, b"torn", NodeKind::Directory),
+        fs.create(root, b"torn", NodeKind::Directory, &DIR_RECORD),
         Err(DriverError::DeviceFault),
         "the home write failed with the log committed"
     );
@@ -2458,7 +2539,7 @@ fn a_replay_that_changes_the_geometry_reads_the_volume_afresh() {
     let root = fs.root();
     let _ = fs.node_info(root);
     let _ = fs.lookup(root, b"lost+found");
-    let _ = fs.create(root, b"after", NodeKind::RegularFile);
+    let _ = fs.create(root, b"after", NodeKind::RegularFile, &FILE_RECORD);
     let _ = fs.into_block();
 }
 
@@ -2469,7 +2550,7 @@ fn a_replay_that_changes_the_geometry_reads_the_volume_afresh() {
 fn a_directory_sized_past_its_blocks_is_walked_over_what_it_maps() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    fs.create(root, b"kept", NodeKind::RegularFile)
+    fs.create(root, b"kept", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     // A `largedir` directory's size has a high half: the largest it can
     // carry, 2^54 blocks of promise over the one block it has.
@@ -2535,7 +2616,7 @@ fn stale_superblock_totals_are_recounted_at_mount() {
     assert_eq!(recounted.free_blocks, exact.free_blocks);
     assert_eq!(recounted.files_free, exact.files_free);
     let root = fs.root();
-    fs.create(root, b"room", NodeKind::RegularFile)
+    fs.create(root, b"room", NodeKind::RegularFile, &FILE_RECORD)
         .expect("the room the groups hold");
     let stats = remount(fs).stats().expect("stats");
     assert_eq!(
@@ -2566,19 +2647,19 @@ fn an_immutable_or_append_only_file_is_held_as_the_volume_says() {
         (b"log", INODE_FLAG_APPEND),
     ] {
         let node = fs
-            .create(root, name, NodeKind::RegularFile)
+            .create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        fs.write_at(root, name, 0, b"first").expect("write");
+        fs.write_at(node, 0, b"first").expect("write");
         chattr(&mut fs, node_inode(node).expect("inode"), flag);
         let refused = Err(DriverError::PermissionDenied);
-        assert_eq!(fs.write_at(root, name, 0, b"over"), refused.map(|()| 0));
-        assert_eq!(fs.truncate(root, name, 0), refused);
+        assert_eq!(fs.write_at(node, 0, b"over"), refused.map(|()| 0));
+        assert_eq!(fs.truncate(node, 0), refused);
         assert_eq!(fs.remove(root, name), refused);
         assert_eq!(fs.rename(root, name, root, b"moved"), refused);
         let mut security = fs.security(node).expect("security");
         security.mode = 0o600;
         assert_eq!(fs.set_security(node, security), refused);
-        let appended = fs.write_at(root, name, 5, b"+more");
+        let appended = fs.write_at(node, 5, b"+more");
         if flag == INODE_FLAG_APPEND {
             assert_eq!(appended, Ok(5), "an append-only file grows at its end");
         } else {
@@ -2586,7 +2667,7 @@ fn an_immutable_or_append_only_file_is_held_as_the_volume_says() {
         }
     }
     let other = fs
-        .create(root, b"other", NodeKind::RegularFile)
+        .create(root, b"other", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(
         fs.rename(root, b"other", root, b"fixed"),
@@ -2606,8 +2687,10 @@ fn an_immutable_or_append_only_directory_is_held_as_the_volume_says() {
         (&b"sealed"[..], INODE_FLAG_IMMUTABLE),
         (b"inbox", INODE_FLAG_APPEND),
     ] {
-        let dir = fs.create(root, name, NodeKind::Directory).expect("mkdir");
-        fs.create(dir, b"kept", NodeKind::RegularFile)
+        let dir = fs
+            .create(root, name, NodeKind::Directory, &DIR_RECORD)
+            .expect("mkdir");
+        fs.create(dir, b"kept", NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
         chattr(&mut fs, node_inode(dir).expect("inode"), flag);
         assert_eq!(fs.remove(dir, b"kept"), Err(DriverError::PermissionDenied));
@@ -2615,7 +2698,9 @@ fn an_immutable_or_append_only_directory_is_held_as_the_volume_says() {
             fs.rename(dir, b"kept", root, b"out"),
             Err(DriverError::PermissionDenied)
         );
-        let added = fs.create(dir, b"new", NodeKind::RegularFile).map(|_| ());
+        let added = fs
+            .create(dir, b"new", NodeKind::RegularFile, &FILE_RECORD)
+            .map(|_| ());
         if flag == INODE_FLAG_APPEND {
             assert_eq!(added, Ok(()), "an append-only directory gains names");
         } else {
@@ -2630,7 +2715,7 @@ fn an_immutable_or_append_only_directory_is_held_as_the_volume_says() {
 fn an_entry_naming_the_journal_is_refused_not_followed() {
     let mut fs = Ext4::open(SizedBlock::over(sparse(JOURNALED))).expect("mount");
     let root = fs.root();
-    fs.create(root, b"victim", NodeKind::RegularFile)
+    fs.create(root, b"victim", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let journal = fs.layout.journal_inum.expect("a journal");
     let dir = fs.read_inode(ROOT_INODE).expect("root");
@@ -2664,7 +2749,9 @@ fn a_log_on_a_multi_mount_protected_volume_is_not_replayed() {
     let root = fs.root();
     let table = inode_block(&mut fs, ROOT_INODE);
     medium.borrow_mut().failing = Some(sectors_of(&fs, table));
-    assert!(fs.create(root, b"torn", NodeKind::Directory).is_err());
+    assert!(fs
+        .create(root, b"torn", NodeKind::Directory, &DIR_RECORD)
+        .is_err());
     let mut image = medium.borrow().data.clone();
     let at = usize::try_from(SUPERBLOCK_OFFSET).expect("small");
     let sb = &mut image[at..at + SUPERBLOCK_LEN];
@@ -2686,9 +2773,9 @@ fn an_interrupted_truncate_finished_at_mount_zeroes_its_tail() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let node = fs
-        .create(root, b"cut", NodeKind::RegularFile)
+        .create(root, b"cut", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.write_at(root, b"cut", 0, &[0xAB; 2048]).expect("write");
+    fs.write_at(node, 0, &[0xAB; 2048]).expect("write");
     let ino = node_inode(node).expect("inode");
     // What a crash mid-truncate leaves: the size cut to 100 bytes and the
     // inode listed, its blocks and the tail of the first not yet cut.
@@ -2705,7 +2792,7 @@ fn an_interrupted_truncate_finished_at_mount_zeroes_its_tail() {
 
     let mut fs = remount(fs);
     assert_eq!(le32(&fs.sb, SB_LAST_ORPHAN), 0, "finished");
-    fs.write_at(root, b"cut", 1000, b"!").expect("grow");
+    fs.write_at(node, 1000, b"!").expect("grow");
     let mut buf = [0u8; 1001];
     let n = fs.read_at(node, 0, &mut buf).expect("read");
     assert_eq!(n, 1001);
@@ -2744,15 +2831,17 @@ fn a_rename_over_a_file_let_go_across_transactions_is_whole_after_a_crash() {
     let mut fs = Ext4::open(device).expect("mount");
     let root = fs.root();
     for name in [&b"old"[..], b"new"] {
-        fs.create(root, name, NodeKind::RegularFile)
+        fs.create(root, name, NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
     }
+    let old = fs.lookup(root, b"old").expect("lookup");
+    let new_file = fs.lookup(root, b"new").expect("lookup");
     let chunk = vec![0xA5u8; 64 * 1024];
     for at in 0..128u64 {
-        fs.write_at(root, b"old", at * chunk.len() as u64, &chunk)
+        fs.write_at(old, at * chunk.len() as u64, &chunk)
             .expect("write");
     }
-    fs.write_at(root, b"new", 0, b"moved here").expect("write");
+    fs.write_at(new_file, 0, b"moved here").expect("write");
     let dir_block = first_dir_block(&mut fs, root);
     medium.borrow_mut().failing = Some(sectors_of(&fs, dir_block));
     assert_eq!(
@@ -2781,14 +2870,14 @@ fn a_create_that_cannot_place_its_name_gives_its_inode_back() {
     let mut long = [b'f'; 200];
     for n in 0..4u8 {
         long[0] = b'a' + n;
-        fs.create(root, &long, NodeKind::RegularFile)
+        fs.create(root, &long, NodeKind::RegularFile, &FILE_RECORD)
             .expect("fits in block 0");
     }
     while fs.alloc_blocks(0, group::MAX_RUN, u64::MAX).is_ok() {}
     let before = fs.stats().expect("stats");
     long[0] = b'z';
     assert_eq!(
-        fs.create(root, &long, NodeKind::RegularFile),
+        fs.create(root, &long, NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::NoSpace)
     );
     assert_eq!(fs.stats().expect("stats"), before, "the inode went back");
@@ -2802,7 +2891,7 @@ fn a_renamed_symlink_keeps_its_entry_type() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let link = fs
-        .create(root, b"link", NodeKind::RegularFile)
+        .create(root, b"link", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let ino = node_inode(link).expect("inode");
     let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
@@ -2811,7 +2900,9 @@ fn a_renamed_symlink_keeps_its_entry_type() {
     put_le32(&mut raw, 0x04, 4);
     raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + 4].copy_from_slice(b"dest");
     fs.write_inode_raw(ino, &mut raw).expect("raw");
-    let dir = fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    let dir = fs
+        .create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
     fs.rename(root, b"link", dir, b"moved").expect("rename");
     let mut block = [0u8; MAX_BLOCK_SIZE as usize];
     let phys = first_dir_block(&mut fs, dir);
@@ -2833,7 +2924,9 @@ fn a_renamed_symlink_keeps_its_entry_type() {
 fn a_directory_size_ignores_its_high_word_without_largedir() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
-    let dir = fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    let dir = fs
+        .create(root, b"dir", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
     let ino = node_inode(dir).expect("inode");
     let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
     fs.read_inode_raw(ino, &mut raw).expect("raw");
@@ -2846,7 +2939,7 @@ fn a_directory_size_ignores_its_high_word_without_largedir() {
     let mut long = [b'f'; 200];
     for n in 0..8u8 {
         long[0] = b'a' + n;
-        fs.create(dir, &long, NodeKind::RegularFile)
+        fs.create(dir, &long, NodeKind::RegularFile, &FILE_RECORD)
             .expect("a second block appended");
     }
     let inode = fs.read_inode(ino).expect("inode");
@@ -2907,12 +3000,12 @@ fn a_seek_finds_the_holes_of_a_block_mapped_file() {
 fn a_seek_finds_a_hole_left_by_writing_past_the_end() {
     let mut fs = mount();
     let root = fs.root();
-    fs.create(root, b"gap", NodeKind::RegularFile)
+    let gap = fs
+        .create(root, b"gap", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let bs = FS_BLOCK as u64;
-    fs.write_all(root, b"gap", 0, &[7u8; FS_BLOCK])
-        .expect("write head");
-    fs.write_all(root, b"gap", 4 * bs, &[9u8; FS_BLOCK])
+    fs.write_all(gap, 0, &[7u8; FS_BLOCK]).expect("write head");
+    fs.write_all(gap, 4 * bs, &[9u8; FS_BLOCK])
         .expect("write past a gap");
     let file = fs.lookup(root, b"gap").expect("found");
     assert_eq!(fs.seek_region(file, 0, SeekRegion::Hole), Ok(Some(bs)));
@@ -2923,5 +3016,427 @@ fn a_seek_finds_a_hole_left_by_writing_past_the_end() {
     );
     // ext4 keeps holes but this driver does not release a range mid-file, and
     // says so rather than writing zeros in its place.
-    assert_eq!(fs.punch(root, b"gap", 0, bs), Err(DriverError::Unsupported));
+    assert_eq!(fs.punch(file, 0, bs), Err(DriverError::Unsupported));
+}
+
+// --- Holds (`pin`, `unpin`, `release_pins`). ---
+
+/// The orphan chain, head first, as the open transaction has it.
+fn orphan_chain<B: Block>(fs: &mut Ext4<B>) -> Vec<u32> {
+    let mut chain = Vec::new();
+    let mut raw = fs.inode_scratch().expect("scratch");
+    let mut at = le32(&fs.sb, crate::superblock::SB_LAST_ORPHAN);
+    while at != 0 {
+        assert!(chain.len() < 64, "the chain loops: {chain:?}");
+        chain.push(at);
+        fs.read_inode_raw(at, &mut raw).expect("an orphan's record");
+        at = le32(&raw, INODE_DTIME);
+    }
+    chain
+}
+
+/// A fresh one-group volume.
+fn formatted() -> Ext4<SizedBlock> {
+    Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format")
+}
+
+/// Create `name` in `dir` holding `body`, hold it, and unlink it.
+fn held_and_unlinked<B: Block>(fs: &mut Ext4<B>, dir: NodeId, name: &[u8], body: &[u8]) -> NodeId {
+    let file = fs
+        .create(dir, name, NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, body).expect("write");
+    let pinned = fs.pin(file).expect("pin");
+    assert_eq!(pinned, file, "the pinned id is the inode number");
+    fs.remove(dir, name).expect("unlink");
+    pinned
+}
+
+#[test]
+fn a_held_file_keeps_its_blocks_past_its_last_link_until_its_last_unpin() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let before = fs.stats().expect("stats");
+    let file = fs
+        .create(root, b"open", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, &[0x5A; 8192]).expect("write");
+    let written = fs.stats().expect("stats");
+    let pinned = fs.pin(file).expect("pin");
+    fs.remove(root, b"open").expect("unlink");
+
+    assert_eq!(fs.lookup(root, b"open"), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.stats().expect("stats"),
+        written,
+        "nothing came back with the link"
+    );
+    let ino = node_inode(pinned).expect("an inode");
+    assert_eq!(orphan_chain(&mut fs), vec![ino], "the chain records it");
+    assert_eq!(fs.node_info(pinned).expect("stat").nlink, 0);
+    let mut buf = [0u8; 8192];
+    assert_eq!(fs.read_at(pinned, 0, &mut buf), Ok(8192));
+    assert!(buf.iter().all(|&b| b == 0x5A), "and its data");
+
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    assert!(orphan_chain(&mut fs).is_empty());
+    assert_eq!(
+        fs.stats().expect("stats"),
+        before,
+        "the last unpin gave back every block and the inode"
+    );
+    assert_eq!(fs.node_info(pinned), Err(DriverError::NotFound));
+}
+
+#[test]
+fn an_unlinked_held_file_takes_writes_truncates_and_record_changes() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let pinned = held_and_unlinked(&mut fs, root, b"open", &[0x5A; 3000]);
+    fs.write_all(pinned, 0, b"still writable")
+        .expect("write an unlinked held file");
+    let mut buf = [0u8; 14];
+    assert_eq!(fs.read_at(pinned, 0, &mut buf), Ok(14));
+    assert_eq!(&buf, b"still writable");
+    fs.truncate(pinned, 5).expect("truncate");
+    assert_eq!(fs.node_info(pinned).expect("stat").size, 5);
+    let record = NodeSecurity::new(0o600, 9, 9);
+    fs.set_security(pinned, record).expect("change its record");
+    assert_eq!(fs.security(pinned), Ok(record));
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    assert_eq!(fs.security(pinned), Err(DriverError::NotFound));
+}
+
+#[test]
+fn holds_count_and_only_the_last_unpin_lets_an_inode_go() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"twice", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, b"kept by the other hold")
+        .expect("write");
+    let first = fs.pin(file).expect("pin");
+    let second = fs.pin(file).expect("pin again");
+    assert_eq!(first, second, "every hold of one node answers one id");
+    fs.remove(root, b"twice").expect("unlink");
+    assert_eq!(fs.unpin(first), Ok(Unpinned::Held));
+    let mut buf = [0u8; 22];
+    assert_eq!(fs.read_at(second, 0, &mut buf), Ok(22));
+    assert_eq!(&buf, b"kept by the other hold");
+    assert_eq!(fs.unpin(second), Ok(Unpinned::Freed));
+    assert_eq!(
+        fs.unpin(second),
+        Err(DriverError::NotFound),
+        "no hold is left"
+    );
+    assert_eq!(fs.unpin(root), Err(DriverError::NotFound), "never held");
+    assert_eq!(fs.pin(NodeId::NONE), Err(DriverError::NotFound));
+}
+
+#[test]
+fn a_held_inode_keeps_its_id_and_its_data_through_renames() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let outer = fs
+        .create(root, b"outer", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let file = fs
+        .create(outer, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(file, 0, b"follows its node").expect("write");
+    let pinned = fs.pin(file).expect("pin");
+    fs.rename(outer, b"f", outer, b"g")
+        .expect("rename the node");
+    fs.rename(root, b"outer", root, b"moved")
+        .expect("rename its parent");
+    let moved = fs.lookup(root, b"moved").expect("lookup");
+    assert_eq!(moved, outer);
+    assert_eq!(
+        fs.lookup(moved, b"g"),
+        Ok(pinned),
+        "a lookup answers the pinned id"
+    );
+    let listing = listed(&mut fs, moved, 0, &[]).expect("list");
+    assert_eq!(listing.len(), 1);
+    assert_eq!(listing[0].0.node, pinned, "and so does a listing");
+    let mut buf = [0u8; 16];
+    assert_eq!(fs.read_at(pinned, 0, &mut buf), Ok(16));
+    assert_eq!(&buf, b"follows its node");
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Released), "it keeps a link");
+    assert!(orphan_chain(&mut fs).is_empty());
+}
+
+#[test]
+fn a_rename_over_a_held_file_keeps_it_until_its_last_unpin() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let old = fs
+        .create(root, b"old", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(old, 0, &[0xA5; 3000]).expect("write");
+    let replacement = fs
+        .create(root, b"new", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_all(replacement, 0, b"replacement").expect("write");
+    let pinned = fs.pin(old).expect("pin");
+    fs.rename(root, b"new", root, b"old")
+        .expect("rename over the held file");
+    assert_eq!(fs.lookup(root, b"old"), Ok(replacement));
+    assert_eq!(fs.node_info(pinned).expect("stat").nlink, 0);
+    assert_eq!(
+        orphan_chain(&mut fs),
+        vec![node_inode(pinned).expect("an inode")],
+        "the replaced file is listed in the rename's own operation"
+    );
+    let mut buf = [0u8; 3000];
+    assert_eq!(fs.read_at(pinned, 0, &mut buf), Ok(3000));
+    assert!(buf.iter().all(|&b| b == 0xA5), "and kept whole");
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    assert_eq!(fs.node_info(pinned), Err(DriverError::NotFound));
+    assert!(orphan_chain(&mut fs).is_empty());
+}
+
+#[test]
+fn a_removed_held_directory_takes_no_entries_and_its_last_unpin_frees_it() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let dir = fs
+        .create(root, b"gone", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let pinned = fs.pin(dir).expect("pin");
+    let root_links = fs.node_info(root).expect("stat").nlink;
+    fs.remove(root, b"gone").expect("rmdir");
+    assert_eq!(
+        fs.node_info(root).expect("stat").nlink,
+        root_links - 1,
+        "its `..` left the parent's count"
+    );
+    assert_eq!(fs.node_info(pinned).expect("stat").nlink, 0);
+    assert_eq!(fs.lookup(pinned, b"x"), Err(DriverError::NotFound));
+    assert_eq!(fs.parent(pinned), Err(DriverError::NotFound));
+    assert_eq!(listed(&mut fs, pinned, 0, &[]), Ok(Vec::new()));
+    assert_eq!(
+        fs.create(pinned, b"x", NodeKind::RegularFile, &FILE_RECORD),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.create(pinned, b"d", NodeKind::Directory, &DIR_RECORD),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.rename(root, b"f", pinned, b"f"),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        fs.lookup(root, b"f"),
+        Ok(file),
+        "the refused rename moved nothing"
+    );
+
+    let held = fs.stats().expect("stats");
+    assert_eq!(fs.unpin(pinned), Ok(Unpinned::Freed));
+    let freed = fs.stats().expect("stats");
+    assert_eq!(freed.free_blocks, held.free_blocks + 1, "its one block");
+    assert_eq!(freed.files_free, held.files_free + 1, "and its inode");
+    assert!(orphan_chain(&mut fs).is_empty());
+}
+
+#[test]
+fn release_pins_frees_every_unlinked_held_inode() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let kept = fs
+        .create(root, b"kept", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let unlinked = [
+        held_and_unlinked(&mut fs, root, b"a", b"a"),
+        held_and_unlinked(&mut fs, root, b"b", b"b"),
+    ];
+    fs.pin(kept).expect("pin");
+    fs.pin(kept).expect("pin again");
+    assert_eq!(orphan_chain(&mut fs).len(), 2);
+
+    assert_eq!(fs.release_pins(), Ok(()));
+    assert!(orphan_chain(&mut fs).is_empty(), "each unlinked one went");
+    for node in unlinked {
+        assert_eq!(fs.node_info(node), Err(DriverError::NotFound));
+    }
+    assert_eq!(
+        fs.unpin(kept),
+        Err(DriverError::NotFound),
+        "every hold went"
+    );
+    assert_eq!(fs.lookup(root, b"kept"), Ok(kept), "a linked inode stays");
+}
+
+#[test]
+fn an_unlinked_inode_no_hold_keeps_is_not_found_to_every_call() {
+    // A freed inode keeps its type, and a stale id once read it (D1443).
+    let mut fs = mount();
+    let root = fs.root();
+    let file = fs.lookup(root, b"hello.txt").expect("found");
+    fs.remove(root, b"hello.txt").expect("remove");
+    let mut buf = [0u8; 16];
+    assert_eq!(fs.node_info(file), Err(DriverError::NotFound));
+    assert_eq!(fs.read_at(file, 0, &mut buf), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.seek_region(file, 0, SeekRegion::Data),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(fs.security(file), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.set_security(file, FILE_RECORD),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(fs.write_at(file, 0, b"stale"), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.pin(file),
+        Err(DriverError::NotFound),
+        "an inode no link reaches cannot be held"
+    );
+}
+
+#[test]
+fn an_orphan_leaves_the_chain_from_wherever_it_sits() {
+    let mut fs = formatted();
+    let root = fs.root();
+    let held: Vec<NodeId> = [&b"first"[..], b"second", b"third", b"fourth"]
+        .into_iter()
+        .map(|name| held_and_unlinked(&mut fs, root, name, name))
+        .collect();
+    let inos: Vec<u32> = held
+        .iter()
+        .map(|&node| node_inode(node).expect("an inode"))
+        .collect();
+    assert_eq!(
+        orphan_chain(&mut fs),
+        vec![inos[3], inos[2], inos[1], inos[0]],
+        "each joins at the head"
+    );
+    // The middle, the tail and the head each leave without disturbing the rest.
+    for (gone, left) in [
+        (1, vec![inos[3], inos[2], inos[0]]),
+        (0, vec![inos[3], inos[2]]),
+        (3, vec![inos[2]]),
+        (2, Vec::new()),
+    ] {
+        assert_eq!(fs.unpin(held[gone]), Ok(Unpinned::Freed));
+        assert_eq!(orphan_chain(&mut fs), left);
+    }
+    assert!(
+        fs.orphan_prev.is_empty(),
+        "the index holds nothing the chain does not"
+    );
+}
+
+#[test]
+fn an_unpin_whose_commit_is_lost_leaves_the_chain_and_its_index_whole() {
+    let (device, medium) = FailingWrites::over(formatted().into_block().expect("commit").data);
+    let mut fs = Ext4::open(device).expect("mount");
+    let root = fs.root();
+    let held = [
+        held_and_unlinked(&mut fs, root, b"tail", b"t"),
+        held_and_unlinked(&mut fs, root, b"middle", b"m"),
+        held_and_unlinked(&mut fs, root, b"head", b"h"),
+    ];
+    let inos = held.map(|node| node_inode(node).expect("an inode"));
+    assert_eq!(orphan_chain(&mut fs), vec![inos[2], inos[1], inos[0]]);
+
+    medium.borrow_mut().failing = Some(superblock_sectors());
+    assert_eq!(
+        fs.unpin(held[1]),
+        Err(DriverError::DeviceFault),
+        "the release's commit is lost"
+    );
+    medium.borrow_mut().failing = None;
+    assert_eq!(fs.write_refusal(), None, "nothing acknowledged was lost");
+    assert_eq!(
+        orphan_chain(&mut fs),
+        vec![inos[2], inos[1], inos[0]],
+        "the chain is as it was"
+    );
+    assert_eq!(
+        fs.unpin(held[0]),
+        Ok(Unpinned::Freed),
+        "the index still names the tail's predecessor"
+    );
+    assert_eq!(fs.unpin(held[2]), Ok(Unpinned::Freed));
+    assert_eq!(
+        orphan_chain(&mut fs),
+        vec![inos[1]],
+        "the orphan whose release was lost waits for the mount"
+    );
+    let mut fs = crashed(&medium);
+    assert!(orphan_chain(&mut fs).is_empty());
+}
+
+#[test]
+fn a_held_file_a_crash_leaves_unlinked_is_released_at_mount() {
+    let (device, medium) = FailingWrites::over(sparse(JOURNALED));
+    let mut fs = Ext4::open(device).expect("mount");
+    let root = fs.root();
+    let before = fs.stats().expect("stats");
+    let pinned = held_and_unlinked(&mut fs, root, b"open", &[0x5A; 6000]);
+    assert_eq!(
+        orphan_chain(&mut fs),
+        vec![node_inode(pinned).expect("an inode")]
+    );
+
+    // No hold outlives the driver: the mount finds only the chain.
+    let mut fs = crashed(&medium);
+    assert!(orphan_chain(&mut fs).is_empty(), "the mount released it");
+    assert_eq!(
+        fs.stats().expect("stats"),
+        before,
+        "and its blocks and inode came back"
+    );
+    assert_eq!(fs.lookup(fs.root(), b"open"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn a_truncate_of_an_unlinked_held_file_spanning_transactions_lists_it_once() {
+    // The rename test's small log: cutting a file across sixteen groups
+    // publishes part-way, which lists a cut not listed already.
+    let mut image = sparse(MULTIGROUP);
+    let log = {
+        let fs = Ext4::open_read_only(SizedBlock::over(image.clone())).expect("mount");
+        fs.journal_map
+            .as_ref()
+            .and_then(|map| map.resolve(0))
+            .expect("a log")
+    };
+    let at = usize::try_from(log).expect("small") * 1024 + crate::journal::SB_MAXLEN;
+    image[at..at + 4].copy_from_slice(&260u32.to_be_bytes());
+    let mut fs = Ext4::open(SizedBlock::over(image)).expect("mount");
+    let root = fs.root();
+    let file = fs
+        .create(root, b"big", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let chunk = vec![0xA5u8; 64 * 1024];
+    for at in 0..128u64 {
+        fs.write_all(file, at * chunk.len() as u64, &chunk)
+            .expect("write");
+    }
+    let big = fs.pin(file).expect("pin");
+    fs.remove(root, b"big").expect("unlink");
+    let small = held_and_unlinked(&mut fs, root, b"small", b"s");
+    let chain = vec![
+        node_inode(small).expect("an inode"),
+        node_inode(big).expect("an inode"),
+    ];
+    assert_eq!(orphan_chain(&mut fs), chain);
+
+    fs.truncate(big, 0).expect("truncate");
+    assert_eq!(orphan_chain(&mut fs), chain, "listed once, where it was");
+    assert_eq!(
+        fs.unpin(big),
+        Ok(Unpinned::Freed),
+        "and still found through the orphan before it"
+    );
+    assert_eq!(fs.unpin(small), Ok(Unpinned::Freed));
+    assert!(orphan_chain(&mut fs).is_empty());
 }

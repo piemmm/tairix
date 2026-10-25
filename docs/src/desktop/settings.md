@@ -150,7 +150,9 @@ nothing — it never reports a success it did not get.
   lies under the pointer.
 - **An open choice list stands over the window.** It is drawn above the pane's
   band and the bars it hangs across, and it holds the pointer until it
-  resolves, so a press on it never reaches a row beneath it.
+  resolves, so a press on it never reaches a row beneath it. A dragged slider
+  holds the pointer the same way, so a drag let go of over the strip settles
+  where it was left.
 
 ## The registry is the surface
 
@@ -516,7 +518,8 @@ and none of the rest is needed to render them. A uid no database holds is
 stated as exactly that, apart from a reading that could not be taken.
 
 The **roster** is the ungated `USER_DIRECTORY`, walked paged: every account's
-name and user id, the `/etc/passwd`-class public pairing, and nothing else.
+name, user id and login group, the `/etc/passwd`-class public fields, and
+nothing else.
 The plate says so in its own footnote rather than fabricating the rest —
 because an ungated lock state is an enumeration of which accounts are live and
 so worth attacking, and an ungated shell and home path are reconnaissance any
@@ -612,15 +615,20 @@ like every machine-scope pane, and the service follows the store, so a change
 takes effect when it is written. The line row offers the header lines the
 service reports as free, or as the fan's already, each labelled with its GPIO
 number and header pin, and names the lines something else holds rather than
-offering them. A row the mode makes moot says so and keeps its value: the line
+offering them. The line staged is always among its choices, shown as chosen
+even where something else holds it, and a pick draws the choices again around
+the line it stages. A row the mode makes moot says so and keeps its value: the line
 and polarity under *Off*, the two temperatures unless *Automatic*.
 
 **The reading** is the service's `thermal-v1` status, asked on a worker so the
 window never waits on it: once when the pane comes on show, then every two
-seconds while it stays there, and never otherwise. An answer that differs only
-in its temperature moves that one reading in place; any other answer rebuilds
-the rows, keeping the working copy. A service that does not answer is stated,
-never stood in for.
+seconds while it stays there, and never otherwise. An answer the pane already
+shows redraws nothing, and nor does one landing once the pane is left. One
+that moves only what STATUS states — the temperature, the fan, its fault —
+restates those rows in place and redraws them alone; any other rebuilds the
+rows, keeping the working copy, and lays the pane out again. One landing while
+a slider is dragged or a list is open waits until the reader lets go. A
+service that does not answer is stated, never stood in for.
 
 ## Notifications, Mouse, Trackpad, Keyboard, Lock Screen, Screensaver and Language & Region
 
@@ -785,8 +793,8 @@ dragged, its figure following the drag, and settles where it rests. The round
 trips run on a worker over `tairix_audio::stream::ControlQueue`,
 one in flight and the latest control of each kind for each device winning
 meanwhile, so a drag costs one request at a time. A reading that lands
-mid-drag is held until the drag settles rather than rebuilding the slider
-under the pointer. The `AudioDevices` and `AudioCapture` notices re-read the
+mid-drag, or while a list is open, is held until the reader lets go rather
+than rebuilding the row under the pointer. The `AudioDevices` and `AudioCapture` notices re-read the
 pane whenever anything moves, whoever moved it. Settings remembers nothing:
 the desktop session follows the same notices and keeps the user's choices.
 
@@ -818,8 +826,8 @@ trip and the value asked last is the one that lands, while picks and returns
 to the theme's sound keep their order. A change shows at once, as the session
 will hold it, in the rows it touches — every row, for the switch — and once it
 is answered the pane reads the choices again, so it shows what the session
-holds rather than what was asked; a reading that lands mid-drag waits for the
-drag to settle, as the devices pane's does.
+holds rather than what was asked; a reading that lands mid-drag or while a list
+is open waits for the reader to let go, as the devices pane's does.
 
 ## On a running machine
 

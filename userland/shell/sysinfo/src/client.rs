@@ -35,8 +35,8 @@ use tairix_procinfo::{
 use crate::command::Command;
 use crate::error::SysinfoError;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `sysinfo`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `sysinfo`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: sysinfo <query>
 

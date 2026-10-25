@@ -1,5 +1,5 @@
 //! The PCM block's registers, and the framing a link's format makes of them
-//! (BCM2711 ARM Peripherals, chapter 7; Linux `sound/soc/bcm/bcm2835-i2s.c`).
+//! (BCM2711 ARM Peripherals, chapter 7).
 //!
 //! The control registers may change only while the block neither transmits
 //! nor receives, so a stream is framed with transmit off. The block takes
@@ -26,7 +26,8 @@ pub const WINDOW_LEN: usize = 0x24;
 const CS_EN: u32 = 1 << 0;
 pub(crate) const CS_TXON: u32 = 1 << 2;
 pub(crate) const CS_TXCLR: u32 = 1 << 3;
-/// Transmit's FIFO threshold at "less than full", as Linux sets it.
+/// Transmit's FIFO threshold, `TXTHR` 01: `TXW`, which nothing here reads,
+/// rises below a quarter full (BCM2711 ARM Peripherals, Table 143).
 const CS_TXTHR: u32 = 1 << 5;
 const CS_DMAEN: u32 = 1 << 9;
 /// The latched FIFO error, cleared by writing one.
@@ -49,7 +50,8 @@ const CH_POSITION_SHIFT: u32 = 4;
 const CH1_SHIFT: u32 = 16;
 
 /// The FIFO levels, in words, below which the DMA channel is asked for more
-/// and then asked with priority, as Linux sets them.
+/// and then asked with priority: the block's reset values (BCM2711 ARM
+/// Peripherals, Table 148).
 const DREQ_TX: u32 = 0x30 << 8;
 const DREQ_TX_PANIC: u32 = 0x10 << 24;
 

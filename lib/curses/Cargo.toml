@@ -20,6 +20,8 @@ program = ["dep:tairix-rt", "dep:tairix-abi"]
 [dependencies]
 tairix-vt = { path = "../vt", version = "=0.0.0" }
 tairix-termcap = { path = "../termcap", version = "=0.0.0" }
+# The one rule a cell's glyph is held to.
+tairix-visible = { path = "../visible", version = "=0.0.0" }
 
 # The `program`-feature `StreamTty` links the freestanding userland runtime
 # for the standard-stream reads/writes, and the frozen `Errno` set to tell a

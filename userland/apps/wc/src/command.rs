@@ -3,7 +3,7 @@
 //! The grammar is the GNU `wc` surface: the count selectors `-c`/`--bytes`,
 //! `-m`/`--chars`, `-l`/`--lines`, `-w`/`--words`, `-L`/`--max-line-length`
 //! (none selected means the newline/word/byte default), `--total=WHEN`
-//! (matched like GNU `argmatch`: an unambiguous prefix of `auto`, `always`,
+//! (an unambiguous prefix of `auto`, `always`,
 //! `only`, `never`), `--files0-from=F` (NUL-separated operand list, which
 //! excludes file operands), the reserved `-h`/`-?`/`--help` short-help
 //! switches, and `--` end-of-options — exactly the forms the GNU tool
@@ -12,6 +12,9 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use tairix_util::argv::choose;
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
 use crate::error::WcError;
 
@@ -80,33 +83,19 @@ pub enum TotalMode {
     Never,
 }
 
+/// The `--total` modes by the words naming them, in GNU's order.
+pub(crate) const MODES: [(&str, TotalMode); 4] = [
+    ("auto", TotalMode::Auto),
+    ("always", TotalMode::Always),
+    ("only", TotalMode::Only),
+    ("never", TotalMode::Never),
+];
+
 impl TotalMode {
-    /// Match `text` against the mode names the way GNU `argmatch` does: an
-    /// exact name or an unambiguous non-empty prefix (`au` names `auto`;
-    /// `a` is ambiguous between `auto` and `always` and is refused).
+    /// The mode `text` names: its word, or the only one it is a prefix of
+    /// (`au` names `auto`; `a` prefixes `auto` and `always` and is refused).
     fn parse(text: &str) -> Result<Self, WcError> {
-        const MODES: [(&str, TotalMode); 4] = [
-            ("auto", TotalMode::Auto),
-            ("always", TotalMode::Always),
-            ("only", TotalMode::Only),
-            ("never", TotalMode::Never),
-        ];
-        if text.is_empty() {
-            return Err(WcError::InvalidTotal(String::new()));
-        }
-        let mut matched: Option<TotalMode> = None;
-        for (name, mode) in MODES {
-            if *name == *text {
-                return Ok(mode);
-            }
-            if name.starts_with(text) {
-                if matched.is_some() {
-                    return Err(WcError::InvalidTotal(String::from(text)));
-                }
-                matched = Some(mode);
-            }
-        }
-        matched.ok_or_else(|| WcError::InvalidTotal(String::from(text)))
+        choose(&MODES, text).map_err(|miss| WcError::BadTotal(miss, String::from(text)))
     }
 }
 
@@ -144,79 +133,66 @@ pub enum Command {
     Help,
 }
 
+/// What each of `wc`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Bytes,
+    Chars,
+    Lines,
+    Words,
+    MaxLine,
+    Total,
+    Files0From,
+    Help,
+}
+
+/// `wc`'s options, as GNU's `wc` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('c', &["bytes"], Flag::Bytes),
+    Opt::flag('m', &["chars"], Flag::Chars),
+    Opt::flag('l', &["lines"], Flag::Lines),
+    Opt::flag('w', &["words"], Flag::Words),
+    Opt::flag('L', &["max-line-length"], Flag::MaxLine),
+    Opt::long(&["total"], Takes::Value, Flag::Total),
+    Opt::long(&["files0-from"], Takes::Value, Flag::Files0From),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// Options and operands may be interleaved (the GNU permutation); `--` ends
-/// option parsing; a lone `-` is the labelled standard-input operand.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, clustered, a long one by any unambiguous prefix, `--` ending
+/// them, and a lone `-` the labelled standard-input operand. The help
+/// switches (`-h`, `-?`, `--help`) answer at once; the selectors accumulate.
 ///
 /// # Errors
 ///
-/// The [`WcError`] usage variants, mirroring the GNU diagnostics —
-/// including the GNU refusal to combine file operands with
-/// `--files0-from`.
+/// * [`WcError::Option`] — an option `getopt` refuses, in its words.
+/// * [`WcError::BadTotal`] — a `--total` value naming no one mode.
+/// * [`WcError::Files0Conflict`] — file operands with `--files0-from`, which
+///   GNU refuses.
 pub fn parse(args: &[&str]) -> Result<Command, WcError> {
     let mut select = Selection::NONE;
     let mut total = TotalMode::default();
     let mut files0_from: Option<String> = None;
     let mut operands: Vec<Operand> = Vec::new();
-    let mut options_done = false;
 
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        if options_done || arg == "-" || !arg.starts_with('-') {
-            operands.push(if arg == "-" {
-                Operand::Dash
-            } else {
-                Operand::Path(String::from(arg))
-            });
-        } else {
-            match arg {
-                "--" => options_done = true,
-                "-h" | "-?" | "--help" => return Ok(Command::Help),
-                "--bytes" => select.bytes = true,
-                "--chars" => select.chars = true,
-                "--lines" => select.lines = true,
-                "--words" => select.words = true,
-                "--max-line-length" => select.max_line = true,
-                "--total" => {
-                    index += 1;
-                    let Some(&value) = args.get(index) else {
-                        return Err(WcError::MissingValue("--total"));
-                    };
-                    total = TotalMode::parse(value)?;
-                }
-                "--files0-from" => {
-                    index += 1;
-                    let Some(&value) = args.get(index) else {
-                        return Err(WcError::MissingValue("--files0-from"));
-                    };
-                    files0_from = Some(String::from(value));
-                }
-                _ if arg.starts_with("--total=") => {
-                    total = TotalMode::parse(&arg["--total=".len()..])?;
-                }
-                _ if arg.starts_with("--files0-from=") => {
-                    files0_from = Some(String::from(&arg["--files0-from=".len()..]));
-                }
-                _ if arg.starts_with("--") => return Err(WcError::UnknownLong(String::from(arg))),
-                _ => {
-                    for flag in arg[1..].chars() {
-                        match flag {
-                            'c' => select.bytes = true,
-                            'm' => select.chars = true,
-                            'l' => select.lines = true,
-                            'w' => select.words = true,
-                            'L' => select.max_line = true,
-                            '?' => return Ok(Command::Help),
-                            _ => return Err(WcError::UnknownShort(flag)),
-                        }
-                    }
-                }
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(WcError::Option)? {
+            Arg::Operand("-") => operands.push(Operand::Dash),
+            Arg::Operand(path) => operands.push(Operand::Path(String::from(path))),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Bytes, _) => select.bytes = true,
+            Arg::Opt(Flag::Chars, _) => select.chars = true,
+            Arg::Opt(Flag::Lines, _) => select.lines = true,
+            Arg::Opt(Flag::Words, _) => select.words = true,
+            Arg::Opt(Flag::MaxLine, _) => select.max_line = true,
+            Arg::Opt(Flag::Total, value) => total = TotalMode::parse(value.unwrap_or_default())?,
+            Arg::Opt(Flag::Files0From, value) => files0_from = value.map(String::from),
         }
-        index += 1;
     }
 
     if files0_from.is_some() && !operands.is_empty() {
@@ -235,12 +211,13 @@ pub fn parse(args: &[&str]) -> Result<Command, WcError> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
     use alloc::vec::Vec;
 
     use super::{parse, Command, Job, Operand, Selection, TotalMode};
     use crate::error::WcError;
+    use tairix_util::argv::WordMiss;
 
     fn job(
         select: Selection,
@@ -310,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn total_modes_parse_like_argmatch() {
+    fn total_modes_take_a_word_or_the_one_prefix_naming_it() {
         assert_eq!(
             parse(&["--total=never"]),
             Ok(job(Selection::DEFAULT, TotalMode::Never, None, vec![]))
@@ -326,13 +303,31 @@ mod tests {
         );
         assert_eq!(
             parse(&["--total=a"]),
-            Err(WcError::InvalidTotal(String::from("a")))
+            Err(WcError::BadTotal(WordMiss::Ambiguous, String::from("a")))
         );
         assert_eq!(
             parse(&["--total=sometimes"]),
-            Err(WcError::InvalidTotal(String::from("sometimes")))
+            Err(WcError::BadTotal(
+                WordMiss::Unknown,
+                String::from("sometimes")
+            ))
         );
-        assert_eq!(parse(&["--total"]), Err(WcError::MissingValue("--total")));
+        assert_eq!(
+            refused(&["--total"]),
+            "option '--total' requires an argument"
+        );
+    }
+
+    #[test]
+    fn a_refused_mode_is_worded_as_gnu_words_it() {
+        assert_eq!(
+            alloc::format!("{}", WcError::BadTotal(WordMiss::Unknown, String::from("bogus"))),
+            "invalid argument 'bogus' for '--total'\nValid arguments are:\n  - 'auto'\n  - 'always'\n  - 'only'\n  - 'never'"
+        );
+        assert_eq!(
+            parse(&["--total="]),
+            Err(WcError::BadTotal(WordMiss::Ambiguous, String::new()))
+        );
     }
 
     #[test]
@@ -355,8 +350,8 @@ mod tests {
             Err(WcError::Files0Conflict)
         );
         assert_eq!(
-            parse(&["--files0-from"]),
-            Err(WcError::MissingValue("--files0-from"))
+            refused(&["--files0-from"]),
+            "option '--files0-from' requires an argument"
         );
     }
 
@@ -381,13 +376,44 @@ mod tests {
         assert_eq!(parse(&["-l?"]), Ok(Command::Help));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_options_are_usage_errors() {
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-lx"]), "invalid option -- 'x'");
         assert_eq!(
-            parse(&["--frob"]),
-            Err(WcError::UnknownLong(String::from("--frob")))
+            refused(&["--total"]),
+            "option '--total' requires an argument"
         );
-        assert_eq!(parse(&["-x"]), Err(WcError::UnknownShort('x')));
+        assert_eq!(
+            refused(&["--lines=x"]),
+            "option '--lines' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `wc --li --max --tot=only f` as
+    /// `wc --lines --max-line-length --total=only f`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--li", "--max", "--tot=only", "f"]),
+            Ok(job(
+                Selection {
+                    lines: true,
+                    max_line: true,
+                    ..Selection::NONE
+                },
+                TotalMode::Only,
+                None,
+                vec![path("f")]
+            ))
+        );
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

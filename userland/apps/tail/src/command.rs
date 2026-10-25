@@ -15,8 +15,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::argv::choose;
 use tairix_util::cnum::scan_double;
 use tairix_util::count::{parse_decimal, parse_suffixed};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
 use crate::error::TailError;
 
@@ -38,6 +40,17 @@ pub enum Follow {
     /// `-F`/`--follow=name` (and `--follow --retry`): follow the *name* — a
     /// rotation (the name replaced by a new file) reopens the new file.
     Name,
+}
+
+/// The `--follow` modes by the words naming them, in GNU's order.
+pub(crate) const FOLLOW_MODES: [(&str, Follow); 2] =
+    [("descriptor", Follow::Descriptor), ("name", Follow::Name)];
+
+impl Follow {
+    /// The mode `text` names: its word, or the only one it is a prefix of.
+    fn parse(text: &str) -> Result<Self, TailError> {
+        choose(&FOLLOW_MODES, text).map_err(|miss| TailError::BadFollow(miss, String::from(text)))
+    }
 }
 
 /// One input of a `tail` run.
@@ -113,21 +126,63 @@ pub enum Command {
 /// The default line count when no `-n`/`-c` is given, as in the GNU tool.
 const DEFAULT_LINES: u64 = 10;
 
+/// What each of `tail`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Bytes,
+    Lines,
+    Follow,
+    FollowName,
+    Retry,
+    Pid,
+    SleepInterval,
+    MaxUnchanged,
+    Quiet,
+    Verbose,
+    Zero,
+    Help,
+}
+
+/// `tail`'s options, as GNU's `tail` spells them, and the reserved help
+/// switches. `-f` is `--follow` without its value.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('c', &["bytes"], Flag::Bytes),
+    Opt::letter('f', Takes::Nothing, Flag::Follow),
+    Opt::long(&["follow"], Takes::Attached, Flag::Follow),
+    Opt::letter('F', Takes::Nothing, Flag::FollowName),
+    Opt::valued('n', &["lines"], Flag::Lines),
+    Opt::long(&["max-unchanged-stats"], Takes::Value, Flag::MaxUnchanged),
+    Opt::long(&["pid"], Takes::Value, Flag::Pid),
+    Opt::flag('q', &["quiet", "silent"], Flag::Quiet),
+    Opt::long(&["retry"], Takes::Nothing, Flag::Retry),
+    Opt::long(&["sleep-interval"], Takes::Value, Flag::SleepInterval),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('z', &["zero-terminated"], Flag::Zero),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// Options and operands may be interleaved (the GNU permutation); `--` ends
-/// option parsing; a lone `-` is the standard-input operand. The obsolete
-/// `{+,-}COUNT[bcl]` form is honoured only as the first argument, exactly as
-/// in the GNU tool; a digit in any later option cluster is the GNU "invalid
-/// trailing option" diagnostic.
+/// The obsolete `{+,-}COUNT[bcl]` form is honoured only as the first
+/// argument, exactly as in the GNU tool; the rest is read as GNU's
+/// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
+/// clustered, a long one by any unambiguous prefix, `--` ending them, and a
+/// lone `-` the standard-input operand. The help switches (`-h`, `-?`,
+/// `--help`) answer at once, and the last `-c`/`-n` wins.
 ///
 /// # Errors
 ///
-/// The [`TailError`] usage variants, mirroring the GNU diagnostics.
-// The GNU option grammar is a single flat dispatch over the whole switch
-// set; splitting it would scatter one cohesive decision across helpers.
-#[allow(clippy::too_many_lines)]
+/// * [`TailError::Option`] — an option `getopt` refuses, in its words.
+/// * [`TailError::InvalidTrailing`] — a letter the obsolete form does not
+///   take, or a digit in a later option cluster, as GNU diagnoses both.
+/// * [`TailError::BadFollow`] — a `--follow` value naming no one mode.
+/// * [`TailError::InvalidLines`] / [`TailError::InvalidBytes`] — a count that
+///   is not one.
+/// * [`TailError::InvalidPid`], [`TailError::InvalidSleep`],
+///   [`TailError::InvalidMaxUnchanged`] — a follow-family value that is not
+///   one.
 pub fn parse(args: &[&str]) -> Result<Command, TailError> {
     let mut count: Option<Count> = None;
     let mut from_start = false;
@@ -139,7 +194,6 @@ pub fn parse(args: &[&str]) -> Result<Command, TailError> {
     let mut sleep_ns = DEFAULT_SLEEP_NS;
     let mut max_unchanged = DEFAULT_MAX_UNCHANGED;
     let mut sources: Vec<Source> = Vec::new();
-    let mut options_done = false;
 
     let mut rest = args;
     if let Some(first) = args.first() {
@@ -149,100 +203,33 @@ pub fn parse(args: &[&str]) -> Result<Command, TailError> {
         }
     }
 
-    let mut index = 0;
-    while index < rest.len() {
-        let arg = rest[index];
-        if options_done || arg == "-" || !arg.starts_with('-') {
-            sources.push(if arg == "-" {
-                Source::Stdin
-            } else {
-                Source::Path(String::from(arg))
-            });
-        } else {
-            match arg {
-                "--" => options_done = true,
-                "-h" | "-?" | "--help" => return Ok(Command::Help),
-                "--quiet" | "--silent" => headers = HeaderMode::Never,
-                "--verbose" => headers = HeaderMode::Always,
-                "--zero-terminated" => zero = true,
-                // `--follow` alone follows by descriptor; `--follow=name`
-                // follows the name (a later `-F`/`--follow=name` upgrades it).
-                "--follow" => follow = Some(follow.unwrap_or(Follow::Descriptor)),
-                "--follow=descriptor" => follow = Some(Follow::Descriptor),
-                "--follow=name" => follow = Some(Follow::Name),
-                "--retry" => retry = true,
-                _ if arg.starts_with("--pid=") => {
-                    pid = Some(parse_pid(&arg["--pid=".len()..])?);
-                }
-                "--pid" => {
-                    index += 1;
-                    let Some(&value) = rest.get(index) else {
-                        return Err(TailError::MissingValue("--pid"));
-                    };
-                    pid = Some(parse_pid(value)?);
-                }
-                _ if arg.starts_with("--sleep-interval=") => {
-                    sleep_ns = parse_sleep(&arg["--sleep-interval=".len()..])?;
-                }
-                "--sleep-interval" => {
-                    index += 1;
-                    let Some(&value) = rest.get(index) else {
-                        return Err(TailError::MissingValue("--sleep-interval"));
-                    };
-                    sleep_ns = parse_sleep(value)?;
-                }
-                _ if arg.starts_with("--max-unchanged-stats=") => {
-                    max_unchanged = parse_max(&arg["--max-unchanged-stats=".len()..])?;
-                }
-                "--max-unchanged-stats" => {
-                    index += 1;
-                    let Some(&value) = rest.get(index) else {
-                        return Err(TailError::MissingValue("--max-unchanged-stats"));
-                    };
-                    max_unchanged = parse_max(value)?;
-                }
-                "--bytes" | "--lines" => {
-                    let lines = arg == "--lines";
-                    index += 1;
-                    let Some(&value) = rest.get(index) else {
-                        return Err(TailError::MissingValue(if lines {
-                            "--lines"
-                        } else {
-                            "--bytes"
-                        }));
-                    };
-                    count = Some(parse_value(value, lines, &mut from_start)?);
-                }
-                _ if arg.starts_with("--bytes=") => {
-                    let value = &arg["--bytes=".len()..];
-                    count = Some(parse_value(value, false, &mut from_start)?);
-                }
-                _ if arg.starts_with("--lines=") => {
-                    let value = &arg["--lines=".len()..];
-                    count = Some(parse_value(value, true, &mut from_start)?);
-                }
-                _ if arg.starts_with("--") => {
-                    return Err(TailError::UnknownLong(String::from(arg)))
-                }
-                _ => {
-                    let help = parse_cluster(
-                        arg,
-                        rest,
-                        &mut index,
-                        &mut count,
-                        &mut from_start,
-                        &mut zero,
-                        &mut headers,
-                        &mut follow,
-                        &mut retry,
-                    )?;
-                    if help {
-                        return Ok(Command::Help);
-                    }
-                }
+    for arg in Scan::new(OPTIONS, rest, Order::Permute) {
+        match arg.map_err(option_error)? {
+            Arg::Operand("-") => sources.push(Source::Stdin),
+            Arg::Operand(path) => sources.push(Source::Path(String::from(path))),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Quiet, _) => headers = HeaderMode::Never,
+            Arg::Opt(Flag::Verbose, _) => headers = HeaderMode::Always,
+            Arg::Opt(Flag::Zero, _) => zero = true,
+            Arg::Opt(Flag::Follow, None) => follow = Some(follow.unwrap_or(Follow::Descriptor)),
+            Arg::Opt(Flag::Follow, Some(mode)) => follow = Some(Follow::parse(mode)?),
+            Arg::Opt(Flag::FollowName, _) => {
+                follow = Some(Follow::Name);
+                retry = true;
+            }
+            Arg::Opt(Flag::Retry, _) => retry = true,
+            Arg::Opt(Flag::Pid, value) => pid = Some(parse_pid(value.unwrap_or_default())?),
+            Arg::Opt(Flag::SleepInterval, value) => {
+                sleep_ns = parse_sleep(value.unwrap_or_default())?;
+            }
+            Arg::Opt(Flag::MaxUnchanged, value) => {
+                max_unchanged = parse_max(value.unwrap_or_default())?;
+            }
+            Arg::Opt(flag @ (Flag::Bytes | Flag::Lines), value) => {
+                let text = value.unwrap_or_default();
+                count = Some(parse_value(text, flag == Flag::Lines, &mut from_start)?);
             }
         }
-        index += 1;
     }
 
     if sources.is_empty() {
@@ -305,57 +292,13 @@ fn parse_max(text: &str) -> Result<u64, TailError> {
     parse_decimal(text).ok_or_else(|| TailError::InvalidMaxUnchanged(String::from(text)))
 }
 
-/// Parse one short-option cluster (`-qn3`, `-vz`, …): `q`/`v`/`z` are flags,
-/// `-c`/`-n` consume the rest of the token (or the next argument, advancing
-/// `index`) as their value, and `?` is the reserved short-help switch.
-/// Returns `Ok(true)` when the cluster asks for help.
-#[allow(clippy::too_many_arguments)]
-fn parse_cluster(
-    arg: &str,
-    rest: &[&str],
-    index: &mut usize,
-    count: &mut Option<Count>,
-    from_start: &mut bool,
-    zero: &mut bool,
-    headers: &mut HeaderMode,
-    follow: &mut Option<Follow>,
-    retry: &mut bool,
-) -> Result<bool, TailError> {
-    for (offset, flag) in arg[1..].char_indices() {
-        match flag {
-            'q' => *headers = HeaderMode::Never,
-            'v' => *headers = HeaderMode::Always,
-            'z' => *zero = true,
-            // `-f` follows by descriptor; `-F` follows by name and retries.
-            // A `-fF` cluster ends on the stronger name form, as in GNU.
-            'f' => *follow = Some(follow.unwrap_or(Follow::Descriptor)),
-            'F' => {
-                *follow = Some(Follow::Name);
-                *retry = true;
-            }
-            'c' | 'n' => {
-                let lines = flag == 'n';
-                let tail = &arg[1 + offset + flag.len_utf8()..];
-                let value = if tail.is_empty() {
-                    *index += 1;
-                    match rest.get(*index) {
-                        Some(&value) => value,
-                        None => {
-                            return Err(TailError::MissingValue(if lines { "-n" } else { "-c" }))
-                        }
-                    }
-                } else {
-                    tail
-                };
-                *count = Some(parse_value(value, lines, from_start)?);
-                return Ok(false);
-            }
-            '?' => return Ok(true),
-            _ if flag.is_ascii_digit() => return Err(TailError::InvalidTrailing(flag)),
-            _ => return Err(TailError::UnknownShort(flag)),
-        }
+/// The error `refusal` stands for: a digit in a later cluster is GNU's
+/// obsolete count out of place, its "invalid trailing option".
+fn option_error(refusal: Refusal) -> TailError {
+    match refusal {
+        Refusal::UnknownShort(digit) if digit.is_ascii_digit() => TailError::InvalidTrailing(digit),
+        refusal => TailError::Option(refusal),
     }
-    Ok(false)
 }
 
 /// Parse the obsolete `{+,-}COUNT[bcl]` first argument. `+` selects the
@@ -451,13 +394,14 @@ fn invalid(text: &str, lines: bool) -> TailError {
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
 
     use super::{
         parse, Command, Count, Follow, HeaderMode, Job, Source, DEFAULT_MAX_UNCHANGED,
         DEFAULT_SLEEP_NS,
     };
     use crate::error::TailError;
+    use tairix_util::argv::WordMiss;
 
     fn job(
         count: Count,
@@ -792,13 +736,18 @@ mod tests {
     #[test]
     fn follow_family_is_parsed() {
         // `-f` / `--follow` / `--follow=descriptor` follow by descriptor.
-        for args in [&["-f"][..], &["--follow"][..], &["--follow=descriptor"][..]] {
+        for args in [
+            &["-f"][..],
+            &["--follow"][..],
+            &["--follow=descriptor"][..],
+            &["--follow=d"][..],
+        ] {
             let job = tail_job(args);
             assert_eq!(job.follow, Some(Follow::Descriptor), "{args:?}");
             assert!(!job.retry, "{args:?}");
         }
         // `-F` / `--follow=name` follow by name and imply `--retry`.
-        for args in [&["-F"][..], &["--follow=name"][..]] {
+        for args in [&["-F"][..], &["--follow=name"][..], &["--follow=n"][..]] {
             let job = tail_job(args);
             assert_eq!(job.follow, Some(Follow::Name), "{args:?}");
             assert!(job.retry, "name-follow implies retry ({args:?})");
@@ -858,24 +807,64 @@ mod tests {
             Err(TailError::InvalidMaxUnchanged(String::from("y")))
         );
         assert_eq!(
-            parse(&["-f", "--pid"]),
-            Err(TailError::MissingValue("--pid"))
+            refused(&["-f", "--pid"]),
+            "option '--pid' requires an argument"
         );
-    }
-
-    #[test]
-    fn unknown_options_are_usage_errors() {
         assert_eq!(
-            parse(&["--frob"]),
-            Err(TailError::UnknownLong(String::from("--frob")))
+            parse(&["--follow=x"]),
+            Err(TailError::BadFollow(WordMiss::Unknown, String::from("x")))
         );
-        assert_eq!(parse(&["-x"]), Err(TailError::UnknownShort('x')));
+        assert_eq!(
+            refused(&["--follow="]),
+            "ambiguous argument '' for '--follow'\nValid arguments are:\n  - 'descriptor'\n  - 'name'"
+        );
+    }
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn missing_values_are_diagnosed() {
-        assert_eq!(parse(&["-n"]), Err(TailError::MissingValue("-n")));
-        assert_eq!(parse(&["--bytes"]), Err(TailError::MissingValue("--bytes")));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-fx"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["-n"]), "option requires an argument -- 'n'");
+        assert_eq!(
+            refused(&["--bytes"]),
+            "option '--bytes' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--retry=x"]),
+            "option '--retry' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `tail --verb --li 3 f` as `tail --verbose --lines 3 f`,
+    /// and refuses `--s`, which begins both `--silent` and `--sleep-interval`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--verb", "--li", "3", "f"]),
+            Ok(job(
+                Count::Lines(3),
+                false,
+                false,
+                HeaderMode::Always,
+                &[path("f")]
+            ))
+        );
+        let followed = tail_job(&["--fol=n", "--sl=2", "--max=3", "--pi", "9"]);
+        assert_eq!(followed.follow, Some(Follow::Name));
+        assert_eq!(followed.sleep_ns, 2_000_000_000);
+        assert_eq!(followed.max_unchanged, 3);
+        assert_eq!(followed.pid, Some(9));
+        assert_eq!(
+            refused(&["--s"]),
+            "option '--s' is ambiguous; possibilities: '--silent' '--sleep-interval'"
+        );
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

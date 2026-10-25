@@ -35,8 +35,7 @@ refused; the registry is the authority on collisions.
 - `0` — the group was created.
 - `1` — the registry refused or failed the creation (for example a
   missing capability or a duplicate id); the reason is printed on
-  standard error.
-- `2` — the command line was not understood.
+  standard error. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

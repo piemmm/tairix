@@ -5,9 +5,10 @@
 //! gate open while its block is up.
 //!
 //! The block's HDMI resets are not served: an HDMI block is brought up by
-//! programming it, and Linux's reset of it through this block does nothing.
+//! programming it, and the HDMI driver asks for no reset.
 //!
-//! Reference: the Linux `clk-bcm2711-dvp` driver.
+//! The gate register and its bits are documented nowhere public; the metal
+//! run confirms them (`plans/PI.md` P14).
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -17,7 +18,8 @@
 mod tests;
 
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
+    compatible_key, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+    RegisterBlock,
 };
 use tairix_clock::{Applied, ClockHardware, Halt, Policy};
 
@@ -49,12 +51,7 @@ const BIND_PRIORITY: u16 = 10;
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(DVP_COMPATIBLE) {
-        Ok(key) => key,
-        // A literal too long for the key would fail const evaluation here,
-        // never at run time.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(DVP_COMPATIBLE),
 )];
 
 /// The two gates. A gate runs only at the rate of the clock it gates, so each

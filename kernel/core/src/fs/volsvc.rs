@@ -41,8 +41,11 @@ pub trait VolumeService: Sync {
     ///
     /// [`Errno::NotFound`] for an identity this service did not attach
     /// (the boot volumes are permanent), a flush failure (the volume
-    /// stays attached — data is never silently discarded), or
-    /// [`Errno::NotImplemented`] before a service is installed.
+    /// stays attached — data is never silently discarded),
+    /// [`Errno::Busy`] for a plain detach while a descriptor holds one of
+    /// the volume's nodes or another volume is shown beneath it, the
+    /// refusal of a volume beneath that a force detach could not detach
+    /// first, or [`Errno::NotImplemented`] before a service is installed.
     fn detach(&self, request: &VolumeDetachRequest) -> Result<(), Errno>;
 }
 

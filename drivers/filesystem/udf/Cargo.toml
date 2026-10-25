@@ -11,6 +11,9 @@ publish.workspace = true
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-bytedev = { path = "../../../lib/bytedev", version = "=0.0.0" }
+# The holds the kernel takes on nodes: an index whose growth is refused, not
+# aborted, when the heap runs out.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The recognition, descriptor tags, CRC and OSTA Compressed Unicode the volume
 # probe shares.

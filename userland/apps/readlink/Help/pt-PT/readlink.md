@@ -43,6 +43,13 @@ de seguir ligações por si. Uma segunda cópia do algoritmo que divergisse
 numa regra imprimiria um caminho que o sistema de ficheiros resolve de
 outro modo.
 
+Num terminal, cada caminho que a saída mostra é posto entre aspas onde
+uma shell precisaria delas, e qualquer carácter de controlo ou outro
+carácter invisível nele contido é escrito como sequência de escape, de
+modo que um caminho não consegue comandar nem reordenar o ecrã; o GNU
+mostra-o sem alterações. Um pipe, um ficheiro ou a saída com `-z` recebe
+o caminho byte a byte.
+
 ## OPTIONS
 
 - `-f, --canonicalize` — imprimir o caminho canónico; todos os
@@ -73,8 +80,8 @@ outro modo.
 
 - `0` — o destino de cada operando foi impresso (ou a ajuda breve foi
   escrita).
-- `1` — pelo menos uma leitura foi recusada, ou a saída falhou.
-- `2` — a linha de comandos não foi compreendida.
+- `1` — pelo menos uma leitura foi recusada, ou a saída falhou. Uma linha
+  de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

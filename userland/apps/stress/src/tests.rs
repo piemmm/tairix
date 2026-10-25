@@ -103,16 +103,50 @@ fn a_run_with_no_workers_is_a_usage_error() {
 fn malformed_values_fail_closed() {
     for bad in [
         &["--cpu", "x"][..],
-        &["--cpu"][..],
         &["--vm-bytes", "0"][..],
         &["--vm-bytes", "12q"][..],
         &["--timeout", "0"][..],
         &["--overcommit", "0"][..],
         &["--temp-path", ""][..],
-        &["--frobnicate", "1"][..],
     ] {
         assert_eq!(parse(bad), Err(StressError::Usage), "input {bad:?}");
     }
+}
+
+#[test]
+fn an_operand_is_a_usage_error() {
+    assert_eq!(parse(&["--cpu", "1", "extra"]), Err(StressError::Usage));
+}
+
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+    assert_eq!(
+        refused(&["--frobnicate", "1"]),
+        "unrecognized option '--frobnicate'"
+    );
+    assert_eq!(refused(&["--cpu"]), "option '--cpu' requires an argument");
+    assert_eq!(
+        refused(&["--quiet=1", "--cpu", "1"]),
+        "option '--quiet' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let spec = run_spec(&["--cp", "2", "--ti=1m", "--q"]);
+    assert_eq!(spec.workers.cpu, 2);
+    assert_eq!(spec.timeout_secs, Some(60));
+    assert!(spec.quiet);
+    assert_eq!(
+        refused(&["--c", "1"]),
+        "option '--c' is ambiguous; possibilities: '--cpu' '--cache'"
+    );
 }
 
 #[test]

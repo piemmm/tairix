@@ -27,11 +27,22 @@ Um caminho ilegível é reportado no erro padrão e o percurso continua
 com o resto; um diretório ilegível não contribui nada em vez de uma
 soma parcial adivinhada.
 
-Um ficheiro alcançado por mais de um nome é contado **uma só vez**, pelo
-que o seu armazenamento não é reportado duas vezes; `-l` conta em vez
-disso cada nome. `-x` (um só sistema de ficheiros) ainda não
-está disponível; as variáveis de ambiente da família `DU_BLOCK_SIZE`
-não são lidas — a escala é escolhida apenas pelas opções.
+Uma ligação simbólica é contada como tal, a menos que `-H` ou `-L` mande
+segui-la. Tudo o que é encontrado uma segunda vez — outro nome de um
+ficheiro já contado, um operando repetido ou situado dentro de outro, um
+diretório que `-L` alcança duas vezes — é deixado de fora, sem linha
+própria, pelo que o seu armazenamento não é reportado duas vezes; `-l`
+conta em vez disso cada ocorrência. `-x` (um só sistema de ficheiros)
+ainda não está disponível; as variáveis de ambiente da família
+`DU_BLOCK_SIZE` não são lidas — a escala é escolhida apenas pelas
+opções.
+
+Num terminal, cada nome que a saída mostra é posto entre aspas onde uma
+shell o exigiria, e qualquer caráter de controlo ou outro caráter
+invisível que contenha é escrito como sequência de escape, pelo que um
+nome não pode comandar o ecrã nem reorganizá-lo; o GNU mostra-o
+inalterado. Um pipe, um ficheiro ou a saída de `-0` recebem o nome byte
+a byte.
 
 ## OPTIONS
 
@@ -46,6 +57,11 @@ não são lidas — a escala é escolhida apenas pelas opções.
   subdiretórios.
 - `-l, --count-links` — contar um ficheiro com vários nomes uma vez
   por nome em vez de uma só.
+- `-L, --dereference` — seguir cada ligação simbólica.
+- `-H, -D, --dereference-args` — seguir apenas as ligações simbólicas
+  indicadas como operandos.
+- `-P, --no-dereference` — não seguir nenhuma ligação simbólica (a
+  predefinição).
 - `--apparent-size` — medir comprimentos aparentes em bytes, não o
   armazenamento alocado.
 - `-b, --bytes` — tamanho aparente em bytes simples
@@ -74,8 +90,7 @@ não são lidas — a escala é escolhida apenas pelas opções.
 - `0` — todos os operandos foram percorridos (ou a ajuda curta foi
   escrita).
 - `1` — um caminho não pôde ser lido, ou a saída não pôde ser
-  entregue.
-- `2` — a linha de comandos não foi compreendida.
+  entregue. Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

@@ -29,6 +29,13 @@ opcionales) se acepta, como en la herramienta GNU.
 Un fichero ilegible se informa en la salida de error y la ejecución
 continúa con el fichero siguiente.
 
+En un terminal, cada nombre que muestra la salida se entrecomilla donde
+un shell lo necesitaría, y cualquier carácter de control u otro carácter
+invisible que haya en él se escribe como secuencia de escape, de modo
+que un nombre no puede controlar ni reordenar la pantalla; GNU lo
+muestra sin cambios. Una tubería o un fichero recibe el nombre byte a
+byte.
+
 ## OPTIONS
 
 - `-c, --bytes <num>` — imprimir los primeros `num` bytes de cada
@@ -54,7 +61,7 @@ continúa con el fichero siguiente.
 
 - `0` — se imprimió cada fichero (o se escribió la ayuda breve).
 - `1` — no se pudo leer un fichero, o no se pudo entregar la salida.
-- `2` — no se entendió la línea de órdenes.
+  Una línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

@@ -328,7 +328,7 @@ impl TrbType {
 /// The whole architected set is named, not the subset today's call sites
 /// branch on: a code the decoder cannot name reaches a diagnostic as
 /// "undecodable", which is precisely the information a metal capture needs
-/// and the reason the Pi 4's `Context State Error` on Address Device read as
+/// and the reason a controller's `Context State Error` on Address Device read as
 /// a driver decode failure. Only *reserved* and *vendor-defined* values stay
 /// undecodable ([`Self::from_raw`]).
 #[repr(u8)]
@@ -507,7 +507,7 @@ impl CompletionCode {
     /// its own view of the slot's or port's state did not match software's,
     /// rather than the device answering at all.
     ///
-    /// The Pi 4 (VL805) rejects an Address Device issued to a port that has
+    /// A controller may reject an Address Device issued to a port that has
     /// not finished settling out of its reset with
     /// [`Self::ContextStateError`]; the device never saw a `SET_ADDRESS`, so
     /// it stays in Default state and re-driving a fresh slot recovers it,

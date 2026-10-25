@@ -57,8 +57,8 @@ da ligação é `local`.
 
 - `0` — o comando chegou ao fim (ou a ajuda breve foi escrita).
 - `1` — o serviço de descoberta recusou o pedido ou não está a funcionar.
-- `2` — a linha de comandos não foi entendida, ou a saída não pôde ser
-  escrita.
+  Uma linha de comandos não entendida também termina com `1`.
+- `2` — a saída não pôde ser escrita.
 
 ## ENVIRONMENT
 

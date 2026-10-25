@@ -422,7 +422,7 @@ mess" is not a design.
   kernel API leaks the DMA ring's geometry into every application as
   "period size" and "buffer size", so every program re-derives latency from
   numbers it should never have seen. Codec support is a per-board quirk table
-  (`patch_realtek.c` is twelve thousand lines of "this laptop wired pin 0x1b
+  (one vendor's codec file is twelve thousand lines of "this laptop wired pin 0x1b
   to the speaker"). Device access is a group-membership check, not a
   capability.
 - **Windows** is cleaner — WASAPI, one engine, endpoint objects — but exclusive
@@ -1171,7 +1171,8 @@ general rather than for an audio ring — §The DMA-engine seam, below.
    through `lib/i2c` and `drivers/bus/i2c`. The endpoint offers the codec's
    widest sample whose FIFO word is a ring's own, so a frame is copied as it
    is and narrowing stays the mixer's; each sample has a slot as wide, two a
-   frame, framed and inverted as the link states and as Linux frames it; and
+   frame, framed and inverted as the link states, in the block's `MODE_A` and
+   `TXC_A` fields (BCM2711 ARM Peripherals, 7.9); and
    every stream starts from a FIFO cleared with transmit off, so the two
    channels cannot swap. The cyclic stream it shares with the jack is one
    engine, `tairix_audiochan::cyclic`.
@@ -1269,9 +1270,9 @@ facts alone.
   DMA-capable shared region carved under the controller's own addressing
   constraint, whose device address the kernel reports to its creator, and a
   mapping of which the kernel grants to the requesting process. Every block's
-  memory side lies inside its channel's own region by construction. It is
-  Linux's rule — a dmaengine client maps its buffer against the controller's
-  device — with the kernel holding it rather than the client.
+  memory side lies inside its channel's own region by construction: the
+  buffer is mapped against the device that reads it, the controller, never
+  its consumer, and the kernel holds that mapping rather than the client.
 - **Lifetime.** The region is refcounted by the kernel. A consumer that dies
   drops only its mapping; the controller stops the channel before releasing its
   own reference, so a consumer's death never leaves the hardware on freed
@@ -1368,7 +1369,8 @@ pinned tree:
   resource, so channels 7 and 8 sharing a line would otherwise collapse into
   one grant and the channel each serves would be lost.
 - **A specifier is mapped only under the port's root controller**, the
-  effective `interrupt-parent` found as Linux's `of_irq_find_parent` finds it;
+  effective `interrupt-parent` found by the Devicetree Specification's rule
+  (§2.4.1.2: a node without one takes its devicetree parent);
   each port names its controller's phandle (`find_gic`, the PLIC node). Read
   as the GIC's, `hdmi0`'s `aon_intr` specifiers granted INTID 33, an ARM
   mailbox line.
@@ -2265,8 +2267,8 @@ The consumers, each owned by its own plan:
 
 ## Native HDMI on the Pi 4
 
-TAIRiX drives the BCM2711 display engine itself, as Linux's full-KMS `vc4`
-does. The firmware lights the screen at boot; the engine driver has the
+TAIRiX drives the BCM2711 display engine itself, not through the firmware.
+The firmware lights the screen at boot; the engine driver has the
 kernel host its framebuffer console on memory the kernel owns, at the size
 the firmware lit (`console_adopt`), then tells the firmware to stop (`NOTIFY_DISPLAY_DONE`,
 tag `0x0003_0066`, its answer recorded and the display taken over whatever it
@@ -2317,7 +2319,7 @@ lives in the firmware's memory.
   both HDMI blocks, their DDC buses, the DVP gates and the L2 controller
   disabled; the image's display overlay (`tairix-display`) enables them,
   disables the firmware's own display devices (`fb`, `firmwarekms`) so the
-  firmware hands the display over as it does for `vc4-kms-v3d`, names
+  firmware hands the display over, names
   the HVS window, and gives the DDC buses the cell counts the I²C controller
   binding states. The firmware-framebuffer service and the unwired `rpi_hvs`
   layer compositor are gone: on a Pi 4 the native engine serves the seat's
@@ -2329,7 +2331,7 @@ lives in the firmware's memory.
 
 **`encoder-v1` (SND19l).** The engine drives each encoder over the `Encoder`
 link its node holds, through the phases a mode set interleaves with the pixel
-valve and the HVS channel (Linux `vc4`'s encoder callbacks):
+valve and the HVS channel:
 
 - **The connector.** `Describe` answers whether a sink is connected and the
   mode the encoder will run for it — its own choice, since it alone knows the
@@ -2354,11 +2356,10 @@ valve and the HVS channel (Linux `vc4`'s encoder callbacks):
   valve.
 - **A lost link.** The connector counts the times its sink lost what the
   running link set it up with — an HDMI 2.0 sink replugged under a scrambled
-  link forgets the scrambling, as Linux's `vc4_hdmi_reset_link` finds — and
-  the engine brings an output up under an older count down and up again,
-  keeping its surface, as DRM's link status asks of a compositor.
+  link reads its SCDC scrambling back off — and the engine brings an output
+  up under an older count down and up again, keeping its surface.
 - **Checks with no interrupt.** A check the hardware raises none for — whether
-  a sink sees its link scrambled, which Linux re-asks once a second until it
+  a sink sees its link scrambled, re-asked once a second until it
   does — is the encoder's deadline, which `lib/drvrt`'s serve loop waits on
   as a one-shot timeout, so the core sleeps between checks.
 - **One holder.** Only a caller whose grants cover the link, and only one at a
@@ -2396,13 +2397,13 @@ DMA line is absent, or whose line opens no channel, says so and serves its
 encoder alone (`tairix_encoder::serve`).
 
 - **The facts are the sink's, per channel count.** A descriptor covers every
-  count up to its own and basic audio covers stereo, as CTA-861 has it, and
-  Linux's ELD constraints apply it: the endpoint offers the widest layout the
+  count up to its own and basic audio covers stereo, as CTA-861 has it: the
+  endpoint offers the widest layout the
   sink's speaker allocation places without a gap (stereo, 5.1, 7.1) at the
   rates its descriptors name for that count. `Configure` refuses a layout
   whose speakers the sink lacks and grants the nearest rate it names for the
   layout's count.
-- **The MAI is set up as Linux's `vc4_hdmi` sets a BCM2711 block up**, fed
+- **The MAI is set up for the stream**, fed
   by a DMA4 channel from the cyclic engine's buffer and clocked from the DVP's
   audio clock, which it holds with the state machine clock while a stream is
   configured — so a stream outlives an output brought down, and when the link

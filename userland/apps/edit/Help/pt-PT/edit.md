@@ -74,8 +74,8 @@ não detém autoridade especial.
   mostrada.
 - `1` — o ficheiro nomeado não pôde ser carregado (não é texto,
   demasiado grande ou recusado), ou o terminal falhou; a razão é
-  impressa no erro padrão.
-- `2` — a linha de comandos não foi compreendida.
+  impressa no erro padrão. Uma linha de comandos não compreendida também
+  termina com `1`.
 
 ## ENVIRONMENT
 

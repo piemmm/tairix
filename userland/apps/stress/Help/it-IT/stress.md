@@ -79,8 +79,8 @@ flusso informativo standard consultivo (fd 3).
 - `0` — l'esecuzione è stata completata (i rifiuti tipizzati dei
   lavoratori sono esiti attesi e non la fanno fallire).
 - `1` — un lavoratore è realmente fallito, o l'esecuzione non ha
-  potuto essere preparata.
-- `2` — la riga di comando non è stata compresa.
+  potuto essere preparata. Anche una riga di comando non compresa
+  termina con `1`.
 - `130` / `143` — `Ctrl-C` / `Terminate` ha terminato l'esecuzione,
   dopo lo smontaggio dei lavoratori e la rimozione dei file di
   lavoro.

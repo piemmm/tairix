@@ -1,7 +1,7 @@
 //! Host tests for the `usermod` command-line grammar.
 
 use super::{parse, Command, Lock, UsageError};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 /// The change set a successfully parsed line asks for.
 fn changes(args: &[&str]) -> super::Changes {
@@ -50,8 +50,8 @@ fn an_empty_group_list_clears_the_set_while_an_empty_element_is_malformed() {
         changes(&["--groups=", "ada"]).supplementary_gids,
         Some(alloc::vec![])
     );
-    assert_eq!(parse(&["--groups=1,,2", "ada"]), Err(UsageError));
-    assert_eq!(parse(&["-g", "notanumber", "ada"]), Err(UsageError));
+    assert_eq!(parse(&["--groups=1,,2", "ada"]), Err(UsageError::Usage));
+    assert_eq!(parse(&["-g", "notanumber", "ada"]), Err(UsageError::Usage));
 }
 
 #[test]
@@ -61,8 +61,12 @@ fn the_lock_switches_are_exclusive_and_idempotent() {
     // Naming the same state twice is the same request, not an error.
     assert_eq!(changes(&["-L", "--lock", "ada"]).lock, Some(Lock::Locked));
     // Naming both is a contradiction, refused rather than guessed at.
-    assert_eq!(parse(&["-L", "-U", "ada"]), Err(UsageError));
-    assert_eq!(parse(&["--lock", "--unlock", "ada"]), Err(UsageError));
+    assert_eq!(parse(&["-L", "-U", "ada"]), Err(UsageError::Usage));
+    assert_eq!(parse(&["-LU", "ada"]), Err(UsageError::Usage));
+    assert_eq!(
+        parse(&["--lock", "--unlock", "ada"]),
+        Err(UsageError::Usage)
+    );
 }
 
 #[test]
@@ -95,14 +99,44 @@ fn end_of_options_lets_a_leading_dash_be_a_name() {
 
 #[test]
 fn a_line_that_asks_for_nothing_is_a_usage_error_not_a_no_op_run() {
-    assert_eq!(parse(&["ada"]), Err(UsageError));
+    assert_eq!(parse(&["ada"]), Err(UsageError::Usage));
 }
 
 #[test]
-fn a_missing_value_an_unknown_option_and_a_wrong_operand_count_fail_closed() {
-    assert_eq!(parse(&["-c"]), Err(UsageError));
-    assert_eq!(parse(&["-x", "ada"]), Err(UsageError));
-    assert_eq!(parse(&["--frob", "ada"]), Err(UsageError));
-    assert_eq!(parse(&["-L"]), Err(UsageError));
-    assert_eq!(parse(&["-L", "ada", "bob"]), Err(UsageError));
+fn a_wrong_operand_count_fails_closed() {
+    assert_eq!(parse(&["-L"]), Err(UsageError::Usage));
+    assert_eq!(parse(&["-L", "ada", "bob"]), Err(UsageError::Usage));
+}
+
+/// `getopt`'s words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-x", "ada"]), "invalid option -- 'x'");
+    assert_eq!(refused(&["--frob", "ada"]), "unrecognized option '--frob'");
+    assert_eq!(refused(&["-c"]), "option requires an argument -- 'c'");
+    assert_eq!(
+        refused(&["ada", "--shell"]),
+        "option '--shell' requires an argument"
+    );
+    assert_eq!(
+        refused(&["--lock=x", "ada"]),
+        "option '--lock' doesn't allow an argument"
+    );
+}
+
+/// `getopt_long` reads `--lo` as `--lock` and `--gra` as `--grants`, and
+/// refuses a prefix two long names share.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    let asked = changes(&["--lo", "--gra=CAP_USER_ADMIN", "ada"]);
+    assert_eq!(asked.lock, Some(Lock::Locked));
+    assert_eq!(asked.grants.as_deref(), Some("CAP_USER_ADMIN"));
+    assert_eq!(
+        refused(&["--gr", "1", "ada"]),
+        "option '--gr' is ambiguous; possibilities: '--groups' '--grants'"
+    );
 }

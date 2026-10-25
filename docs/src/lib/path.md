@@ -67,12 +67,29 @@ whatever root a spelling names (`/`, `Name:/`, `alias::Name/`,
 filename generation takes a word's root off before reading the rest as a
 glob pattern.
 
+For a name a listing returns, `is_relative_spelling` answers the converse
+question: whether the grammar reads a spelling as relative to the working
+directory — no leading `/` and no `:` before its first `/`. A volume written
+elsewhere may hold a directory named `Home:`, which leading a relative path
+would read as the alias root, so the shell's filename generation writes such
+a path from `./` (`./Home:/x`). `is_hidden_name` is the one rule for a hidden
+item — a name beginning with `.` — that every listing leaves out unless asked
+for everything.
+
 For the ancestor-walking tools — `mkdir -p` (create missing parents,
 outermost first) and `rmdir -p` (remove parents, innermost first) — a parsed
 `Path` exports `prefix(len)`: the canonical spelling of the path truncated to
 its first `len` components (`prefix(0)` is the bare root — `/`, `Name:/`,
 `id::<volume-id>/`, or `.`). Both walks import this one rule, so how a
 truncated path is spelled is never re-derived per tool.
+
+The kernel's resolver walks real directories, so it takes a spelling apart
+with `steps` instead: the root, and the steps as written, read one at a time
+into the resolver's own bounded list, `.` dropped and every `..` kept as
+`Step::Up` rather than collapsed against the text before it, so a `..` names the directory the walk actually reached
+(`plans/SYMLINKS.md` decision 4). Names are checked exactly as `parse` checks
+them; only the `..` is left to the resolver, so a rooted `/..` is a step
+here, not `EscapesRoot`.
 
 The remaining administrative resolver spellings — `fs::<driver>/<root>/…`,
 the `<driver>::<root>/…` shorthand, `dev::…`, and `net::…` — are refused

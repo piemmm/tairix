@@ -534,10 +534,10 @@ pub enum PointerAction {
     /// gesture whose *duration* is the point — a tap-or-hold, a drag — where
     /// the steps between them are exactly what the script is expressing.
     Click(MouseButton),
-    /// Turn the wheel one detent: `mouse_move 0 0 <dz>`. QEMU's
-    /// `hmp_mouse_move` (`ui/ui-hmp-cmds.c`) presses and releases one wheel
-    /// button for any non-zero `dz` whatever its magnitude, so a step is
-    /// exactly one detent and a longer turn is that many steps.
+    /// Turn the wheel one detent: `mouse_move 0 0 <dz>`. QEMU's HMP
+    /// `mouse_move` turns the wheel one detent for any non-zero `dz` whatever
+    /// its magnitude, so a step is exactly one detent and a longer turn is
+    /// that many steps.
     Wheel(WheelTurn),
     /// Touch the touchscreen at (`x`, `y`) and lift, as one step for the
     /// reason a [`Click`](Self::Click) is one. Sent over the QMP control
@@ -601,17 +601,13 @@ pub enum MouseButton {
 }
 
 impl MouseButton {
-    /// The button's bit in the HMP `mouse_button` state mask, **as QEMU's
-    /// `hmp_mouse_button` actually decodes it**: bit `0x1` = left,
+    /// The button's bit in the HMP `mouse_button` state mask, **as QEMU
+    /// actually delivers it**: bit `0x1` = left,
     /// `0x2` = right, `0x4` = middle.
     ///
     /// The `qemu-system-*` `mouse_button` help string ("1=L, 2=M, 4=R") is
-    /// wrong: `hmp_mouse_button` (`ui/ui-hmp-cmds.c`) feeds the state mask to
-    /// `qemu_input_update_buttons` through a `bmap` whose entries are the
-    /// legacy `MOUSE_EVENT_*` bits (`include/ui/console.h`) —
-    /// `MOUSE_EVENT_LBUTTON = 0x1`, `MOUSE_EVENT_RBUTTON = 0x2`,
-    /// `MOUSE_EVENT_MBUTTON = 0x4`. So state bit `0x2` raises
-    /// `INPUT_BUTTON_RIGHT` and bit `0x4` raises `INPUT_BUTTON_MIDDLE`,
+    /// wrong: QEMU delivers state bit `0x2` as the right button and `0x4` as
+    /// the middle one (the `MOUSE_EVENT_*` bits of its `include/ui/console.h`),
     /// the opposite of what the help string claims. Following the help
     /// string sent the secondary press as bit `0x4`, which QEMU delivered
     /// to the guest as a *middle*-button event — so a scripted right-click
@@ -5582,8 +5578,7 @@ mod tests {
 
     #[test]
     fn mouse_button_mask_bits_match_qemus_actual_button_decode() {
-        // The bits QEMU's `hmp_mouse_button` actually decodes (via the
-        // legacy `MOUSE_EVENT_*` `bmap`), *not* the wrong help string
+        // The bits QEMU actually delivers, *not* the wrong help string
         // ("1=L, 2=M, 4=R"): state bit 0x2 raises the right button and
         // 0x4 the middle. A press ORs its bit in, a release clears only
         // its own, so overlapping holds report faithfully.

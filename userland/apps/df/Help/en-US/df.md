@@ -68,8 +68,8 @@ available.
 - `0` — the report covered everything asked for (or the short help
   was written).
 - `1` — an operand could not be reported, the filters left nothing,
-  or the query/output failed.
-- `2` — the command line was not understood.
+  or the query/output failed. A command line that was not understood
+  exits `1` too.
 
 ## ENVIRONMENT
 

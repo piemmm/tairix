@@ -29,8 +29,7 @@ target, rather than as a target read back to itself.
 
 In the kernel. The governor has to answer inside the idle transition it is
 reacting to — a target computed an IPC round trip after the work appeared
-arrives after the latency it exists to avoid. This is what Linux's `schedutil`
-is, and for the same reason.
+arrives after the latency it exists to avoid.
 
 The *mechanism* is in user space, which is where TAIRiX differs: applying a
 rate is a device operation. On a Raspberry Pi it is a `VideoCore` firmware
@@ -50,7 +49,7 @@ hardware through the same capability-gated paths any driver uses.
 | Every CPU idle for a window | walks down a step per window to the minimum |
 | Settled at the minimum, nothing running | unchanged, and no wakeup is armed |
 
-The quarter of headroom is `schedutil`'s: a CPU saturated at its current rate
+The quarter of headroom is there because a CPU saturated at its current rate
 cannot report how much faster it wanted to go, so the target overshoots to
 find out. With that headroom and the clamp, anything under about a third of a
 core already asks for the floor on a 600–1500 MHz part.

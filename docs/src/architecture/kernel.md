@@ -341,17 +341,22 @@ record carries a capability token or any other secret.
 `FS_NODE_MUTATED` / `FS_MUTATION_DENIED` are the filesystem-mutation audit
 pair. Every state-changing filesystem syscall — `fs_mkdir`, `fs_unlink`
 (recorded as `rmdir` when the directory flag is set, else `unlink`),
-`fs_rename`, `fs_symlink`, `fs_set_mode` (`chmod`), and `fs_set_owner`
-(`chown`) — emits
+`fs_rename`, `fs_link`, `fs_symlink`, `fs_set_mode` (`chmod`), and
+`fs_set_owner` (`chown`) — emits
 exactly one record after the secured VFS decides it under the caller's
 kernel-attested identity: `FS_NODE_MUTATED` (`Info`) when the change was
 applied, `FS_MUTATION_DENIED` (`Warn`, carrying the refusal's `errno`) when
 the VFS refused it and nothing changed (fail closed). Both carry the
-operation (`op`), the caller's uid (`uid`), and the target `path`, plus the
-operation-specific content that makes the trail actionable: `to` (a rename's
-destination), `target` (the path a new symbolic link stores, recorded because
-it is what changes how later resolutions behave), `mode` (a chmod's new
-permission word, octal), and `owner`/`group` (a chown's new ids). Read-only operations are **not** audited
+operation (`op`), the caller's uid (`uid`), and the target `path` as typed,
+plus the operation-specific content that makes the trail actionable: `to` (a
+rename's destination), `existing` (the name a hard link's node already has),
+`target` (the path a new symbolic link stores, recorded because it is what
+changes how later resolutions behave), `mode` (a chmod's new permission word,
+octal), and `owner`/`group` (a chown's new ids). A relative path is recorded
+beside the label of the directory it started from (`from`, `to_from`,
+`existing_from`) — the path that directory was reached by, which a rename
+since may have made stale — rather than joined to it, so a record never names
+a location the walk did not take. Read-only operations are **not** audited
 (only mutations are security-relevant decisions). Paths are bounded to the
 log field limit on a character boundary so an over-long path can never make
 the record fail to encode and drop — a mutation can never escape the trail.
@@ -371,9 +376,8 @@ delivered, and its `irq_wait` / `waitset_wait` waiter fails closed with
 `Errno::DeviceFault`. The record is emitted **once** at that syscall
 boundary (task context, so the interrupt-context `fire` path stays
 lock-free), naming the `line` and owning `task`; a fresh `irq_bind` clears
-the quarantine so a driver can recover the line. This is the kernel's
-analogue of Linux's `note_interrupt` spurious-IRQ disable, adapted to the
-user-space IRQ model, and is what turns the "mouse driver / xhci pegged at 100%
+the quarantine so a driver can recover the line. This is what turns the
+"mouse driver / xhci pegged at 100%
 CPU" storm into a bounded, logged, fail-closed event.
 
 `DMA_QUARANTINED` and `DMA_QUARANTINE_RELEASED` record a dead driver's DMA
@@ -454,9 +458,10 @@ the line. A line with no driver binding is then offered to the port's
 kernel-internal line-name resolver (`KernelArch::watchdog_line_names`), so a
 line the kernel services *itself* through a chained or bespoke handler —
 which by construction has no `irq_wait` binding — is **named** rather than
-dismissed: aarch64 reports `stuck_owner=pcie-msi` for the BCM2711 PCIe
-root-complex MSI multiplexer's shared SPI (the USB/PCIe MSI line a wedged CPU
-could not service) and `stuck_owner=console-uart` for the console UART
+dismissed: aarch64 reports `stuck_owner=pcie-msi` for the parent line of the
+chained message multiplexer its port discovered (on the Raspberry Pi 4 the PCIe
+root complex's: the USB/PCIe MSI line a wedged CPU could not service) and
+`stuck_owner=console-uart` for the console UART
 receive line, both matched against interrupt numbers discovered from the
 device tree, never board constants. Only a line neither a driver nor the
 kernel owns is `stuck_owner=unbound` — a genuinely spurious or contained
@@ -877,12 +882,12 @@ prompt (§5.4.5). `resolve` is paired with opening the console-0 gate
 through one `release_console0_to_login` helper so they can never diverge
 (§2.2), and the metal-confirmed boot is unaffected (§2.17).
 
-The board-specific bring-up that *supplies* the block device and drives this
-policy is wired into the boot path (`plans/PI.md` P11 Chunk B-2): the init
-seam admits the in-kernel root-unlock kthread
-(`tairix_kernel::unlock_service::spawn_if_present`), which brings the bound
-block driver up through an in-kernel block DriverHost behind the signed §8
-load gate over the production device-IRQ path, prompts on the primary
+The bring-up that *supplies* the block device and drives this policy is wired
+into the boot path (`plans/PI.md` P11 Chunk B-2): the init seam admits the
+in-kernel root-unlock kthread (`tairix_kernel::unlock_orchestrate::spawn_unlock`,
+which each port's `root_unlock::spawn_if_present` runs over its `UnlockPort`),
+which brings the bound block driver up behind the signed §8 load gate over the
+production device-IRQ path, prompts on the primary
 console, runs `unlock_root_disk_interactively`, and (through the one
 `release_console0_to_login` helper) opens the console-0 ownership gate and
 resolves the `LateUsersDb` cell so a `login` parked on the pending
@@ -897,27 +902,33 @@ completion so a stale edge cannot mis-pair back-to-back reads, and the
 service's mount / install / give-up decisions route onto the audit channel
 (`InitSpawnCtx::static_audit`, §19.4).
 
-The kthread dispatches on which floor block driver bound: **virtio-blk**, or
-the Raspberry Pi 4 **EMMC2** SD host. A virtio-MMIO disk is brought up by the
-one sequence both device-tree ports share (`floor_mmio::bring_up_virtio_mmio`):
-it claims the node for the kernel, carves its DMA through the kernel's own
-domain where a unit translates it, refuses a slot that does not snoop before
-its line is bound, then binds and arms the slot's interrupt. A port supplies
-only what its silicon decides (`MmioFloorPort`): its bookkeeping page tables,
-the maps registers and frames are reached through, and where its devices take
-their interrupts. The x86_64 virtio-PCI disk is brought up by `x86_64::floor`
-instead. Every floor device's interrupt, EMMC2's included, is bound through
-`floor_irq::LineHost`, which configures a wired line's trigger while it is
-still masked and unbinds a line it cannot arm. Every virtio disk is then
-admitted at the signed load gate and opened by `finish_virtio_unlock`; it and
-EMMC2 share the mount, the pre-unlock `/System` autoload, and the interactive
-unlock (`finish_unlock`).
-EMMC2
-is interrupt-driven and uses ADMA2 DMA: it
-maps the matched node's sole SDHCI register window under `CAP_MMIO_MAP`
-through a minimal in-kernel MMIO-only DriverHost, carves a staging slab
-from a `CAP_MEM_DMA`-gated `Emmc2DmaHost`, and brings the card up over
-the host-proven `tairix-drv-storage-emmc2` engine.
+The kthread admits the bound floor driver at the signed load gate before it
+touches the device, then brings the device up the way the driver's
+`Floor.toml` declares ([the bootstrap floor](../drivers/block.md#discovery-and-the-bootstrap-floor),
+`driver_catalog::FloorBringUp`). A **virtio** disk on a device-tree port is
+brought up by the one sequence both such ports share
+(`floor_mmio::bring_up_virtio_mmio`): it claims the node for the kernel, carves
+its DMA through the kernel's own domain where a unit translates it, refuses a
+slot that does not snoop before its line is bound, then binds and arms the
+slot's interrupt. A port supplies only what its silicon decides
+(`MmioFloorPort`): its bookkeeping page tables, the maps registers and frames
+are reached through, and where its devices take their interrupts. The x86_64
+virtio-PCI disk is brought up by `x86_64::floor` instead, and every virtio disk
+is opened by `finish_virtio_unlock`. A **host** driver opens its own device
+(`floor_mmio::bring_up_host_floor`): the kernel claims the node, refuses one a
+translation unit stands in front of, and binds and arms its one wired line
+(`floor_host::claim_and_bind`), then lends the driver's
+`floor::open` a host (`floor_host::FloorDriverHost`) whose mapper maps only the
+node's own windows under `CAP_MMIO_MAP`, whose `CAP_MEM_DMA`-gated DMA host
+carves inside the node's DMA window and addresses it as the bus sees it
+(`floor_dma::WindowDmaHost`), and, for the bring-up alone, the port's channel
+to its firmware (`HostFloorPort::with_firmware`), which forwards only what the
+firmware service would forward that node's driver. The driver parks on its line
+(`floor_irq::FloorCompletion`) and records its own outcome. Every floor
+device's interrupt is bound through `floor_irq::LineHost`, which configures a
+wired line's trigger while it is still masked and unbinds a line it cannot arm,
+and both kinds share the mount, the pre-unlock `/System` autoload, and the
+interactive unlock (`finish_unlock`).
 
 `virtio-blk` proves it end to end on `-M virt`: the `root_unlock_login`
 vertical drives the unlock *policy* directly, and the `root_unlock_admission`

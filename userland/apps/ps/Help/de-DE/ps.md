@@ -37,8 +37,8 @@ zuletzt lief (`CPU`), und der Kommandoname (`NAME`).
 
 - `0` — die Liste wurde geschrieben.
 - `1` — der Dienst hat abgelehnt oder versagt, oder die Liste konnte
-  nicht ausgegeben werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  nicht ausgegeben werden. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

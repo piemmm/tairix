@@ -36,8 +36,7 @@ last ran on (`CPU`), and the command name (`NAME`).
 
 - `0` — the listing was written.
 - `1` — the service refused or failed, or the listing could not be
-  delivered.
-- `2` — the command line was not understood.
+  delivered. A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

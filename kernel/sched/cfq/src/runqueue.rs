@@ -8,9 +8,7 @@
 //!
 //! Unlike the MLFQ sibling's per-band Chase–Lev deques, CFQ orders the
 //! ready set by a continuous virtual runtime and always dispatches the
-//! task with the *smallest* vruntime — the "leftmost" entity, exactly as
-//! Linux CFS picks the leftmost node of its per-runqueue red-black tree
-//! (Molnar's Completely Fair Scheduler). The set is a min-heap keyed by
+//! task with the *smallest* vruntime. The set is a min-heap keyed by
 //! `(vruntime, arrival)`, so the pick and every insert are `O(log n)` —
 //! never an `O(n)` scan of a growable list on the dispatch hot path. No
 //! entry is removed from the middle (a stale one is discarded when picked),
@@ -39,8 +37,7 @@ use tairix_sync::SpinLock;
 /// lightest weight settles the pick instead, and every dispatch charges at
 /// least a tick back, so a task that wakes repeatedly cannot outrun one that
 /// has been ready all along. The placement is absolute against the monotonic
-/// floor, so the head start can never accumulate past this bound (the CFS
-/// `place_entity` sleeper credit).
+/// floor, so the head start can never accumulate past this bound.
 pub(crate) const SLEEPER_CREDIT: u64 = SCALE;
 
 /// A ready task as tracked by a [`RunQueue`].
@@ -65,8 +62,7 @@ struct Inner<T> {
     /// placement). Bounded by [`Self::capacity`] exactly like the fair set.
     rt_ready: VecDeque<T>,
     /// Ready set keyed by `(vruntime, seq)` so the top of the heap is the
-    /// smallest-vruntime task, ties broken by arrival order. The CFS
-    /// red-black tree analog.
+    /// smallest-vruntime task, ties broken by arrival order.
     ///
     /// The tie-break is the enqueue sequence rather than the task id
     /// because equal virtual runtimes are not rare — every task admitted
@@ -87,7 +83,7 @@ struct Inner<T> {
     /// joining or re-joining this CPU is placed one [`SLEEPER_CREDIT`] ahead
     /// of it, so a task that slept at a low vruntime gets a bounded head
     /// start rather than leaping the running population and monopolising the
-    /// CPU (the CFS `place_entity` / min-vruntime rule).
+    /// CPU.
     min_vruntime: u64,
     /// Sum of the weights of every task this CPU currently owns (queued
     /// here or running off it). Read by the placement path to balance
@@ -133,7 +129,7 @@ impl<T> RunQueue<T> {
     ///
     /// The floor advances only to a *picked* task's vruntime, so the head
     /// start is bounded by that one credit however long the joiner slept: it
-    /// cannot leap the running population (the CFS `place_entity` rule).
+    /// cannot leap the running population.
     pub(crate) fn front(&self) -> u64 {
         self.inner
             .lock()

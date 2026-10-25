@@ -171,8 +171,8 @@ pub enum FanFault {
     LineUnavailable = 3,
     /// Automatic, but the machine has no processor sensor; the fan runs.
     NoSensor = 4,
-    /// Automatic, but the processor's temperature could not be read; the fan
-    /// runs until it can.
+    /// Automatic, but the processor's temperature could not be read, or read
+    /// what no processor could be at; the fan runs until it can.
     SensorFailed = 5,
 }
 
@@ -202,7 +202,7 @@ pub struct ThermalStatus {
     /// Why the fan is not as the policy asks, if it is not.
     pub fault: Option<FanFault>,
     /// The header's lines as the fan may use them; [`None`] when the machine
-    /// has no header served.
+    /// has no header served or its lines could not be read.
     pub lines: Option<FanLines>,
 }
 

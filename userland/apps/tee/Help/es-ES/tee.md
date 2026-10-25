@@ -60,8 +60,8 @@ llegará con ese trabajo del núcleo en lugar de aceptarse e ignorarse.
   se mostró la ayuda corta solicitada); un fallo de la salida estándar
   tolerado por un modo `-nopipe` no lo cambia.
 - `1` — una salida falló de una manera que el modo elegido cuenta, o la
-  entrada no pudo leerse.
-- `2` — la línea de órdenes no se entendió.
+  entrada no pudo leerse. Una línea de órdenes no entendida también
+  termina con `1`.
 
 ## ENVIRONMENT
 

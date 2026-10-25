@@ -31,7 +31,8 @@ capability model, kinds) lives in
 | `tairix_abi::driver::dma`             | `DmaHost` + owned DMA regions.         |
 | `tairix_abi::driver::virtio`          | `VirtioHost` virtio host seam.         |
 | `tairix_abi::driver::mailbox`         | `MailboxChannel` firmware property-mailbox seam. |
-| `tairix_abi::driver::timing`          | `Delay` microsecond timed waits.       |
+| `tairix_abi::driver::timing`          | `Delay` microsecond timed waits + `CompletionWait`, a wait for a device's completion interrupt. |
+| `tairix_abi::driver::supply`          | `IoRail` / `PowerRail`, the firmware-switched supply rails discovery states on a node. |
 | `tairix_abi::driver::register`        | The driver register-reply record.      |
 | [`tairix_abi::driver::audio`]         | `Audio` trait + the PCM vocabulary.    |
 | [`tairix_abi::driver::audio_channel`] | The `audiochan-v1` device channel.     |
@@ -413,27 +414,56 @@ trait**, `FilesystemRead`, not an added method on the frozen one
 | `node_identity()`                 | Driver handle.                        |
 | `node_info(node)`                 | Driver handle.                        |
 | `lookup(dir, name)`               | Driver handle.                        |
+| `parent(dir)`                     | Driver handle.                        |
 | `read_at(file, offset, &mut)`     | Driver handle.                        |
+| `read_link(link, &mut)`           | Driver handle.                        |
+| `seek_region(file, offset, region)` | Driver handle.                      |
 | `read_dir(dir, cursor, after, visit)` | Driver handle.                    |
+| `pin(node)`                       | Driver handle.                        |
+| `unpin(pinned)`                   | Driver handle.                        |
+| `release_pins()`                  | Driver handle.                        |
 
 The surface is allocation-free: a `NodeId` is an opaque,
 implementation-minted token (`NodeId::NONE` is reserved), `NodeInfo`
-reports `{ kind, nlink, size, allocated, times, content_gen }` —
-`allocated` being the bytes of on-disk storage the node's data really
+reports `{ kind, nlink, ino, size, allocated, times, content_gen }` —
+`ino` being the node's number as `stat` reports it and `FileId::node`
+carries (an inode, a record address, an entry's location), equal on every
+format to the raw value of the id lookups and listings answer;
+`allocated` the bytes of on-disk storage the node's data really
 occupies, from the format's own allocation tracking (ext4 `i_blocks`, the
 clusters a FAT file's size needs or a FAT directory's chain, ARXFS mapped
-extents), and `content_gen` the version of the node's data, which the volume
+extents); and `content_gen` the version of the node's data, which the volume
 never hands out twice (`NodeInfo::NO_CONTENT_GEN`, `0`, where the format keeps
 none: ext4, FAT32 and ADFS).
 
+`parent(dir)` answers the directory holding `dir`'s name, its `..` as the
+format records it; the root answers itself, a removed directory is
+`NotFound`, and a non-directory `Unsupported`.
+
 `name_matching` and `node_identity` are declarations only the format can
 make, so neither has a default. `node_identity` says how long a node keeps
-its id: `Stable` where the format numbers its nodes (ARXFS, ext4), and
-`ContentDerived` where it names a file by facts a write rewrites — FAT32
-packs a file's first cluster and size into its id, and ADFS names an object
-with no allocation by its name. The cache in front of every mounted volume
-looks a name up again after writing through it on the second kind, so a read
-after a write is never answered for the id the write replaced.
+its id: `Stable` for as long as the node keeps its name, a pin changing
+nothing (ARXFS, ext4, UDF, ISO 9660), and `ContentDerived` where a write, a
+truncate, a rename, a pin or the last unpin may change it: FAT32 and ADFS
+report a pinned node under a token, and ADFS names any other object by where
+its data lies. The cache in front of every mounted volume keeps no lookup or
+listing on the second kind, so a read after a write is never answered for
+the id the write replaced.
+
+`pin(node)` holds a node and answers the id that names it until the matching
+`unpin`: through renames of it and its ancestors, writes, truncates and the
+loss of its last name, and no other node is given that id while it is held.
+Holds count, every hold of one node answers the same id, and while a node is
+held every id the driver reports for it — a lookup, a listing, `parent`, the
+root — is that one. A held node that loses its last name keeps its data and
+still takes byte reads and writes, truncates, `node_info` (with `nlink` 0),
+and security and attribute changes; a held directory that loses its name
+takes no entries and lists nothing. `unpin` answers `Unpinned::Held` while
+other holds remain, `Released` for a node that keeps a name, and `Freed` when
+it was the last hold of a nameless node, which it frees. `release_pins` lets
+every hold go, completing each deferred deletion, before a forced detach. A
+node no name and no hold reaches is `NotFound` to every call. Each format's
+holds are listed in the [overview](../filesystem/overview.md#held-nodes).
 
 `read_dir` hands a visitor the directory's entries in order, each a
 `DirEntry { node, info, next_cursor }` with its name borrowed from the
@@ -470,18 +500,26 @@ The mutating surface is a second separate versioned trait,
 
 | Method                                | Capability gate                   |
 |---------------------------------------|-----------------------------------|
-| `create(dir, name, kind)`             | Driver handle (writable mount).   |
-| `write_at(dir, name, offset, data)`   | Driver handle (writable mount).   |
-| `truncate(dir, name, size)`           | Driver handle (writable mount).   |
+| `create(dir, name, kind, record)`     | Driver handle (writable mount).   |
+| `create_link(dir, name, target, record)` | Driver handle (writable mount). |
+| `link(dir, name, node)`               | Driver handle (writable mount).   |
+| `write_at(file, offset, data)`        | Driver handle (writable mount).   |
+| `write_all(file, offset, data)`       | Driver handle (writable mount).   |
+| `truncate(file, size)`                | Driver handle (writable mount).   |
+| `punch(file, offset, len)`            | Driver handle (writable mount).   |
 | `remove(dir, name)`                   | Driver handle (writable mount).   |
 | `rename(src_dir, src_name, dst_dir, dst_name)` | Driver handle (writable mount). |
 | `flush()`                             | Driver handle.                    |
 
-Unlike the read surface, the mutating methods address their target as a
-`(dir, name)` pair rather than by a `NodeId`: a `NodeId` is
-self-describing but carries no back-pointer to the directory entry that
-stores a file's length and starting location, and filesystems such as
-FAT keep that metadata *in the parent directory*. As on the read side,
+A name mutation — `create`, `create_link`, `link`, `remove`, `rename` —
+changes a directory's entries and takes a `(dir, name)` pair. A byte write
+— `write_at`, `write_all`, `truncate`, `punch` — takes the node it
+changes. A pinned id is valid for a byte write until its last `unpin`; an id
+a lookup answered for an unheld node only until the next name mutation in its
+directory, and on a `ContentDerived` format until the next mutation of the
+node, so the VFS resolves the name and writes under one hold of the driver's
+lock. A held node that loses its last name — a removal, or a rename replacing
+it — is kept, and `link` refuses it with `NotFound`. As on the read side,
 the driver makes no permission decision; the VFS authorises the write
 against the §5.3 template (and refuses a write to a `READ_ONLY` mount)
 before delegating (`AGENTS.md` §5.4). The first implementation is the
@@ -495,7 +533,6 @@ it reports:
 |--------------------------------|-----------------------------------|
 | `security(node)`               | Driver handle.                    |
 | `set_security(node, record)`   | Driver handle (writable mount).   |
-| `stamp_owner(node, uid, gid)`  | Driver handle (writable mount).   |
 
 `security` returns a `NodeSecurity { mode, uid, gid, required_cap, acl }`
 record, where `acl` is up to `MAX_ACL_ENTRIES` (eight) grant-only
@@ -505,20 +542,24 @@ surfaces the driver only *reports and stores* the record and makes no
 decision; the VFS translates it into its policy metadata and applies the
 §5.3 model (`AGENTS.md` §5.4).
 
-A create records its creator as the new node's owner through `stamp_owner`
-in the same operation, and if that fails the VFS takes the node back out,
-so a create lands whole or leaves nothing. What a format can store differs,
-and a refusal reaches the caller as `NotSupported`:
+A create hands the driver the whole record the node is born with in the
+creating call, so there is no second step to undo: the VFS gives it the
+creator's identity, the mode the create asked for less the creating
+process's umask (`0o777` for a link) and, in a setgid directory, that
+directory's group. What a format can store differs; a record it cannot store is ignored at creation,
+and a `set_security` it cannot store reaches the caller as `NotSupported`:
 
 - the native [`arxfs` driver](../filesystem/arxfs.md) stores the whole
   record;
 - the [`ext4` driver](../filesystem/ext4.md) reports each inode's owner,
-  group, mode and POSIX ACL grants, records a creator's owner and group,
-  and refuses a `set_security` it could not store whole;
+  group, mode and POSIX ACL grants, records a creator's owner, group and
+  mode, and refuses a `set_security` it could not store whole;
+- the [UDF driver](../filesystem/udf.md) records a creator's owner, group
+  and permissions in the file entry;
 - the [FAT32 driver](../filesystem/fat32.md) reports one fixed record per
-  kind and keeps no owner, so a stamp stores nothing and `set_security` is
-  refused; mounted removable media take the storage-group identity map
-  instead.
+  kind and keeps no owner, so a create's record is ignored and
+  `set_security` is refused; mounted removable media take the storage-group
+  identity map instead.
 
 A node's four §21 timestamps travel **in `NodeInfo`** — the `times:
 NodeTimes { created, modified, accessed, changed }` field the read
@@ -533,8 +574,9 @@ time): the native [`arxfs` driver](../filesystem/arxfs.md) deliberately
 does **not** track access time, so its `times.accessed` is always the
 epoch, while [`ext4`](../filesystem/ext4.md) reports the real
 `i_atime`/`i_ctime`/`i_mtime`/`i_crtime` its inodes store, and FAT — which
-holds stamps only in the parent's directory record — reports them through
-`read_dir` (a stat by node reports the epoch). There is no separate
+holds stamps only in the parent's directory record — reads a file's from
+the entry its id locates and a directory's from its entry in the parent its
+`..` names. There is no separate
 `FilesystemTimestamps` trait: folding the times into `NodeInfo` removed
 both it and the old separate `DirEntry.modified` stamp (`AGENTS.md` §2.2).
 

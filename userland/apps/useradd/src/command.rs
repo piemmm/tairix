@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::UseraddError;
-use tairix_util::argv::option_value;
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
 /// Maximum length of a login name, in bytes.
 ///
@@ -47,33 +47,46 @@ pub struct NewUser {
     pub home: Option<String>,
 }
 
+/// What each of `useradd`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Uid,
+    Gid,
+    Groups,
+    Comment,
+    Home,
+    Help,
+}
+
+/// `useradd`'s options and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('u', &["uid"], Flag::Uid),
+    Opt::valued('g', &["gid"], Flag::Gid),
+    Opt::valued('G', &["groups"], Flag::Groups),
+    Opt::valued('c', &["comment"], Flag::Comment),
+    Opt::valued('d', &["home"], Flag::Home),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
 /// The grammar is
-/// `useradd [-u UID] -g GID [-G LIST] [-c COMMENT] [-d HOME] [--] NAME`:
-///
-/// * `-u` / `--uid` — numeric user id (auto-allocated when omitted).
-/// * `-g` / `--gid` — numeric primary group id (**required**).
-/// * `-G` / `--groups` — comma-separated numeric supplementary group ids.
-/// * `-c` / `--comment` — account comment / full name.
-/// * `-d` / `--home` — home directory.
-/// * `-h` / `-?` / `--help` — show the command's own short help (wins
-///   immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * any other `-…` — a [`UseraddError::Usage`] error (fail closed).
-///
-/// Each value-taking option accepts its value attached (`-u0`, `--uid=0`) or
-/// as the following argument (`-u 0`, `--uid 0`). Exactly one operand — the
-/// login name — is required.
+/// `useradd [-u UID] -g GID [-G LIST] [-c COMMENT] [-d HOME] [--] NAME`, read
+/// as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among the
+/// operands, clustered, a value attached (`-u0`, `--uid=0`) or following
+/// (`-u 0`), a long one by any unambiguous prefix, `--` ending them. The help
+/// switches (`-h`, `-?`, `--help`) answer at once. `-g` is required, and so
+/// is exactly one operand: the login name.
 ///
 /// # Errors
 ///
-/// [`UseraddError::Usage`] for an unrecognised option, a missing value, a
-/// missing `-g`, or a number of operands other than one. [`UseraddError::BadId`]
-/// when a `-u`/`-g`/`-G` value is not a decimal id (or a `-G` element is
-/// empty). [`UseraddError::BadName`] when the operand is not a valid login
-/// name.
+/// [`UseraddError::Option`] for an option `getopt` refuses.
+/// [`UseraddError::Usage`] for a missing `-g` or a number of operands other
+/// than one. [`UseraddError::BadId`] when a `-u`/`-g`/`-G` value is not a
+/// decimal id (or a `-G` element is empty). [`UseraddError::BadName`] when
+/// the operand is not a valid login name.
 pub fn parse(args: &[&str]) -> Result<Command, UseraddError> {
     let mut uid: Option<u32> = None;
     let mut primary_gid: Option<u32> = None;
@@ -81,59 +94,18 @@ pub fn parse(args: &[&str]) -> Result<Command, UseraddError> {
     let mut comment: Option<String> = None;
     let mut home: Option<String> = None;
     let mut operands: Vec<String> = Vec::new();
-    let mut options_done = false;
-
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(UseraddError::Option)? {
+            Arg::Operand(operand) => operands.push(String::from(operand)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Uid, value) => uid = value.map(parse_id).transpose()?,
+            Arg::Opt(Flag::Gid, value) => primary_gid = value.map(parse_id).transpose()?,
+            Arg::Opt(Flag::Groups, value) => {
+                supplementary_gids = parse_id_list(value.unwrap_or_default())?;
             }
-            if let Some(long) = arg.strip_prefix("--") {
-                let (name, inline) = match long.split_once('=') {
-                    Some((n, v)) => (n, Some(v)),
-                    None => (long, None),
-                };
-                match name {
-                    "help" => return Ok(Command::Help),
-                    "uid" => uid = Some(parse_id(value(inline, args, &mut index)?)?),
-                    "gid" => primary_gid = Some(parse_id(value(inline, args, &mut index)?)?),
-                    "groups" => {
-                        supplementary_gids = parse_id_list(value(inline, args, &mut index)?)?;
-                    }
-                    "comment" => comment = Some(String::from(value(inline, args, &mut index)?)),
-                    "home" => home = Some(String::from(value(inline, args, &mut index)?)),
-                    _ => return Err(UseraddError::Usage),
-                }
-                continue;
-            }
-            if let Some(rest) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                let mut chars = rest.chars();
-                let letter = chars.next().unwrap_or('-');
-                let attached = chars.as_str();
-                let inline = if attached.is_empty() {
-                    None
-                } else {
-                    Some(attached)
-                };
-                match letter {
-                    'h' | '?' => return Ok(Command::Help),
-                    'u' => uid = Some(parse_id(value(inline, args, &mut index)?)?),
-                    'g' => primary_gid = Some(parse_id(value(inline, args, &mut index)?)?),
-                    'G' => {
-                        supplementary_gids = parse_id_list(value(inline, args, &mut index)?)?;
-                    }
-                    'c' => comment = Some(String::from(value(inline, args, &mut index)?)),
-                    'd' => home = Some(String::from(value(inline, args, &mut index)?)),
-                    _ => return Err(UseraddError::Usage),
-                }
-                continue;
-            }
+            Arg::Opt(Flag::Comment, value) => comment = value.map(String::from),
+            Arg::Opt(Flag::Home, value) => home = value.map(String::from),
         }
-        operands.push(String::from(arg));
     }
 
     if operands.len() != 1 {
@@ -152,22 +124,6 @@ pub fn parse(args: &[&str]) -> Result<Command, UseraddError> {
         comment,
         home,
     }))
-}
-
-/// Resolve the value of a value-taking option: the attached `inline` text when
-/// present, otherwise the following argument (which the caller's `index` is
-/// advanced past).
-///
-/// # Errors
-///
-/// [`UseraddError::Usage`] when neither an attached value nor a following
-/// argument is available.
-fn value<'a>(
-    inline: Option<&'a str>,
-    args: &[&'a str],
-    index: &mut usize,
-) -> Result<&'a str, UseraddError> {
-    option_value(inline, args, index).ok_or(UseraddError::Usage)
 }
 
 /// Validate a login name against `[a-z_][a-z0-9_-]*` within
@@ -334,19 +290,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "-g", "100", "a"]), Err(UseraddError::Usage));
-        assert_eq!(
-            parse(&["--frob", "-g", "100", "a"]),
-            Err(UseraddError::Usage)
-        );
+    /// `getopt`'s words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
     }
 
     #[test]
-    fn a_missing_option_value_is_usage() {
-        assert_eq!(parse(&["-g", "100", "-u"]), Err(UseraddError::Usage));
-        assert_eq!(parse(&["-g"]), Err(UseraddError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "-g", "100", "a"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frob", "-g", "100", "a"]),
+            "unrecognized option '--frob'"
+        );
+        assert_eq!(
+            refused(&["-g", "100", "-u"]),
+            "option requires an argument -- 'u'"
+        );
+        assert_eq!(refused(&["-g"]), "option requires an argument -- 'g'");
+        assert_eq!(
+            refused(&["-g", "100", "a", "--home"]),
+            "option '--home' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--help=x", "-g", "100", "a"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// `getopt_long` reads `--gi` as `--gid` and `--com` as `--comment`, and
+    /// refuses a prefix two long names share.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--gi=100", "--com", "Alice A", "alice"]),
+            Ok(create("alice", None, 100, &[], Some("Alice A"), None))
+        );
+        assert_eq!(
+            refused(&["--g", "100", "alice"]),
+            "option '--g' is ambiguous; possibilities: '--gid' '--groups'"
+        );
+        assert_eq!(
+            refused(&["--h"]),
+            "option '--h' is ambiguous; possibilities: '--home' '--help'"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ fires. Lines reach their consumers as `InterruptLine` links
 | Id | Item | Status |
 |---|---|---|
 | G1 | The line-interrupt service (`lib/abi/src/driver/irqline.rs`, `irqline-v1`): a consumer's link endpoint answers `Wait` when its line fires, with the trigger and polarity its selector states; the line stays masked from the moment it fires until the consumer waits again, so a level interrupt is serviced before it re-arms; first served by the BCM L2 controller (`plans/SOUND.md` SND19e) | done |
-| G2 | The BCM2835-family GPIO controller driver (`drivers/gpio/bcm2835`: `brcm,bcm2711-gpio`, `brcm,bcm2835-gpio`): its bank interrupts, per-line edge and level detection, the service, and the header's lines lent over `gpio-header-v1` (`plans/COOLING.md` CL2) | done |
+| G2 | The BCM2835-family GPIO controller driver (`drivers/gpio/bcm2835`: `brcm,bcm2711-gpio`): its bank interrupts, per-line edge and level detection, the service, and the header's lines lent over `gpio-header-v1` (`plans/COOLING.md` CL2) | done |
 | G3 | The Intel PCH GPIO controller driver (`drivers/gpio/intel_pch`, Sunrise Point and later): communities, pad groups, ACPI pin numbering, GPI interrupts through the controller's shared interrupt; published by the ACPI bus driver (`plans/ACPI.md` A4) | planned |
 
 ## The service (G1)
@@ -45,8 +45,10 @@ fires. Lines reach their consumers as `InterruptLine` links
   alternate function is never taken for either. Pulls are the board's wiring,
   stated by the firmware's `gpio=` lines, and are never touched.
 - A level line's detection is enabled only while its consumer waits and is
-  disabled as it fires; an edge line's stays enabled while held, and an edge
-  with no wait posted is latched in the driver.
+  disabled as it fires. An edge line's is enabled by every wait and disabled
+  when an edge fires with no wait posted, the edge latched in the driver to
+  answer the next wait at once: a line that keeps firing wakes the driver at
+  most once between waits.
 
 ## The Intel PCH (G3)
 

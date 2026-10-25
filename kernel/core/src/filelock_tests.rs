@@ -13,16 +13,15 @@ use tairix_rng::{FastRng, RandU64};
 
 use super::{
     acquire, dequeue, enqueue, held_ranges, invariants_hold, live_records, locks_present,
-    mint_owner, query, registry_guard, release, release_owner, usage, Conflict, Held, OwnerId,
-    Refusal, Request,
+    mint_owner, query, registry_guard, release, release_owner, usage, Conflict, Held, LockedNode,
+    OwnerId, Refusal, Request,
 };
-use tairix_abi::FileId;
 
-/// A distinct file identity per test.
-fn file(node: u64) -> FileId {
-    FileId {
-        volume: [7u8; 16],
-        node,
+/// A distinct locked node per test.
+fn file(node: u64) -> LockedNode {
+    LockedNode {
+        instance: 7,
+        pinned: node,
     }
 }
 
@@ -56,7 +55,7 @@ fn range(start: u64, end_inclusive: u64) -> LockRange {
 
 /// Take `held` over `[start, end]` without waiting, expecting it to be
 /// granted.
-fn take(file: FileId, owner: OwnerId, pid: ProcessId, task: u64, range: LockRange, held: Held) {
+fn take(file: LockedNode, owner: OwnerId, pid: ProcessId, task: u64, range: LockRange, held: Held) {
     acquire(&Request {
         file,
         owner,
@@ -71,7 +70,7 @@ fn take(file: FileId, owner: OwnerId, pid: ProcessId, task: u64, range: LockRang
 }
 
 /// The mode covering each byte of `0..len` for `owner`, as the records say.
-fn coverage(f: FileId, owner: OwnerId, len: u64) -> Vec<Option<Held>> {
+fn coverage(f: LockedNode, owner: OwnerId, len: u64) -> Vec<Option<Held>> {
     let records = held_ranges(f, owner);
     (0..len)
         .map(|byte| {
@@ -352,7 +351,7 @@ fn releasing_the_description_drops_every_lock_it_held_on_every_file() {
 }
 
 /// Identity helper so the test above reads as two distinct files.
-fn f_of(f: FileId) -> FileId {
+fn f_of(f: LockedNode) -> LockedNode {
     f
 }
 

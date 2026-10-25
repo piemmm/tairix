@@ -75,8 +75,8 @@ autoridad especial.
   ayuda corta.
 - `1` — el archivo nombrado no pudo cargarse (no es texto, es
   demasiado grande o fue rechazado), o el terminal falló; el motivo
-  se imprime en la salida de error.
-- `2` — la línea de órdenes no se entendió.
+  se imprime en la salida de error. Una línea de órdenes no
+  entendida también termina con `1`.
 
 ## ENVIRONMENT
 

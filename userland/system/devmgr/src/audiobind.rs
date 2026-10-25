@@ -28,7 +28,7 @@ use core::hash::Hasher;
 
 use tairix_abi::audio::AudioBaseline;
 use tairix_abi::driver::audio_channel::AUDIOCHAN_NODE_COMPATIBLE;
-use tairix_abi::hwtree::{HwMatchKind, HwResourceKind, HW_NODE_ROOT};
+use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::{Errno, HwNode};
 use tairix_hash::{HashSeed, SipHash13};
 use tairix_log::{log as log_event, Event, EventId, Field, FieldValue, Level, Sink};
@@ -228,28 +228,6 @@ pub fn deliver_audio_baseline(
     }
 }
 
-/// If `node` is an audio device-channel node — its match keys carry the
-/// [`AUDIOCHAN_NODE_COMPATIBLE`] `compatible` string — return the
-/// call-endpoint id it published as an [`HwResourceKind::Endpoint`] grant
-/// request.
-///
-/// Returns [`None`] for any other node, and for an `audiochan` node that
-/// carries no endpoint resource (a malformed emission — never guessed at).
-#[must_use]
-pub fn audiochan_endpoint(node: &HwNode) -> Option<u64> {
-    let is_audiochan = node.match_keys().iter().any(|key| {
-        key.kind() == Some(HwMatchKind::Compatible)
-            && key.compatible_bytes() == AUDIOCHAN_NODE_COMPATIBLE
-    });
-    if !is_audiochan {
-        return None;
-    }
-    node.resources()
-        .iter()
-        .find(|resource| resource.kind() == Some(HwResourceKind::Endpoint))
-        .map(tairix_abi::HwResource::base)
-}
-
 /// Hand every not-yet-adopted audio device channel in `nodes` to the audio
 /// service through `audiod`, recording each success in `state`.
 ///
@@ -268,7 +246,7 @@ pub fn bind_new_channels(
     state.deferred = false;
     retire_vanished(nodes, state, audiod, sink);
     for node in nodes {
-        let Some(endpoint) = audiochan_endpoint(node) else {
+        let Some(endpoint) = node.channel_endpoint(AUDIOCHAN_NODE_COMPATIBLE) else {
             continue;
         };
         if state.bound.contains(&endpoint) {
@@ -316,7 +294,10 @@ fn retire_vanished(
     audiod: &mut dyn AudiodBind,
     sink: &dyn Sink,
 ) {
-    let present: BTreeSet<u64> = nodes.iter().filter_map(audiochan_endpoint).collect();
+    let present: BTreeSet<u64> = nodes
+        .iter()
+        .filter_map(|node| node.channel_endpoint(AUDIOCHAN_NODE_COMPATIBLE))
+        .collect();
     let gone: Vec<u64> = state
         .bound
         .iter()

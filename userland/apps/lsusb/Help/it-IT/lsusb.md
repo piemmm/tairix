@@ -67,8 +67,8 @@ più interfacce compare una sola volta.
 
 - `0` — l'elenco (o la guida breve) è stato scritto.
 - `1` — l'interrogazione dell'albero hardware è stata rifiutata o è
-  fallita, oppure l'output non ha potuto essere scritto.
-- `2` — la riga di comando non è stata compresa.
+  fallita, oppure l'output non ha potuto essere scritto. Anche una
+  riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

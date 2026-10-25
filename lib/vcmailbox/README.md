@@ -44,18 +44,23 @@ crate owns that protocol once:
   stamps success without processing the tag, or answers about a different
   register, is a fault rather than a plausible wall time.
 - the **admission policy** (`admit_request`): the one table of requests the
-  user-space mailbox service forwards. Each is one tag, pinned word for word
-  to the shape its driver sends, and admitted only from the driver the kernel
-  attests is loaded for that tag's device. Every other tag — code execution,
-  GPU memory, voltage, one-time-programmable bits, GPIO, framebuffer
-  allocation, even the revision probe — is refused, and a malformed buffer is
-  refused before any tag in it is trusted.
+  user-space mailbox service forwards, and the kernel's own channel to the
+  firmware admits for its storage floor. Each is one tag, pinned word for
+  word to the shape its driver sends, and admitted only from the driver the
+  kernel attests is loaded for that tag's device. A GPIO switch is the SD
+  host's alone, and only on a line its node's rails name (`HwNode::io_rail`,
+  `HwNode::power_rail`, which only discovery states). Every other tag — code
+  execution, GPU memory, voltage, one-time-programmable bits, any other GPIO
+  line, framebuffer allocation, even the revision probe — is refused, and a
+  malformed buffer is refused before any tag in it is trusted.
 - the **client devices**: `DISPLAY_ENGINE_KEY`, `RPI_RTC_KEY`,
-  `FIRMWARE_CLOCKS_KEY` and `VL805_KEY` (with `VL805_FIRMWARE_DEV_ADDR`, the
-  one address the xHCI reset may name). Each driver's bind table is built from
-  its key, so the device it binds is the device its requests are judged
-  against. `SERVICE_CAPS` beside `BIND_KEYS` is the service's own capability
-  set, the single source its bundle's manifest is authored from.
+  `FIRMWARE_CLOCKS_KEY`, `SD_HOST_KEY` (from `SD_HOST_COMPATIBLE`, which the
+  aarch64 port's discovery keys the SD host's node by too) and `VL805_KEY`
+  (with `VL805_FIRMWARE_DEV_ADDR`, the one address the xHCI reset may name).
+  Each driver's bind table is built from its key, so the device it binds is
+  the device its requests are judged against. `SERVICE_CAPS` beside
+  `BIND_KEYS` is the service's own capability set, the single source its
+  bundle's manifest is authored from.
 - the **display engine's wiring**: `ENGINE_OUTPUTS`, each HDMI output's pixel
   valve and encoder bindings and the names its valve's window and encoder
   link carry on the engine's node — what the aarch64 port states and the
@@ -70,8 +75,9 @@ second consumer: independent consumers speak this protocol — the aarch64
 port's framebuffer boot console (`kernel/arch/aarch64`, P7b), the display
 engine (`drivers/display/bcm2711_hvs`, `plans/SOUND.md` SND19m), the firmware
 clocks (`drivers/clock/rpi_firmware`), the VL805 firmware reload
-(`drivers/bus/usb/vl805`, P10), the PMIC clock (`drivers/rtc/rpi`), and the
-storage floor's SD-card bring-up (`kernel/arch/aarch64::sd_supply`, P8). The
+(`drivers/bus/usb/vl805`, P10), the PMIC clock (`drivers/rtc/rpi`), the SD
+host's driver (`drivers/storage/emmc2`, P8), and the aarch64 port's channel
+the storage floor lends that driver (`kernel/arch/aarch64::firmware`). The
 boot console is a
 **charter-legal non-driver** consumer (a genuine early-boot need, not a
 removable scaffold), so the §2.20 carve-out applies and the shared definition

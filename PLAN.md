@@ -81,7 +81,7 @@ plan's ledger. A `blocked` row names its blocker.
 
 | Id | Item | Status |
 |---|---|---|
-| WIRING | Arch HAL migration and cross-arch parity, W0–W17 (`plans/WIRING.md`) | done |
+| WIRING | Arch HAL migration and cross-arch parity, W0–W18 (`plans/WIRING.md`) | in progress |
 | ARCHSUPPORT | x86_64 product parity with aarch64 (`plans/ARCHSUPPORT.md`) | in progress |
 | FINISH-x86_64 | An x86_64 image booting from UEFI firmware to the desktop in QEMU; the Surface Go 2 next (`plans/FINISH-x86_64.md`) | planned |
 | PI | Raspberry Pi 4 bring-up (`plans/PI.md`) | in progress |
@@ -256,6 +256,11 @@ non-cryptographic generator, and the entropy and hardware-RNG seams), the
 allocation-free `lib/inline` beside the heap-backed `lib/collections`,
 `lib/memguard` (the one guard-region sentinel and canary window, shared by the
 slab guard, the kthread stack guard and every port's boot-stack guard),
+`lib/visible` (the one rule for a character that draws nothing yet hides,
+reorders or breaks the text around it, linking no allocator so every port's
+boot console holds its glyphs to it: `lib/vt`, `lib/curses`, `lib/util`,
+`lib/controls`, `lib/devids`, `lib/font`, `lib/fsmeta`, `lib/net`, `lib/tz`,
+`lib/window`, `fontd`, the desktop session's alerts, TextEdit, `xtask devids`),
 `lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry),
 `lib/mix` (the one SplitMix64 and lowbias32 integer finalisers, which seeded
 draws, load slots and the land generator's and ray tracer's lattices key by),
@@ -276,25 +281,30 @@ README requires this file to name them:
 
 | Module | Callers |
 |---|---|
-| `argv` | `useradd`, `usermod`, `groupadd`, `passwd`, `mount` |
+| `argv` | `tail`, `tee`, `wc` (`choose`, `BadWord`) |
+| `banner` | `head`, `tail` |
 | `cfloat` | `seq`, `printf`, `ping` |
-| `cnum` | `seq`, `printf` |
-| `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
-| `count`, `tailwindow` | `head`, `tail` |
-| `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`) |
-| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/font`, `lib/fsprobe`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/terrain`, `lib/writeback`, the kernel, the ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `sysinfod`, `thermald`, `devmgr`, `cp`, `mv`, `fstree`, the file manager, TextEdit, `view`, Paint, WinterSun |
-| `fmt` | `kernel/sec`, `kernel/ipc` |
+| `cnum` | `seq`, `printf`, `sleep`, `tail`, `lib/svg`, `lib/image` |
+| `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init`, `tools/signkeys` (`setting_line`); `configure`, Settings (`ValueShape`) |
+| `count`, `tailwindow` | `head`, `tail`; `count` also the QEMU verticals reading a figure from a guest's log |
+| `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`), Date & Time's, Music's and `netmap`'s work queues, WinterSun's client |
+| `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/font`, `lib/fsprobe`, `lib/glob`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/terrain`, `lib/writeback`, the kernel, the ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `sysinfod`, `thermald`, `devmgr`, `cp`, `mv`, `fstree`, the file manager, TextEdit, `view`, Paint, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
+| `getopt` | every command app that takes options (`cat`, `cp`, `df`, `du`, `head`, `ls`, `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo`, …), the desktop session's command line (`applib`), the file manager's |
+| `fmt` | `kernel/sec`, `kernel/ipc`, `kernel/syscall`, `kernel/core`, the kernel binary, the xHCI, USB HID, USB mass-storage, RAID and volume-manager drivers, `lib/controls`, `lib/dmaengine`, `lib/sysconfig`, `devmgr`, `xtask`, the QEMU verticals |
+| `hex` | `tools/cc`, `tools/mkimage`, `tools/signkeys`, `tools/tzcompile` |
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/audio`, `lib/colour`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, WinterSun, the desktop session's screensavers |
-| `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams |
-| `report` | `lib/image`'s picture reports, `lib/binfmt`'s executable and manifest reports, and `lib/sandbox`'s one report reply |
-| `retry` | `userland/system/timed`, `userland/system/init` |
-| `utf8` | `lib/syntax`, `wc`, TextEdit |
+| `mathf` | `lib/audio`, `lib/colour`, `lib/controls`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/icon`, `lib/image`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/scatter`, `lib/sound`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, Paint, Patience, WinterSun, the Retro Games and Starfield screensavers |
+| `mode` | `chmod`, `mkdir`, `elsh`'s `umask` (`Mode`); `lib/rt`, `cp`, `elsh`, `edit`, `vim`, `tee`, `flock`, `fstree`, `stress`, the file manager, the desktop session, `applib`, `confd`, `journald`, `settingsd`, `init`, `timed` (`NEW_FILE`, `NEW_DIR` and the bit masks) |
+| `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams, which also answer `at_terminal` for `head`, `tail`, `du`, `wc`, `readlink` and `stat`; `Carried` for `cat`, `chmod`, `chown`, `cp`, `getcap`, `ln`, `mkdir`, `mv`, `rm`, `rmdir`, `setcap` |
+| `quote` | `ls`, `printf`, `elsh`, `servicectl`, `edit`, `vim`, `man`, `fstree`, the file manager, `lib/fscopy`'s omission report, and every command app that names a file or other text from elsewhere in a message, a prompt, a `-v` report or its standard output (`cat`, `cp`, `du`, `head`, `mv`, `rm`, `stat`, `tail`, `wc`, …) |
+| `report` | `lib/image`'s picture reports, `lib/binfmt`'s executable and manifest reports, `lib/sandbox`'s one report reply, and the `fstree` and TextEdit views that show them |
+| `retry` | `timed`, `init` (`RetryLadder`); `init`, `devmgr`, the desktop session, `lib/sandbox` (`RestartPacer`) |
+| `utf8` | `lib/syntax`, `wc`, TextEdit (`sequence_len`); `lib/controls`, the taskbar (`fold`, `folded`); `lib/tz`, Settings, the taskbar (`reader_order`); `lib/browse`, `lib/procinfo`, `lib/window`, the file manager, `elsh` (`shown`) |
 | `seconds` | `ping`, `traceroute` |
-| `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field, WinterSun's cached chunks and ground |
-| `size` | `du`, `df` |
+| `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, the greeter, the desktop session's elevation prompt, lock and clipboard, `lib/controls`' masked field, the Supervisor's control commands, `signkeys`, `mkimage`, `discoveryd`'s and `netstack`'s keys, `kernel/core`'s boot id, file-watch records and kernel-thread stacks; the caches `lib/font`, `lib/raster`, the compositor and WinterSun erase (`wipe_with`) |
+| `size` | `du`, `df` (the GNU spelling); `lib/procinfo`, Settings, the desktop session (`format_binary`) |
 | `space` | `lib/noise`, `lib/raytrace`, the Retro Games screensaver |
 
 ## Stage 2 — Kernel core (architecture-neutral)
@@ -302,9 +312,10 @@ README requires this file to name them:
 The sub-stage numbers are cited by the crates they delivered.
 
 - **2.1 `lib/sync`**: spinlock, IRQ-safe spinlock, writer-preference `RwLock`,
-  MCS queue lock, `SeqLock`, `Once`/`OnceCell`. It needs only `core`, so a
-  freestanding binary that links it supplies no allocator. Choosing a lock:
-  `docs/src/architecture/sync.md`.
+  MCS queue lock, `SeqLock`, `Once`/`OnceCell`, and the lowest-free bit
+  `claims` a vector or slot allocator keeps its map in. It needs only `core`,
+  so a freestanding binary that links it supplies no allocator. Choosing a
+  lock: `docs/src/architecture/sync.md`.
 - **2.2 `kernel/mem`**: the buddy/bitmap `FrameAllocator`, per-process
   `AddressSpace<P: PageTable>` over the Arch HAL, the guard-page `Slab`,
   zero-on-free sensitive allocations, a `Result` from every allocation, and the
@@ -349,8 +360,11 @@ generic timer and PSCI; the Raspberry Pi 4 is `plans/PI.md`), 3c `riscv64`
 
 The closed HAL slice set is enumerated in `AGENTS.md` §17.2, and its per-slice
 state lives in `plans/WIRING.md`. The one slice authorised but not yet built is
-`shadowstack` (`plans/FIX-PROTECTION.md` P4). The CPU-feature slice and the
-`lib/cpuops` dispatch framework built on it are
+`shadowstack` (`plans/FIX-PROTECTION.md` P4). The optional message-interrupt
+multiplexer slice, `MsiMultiplexer` (W18), puts a root complex's chained MSI
+controller behind the HAL, so the kernel binary names no part; its kernel half,
+the line layout and the `msi_alloc` facility, is `kernel/core::msimux`. The
+CPU-feature slice and the `lib/cpuops` dispatch framework built on it are
 `plans/FIX-HARDWARE-FEATURES.md`; their shared vocabulary lives in
 `tairix_abi::cpufeatures`, so the framework takes no `kernel/*` edge.
 
@@ -410,8 +424,9 @@ a load, use, unload and reload QEMU vertical, and the Stage 4.D acceptance gate
   node's removal revokes its authority from its driver and every delegate,
   tearing down their windows, interrupt bindings and granted regions before it
   returns (`plans/OPEN-DEFECTS.md` D167, D225–D227, D230).
-- **The floor is the storage path.** `driver_catalog::IN_KERNEL_DRIVERS` holds
-  only virtio-blk, plus EMMC2 on aarch64. The signed driver store lives on a
+- **The floor is the storage path.** `driver_catalog::IN_KERNEL_DRIVERS`,
+  generated from each floor driver's own `Floor.toml`, holds only virtio-blk,
+  plus EMMC2 on aarch64. The signed driver store lives on a
   read-only `/System` volume mounted before the root and kept mounted for
   life, so even the unlock keyboard is an autoloaded user-space driver
   (`plans/PI.md`, designs B and D).
@@ -462,8 +477,8 @@ FS-WALK and FS-MAC are what remains.
 
 **Demand-paged file mappings.** `file_map`/`file_unmap` (76/77) give a
 read-only, never-executable, demand-paged private mapping out of the per-task
-file window. Each page is resolved on first access through the secured VFS
-under the mapping-time identity. Every other user fault, data or instruction, on
+file window. Each page is resolved on first access as the descriptor it was
+mapped from would read it. Every other user fault, data or instruction, on
 every bare-metal port, goes to the one kill policy (`terminate_user_fault`, audited as
 `TaskFaultKilled`), which ends the task with 139 and never the machine. Design:
 `docs/src/architecture/memory.md` §7f/§7o.
@@ -946,6 +961,19 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-10-24 — §17.2: the optional `MsiMultiplexer` Arch HAL slice.** A
+  root complex's chained MSI controller lived in the kernel binary, which named
+  the part; it is optional because only a root complex with one implements it.
+
+- **2026-10-24 — §16.7: compatibility from manuals and black-box runs.**
+  TAIRiX is GPL-2.0-or-later, and matching a GNU tool is no licence to read
+  its source; the rule the work already kept is now the charter's.
+
+- **2026-10-23 — §7, §17.5: `board-check`; §15.18: `plans/OPENFILE.md`.**
+  A sweep found about 550 board and part names in generic code that no gate
+  had refused, so a source scan now refuses them; the open-file redesign
+  gained its plan.
 
 - **2026-10-22 — §2.20, §3, §15.18: the Raspberry Pi settings category,
   `drivers/gpio`, `drivers/sensor`, `thermald`.** At the user's direction

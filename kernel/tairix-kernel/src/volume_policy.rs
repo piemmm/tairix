@@ -31,7 +31,8 @@
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeHost,
+    VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -149,6 +150,10 @@ impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
         self.inner.lookup(dir, name)
     }
 
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        self.inner.parent(dir)
+    }
+
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         self.inner.read_at(file, offset, buf)
     }
@@ -162,11 +167,32 @@ impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
     ) -> Result<(), DriverError> {
         self.inner.read_dir(dir, cursor, after, visit)
     }
+
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        self.inner.pin(node)
+    }
+
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        self.inner.unpin(pinned)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        self.inner.release_pins()
+    }
 }
 
 impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        self.inner.create(dir, name, kind)
+    /// The record reaches the format, which keeps it where it records an
+    /// owner; on a node it does not, the mapped record stands as for any
+    /// other.
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
+        self.inner.create(dir, name, kind, record)
     }
 
     fn create_link(
@@ -174,36 +200,25 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
         dir: NodeId,
         name: &[u8],
         target: &[u8],
+        record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
-        self.inner.create_link(dir, name, target)
+        self.inner.create_link(dir, name, target, record)
     }
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
         self.inner.link(dir, name, node)
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        self.inner.write_at(dir, name, offset, data)
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        self.inner.write_at(file, offset, data)
     }
 
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        self.inner.truncate(dir, name, size)
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+        self.inner.truncate(file, size)
     }
 
-    fn punch(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        len: u64,
-    ) -> Result<(), DriverError> {
-        self.inner.punch(dir, name, offset, len)
+    fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
+        self.inner.punch(file, offset, len)
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
@@ -261,12 +276,6 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for GroupMappedF
         // format cannot hold a record for this node; storing a silently
         // lossy one is forbidden, so the write is refused whole.
         Err(DriverError::Unsupported)
-    }
-
-    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
-        // Whether a new node keeps its creator is the format's to say: one
-        // that records owners stores it, an ownerless one keeps nothing.
-        self.inner.stamp_owner(node, uid, gid)
     }
 
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {

@@ -1,21 +1,26 @@
 //! The parsed shape of a `servicectl` command line.
 
+use alloc::vec::Vec;
+use core::fmt;
+
 use tairix_abi::service::SERVICE_MANIFEST_MAX_NAME_LEN;
 use tairix_abi::{ServiceControlOp, ServiceEnrolOp};
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `servicectl`'s own Help tree is
-/// unavailable.
+/// The usage banner the short-help switches print when `servicectl`'s own
+/// Help tree is unavailable.
 pub const USAGE: &str = "usage: servicectl [-h | -?] start|stop|enable|disable SERVICE";
 
 /// Why a command line was not understood.
 ///
-/// Distinguished rather than collapsed into one error because the three read
+/// Distinguished rather than collapsed into one error because they read
 /// very differently at a terminal: a missing operand is a typo, an unknown
 /// verb is usually a wrong tool, and an over-long name is a name the manager
 /// could not hold whatever it referred to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageError {
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// No command word at all.
     MissingCommand,
     /// The command word is not one this tool implements.
@@ -26,6 +31,18 @@ pub enum UsageError {
     /// The service name exceeds what the control wire can carry, so it is
     /// refused here rather than sent to be refused there.
     NameTooLong,
+}
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::MissingCommand => f.write_str("no command given"),
+            Self::UnknownCommand => f.write_str("unknown command"),
+            Self::WrongOperandCount => f.write_str("exactly one service name is required"),
+            Self::NameTooLong => f.write_str("service name is too long"),
+        }
+    }
 }
 
 /// One thing the `servicectl` tool can do.
@@ -49,9 +66,23 @@ pub enum Command<'a> {
     Help,
 }
 
+/// What each of `servicectl`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `servicectl`'s options: the reserved help switches alone.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name).
 ///
-/// The grammar is `servicectl [-h | -?] start|stop|enable|disable SERVICE`:
+/// The grammar is `servicectl [-h | -?] start|stop|enable|disable SERVICE`,
+/// read as GNU's `getopt_long` reads it ([`Scan`]) with the command word
+/// ending the options:
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches; they win
 ///   immediately.
@@ -67,18 +98,17 @@ pub enum Command<'a> {
 ///
 /// A [`UsageError`] naming which part of the grammar was not met. Nothing is
 /// sent when the line does not parse (fail closed).
-pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, UsageError> {
-    let mut rest = args;
-    if let Some(&("-h" | "-?" | "--help")) = rest.first() {
-        return Ok(Command::Help);
+pub fn parse<'a>(args: &'a [&'a str]) -> Result<Command<'a>, UsageError> {
+    let mut words = Vec::new();
+    for arg in Scan::new(OPTIONS, args, Order::OperandsEnd) {
+        match arg.map_err(UsageError::Option)? {
+            Arg::Operand(word) => words.push(word),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+        }
     }
-    if let Some(&"--") = rest.first() {
-        rest = &rest[1..];
-    }
-    let Some((verb, operands)) = rest.split_first() else {
+    let Some((&verb, operands)) = words.split_first() else {
         return Err(UsageError::MissingCommand);
     };
-    let verb = *verb;
     if !matches!(verb, "start" | "stop" | "enable" | "disable") {
         return Err(UsageError::UnknownCommand);
     }
@@ -112,6 +142,7 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, UsageError> {
 #[cfg(test)]
 mod tests {
     use super::{parse, Command, UsageError, USAGE};
+    use alloc::string::{String, ToString};
     use tairix_abi::service::SERVICE_MANIFEST_MAX_NAME_LEN;
     use tairix_abi::{ServiceControlOp, ServiceEnrolOp};
 
@@ -181,12 +212,50 @@ mod tests {
             parse(&["restart", "timed"]),
             Err(UsageError::UnknownCommand)
         );
-        assert_eq!(parse(&["-x", "timed"]), Err(UsageError::UnknownCommand));
         assert_eq!(parse(&["start"]), Err(UsageError::WrongOperandCount));
         assert_eq!(
             parse(&["start", "timed", "extra"]),
             Err(UsageError::WrongOperandCount)
         );
+    }
+
+    #[test]
+    fn every_usage_failure_states_its_reason() {
+        for (err, reason) in [
+            (UsageError::MissingCommand, "no command given"),
+            (UsageError::UnknownCommand, "unknown command"),
+            (
+                UsageError::WrongOperandCount,
+                "exactly one service name is required",
+            ),
+            (UsageError::NameTooLong, "service name is too long"),
+        ] {
+            assert_eq!(err.to_string(), reason);
+        }
+    }
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "timed"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frob", "stop", "timed"]),
+            "unrecognized option '--frob'"
+        );
+        assert_eq!(
+            refused(&["--help=x"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `servicectl --he` as `servicectl --help`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]
@@ -228,8 +297,8 @@ mod tests {
                 );
             }
             // The exit codes are the tool's contract with a script, so every
-            // locale states all three rather than only the happy one.
-            for code in ["`0`", "`1`", "`2`"] {
+            // locale states both rather than only the happy one.
+            for code in ["`0`", "`1`"] {
                 assert!(
                     text.contains(code),
                     "{locale}/servicectl.md must state exit status {code}"

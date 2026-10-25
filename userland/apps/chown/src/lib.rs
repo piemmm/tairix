@@ -1,62 +1,26 @@
-//! TAIRiX `chown` — change file owner and group (Stage 6
-//! `userland/apps/`).
+//! TAIRiX `chown` — change file owner and group, with GNU's command line.
 //!
-//! `chown` applies an ownership change to each of its file operands. The owner
-//! operand is `OWNER`, `OWNER:GROUP`, or `:GROUP`, where `OWNER` and `GROUP`
-//! are **decimal** user/group ids: `OWNER` changes only the owning user,
-//! `:GROUP` only the owning group, and `OWNER:GROUP` both. With `-R` a
-//! directory operand is changed and then its contents are changed recursively.
-//! This is the POSIX model, restricted to numeric ids (TAIRiX has no
-//! name-to-id seam in this tool, so a name would be interface creep) and a building block of the filesystem permission
-//! model.
-//!
-//! # What this crate is
-//!
-//! An **ownership-changing engine**, not a data source. For one parsed
-//! [`Command`] it asks the injected filesystem seam for each operand's kind,
-//! applies the new owner, and walks each directory `-R` must descend. The
-//! operations that touch the outside world are the injected seams:
-//!
-//! * [`FileSystem`] — learn a path's kind, set its owner, and read a
-//!   directory's entries (for `-R`).
-//! * [`Output`] — write the usage banner to the terminal.
-//!
-//! The binary that ships as `chown` wires the real syscall-backed filesystem
-//! and console output; tests wire in-memory fixtures. This is the seam
-//! discipline of the other userland crates (`init`'s `Spawner`/`Reaper`,
-//! `login`'s `Prompt`, `sysinfo`'s `Transport`, `cat`'s `FileSource`, `ls`'s
-//! `Listing`, `rm`'s `Removal`, `cp`'s and `mv`'s `FileSystem`, `chmod`'s
-//! `FileSystem`), and it keeps every parsing, owner-spec, and recursion
-//! decision testable without a kernel.
-//!
-//! # Fail closed
-//!
-//! An unknown option or a missing operand is a [`ChownError::Usage`] that
-//! changes nothing; an owner operand that is not a valid
-//! `OWNER`/`OWNER:GROUP`/`:GROUP` spec is a [`ChownError::BadOwner`]; an
-//! operand that cannot be inspected surfaces the underlying
-//! [`Errno`](tairix_abi::Errno) as [`ChownError::Stat`]; an owner that cannot
-//! be applied is [`ChownError::Apply`]; a directory whose entries cannot be
-//! read during a recursive descent is [`ChownError::Read`]. The first failure
-//! stops the run before any later operand, and there is no panic.
+//! Each file operand is given the owner and group an `[OWNER][:[GROUP]]`
+//! operand names, or those of a `--reference` file. Names are read against
+//! the account and group directories, a number taken only when no name
+//! matches. Every change is made through the descriptor of the node its
+//! current owner was read from, and `-R` walks a tree through the directories
+//! it holds (`tairix_fscopy::tree`), so no entry swapped for a link meanwhile
+//! can carry a change out of the tree.
 //!
 //! # Module map
 //!
-//! * [`error`] — [`ChownError`], the outcomes of [`run`].
-//! * [`command`] — the [`Command`]/[`Owner`] shapes and the [`parse`]r.
-//! * [`io`] — the [`FileSystem`] and [`Output`] seams and the
-//!   [`Entry`]/[`EntryKind`] data they carry.
-//! * [`client`] — the [`run`] entry point and the recursive engine.
+//! * [`command`] — the [`Command`] a command line asks for, and its [`parse`]r.
+//! * [`owner`] — the owner operand's grammar and its [`resolve`]r.
+//! * [`io`] — the [`Accounts`] seam names are read through.
+//! * [`client`] — [`run`]: operands opened, trees walked, changes reported.
+//! * [`error`] — [`ChownError`].
 //!
-//! # Layering & safety
-//!
-//! `no_std` (with `alloc`); the only dependency is the
-//! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths.
+//! `no_std` with `alloc`, no `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths.
 
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 extern crate alloc;
@@ -65,8 +29,10 @@ pub mod client;
 pub mod command;
 pub mod error;
 pub mod io;
+pub mod owner;
 
 pub use client::{run, USAGE};
-pub use command::{parse, parse_owner, Command, Options, Owner, Verbosity};
+pub use command::{parse, Command, Links, Options, Target, Traverse, Verbosity};
 pub use error::ChownError;
-pub use io::{Entry, EntryKind, FileSystem, Metadata, Output};
+pub use io::{Account, Accounts, Output};
+pub use owner::{resolve, Owner, Resolved};

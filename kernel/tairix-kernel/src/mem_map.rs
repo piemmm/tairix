@@ -125,7 +125,7 @@ pub(crate) fn reserve_blob_frames(map: &mut BootMemoryMap, base: u64, len: u64) 
 /// The aarch64 identity map types memory at 1 GiB granularity and Device
 /// wins over RAM for a shared gigapage (MMIO must never be cached or
 /// speculated), so RAM that shares a gigapage with a discovered MMIO block
-/// — the Pi 4's window below 4 GiB ends inside the gigapage holding its
+/// — a window below 4 GiB ending inside the gigapage holding the
 /// UART/GIC/PCIe — would be mapped Device: atomics on it are unpredictable
 /// and the allocator must never hand it out. Such bytes are clipped here,
 /// fail closed; reclaiming them needs 2 MiB-granular identity typing (the
@@ -185,7 +185,7 @@ pub(crate) fn clip_windows_to_normal_ram(
 /// The kernel window's regions, in physical order, are the
 /// [`RegionKind::Reserved`] kernel image and the [`RegionKind::Usable`]
 /// remainder; every other window contributes one whole
-/// [`RegionKind::Usable`] region (a machine like the Pi 4 describes RAM
+/// [`RegionKind::Usable`] region (a machine may describe RAM
 /// above its MMIO hole and above 4 GiB as further windows). Zero-length
 /// windows and usable spans are omitted so no degenerate region reaches
 /// the allocator.
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn window_byte_total_sums_every_window_and_saturates() {
-        // An 8 GiB Pi 4 declares three windows; the installed figure is all
+        // An 8 GiB board declaring three windows: the installed figure is all
         // of them, not the first.
         assert_eq!(
             window_byte_total(&[
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn further_windows_are_wholly_usable() {
-        // A Pi 4 (8 GiB) shape: the kernel window below the MMIO hole plus
+        // An 8 GiB shape: the kernel window below the MMIO hole plus
         // two further windows (1 GiB..~4 GiB and above 4 GiB). Every
         // non-kernel window arrives as one whole usable region.
         let windows = [
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn clip_drops_ram_inside_device_typed_gigapages() {
-        // Pi 4 shape: gigapage 3 holds the UART/GIC/PCIe, so the below-hole
+        // Gigapage 3 holds the UART/GIC/PCIe, so the below-hole
         // window's bytes inside it are clipped; the windows outside stay
         // whole. Device mask bit 3 set.
         let device_mask = [1u64 << 3];

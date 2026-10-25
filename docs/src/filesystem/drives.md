@@ -150,6 +150,14 @@ arxfs::System/Kernel/tairix.rxe
 /Users/ian/Documents/file.txt          # valid view path, not canonical identity
 ```
 
+These are the parser's verdicts (§12), what a displayed or compared path must
+spell. The kernel does not normalise a `/`-view or relative path it is asked to
+resolve: it takes the steps as spelled (`lib/path::steps`) and applies
+each `..` to the directory its walk actually reached, a `..` at the view root
+staying there as POSIX specifies (§18). An alias or `id::` path is resolved to
+its backing location first, and its own `..` still cannot climb above its
+root.
+
 ## 6. Resolver table
 
 The resolver set is **closed for `abi-v1`**. Adding a resolver is an
@@ -237,14 +245,18 @@ with no backing, stored on no volume, so its listing is exactly the attached
 volumes and nothing can be stored in it — a mutation of it or of a name in it
 is refused `ReadOnly`.
 
-**Enumeration is landed** (`plans/DEVICES.md` D3d): listing a directory
-merges the driver-backed mounts sitting directly beneath it into the
-listing (`MountTable::direct_children`, consumed by the `fs_readdir`
-service), and listing the catalog is that merge alone, so a runtime
-`/Storage/<name>` mount appears in `/Storage` as a structural directory
-entry with the same `UNIX_EPOCH` stamp any stampless backing reports. The
-mount points list in name order, so a batched listing resumes after the last
-one it returned.
+**Enumeration is landed** (`plans/DEVICES.md` D3d): listing a projection's
+floor merges the projections sitting directly beneath it into the listing
+(`MountTable::direct_children`, consumed by the `fs_readdir` service), and
+listing the catalog is that merge alone, so a runtime `/Storage/<name>` mount
+appears in `/Storage` as a structural directory entry with the same
+`UNIX_EPOCH` stamp any stampless backing reports. The mount points list in
+name order, so a batched listing resumes after the last one it returned. Every
+projection sits directly beneath the floor of another, and a runtime volume is
+attached only directly beneath the catalog, so nothing is ever shown beneath a
+runtime volume and no directory but a floor has a projection beneath it. An
+attach anywhere else is refused, and so is a withdrawal that would leave a
+projection beneath no floor.
 
 ## 11. Fail-closed rules
 
@@ -365,17 +377,25 @@ same alias-first model; a multi-volume install publishes each volume as its own
 
 The shell displays and consumes alias paths (`cd`, prompt, word/tilde expansion,
 completion) through `lib/path` — never a fixed top-level directory set and never
-a second parser. `cd` changes a per-process current root/directory that is a
-typed `Root` + components, not a raw string. The file manager shows the alias
+a second parser. `cd` changes a per-process working directory, which is the
+directory itself and not a path: `FilesystemService::chdir` answers it pinned
+(`Cwd`) once it is a directory its caller may search, so it survives a rename,
+a relative path is walked from it, and `..` from it is its physical parent —
+at a volume's floor, the catalog the volume is shown in. `getcwd` answers its
+canonical path now (`FilesystemService::canonical_of`), and a removed working
+directory is `NotFound`. A directory descriptor is a start in the same way. The
+file manager shows the alias
 forest (`System`, `Home`, `Storage`, plus published volume aliases);
 recent-file lists store durable `id::` references so they survive alias
 churn.
 
 ## 19. Links and cross-root references
 
-Hardlinks are within a single root only. A relative symbolic link resolves
-within its containing root and cannot escape it (`..` bounded, §5). An absolute
-symlink within the same root resolves against that root. A **cross-root**
+Hardlinks are within a single root only. A symbolic link resolves within the
+projection that shows it: its `..` stops at that projection's floor, an
+absolute target restarts there, and a name it supplies that a projection
+beneath that floor is shown under is not found, neither crossing into that
+projection nor reaching the directory it covers. A **cross-root**
 symbolic link (target names another alias/ID) is resolved only with authority
 over the target root and is subject to the same two-phase capability check
 (§14); a cycle across views fails closed (`ViewCycle`).
@@ -493,6 +513,14 @@ condition a re-insert can clear, and a caller must be able to tell them apart.
 So the stand-in a removal installs under the volume's handle writes out every
 method of every facet it claims — including the ones the driver ABI defaults —
 because inheriting a default would answer the wrong one of these two.
+
+A descriptor holds its volume's registration, never its name: one whose volume
+was detached, retracted or re-attached since it opened answers `Stale`, and
+never reaches a volume attached at the same name since; one of a volume held
+unavailable answers the device error until a recovery or a verified re-insert
+gives the volume a fresh registration. A plain detach is refused `Busy` while
+a descriptor holds a node of the volume; a force detach releases every pin,
+completing each deferred deletion, and revokes them.
 
 A removal applies to every volume on the device, a partitioned stick carrying
 several over one endpoint. A volume whose driver holds writes it acknowledged

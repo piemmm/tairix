@@ -24,8 +24,9 @@
 //! path (`read_link` over an inode of on-disk kind `3`, whose target is held
 //! as node data and reached through the same integrity pipeline as file
 //! bytes), the scrub-progress and health-baseline record decoders
-//! (`scrub`/`health`), the offline `check` re-walk, and the read-only
-//! `rescue` root scan. Each shares the same invariant: it returns a
+//! (`scrub`/`health`), the offline `check` re-walk, the pin path (a held
+//! file written, unlinked and released), and the read-only `rescue` root
+//! scan. Each shares the same invariant: it returns a
 //! `Result`, never panics, and fails closed.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded
@@ -55,7 +56,9 @@
 //! both-copies-bad sweep runs in either mode.
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
-use tairix_abi::driver::filesystem::{DirVisit, FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{
+    DirVisit, FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity,
+};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_drv_fs_arxfs::{
     EntropySource, Keying, RescueSink, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
@@ -229,6 +232,8 @@ fn walk_directories(fs: &mut ARXFS<MemBlock>) {
         if visits > 4096 {
             break;
         }
+        // A fuzzed `..` may name any inode, or none.
+        let _ = fs.parent(dir);
         // A fuzzed image may describe any directory; the entry budget bounds
         // one listing however it is shaped.
         let mut entries = Vec::new();
@@ -254,6 +259,26 @@ fn walk_directories(fs: &mut ARXFS<MemBlock>) {
             }
         }
     }
+}
+
+/// Drive the pin path over a fuzzed volume: a file born with a record, held,
+/// written whole and read back, unlinked while held and released, which frees
+/// it. Every call must return a `Result`, never panic.
+fn exercise_pins(fs: &mut ARXFS<MemBlock>) {
+    let root = fs.root();
+    let record = NodeSecurity::new(0o600, 7, 7);
+    let Ok(file) = fs.create(root, b"pinned", NodeKind::RegularFile, &record) else {
+        return;
+    };
+    let Ok(pinned) = fs.pin(file) else {
+        return;
+    };
+    let _ = fs.write_all(pinned, 0, b"held across its unlink");
+    let mut back = [0u8; 32];
+    let _ = fs.read_at(pinned, 0, &mut back);
+    let _ = fs.remove(root, b"pinned");
+    let _ = fs.read_at(pinned, 0, &mut back);
+    let _ = fs.unpin(pinned);
 }
 
 /// The single invariant: opening an arbitrary image must return a `Result`,
@@ -283,6 +308,7 @@ fn exercise_under(store: &[u8], keying: Keying<'_>) {
         // free-space walk never reads. Like `open` it must return a `Result`,
         // never panic, for any device contents.
         walk_directories(&mut fs);
+        exercise_pins(&mut fs);
         // Drive the Stage-8 scrub-progress decode path: a bounded scrub reads
         // and decodes any persisted scrub-progress record (`load_scrub_progress`)
         // before resuming. Like `open` it must return a `Result`, never panic,
@@ -336,23 +362,20 @@ fn formatted_image(keying: Keying<'_>) -> Vec<u8> {
     let root = fs.root();
     for i in 0..6u32 {
         let name = format!("f{i}");
-        if fs
-            .create(root, name.as_bytes(), NodeKind::RegularFile)
-            .is_err()
-        {
+        let Ok(file) = fs.create(
+            root,
+            name.as_bytes(),
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        ) else {
             break;
-        }
+        };
         // Two non-adjacent blocks build an extent record beyond the trivial.
         // The identical content across files also makes block 0 a *shared*
         // chunk, so the chunk/refcount and reverse-reference trees exist and
         // their decode paths are swept (Stage 7).
-        let _ = fs.write_at(root, name.as_bytes(), 0, &[0xA5u8; 16]);
-        let _ = fs.write_at(
-            root,
-            name.as_bytes(),
-            2 * u64::from(BLOCK_SIZE),
-            &[0x5Au8; 16],
-        );
+        let _ = fs.write_at(file, 0, &[0xA5u8; 16]);
+        let _ = fs.write_at(file, 2 * u64::from(BLOCK_SIZE), &[0x5Au8; 16]);
     }
     // A reflink guarantees a shared chunk with multiple referrers, populating
     // the reverse-reference tree even if the duplicate-content sharing above
@@ -363,7 +386,7 @@ fn formatted_image(keying: Keying<'_>) -> Vec<u8> {
     // image declare the symlink incompatible-feature bit so the sweep also
     // hammers the superblock feature-word validation. Best-effort on the
     // tiny fuzz device.
-    let _ = fs.create_link(root, b"alink", b"/f0");
+    let _ = fs.create_link(root, b"alink", b"/f0", &NodeSecurity::new(0o777, 0, 0));
     // Leave a scrub paused mid-pass so the base image carries a persisted
     // scrub-progress record (Stage 8): the sweep then hammers that on-disk
     // decode path too. Best-effort on the tiny fuzz device.

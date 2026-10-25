@@ -126,15 +126,15 @@ mod tests {
     }
 
     #[test]
-    fn pi_4_shaped_affinities_survive_intact() {
-        // The Pi 4's DT lists cpu@0..cpu@3 with Aff0 = 0..3 and the boot
+    fn sequential_affinities_survive_intact() {
+        // A tree listing cpu@0..cpu@3 with Aff0 = 0..3 and the boot
         // core is affinity 0 — the common case is a straight pass-through.
         assert_eq!(order_cpus(&[0, 1, 2, 3], 0).unwrap(), &[0, 1, 2, 3]);
     }
 
     #[test]
     fn release_addrs_follow_the_dense_order() {
-        // The Pi 4 shape: no release word for the boot CPU, one per
+        // A spin-table shape: no release word for the boot CPU, one per
         // secondary, aligned to the dense ids whatever the tree order.
         let ordered = order_cpus(&[2, 1, 0, 3], 0).unwrap();
         assert_eq!(ordered, &[0, 2, 1, 3]);

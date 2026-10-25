@@ -1,6 +1,5 @@
 //! Unit tests for the xHCI protocol layers against a register-level
-//! mock controller plus an in-memory ring/DMA model (mirrors the
-//! `emmc2` `MockSdhci` seam).
+//! mock controller plus an in-memory ring/DMA model.
 
 extern crate alloc;
 
@@ -518,7 +517,7 @@ fn slab_bank_brackets_writes_and_reads_with_cache_maintenance() {
     use slab_coherency_test_state as rec;
 
     // A bank whose host mints slabs carrying the recording coherency hook —
-    // the metal shape where the BCM2711 PCIe master does not snoop the CPU
+    // the metal shape where a PCIe master does not snoop the CPU
     // caches, so the bank must bracket every ring publish / event consume
     // with cache maintenance.
     let host = bank_test::MockSlabHost::new(0x1000);
@@ -594,7 +593,7 @@ const MOCK_CONFIG_DESCRIPTOR_EP2: [u8; 25] = [
 ];
 
 /// Device descriptor fixture for a USB **hub** (`bDeviceClass = 0x09`),
-/// `idVendor:idProduct = 2109:3431` — the Pi 4B's onboard VIA Labs hub.
+/// `idVendor:idProduct = 2109:3431` — a high-speed onboard hub.
 const MOCK_HUB_DESCRIPTOR: [u8; 18] = [
     18, 0x01, 0x00, 0x02, 0x09, 0x00, 0x00, 0x40, 0x09, 0x21, 0x31, 0x34, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x01,
@@ -602,8 +601,8 @@ const MOCK_HUB_DESCRIPTOR: [u8; 18] = [
 
 /// Device descriptor fixture for a **`SuperSpeed`** USB hub: bcdUSB 3.00,
 /// `bMaxPacketSize0 = 9` (the exponent encoding of EP0's fixed 512, USB
-/// 3.2 §9.6.1), `idVendor:idProduct = 0bda:5411` — the Realtek RTS5411
-/// a Pi 4 multi-drive enclosure presents on the `SuperSpeed` root port.
+/// 3.2 §9.6.1), `idVendor:idProduct = 0bda:5411` — the hub a multi-drive
+/// enclosure presents on the `SuperSpeed` root port.
 const MOCK_SS_HUB_DESCRIPTOR: [u8; 18] = [
     18, 0x01, 0x00, 0x03, 0x09, 0x00, 0x00, 9, 0xDA, 0x0B, 0x11, 0x54, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x01,
@@ -826,7 +825,7 @@ const MOCK_KEYBOARD_CARD_READER_CONFIG_DESCRIPTOR: [u8; 48] = [
 ///
 /// The booleans mirror independent hardware bits and fault-injection
 /// knobs, not a state machine — the `struct_excessive_bools` lint is
-/// allowed here for the same reason as the `emmc2` `MockSdhci`.
+/// allowed here.
 #[allow(clippy::struct_excessive_bools)]
 struct MockXhci {
     /// Register reads served, so a cost-budget regression can hold the
@@ -1010,7 +1009,7 @@ struct MockXhci {
     /// the device.
     fault_next_address_device: Option<CompletionCode>,
     /// As [`Self::fault_next_address_device`], but for a device on a *root*
-    /// hub port — modelling the Pi 4 (VL805) rejecting an Address Device
+    /// hub port — modelling a controller rejecting an Address Device
     /// with a Context State Error when the port has not finished settling
     /// out of its reset. The command never reaches the device, so a fresh
     /// slot must re-drive it.
@@ -1069,12 +1068,12 @@ struct MockXhci {
     teardown_log: Option<TeardownLog>,
     /// A root-hub port (0-based) whose device only reports Current
     /// Connect Status once software writes Port Power — modelling a
-    /// port-power-controlled controller (the VL805, `HCCPARAMS1`
+    /// port-power-controlled controller (`HCCPARAMS1`
     /// PPC = 1), where an unpowered port reads disconnected.
     latent_device_port: Option<usize>,
     /// `HCSPARAMS2` value the mock reports (the split Max Scratchpad
     /// Buffers fields). `0` (default) needs no scratchpad; a non-zero
-    /// count models the VL805, which executes **no** command until
+    /// count models a controller that executes **no** command until
     /// software points `DCBAA[0]` at a programmed scratchpad array
     /// (xHCI §4.20).
     hcsparams2: u32,
@@ -1082,8 +1081,7 @@ struct MockXhci {
     pagesize: u32,
     /// When non-zero, the attached device is a USB **hub** reporting
     /// this many downstream ports; its device/config descriptors switch
-    /// to the hub fixtures (class `0x09`), mirroring the Pi 4B's onboard
-    /// `2109:3431` VIA Labs hub.
+    /// to the hub fixtures (class `0x09`), mirroring an onboard hub.
     hub_ports: u8,
     /// The USB 2.0 hub's `DeviceRemovable` byte: the downstream ports whose
     /// device is built in.
@@ -1769,8 +1767,7 @@ impl MockXhci {
     /// root-hub port 1 (a high-speed device, enabled), reporting `ports`
     /// downstream ports with a high-speed device on downstream port
     /// `downstream`. The downstream port reports a connected device only
-    /// once software powers it — mirroring the Pi 4B's onboard
-    /// `2109:3431` hub and its keyboard.
+    /// once software powers it — mirroring an onboard hub and its keyboard.
     fn with_hub(mem: &SharedMem, ports: u8, downstream: u8) -> Self {
         let mut mock = Self::with_device(mem);
         mock.hub_ports = ports;
@@ -1783,7 +1780,7 @@ impl MockXhci {
     /// As [`Self::with_hub`], but the hub tier is **`SuperSpeed`**: the
     /// root port trains at protocol speed 4 and the hub serves only the
     /// 12-byte 0x2A SS hub descriptor — the multi-drive-enclosure shape a
-    /// Pi 4's USB3 root port presents. The downstream leaf is a
+    /// `SuperSpeed` root port presents. The downstream leaf is a
     /// `SuperSpeed` device whose exponent-encoded `bMaxPacketSize0` refuses
     /// any misdecoded (USB 2.0) downstream speed.
     fn with_ss_hub(mem: &SharedMem, ports: u8, downstream: u8) -> Self {
@@ -1875,7 +1872,7 @@ impl MockXhci {
     }
 
     /// As [`Self::with_device`], but the controller requires `count`
-    /// page-sized scratchpad buffers (the VL805 needs 31) and reports a
+    /// page-sized scratchpad buffers and reports a
     /// 4 KiB page size — and, modelling the real hardware, posts **no**
     /// command completion until software programs `DCBAA[0]`
     /// ([`Self::scratchpad_unprogrammed`]).
@@ -2062,7 +2059,7 @@ impl MockXhci {
         }
     }
 
-    /// Model the non-coherent BCM2711/VL805 hazard where the controller has
+    /// Model the non-coherent PCIe hazard where the controller has
     /// advanced its event-ring enqueue and set the new entry's cycle bit, but
     /// the entry's 16-byte body has not yet reached RAM: zero the body of the
     /// most-recently-posted event while keeping its cycle bit, so the consumer
@@ -2254,7 +2251,7 @@ impl MockXhci {
     fn process_command_ring(&mut self) {
         // A controller that requires scratchpad buffers does not execute
         // any command until software points `DCBAA[0]` at the scratchpad
-        // array (xHCI §4.20) — the VL805's metal `stage=2 completion=0`.
+        // array (xHCI §4.20).
         if regs::hcsparams2_max_scratchpad(self.hcsparams2) > 0 && self.scratchpad_unprogrammed() {
             return;
         }
@@ -3331,7 +3328,7 @@ impl MockXhci {
             && self
                 .nested_by_root_port((self.downstream_route & 0xF) as u8)
                 .is_some();
-        // The hub fixture sits on root port 1 (the Pi 4's onboard-hub
+        // The hub fixture sits on root port 1 (an onboard-hub
         // shape); a root device addressed on any other port is a plain
         // leaf, so a hub tier and a directly-attached device coexist.
         let is_hub_device =
@@ -6122,7 +6119,7 @@ fn usb_device_start_programs_dma_and_runs() {
 fn a_controller_taking_more_segments_gets_a_longer_event_ring() {
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
-    // ERST Max 3, as the VL805 reports: eight entries, of which four are used.
+    // ERST Max 3: eight entries, of which four are used.
     mock.hcsparams2 |= 3 << 4;
     let device = started_device(mock, &mem);
     let mut host = device.host_mut();
@@ -6158,8 +6155,8 @@ fn usb_device_start_rejects_bad_regions() {
 }
 
 #[test]
-fn hcsparams2_decodes_the_vl805_scratchpad_count() {
-    // VL805 datasheet HCSPARAMS2 default `FC000031h` → 31 scratchpad
+fn hcsparams2_decodes_a_31_buffer_scratchpad_count() {
+    // An HCSPARAMS2 of `FC000031h` → 31 scratchpad
     // buffers (low field bits 31:27 = 0x1F, high field bits 25:21 = 0).
     assert_eq!(regs::hcsparams2_max_scratchpad(0xFC00_0031), 31);
     // A high-field-only value combines into the 10-bit count.
@@ -6170,7 +6167,7 @@ fn hcsparams2_decodes_the_vl805_scratchpad_count() {
 
 #[test]
 fn hcsparams2_decodes_the_scheduling_threshold_and_segment_table_size() {
-    // The VL805's `FC000031h`: IST of one microframe, ERST Max 3.
+    // `FC000031h`: IST of one microframe, ERST Max 3.
     assert_eq!(regs::hcsparams2_ist_microframes(0xFC00_0031), 1);
     assert_eq!(regs::hcsparams2_erst_entries(0xFC00_0031), 8);
     // QEMU's `0000000Fh`: IST of seven whole frames, one segment.
@@ -6182,7 +6179,7 @@ fn hcsparams2_decodes_the_scheduling_threshold_and_segment_table_size() {
 
 #[test]
 fn pagesize_decodes_the_lowest_supported_page() {
-    // Bit 0 → 4 KiB (the VL805's page); a higher bit → its `2^(n+12)`.
+    // Bit 0 → 4 KiB; a higher bit → its `2^(n+12)`.
     assert_eq!(regs::pagesize_bytes(1), 4096);
     assert_eq!(regs::pagesize_bytes(1 << 4), 1 << 16);
     // An unset register reports no size, so the caller fails closed.
@@ -6214,10 +6211,10 @@ fn starting_the_engine_declares_the_reset_controller_quiesced() {
 
 #[test]
 fn start_reserves_scratchpad_and_programs_dcbaa0() {
-    // A VL805-shaped controller: 31 page-sized scratchpad buffers, and
+    // A controller needing 31 page-sized scratchpad buffers, and
     // no command completes until software points `DCBAA[0]` at the
     // scratchpad array (xHCI §4.20). Before this fix the very first
-    // Enable Slot produced no completion event (the Pi 4 metal
+    // Enable Slot produced no completion event (the metal
     // `4126 stage=2 completion=0`); now `start` reserves the buffers, so
     // the command ring runs and enumeration completes.
     let mem = shared_mem();
@@ -6251,7 +6248,7 @@ fn start_reserves_scratchpad_and_programs_dcbaa0() {
 
 #[test]
 fn start_stalls_without_scratchpad_on_a_controller_that_needs_it() {
-    // The same VL805-shaped controller, but the engine is denied a region
+    // The same controller, but the engine is denied a region
     // large enough to reserve the 31 scratchpad pages: `start` fails
     // closed (`OutOfMemory`) rather than running a controller whose
     // `DCBAA[0]` it could not program.
@@ -6404,7 +6401,7 @@ fn bring_up_powers_every_root_port() {
 
 #[test]
 fn bring_up_connects_a_port_only_after_power() {
-    // Model the VL805: the device reports no Current Connect Status until
+    // A port-power-controlled controller: the device reports no Current Connect Status until
     // software powers the port. A walk that read connect status without
     // first asserting `PP` (the old behaviour) would find nothing; the
     // power-then-debounce scan brings the device up.
@@ -6424,11 +6421,11 @@ fn bring_up_connects_a_port_only_after_power() {
 
 #[test]
 fn a_root_port_reset_consumes_its_change_latches_and_settles_reset_recovery() {
-    // The Pi 4 defect. The root-port reset used to return the instant
+    // The metal defect. The root-port reset used to return the instant
     // `PORTSC.PR` read clear and address the device straight away, leaving
     // the reset's own `PRC`/`PEC` latches set and skipping the `TRSTRCY`
     // recovery interval (USB 2.0 §7.1.7.5) the device is owed — which is
-    // what had the VL805 reject the Address Device with a Context State
+    // what had the controller reject the Address Device with a Context State
     // Error. The downstream hub-port path already did this correctly; the
     // root port now runs the same protocol step.
     //
@@ -6501,7 +6498,7 @@ fn a_root_port_that_never_leaves_reset_fails_closed_within_the_poll_bound() {
 fn the_completion_code_decoder_names_the_whole_architected_set() {
     // A completion code the decoder cannot name reaches a diagnostic as
     // "undecodable", which is exactly the information a metal capture needs:
-    // the Pi 4's Context State Error (19) on Address Device read as a driver
+    // a controller's Context State Error (19) on Address Device read as a driver
     // decode failure rather than as the controller's own answer. Every code
     // xHCI 1.2 table 6-90 architects decodes; only the values it reserves or
     // leaves vendor-defined still fail closed.
@@ -6533,7 +6530,7 @@ fn the_completion_code_decoder_names_the_whole_architected_set() {
     // fresh slot re-drives either, but only the latter reads as a removal.
     assert!(
         CompletionCode::ContextStateError.indicates_state_disagreement(),
-        "the Pi 4's Address Device rejection is a state disagreement"
+        "an Address Device rejection for context state is a state disagreement"
     );
     assert!(
         !CompletionCode::ContextStateError.indicates_device_unreachable(),
@@ -6611,11 +6608,11 @@ fn the_deferred_retry_never_resets_an_already_served_port() {
 
 #[test]
 fn an_address_device_rejected_for_context_state_is_retried_on_a_fresh_slot() {
-    // The exact metal failure: `enum_stage=3 completion=19` — the VL805
+    // The exact metal failure: `enum_stage=3 completion=19` — the controller
     // rejecting Address Device with a Context State Error because its view of
     // the port/slot state did not match the driver's. The command never
     // reached the device, so it stays in Default state and a fresh slot
-    // re-drives it cleanly (as Linux's `hub_port_init` does). Before the fix
+    // re-drives it cleanly. Before the fix
     // code 19 was not modelled at all: it decoded as "undecodable", took the
     // fault out of the retry classification, and — with the only connected
     // root port failing — killed the whole controller.
@@ -6715,7 +6712,7 @@ fn root_attach_records_the_configured_stage_on_success() {
 
 #[test]
 fn root_attach_recognises_a_hub_via_the_device_class() {
-    // The Pi 4B's onboard 2109:3431 VIA Labs hub enumerates on root-hub
+    // An onboard 2109:3431 hub enumerates on root-hub
     // port 1; the keyboard hangs off it, so the attach must recognise
     // the enumerated device is a hub (bDeviceClass 0x09) and install it
     // rather than serving it as a leaf (metal `4102 vendor=2109
@@ -6890,7 +6887,7 @@ fn enumerating_a_hub_does_not_arm_its_interrupt_endpoint() {
 
 #[test]
 fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
-    // The Pi 4B metal case: the onboard 2109:3431 hub enumerates on slot
+    // The metal case: the onboard 2109:3431 hub enumerates on slot
     // 1, and a *full-speed* keyboard hangs off a downstream port (the
     // metal `4127` capture: connected, no speed bit → full speed). Reach
     // it on a second xHCI slot whose slot context carries the Route
@@ -7339,7 +7336,7 @@ fn a_configuration_longer_than_512_bytes_is_read_whole() {
 fn a_report_transfer_is_armed_no_longer_than_the_report_needs() {
     // A full/low-speed endpoint behind a high-speed hub faults with a Split
     // Transaction Error when a transfer outruns the interval budget its
-    // transaction translator scheduled: the Pi 4 keyboard behind its hub.
+    // transaction translator scheduled: a keyboard behind a hub.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device.bring_up().expect("the boot keyboard enumerates");
@@ -7711,7 +7708,7 @@ fn the_interrupt_pump_captures_a_mouse_the_same_way_as_a_keyboard() {
 
 #[test]
 fn bring_up_keyboard_descends_through_a_hub_to_the_keyboard() {
-    // The Pi 4B metal topology: the onboard hub enumerates on the root
+    // The metal topology: an onboard hub enumerates on the root
     // port and a full-speed keyboard hangs off a downstream port. The
     // orchestration recognises the hub, powers its ports, waits the
     // power-on-good window, resets the connected port, waits reset
@@ -8079,11 +8076,11 @@ fn a_forged_hub_descriptor_fails_the_attach_closed() {
 
 #[test]
 fn a_garbled_hub_descriptor_reply_is_retried_and_the_attach_succeeds() {
-    // The Pi 4 metal failure: a multi-drive enclosure's RTS5411 hub
+    // The metal failure: a multi-drive enclosure's hub
     // enumerated cleanly, then answered the hub-descriptor read with a
     // *successful* transfer whose bytes were not a hub descriptor, and
-    // the whole tier behind it was refused. Production stacks retry this
-    // exchange; this pins that one garbled reply costs nothing — the
+    // the whole tier behind it was refused. A bounded retry rides this
+    // out; this pins that one garbled reply costs nothing — the
     // bounded retry reads the honest descriptor and the hub installs.
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
@@ -8097,8 +8094,8 @@ fn a_garbled_hub_descriptor_reply_is_retried_and_the_attach_succeeds() {
 
 #[test]
 fn a_superspeed_hub_installs_with_its_own_descriptor_and_hub_depth() {
-    // The Pi 4 metal failure on the `SuperSpeed` root port: the enclosure's
-    // RTS5411 is an SS hub there — it serves only the 12-byte 0x2A hub
+    // The metal failure on the `SuperSpeed` root port: the enclosure's
+    // hub is an SS hub there — it serves only the 12-byte 0x2A hub
     // descriptor and refuses the USB 2.0 0x29 request the engine used to
     // send, so the whole tier was skipped at boot and on hot-plug alike
     // (BadMagic at EnumStage::Configured while the USB 2.0 port worked).
@@ -8628,9 +8625,9 @@ fn a_transient_split_fault_during_enumeration_retries_and_serves_the_device() {
     // Transaction Error (the boot log's `enum_stage=3 completion=36`). That is
     // a present-but-disturbed device, not a broken one: the device never saw
     // the Set Address, so it stays in Default state. Enumeration must re-drive
-    // a fresh slot (Linux's `hub_port_init` retries the same way) and still
-    // serve the keyboard, instead of failing the attach — which, on the Pi 4
-    // where the only connected root port is the onboard hub, would take the
+    // a fresh slot and still
+    // serve the keyboard, instead of failing the attach — which, on a board
+    // whose only connected root port is the onboard hub, would take the
     // whole controller down (attach 0 → `bring_up` errors → task exits).
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
@@ -8895,7 +8892,7 @@ fn acknowledge_clears_ip_only_and_a_zero_event_wake_never_writes_erdp() {
     // write performed on every interrupt service, including a wake that
     // dequeued nothing. Writing ERDP (with the Event Handler Busy clear bit)
     // while the controller still holds an un-dequeued event — routine on the
-    // non-coherent VL805/PCIe path, where the MSI can arrive before the event
+    // non-coherent PCIe path, where the MSI can arrive before the event
     // TRB's DMA write is visible to this PE — tells the controller the ring is
     // drained to a point *behind* its own enqueue, so it re-asserts the
     // interrupt immediately and the loop spins forever.
@@ -8977,8 +8974,8 @@ fn acknowledge_clears_ip_only_and_a_zero_event_wake_never_writes_erdp() {
 
 #[test]
 fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives() {
-    // The metal "first key then silent" fault: on the non-coherent BCM2711/
-    // VL805 PCIe path the controller's event-TRB write does not reach RAM
+    // The metal "first key then silent" fault: on a non-coherent PCIe path
+    // the controller's event-TRB write does not reach RAM
     // atomically, so the announcing cycle bit can be visible to this PE while
     // the 16-byte body is still the zeroed initial state. The drain must NOT
     // consume such a phantom: a real event TRB never has type 0, and consuming
@@ -9044,7 +9041,7 @@ fn controller_faulted_reports_hse_and_halt_and_recovery_clears_it() {
     // A halted/errored controller (USBSTS.HSE or HCHalted) raises no further
     // interrupts until a Host Controller Reset, so a watched device's hot-plug
     // and transfers go silent — the metal "unplug worked but the controller
-    // never saw the re-plug" fault. On the Pi 4 the VL805 latches a Host System
+    // never saw the re-plug" fault. A controller may latch a Host System
     // Error during the downstream-device hot-removal teardown, after its
     // Disable Slot has already completed. The HCD detects this and recovers by
     // resetting and re-enumerating; this verifies the predicate it keys on and
@@ -11381,7 +11378,7 @@ fn hub_watch_reenumerates_a_reattached_device_on_a_fresh_slot() {
 
 #[test]
 fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
-    // On the Pi 4 the keyboard hangs off a hub, and pulling the keyboard out
+    // Where the keyboard hangs off a hub, pulling the keyboard out
     // takes that hub with it: the unplug surfaces as the hub's own *root* port
     // losing connection (its `PORTSC.CSC` latching), not as a downstream
     // hub-port change. The hub being gone, it answers neither its
@@ -11461,7 +11458,7 @@ fn hub_assembly_unplug_at_root_port_tears_down_and_replug_reenumerates() {
 
 #[test]
 fn a_device_plugged_into_a_second_root_port_is_served_while_the_hub_stays_watched() {
-    // The Pi 4 metal defect this rework fixes: only the USB2 side of the
+    // The metal defect this rework fixes: only the USB2 side of the
     // jacks runs through the watched onboard hub — a `SuperSpeed` device
     // trains directly on *another* root port. The old engine served only
     // the first connected root port and never scanned the others while a
@@ -12936,7 +12933,7 @@ fn bring_up_keyboard_comes_up_awaiting_a_connect_when_no_device_is_attached() {
 
 #[test]
 fn bring_up_serves_a_keyboard_and_a_storage_stick_behind_the_hub_together() {
-    // The Pi 4 boot defect the multi-device engine fixes: with a storage
+    // The boot defect the multi-device engine fixes: with a storage
     // stick plugged in beside the keyboard, the stick won the engine's
     // single device slot and the keyboard never enumerated (the boot hung
     // with dead input). Both hub ports must be served concurrently, each on
@@ -13098,7 +13095,7 @@ fn unplugging_the_keyboard_leaves_the_storage_stick_served() {
 
 #[test]
 fn bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together() {
-    // The Pi 4 defect the mouse class driver rides on: a keyboard and a
+    // The defect the mouse class driver rides on: a keyboard and a
     // mouse plugged in together must both be served, each on its own
     // device index with its own interrupt endpoint, and each emitted node
     // must carry its own interface class so `devmgr` autoloads the
@@ -13921,7 +13918,7 @@ mod alloc_counter {
 #[global_allocator]
 static COUNTING_ALLOC: alloc_counter::Counting = alloc_counter::Counting;
 
-/// Bring up the Pi-4-shaped topology (onboard hub, keyboard and mouse behind
+/// Bring up an onboard-hub topology (onboard hub, keyboard and mouse behind
 /// it), settle the report endpoints, and post one mouse-move report — the state
 /// the per-interrupt cost tests measure from.
 fn hub_with_a_mouse_report_posted(mem: &SharedMem) -> TestHost {

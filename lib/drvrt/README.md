@@ -39,6 +39,9 @@ grants and:
   the call it serves; `Supplier` and `Recorder<R>` — the supplier as its loop
   drives it, and where its decisions go; `serve::Service` — the one loop
   every supplier serves its endpoint from.
+- `irqline::IrqLines` — the line holders every `irqline-v1` supplier keeps,
+  over its controller's registers (`irqline::LineHardware`), its decisions
+  `irqline::LineRecord`s.
 - `testkit` (feature `test-support`) — `FakeKernel` and `Records`, the kernel
   and record double every supplier's tests use.
 

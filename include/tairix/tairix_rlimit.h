@@ -22,7 +22,7 @@
 
 /* Resource kinds a tairix_resource_limit_t can govern (uint32_t; AGENTS.md sec.24.3). */
 #define TAIRIX_LIMIT_KIND_ADDRESS_SPACE_BYTES ((uint32_t)0u)
-#define TAIRIX_LIMIT_KIND_OPEN_STREAMS ((uint32_t)1u)
+#define TAIRIX_LIMIT_KIND_OPEN_FILES ((uint32_t)1u)
 #define TAIRIX_LIMIT_KIND_PROCESSES ((uint32_t)2u)
 #define TAIRIX_LIMIT_KIND_STACK_BYTES ((uint32_t)3u)
 #define TAIRIX_LIMIT_KIND_PINNED_MEMORY_BYTES ((uint32_t)4u)

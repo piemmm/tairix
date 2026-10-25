@@ -47,6 +47,18 @@ ei ddatrys, sef yr hyn y mae'r cysylltiad yn ei gadw. Felly rhestrir
 cysylltiad sy'n hongian fel arfer; dim ond ystum sy'n ei ddatrys (`-L`,
 neu `-H` ar gyfer operand) sy'n adrodd am darged na all gyrraedd.
 
+Dyfynnir enwau fel bod nodau lletchwith yn weladwy ac yn ddiogel i'w
+gludo'n ôl i gragen: wrth derfynell y rhagosodiad yw `shell-escape`
+(dyfynnir enw â bylchau neu feta-nodau, a dangosir nodau rheoli fel
+dilyniannau dianc `$'…'`), a `literal` fel arall (enwau'n llythrennol).
+Mae `-N`, `-Q`, `-b` a `--quoting-style` yn dewis yr arddull, ac mae
+`-q` yn dangos nodau rheoli fel `?`. O dan `-F` a `--file-type`, mae
+arddulliau'r gragen yn dyfynnu enw sy'n cynnwys `*`, `=`, `>`, `@` neu
+`|`, ac mae `-Q` a `-b` yn dianc y nod hwnnw ynddo, felly ni ellir ei
+gamgymryd am ôl-ddodiad dynodwr. Mae `-F` GNU yn gadael `*` heb ei
+farcio, ac yno mae enw sy'n gorffen ag un yn edrych fel ffeil
+weithredadwy.
+
 ## OPTIONS
 
 - `-t` — didoli yn ôl y stamp amser a ddangosir, y diweddaraf yn
@@ -191,9 +203,11 @@ neu `-H` ar gyfer operand) sy'n adrodd am darged na all gyrraedd.
 ## EXIT STATUS
 
 - `0` — rhestrwyd pob operand.
-- `1` — ni ellid archwilio operand, ni ellid darllen cyfeiriadur, neu
-  ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — problem fach: ni ellid archwilio na darllen cofnod neu
+  is-gyfeiriadur o fewn rhestr.
+- `2` — trafferth ddifrifol: ni ddeallwyd y llinell orchymyn, ni ellid
+  archwilio na darllen operand, cyrhaeddodd `-R` gyfeiriadur eto drwy
+  gysylltiad, rhedodd y cof allan, neu ni ellid cyflwyno'r allbwn.
 
 ## ENVIRONMENT
 

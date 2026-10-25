@@ -134,8 +134,7 @@ diweddarach o gynllun yr offeryn.
 
 - `0` — daeth y sesiwn i ben drwy `q` y defnyddiwr.
 - `1` — ni ellid rhestru'r cyfeiriadur cychwynnol, neu fethodd llwybr y
-  derfynell.
-- `2` — ni ellid deall y dadleuon.
+  derfynell. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## SEE ALSO
 

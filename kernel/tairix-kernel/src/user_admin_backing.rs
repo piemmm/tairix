@@ -6,7 +6,7 @@
 //! `/System` volume — the account databases are reachable only through the
 //! driver backing the root volume, exactly like the boot-time load.
 //! The engine therefore shares the **one** registered root-volume driver
-//! (the same `SleepLock`-serialised instance the `fs_*` syscalls run
+//! (the same `DriverLock`-serialised instance the `fs_*` syscalls run
 //! against): the volume has a single writer, so its copy-on-write
 //! allocation state can never diverge between two independent windows, and
 //! every mutation is visible to the filesystem cache wrapped around that
@@ -16,9 +16,9 @@
 //! sibling temporary node carrying the original's security record, then
 //! renamed over the original, so a power cut mid-write leaves either the
 //! old or the new database — never a torn one. Home provisioning walks
-//! and creates the directory path, stamps the leaf owner-only under the
-//! new account's identity, and gives it the fixed home shape through the one
-//! shared walk ([`tairix_users::provision_home_shape`]).
+//! and creates the directory path, the leaf born owner-only for the new
+//! account, and gives it the fixed home shape through the one shared walk
+//! ([`tairix_users::provision_home_shape`]).
 
 use alloc::sync::Arc;
 
@@ -27,7 +27,7 @@ use tairix_abi::driver::filesystem::{
     NodeSecurity,
 };
 use tairix_abi::{DriverError, Errno};
-use tairix_kernel_core::{SleepLock, UserAdminBacking};
+use tairix_kernel_core::{DriverLock, UserAdminBacking};
 use tairix_users::{provision_home_shape, ShapeError, HOME_MODE};
 
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
@@ -38,13 +38,13 @@ pub struct RootAdminBacking<F: 'static> {
     /// because a commit parks on device completion; holding it serialises
     /// an admin commit against every concurrent `fs_*` operation on the
     /// same volume.
-    fs: Arc<SleepLock<F>>,
+    fs: Arc<DriverLock<F>>,
 }
 
 impl<F> RootAdminBacking<F> {
     /// Share the registered root-volume driver.
     #[must_use]
-    pub const fn new(fs: Arc<SleepLock<F>>) -> Self {
+    pub const fn new(fs: Arc<DriverLock<F>>) -> Self {
         Self { fs }
     }
 }
@@ -95,14 +95,14 @@ where
                     dir = node;
                 }
                 Err(DriverError::NotFound) => {
-                    let node = fs
-                        .create(dir, component.as_bytes(), NodeKind::Directory)
+                    let record = if is_leaf {
+                        NodeSecurity::new(HOME_MODE, uid, gid)
+                    } else {
+                        NodeSecurity::created(NodeKind::Directory, 0, 0)
+                    };
+                    dir = fs
+                        .create(dir, component.as_bytes(), NodeKind::Directory, &record)
                         .map_err(DriverError::as_errno)?;
-                    if is_leaf {
-                        fs.set_security(node, NodeSecurity::new(HOME_MODE, uid, gid))
-                            .map_err(DriverError::as_errno)?;
-                    }
-                    dir = node;
                 }
                 Err(err) => return Err(err.as_errno()),
             }
@@ -190,18 +190,16 @@ where
     }
 
     let tmp = fs
-        .create(dir, tmp_name, NodeKind::RegularFile)
+        .create(dir, tmp_name, NodeKind::RegularFile, &security)
         .map_err(DriverError::as_errno)?;
     // The whole database or none of it: a driver may store less than it was
     // handed as back-pressure, so the write resumes rather than being read as
     // a failure — but a genuine refusal still drops the temp instead of
     // letting a truncated database be renamed over the live one.
-    if let Err(err) = fs.write_all(dir, tmp_name, 0, data) {
+    if let Err(err) = fs.write_all(tmp, 0, data) {
         let _ = fs.remove(dir, tmp_name);
         return Err(err.as_errno());
     }
-    fs.set_security(tmp, security)
-        .map_err(DriverError::as_errno)?;
     // Land the temp durably before it replaces the original, so the rename
     // can never expose a half-written database.
     fs.flush().map_err(DriverError::as_errno)?;
@@ -224,6 +222,11 @@ mod tests {
     };
 
     const KEY: VolumeKey = [0x5A; VOLUME_KEY_LEN];
+    const SYSTEM_DIR: NodeSecurity = NodeSecurity::created(NodeKind::Directory, 0, 0);
+    const SYSTEM_FILE: NodeSecurity = NodeSecurity::created(NodeKind::RegularFile, 0, 0);
+    /// The databases' own record: owner-only, unlike any default, so a
+    /// replacement that fell back to one is caught.
+    const DATABASE: NodeSecurity = NodeSecurity::new(0o600, 0, 0);
     const SECTOR: usize = 512;
     const SECTOR_U32: u32 = 512;
 
@@ -286,22 +289,22 @@ mod tests {
             .expect("test volume formats");
         let root = fs.root();
         let system = fs
-            .create(root, b"System", NodeKind::Directory)
+            .create(root, b"System", NodeKind::Directory, &SYSTEM_DIR)
             .expect("mkdir System");
         let security = fs
-            .create(system, b"Security", NodeKind::Directory)
+            .create(system, b"Security", NodeKind::Directory, &SYSTEM_DIR)
             .expect("mkdir Security");
         for name in [&b"Users"[..], &b"Groups"[..]] {
-            fs.create(security, name, NodeKind::RegularFile)
+            let file = fs
+                .create(security, name, NodeKind::RegularFile, &DATABASE)
                 .expect("create db file");
-            let written = fs
-                .write_at(security, name, 0, b"seed")
-                .expect("seed db file");
+            let written = fs.write_at(file, 0, b"seed").expect("seed db file");
             assert_eq!(written, 4);
         }
-        fs.create(root, b"Users", NodeKind::Directory)
+        fs.create(root, b"Users", NodeKind::Directory, &SYSTEM_DIR)
             .expect("mkdir Users");
-        RootAdminBacking::new(Arc::new(SleepLock::new(fs)))
+        let nodes = Arc::new(tairix_kernel_core::fs::VolumeNodes::new(1));
+        RootAdminBacking::new(Arc::new(DriverLock::new(fs, nodes)))
     }
 
     fn read_file(backing: &RootAdminBacking<ARXFS<VecBlock>>, name: &[u8]) -> Vec<u8> {
@@ -337,10 +340,8 @@ mod tests {
         let fs = &mut *fs;
         let security_dir = resolve_security_dir(fs).expect("resolves");
         let node = fs.lookup(security_dir, b"Users").expect("exists");
-        let after = fs.security(node).expect("security");
-        assert_eq!(after.mode, before.mode);
-        assert_eq!(after.uid, before.uid);
-        assert_eq!(after.gid, before.gid);
+        assert_eq!(before, DATABASE);
+        assert_eq!(fs.security(node), Ok(before));
         assert_eq!(
             fs.lookup(security_dir, b"Users.tmp").unwrap_err(),
             DriverError::NotFound
@@ -355,11 +356,10 @@ mod tests {
         let body = alloc::vec![0x3Cu8; 4096];
         for file in 0..10_000 {
             let name = alloc::format!("fill{file}");
-            if fs
-                .create(users, name.as_bytes(), NodeKind::RegularFile)
-                .is_err()
-                || fs.write_at(users, name.as_bytes(), 0, &body).is_err()
-            {
+            let filled = fs
+                .create(users, name.as_bytes(), NodeKind::RegularFile, &SYSTEM_FILE)
+                .and_then(|made| fs.write_at(made, 0, &body));
+            if filled.is_err() {
                 fs.flush().expect("publish the fill");
                 return;
             }
@@ -573,8 +573,13 @@ mod tests {
                 .expect("removes the gated root");
             fs.remove(home, b"Settings").expect("removes Settings");
             fs.remove(home, b"Desktop").expect("removes Desktop");
-            fs.create(home, b"Desktop", NodeKind::RegularFile)
-                .expect("the account puts a file there instead");
+            fs.create(
+                home,
+                b"Desktop",
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 1001, 100),
+            )
+            .expect("the account puts a file there instead");
         }
 
         backing
@@ -645,7 +650,7 @@ mod tests {
             let mut fs = backing.fs.lock();
             let fs = &mut *fs;
             let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
-            fs.create(users, b"grace", NodeKind::RegularFile)
+            fs.create(users, b"grace", NodeKind::RegularFile, &SYSTEM_FILE)
                 .expect("plant a file");
         }
         assert_eq!(

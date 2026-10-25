@@ -152,8 +152,7 @@ impl<R: RegisterBlock> Hvs<R> {
 
     /// Take the HVS over: every channel stopped and every output unfed, the
     /// interrupts the engine does not use masked, the composite output
-    /// buffer divided and the filter kernel in place. Linux's
-    /// `vc4_hvs_hw_init` and `vc4_hvs_cob_init` for this part.
+    /// buffer divided and the filter kernel in place.
     pub fn take_over(&self) -> Result<(), DriverError> {
         for channel in 0..reg::CHANNELS {
             self.stop(channel)?;

@@ -275,9 +275,9 @@ Datenträger ist ungeschützt.
 ## EXIT STATUS
 
 - `0` — die Sitzung endete mit `q`, oder die Kurzhilfe wurde gezeigt.
-- `1` — das Terminal scheiterte; der Grund wird auf die Standardfehler-
-  ausgabe geschrieben.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — das Terminal scheiterte; der Grund wird auf die
+  Standardfehlerausgabe geschrieben. Eine nicht verstandene Befehlszeile
+  endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

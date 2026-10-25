@@ -32,27 +32,25 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when a requested short help was served; `1` when the
-    /// output stopped accepting bytes (the tool's one stop condition); `2`
-    /// on a usage error. A normal `yes` run never returns on its own — it
-    /// ends when its consumer goes away or the user interrupts it.
+    /// output stopped accepting bytes (the tool's one stop condition) or the
+    /// command line was not understood. A normal `yes` run never returns on
+    /// its own — it ends when its consumer goes away or the user interrupts
+    /// it.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("yes") else {
+            return tairix_help::MISUSE;
         };
         let operands = match parse(&arguments) {
             Ok(Command::Repeat(operands)) => operands,
             Ok(Command::Help) => return tairix_help::print_own_short_help("yes", Some(USAGE)),
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
+            Err(err) => {
+                tairix_help::report_misuse("yes", &err);
+                return tairix_help::MISUSE;
             }
         };
         // The endless writer: it returns only once a write has failed.
-        pump(&block(&operands), &Stdout);
-        write_stderr_line("yes: write error");
+        let stopped = pump(&block(&operands), &Stdout);
+        write_stderr_line(format_args!("yes: {stopped}"));
         1
     }
 

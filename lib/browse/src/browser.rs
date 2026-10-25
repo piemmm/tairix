@@ -23,8 +23,8 @@ use crate::activate::{Activation, BundleIntent};
 use crate::clipboard::{Clipboard, ClipboardOp};
 use crate::column::ScrollColumn;
 use crate::create::{validate_new_entry_name, CreateError};
-use crate::delete::DeletePlan;
-use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget};
+use crate::delete::{DeletePlan, DeleteTarget};
+use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget, Listed};
 use crate::error::BrowseError;
 use crate::layout::{BandMarks, ViewMode};
 use crate::places::{PlaceKind, Places};
@@ -705,55 +705,52 @@ impl<S: DirectorySource> Browser<S> {
         self.selection = base;
     }
 
-    /// The absolute root-first component paths of the currently selected
-    /// entries, in listing order — the source paths a [`clipboard`](Self::clipboard)
-    /// captures for a move or copy.
+    /// The selected entries as listed, in listing order: what a
+    /// [`clipboard`](Self::clipboard) or a drag carries.
     #[must_use]
-    pub fn selected_component_paths(&self) -> Vec<Vec<String>> {
+    pub fn listed_selection(&self) -> Vec<Listed> {
         self.selection
             .iter()
             .filter_map(|index| self.entries.get(index))
-            .map(|entry| {
-                let mut path = self.components.clone();
-                path.push(String::from(entry.name()));
-                path
-            })
+            .map(|entry| self.listed(entry))
             .collect()
+    }
+
+    fn listed(&self, entry: &Entry) -> Listed {
+        let mut path = self.components.clone();
+        path.push(String::from(entry.name()));
+        Listed {
+            path,
+            id: entry.id(),
+        }
     }
 
     /// Capture the current selection onto a cut/copy [`Clipboard`] for `op`, or
     /// `None` when nothing is selected.
     ///
     /// The clipboard holds the selected entries' absolute paths, so it stays
-    /// valid after the user navigates elsewhere to paste. Building it grants no
+    /// valid after the user navigates elsewhere to paste, and the node each
+    /// was listed as, so a paste never carries another. Building it grants no
     /// authority — the move/copy the app later performs is the user's own
     /// capability-checked filesystem operation.
     #[must_use]
     pub fn clipboard(&self, op: ClipboardOp) -> Option<Clipboard> {
-        Clipboard::new(op, self.selected_component_paths())
+        Clipboard::new(op, self.listed_selection())
     }
 
     /// Capture the current selection into a [`DeletePlan`] naming what a Delete
     /// would remove, or `None` when nothing is selected.
     ///
-    /// Each target carries its absolute path (so it names exactly the node the
-    /// browser shows) and whether it is directory-backed on disk (so the app
-    /// removes it with [`UnlinkFlags::DIRECTORY`](tairix_abi::UnlinkFlags::DIRECTORY)
-    /// and recurses, rather than unlinking a leaf file). Building the plan
-    /// grants no authority — the `fs_unlink` the app later performs is the
-    /// user's own capability-checked filesystem operation, so the read-only
-    /// picker composes the same [`Browser`] and never builds one.
+    /// Building the plan grants no authority — the removal the app later
+    /// performs is the user's own capability-checked filesystem operation, so
+    /// the read-only picker composes the same [`Browser`] and never builds one.
     #[must_use]
     pub fn plan_delete(&self) -> Option<DeletePlan> {
         let targets = self
             .selection
             .iter()
             .filter_map(|index| self.entries.get(index))
-            .map(|entry| {
-                let mut path = self.components.clone();
-                path.push(String::from(entry.name()));
-                (path, entry.is_directory_backed())
-            })
+            .map(|entry| DeleteTarget::new(self.listed(entry), entry.is_directory_backed()))
             .collect();
         DeletePlan::new(targets)
     }

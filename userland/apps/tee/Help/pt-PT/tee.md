@@ -58,8 +58,8 @@ chegará com esse trabalho no núcleo, em vez de ser aceite e ignorado.
   ajuda curta pedida foi servida); uma falha da saída padrão tolerada
   por um modo `-nopipe` não muda isto.
 - `1` — uma saída falhou de forma que o modo selecionado conta, ou a
-  entrada não pôde ser lida.
-- `2` — a linha de comandos não foi compreendida.
+  entrada não pôde ser lida. Uma linha de comandos não compreendida
+  também termina com `1`.
 
 ## ENVIRONMENT
 

@@ -53,9 +53,11 @@ pub enum LimitKind {
     /// anonymous regions, file regions, and every thread's committed stack
     /// (`plans/SPAWN.md` SP5).
     AddressSpaceBytes = 0,
-    /// Maximum number of open standard-stream descriptors the process may
-    /// hold (the descriptor-table capacity).
-    OpenStreams = 1,
+    /// Maximum number of descriptors the process may hold: every file,
+    /// directory, resource, pipe and pty end it opens, redeems or is handed.
+    /// A descriptor the spawner wires behind a standard stream is not refused
+    /// by it, but counts against it.
+    OpenFiles = 1,
     /// Maximum number of live child processes the process may have spawned
     /// (the `spawn` fan-out capacity, `plans/SPAWN.md` SP3).
     Processes = 2,
@@ -132,7 +134,7 @@ impl LimitKind {
     /// without extending this array fails to compile.
     pub const ALL: [Self; Self::COUNT] = [
         Self::AddressSpaceBytes,
-        Self::OpenStreams,
+        Self::OpenFiles,
         Self::Processes,
         Self::StackBytes,
         Self::PinnedMemoryBytes,
@@ -152,7 +154,7 @@ impl LimitKind {
     /// disagree. The names are part of the `abi-v1` contract.
     const NAMED: [(Self, &'static str); Self::COUNT] = [
         (Self::AddressSpaceBytes, "address-space-bytes"),
-        (Self::OpenStreams, "open-streams"),
+        (Self::OpenFiles, "open-files"),
         (Self::Processes, "processes"),
         (Self::StackBytes, "stack-bytes"),
         (Self::PinnedMemoryBytes, "pinned-memory-bytes"),
@@ -178,7 +180,7 @@ impl LimitKind {
             | Self::StackBytes
             | Self::PinnedMemoryBytes
             | Self::IpcQueueBytes => true,
-            Self::OpenStreams
+            Self::OpenFiles
             | Self::Processes
             | Self::Threads
             | Self::FileLocks
@@ -343,7 +345,7 @@ mod tests {
     fn limit_kind_discriminants_are_frozen() {
         // The numeric discriminants are part of abi-v1; do not renumber.
         assert_eq!(LimitKind::AddressSpaceBytes.as_u32(), 0);
-        assert_eq!(LimitKind::OpenStreams.as_u32(), 1);
+        assert_eq!(LimitKind::OpenFiles.as_u32(), 1);
         assert_eq!(LimitKind::Processes.as_u32(), 2);
         assert_eq!(LimitKind::StackBytes.as_u32(), 3);
         assert_eq!(LimitKind::PinnedMemoryBytes.as_u32(), 4);
@@ -382,6 +384,7 @@ mod tests {
 
     #[test]
     fn names_are_frozen_and_round_trip() {
+        assert_eq!(LimitKind::OpenFiles.name(), "open-files");
         assert_eq!(LimitKind::Processes.name(), "processes");
         assert_eq!(LimitKind::Threads.name(), "threads");
         assert_eq!(LimitKind::DirWatches.name(), "dir-watches");

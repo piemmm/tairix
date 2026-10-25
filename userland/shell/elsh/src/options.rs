@@ -11,7 +11,7 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::builtin::BuiltinContext;
-use tairix_util::quote::quote_if_needed;
+use tairix_util::quote::quote_subject;
 
 /// One shell option, as `shopt` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +145,7 @@ pub(crate) fn shopt(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
         } else {
             ctx.console.write_stderr(&format!(
                 "shopt: {}: invalid shell option name\n",
-                quote_if_needed(word)
+                quote_subject(word)
             ));
             status = 1;
         }
@@ -221,7 +221,10 @@ fn parse(args: &[String]) -> Result<Request<'_>, Refusal> {
                 }
                 other => {
                     return Err(Refusal {
-                        message: format!("shopt: -{other}: invalid option\n{USAGE}"),
+                        message: format!(
+                            "shopt: {}: invalid option\n{USAGE}",
+                            quote_subject(&format!("-{other}"))
+                        ),
                         status: 2,
                     });
                 }
@@ -344,5 +347,22 @@ mod tests {
         // `noglob` is a `set -o` option, reached only with `-o`.
         assert_eq!(fx.run(&["shopt", "-s", "noglob"]), Some(1));
         assert!(!fx.options.is_on(ShellOption::Noglob));
+    }
+
+    #[test]
+    fn refusals_quote_what_they_name() {
+        let mut fx = Fixture::new();
+        assert_eq!(fx.run(&["shopt", "-s", "no such"]), Some(1));
+        assert_eq!(
+            fx.console.stderr(),
+            "shopt: 'no such': invalid shell option name\n"
+        );
+        fx.console.clear();
+        assert_eq!(fx.run(&["shopt", "-\u{1b}"]), Some(2));
+        let refusal = fx.console.stderr();
+        assert!(
+            refusal.contains("invalid option") && !refusal.contains('\u{1b}'),
+            "{refusal:?}"
+        );
     }
 }

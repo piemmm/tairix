@@ -188,7 +188,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     // `PanicInfo`'s `Display` prints "panicked at <location>:\n<message>" —
     // everything the report needs, within the workspace MSRV.
     let _ = write!(report, "{info}");
-    let _ = report.write_str("\n");
+    report.end_line();
     write_stderr_best_effort(report.as_bytes());
     log_panic_best_effort(info);
     exit(EXIT_PANIC)
@@ -218,7 +218,7 @@ fn out_of_memory(layout: core::alloc::Layout) -> ! {
         layout.size()
     );
     log_fatal_best_effort(crate::OUT_OF_MEMORY_REPORTED, report.as_bytes());
-    let _ = report.write_str("\n");
+    report.end_line();
     write_stderr_best_effort(report.as_bytes());
     exit(status)
 }

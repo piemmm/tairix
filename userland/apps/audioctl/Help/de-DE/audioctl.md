@@ -60,8 +60,8 @@ Auf der Standardinformation (fd 3) schreibt `audioctl streams` einen
 ## EXIT STATUS
 
 - `0` — der Befehl wurde ausgeführt.
-- `1` — er wurde abgelehnt oder konnte nicht ausgeführt werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — er wurde abgelehnt oder konnte nicht ausgeführt werden. Eine nicht
+  verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

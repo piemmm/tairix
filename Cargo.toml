@@ -159,6 +159,7 @@ members = [
     "lib/virtio",
     "lib/virtio_input",
     "lib/virtio_net",
+    "lib/visible",
     "lib/vt",
     "lib/wallpaper",
     "lib/window",

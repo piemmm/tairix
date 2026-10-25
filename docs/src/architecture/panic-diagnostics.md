@@ -277,7 +277,7 @@ CPU time, and the parts that cost image *size* are debug-only.
   debug images only, and not yet implemented.** Its cost is image *size* (a
   symbol table shipped in the kernel), not CPU. The zero-image-cost default
   everywhere is to print **raw addresses** and resolve them offline against
-  the unstripped kernel ELF, exactly as Linux's `decode_stacktrace.sh` does.
+  the unstripped kernel ELF with `llvm-addr2line` or `llvm-symbolizer`.
   An on-target `(addr, name)` table looked up by binary search on the panic
   path, gated on `cfg!(debug_assertions)`, is a staged future addition
   (`PLAN.md`); the offline workflow below is the complete story today.
@@ -420,6 +420,5 @@ $ llvm-symbolizer --obj=target/<triple>/debug/tairix-kernel \
     0xffffffff80001234 0xffffffff80001300
 ```
 
-`addr2line` (GNU binutils) works identically. This mirrors Linux's
-`scripts/decode_stacktrace.sh` — the kernel prints addresses, the developer
-resolves them against the image they built.
+`addr2line` (GNU binutils) accepts the same flags. The kernel prints
+addresses; the developer resolves them against the image they built.

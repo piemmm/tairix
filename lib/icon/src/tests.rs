@@ -96,6 +96,7 @@ fn for_asset_maps_known_ids() {
     );
     assert_eq!(IconKind::for_asset("disk"), IconKind::Disk);
     assert_eq!(IconKind::for_asset("disk-usb"), IconKind::DiskUsb);
+    assert_eq!(IconKind::for_asset("board-fan"), IconKind::BoardFan);
 }
 
 #[test]

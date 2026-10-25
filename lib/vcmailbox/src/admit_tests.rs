@@ -3,7 +3,8 @@
 //! driver may send, and against hostile buffer shapes.
 
 use tairix_abi::driver::display::DisplayFormat;
-use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode};
+use tairix_abi::driver::supply::{IoRail, PowerRail};
+use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
 
 use super::{admit_request, Refusal};
 use crate::{
@@ -11,8 +12,8 @@ use crate::{
     encode_display_size_query, encode_firmware_revision_query, encode_gpio_state_write,
     encode_rtc_register_query, encode_rtc_register_write, encode_xhci_reset, request,
     ClockRateQuery, FirmwareClock, FramebufferRequest, RtcRegister, DISPLAY_ENGINE_KEY,
-    FIRMWARE_CLOCKS_KEY, PROPERTY_WORDS, RPI_RTC_KEY, SKIP_SETTING_TURBO, TAG_SET_CLOCK_RATE,
-    TAG_SET_RTC_REG, VL805_KEY,
+    FIRMWARE_CLOCKS_KEY, PROPERTY_WORDS, RPI_RTC_KEY, SD_HOST_KEY, SKIP_SETTING_TURBO,
+    TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG, VL805_KEY,
 };
 
 const EXECUTE_CODE: u32 = 0x0003_0010;
@@ -27,20 +28,57 @@ fn node(class: HwDeviceClass, keys: &[HwMatchKey]) -> HwNode {
     node
 }
 
-/// The four drivers the service answers, each loaded for its device's node.
-fn clients() -> [HwNode; 4] {
+/// The expander lines the SD host's node states switch its I/O and power
+/// rails.
+const SD_IO_LINE: u8 = 4;
+const SD_POWER_LINE: u8 = 6;
+
+/// The SD host's node as discovery publishes it, with its rails when `rails`.
+fn sd_host(rails: bool) -> HwNode {
+    let mut host = node(HwDeviceClass::Storage, &[SD_HOST_KEY]);
+    if rails {
+        host.push_resource(HwResource::io_rail(IoRail {
+            line: SD_IO_LINE,
+            level_1v8: Some(true),
+            level_3v3: Some(false),
+            settle_us: 5000,
+        }))
+        .expect("room");
+        let power = PowerRail {
+            line: SD_POWER_LINE,
+            active_low: false,
+            startup_us: 0,
+            off_on_us: 0,
+        };
+        host.push_resource(HwResource::power_rail(power).expect("fits"))
+            .expect("room");
+    }
+    host
+}
+
+/// The five drivers the service answers, each loaded for its device's node.
+fn clients() -> [HwNode; 5] {
     [
         node(HwDeviceClass::Bus, &[VL805_KEY]),
         node(HwDeviceClass::Rtc, &[RPI_RTC_KEY]),
         node(HwDeviceClass::Other, &[FIRMWARE_CLOCKS_KEY]),
         node(HwDeviceClass::Display, &[DISPLAY_ENGINE_KEY]),
+        sd_host(true),
     ]
 }
 
 /// Each driver's working set: the index of its driver in [`clients`], and one
 /// request of it.
-fn working_sets() -> [(usize, [u32; PROPERTY_WORDS]); 22] {
+fn working_sets() -> [(usize, [u32; PROPERTY_WORDS]); 27] {
     [
+        (
+            4,
+            encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Current),
+        ),
+        (4, encode_gpio_state_write(SD_IO_LINE, true)),
+        (4, encode_gpio_state_write(SD_IO_LINE, false)),
+        (4, encode_gpio_state_write(SD_POWER_LINE, true)),
+        (4, encode_gpio_state_write(SD_POWER_LINE, false)),
         (3, encode_display_done()),
         (3, encode_display_size_query()),
         (0, encode_xhci_reset()),
@@ -160,10 +198,10 @@ fn a_caller_loaded_for_no_device_is_refused_and_the_tag_it_named_is_reported() {
     }
 }
 
-/// Code execution, GPU memory, voltage, one-time-programmable bits, GPIO, the
-/// framebuffer's allocation and even the harmless revision probe are no
-/// driver's, so no caller may send them, not even one loaded for a node
-/// carrying every client's key.
+/// Code execution, GPU memory, voltage, one-time-programmable bits, a GPIO
+/// line no rail of the caller's names, the framebuffer's allocation and even
+/// the harmless revision probe are no driver's, so no caller may send them,
+/// not even one loaded for a node carrying every client's key.
 #[test]
 fn every_tag_outside_the_working_sets_is_refused_to_every_caller() {
     const ALLOCATE_MEMORY: u32 = 0x0003_000c;
@@ -172,7 +210,7 @@ fn every_tag_outside_the_working_sets_is_refused_to_every_caller() {
     const SET_CUSTOMER_OTP: u32 = 0x0003_8021;
     let everything = node(
         HwDeviceClass::Other,
-        &[VL805_KEY, RPI_RTC_KEY, FIRMWARE_CLOCKS_KEY],
+        &[VL805_KEY, RPI_RTC_KEY, FIRMWARE_CLOCKS_KEY, SD_HOST_KEY],
     );
     let refused_tags = [
         request(&[(EXECUTE_CODE, &[0x1000, 0, 0, 0, 0, 0, 0])]),
@@ -203,9 +241,50 @@ fn every_tag_outside_the_working_sets_is_refused_to_every_caller() {
     );
 }
 
+/// Regression: the SD host's bring-up asks for its base clock, which no rule
+/// answered while the kernel drove the doorbell unchecked.
+#[test]
+fn the_sd_host_may_read_its_own_clock() {
+    let query = encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Current);
+    assert_eq!(admit_request(&query, Some(&sd_host(false))), Ok(()));
+}
+
+/// A switch is the SD host's only for a line its own node's rails name, and
+/// its clock is the one it may read, never set or another's.
+#[test]
+fn the_sd_host_may_switch_only_the_lines_its_node_names() {
+    let host = sd_host(true);
+    let bare = sd_host(false);
+    let another_line = encode_gpio_state_write(SD_IO_LINE + 1, true);
+    assert_eq!(
+        admit_request(&another_line, Some(&host)),
+        refused(&another_line, Errno::PermissionDenied)
+    );
+    let own_line = encode_gpio_state_write(SD_IO_LINE, true);
+    assert_eq!(
+        admit_request(&own_line, Some(&bare)),
+        refused(&own_line, Errno::PermissionDenied),
+        "a node stating no rails switches nothing"
+    );
+    let mut stray_level = own_line;
+    stray_level[6] = 2;
+    for message in [
+        stray_level,
+        encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Max),
+        encode_clock_rate_write(FirmwareClock::Emmc2, 200_000_000),
+        encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Current),
+    ] {
+        assert_eq!(
+            admit_request(&message, Some(&host)),
+            refused(&message, Errno::PermissionDenied),
+            "{message:x?}"
+        );
+    }
+}
+
 #[test]
 fn a_tag_in_a_shape_its_driver_never_sends_is_refused() {
-    let [vl805, rtc, clocks, _] = clients();
+    let [vl805, rtc, clocks, ..] = clients();
     let arm = FirmwareClock::Arm.as_u32();
     // The clock write with its turbo word missing answered a lowering with the
     // ceiling; with the word clear it performs the turbo transition.
@@ -251,7 +330,7 @@ fn a_tag_in_a_shape_its_driver_never_sends_is_refused() {
         refused(&another_controller, Errno::PermissionDenied)
     );
 
-    let [.., engine] = clients();
+    let [.., engine, _] = clients();
     let mut stray_size_slot = encode_display_size_query();
     stray_size_slot[6] = 1920;
     assert_eq!(

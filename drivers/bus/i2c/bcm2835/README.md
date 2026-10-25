@@ -37,8 +37,8 @@ moved bytes: between writes, and before a read that ends the transaction.
 ## Repeated START by chaining
 
 The BSC has no repeated-START command. A message started while the one before
-it is active follows it with a repeated START instead of a STOP, which is how
-Linux's `i2c-bcm2835` issues one. The chain must be in place before the
+it is active follows it with a repeated START instead of a STOP (BCM2835 ARM
+Peripherals §3.3). The chain must be in place before the
 message before it can end, so the driver withholds each write's last byte
 until the next message is started: the controller cannot finish a write it
 has not been given, however late this process runs. A read must end the
@@ -49,12 +49,13 @@ transaction, so any other shape is refused before the bus is touched.
 The FIFO is refilled at its write threshold and drained at its read threshold
 and at completion, the transaction parking on the interrupt in between. Its
 budget is per step of progress: a FIFO's worth of bytes at the bus's speed and
-the longest a target may hold the bus still, one second, the Linux I²C core's
-default. While the controller waits on this driver it holds the clock, so a
+the longest a target may hold the bus still, one second (`lib/i2cbus`).
+While the controller waits on this driver it holds the clock, so a
 late wake finds work rather than a timeout; only a bus that makes no progress
 for a whole step is abandoned, its controller reset, and the transaction
-reported timed out. The controller's own clock-stretch timeout is off, as
-Linux leaves it, so every stall is reported against the message it stalled.
+reported timed out. The controller's own clock-stretch timeout is off
+(`CLKT` is written 0, BCM2835 ARM Peripherals §3.2), so every stall is
+reported against the message it stalled.
 
 ## Bus speed
 
@@ -93,6 +94,7 @@ The endpoint's records are `lib/i2cbus`'s (`docs/src/lib/i2cbus.md`).
 ## References
 
 - BCM2835 ARM Peripherals, §3 (Broadcom Serial Controller).
-- Linux `drivers/i2c/busses/i2c-bcm2835.c`.
+- FreeBSD `sys/arm/broadcom/bcm2835/bcm2835_bsc.c` (BSD-2-Clause), for the
+  byte count held back to chain a repeated START.
 - I²C-bus specification and user manual, NXP UM10204.
 - `plans/I2C.md` I1, I4.

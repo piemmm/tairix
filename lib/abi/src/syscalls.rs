@@ -1,14 +1,12 @@
-//! Frozen `abi-v1` syscall specification table.
+//! The `abi-v1` syscall specification table.
 //!
 //! This module is the **source of truth** for the user/kernel syscall
-//! contract described in: every entry in [`SYSCALLS`] pins
-//! one syscall's number, argument shape, return type, and the capability a
-//! caller must hold to invoke it. The kernel side
-//! (`kernel/syscall/src/table.rs`) is generated against this table and the
-//! two are cross-checked by `cargo xtask abi-check` (final
-//! paragraph). Mutating an existing entry is **not** allowed under
-//! `abi-v1`; new behaviour ships in `abi-v2` (second
-//! paragraph).
+//! contract: every entry in [`SYSCALLS`] pins one syscall's number, argument
+//! shape, return type, and the capability a caller must hold to invoke it.
+//! The kernel side (`kernel/syscall/src/table.rs`) is generated against this
+//! table and the two are cross-checked by `cargo xtask abi-check`. Until the
+//! first release an entry changes in place, with every caller; from then
+//! `abi-v1` is frozen and new behaviour ships as `abi-v2`.
 //!
 //! # Cross-check protocol
 //!
@@ -98,6 +96,10 @@ pub enum AbiType {
     /// pattern is a value. Task ids are drawn over the whole 64-bit space,
     /// so a pid selector is this width rather than `I32`.
     I64 = 10,
+    /// User-space pointer to an operand a call may omit. The dispatcher checks
+    /// nothing: the handler decides what null means and walks page tables
+    /// for any other value.
+    UserPtrOrNull = 11,
 }
 
 impl AbiType {
@@ -143,11 +145,10 @@ pub const fn i32_from_register(raw: u64) -> i32 {
     ((raw & 0xFFFF_FFFF) as u32).cast_signed()
 }
 
-/// One row of the frozen `abi-v1` syscall table.
+/// One row of the `abi-v1` syscall table.
 ///
 /// Fields are public and `const`-constructible so that the table can be
-/// declared as a `&'static [SyscallSpec]`. Existing entries must never
-/// change; see the module-level frozen-ABI note.
+/// declared as a `&'static [SyscallSpec]`.
 #[derive(Copy, Clone, Debug)]
 pub struct SyscallSpec {
     /// Stable identifier.
@@ -174,7 +175,7 @@ pub struct SyscallSpec {
     pub audit: bool,
 }
 
-/// The frozen `abi-v1` syscall table.
+/// The `abi-v1` syscall table.
 ///
 /// Indexed by [`SyscallNumber::as_u16`]. Every entry's array index equals
 /// its `number` field (verified by the in-module `table_is_dense_and_ordered`
@@ -391,13 +392,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // target user (`SPAWN_UID_INHERIT` or a concrete uid,
             // kernel-gated on `CAP_SPAWN_AS_USER`), its base console
             // (`CONSOLE_INHERIT` or an installed index), and one `FdWire`
-            // per standard descriptor (`plans/SPAWN.md` SP10). Zero means
-            // "no block": full inherit, the pre-SP10 semantics. `U64`
-            // rather than `UserPtr` so the absent case is representable;
-            // the handler stages and parses a present block fail-closed
-            // and owner-checks every named handle before any state is
-            // touched.
-            AbiType::U64,
+            // per standard descriptor (`plans/SPAWN.md` SP10). Null means
+            // "no block": full inherit, the pre-SP10 semantics. The handler
+            // stages and parses a present block fail-closed and
+            // owner-checks every named handle before any state is touched.
+            AbiType::UserPtrOrNull,
             // Exact byte length of the attach block
             // (`SPAWN_ATTACH_LEN`), zero when absent; any other value
             // fails closed before staging.
@@ -405,14 +404,13 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // The child's startup strings: the address of an encoded
             // `tairix_abi::process` startup-vector block (the same `PSV1`
             // format the kernel writes into a child's image) carrying the
-            // argument vector and environment the caller chose. Zero means
+            // argument vector and environment the caller chose. Null means
             // "no block": the child receives the program's registered
-            // default arguments and an empty environment. `U64` rather than
-            // `UserPtr` so the absent case is representable; the handler
+            // default arguments and an empty environment. The handler
             // stages and parses a present block fail-closed (the strings
             // are data — they carry no authority and the kernel mints the
             // child's canary itself, ignoring the block's).
-            AbiType::U64,
+            AbiType::UserPtrOrNull,
             // Byte length of the startup-strings block (zero when absent);
             // bounded by the handler against
             // `PROCESS_START_MAX_TOTAL_LEN` before staging.
@@ -1274,15 +1272,16 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_OPEN,
         name: "fs_open",
-        arg_count: 3,
+        arg_count: 5,
         args: [
-            // Non-null `UserPtr` to the absolute path, its length, then the
-            // `OpenFlags` bits.
+            // The directory a relative path starts from (`FD_CWD` for the
+            // working directory), the non-null path `UserPtr` and its length,
+            // the `OpenFlags` bits, then the mode a create asks for.
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::U32,
-            AbiType::Unit,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
         ],
         // Returns the new file descriptor; a `Handle` minted against the
@@ -1445,12 +1444,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_MKDIR,
         name: "fs_mkdir",
-        arg_count: 2,
+        arg_count: 4,
         args: [
+            // The start directory, the path and its length, and the mode the
+            // directory asks for.
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -1462,17 +1463,20 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_UNLINK,
         name: "fs_unlink",
-        arg_count: 3,
+        arg_count: 5,
         args: [
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             // The validated `UnlinkFlags` word: empty removes the named
             // file or (empty) directory; `DIRECTORY` restricts the removal
-            // to an (empty) directory (the atomic `rmdir` posture). A
-            // reserved bit fails closed at dispatch.
+            // to an (empty) directory (the atomic `rmdir` posture); an
+            // `EXPECT_*` bit makes it conditional on the `NodeExpect` the
+            // next word addresses. A reserved bit fails closed at dispatch.
             AbiType::U32,
-            AbiType::Unit,
-            AbiType::Unit,
+            // The `NodeExpect` address, null exactly without an expectation
+            // bit.
+            AbiType::UserPtrOrNull,
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
@@ -1507,16 +1511,21 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_RENAME,
         name: "fs_rename",
-        arg_count: 5,
+        arg_count: 4,
         args: [
+            // Non-null `UserPtr`s to the source's and the destination's
+            // `PathAt`.
             AbiType::UserPtr,
-            AbiType::Len,
             AbiType::UserPtr,
-            AbiType::Len,
             // The validated `RenameFlags` word: empty is POSIX `rename()`,
             // replacing an existing destination; `NO_REPLACE` refuses the
-            // move instead. A reserved bit fails closed at dispatch.
+            // move instead; `EXPECT_NODE` makes it conditional on the
+            // `NodeExpect` the next word addresses. A reserved bit fails
+            // closed at dispatch.
             AbiType::U32,
+            // The `NodeExpect` address, null exactly without `EXPECT_NODE`.
+            AbiType::UserPtrOrNull,
+            AbiType::Unit,
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
@@ -1691,14 +1700,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_CHDIR,
         name: "fs_chdir",
-        arg_count: 2,
+        arg_count: 4,
         args: [
-            // Non-null `UserPtr` to the (absolute or cwd-relative) path, then
-            // its length.
-            AbiType::UserPtr,
+            // The start directory, the path and its length (null and 0
+            // exactly with `EMPTY_PATH`), then the `AtFlags` bits.
+            AbiType::U32,
+            AbiType::UserPtrOrNull,
             AbiType::Len,
-            AbiType::Unit,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -1728,9 +1737,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `U64` carries the bytes-written-or-`-errno` register convention
         // `terminal_size` / `wall_time_get` use.
         ret: AbiType::U64,
-        // Reading one's own working directory grants no authority, so — like
-        // `terminal_size` — it needs no capability and is not audited.
-        required_capability: None,
+        // Spelling the directory reads the entries of every directory above
+        // it, which is filesystem use like any other; it changes nothing, so
+        // it is not audited.
+        required_capability: Some(CapabilityId::FS_ACCESS),
         audit: false,
     },
     SyscallSpec {
@@ -1919,17 +1929,20 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_SET_MODE,
         name: "fs_set_mode",
-        arg_count: 3,
+        arg_count: 5,
         args: [
-            AbiType::UserPtr,
+            // The start directory, the path and its length (null and 0
+            // exactly with `EMPTY_PATH`).
+            AbiType::U32,
+            AbiType::UserPtrOrNull,
             AbiType::Len,
             // The new permission bits. A word carrying any bit above
             // `FS_MODE_MASK` (the `rwx` triads plus setuid/setgid/sticky)
             // fails closed at dispatch — never masked to a mode the caller
             // did not ask for.
             AbiType::U32,
-            AbiType::Unit,
-            AbiType::Unit,
+            // The `AtFlags` bits.
+            AbiType::U32,
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
@@ -1965,8 +1978,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         arg_count: 3,
         args: [
             // The descriptor to map; must be open for reading and backed
-            // by a filesystem path (a resource or pipe backing is refused
-            // by the handler — only a positional byte store can page).
+            // by a node of a mounted volume (a resource or pipe backing is
+            // refused by the handler — only a positional byte store can page).
             AbiType::U32,
             // The file byte offset the mapping starts at (page-aligned).
             // Always 64-bit: a mappable file may exceed both `usize` and
@@ -1981,12 +1994,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::U64,
         // Ungated at the dispatcher, like `fs_read`: the descriptor's
-        // backing decides the authority, and the region records the
-        // identity the fault path re-checks every demand-paged read
-        // under — the caller's own for a descriptor it opened, the
-        // grantor's captured pair for a delegation. Per-inode
-        // owner/mode/ACL enforcement is the secured VFS's throughout.
-        // Like `fs_read` it is not audited per call.
+        // backing decides the authority, and the region keeps it, so every
+        // demand-paged read is checked as the descriptor would be — the
+        // process's live identity for a descriptor it opened, the captured
+        // one for a conferred or granted descriptor. Like `fs_read` it is
+        // not audited per call.
         required_capability: None,
         audit: false,
     },
@@ -2159,18 +2171,18 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_ATTR_GET,
         name: "fs_attr_get",
-        arg_count: 6,
+        arg_count: 5,
         args: [
-            // Path bytes, then the fsmeta-grammar key bytes, then the
+            // The descriptor, the fsmeta-grammar key bytes, then the
             // caller's value-out buffer. The dispatcher bounds the key
             // length to 1..=FS_ATTR_KEY_MAX before any copy; the grammar
             // itself is validated by the secured VFS through lib/fsmeta.
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::UserPtr,
-            AbiType::Len,
+            AbiType::Unit,
         ],
         // `U64` carries the value byte count (or a negated errno; an
         // absent attribute is `-NoData`, never an empty read).
@@ -2182,17 +2194,17 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_ATTR_SET,
         name: "fs_attr_set",
-        arg_count: 6,
+        arg_count: 5,
         args: [
-            // Path bytes, key bytes, then the opaque value bytes. The
+            // The descriptor, key bytes, then the opaque value bytes. The
             // dispatcher bounds the key to 1..=FS_ATTR_KEY_MAX and the
             // value to FS_ATTR_VALUE_MAX before any copy.
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::UserPtr,
-            AbiType::Len,
+            AbiType::Unit,
         ],
         ret: AbiType::Errno,
         required_capability: Some(CapabilityId::FS_ACCESS),
@@ -2202,15 +2214,15 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_ATTR_LIST,
         name: "fs_attr_list",
-        arg_count: 5,
+        arg_count: 4,
         args: [
-            // Path bytes, the index to yield, then the caller's key-out
+            // The descriptor, the index to yield, then the caller's key-out
             // buffer: one key per call.
-            AbiType::UserPtr,
-            AbiType::Len,
+            AbiType::U32,
             AbiType::U64,
             AbiType::UserPtr,
             AbiType::Len,
+            AbiType::Unit,
             AbiType::Unit,
         ],
         // `U64` carries the key byte count, `0` for end-of-list (a real
@@ -2223,13 +2235,13 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_ATTR_REMOVE,
         name: "fs_attr_remove",
-        arg_count: 4,
+        arg_count: 3,
         args: [
-            // Path bytes, then the key bytes of the attribute to remove.
+            // The descriptor, then the key bytes of the attribute to remove.
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::UserPtr,
-            AbiType::Len,
+            AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -2447,16 +2459,19 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_SET_OWNER,
         name: "fs_set_owner",
-        arg_count: 4,
+        arg_count: 6,
         args: [
-            AbiType::UserPtr,
+            // The start directory, the path and its length (null and 0
+            // exactly with `EMPTY_PATH`).
+            AbiType::U32,
+            AbiType::UserPtrOrNull,
             AbiType::Len,
             // The new owning user id, or `FS_OWNER_UNCHANGED` to leave it.
             AbiType::U32,
             // The new owning group id, or `FS_OWNER_UNCHANGED` to leave it.
             AbiType::U32,
-            AbiType::Unit,
-            AbiType::Unit,
+            // The `AtFlags` bits.
+            AbiType::U32,
         ],
         ret: AbiType::Errno,
         // The coarse "may use the filesystem at all" gate, like the other
@@ -2851,14 +2866,15 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_SYMLINK,
         name: "fs_symlink",
-        arg_count: 4,
+        arg_count: 5,
         args: [
-            // target ptr/len (stored verbatim), then the link's own path.
+            // target ptr/len (stored verbatim), then the start directory and
+            // the link's own path.
             AbiType::UserPtr,
             AbiType::Len,
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
@@ -2870,14 +2886,15 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_READLINK,
         name: "fs_readlink",
-        arg_count: 4,
+        arg_count: 5,
         args: [
-            // link path ptr/len, then the caller's output buffer.
+            // The start directory, the link path ptr/len, then the caller's
+            // output buffer.
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
             AbiType::Unit,
         ],
         ret: AbiType::U64,
@@ -2888,18 +2905,19 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_LINK,
         name: "fs_link",
-        arg_count: 5,
+        arg_count: 3,
         args: [
-            // the existing name ptr/len, then the new name's own path.
+            // Non-null `UserPtr`s to the existing name's and the new name's
+            // `PathAt`.
             AbiType::UserPtr,
-            AbiType::Len,
             AbiType::UserPtr,
-            AbiType::Len,
             // The validated `LinkFlags` word: empty is POSIX `link()`,
             // following neither final component; `FOLLOW` is
             // `linkat(AT_SYMLINK_FOLLOW)`, resolving the existing name's
             // final link. A reserved bit fails closed at dispatch.
             AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
@@ -2911,9 +2929,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_REALPATH,
         name: "fs_realpath",
-        arg_count: 5,
+        arg_count: 6,
         args: [
-            // path ptr/len, then the caller's output buffer.
+            // The start directory, the path ptr/len, then the caller's
+            // output buffer.
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::UserPtr,
@@ -2921,7 +2941,6 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // The validated `RealpathMode` value: how much of the path must
             // exist. An undefined value fails closed at dispatch.
             AbiType::U32,
-            AbiType::Unit,
         ],
         ret: AbiType::U64,
         required_capability: Some(CapabilityId::FS_ACCESS),
@@ -3019,10 +3038,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::U64,
         ],
         ret: AbiType::Errno,
-        // The same coarse gate the descriptor's own `fs_open` required; the
-        // per-inode read/write check is then re-run under the caller's
-        // identity, since an exclusive lock asserts a writer's right.
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Ungated at the dispatcher, as the byte operations are: the lock is
+        // judged on the node under the descriptor's authority, a read for a
+        // shared lock and a write for an exclusive one, so a descriptor
+        // conferred at spawn locks for a child holding no filesystem
+        // capability of its own.
+        required_capability: None,
         // A lock grants no authority and withholds none — it coordinates
         // participants who opt in — so it decides no security question. A
         // database taking a lock per record would drown the log.
@@ -3044,7 +3065,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         // Bytes written, and `0` for "the request would be granted".
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Judged as `fs_lock` is.
+        required_capability: None,
         // A pure read of coordination state, like `fs_stat`.
         audit: false,
     },
@@ -3678,14 +3700,56 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_UMASK,
+        name: "fs_umask",
+        arg_count: 1,
+        args: [
+            // The new mask, or `FS_UMASK_QUERY` to read it unchanged.
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The mask held before.
+        ret: AbiType::U64,
+        // A process's mask decides only what its own creates are born with,
+        // bits their owner may change at will, so it is ungated and not
+        // audited.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_ACCESS,
+        name: "fs_access",
+        arg_count: 5,
+        args: [
+            // The start directory, the path and its length (null and 0
+            // exactly with `EMPTY_PATH`), the `Access` bits asked, then the
+            // `AtFlags` bits.
+            AbiType::U32,
+            AbiType::UserPtrOrNull,
+            AbiType::Len,
+            AbiType::U32,
+            AbiType::U32,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The coarse filesystem-access gate, as every path-taking call has;
+        // the answer is the inode model's under the caller's credentials. A
+        // pure query, high-volume like fs_stat; not audited per call.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
 /// [`ENCODED_TABLE`].
 ///
-/// Derived from [`SYSCALLS`]'s length so that appending a syscall row keeps
-/// the encoding buffer in step automatically (`abi-v1` grows by appending —
-/// existing rows never change).
+/// Derived from [`SYSCALLS`]'s length, so a row added keeps the encoding
+/// buffer in step.
 pub const ENCODED_TABLE_LEN: usize = SYSCALL_ENCODED_RECORD_LEN * SYSCALLS.len();
 
 /// Canonical byte representation of [`SYSCALLS`].
@@ -3818,6 +3882,31 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    /// Every operand a call may omit is a pointer or null, so its C view is
+    /// a pointer and the dispatcher leaves null to the handler.
+    #[test]
+    fn an_operand_a_call_may_omit_is_a_pointer_or_null() {
+        for (number, slot) in [
+            (SyscallNumber::SPAWN, 2),
+            (SyscallNumber::SPAWN, 4),
+            (SyscallNumber::FS_UNLINK, 4),
+            (SyscallNumber::FS_RENAME, 3),
+            (SyscallNumber::FS_CHDIR, 1),
+            (SyscallNumber::FS_SET_MODE, 1),
+            (SyscallNumber::FS_SET_OWNER, 1),
+            (SyscallNumber::FS_ACCESS, 1),
+        ] {
+            let spec = spec_for(number).expect("an assigned number");
+            assert_eq!(
+                spec.args[slot],
+                AbiType::UserPtrOrNull,
+                "{} slot {slot}",
+                spec.name
+            );
+        }
+        assert_eq!(AbiType::UserPtrOrNull.as_u8(), 11);
     }
 
     #[test]
@@ -4037,17 +4126,19 @@ mod tests {
         // CAP_FS_ACCESS entry gate (the per-path authority is the VFS inode
         // model under the caller's real credentials, not this capability).
         // The *descriptor-operating* calls are ungated at the dispatcher: a
-        // descriptor may be backed by a filesystem path (opened under
+        // descriptor may be backed by a node its holder opened (under
         // CAP_FS_ACCESS), a resource reference (opened under its namespace's
         // own authority), or a one-shot delegation (exercised under the
         // grantor's captured set, so its holder may hold no filesystem
         // capability at all), so the handler applies the backing-specific
-        // check rather than a blanket gate — a path-backed descriptor still
-        // requires CAP_FS_ACCESS there. fs_readdir keeps the blanket gate
-        // because fd_grant refuses a directory, so it has no delegated form.
+        // check rather than a blanket gate — a descriptor its holder opened
+        // still requires CAP_FS_ACCESS there. fs_readdir keeps the blanket gate
+        // because fd_grant refuses a directory, so it has no delegated form,
+        // and the attribute calls keep it because they act as the caller
+        // whatever descriptor names the node.
         // State-mutating calls (open — which may create — write, truncate,
         // mkdir, unlink, rename) are audited; the pure reads (read, readdir,
-        // stat) and the own-handle lifecycle calls (close, sync) are
+        // stat, access) and the own-handle lifecycle calls (close, sync) are
         // high-volume and not audited per call. Lock this down so a refactor
         // cannot loosen a path gate or drop the audit on a mutator.
         for n in [
@@ -4058,11 +4149,18 @@ mod tests {
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
+            SyscallNumber::FS_CHDIR,
             SyscallNumber::FS_SET_MODE,
+            SyscallNumber::FS_SET_OWNER,
             SyscallNumber::FS_ATTR_GET,
             SyscallNumber::FS_ATTR_SET,
             SyscallNumber::FS_ATTR_LIST,
             SyscallNumber::FS_ATTR_REMOVE,
+            SyscallNumber::FS_SYMLINK,
+            SyscallNumber::FS_READLINK,
+            SyscallNumber::FS_LINK,
+            SyscallNumber::FS_REALPATH,
+            SyscallNumber::FS_ACCESS,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,
@@ -4085,6 +4183,8 @@ mod tests {
             SyscallNumber::FILE_MAP,
             SyscallNumber::FS_SEEK_REGION,
             SyscallNumber::FS_PUNCH,
+            SyscallNumber::FS_LOCK,
+            SyscallNumber::FS_LOCK_QUERY,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,
@@ -4121,6 +4221,7 @@ mod tests {
             SyscallNumber::FS_SYNC,
             SyscallNumber::FS_ATTR_GET,
             SyscallNumber::FS_ATTR_LIST,
+            SyscallNumber::FS_ACCESS,
         ] {
             assert!(
                 !spec_for(n).unwrap().audit,
@@ -4128,6 +4229,12 @@ mod tests {
                 spec_for(n).unwrap().name
             );
         }
+        // fs_umask sets the caller's own creation mask, which reaches no
+        // other principal: ungated and unaudited.
+        let umask = spec_for(SyscallNumber::FS_UMASK).unwrap();
+        assert_eq!(umask.required_capability, None);
+        assert!(!umask.audit, "fs_umask must not audit per call");
+        assert_eq!(umask.arg_count, 1);
     }
 
     #[test]

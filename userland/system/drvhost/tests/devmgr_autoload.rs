@@ -53,10 +53,6 @@ impl DriverLoader for HostLoader<'_, '_> {
     }
 }
 
-fn compat(s: &[u8]) -> HwMatchKey {
-    HwMatchKey::compatible(s).expect("test compatible strings fit HW_COMPATIBLE_MAX")
-}
-
 fn caller_with_drv_load() -> CapabilitySet {
     let mut set = CapabilitySet::empty();
     set.insert(CapabilityId::DRV_LOAD);
@@ -84,18 +80,24 @@ fn autoload_matches_and_loads_through_the_real_gate() {
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
 
-    let emmc_keys = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
-    let uart_keys = [DriverBindKey::new(2, compat(b"arm,pl011"))];
+    let emmc_keys = [DriverBindKey::new(
+        5,
+        tairix_abi::compatible_key!(b"vendor,sd-host"),
+    )];
+    let uart_keys = [DriverBindKey::new(
+        2,
+        tairix_abi::compatible_key!(b"arm,pl011"),
+    )];
     let mut source = MemSource::new();
     source.images.insert(
-        "/System/Drivers/emmc2".into(),
+        "/System/Drivers/sd".into(),
         build_signed_image_with_bind_keys(
             &sk,
             DriverKind::UserSpace,
             SYS_HASH,
             &[],
             &emmc_keys,
-            b"emmc2",
+            b"sd",
         ),
     );
     source.images.insert(
@@ -110,11 +112,11 @@ fn autoload_matches_and_loads_through_the_real_gate() {
         ),
     );
 
-    let emmc_table = decode_bind_table(&source, "/System/Drivers/emmc2");
+    let emmc_table = decode_bind_table(&source, "/System/Drivers/sd");
     let uart_table = decode_bind_table(&source, "/System/Drivers/uart");
     let candidates = [
         DriverCandidate {
-            path: "/System/Drivers/emmc2",
+            path: "/System/Drivers/sd",
             bind_keys: &emmc_table,
         },
         DriverCandidate {
@@ -125,11 +127,11 @@ fn autoload_matches_and_loads_through_the_real_gate() {
 
     let mut storage = HwNode::new(2, 1, HwDeviceClass::Storage);
     storage
-        .push_match_key(compat(b"brcm,bcm2711-emmc2"))
+        .push_match_key(tairix_abi::compatible_key!(b"vendor,sd-host"))
         .expect("key fits");
     let mut serial = HwNode::new(3, 1, HwDeviceClass::Serial);
     serial
-        .push_match_key(compat(b"arm,pl011"))
+        .push_match_key(tairix_abi::compatible_key!(b"arm,pl011"))
         .expect("key fits");
     // A display node nothing matches: a headless image leaves it
     // unbound and that is never an error.
@@ -183,7 +185,10 @@ fn autoload_without_cap_drv_load_fails_closed_at_the_real_gate() {
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
 
-    let uart_keys = [DriverBindKey::new(2, compat(b"arm,pl011"))];
+    let uart_keys = [DriverBindKey::new(
+        2,
+        tairix_abi::compatible_key!(b"arm,pl011"),
+    )];
     let mut source = MemSource::new();
     source.images.insert(
         "/System/Drivers/uart".into(),
@@ -204,7 +209,7 @@ fn autoload_without_cap_drv_load_fails_closed_at_the_real_gate() {
 
     let mut serial = HwNode::new(2, 1, HwDeviceClass::Serial);
     serial
-        .push_match_key(compat(b"arm,pl011"))
+        .push_match_key(tairix_abi::compatible_key!(b"arm,pl011"))
         .expect("key fits");
     let tree = [serial];
 

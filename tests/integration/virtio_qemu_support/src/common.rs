@@ -26,9 +26,11 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::accelerator::{Accelerator, CipherAlgorithm, CipherDirection, CipherJob};
 use tairix_abi::driver::block::Block;
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{
+    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind, NodeSecurity,
+};
 use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, POINTER_BUTTON_CODE_BASE};
-use tairix_abi::{CapabilityId, DriverHandle, Errno, RealpathMode};
+use tairix_abi::{CapabilityId, DriverHandle, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_accelerator_virtio_crypto::VirtioCrypto;
@@ -322,10 +324,16 @@ pub fn fat32_round_trip<Tr: Transport>(
     }
     env.log("virtio-qemu: fat32 planted file verified");
 
-    fs.create(root, image::NEW_FILE_NAME, NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            image::NEW_FILE_NAME,
+            NodeKind::RegularFile,
+            &NodeSecurity::created(NodeKind::RegularFile, 0, 0),
+        )
         .map_err(|_| "create new file")?;
     let written = fs
-        .write_at(root, image::NEW_FILE_NAME, 0, image::NEW_FILE_CONTENT)
+        .write_at(file, 0, image::NEW_FILE_CONTENT)
         .map_err(|_| "write new file")?;
     if written != image::NEW_FILE_CONTENT.len() {
         return Err("short write of new file");
@@ -353,9 +361,8 @@ pub fn fat32_round_trip<Tr: Transport>(
 /// MMIO verticals run identical code.
 ///
 /// The tail then continues into [`link_vfs_round_trip`] over that same
-/// mounted volume, so the link and canonicalisation surface is exercised
-/// through the production filesystem cache on real hardware without a
-/// second device open.
+/// mounted volume, so the production filesystem cache's link forwarding is
+/// exercised on real hardware without a second device open.
 ///
 /// The on-disk layout and the planted/written file names and contents
 /// come from the shared [`tairix_test_arxfs_image`] fixture — the same
@@ -389,10 +396,16 @@ pub fn arxfs_round_trip<Tr: Transport>(
     }
     env.log("virtio-qemu: arxfs planted file verified");
 
-    fs.create(root, image::NEW_FILE_NAME, NodeKind::RegularFile)
+    let file = fs
+        .create(
+            root,
+            image::NEW_FILE_NAME,
+            NodeKind::RegularFile,
+            &NodeSecurity::created(NodeKind::RegularFile, 0, 0),
+        )
         .map_err(|_| "create new file")?;
     let written = fs
-        .write_at(root, image::NEW_FILE_NAME, 0, image::NEW_FILE_CONTENT)
+        .write_at(file, 0, image::NEW_FILE_CONTENT)
         .map_err(|_| "write new file")?;
     if written != image::NEW_FILE_CONTENT.len() {
         return Err("short write of new file");
@@ -467,27 +480,20 @@ pub fn users_db_load<Tr: Transport>(
     Ok(())
 }
 
-/// Secured-VFS device tail: mount the planted arxfs volume through the
-/// **production filesystem cache**, then drive both link kinds and
-/// canonicalisation through the secured VFS — on real (emulated) hardware,
-/// in a freestanding build.
+/// Link device tail: make both link kinds on the planted arxfs volume
+/// through the **production filesystem cache**, then resolve each with the
+/// secured boot reader — on real (emulated) hardware, in a freestanding
+/// build.
 ///
-/// Every other link test builds a `Vfs` over a driver *directly*, so none of
-/// them touches a wrapper; that is exactly how `read_link` / `create_link` /
-/// `link` came to sit at their trait defaults in three wrappers at once
-/// (`plans/SYMLINKS.md`). A host test now covers the whole production chain,
-/// but a host test builds none of the freestanding halves. This tail closes
-/// the other half: the secured `Vfs` over `CachedFs` over `ARXFS`, across a
-/// real virtio device, compiled for a bare-metal target — so a wrapper that
-/// forwarded a link method by omission fails here rather than answering
-/// "this volume has no links" on every genuinely mounted volume.
+/// A host test covers the whole production chain but builds none of the
+/// freestanding halves, and a wrapper that forwards a link method by
+/// omission answers "this volume has no links" on every mounted volume
+/// (`plans/SYMLINKS.md`). Here `CachedFs` over `ARXFS` runs across a real
+/// virtio device, compiled for a bare-metal target, so such a wrapper fails.
 ///
-/// It stops one layer below `MountedFilesystemService`, which the host test
-/// covers, because that service's `Send` bound cannot be met by a driver
-/// stack holding a borrowed `VirtioHost` — and asserting `Send` for one, or
-/// widening a kernel trait to host a test, would be the wrong trade. The
-/// layer it omits resolves the caller's groups and takes the per-mount lock;
-/// it holds no link logic of its own.
+/// It stops below `MountedFilesystemService`, whose `Send` bound a driver
+/// stack holding a borrowed `VirtioHost` cannot meet; the link policy above
+/// the driver seam is the host suites'.
 fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), &'static str> {
     use alloc::boxed::Box;
     use tairix_abi::driver::filesystem::MountFlags;
@@ -551,14 +557,13 @@ fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), 
         .map_err(|_| "mount the volume")?;
     env.log("virtio-qemu: link-vfs volume projected");
 
-    let planted = core::str::from_utf8(tairix_test_arxfs_image::PLANTED_FILE_NAME)
-        .map_err(|_| "planted name")?;
+    let planted = tairix_test_arxfs_image::PLANTED_FILE_NAME;
     symbolic_link_phase(&vfs, &mut cached, &cred, planted)?;
     env.log("virtio-qemu: symbolic link round-trips through the cache");
-    canonical_path_phase(&vfs, &mut cached, &cred, planted)?;
-    env.log("virtio-qemu: canonicalisation round-trips through the cache");
     hard_link_phase(&vfs, &mut cached, &cred, planted)?;
     env.log("virtio-qemu: hard link round-trips through the cache");
+    parent_phase(&mut cached)?;
+    env.log("virtio-qemu: a directory's parent climbs through the cache");
     Ok(())
 }
 
@@ -570,129 +575,113 @@ fn under(name: &str) -> Result<tairix_kernel_core::fs::Path, &'static str> {
     tairix_kernel_core::fs::Path::parse(&alloc::format!("{LINK_MOUNT}/{name}")).map_err(|_| "path")
 }
 
-/// A symbolic link, created and read back verbatim through the cache, then
-/// resolved to its target's bytes — so it resolves rather than merely
-/// existing.
+/// The bytes of the regular file `name` under [`LINK_MOUNT`] reaches, as the
+/// secured boot reader returns them through the cache, a final link
+/// followed.
+fn read_through<F>(
+    vfs: &tairix_kernel_core::fs::Vfs,
+    cached: &mut F,
+    cred: &tairix_kernel_core::fs::Credentials<'_>,
+    name: &str,
+) -> Result<Vec<u8>, &'static str>
+where
+    F: FilesystemRead + FilesystemSecurity,
+{
+    /// Larger than any file the fixture plants.
+    const LARGEST: u64 = 128;
+    let mut bytes = Vec::new();
+    vfs.read_bounded_via_secured(cred, &under(name)?, cached, LARGEST, usize::MAX, &mut bytes)
+        .map_err(|_| "read through the secured walk")?;
+    Ok(bytes)
+}
+
+/// A symbolic link made through the cache stores its target verbatim, and
+/// the secured walk follows it to the target's bytes.
 fn symbolic_link_phase<F>(
     vfs: &tairix_kernel_core::fs::Vfs,
     cached: &mut F,
     cred: &tairix_kernel_core::fs::Credentials<'_>,
-    planted: &str,
+    planted: &[u8],
 ) -> Result<(), &'static str>
 where
-    F: FilesystemRead + FilesystemWrite + tairix_abi::driver::filesystem::FilesystemSecurity,
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity,
 {
-    let alias = under("alias")?;
-    vfs.symlink_via_secured(cred, &vfs.cover(&alias), cached, planted)
+    let root = cached.root();
+    let record = NodeSecurity::created(NodeKind::Symlink, 0, 0);
+    let link = cached
+        .create_link(root, b"alias", planted, &record)
         .map_err(|_| "symlink through the cache")?;
-    if vfs
-        .readlink_via_secured(cred, &vfs.cover(&alias), cached)
-        .map_err(|_| "readlink through the cache")?
-        != planted
-    {
+    let mut stored = [0u8; 128];
+    let len = cached
+        .read_link(link, &mut stored)
+        .map_err(|_| "readlink through the cache")?;
+    if stored.get(..len) != Some(planted) {
         return Err("the stored target did not come back verbatim");
     }
-    let mut buf = [0u8; 128];
-    let read = vfs
-        .read_via_secured(cred, &vfs.cover(&alias), cached, 0, &mut buf)
-        .map_err(|_| "read through the link")?;
-    if &buf[..read] != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
+    let through = read_through(vfs, cached, cred, "alias")?;
+    if through != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
         return Err("reading through the link reached the wrong bytes");
     }
     Ok(())
 }
 
-/// The link's canonical path is the target's, spelled in the caller's own
-/// namespace with the mount point included; and a vacant name is refused
-/// under the strict reading yet carried into the answer under the tolerant
-/// one, so both arms are live on real hardware.
-fn canonical_path_phase<F>(
-    vfs: &tairix_kernel_core::fs::Vfs,
-    cached: &mut F,
-    cred: &tairix_kernel_core::fs::Credentials<'_>,
-    planted: &str,
-) -> Result<(), &'static str>
-where
-    F: FilesystemRead + tairix_abi::driver::filesystem::FilesystemSecurity,
-{
-    let alias = under("alias")?;
-    if vfs
-        .realpath_via_secured(cred, &vfs.cover(&alias), cached, RealpathMode::Existing)
-        .map_err(|_| "realpath through the cache")?
-        != alloc::format!("{LINK_MOUNT}/{planted}")
-    {
-        return Err("the canonical path did not name the link's target");
-    }
-    let vacant = under("absent")?;
-    if vfs
-        .realpath_via_secured(cred, &vfs.cover(&vacant), cached, RealpathMode::Existing)
-        .is_ok()
-    {
-        return Err("a vacant name must be refused under the strict reading");
-    }
-    if vfs
-        .realpath_via_secured(cred, &vfs.cover(&vacant), cached, RealpathMode::Final)
-        .map_err(|_| "realpath of a vacant name")?
-        != alloc::format!("{LINK_MOUNT}/absent")
-    {
-        return Err("a vacant final name must be carried into the answer");
-    }
-    Ok(())
-}
-
-/// A second name reaching one node, with the count the format keeps carried
-/// up through the cache — and a directory refused, by the VFS rather than by
-/// the format, so the tree stays a tree on a live volume too.
+/// A second name made through the cache reaches the planted node, the
+/// format's own name count is carried up through the cache, and the secured
+/// walk reads the node's bytes through the new name.
 fn hard_link_phase<F>(
     vfs: &tairix_kernel_core::fs::Vfs,
     cached: &mut F,
     cred: &tairix_kernel_core::fs::Credentials<'_>,
-    planted: &str,
+    planted: &[u8],
 ) -> Result<(), &'static str>
 where
-    F: FilesystemRead + FilesystemWrite + tairix_abi::driver::filesystem::FilesystemSecurity,
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity,
 {
-    use tairix_kernel_core::fs::{FinalLink, Path};
-
-    let target = under(planted)?;
-    let second = under("second")?;
-    vfs.link_via_secured(
-        cred,
-        &vfs.cover_pair(&target, &second),
-        cached,
-        FinalLink::Keep,
-    )
-    .map_err(|_| "link through the cache")?;
-    let first = vfs
-        .stat_via_secured(cred, &vfs.cover(&target), cached, FinalLink::Keep)
-        .map_err(|_| "stat the first name")?;
-    let other = vfs
-        .stat_via_secured(cred, &vfs.cover(&second), cached, FinalLink::Keep)
-        .map_err(|_| "stat the second name")?;
-    if first.node != other.node {
+    let root = cached.root();
+    let node = cached
+        .lookup(root, planted)
+        .map_err(|_| "lookup the planted file")?;
+    cached
+        .link(root, b"second", node)
+        .map_err(|_| "link through the cache")?;
+    let second = cached
+        .lookup(root, b"second")
+        .map_err(|_| "lookup the second name")?;
+    if second != node {
         return Err("the two names did not reach one node");
     }
-    if first.nlink != 2 || other.nlink != 2 {
+    let info = cached.node_info(node).map_err(|_| "stat the node")?;
+    if info.nlink != 2 {
         return Err("the format's own name count was not carried up");
     }
-    let mut through = [0u8; 128];
-    let via_second = vfs
-        .read_via_secured(cred, &vfs.cover(&second), cached, 0, &mut through)
-        .map_err(|_| "read through the second name")?;
-    if &through[..via_second] != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
+    let through = read_through(vfs, cached, cred, "second")?;
+    if through != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
         return Err("the second name reached the wrong bytes");
     }
-    let mount = Path::parse(LINK_MOUNT).map_err(|_| "mount path")?;
-    if vfs
-        .link_via_secured(
-            cred,
-            &vfs.cover_pair(&mount, &under("dirlink")?),
-            cached,
-            FinalLink::Keep,
+    Ok(())
+}
+
+/// A directory made through the cache names the root as its parent, and the
+/// root names itself: the climb a canonical path is spelled by, which a
+/// wrapper forwarding `parent` by omission would break on every volume.
+fn parent_phase<F>(cached: &mut F) -> Result<(), &'static str>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity,
+{
+    let root = cached.root();
+    let sub = cached
+        .create(
+            root,
+            b"climb",
+            NodeKind::Directory,
+            &NodeSecurity::created(NodeKind::Directory, 0, 0),
         )
-        .is_ok()
-    {
-        return Err("a directory must never gain a second name");
+        .map_err(|_| "make a directory through the cache")?;
+    if cached.parent(sub).map_err(|_| "parent of the directory")? != root {
+        return Err("a directory's parent was not the root");
+    }
+    if cached.parent(root).map_err(|_| "parent of the root")? != root {
+        return Err("the root was not its own parent");
     }
     Ok(())
 }

@@ -14,10 +14,11 @@ use tairix_abi::time::Time64;
 use tairix_abi::Errno;
 use tairix_curses::downgrade;
 use tairix_fsmeta::calendar::month_abbreviation;
+use tairix_glob::Scratch;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::join;
 use tairix_termcap::{ColorChoice, ColorDepth};
-use tairix_util::quote::{Quoted, Style as QuotingStyle};
+use tairix_util::quote::{output_style, Quoted, Style as QuotingStyle};
 use tairix_vt::{encode_into, str_width, Op, Role, Sgr};
 
 use crate::command::{
@@ -26,10 +27,10 @@ use crate::command::{
 };
 use crate::error::LsError;
 use crate::io::{Entry, FinalLink, Listing, Metadata, Output, Terminal};
-use tairix_util::quote::quote;
+use tairix_util::quote::{quote, quote_subject};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `ls`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `ls`'s own Help tree
+/// is unavailable.
 pub const USAGE: &str =
     "usage: ls [-aACdFgGhklmnopQrRsSTtx1] [-w cols] [--block-size=SIZE] [--] [path...]";
 
@@ -60,6 +61,8 @@ const OWN_WORD: &str = "ls";
 /// * [`LsError::Output`] — writing the listing to the terminal failed. This
 ///   is the one failure that stops the run: with nowhere to write, there is
 ///   nothing left to do.
+/// * [`LsError::MemoryExhausted`] — a name filter's match needed more
+///   memory than the heap would give; GNU ends the same way.
 pub fn run(
     command: Command,
     locale: Option<&str>,
@@ -84,7 +87,8 @@ pub fn run(
 /// GNU `ls` grades its exit status: everything listed is `0`, a *minor*
 /// problem — an entry or subdirectory inside a listing that could not be
 /// reached — is `1`, and *serious trouble* — a command-line operand that
-/// could not be reached at all — is `2`. The reason is always reported on
+/// could not be reached at all, or a directory `-R` reached again through a
+/// link — is `2`. The reason is always reported on
 /// the error stream as it happens; this is only the grade the caller turns
 /// into that status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -94,8 +98,8 @@ pub enum Outcome {
     /// Something inside a listing could not be reached; it was reported and
     /// the listing continued. Exit `1`.
     MinorProblem,
-    /// A command-line operand could not be reached; it was reported and
-    /// skipped. Exit `2`.
+    /// A command-line operand could not be reached, or `-R` reached a
+    /// directory again through a link; it was reported and skipped. Exit `2`.
     SeriousProblem,
 }
 
@@ -371,20 +375,25 @@ fn list_directories(
         .into_iter()
         .map(|(path, id)| Pending {
             path,
-            chain: if track_cycles {
-                alloc::vec![id]
-            } else {
-                Vec::new()
+            visit: Visit::List {
+                chain: if track_cycles {
+                    alloc::vec![id]
+                } else {
+                    Vec::new()
+                },
+                operand: true,
             },
-            operand: true,
         })
         .collect();
-    while let Some(item) = pending.pop() {
-        let Pending {
-            path,
-            chain,
-            operand,
-        } = item;
+    while let Some(Pending { path, visit }) = pending.pop() {
+        let (chain, operand) = match visit {
+            Visit::List { chain, operand } => (chain, operand),
+            Visit::Again => {
+                report_cycle(out, &path);
+                outcome = outcome.worse(Outcome::SeriousProblem);
+                continue;
+            }
+        };
         let mut entries = match fs.read_dir(&path) {
             Ok(entries) => entries,
             // An unreadable directory is reported and skipped: a listing of
@@ -401,22 +410,7 @@ fn list_directories(
                 continue;
             }
         };
-        // Two filtering stages, in GNU's order. First the default dotfile
-        // rule, whose omissions are counted for the advisory record (a
-        // surprising, non-requested hiding). Then the explicit `-B`/`-I`/
-        // `--hide` name filters, which the user asked for and so are applied
-        // silently — never advertised as an omission.
-        let before_dotfiles = entries.len();
-        match options.hidden {
-            Hidden::Skip => entries.retain(|entry| !tairix_path::is_hidden_name(&entry.name)),
-            Hidden::AlmostAll => entries.retain(|entry| entry.name != "." && entry.name != ".."),
-            Hidden::All => {}
-        }
-        if options.hidden == Hidden::Skip {
-            hidden_omitted += (before_dotfiles - entries.len()) as u64;
-        }
-        let show_hidden = options.hidden != Hidden::Skip;
-        entries.retain(|entry| !filters.suppresses(&entry.name, show_hidden));
+        hidden_omitted += filter_entries(&mut entries, options, filters)?;
         let listed = rows_for(&path, &entries, options, deref, ctx.painter, fs, out);
         let mut rows = listed.rows;
         outcome = outcome.worse(listed.outcome);
@@ -429,59 +423,123 @@ fn list_directories(
         render_rows(buf, &rows, options, format, width, ctx);
         write_block(out, buf)?;
         if options.recursive {
-            for row in rows.iter().rev() {
-                // `.`/`..` never recurse — a listing must terminate even
-                // when `-a` renders them — and a row shown *as* a link is
-                // not descended: only a posture that already resolved it
-                // reports `Directory` here.
-                let descend = match row.kind {
-                    FileKind::Directory => row.name != "." && row.name != "..",
-                    FileKind::Regular | FileKind::Symlink => false,
-                };
-                if !descend {
-                    continue;
-                }
-                let child = join(&path, &row.name);
-                let id = row.stat.map_or(FileId::NONE, |meta| meta.id);
-                // A directory already on the chain that led here was reached
-                // through a link pointing back at it; report it once and do
-                // not descend, exactly as GNU does, rather than walking the
-                // loop until the path outgrows the kernel's bound.
-                if track_cycles && !id.is_none() && chain.contains(&id) {
-                    report_cycle(out, &child);
-                    outcome = outcome.worse(Outcome::MinorProblem);
-                    continue;
-                }
-                let mut child_chain = chain.clone();
-                if track_cycles {
-                    child_chain.push(id);
-                }
-                pending.push(Pending {
-                    path: child,
-                    chain: child_chain,
-                    operand: false,
-                });
-            }
+            queue_children(&mut pending, &path, &rows, &chain, track_cycles);
         }
     }
     Ok((outcome, hidden_omitted))
 }
 
-/// One directory still to be listed.
+/// Drop what the listing does not show, in GNU's order: the default dotfile
+/// rule, whose omissions are counted for the advisory record, then the
+/// `-B`/`-I`/`--hide` filters the user asked for, applied silently. Answers
+/// how many entries the dotfile rule hid.
+fn filter_entries(
+    entries: &mut Vec<Entry>,
+    options: Options,
+    filters: &Filters,
+) -> Result<u64, LsError> {
+    let before_dotfiles = entries.len();
+    match options.hidden {
+        Hidden::Skip => entries.retain(|entry| !tairix_path::is_hidden_name(&entry.name)),
+        Hidden::AlmostAll => entries.retain(|entry| entry.name != "." && entry.name != ".."),
+        Hidden::All => {}
+    }
+    let hidden = if options.hidden == Hidden::Skip {
+        (before_dotfiles - entries.len()) as u64
+    } else {
+        0
+    };
+    let show_hidden = options.hidden != Hidden::Skip;
+    let mut scratch = Scratch::new();
+    let mut exhausted = false;
+    entries.retain(|entry| {
+        if exhausted {
+            return true;
+        }
+        let Ok(suppressed) = filters.suppresses(&entry.name, show_hidden, &mut scratch) else {
+            exhausted = true;
+            return true;
+        };
+        !suppressed
+    });
+    if exhausted {
+        return Err(LsError::MemoryExhausted);
+    }
+    Ok(hidden)
+}
+
+/// Queue the directories among `rows`, listed under `path` reached through
+/// `chain`, so they pop in rendered order.
+fn queue_children(
+    pending: &mut Vec<Pending>,
+    path: &str,
+    rows: &[Row],
+    chain: &[FileId],
+    track_cycles: bool,
+) {
+    for row in rows.iter().rev() {
+        // `.`/`..` never recurse — a listing must terminate even when `-a`
+        // renders them — and a row shown *as* a link is not descended: only
+        // a posture that already resolved it reports `Directory` here.
+        let descend = match row.kind {
+            FileKind::Directory => row.name != "." && row.name != "..",
+            FileKind::Regular | FileKind::Symlink => false,
+        };
+        if !descend {
+            continue;
+        }
+        let child = join(path, &row.name);
+        let id = row.stat.map_or(FileId::NONE, |meta| meta.id);
+        // A directory already on the chain was reached through a link back
+        // at it: its turn reports that rather than walking the loop.
+        if track_cycles && !id.is_none() && chain.contains(&id) {
+            pending.push(Pending {
+                path: child,
+                visit: Visit::Again,
+            });
+            continue;
+        }
+        let mut child_chain = chain.to_vec();
+        if track_cycles {
+            child_chain.push(id);
+        }
+        pending.push(Pending {
+            path: child,
+            visit: Visit::List {
+                chain: child_chain,
+                operand: false,
+            },
+        });
+    }
+}
+
+/// One directory still to be visited.
 struct Pending {
     path: String,
-    /// Node identities of the directories this one was reached through,
-    /// starting at the operand — empty unless a cycle is possible at all
-    /// (`-R` with `-L`).
-    ///
-    /// A cycle requires a symbolic link, and every format that stores one
-    /// reports node identities, so a tracked chain is never made of
-    /// unusable [`FileId::NONE`]s in practice; an identity-less entry is
-    /// simply not compared.
-    chain: Vec<FileId>,
-    /// Whether the directory was named on the command line, which decides
-    /// how serious a failure to read it is.
-    operand: bool,
+    visit: Visit,
+}
+
+/// What a pending directory's turn does.
+enum Visit {
+    /// List it.
+    List {
+        /// Node identities of the directories this one was reached through,
+        /// starting at the operand — empty unless a cycle is possible at all
+        /// (`-R` with `-L`).
+        ///
+        /// A cycle requires a symbolic link, and every format that stores one
+        /// reports node identities, so a tracked chain is never made of
+        /// unusable [`FileId::NONE`]s in practice; an identity-less entry is
+        /// simply not compared.
+        chain: Vec<FileId>,
+        /// Whether the directory was named on the command line, which
+        /// decides how serious a failure to read it is.
+        operand: bool,
+    },
+    /// It was reached again through a link back into its own chain: its turn
+    /// reports that, where GNU reports it, and lists nothing — serious
+    /// trouble, as GNU grades it.
+    Again,
 }
 
 /// The [`Metadata`] a *command-line operand* is described by, applying the
@@ -525,11 +583,12 @@ fn report_unreadable(out: &dyn Terminal, path: &str, errno: Errno) {
 }
 
 /// Report a directory `-R` reached again through a link back into its own
-/// chain, in the GNU shape.
+/// chain, in the GNU shape: the path first, quoted only where a shell needs
+/// it, or where it holds the `:` the message is delimited by.
 fn report_cycle(out: &dyn Terminal, path: &str) {
     out.error(&format!(
-        "{OWN_WORD}: not listing already-listed directory: {path}",
-        path = quote(path)
+        "{OWN_WORD}: {path}: not listing already-listed directory",
+        path = quote_subject(path)
     ));
 }
 
@@ -668,9 +727,8 @@ fn selected_time(row: &Row, field: TimeField) -> Time64 {
 }
 
 /// The file-name extension `-X` sorts on: the text from the last `.`
-/// (inclusive), or the empty string when the name has none — exactly what
-/// GNU compares (`strrchr(name, '.')`). A leading-dot name like `.bashrc`
-/// therefore has extension `.bashrc`, matching the GNU tool.
+/// (inclusive), or the empty string when the name has none; a leading-dot
+/// name like `.bashrc` is all extension, as GNU `ls -X` sorts it.
 fn extension(name: &str) -> &str {
     match name.rfind('.') {
         Some(dot) => &name[dot..],
@@ -703,7 +761,7 @@ fn sort_rows(rows: &mut [Row], options: Options) {
         }),
         // Natural version order, ties by name — the GNU `-v` order.
         Sort::Version => rows.sort_by(|a, b| {
-            version::filevercmp(a.name.as_bytes(), b.name.as_bytes())
+            version::version_order(a.name.as_bytes(), b.name.as_bytes())
                 .then_with(|| a.name.cmp(&b.name))
         }),
     }
@@ -1063,18 +1121,20 @@ fn render_grid(
     }
 }
 
-/// Advance from column `from` to column `to`, emitting a tab whenever it
-/// lands the position at or past the next tab stop and a space otherwise — a
-/// direct port of the GNU `ls` `indent` routine. A `tabsize` of `0` pads
-/// with spaces only (`-T0`).
-fn indent(buf: &mut String, mut from: usize, to: usize, tabsize: usize) {
-    while from < to {
-        if tabsize != 0 && to / tabsize > (from + 1) / tabsize {
+/// Pad from column `from` to column `to` as GNU `ls -C -T` pads: a tab while
+/// a tab stop lies past the next column and no further than `to`, taking the
+/// position to the first stop past it, and a space otherwise (`-T3` pads
+/// column 2 to 4 with two spaces). A `tabsize` of `0` pads with spaces only.
+fn indent(buf: &mut String, from: usize, to: usize, tabsize: usize) {
+    let stop_past = |column: usize| (column / tabsize + 1) * tabsize;
+    let mut column = from;
+    while column < to {
+        if tabsize != 0 && stop_past(column + 1) <= to {
             buf.push('\t');
-            from += tabsize - from % tabsize;
+            column = stop_past(column);
         } else {
             buf.push(' ');
-            from += 1;
+            column += 1;
         }
     }
 }
@@ -1477,11 +1537,7 @@ impl Quoting {
     /// for an executable there; it is marked here.
     fn resolve(options: Options, terminal: Option<usize>) -> Self {
         let at_terminal = terminal.is_some() && !options.zero;
-        let style = options.quoting.unwrap_or(if at_terminal {
-            QuotingStyle::ShellEscape
-        } else {
-            QuotingStyle::Literal
-        });
+        let style = options.quoting.unwrap_or(output_style(at_terminal));
         let indicates = matches!(options.indicator, Indicator::FileType | Indicator::Classify);
         Self {
             style,
@@ -1601,211 +1657,191 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
     }
 }
 
-/// Natural "version" ordering for the `-v` / `--sort=version` sort.
-///
-/// This is a faithful port of GNU gnulib's `filevercmp` (the ordering GNU
-/// `ls -v` and `sort -V` use), so a run of digits compares numerically —
-/// `f2` before `f10` — while surrounding text compares by the Debian
-/// version algorithm, with file suffixes (`.c`, `.tar.gz`) cut off for a
-/// first pass and restored for a tie-break. Operating on bytes in the C
-/// locale (ASCII classification) matches the reference exactly; a `~`
-/// sorts before everything, including the empty string.
-///
-/// The comparator is total and never panics: it only indexes within the
-/// slices it is given.
+/// The version order of `ls -v` and `--sort=version`, as the coreutils manual
+/// states it ("Version sort ordering"): `""`, `.`, `..` and then dot names sort
+/// first, a dot name compared without its dot; a name is compared without a
+/// trailing suffix matching `(\.[A-Za-z~][A-Za-z0-9~]*)*` first, and whole
+/// only on a tie; and within either, runs of digits compare by value and the
+/// text between them bytewise, letters before other bytes and `~` before
+/// everything, even the end of the text. Bytes are classified as ASCII, the
+/// manual's C locale.
 mod version {
     use core::cmp::Ordering;
 
-    /// The length of the longest suffix of `s` matching the GNU C-locale
-    /// regex `(\.[A-Za-z~][A-Za-z0-9~]*)*$`, but never all of a non-empty
-    /// `s`. This is the run of file extensions cut before the first pass.
-    fn file_prefixlen(s: &[u8]) -> usize {
-        let n = s.len();
-        let mut prefixlen = 0;
-        let mut i = 0;
-        loop {
-            if i == n {
-                return prefixlen;
-            }
-            i += 1;
-            prefixlen = i;
-            while i + 1 < n && s[i] == b'.' && (s[i + 1].is_ascii_alphabetic() || s[i + 1] == b'~')
-            {
-                i += 2;
-                while i < n && (s[i].is_ascii_alphanumeric() || s[i] == b'~') {
-                    i += 1;
-                }
+    /// Where a name sorts before its text is compared.
+    #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+    enum Rank {
+        Empty,
+        Dot,
+        DotDot,
+        Hidden,
+        Plain,
+    }
+
+    impl Rank {
+        fn of(name: &[u8]) -> Self {
+            match name {
+                b"" => Self::Empty,
+                b"." => Self::Dot,
+                b".." => Self::DotDot,
+                [b'.', ..] => Self::Hidden,
+                _ => Self::Plain,
             }
         }
     }
 
-    /// The version-sort weight of `s`'s byte at `pos` (of length `len`): the
-    /// empty position sorts before every non-`~` byte, digits share a rank,
-    /// letters keep their byte value, `~` sorts before everything, and any
-    /// other byte sorts after all letters.
-    fn order(s: &[u8], pos: usize, len: usize) -> i32 {
-        if pos == len {
-            return -1;
+    /// `a` against `b` in version order: [`Ordering::Equal`] for names that
+    /// differ only in a number's leading zeros, which the caller orders.
+    pub(super) fn version_order(a: &[u8], b: &[u8]) -> Ordering {
+        let rank = Rank::of(a);
+        if rank != Rank::of(b) || rank < Rank::Hidden {
+            return rank.cmp(&Rank::of(b));
         }
-        let c = s[pos];
-        if c.is_ascii_digit() {
-            0
-        } else if c.is_ascii_alphabetic() {
-            i32::from(c)
-        } else if c == b'~' {
-            -2
+        let dot = usize::from(rank == Rank::Hidden);
+        let (a, b) = (&a[dot..], &b[dot..]);
+        compare(stem(a), stem(b)).then_with(|| compare(a, b))
+    }
+
+    /// `name` without the suffix the manual sets aside: its longest tail of
+    /// `.`-led groups, each a letter or `~` and then letters, digits and `~`.
+    fn stem(name: &[u8]) -> &[u8] {
+        #[derive(Clone, Copy, PartialEq)]
+        enum At {
+            Outside,
+            Dot,
+            Group,
+        }
+        let mut start = name.len();
+        let mut at = At::Outside;
+        for (index, &byte) in name.iter().enumerate() {
+            at = match (at, byte) {
+                (At::Group, b'.') => At::Dot,
+                (_, b'.') => {
+                    start = index;
+                    At::Dot
+                }
+                (At::Dot | At::Group, byte) if byte.is_ascii_alphabetic() || byte == b'~' => {
+                    At::Group
+                }
+                (At::Group, byte) if byte.is_ascii_digit() => At::Group,
+                _ => At::Outside,
+            };
+        }
+        if at == At::Group {
+            &name[..start]
         } else {
-            // Non-alphanumeric, non-`~`: after every letter. `UCHAR_MAX` is
-            // 255, so this is `c + 256`, matching the reference weight.
-            i32::from(c) + 256
+            name
         }
     }
 
-    /// The Debian version comparison over the byte ranges `s1[..s1_len]` and
-    /// `s2[..s2_len]` (a port of gnulib's `verrevcmp`): non-digit runs
-    /// compare by [`order`], digit runs compare numerically ignoring leading
-    /// zeros.
-    fn verrevcmp(s1: &[u8], s1_len: usize, s2: &[u8], s2_len: usize) -> i32 {
-        let (mut p1, mut p2) = (0usize, 0usize);
-        while p1 < s1_len || p2 < s2_len {
-            let mut first_diff = 0i32;
-            while (p1 < s1_len && !s1[p1].is_ascii_digit())
-                || (p2 < s2_len && !s2[p2].is_ascii_digit())
-            {
-                let c1 = order(s1, p1, s1_len);
-                let c2 = order(s2, p2, s2_len);
-                if c1 != c2 {
-                    return c1 - c2;
-                }
-                p1 += 1;
-                p2 += 1;
+    /// The manual's comparison: alternating runs of text and of digits, the
+    /// text by [`weight`] and the digits by value.
+    fn compare(mut a: &[u8], mut b: &[u8]) -> Ordering {
+        while !a.is_empty() || !b.is_empty() {
+            let (text_a, rest_a) = split(a, false);
+            let (text_b, rest_b) = split(b, false);
+            let by_text = (0..text_a.len().max(text_b.len()))
+                .map(|at| weight(text_a.get(at)).cmp(&weight(text_b.get(at))))
+                .find(|order| order.is_ne())
+                .unwrap_or(Ordering::Equal);
+            let (digits_a, rest_a) = split(rest_a, true);
+            let (digits_b, rest_b) = split(rest_b, true);
+            let (value_a, value_b) = (significant(digits_a), significant(digits_b));
+            let order = by_text
+                .then_with(|| value_a.len().cmp(&value_b.len()))
+                .then_with(|| value_a.cmp(value_b));
+            if order.is_ne() {
+                return order;
             }
-            while p1 < s1_len && s1[p1] == b'0' {
-                p1 += 1;
-            }
-            while p2 < s2_len && s2[p2] == b'0' {
-                p2 += 1;
-            }
-            while p1 < s1_len && p2 < s2_len && s1[p1].is_ascii_digit() && s2[p2].is_ascii_digit() {
-                if first_diff == 0 {
-                    first_diff = i32::from(s1[p1]) - i32::from(s2[p2]);
-                }
-                p1 += 1;
-                p2 += 1;
-            }
-            if p1 < s1_len && s1[p1].is_ascii_digit() {
-                return 1;
-            }
-            if p2 < s2_len && s2[p2].is_ascii_digit() {
-                return -1;
-            }
-            if first_diff != 0 {
-                return first_diff;
-            }
+            (a, b) = (rest_a, rest_b);
         }
-        0
+        Ordering::Equal
     }
 
-    /// Compare version strings `a` and `b` (byte slices), returning their
-    /// [`Ordering`]. A faithful port of gnulib `filenvercmp`.
-    pub fn filevercmp(a: &[u8], b: &[u8]) -> Ordering {
-        raw(a, b).cmp(&0)
+    /// The leading run of text (or of digits) in `bytes`, and what follows.
+    fn split(bytes: &[u8], digits: bool) -> (&[u8], &[u8]) {
+        let end = bytes
+            .iter()
+            .position(|byte| byte.is_ascii_digit() != digits)
+            .unwrap_or(bytes.len());
+        bytes.split_at(end)
     }
 
-    /// The signed comparison value, so the port reads like the reference.
-    fn raw(a: &[u8], b: &[u8]) -> i32 {
-        // Empty versions sort first.
-        if a.is_empty() {
-            return if b.is_empty() { 0 } else { -1 };
-        }
-        if b.is_empty() {
-            return 1;
-        }
-        // Leading ".": "." sorts first, then "..", then other dot-names,
-        // then the rest.
-        if a[0] == b'.' {
-            if b[0] != b'.' {
-                return -1;
-            }
-            let adot = a.len() == 1;
-            let bdot = b.len() == 1;
-            if adot {
-                return if bdot { 0 } else { -1 };
-            }
-            if bdot {
-                return 1;
-            }
-            let adotdot = a[1] == b'.' && a.len() == 2;
-            let bdotdot = b[1] == b'.' && b.len() == 2;
-            if adotdot {
-                return if bdotdot { 0 } else { -1 };
-            }
-            if bdotdot {
-                return 1;
-            }
-        } else if b[0] == b'.' {
-            return 1;
-        }
-        // Cut file suffixes for the first pass; restore them on a tie.
-        let apre = file_prefixlen(a);
-        let bpre = file_prefixlen(b);
-        let one_pass_only = apre == a.len() && bpre == b.len();
-        let result = verrevcmp(a, apre, b, bpre);
-        if result != 0 || one_pass_only {
-            result
-        } else {
-            verrevcmp(a, a.len(), b, b.len())
+    /// The digits that carry a run's value: all but its leading zeros, so an
+    /// empty run is zero.
+    fn significant(digits: &[u8]) -> &[u8] {
+        let zeros = digits.iter().take_while(|&&digit| digit == b'0').count();
+        &digits[zeros..]
+    }
+
+    /// A text byte's place: `~` before the end of the text, the end before
+    /// letters, and letters before every other byte.
+    fn weight(byte: Option<&u8>) -> i32 {
+        match byte.copied() {
+            None => 0,
+            Some(b'~') => -1,
+            Some(byte) if byte.is_ascii_alphabetic() => i32::from(byte),
+            Some(byte) => i32::from(byte) + 256,
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use super::filevercmp;
+        use alloc::vec::Vec;
         use core::cmp::Ordering;
 
-        fn cmp(a: &str, b: &str) -> Ordering {
-            filevercmp(a.as_bytes(), b.as_bytes())
+        use super::version_order;
+
+        fn order(a: &str, b: &str) -> Ordering {
+            version_order(a.as_bytes(), b.as_bytes())
         }
 
         #[test]
-        fn digit_runs_compare_numerically() {
-            assert_eq!(cmp("f2", "f10"), Ordering::Less);
-            assert_eq!(cmp("f10", "f2"), Ordering::Greater);
-            assert_eq!(cmp("file", "file"), Ordering::Equal);
+        fn digits_compare_by_value_whatever_their_leading_zeros() {
+            assert_eq!(order("f2", "f10"), Ordering::Less);
+            assert_eq!(order("f10", "f2"), Ordering::Greater);
+            assert_eq!(order("f008", "f8"), Ordering::Equal);
+            assert_eq!(order("f09", "f10"), Ordering::Less);
+            assert_eq!(
+                order("v18446744073709551617", "v18446744073709551616"),
+                Ordering::Greater
+            );
         }
 
         #[test]
-        fn leading_zeros_are_ignored_in_a_numeric_run() {
-            assert_eq!(cmp("f008", "f8"), Ordering::Equal);
-            assert_eq!(cmp("f09", "f10"), Ordering::Less);
+        fn a_tilde_sorts_before_the_end_of_the_text() {
+            assert_eq!(order("f~", "f"), Ordering::Less);
+            assert_eq!(order("1.0~beta", "1.0"), Ordering::Less);
         }
 
         #[test]
-        fn tilde_sorts_before_everything() {
-            assert_eq!(cmp("f~", "f"), Ordering::Less);
-            assert_eq!(cmp("1.0~beta", "1.0"), Ordering::Less);
+        fn dot_names_sort_first_and_compare_without_their_dot() {
+            assert_eq!(order("", "."), Ordering::Less);
+            assert_eq!(order(".", ".."), Ordering::Less);
+            assert_eq!(order("..", ".bashrc"), Ordering::Less);
+            assert_eq!(order(".bashrc", "a"), Ordering::Less);
+            assert_eq!(order(".d3", ".d20"), Ordering::Less);
         }
 
         #[test]
-        fn dot_names_sort_first_in_order() {
-            assert_eq!(cmp(".", ".."), Ordering::Less);
-            assert_eq!(cmp("..", ".bashrc"), Ordering::Less);
-            assert_eq!(cmp(".bashrc", "bashrc"), Ordering::Less);
+        fn a_suffix_is_set_aside_until_the_rest_ties() {
+            assert_eq!(order("hello.c", "hello.o"), Ordering::Less);
+            assert_eq!(order("hello-2.c", "hello-10.c"), Ordering::Less);
+            assert_eq!(order("hello-8.txt", "hello-8.2.txt"), Ordering::Less);
         }
 
+        /// GNU coreutils 9.4's `LC_ALL=C sort -V` order of 600 seeded random
+        /// names, the oracle this order is held to: `sort` breaks a version
+        /// tie bytewise, as `ls` does.
         #[test]
-        fn suffixes_are_cut_then_restored_for_a_tie() {
-            // Same base, different extension: the suffix breaks the tie.
-            assert_eq!(cmp("hello.c", "hello.o"), Ordering::Less);
-            // Different version in the base wins over the suffix.
-            assert_eq!(cmp("hello-2.c", "hello-10.c"), Ordering::Less);
-        }
-
-        #[test]
-        fn the_empty_string_sorts_first() {
-            assert_eq!(cmp("", "a"), Ordering::Less);
-            assert_eq!(cmp("a", ""), Ordering::Greater);
-            assert_eq!(cmp("", ""), Ordering::Equal);
+        fn names_sort_as_gnu_sort_v_sorts_them() {
+            let gnu: Vec<&str> = include_str!("version_gnu_order.txt")
+                .split_terminator('\n')
+                .collect();
+            let mut ours = gnu.clone();
+            ours.reverse();
+            ours.sort_by(|a, b| order(a, b).then_with(|| a.cmp(b)));
+            assert_eq!(ours, gnu);
         }
     }
 }
@@ -1827,7 +1863,12 @@ mod tests {
     use tairix_abi::time::Time64;
     use tairix_abi::{Errno, NodeTimes};
     use tairix_help::{HelpSource, SourceError};
+    use tairix_path::dir_name;
     use tairix_termcap::ColorChoice;
+
+    /// Every request the test binary makes, metered per thread.
+    #[global_allocator]
+    static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
     /// An in-memory tree: a table of each path's **own** (`lstat`) metadata,
     /// the stored target of every path that is a link, and — for directories
@@ -1928,7 +1969,7 @@ mod tests {
             if hops == 0 || self.exact(path).is_some() {
                 return String::from(path);
             }
-            let parent = parent_of(path);
+            let parent = dir_name(path);
             let leaf = path.rsplit('/').next().unwrap_or(path);
             if parent == path || leaf.is_empty() {
                 return String::from(path);
@@ -1952,7 +1993,7 @@ mod tests {
                         let next = if target.starts_with('/') {
                             target
                         } else {
-                            super::join(parent_of(&here), &target)
+                            super::join(dir_name(&here), &target)
                         };
                         self.follow(&next, hops - 1)
                     }
@@ -2192,15 +2233,6 @@ mod tests {
         }
     }
 
-    /// The directory part of `path`, for resolving a relative link target.
-    fn parent_of(path: &str) -> &str {
-        match path.rfind('/') {
-            Some(0) => "/",
-            Some(slash) => &path[..slash],
-            None => ".",
-        }
-    }
-
     /// A Help tree with no documents at all: the short-help fallback path.
     struct NoHelp;
 
@@ -2247,6 +2279,8 @@ mod tests {
         records: RefCell<Vec<Vec<u8>>>,
         /// The diagnostics the listing wrote to the error stream, in order.
         errors: RefCell<Vec<String>>,
+        /// How many output chunks had been written as each diagnostic was.
+        errors_after: RefCell<Vec<usize>>,
         fail: bool,
         /// The width [`Terminal::terminal_width`] reports; `None` models a
         /// non-terminal stdout (a pipe/file), which is the default the
@@ -2260,6 +2294,7 @@ mod tests {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
                 errors: RefCell::new(Vec::new()),
+                errors_after: RefCell::new(Vec::new()),
                 fail: false,
                 width: None,
             }
@@ -2273,6 +2308,7 @@ mod tests {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
                 errors: RefCell::new(Vec::new()),
+                errors_after: RefCell::new(Vec::new()),
                 fail: false,
                 width: Some(cols),
             }
@@ -2283,6 +2319,7 @@ mod tests {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
                 errors: RefCell::new(Vec::new()),
+                errors_after: RefCell::new(Vec::new()),
                 fail: true,
                 width: None,
             }
@@ -2303,6 +2340,10 @@ mod tests {
 
         fn errors(&self) -> Vec<String> {
             self.errors.borrow().clone()
+        }
+
+        fn errors_after(&self) -> Vec<usize> {
+            self.errors_after.borrow().clone()
         }
 
         fn records(&self) -> Vec<String> {
@@ -2331,6 +2372,9 @@ mod tests {
     impl Terminal for Recorder {
         fn error(&self, message: &str) {
             self.errors.borrow_mut().push(String::from(message));
+            self.errors_after
+                .borrow_mut()
+                .push(self.chunks.borrow().len());
         }
 
         fn terminal_width(&self) -> Option<usize> {
@@ -2598,6 +2642,33 @@ mod tests {
         // `-I` applies under `-a` too: the object files are gone, the
         // dotfile stays.
         assert_eq!(out.text(), ".hidden\nkeep.txt\n");
+    }
+
+    /// One scratch serves every name a listing filters, so a name filter
+    /// costs a listing no allocation per name.
+    #[test]
+    fn a_name_filter_allocates_nothing_per_name() {
+        let mut fs = TreeFs::new().dir(".");
+        for n in 0..500 {
+            fs = fs.entry(".", &format!("f{n}.c"), FileKind::Regular, 0o644, 0);
+        }
+        let allocations = |filters: Filters| {
+            let out = Recorder::new();
+            let (outcome, metering) = tairix_fuzzseed::meter::metered(|| {
+                run_ls(listing_with(Options::DEFAULT, filters, &["."]), &fs, &out)
+            });
+            assert_eq!(outcome, Ok(Outcome::Complete));
+            metering.allocations
+        };
+        let plain = allocations(Filters::default());
+        let filtered = allocations(Filters {
+            ignore: alloc::vec![crate::command::name_pattern("*.o").expect("valid glob")],
+            ..Filters::default()
+        });
+        assert!(
+            filtered <= plain + 8,
+            "{filtered} allocations filtered against {plain}"
+        );
     }
 
     /// GNU matches `-I` with `FNM_PERIOD`: `ls -a -I '*'` drops every name
@@ -4818,13 +4889,64 @@ mod tests {
             },
             &["/top"],
         );
-        assert_eq!(run_ls(command, &fs, &out), Ok(Outcome::MinorProblem));
+        assert_eq!(run_ls(command, &fs, &out), Ok(Outcome::SeriousProblem));
         assert_eq!(
             out.errors(),
-            ["ls: not listing already-listed directory: '/top/loop'"]
+            ["ls: /top/loop: not listing already-listed directory"]
         );
         // The listing itself is finite and complete.
         assert_eq!(out.text(), "/top:\nf\nloop\n");
+    }
+
+    /// A directory reached again is reported when its turn comes, after the
+    /// siblings listed before it, where GNU reports it.
+    #[test]
+    fn a_cycle_is_reported_in_its_turn() {
+        let fs = TreeFs::new()
+            .dir("/top")
+            .entry("/top", "a", FileKind::Directory, 0o755, 0)
+            .dir("/top/a")
+            .entry("/top/a", "x", FileKind::Regular, 0o644, 0)
+            .link_entry("/top", "loop", "/top");
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                recursive: true,
+                dereference: Some(Dereference::Always),
+                ..Options::DEFAULT
+            },
+            &["/top"],
+        );
+        assert_eq!(run_ls(command, &fs, &out), Ok(Outcome::SeriousProblem));
+        assert_eq!(out.chunks().len(), 2, "/top and /top/a: {:?}", out.chunks());
+        assert_eq!(out.errors_after(), [2], "reported once /top/a is listed");
+    }
+
+    /// The path goes first, quoted only where a shell needs it, or where it
+    /// holds the `:` the message is delimited by, as GNU `ls` 9.4 writes it.
+    #[test]
+    fn a_cycle_report_names_its_path_first_quoted_only_where_needed() {
+        for (name, shown) in [
+            ("loop", "/top/loop"),
+            ("a b", "'/top/a b'"),
+            ("a:b", "'/top/a:b'"),
+        ] {
+            let fs = TreeFs::new().dir("/top").link_entry("/top", name, "/top");
+            let out = Recorder::new();
+            let command = list_with(
+                Options {
+                    recursive: true,
+                    dereference: Some(Dereference::Always),
+                    ..Options::DEFAULT
+                },
+                &["/top"],
+            );
+            assert_eq!(run_ls(command, &fs, &out), Ok(Outcome::SeriousProblem));
+            assert_eq!(
+                out.errors(),
+                [format!("ls: {shown}: not listing already-listed directory")]
+            );
+        }
     }
 
     #[test]

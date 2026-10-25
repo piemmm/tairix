@@ -226,12 +226,15 @@ and `plans/IO.md`.
 
 ## Filesystem (`File`, `Dir`)
 
-`tairix-rt` exposes the userland filesystem surface (`PREREQUISITES.md` P-A):
+`tairix-rt` exposes the userland filesystem surface:
 thin `fs_open`/`fs_close`/`fs_read`/`fs_write`/`fs_readdir`/`fs_stat_raw`/
 `fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_symlink`/
-`fs_readlink` wrappers over the `abi-v1` syscalls, the working-directory pair (`fs_chdir`/`fs_getcwd`, against
-which relative paths resolve, `plans/SHELL.md` P2), plus the
-ergonomic `File` and `Dir` handles a program normally uses. `realpath` and
+`fs_readlink` wrappers over the `abi-v1` syscalls, the working-directory pair
+(`fs_chdir`/`fs_getcwd`; the working directory a relative path resolves from
+holds the directory itself, so it follows the directory through a rename),
+plus the ergonomic `File` and `Dir` handles a program normally uses. Every
+path-only function passes `FD_CWD`, starting a relative path at the working
+directory. `realpath` and
 `readlink` answer a path's resolution and a link's stored target as owned
 text, growing the answer buffer fallibly to the kernel's bound, so no tool
 sizes one of its own.
@@ -252,32 +255,69 @@ document with one `fs_stat` — `None` for anything but a regular file, whose
 declared length says nothing about a read. A program names
 a descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
 per-inode check stays kernel-side behind the secured VFS (`AGENTS.md` §5.4); a
-refusal surfaces as the raw `-errno`. The `open` / `create` / `create_new` /
-`open_dir` free functions are the common-case openers (read-only,
+refusal surfaces as the raw `-errno`. The `open` / `create` / `create_new`
+free functions and `Dir::open` are the common-case openers (read-only,
 write+create+truncate, write+create refusing an existing file, and
 directory-listing respectively).
+
+A `Dir` is also where relative calls start: `open_dir`, `open_file`,
+`create_file`, `make_dir`, `mkdir`, `unlink`, `rename`, `link`, `symlink`,
+`readlink`, `set_mode_at`, `set_owner_at` and `access` resolve a relative
+name from the directory the handle holds, wherever it has moved, and an
+absolute one as the free functions do; `chdir` makes it the working
+directory. Each runs as the caller. `Dir::create` and `Dir::make_dir` make a
+directory and answer it open (`CREATE | DIRECTORY | EXCLUSIVE`), so what is
+done to it next reaches the directory made, whatever its name holds by then;
+`Dir::unlink` and `Dir::rename` carry an optional `NodeExpect`, refused
+`Stale` with nothing changed when the name no longer holds the node it
+describes. A descriptor's own node is reached through `EMPTY_PATH`:
+`File::set_mode`, `File::set_owner`, `File::access` and `Dir::chdir`.
+`access(path, want, flags)` answers whether the caller may read, write or run
+a node — its mode, ACL and capability gate under the caller's identity, then
+the mount's flags — for a program deciding what to ask or show; the call it
+then makes is checked again.
+
+A node is born with the mode its creator names, less the process's file mode
+creation mask: `File::create(path, flags, mode)`, `create`, `create_new` and
+`fs_mkdir` all take it, `fs_open`'s fifth register carries it, and
+`File::open` refuses flags that would create, so no node is created without
+one. `umask(mask)` sets the mask (its permission bits; it answers the mask it
+replaced) and `umask_get()` reads it, over `fs_umask`; a child inherits it at
+spawn.
 
 `replace_file` is the one way a program replaces a whole document, so a crash
 or power loss at any point leaves the old contents or the new, never an empty
 or torn file: the bytes go to a sibling temporary named for that replace alone,
-which takes the original's extended attributes (through the copy engine, every
-one or the replace is refused), owner, group and mode, is synced, and is
-renamed over the original, and a second sync puts the rename on the medium.
+made owner-only and held open, which takes through its descriptor the
+original's extended attributes (through the copy engine, every one or the
+replace is refused), owner, group and mode, is synced, and is renamed over the
+original only while its name still holds it; a second sync puts the rename on
+the medium.
 `staging_name` draws that sibling's name — `<name>.<16 hex digits>.new`, or
 `.<16 hex digits>.new` in the same directory when the name would outgrow a
 component — for any program that builds a replacement itself, as `mv` builds
 a cross-volume move, so every staged replacement is spelled alike.
 `ParentDir::CreatedIfMissing` creates the document's directory only when the
-replace finds it missing. A file's ACL and capability gate are not visible to
+replace finds it missing. A document that did not exist is created with the
+mode the caller names; the temporary replacing one that did is its writer's
+alone until it is whole, so the bytes and attributes it takes first are never
+shown to anyone, and a link swapped in at its name is never written through
+nor put in place. A file's ACL and capability gate are not visible to
 a program, so neither survives a replace: it is not for a file carrying
-either.
+either. `replace_with_link` is the same rule for a name a link replaces —
+`ln -f`, `cp -lf`/`-sf`, `fstree` copying a link onto a file the user agreed
+to replace: the `NewLink` (symbolic, or a second name for a node) is made
+under such a sibling and renamed over the name, so the name is never missing
+and nothing it held is removed unless the link was made; a hard link's
+missing source is refused before the name is touched.
 
-The `copy` module is the shared copy engine's seams (`lib/fscopy`) over this
-runtime: `RtFile` reads and writes an open `File` with its holes,
-`RtAttributes` reads and sets a path's extended attributes, `OpenFiles`
-keeps one source and one destination open by path between a copying tool's
-chunks, and `RtAncestry` answers the containment check's resolutions and
-identities.
+The `copy` module is the shared tree seam and the copy engine's data seams
+(`lib/fscopy`) over this runtime: a `File` is a held node, read and written
+with its holes through its descriptor; a `Dir` is a held directory whose
+children are reached by name from it, never through a link
+(`NO_FOLLOW`); and `WorkingDirectory` opens a tool's operands from the
+working directory. `Dir::open_dir` opens a child directory the same way, so a
+link where a directory was expected answers `NotADirectory`.
 
 `File::open` is the one **open-by-name** path, and it applies the shared
 `lib/resref` spelling rule (`names_resource_reference`) before any lookup: a
@@ -292,13 +332,16 @@ containing `:` stays reachable as `./name`, and `File::open_resource` remains
 the explicit constructor for a caller that has already classified its target
 (the shell's parsed redirection targets).
 
-`fs_attr_keys` and `fs_attr_value` are the shared drains of the
-extended-attribute reads: the first walks `fs_attr_list`'s index iteration to
-its end-of-list answer (refusing a key the backing spelled malformed rather
-than showing it lossily), the second reads one value into a buffer the fixed
-`FS_ATTR_VALUE_MAX` bound guarantees is large enough. Both consumers — the
-file manager's Properties window and `fstree`'s attribute editor — read through
-them, so no tool carries its own copy of the iteration rule.
+Extended attributes are reached through a descriptor only: `File::attr_keys`,
+`attr_value`, `attr_set` and `attr_remove` act on the node the handle holds,
+a link's own when it was opened `NO_FOLLOW`. `attr_keys` and `attr_value`
+are the shared drains of the reads: the first walks `fs_attr_list`'s index
+iteration to its end-of-list answer (refusing a key the backing spelled
+malformed rather than showing it lossily), the second reads one value into a
+buffer the fixed `FS_ATTR_VALUE_MAX` bound guarantees is large enough. Every
+consumer — the file manager's Properties window, `fstree`'s attribute editor
+and the copy engine's seam — reads through them, so no tool carries its own
+copy of the iteration rule.
 
 ## Raw syscall results (`Errno::from_syscall`)
 
@@ -415,7 +458,9 @@ compiled, unit-tested through the trap crate's injectable seam.
 `experimental` — `abi-v1` is **not** frozen yet (`plans/CCOMPAT.md` §0). The
 exposed syscall-wrapper surface grows as TAIRiX programs need it: the
 standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`, `AGENTS.md`
-§20), `spawn` / `spawn_in` / `console_count` / `wait` / `yield_now` / `exit`,
+§20), `spawn` / `spawn_in` / `spawn_attached` / `spawn_attached_in` (the child
+started in a directory resolved as the child) / `console_count` / `wait` /
+`yield_now` / `exit`,
 the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed
 `#[global_allocator]` they power, the resource-limit pair (`rlimit_get`,
 `rlimit_set`), the session wrappers (`set_input_mode`, `users_db_read`,

@@ -1,5 +1,5 @@
 //! `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond QEMU integration test: boot the
-//! production riscv64 (QEMU `virt` / SiFive) `tairix-kernel` pipeline against
+//! production riscv64 (QEMU `virt`) `tairix-kernel` pipeline against
 //! the shared `bond-net-root` whole-disk image — whose always-readable
 //! `/System` volume carries the **kernel-signed virtio-net driver bundle**
 //! (cross-compiled for riscv64) and a planted

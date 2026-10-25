@@ -16,9 +16,9 @@
 //! same deliberate divergence `lsusb`'s bus/device numbers make; the Help
 //! document states it).
 
-use alloc::format;
 use alloc::string::{String, ToString};
 use core::fmt;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
 /// What a parsed argument vector asks `lspci` to do.
@@ -73,10 +73,8 @@ pub struct Options {
 /// Why an argument vector did not parse.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// An option this tool does not implement.
-    UnknownOption(String),
-    /// A value-carrying option (`-d`, `-s`) with no value.
-    MissingValue(&'static str),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A `-d` value that is not `[<vendor>]:[<device>]` in hex.
     BadDeviceFilter(String),
     /// A `-s` value that is not a decimal listing number.
@@ -88,10 +86,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
-            Self::MissingValue(opt) => {
-                write!(f, "option {opt} requires an argument", opt = quote(opt))
-            }
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::BadDeviceFilter(value) => {
                 write!(
                     f,
@@ -111,87 +106,83 @@ impl fmt::Display for ParseError {
     }
 }
 
+/// What each of `lspci`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Numeric,
+    Verbose,
+    Tree,
+    Device,
+    Slot,
+    Help,
+}
+
+/// `lspci`'s options, as `pciutils` spells them, and the reserved help
+/// switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::letter('n', Takes::Nothing, Flag::Numeric),
+    Opt::letter('v', Takes::Nothing, Flag::Verbose),
+    Opt::letter('t', Takes::Nothing, Flag::Tree),
+    Opt::letter('d', Takes::Value, Flag::Device),
+    Opt::letter('s', Takes::Value, Flag::Slot),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse an argument vector (without the program name).
 ///
-/// `--` ends option parsing (anything after it is an operand, and
-/// therefore an error — `lspci` takes none). Short options cluster; a
-/// second `n` in the same invocation upgrades `-n` to `-nn`, exactly as
-/// `pciutils` treats `-nn`.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options clustered, `-d`'s
+/// and `-s`'s value attached or the next argument, a long option by any
+/// unambiguous prefix, `--` ending them. The help switches (`-?`, `--help`)
+/// answer at once. A second `n` upgrades `-n` to `-nn`, exactly as `pciutils`
+/// treats `-nn`.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] naming the offending argument; the caller reports it
-/// with the usage banner and exits `2`.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::BadDeviceFilter`] — a `-d` value that is not
+///   `[<vendor>]:[<device>]` in hex.
+/// * [`ParseError::BadSlot`] — a `-s` value that is not a decimal listing
+///   number.
+/// * [`ParseError::UnexpectedOperand`] — any operand, before or after `--`:
+///   `lspci` takes none.
+///
+/// The caller reports each, then where the help is, and exits `1`.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut options = Options::default();
-    let mut index = 0;
-    let mut options_ended = false;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if options_ended || arg == "-" || !arg.starts_with('-') {
-            return Err(ParseError::UnexpectedOperand(arg.to_string()));
-        }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            match long {
-                "help" => return Ok(Command::Help),
-                _ => return Err(ParseError::UnknownOption(arg.to_string())),
-            }
-        }
-        // A short-option cluster; `-d` and `-s` consume the rest of the
-        // cluster (or the next argument) as their value.
-        let mut cluster = arg[1..].chars();
-        while let Some(flag) = cluster.next() {
-            match flag {
-                '?' => return Ok(Command::Help),
-                'n' => {
-                    options.names = match options.names {
-                        NameMode::Names => NameMode::Numeric,
-                        NameMode::Numeric | NameMode::Both => NameMode::Both,
-                    };
-                }
-                'v' => options.verbose = true,
-                't' => options.tree = true,
-                'd' => {
-                    let value = take_cluster_value(cluster.as_str(), args, &mut index, "-d")?;
-                    options.device = Some(parse_device_filter(value)?);
-                    break;
-                }
-                's' => {
-                    let value = take_cluster_value(cluster.as_str(), args, &mut index, "-s")?;
-                    options.slot = Some(
-                        value
-                            .parse::<u32>()
-                            .map_err(|_| ParseError::BadSlot(value.to_string()))?,
-                    );
-                    break;
-                }
-                other => return Err(ParseError::UnknownOption(format!("-{other}"))),
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(word) => return Err(ParseError::UnexpectedOperand(word.to_string())),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(flag, value) => options.set(flag, value.unwrap_or_default())?,
         }
     }
     Ok(Command::List(options))
 }
 
-/// The value of a `-x value` / `-xvalue` short option.
-fn take_cluster_value<'a>(
-    rest: &'a str,
-    args: &[&'a str],
-    index: &mut usize,
-    option: &'static str,
-) -> Result<&'a str, ParseError> {
-    if !rest.is_empty() {
-        return Ok(rest);
+impl Options {
+    /// Apply the option `flag` names, with the value it took.
+    fn set(&mut self, flag: Flag, value: &str) -> Result<(), ParseError> {
+        match flag {
+            Flag::Numeric => {
+                self.names = match self.names {
+                    NameMode::Names => NameMode::Numeric,
+                    NameMode::Numeric | NameMode::Both => NameMode::Both,
+                };
+            }
+            Flag::Verbose => self.verbose = true,
+            Flag::Tree => self.tree = true,
+            Flag::Device => self.device = Some(parse_device_filter(value)?),
+            Flag::Slot => {
+                self.slot = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| ParseError::BadSlot(value.to_string()))?,
+                );
+            }
+            Flag::Help => {}
+        }
+        Ok(())
     }
-    let Some(value) = args.get(*index) else {
-        return Err(ParseError::MissingValue(option));
-    };
-    *index += 1;
-    Ok(value)
 }
 
 /// Parse a `-d` value: `[<vendor>]:[<device>]`, each half up to four hex
@@ -217,6 +208,29 @@ fn parse_device_filter(value: &str) -> Result<DeviceFilter, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-Q"]), "invalid option -- 'Q'");
+        assert_eq!(refused(&["-vQ"]), "invalid option -- 'Q'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-d"]), "option requires an argument -- 'd'");
+        assert_eq!(
+            refused(&["--help=1"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
+        assert_eq!(parse(&["-v", "--h"]), Ok(Command::Help));
+    }
 
     fn list(args: &[&str]) -> Options {
         match parse(args).expect("parses") {
@@ -295,14 +309,17 @@ mod tests {
             Err(ParseError::BadDeviceFilter(_))
         ));
         assert!(matches!(parse(&["-s", "0x7"]), Err(ParseError::BadSlot(_))));
-        assert!(matches!(
+        assert_eq!(
             parse(&["-s"]),
-            Err(ParseError::MissingValue("-s"))
-        ));
-        assert!(matches!(parse(&["-z"]), Err(ParseError::UnknownOption(_))));
+            Err(ParseError::Option(Refusal::MissingShortValue('s')))
+        );
+        assert_eq!(
+            parse(&["-z"]),
+            Err(ParseError::Option(Refusal::UnknownShort('z')))
+        );
         assert!(matches!(
             parse(&["--verbose"]),
-            Err(ParseError::UnknownOption(_))
+            Err(ParseError::Option(Refusal::UnknownLong(_)))
         ));
     }
 

@@ -405,7 +405,7 @@ pub fn addressable_port(resource: &HwResource, port: u64, width: PortWidth) -> R
 /// `msi_alloc` syscall seam).
 ///
 /// Allocating an MSI vector and bringing the platform's MSI controller up
-/// is irreducibly architecture-specific (the BCM2711 root-complex MSI
+/// is irreducibly architecture-specific (a root complex's internal MSI
 /// controller, an x86 IO-APIC/LAPIC MSI domain, …), so — like
 /// [`MmioMapFacility`] / [`DmaAllocFacility`] — the concrete producer is
 /// installed at boot through a `with_*` builder and the handler reaches it
@@ -879,11 +879,11 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
 /// grant's inbound-viewport translation.
 ///
 /// * An **untranslated** (coherent) constraint (`translated_base == 0`) — a
-///   coherent bus, the QEMU `virt` stand-in, the `VideoCore` mailbox carve —
+///   coherent bus, the QEMU `virt` stand-in, a firmware mailbox carve —
 ///   names the device by the CPU-physical base itself, returned unchanged.
 /// * A **translating inbound viewport** (`translated_base != 0`) — a PCIe
-///   root complex's `dma-ranges`, e.g. the Pi 4's `IB MEM 0x0..0x1ffffffff
-///   -> 0x4_0000_0000` — maps the CPU window `[cpu_base, addr_limit)` onto
+///   root complex's `dma-ranges` (`IB MEM 0x0..0x1ffffffff
+///   -> 0x4_0000_0000`, say) — maps the CPU window `[cpu_base, addr_limit)` onto
 ///   the bus window `[translated_base, translated_base + max_len)`, where
 ///   `cpu_base = addr_limit - max_len`. A buffer at `cpu_phys` is seen by
 ///   the device at `translated_base + (cpu_phys - cpu_base)`, and only a
@@ -1190,7 +1190,7 @@ mod tests {
 
     #[test]
     fn translate_device_addr_rebases_a_translating_viewport() {
-        // The Pi 4 inbound viewport: CPU window [0, 0x2_0000_0000) mapped onto
+        // An inbound viewport: CPU window [0, 0x2_0000_0000) mapped onto
         // bus window [0x4_0000_0000, 0x6_0000_0000) (cpu_base = top - len = 0).
         // A buffer carved at CPU-physical 0x10_0000 is seen by the device at
         // 0x4_0000_0000 + 0x10_0000.

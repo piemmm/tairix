@@ -57,7 +57,8 @@ pub const TARGETS: &[Target] = &[
         dir: "lib/sync",
         harness: "loom",
         build: Build::SwappedAtomics,
-        description: "the spin/MCS/RW locks, the seqlock, and the set-once cell",
+        description: "the spin/MCS/RW locks, the seqlock, the set-once cell, and \
+                      the bit claims",
     },
     Target {
         package: "tairix-abi",

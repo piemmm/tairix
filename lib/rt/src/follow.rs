@@ -12,6 +12,14 @@ use tairix_abi::Errno;
 
 use crate::{Dir, WaitSet};
 
+/// The shortest time between two reports of a storm of changes to a followed
+/// file's directory; an isolated change reports at once.
+const STORM_LATENCY_NS: u64 = 1_000_000_000;
+
+/// Change batches one drain reads before the file is read anyway, so a
+/// directory changing without pause cannot hold its follower.
+const DRAIN_BATCHES: usize = 16;
+
 /// What a drained batch from a followed file's watch asks for, least first.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Verdict {
@@ -82,8 +90,8 @@ pub enum Follow {
     NotYet,
     /// It is followed.
     Watching(Followed),
-    /// Its directory or the parent is there but cannot be watched, for this
-    /// reason.
+    /// Its directory, or the parent while the directory is absent, cannot be
+    /// opened or watched, for this reason.
     Unwatched(Errno),
 }
 
@@ -96,22 +104,27 @@ pub struct Followed {
 }
 
 impl Followed {
-    /// Follow the file at `path`, its watch joined to `set` under `token` and
-    /// reporting a storm of changes at most once a `latency_ns`.
+    /// Follow the file at `path`, its watch joined to `set` under `token`.
+    ///
+    /// Only an absent directory is waited for: one there but refused, or not a
+    /// directory, is answered [`Follow::Unwatched`] with why.
     #[must_use]
-    pub fn follow(path: &'static str, set: &WaitSet, token: u64, latency_ns: u64) -> Follow {
+    pub fn follow(path: &'static str, set: &WaitSet, token: u64) -> Follow {
         let Some(places) = Places::of(path) else {
             return Follow::Unwatched(Errno::OutOfRange);
         };
-        let (opened, exact) = match crate::open_dir(places.dir.as_bytes()) {
+        let open = |dir: &str| Dir::open(dir.as_bytes()).map_err(Errno::from_syscall);
+        let (opened, exact) = match open(places.dir) {
             Ok(opened) => (opened, true),
-            Err(_) => match crate::open_dir(places.parent.as_bytes()) {
+            Err(Errno::NotFound) => match open(places.parent) {
                 Ok(opened) => (opened, false),
-                Err(_) => return Follow::NotYet,
+                Err(Errno::NotFound) => return Follow::NotYet,
+                Err(refused) => return Follow::Unwatched(refused),
             },
+            Err(refused) => return Follow::Unwatched(refused),
         };
         let armed = opened
-            .watch(latency_ns)
+            .watch(STORM_LATENCY_NS)
             .map_err(Errno::from_syscall)
             .and_then(|()| set.add(WaitSourceKind::DirWatch, u64::from(opened.fd()), token));
         match armed {
@@ -125,10 +138,10 @@ impl Followed {
         }
     }
 
-    /// Drain the watch, at most `batches` batches, answering the most they
+    /// Drain the watch, a bounded number of batches, answering the most they
     /// ask for; a directory still changing after them is read again.
     #[must_use]
-    pub fn drain(&self, batches: usize) -> Verdict {
+    pub fn drain(&self) -> Verdict {
         let name = if self.exact {
             self.places.file
         } else {
@@ -136,7 +149,7 @@ impl Followed {
         };
         let mut scratch = [0u8; 2 * DirChangeBatch::MIN_BUFFER];
         let mut most = Verdict::Unconcerned;
-        for _ in 0..batches {
+        for _ in 0..DRAIN_BATCHES {
             let Ok(len) = self.dir.read_changes(&mut scratch) else {
                 return Verdict::Rewatch;
             };
@@ -224,5 +237,28 @@ mod tests {
             (Verdict::Unconcerned, false)
         );
         assert_eq!(verdict(&[0xFF; 8], true, file), (Verdict::Rewatch, false));
+    }
+
+    /// Only an absent directory is waited for: one refused, or not a
+    /// directory, is answered with why, never awaited in silence.
+    #[test]
+    fn only_an_absent_directory_is_awaited() {
+        use super::{Follow, Followed};
+        use tairix_abi::Errno;
+        use tairix_abi_trap::seam;
+        let set = crate::WaitSet(0);
+        for refused in [Errno::PermissionDenied, Errno::NotADirectory] {
+            seam::arm(seam::refusal(refused));
+            let followed = Followed::follow("/Example/Settings/example.conf", &set, 0);
+            assert!(
+                matches!(followed, Follow::Unwatched(errno) if errno == refused),
+                "{refused:?}"
+            );
+        }
+        seam::arm(seam::refusal(Errno::NotFound));
+        assert!(matches!(
+            Followed::follow("/Example/Settings/example.conf", &set, 0),
+            Follow::NotYet
+        ));
     }
 }

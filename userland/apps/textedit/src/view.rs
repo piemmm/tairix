@@ -289,6 +289,17 @@ struct Drag {
     anchor: (usize, usize),
 }
 
+/// The document as a command found it, so its report can say which rows
+/// moved: an edit that changes the byte count moves every hex row after it,
+/// and one that changes the row count every text row below it, though no line
+/// feed came or went.
+#[derive(Copy, Clone, Debug)]
+struct Before {
+    selection: crate::selection::Selection,
+    len: usize,
+    rows: usize,
+}
+
 /// A question the window asks in a dialog of its own.
 #[derive(Debug)]
 enum Modal {
@@ -593,6 +604,16 @@ impl View {
         self.display.as_ref().filter(|display| display.showing())
     }
 
+    /// The document as it stands, before a command changes it.
+    fn before_command(&self) -> Before {
+        let document = self.editor.document();
+        Before {
+            selection: self.editor.selection(),
+            len: document.len(),
+            rows: document.row_count(),
+        }
+    }
+
     /// The read-only display, while the window shows its document that way,
     /// for a change to where it is scrolled.
     fn display_scrolled(&mut self) -> Option<&mut Display> {
@@ -864,7 +885,7 @@ impl View {
             return Outcome::none();
         }
         self.conversion = None;
-        let before = self.editor.selection();
+        let before = self.before_command();
         let effect = self.editor.converted(generation, chunks, to);
         self.message = None;
         damage.add(layout.status());
@@ -1079,7 +1100,7 @@ impl View {
     fn report(
         &mut self,
         effect: Effect,
-        before: crate::selection::Selection,
+        before: Before,
         layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
@@ -1110,10 +1131,15 @@ impl View {
             let range = selection.range();
             document.line_of(range.start)..=document.line_of(range.end)
         };
-        let (was, now) = (lines_of(before), lines_of(self.editor.selection()));
+        let (was, now) = (
+            lines_of(before.selection),
+            lines_of(self.editor.selection()),
+        );
+        let rows_moved = document.row_count() != before.rows;
         for (index, row) in self.visible_rows(layout.rows().max(1)).enumerate() {
             let text_hit = effect.text.is_some_and(|lines| {
-                row.line >= lines.first && lines.last.is_none_or(|last| row.line <= last)
+                row.line >= lines.first
+                    && (rows_moved || lines.last.is_none_or(|last| row.line <= last))
             });
             let selection_hit =
                 effect.selection && (was.contains(&row.line) || now.contains(&row.line));
@@ -1131,7 +1157,7 @@ impl View {
     fn damage_hex_rows(
         &self,
         effect: &Effect,
-        before: crate::selection::Selection,
+        before: Before,
         layout: &Layout,
         damage: &mut Region,
     ) {
@@ -1144,21 +1170,22 @@ impl View {
             }
         };
         if effect.selection {
-            rows(before.range());
+            rows(before.selection.range());
             rows(self.editor.selection().range());
         }
         if let Some(lines) = effect.text {
             let document = self.editor.document();
-            let end = lines
-                .last
-                .map_or(usize::MAX, |last| document.line_bounds(last).next);
+            let end = match lines.last {
+                Some(last) if document.len() == before.len => document.line_bounds(last).next,
+                _ => usize::MAX,
+            };
             rows(document.line_start(lines.first)..end);
         }
     }
 
     /// Run `command` on the editor and report what it did.
     fn command(&mut self, command: &Command, layout: &Layout, damage: &mut Region) -> Outcome {
-        let before = self.editor.selection();
+        let before = self.before_command();
         let effect = self
             .editor
             .run(command, layout.rows().saturating_sub(1).max(1));
@@ -1231,7 +1258,7 @@ impl View {
     }
 
     fn cut(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        let before = self.editor.selection();
+        let before = self.before_command();
         let (effect, bytes) = self.editor.cut();
         let mut outcome = self.report(effect, before, layout, damage);
         if let Some(bytes) = bytes {
@@ -1257,7 +1284,7 @@ impl View {
             }
             return Outcome::none();
         }
-        let before = self.editor.selection();
+        let before = self.before_command();
         let effect = self.editor.replace_selection(bytes);
         self.report(effect, before, layout, damage)
     }
@@ -1500,7 +1527,7 @@ impl View {
         let selection = self.editor.selection().range();
         let mut replaced = Outcome::none();
         if !selection.is_empty() && pattern.is_match(self.editor.document(), selection) {
-            let before = self.editor.selection();
+            let before = self.before_command();
             let effect = self.editor.replace_selection(&bytes);
             replaced = self.report(effect, before, layout, damage);
         }
@@ -1543,7 +1570,7 @@ impl View {
         match step {
             Step::Found(range) => {
                 self.message = None;
-                let before = self.editor.selection();
+                let before = self.before_command();
                 let effect = self.editor.select_match(range);
                 self.report(effect, before, layout, damage)
             }
@@ -1553,7 +1580,7 @@ impl View {
             }
             Step::All { matches, more } => {
                 let count = matches.len();
-                let before = self.editor.selection();
+                let before = self.before_command();
                 let effect = self
                     .editor
                     .replace_all(&matches, replacement.unwrap_or_default());
@@ -1902,7 +1929,7 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
-        let before = self.editor.selection();
+        let before = self.before_command();
         let effect = if self.editor.mode() == Mode::Hex {
             let len = self.editor.document().len();
             let hex_layout = HexLayout::for_len(len);
@@ -1963,10 +1990,16 @@ impl View {
         let grid = layout.grid();
         // Past the grid's top or bottom the view scrolls a row toward the
         // pointer each time it moves.
-        if self.pointer.y < grid.top() {
-            self.nudge(false);
+        let scrolled = if self.pointer.y < grid.top() {
+            self.nudge(false)
         } else if self.pointer.y >= grid.bottom() {
-            self.nudge(true);
+            self.nudge(true)
+        } else {
+            false
+        };
+        if scrolled {
+            damage.add(layout.gutter());
+            damage.add(grid);
         }
         let (row, half) = layout.cell_near(self.pointer);
         let row = row.min(layout.rows().saturating_sub(1));
@@ -1986,7 +2019,7 @@ impl View {
         } else {
             (drag.anchor.0, unit.1.max(drag.anchor.1))
         };
-        let before = self.editor.selection();
+        let before = self.before_command();
         self.editor.click(anchor, false);
         let effect = self.editor.click(head, true);
         self.report(
@@ -2000,13 +2033,14 @@ impl View {
         )
     }
 
-    fn nudge(&mut self, down: bool) {
+    /// Scroll a row toward `down`, answering whether the view moved.
+    fn nudge(&mut self, down: bool) -> bool {
         let len = self.editor.document().len();
         if let Some(display) = self.display_scrolled() {
-            display.scroll(if down { 1 } else { -1 }, len);
-            return;
+            return display.scroll(if down { 1 } else { -1 }, len);
         }
         let document = self.editor.document();
+        let was = (self.top, self.hex_top);
         match self.editor.mode() {
             Mode::Text => {
                 let moved = if down {
@@ -2023,6 +2057,7 @@ impl View {
             }
             Mode::Hex => self.hex_top = self.hex_top.saturating_sub(1),
         }
+        (self.top, self.hex_top) != was
     }
 
     /// Scroll to where a bar asked, `down` and `across` pixels in: the cells
@@ -2337,7 +2372,7 @@ impl View {
                     hex::Pane::Hex => hex::Pane::Ascii,
                     hex::Pane::Ascii => hex::Pane::Hex,
                 };
-                let before = self.editor.selection();
+                let before = self.before_command();
                 let effect = self.editor.set_pane(pane);
                 return self.report(effect, before, layout, damage);
             }

@@ -107,8 +107,7 @@ Heb ymholiad, dangosir y cymorth byr.
 
 - `0` — atebwyd yr ymholiad a'i rendro.
 - `1` — gwrthododd neu fethodd y gwasanaeth, neu ni ellid cyflwyno'r
-  canlyniad.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  canlyniad. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

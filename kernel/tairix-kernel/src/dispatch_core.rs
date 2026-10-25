@@ -402,7 +402,7 @@ mod tests {
     /// An unattributable syscall must never take the CPU down.
     ///
     /// Regression: `NoCallerContext` used to return `None`, which every
-    /// arch callback answers with a permanent halt. On a Pi 4B that let one
+    /// arch callback answers with a permanent halt. On metal that let one
     /// `svc` from a task whose current-task slot had been cleared kill CPU 0
     /// forever — holding the scheduler's task-body lock and the console UART
     /// IRQ, with the watchdog's own recovery masked out.

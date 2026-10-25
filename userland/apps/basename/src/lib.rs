@@ -29,10 +29,11 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`). It links only `lib/*` crates — `lib/path` and
-//! the `lib/help` engine used by the `Run` binary — never a kernel or
-//! driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
-//! production paths; nothing writes to fd 3 (`stdinfo`).
+//! `no_std` (with `alloc`). It links only `lib/*` crates — `lib/path`,
+//! `lib/util`'s command-line scanner and quoting, and the `lib/help` engine
+//! used by the `Run` binary — never a kernel or driver crate. No `unsafe`,
+//! and no `unwrap`/`expect`/`panic!` in production paths; nothing writes to
+//! fd 3 (`stdinfo`).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -45,11 +46,11 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_path::leaf_name;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `basename`'s own Help tree is
-/// unavailable.
+/// The usage banner the short-help switches print when `basename`'s own
+/// Help tree is unavailable.
 pub const USAGE: &str = "usage: basename name [suffix] | basename [-az] [-s suffix] name...";
 
 /// One thing the `basename` tool can do.
@@ -76,111 +77,81 @@ pub enum Command {
 /// The failures [`parse`] reports, mirroring the GNU tool's diagnostics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BasenameError {
-    /// An unrecognised option.
-    Usage,
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// No `name` operand was given.
     MissingOperand,
     /// A third operand in the `NAME [SUFFIX]` form; carries the operand.
     ExtraOperand(String),
-    /// `-s`/`--suffix` was given without its suffix value.
-    MissingSuffix,
 }
 
 impl fmt::Display for BasenameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BasenameError::Usage => f.write_str("unrecognized option"),
+            BasenameError::Option(refusal) => write!(f, "{refusal}"),
             BasenameError::MissingOperand => f.write_str("missing operand"),
             BasenameError::ExtraOperand(operand) => {
                 write!(f, "extra operand {operand}", operand = quote(operand))
             }
-            BasenameError::MissingSuffix => f.write_str("option requires an argument -- 's'"),
         }
     }
 }
 
+/// What each of `basename`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Multiple,
+    Suffix,
+    Zero,
+    Help,
+}
+
+/// `basename`'s options, as GNU's `basename` spells them, and the reserved
+/// help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('a', &["multiple"], Flag::Multiple),
+    Opt::valued('s', &["suffix"], Flag::Suffix),
+    Opt::flag('z', &["zero"], Flag::Zero),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is the GNU `basename` surface:
+/// The grammar is the GNU `basename` surface, read as GNU's `getopt_long`
+/// reads it ([`Scan`]): options anywhere among the operands, clustered, a
+/// long one by any unambiguous prefix, a value attached or following, `--`
+/// ending them.
 ///
 /// * `-a` / `--multiple` — every operand is a `name`.
-/// * `-s <suffix>` / `--suffix=<suffix>` / `--suffix <suffix>` — strip a
-///   trailing `suffix` from each base name; implies `-a`.
+/// * `-s <suffix>` / `--suffix <suffix>` — strip a trailing `suffix` from
+///   each base name; implies `-a`.
 /// * `-z` / `--zero` — terminate each result with NUL instead of newline.
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md §4; they win immediately).
-/// * `--` — end option parsing; every later argument is an operand.
-/// * short options bundle (`-az`); a bundled `-s` takes the rest of its
-///   token as the suffix (`-s.c`) or the next argument.
 /// * without `-a`/`-s`, the operands are `NAME [SUFFIX]`: one or two, a
 ///   third is an error.
 ///
-/// Options and operands may be interleaved (the GNU permutation).
-///
 /// # Errors
 ///
-/// * [`BasenameError::Usage`] — an unrecognised option.
+/// * [`BasenameError::Option`] — an option `getopt` refuses, in its words.
 /// * [`BasenameError::MissingOperand`] — no `name` was given.
 /// * [`BasenameError::ExtraOperand`] — a third operand without `-a`/`-s`.
-/// * [`BasenameError::MissingSuffix`] — `-s` without its value.
 pub fn parse(args: &[&str]) -> Result<Command, BasenameError> {
     let mut multiple = false;
     let mut zero = false;
     let mut suffix: Option<String> = None;
     let mut names: Vec<String> = Vec::new();
-    let mut options_done = false;
 
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        if options_done {
-            names.push(String::from(arg));
-        } else {
-            match arg {
-                "--" => options_done = true,
-                "-h" | "-?" | "--help" => return Ok(Command::Help),
-                "--multiple" => multiple = true,
-                "--zero" => zero = true,
-                "--suffix" => {
-                    index += 1;
-                    let Some(&value) = args.get(index) else {
-                        return Err(BasenameError::MissingSuffix);
-                    };
-                    suffix = Some(String::from(value));
-                }
-                _ if arg.starts_with("--suffix=") => {
-                    suffix = arg.get("--suffix=".len()..).map(String::from);
-                }
-                _ if arg.starts_with("--") => return Err(BasenameError::Usage),
-                _ if arg.len() > 1 && arg.starts_with('-') => {
-                    for (offset, flag) in arg[1..].char_indices() {
-                        match flag {
-                            'a' => multiple = true,
-                            'z' => zero = true,
-                            's' => {
-                                // The rest of the token is the suffix
-                                // (`-s.c`), or the next argument is.
-                                let rest = &arg[1 + offset + flag.len_utf8()..];
-                                if rest.is_empty() {
-                                    index += 1;
-                                    let Some(&value) = args.get(index) else {
-                                        return Err(BasenameError::MissingSuffix);
-                                    };
-                                    suffix = Some(String::from(value));
-                                } else {
-                                    suffix = Some(String::from(rest));
-                                }
-                                break;
-                            }
-                            _ => return Err(BasenameError::Usage),
-                        }
-                    }
-                }
-                _ => names.push(String::from(arg)),
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(BasenameError::Option)? {
+            Arg::Operand(name) => names.push(String::from(name)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Multiple, _) => multiple = true,
+            Arg::Opt(Flag::Suffix, value) => suffix = value.map(String::from),
+            Arg::Opt(Flag::Zero, _) => zero = true,
         }
-        index += 1;
     }
 
     // `-s` implies `-a`, as in the GNU tool.
@@ -247,7 +218,7 @@ pub fn output(names: &[String], suffix: Option<&str>, zero: bool) -> Vec<u8> {
 mod tests {
     extern crate std;
 
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
 
     use super::{basename_of, output, parse, BasenameError, Command};
@@ -329,8 +300,8 @@ mod tests {
 
     #[test]
     fn suffix_value_may_be_missing() {
-        assert_eq!(parse(&["-s"]), Err(BasenameError::MissingSuffix));
-        assert_eq!(parse(&["a", "-s"]), Err(BasenameError::MissingSuffix));
+        assert_eq!(refused(&["-s"]), "option requires an argument -- 's'");
+        assert_eq!(refused(&["a", "-s"]), "option requires an argument -- 's'");
     }
 
     #[test]
@@ -351,10 +322,35 @@ mod tests {
         assert_eq!(parse(&["--help"]), Ok(Command::Help));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "a"]), Err(BasenameError::Usage));
-        assert_eq!(parse(&["--frob", "a"]), Err(BasenameError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "a"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob", "a"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-zx", "a"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--zero=x", "a"]),
+            "option '--zero' doesn't allow an argument"
+        );
+        assert_eq!(
+            refused(&["--suffix"]),
+            "option '--suffix' requires an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `basename --mul --z --suf=.c a.c b.c` as
+    /// `basename --multiple --zero --suffix=.c a.c b.c`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--mul", "--z", "--suf=.c", "a.c", "b.c"]),
+            Ok(emit(&["a.c", "b.c"], Some(".c"), true))
+        );
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

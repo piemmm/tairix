@@ -723,7 +723,7 @@ EDDEVID capability → EDPRSR validity → EDPCSR **capture-first** (low word
 latches high/context) → assemble — over a `DebugMmio` seam; a scale-sized
 set-once per-cpu debug-base registry; the freestanding `VolatileDebugMmio`;
 `Watchdog::remote_pc_sample` delegates. Discovery (`fdt::debug_component_bases`,
-host-tested): the Linux `arm,coresight-cpu-debug` binding (translated `reg` +
+host-tested): the `arm,coresight-cpu-debug` binding (translated `reg` +
 `cpu`-phandle → dense id), installed at boot **only** for a base whose gigapage
 is already Device-mapped, so a read on the lockup path can never fault; a
 component elsewhere, or a tree with no debug nodes (QEMU `virt`, the stock Pi 4

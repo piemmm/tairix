@@ -29,6 +29,13 @@ facultatives) est acceptée, comme dans l'outil GNU.
 Un fichier illisible est signalé sur la sortie d'erreur et l'exécution
 continue avec le fichier suivant.
 
+Sur un terminal, chaque nom affiché est mis entre guillemets là où un
+shell en aurait besoin, et tout caractère de contrôle ou autre caractère
+invisible qu'il contient est écrit sous forme de séquence d'échappement,
+de sorte qu'un nom ne peut ni commander ni réorganiser l'écran ; GNU
+l'affiche tel quel. Un tube ou un fichier reçoit le nom octet pour
+octet.
+
 ## OPTIONS
 
 - `-c, --bytes <num>` — afficher les `num` premiers octets de chaque
@@ -54,8 +61,7 @@ continue avec le fichier suivant.
 
 - `0` — chaque fichier a été affiché (ou l'aide courte a été écrite).
 - `1` — un fichier n'a pas pu être lu, ou la sortie n'a pas pu être
-  délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+  délivrée. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

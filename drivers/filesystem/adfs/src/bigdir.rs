@@ -7,7 +7,7 @@
 //! entries, the name heap (each name `CR`-terminated and word-padded),
 //! and an 8-byte tail (`oven`, sequence byte, two zero bytes, check
 //! byte) at the very end of the directory. Reference: G. Holdsworth,
-//! "Guide To Disc Formats" and the Linux `fs/adfs/dir_fplus` reference.
+//! "Guide To Disc Formats".
 //!
 //! The engine streams through a [`DirStore`] — byte-addressed access to
 //! the directory object — so a directory of any size is handled without

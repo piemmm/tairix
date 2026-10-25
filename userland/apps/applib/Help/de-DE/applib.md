@@ -114,10 +114,11 @@ dem Standard-Informationsstrom (fd 3) ausgegeben, den Skripte mit
 - `0` — Listung, Änderung, Rescan oder Kurzhilfe wurden abgeschlossen.
 - `1` — ein Speicher-, Paket- oder Ausgabefehler (z. B. darf der
   Aufrufer den systemweiten Katalog nicht ändern); der Grund wird auf
-  dem Diagnosestrom angegeben.
-- `2` — die Befehlszeile wurde nicht verstanden, der Ordner oder
-  Eintrag ist unbekannt oder das Paket kann nicht wie gewünscht
-  registriert werden.
+  dem Diagnosestrom angegeben. Eine nicht verstandene Befehlszeile (ein
+  unbekannter `--category`-Ordner eingeschlossen) endet ebenfalls mit
+  `1`.
+- `2` — der Eintrag ist unbekannt oder das Paket kann nicht wie
+  gewünscht registriert werden.
 
 ## ENVIRONMENT
 

@@ -24,7 +24,7 @@ board's `simple-audio-card`.
 
 At bring-up it resets the part, leaves it in standby and muted, makes both
 clocks inputs, feeds its PLL from the bit clock and has it ignore the absent
-system clock — the consumer sequence Linux's `pcm512x` driver uses. Serving
+system clock — the datasheet's 3-wire mode (TI SLAS763C, 8.3.6.3). Serving
 `codec-v1` (`lib/codec`):
 
 - **Configure** programs the framing the board's link states (I²S, left- or

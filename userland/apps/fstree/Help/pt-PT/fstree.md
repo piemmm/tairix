@@ -126,8 +126,8 @@ desassemblagem chegam em fases posteriores do plano da ferramenta.
 
 - `0` — a sessão terminou com o `q` do utilizador.
 - `1` — o diretório inicial não pôde ser listado, ou o caminho do
-  terminal falhou.
-- `2` — os argumentos não puderam ser compreendidos.
+  terminal falhou. Uma linha de comandos não compreendida também termina
+  com `1`.
 
 ## SEE ALSO
 

@@ -51,7 +51,6 @@ mod program {
     use tairix_rt::io::write_stderr_line;
     use tairix_rt::File;
     use tairix_termcap::from_term;
-    use tairix_util::quote::quote_if_needed;
     use tairix_vim::{parse, run, Command, Editor, FileIo, USAGE};
 
     /// The conventional fallback terminal grid — 80 columns by 24 rows —
@@ -87,10 +86,8 @@ mod program {
         }
 
         fn write(&self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-            let flags = OpenFlags::WRITE
-                .union(OpenFlags::CREATE)
-                .union(OpenFlags::TRUNCATE);
-            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            let file = tairix_rt::create(path.as_bytes(), tairix_abi::fs::FS_NEW_FILE_MODE)
+                .map_err(Errno::from_syscall)?;
             let mut offset = 0u64;
             let mut remaining = bytes;
             // The kernel may accept a short write; every byte is this
@@ -116,14 +113,11 @@ mod program {
     /// syscall.
     ///
     /// Exit codes: `0` on a clean quit (or served short help), `1` on a
-    /// terminal failure, `2` on a usage error (a malformed argument vector
-    /// or an unrecognised option).
+    /// terminal failure or a command line that was not understood (a
+    /// malformed argument vector or an unrecognised option).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error,
-        // reported rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("vim") else {
+            return tairix_help::MISUSE;
         };
         let (readonly, start, files) = match parse(&arguments) {
             Ok(Command::Run {
@@ -133,12 +127,8 @@ mod program {
             }) => (readonly, start, files),
             Ok(Command::Help) => return tairix_help::print_own_short_help("vim", Some(USAGE)),
             Err(err) => {
-                write_stderr_line(&alloc::format!(
-                    "vim: unknown argument: {}",
-                    quote_if_needed(&err.argument)
-                ));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("vim", &err);
+                return tairix_help::MISUSE;
             }
         };
 
@@ -180,7 +170,7 @@ mod program {
         // states that reason on stderr — after the terminal is restored,
         // so the message is not torn down with the alternate screen.
         if let Err(err) = &result {
-            write_stderr_line(&alloc::format!("vim: {err}"));
+            write_stderr_line(format_args!("vim: {err}"));
         } else if entered.is_err() || left.is_err() {
             write_stderr_line("vim: terminal error: the screen could not be switched");
         }

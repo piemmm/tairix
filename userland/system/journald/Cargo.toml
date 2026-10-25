@@ -39,6 +39,9 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # the stream/level vocabulary, the machine-id-hash / attestation-key material,
 # and the admission authority all live here.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The modes a new stream directory and segment are created with, the ones
+# every creator names.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime: `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the

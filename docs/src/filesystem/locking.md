@@ -1,8 +1,8 @@
 # Advisory file locking
 
 TAIRiX offers one file-locking model: **byte-range advisory locks owned by
-the open file description**. It is what Linux calls an OFD lock
-(`F_OFD_SETLK`) — the modern, recommended API — and it is the only model,
+the open file description**: POSIX's open-file-description lock
+(`F_OFD_SETLK`, POSIX.1-2024 `fcntl()`) — and it is the only model,
 because there is no legacy to be compatible with.
 
 The syscalls are `fs_lock` and `fs_lock_query`; the vocabulary is
@@ -24,16 +24,19 @@ Enforcing locks against non-participants — POSIX mandatory locking — is
 deliberately absent, and not for want of effort. It would hand any
 principal with write permission a way to stall every other reader of a
 file indefinitely, which is authority the file's own permissions never
-granted. Linux deleted its implementation in 5.15 for that reason and
-because the write-time check was racy.
+granted.
 
 Acquisition is nonetheless checked, so a lock is not a way to reach past
 the file's permissions:
 
-* The syscall carries `CAP_FS_ACCESS`, the same coarse gate the
-  descriptor's own open needed.
-* The path is re-resolved and re-authorised under the caller's attested
-  identity on **every** call — the descriptor caches no authority.
+* The descriptor's authority must hold `CAP_FS_ACCESS`, the coarse gate
+  every byte operation through it faces. The call itself is ungated, so a
+  child holding no filesystem capability locks through a descriptor its
+  parent conferred.
+* The node the descriptor pinned at open is re-authorised on **every** call
+  under the descriptor's authority: the caller's own identity for a
+  descriptor it opened, the identity captured at the spawn for one its parent
+  conferred.
 * A shared lock needs read access and an exclusive lock needs write
   access, because an exclusive lock asserts a writer's right.
 * The per-process record count is bounded by the `file-locks` resource
@@ -46,7 +49,7 @@ it — not to the process, and not to the descriptor number. So:
 
 | Situation | Behaviour |
 |---|---|
-| Two descriptors on one description (spawn-inherited, duplicated) | Share the locks; neither conflicts with the other. |
+| Two descriptors on one description (spawn-conferred, duplicated) | Share the locks; neither conflicts with the other. |
 | Two separate `fs_open`s of the same file | Two owners; they **do** conflict, even within one process or thread. |
 | Last descriptor on the description closes | The locks release. |
 | Process exits, by any route | Every description it held closes, so every lock releases. |
@@ -122,8 +125,7 @@ self-deadlock, including one between two descriptions of a single process.
 A cycle whose participants block through one description while holding
 through a *different* one is not detected; that wait ends when a
 participant closes or exits, and it stays interruptible throughout, so it
-is recoverable rather than an unkillable hang. Linux detects none of these
-cases for its equivalent locks.
+is recoverable rather than an unkillable hang.
 
 ## Querying
 
@@ -143,18 +145,20 @@ ask.
 
 ## What can be locked
 
-A lock is keyed on the file's stable `FileId` (its volume id plus the
-driver's node number) rather than on a path, so a rename moves neither the
-lock nor the identity two participants agree on.
+A lock is keyed on the node the descriptor pinned at open — the volume's
+registration and the id its driver holds the node under
+([overview](./overview.md#open-file-descriptions)) — rather than on a path or
+on a number the format may move: a rename moves nothing, a write to a FAT file
+keeps the key, and two descriptors of one node agree on it on every format.
 
 Consequently a descriptor whose backing has no file to lock fails closed:
 
 | Backing | Result |
 |---|---|
-| A path — regular file or directory | Lockable. |
+| A node of a volume — regular file or directory | Lockable, through the opener's own descriptor or one conferred at spawn. |
+| The `Storage` catalog | `NotSupported`: it is stored on no volume. |
 | A pipe, a pty end, a typed resource | `NotSupported`: no file two participants could agree on. |
 | A one-shot delegation (`fd_grant`) | `NotSupported`: a bounded byte access under another principal's captured identity is not a coordination role. |
-| A backing reporting no stable identity | `NotSupported`, rather than letting two unrelated nodes share one owner's records. |
 
 ## Cost
 

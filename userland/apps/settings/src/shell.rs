@@ -403,10 +403,8 @@ pub struct Shell {
     board: Board,
     /// What the desktop session answered of the user's sound choices.
     effects: Option<EffectsReading>,
-    /// A level being dragged on a sound pane, so a reading landing meanwhile
-    /// waits for it to settle rather than rebuilding the slider under it.
-    dragging: bool,
-    /// A reading that landed during the drag.
+    /// A reading of the pane on show that landed mid-gesture, adopted once
+    /// the reader lets go rather than rebuilding the row under the pointer.
     deferred: bool,
     /// Why the desktop last would not lock the screen, held here so a refusal
     /// landing while another pane is on show is stated once the pane that
@@ -498,7 +496,6 @@ impl Shell {
             cooling: Cooling::Unread,
             board,
             effects: None,
-            dragging: false,
             deferred: false,
             lock_refusal: None,
             preview_refusal: None,
@@ -598,8 +595,7 @@ impl Shell {
         let Some(form) = self.body.form_mut() else {
             return ShellOutcome::Idle;
         };
-        let acted = form.choose_zone(zone.setting());
-        self.concluded(acted)
+        outcome_of(form.choose_zone(zone.setting()))
     }
 
     /// Adopt the machine's own zone, as the desktop states it; the panes that
@@ -951,20 +947,44 @@ impl Shell {
         }
     }
 
-    /// Adopt what the cooling service answered.
-    pub fn adopt_cooling(&mut self, reading: Cooling) {
+    /// Adopt what the cooling service answered, reporting into `damage` what
+    /// it moved on the pane on show, which is nothing once the pane is left.
+    /// One landing mid-gesture waits for the reader to let go.
+    pub fn adopt_cooling(
+        &mut self,
+        reading: Cooling,
+        seat: (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) {
         self.cooling = reading;
         self.wanted.landed(Reading::Cooling);
         if !self.states_cooling() {
             return;
         }
-        if self.dragging {
+        if self.body.mid_gesture() {
             self.deferred = true;
             return;
         }
-        if let Some(form) = self.body.form_mut() {
-            form.adopt_cooling(&self.cooling);
+        let (viewport, scale, theme) = seat;
+        let before = self.placement();
+        self.restate_cooling(seat, damage);
+        if self.placement() != before {
+            self.rehover(viewport, scale, theme, damage);
         }
+    }
+
+    /// Bring the pane's rows in line with the cooling service's reading,
+    /// reporting the rows it moved, or the pane laid out again where it
+    /// rebuilt them.
+    fn restate_cooling(&mut self, seat: (Rect, Scale, &Theme), damage: &mut Region) {
+        let (viewport, scale, theme) = seat;
+        let reading = self.cooling.clone();
+        let frame = self.frame(viewport, scale, theme);
+        let _ = self.in_form(&frame, seat, damage, |form, _, spot, drew| {
+            form.adopt_cooling(&reading, spot, drew);
+            FormOutcome::Idle
+        });
+        self.refit(viewport, scale, theme, damage);
     }
 
     /// Whether the pane on show is the Sound Effects pane.
@@ -994,7 +1014,7 @@ impl Shell {
         if !self.states_effects() {
             return;
         }
-        if self.dragging {
+        if self.body.mid_gesture() {
             self.deferred = true;
             return;
         }
@@ -1024,7 +1044,7 @@ impl Shell {
         if !self.states_sound() {
             return;
         }
-        if self.dragging {
+        if self.body.mid_gesture() {
             self.deferred = true;
             return;
         }
@@ -1033,23 +1053,27 @@ impl Shell {
         }
     }
 
-    /// Adopt the reading of the pane on show that landed during a drag.
-    fn adopt_deferred(&mut self) {
-        let (sound, effects, cooling) = (
-            self.states_sound(),
-            self.states_effects(),
-            self.states_cooling(),
-        );
-        let Some(form) = self.body.form_mut() else {
+    /// Adopt the reading of the pane on show that landed mid-gesture, once
+    /// the reader has let go, reporting what it moved.
+    fn adopt_deferred(&mut self, seat: (Rect, Scale, &Theme), damage: &mut Region) {
+        if !self.deferred || self.body.mid_gesture() {
             return;
-        };
-        if sound {
-            form.adopt_sound(self.sound.as_ref());
-        } else if effects {
-            form.adopt_effects(self.effects.as_ref());
-        } else if cooling {
-            form.adopt_cooling(&self.cooling);
         }
+        self.deferred = false;
+        if self.states_cooling() {
+            self.restate_cooling(seat, damage);
+            return;
+        }
+        let (sound, effects) = (self.states_sound(), self.states_effects());
+        if let Some(form) = self.body.form_mut() {
+            if sound {
+                form.adopt_sound(self.sound.as_ref());
+            } else if effects {
+                form.adopt_effects(self.effects.as_ref());
+            }
+        }
+        let (viewport, scale, theme) = seat;
+        self.refit(viewport, scale, theme, damage);
     }
 
     /// Whether the caller should ask the desktop which sources have
@@ -1378,6 +1402,8 @@ impl Shell {
             Some((_, pane)) => Body::of(pane, &answered),
             None => Body::Statement,
         };
+        // Built from every reading held, so none is waiting any longer.
+        self.deferred = false;
         // Asked for when the pane that lists them *comes* on show, so the
         // table is current each time the reader looks. Not on every rebuild:
         // adopting an answered walk rebuilds too, and re-arming there would
@@ -1958,6 +1984,7 @@ impl Shell {
         let before = self.placement();
         let mut drew = tairix_controls::damage::sink();
         let outcome = self.route_pointer(event, viewport, scale, theme, &mut drew);
+        self.adopt_deferred((viewport, scale, theme), &mut drew);
         if self.placement() != before {
             self.rehover(viewport, scale, theme, &mut drew);
         }
@@ -1979,14 +2006,14 @@ impl Shell {
         let frame = self.frame(viewport, scale, theme);
 
         // Both lists stand over the bands they hang across and hold the
-        // pointer until they resolve, so they are asked before anything
-        // drawn beneath them.
+        // pointer until they resolve, as a dragged slider does, so they are
+        // asked before anything drawn beneath them.
         if let Some(menu) = &mut self.categories {
             let rect = Self::list_rect(menu, &frame, viewport, scale, theme);
             let acted = menu.on_pointer(event, rect, scale, theme, damage);
             return self.list_acted(acted, viewport, scale, theme, damage);
         }
-        if self.body.is_listing() {
+        if self.body.mid_gesture() {
             return self.pressed_pane(event, &frame, viewport, scale, theme, damage);
         }
         if let Some(outcome) = self.held_bar(event, &frame, scale, theme, damage) {
@@ -2169,27 +2196,6 @@ impl Shell {
             self.restate_staged(frame, viewport, scale, theme, damage);
         }
         self.refit(viewport, scale, theme, damage);
-        self.concluded(acted)
-    }
-
-    /// The shell outcome a form's answer implies. A sound reading that landed
-    /// while a level was dragged is adopted once the drag settles.
-    fn concluded(&mut self, acted: FormOutcome) -> ShellOutcome {
-        let settled = match &acted {
-            FormOutcome::Sound {
-                control: DeviceControl::Level(_),
-                settled,
-                ..
-            }
-            | FormOutcome::Effects { settled, .. } => Some(*settled),
-            _ => None,
-        };
-        if let Some(settled) = settled {
-            self.dragging = !settled;
-            if settled && core::mem::take(&mut self.deferred) {
-                self.adopt_deferred();
-            }
-        }
         outcome_of(acted)
     }
 
@@ -2284,6 +2290,7 @@ impl Shell {
         let before = self.placement();
         let mut drew = tairix_controls::damage::sink();
         let outcome = self.route_key(stroke, viewport, scale, theme, &mut drew);
+        self.adopt_deferred((viewport, scale, theme), &mut drew);
         if self.placement() != before {
             self.rehover(viewport, scale, theme, &mut drew);
         }
@@ -2433,7 +2440,7 @@ impl Shell {
                     // to.
                     let frame = self.frame(viewport, scale, theme);
                     self.reveal_cursor(&frame, viewport, scale, theme, damage);
-                    return self.concluded(acted);
+                    return outcome_of(acted);
                 }
                 let Some(rect) = frame.scrollbar else {
                     return ShellOutcome::Idle;
@@ -3263,10 +3270,10 @@ impl Shell {
         self.body.form_mut()
     }
 
-    /// Conclude a form's answer as a routed event would, for a test.
+    /// The shell outcome a form's answer implies, for a test.
     #[cfg(test)]
-    pub(crate) fn conclude_for_test(&mut self, acted: FormOutcome) -> ShellOutcome {
-        self.concluded(acted)
+    pub(crate) fn conclude_for_test(acted: FormOutcome) -> ShellOutcome {
+        outcome_of(acted)
     }
 
     /// The volume cards the pane on show draws, for a test that asks what

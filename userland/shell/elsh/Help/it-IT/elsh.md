@@ -22,13 +22,34 @@ un bundle risolto ma non eseguibile esce con `126`.
 
 I comandi integrati:
 
-- `cd <path>`, `pwd` — cambiare e stampare la directory di lavoro.
+- `cd [-L | -P [-e]] [directory]`, `cd -` — cambiare la directory di
+  lavoro: in `directory`, in `HOME` se non è indicata, o con `-` di
+  nuovo in `OLDPWD`, stampandola. `-L`, il comportamento predefinito,
+  applica `directory` a `PWD` così com'è scritta finché `PWD` nomina
+  ancora la directory di lavoro, quindi `cd link` e poi `cd ..`
+  riportano dove si trova il collegamento; `-P` segue prima i
+  collegamenti, e `PWD` diventa il percorso della directory stessa (`-e`
+  allora fallisce quando quel percorso non può essere letto). `/..` è
+  `/`, e sotto una radice alias (`Home:/`) un `..` non sale mai al di
+  sopra di essa.
+- `pwd [-L | -P]` — stampare la directory di lavoro: `PWD` finché la
+  nomina ancora (`-L`, il comportamento predefinito), oppure il percorso
+  della directory stessa (`-P`).
 - `echo ...` — stampare i propri operandi.
 - `export NAME=value`, `unset NAME` — modificare l'ambiente esportato.
 - `jobs`, `fg`, `bg` — controllo dei job.
-- `ulimit` — leggere e imporre limiti di risorse.
-- `elevate` — eseguire un comando ri-autenticato tramite il supervisore
-  di accesso della console.
+- `ulimit [-a] [-H | -S] [resource [value]]` — leggere e imporre limiti di
+  risorse; `ulimit -n [value]` legge o imposta il limite sui file aperti.
+- `umask [-S] [mode]` — mostrare la maschera di creazione del modo dei
+  file (`0022`), o con `-S` i permessi che essa lascia
+  (`u=rwx,g=rx,o=rx`), oppure impostarla: un `mode` ottale è la maschera
+  stessa, uno simbolico (`g-w`, `u=rwx,g=rx,o=`) modifica i permessi che
+  essa lascia. Ogni comando lanciato in seguito la applica ai file che
+  crea, e una redirezione crea il proprio file con `0666` meno la
+  maschera.
+- `elevate <user> <program> [argument ...]` — eseguire un solo comando,
+  con gli argomenti indicati, ri-autenticato tramite il supervisore di
+  accesso della console.
 - `shopt [-pqsu] [-o] [name ...]` — mostrare o impostare le opzioni dei
   modelli di nomi di file.
 - `help` — elencare i comandi integrati.
@@ -47,20 +68,29 @@ parola), `failglob` (nessuna corrispondenza è un errore), `dotglob`,
 `extglob` (`?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)`); `shopt -o -s noglob`
 disattiva i modelli di nomi di file.
 
+Su un terminale la shell offre un editor di riga interattivo con i
+consueti tasti di bash/zsh: Su/Giù (o `Ctrl-P`/`Ctrl-N`) scorrono la
+cronologia dei comandi della sessione, `Ctrl-R` la cerca in modo
+incrementale, Sinistra/Destra/Home/Fine e `Ctrl-A`/`Ctrl-E` spostano il
+cursore, `Ctrl-K`/`Ctrl-U`/`Ctrl-W`/`Ctrl-Y` tagliano e incollano,
+`Ctrl-T` scambia due caratteri, `Ctrl-L` ridisegna la riga su uno
+schermo ripulito, `Ctrl-C` scarta la riga in modifica e `Ctrl-D` su una
+riga vuota termina la sessione. Tab completa la parola sotto il cursore:
+nomi di comandi (comandi integrati e app di comando installate),
+percorsi di file e — per una destinazione di redirezione o una parola
+con la forma di un riferimento — riferimenti a risorse come
+`sys:random`. Uno spazio dei nomi completa i suoi selettori registrati
+un segmento alla volta (`state:` → `net/` → `wan/` → `link`); dove il
+registro conosce solo la forma — un nome di interfaccia, una linea di
+interrupt — Tab offre i nomi reali della macchina, o nulla se questa
+sessione non può elencarli. `info:`/`state:`/`stats:` compaiono come
+argomenti e dopo `<`, che ne legge il valore
+(`cat < info:mem/physical`), ma mai dopo `>`: una tale risorsa non si
+scrive mai per redirezione. L'input da pipe o da script non passa
+dall'editor e si comporta allo stesso modo con o senza terminale.
+
 La shell non accetta operandi: l'esecuzione di script non fa ancora
 parte della sua grammatica.
-
-Su un terminale la shell offre un editor di riga interattivo: Su/Giù
-scorrono la cronologia dei comandi, `Ctrl-R` la cerca, `Ctrl-C` scarta
-la riga in corso, `Ctrl-D` su una riga vuota termina la sessione e Tab
-completa nomi di comandi, percorsi e riferimenti a risorse come
-`sys:random`. Uno spazio dei nomi completa i suoi selettori registrati un
-segmento alla volta (`state:` → `net/` → `wan/` → `link`). Dove il registro
-conosce solo la forma — un nome di interfaccia, una linea di interrupt — Tab
-offre i nomi reali della macchina, o nulla se questa sessione non può
-elencarli. `info:`/`state:`/`stats:` compaiono come argomento e dopo `<`, che ne legge
-il valore (`cat < info:mem/physical`), ma mai dopo `>`: una tale risorsa non
-si scrive mai per redirezione.
 
 ## OPTIONS
 
@@ -74,9 +104,16 @@ si scrive mai per redirezione.
 
 ## ENVIRONMENT
 
+- `HOME` — dove va `cd` senza operando.
+- `PWD`, `OLDPWD` — la directory di lavoro come `cd` l'ha raggiunta, e
+  quella precedente; `cd` le imposta entrambe. Un `PWD` con cui la shell
+  si avvia viene mantenuto finché nomina la directory di lavoro, e
+  altrimenti diventa il percorso di quella directory stessa.
 - `PATH` — le directory cercate dopo il prefisso fisso di store.
 - `GLOBIGNORE` — modelli separati da `:` le cui corrispondenze un
-  modello di nomi di file scarta.
+  modello di nomi di file scarta. Finché la variabile non è vuota, un
+  modello di nomi di file corrisponde anche ai nomi che iniziano con `.`,
+  quindi `rm *` rimuove allora anche `.profile`.
 - `LANG` — la locale preferita per la guida breve (un tag BCP-47 come
   `it-IT`), esportata a ogni comando lanciato.
 

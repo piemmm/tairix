@@ -36,8 +36,7 @@ La commande ne prend aucun opérande ; un argument est une erreur
 - `0` — le nom (ou l'aide courte demandée) a été écrit.
 - `1` — la lecture de l'identité, la consultation de l'annuaire ou la
   sortie a échoué, ou l'annuaire ne contient aucun nom pour
-  l'identifiant.
-- `2` — la ligne de commande n'a pas été comprise.
+  l'identifiant. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

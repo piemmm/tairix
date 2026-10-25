@@ -3,9 +3,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_fuzzseed::Prng;
+
 use crate::compile::{GroupOp, Node};
 use crate::{
-    may_hold_wildcards, GlobError, Mark, Options, Pattern, Scratch, MAX_CLASS_ITEMS,
+    may_hold_wildcards, GlobError, Mark, Options, OutOfMemory, Pattern, Scratch, MAX_CLASS_ITEMS,
     MAX_EXTENDED_LEN, MAX_GROUPS, MAX_GROUP_DEPTH, MAX_PATTERN_LEN, MAX_TOKENS,
 };
 
@@ -13,17 +15,24 @@ fn matches(pattern: &str, candidate: &str) -> bool {
     Pattern::new(pattern)
         .expect("pattern compiles")
         .matches(candidate)
+        .expect("the match fits in memory")
 }
 
 fn matches_as(pattern: &str, options: Options, candidate: &str) -> bool {
     Pattern::with_options(pattern, options)
         .expect("pattern compiles")
         .matches(candidate)
+        .expect("the match fits in memory")
 }
 
 const EXTENDED: Options = Options::EXTENDED;
 const PERIOD: Options = Options::PERIOD;
 const NOCASE: Options = Options::CASE_INSENSITIVE;
+
+/// Every request this binary makes, refusable per thread, so a test can
+/// stand in for an exhausted heap.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 #[test]
 fn empty_pattern_matches_only_empty() {
@@ -153,6 +162,14 @@ fn equivalence_classes_and_collating_symbols() {
     assert!(matches("[[.-.]]", "-"));
 }
 
+/// bash's `minus` and `dash` name a `-` too.
+#[test]
+fn bash_names_a_hyphen_minus_and_dash_too() {
+    for name in ["hyphen", "hyphen-minus", "minus", "dash"] {
+        assert!(matches(&format!("[[.{name}.]]"), "-"), "{name}");
+    }
+}
+
 #[test]
 fn malformed_patterns_fail_closed() {
     assert_eq!(Pattern::new("[z-a]"), Err(GlobError::ReversedRange));
@@ -184,16 +201,21 @@ fn case_insensitive_folds_literals_and_ranges_but_not_classes() {
     assert!(!matches("*.TXT", "notes.txt"));
     // A literal component folds through its fast path too.
     let literal = Pattern::with_options("ReadMe", NOCASE).expect("compiles");
-    assert!(literal.matches("README"));
+    assert_eq!(literal.matches("README"), Ok(true));
 }
 
+/// bash folds a range's endpoints before it orders them.
 #[test]
-fn a_spelled_range_stays_valid_whatever_folding_makes_of_it() {
-    // `Z-a` is in order as written; folded it would run backwards, which
-    // must leave an empty range rather than refuse the pattern.
-    let pattern = Pattern::with_options("[Z-a]", NOCASE).expect("valid as spelled");
-    assert!(!pattern.matches("q"));
+fn a_range_is_put_in_order_once_folded() {
+    assert!(matches_as("[a-Z]*", NOCASE, "q.txt"));
+    assert!(matches_as("[a-Z]*", NOCASE, "Q.TXT"));
+    assert!(!matches_as("[a-Z]*", NOCASE, "_x"));
+    assert_eq!(
+        Pattern::with_options("[Z-a]", NOCASE),
+        Err(GlobError::ReversedRange)
+    );
     assert!(matches("[Z-a]", "_"));
+    assert_eq!(Pattern::new("[a-Z]"), Err(GlobError::ReversedRange));
 }
 
 #[test]
@@ -233,6 +255,45 @@ fn pathname_mode_matches_component_by_component() {
 fn the_separator_is_ordinary_outside_pathname_mode() {
     assert!(matches("a/*/c", "a/b/c"));
     assert!(matches("*", "a/b/c"));
+}
+
+/// A `/` inside a group is part of it, as bash 5.2's filename generation
+/// reads it, so the group stays one component and an alternative holding one
+/// matches no single component.
+#[test]
+fn pathname_mode_splits_only_outside_groups() {
+    let path = Options::PATHNAME.union(EXTENDED);
+    let count = |source: &str, options| {
+        Pattern::with_options(source, options).map(|pattern| pattern.components().len())
+    };
+    assert_eq!(count("@(src|docs/api)", path), Ok(1));
+    assert!(matches_as("@(src|docs/api)", path, "src"));
+    assert!(!matches_as("@(src|docs/api)", path, "docs"));
+    assert!(!matches_as("@(src|docs/api)", path, "docs/api"));
+    assert_eq!(count("!(build/keep)", path), Ok(1));
+    assert!(matches_as("!(build/keep)", path, "build"));
+    assert!(matches_as("!(build/keep)", path, "keep"));
+    assert_eq!(count("@(a|b/c)/*", path), Ok(2));
+    assert!(matches_as("@(a|b/c)/*", path, "a/x"));
+    // Without the option the group is text, split as any other.
+    assert_eq!(count("@(a|b/c)", Options::PATHNAME), Ok(2));
+}
+
+/// A bracket expression never spans a `/` in pathname mode — inside a group
+/// too, where no `/` separates components — so its `[` stands for itself, as
+/// POSIX's pathname expansion and bash read it; a class whose `:]` lies past
+/// a `/` is no class.
+#[test]
+fn a_bracket_expression_never_spans_a_slash_in_pathname_mode() {
+    let path = Options::PATHNAME;
+    assert!(matches_as("[a/b]", path, "[a/b]"));
+    assert!(!matches_as("[a/b]", path, "a"));
+    let grouped = path.union(EXTENDED);
+    assert!(!matches_as("@([d/x]|zzz)ocs", grouped, "docs"));
+    assert!(matches_as("@([d/x]|zzz)ocs", EXTENDED, "docs"));
+    assert!(!matches_as("@(d[o/x]cs)", grouped, "docs"));
+    assert!(matches_as("@(d[o/x]cs)", EXTENDED, "docs"));
+    assert!(matches_as("[[:l]ib/!(:])", grouped, "lib/x"));
 }
 
 #[test]
@@ -328,10 +389,66 @@ fn malformed_extended_patterns_fail_closed() {
 fn an_extended_component_matches_names_up_to_the_bound() {
     let pattern = Pattern::with_options("@(*)", EXTENDED).expect("compiles");
     let longest: String = "a".repeat(MAX_EXTENDED_LEN);
-    assert!(pattern.matches(&longest));
-    assert!(!pattern.matches(&format!("{longest}a")));
+    assert_eq!(pattern.matches(&longest), Ok(true));
+    assert_eq!(pattern.matches(&format!("{longest}a")), Ok(false));
     // A plain pattern has no such bound.
     assert!(matches("*", &"a".repeat(MAX_EXTENDED_LEN * 4)));
+}
+
+/// A match the heap cannot hold is refused as such, never by ending the
+/// process, and the scratch it was refused in answers truly once there is
+/// room.
+#[test]
+fn a_match_the_heap_cannot_hold_is_refused() {
+    use tairix_fuzzseed::meter::refusing_above;
+    for (source, options, len) in [
+        ("*b", Options::empty(), 4096),
+        ("@(*)b", EXTENDED, MAX_EXTENDED_LEN),
+    ] {
+        let pattern = Pattern::with_options(source, options).expect("compiles");
+        let candidate = "a".repeat(len);
+        let mut scratch = Scratch::new();
+        assert_eq!(
+            refusing_above(1024, || pattern.matches_with(&candidate, &mut scratch)),
+            Err(OutOfMemory),
+            "{source}"
+        );
+        assert_eq!(
+            pattern.matches_with(&candidate, &mut scratch),
+            Ok(false),
+            "{source}"
+        );
+    }
+}
+
+/// A candidate past the bound of a component holding a group is refused
+/// before any of it is copied.
+#[test]
+fn an_overlong_candidate_is_refused_before_it_is_copied() {
+    let pattern = Pattern::with_options("@(*)", EXTENDED).expect("compiles");
+    let long = "a".repeat(MAX_EXTENDED_LEN + 1);
+    let mut scratch = Scratch::new();
+    let (answer, metering) =
+        tairix_fuzzseed::meter::metered(|| pattern.matches_with(&long, &mut scratch));
+    assert_eq!(answer, Ok(false));
+    assert_eq!(metering.allocations, 0);
+}
+
+/// What a compiled pattern reports holding is what compiling it kept, so a
+/// caller can bound a cache of them.
+#[test]
+fn a_pattern_reports_the_heap_it_holds() {
+    for (source, options) in [
+        ("README", Options::empty()),
+        ("*.[ch]", Options::empty()),
+        ("[[:alpha:]α-ω]x?", NOCASE),
+        ("@(a|b*(c|[dé]))/!(x)/**", Options::PATHNAME.union(EXTENDED)),
+    ] {
+        let (pattern, metering) =
+            tairix_fuzzseed::meter::metered(|| Pattern::with_options(source, options));
+        let pattern = pattern.expect("compiles");
+        assert_eq!(pattern.heap_bytes(), metering.retained, "{source}");
+    }
 }
 
 #[test]
@@ -346,8 +463,8 @@ fn marked_text_keeps_quoted_characters_literal() {
         .collect();
     let pattern = Pattern::from_marked(&marked, Options::empty()).expect("compiles");
     // `*` is a wildcard; the marked `\` and `[` stand for themselves.
-    assert!(pattern.matches("x\\[a]"));
-    assert!(!pattern.matches("xa"));
+    assert_eq!(pattern.matches("x\\[a]"), Ok(true));
+    assert_eq!(pattern.matches("xa"), Ok(false));
 }
 
 #[test]
@@ -514,22 +631,8 @@ fn reference(nodes: &[Node], text: &[char], start: usize, dot0: bool) -> BTreeSe
     ends
 }
 
-/// A small pseudo-random generator: the differential sweep below must be
-/// reproducible without a seed source.
-struct Lcg(u64);
-
-impl Lcg {
-    fn below(&mut self, bound: usize) -> usize {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        usize::try_from(self.0 >> 33).expect("fits") % bound
-    }
-}
-
 /// A random extended pattern holding at most `groups` groups.
-fn random_pattern(rng: &mut Lcg, depth: usize, groups: &mut usize) -> String {
+fn random_pattern(rng: &mut Prng, depth: usize, groups: &mut usize) -> String {
     const ATOMS: &[&str] = &["a", "b", ".", "?", "*", "[ab]", "[!a]", "\\*"];
     let mut out = String::new();
     for _ in 0..=rng.below(4) {
@@ -555,7 +658,7 @@ fn random_pattern(rng: &mut Lcg, depth: usize, groups: &mut usize) -> String {
 /// patterns and short candidates, with and without the period rule.
 #[test]
 fn the_engine_agrees_with_the_reference_matcher() {
-    let mut rng = Lcg(0x5eed_9a7e_2026);
+    let mut rng = Prng::new(0x5eed_9a7e_2026);
     let mut scratch = Scratch::new();
     for _ in 0..4000 {
         let mut budget = MAX_GROUPS;
@@ -581,7 +684,7 @@ fn the_engine_agrees_with_the_reference_matcher() {
             let expected = reference(&component.nodes, &chars, 0, dot0).contains(&chars.len());
             assert_eq!(
                 pattern.matches_with(&text, &mut scratch),
-                expected,
+                Ok(expected),
                 "{source} against {text:?} (period {period})"
             );
         }

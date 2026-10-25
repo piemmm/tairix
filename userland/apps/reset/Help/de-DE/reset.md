@@ -35,8 +35,8 @@ der Eingabedisziplin.
 ## EXIT STATUS
 
 - `0` — das Terminal wurde wiederhergestellt.
-- `1` — die Ausgabe konnte nicht zugestellt werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — die Ausgabe konnte nicht zugestellt werden. Eine nicht
+  verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

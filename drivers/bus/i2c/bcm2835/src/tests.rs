@@ -25,9 +25,10 @@ use tairix_abi::{
 use tairix_i2cbus::{step_budget_ns, I2cBus, STALL_ALLOWANCE_NS};
 
 use super::{
-    register, Bsc, BusWait, ParentClock, A, BIND_KEYS, BSC_COMPATIBLE, C, CLKT, C_CLEAR, C_I2CEN,
-    C_INTD, C_INTR, C_INTT, C_READ, C_ST, DEL, DIV, DLEN, FIFO, FIFO_DEPTH, REGISTER_BLOCK_LEN,
-    REQUIRED_CAPABILITIES, S, S_CLKT, S_DONE, S_ERR, S_RXD, S_RXR, S_TXD, S_TXW,
+    divider, edge_delays, register, Bsc, BusWait, ParentClock, A, BIND_KEYS, BSC_COMPATIBLE, C,
+    CDIV_MAX, CDIV_MIN, CLKT, C_CLEAR, C_I2CEN, C_INTD, C_INTR, C_INTT, C_READ, C_ST, DEL, DIV,
+    DLEN, FEDL_SHIFT, FIFO, FIFO_DEPTH, REGISTER_BLOCK_LEN, REQUIRED_CAPABILITIES, S, S_CLKT,
+    S_DONE, S_ERR, S_RXD, S_RXR, S_TXD, S_TXW,
 };
 
 const FIFO_LEN: usize = 16;
@@ -682,6 +683,22 @@ fn the_divider_follows_the_parent_clock_into_every_transaction() {
         .expect("ran")
         .expect("answered");
     assert_eq!(registers(&sim).0, 3002, "rounded up, then up to even");
+}
+
+#[test]
+fn every_divider_the_bus_runs_at_keeps_its_edge_delays_below_half_of_it() {
+    for divider in (CDIV_MIN..=CDIV_MAX).step_by(2) {
+        let delays = edge_delays(divider);
+        for delay in [delays >> FEDL_SHIFT, delays & ((1 << FEDL_SHIFT) - 1)] {
+            assert!(
+                (1..divider / 2).contains(&delay),
+                "divider {divider}: delay {delay}"
+            );
+        }
+    }
+    let speed = NonZeroU32::new(100_000).expect("non-zero");
+    assert_eq!(divider(200_000, speed), Err(DriverError::OutOfRange));
+    assert_eq!(divider(400_000, speed), Ok(4));
 }
 
 #[test]

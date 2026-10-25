@@ -705,7 +705,7 @@ impl CallEndpoint {
     /// number of calls cancelled.
     ///
     /// Without this, a dead caller's queued request would later be served
-    /// on its ticket — the observed Pi 4 defect: an unloaded USB class
+    /// on its ticket — the observed metal defect: an unloaded USB class
     /// driver's final request survived its death, was held by the
     /// host-controller driver after a fault recovery, and wedged the
     /// single-URB transport against the replacement driver. Records one
@@ -2229,7 +2229,7 @@ mod tests {
 
     #[test]
     fn cancel_posted_by_scrubs_every_state_of_the_dead_poster() {
-        // The Pi 4 keyboard-wedge regression: a killed class driver's final
+        // The keyboard-wedge regression: a killed class driver's final
         // queued URB submit survived its death, was later received and held
         // by the HCD, and the replacement driver's every submit was refused
         // as AlreadyExists. Cancellation on the poster's exit must scrub the

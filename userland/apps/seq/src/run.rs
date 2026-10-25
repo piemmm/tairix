@@ -26,34 +26,28 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stdout};
-    use tairix_seq::{parse, run, SeqError, USAGE};
+    use tairix_seq::{parse, run, SeqError};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when the sequence (or a requested short help) was
-    /// written; `1` when the output stopped accepting bytes; `2` on a usage
-    /// error (a malformed argument vector, an unrecognised option, an
-    /// invalid number, a zero increment, or a bad format).
+    /// written; `1` when the output stopped accepting bytes or the command
+    /// line was not understood (a malformed argument vector, an
+    /// unrecognised option, an invalid number, a zero increment, or a bad
+    /// format).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("seq") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("seq: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("seq", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -68,9 +62,8 @@ mod program {
             Err(err) => {
                 // The operand scan (numbers, zero increment) diagnoses at
                 // run time but is a usage error all the same.
-                write_stderr_line(&format!("seq: {err}"));
-                write_stderr_line(USAGE);
-                2
+                tairix_help::report_misuse("seq", &err);
+                tairix_help::MISUSE
             }
         }
     }

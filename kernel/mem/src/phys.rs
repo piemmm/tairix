@@ -52,7 +52,7 @@ pub trait PhysMap {
     /// non-I/O-coherent platform the dirty zero lines that zeroing leaves
     /// behind are written back at an arbitrary later time, silently
     /// overwriting rings and descriptors the driver has since published
-    /// (the Pi 4 xHCI command ring went dead exactly this way). Every
+    /// (an xHCI command ring went dead exactly this way). Every
     /// implementation must therefore state its coherence decision
     /// explicitly: a real cache clean+invalidate on a port whose DMA
     /// masters are not I/O-coherent, or a documented no-op where no
@@ -266,8 +266,8 @@ impl PhysMap for DirectPhysMap {
         // Deliberate no-op: `DirectPhysMap` carries no architecture handle,
         // so it can serve only I/O-coherent configurations (x86_64, the
         // QEMU `virt` boards) and purely cacheable uses (image build,
-        // copy-out). A port whose DMA masters are not I/O-coherent (the
-        // Pi 4's BCM2711 PCIe) must wire a `PhysMap` that wraps its cache
+        // copy-out). A port whose DMA masters are not I/O-coherent must
+        // wire a `PhysMap` that wraps its cache
         // maintenance primitive instead — the aarch64
         // `ConfiguredPhysMap` — anywhere DMA buffers are zeroed
         // through the direct map.
@@ -279,7 +279,7 @@ impl PhysMap for DirectPhysMap {
         // configurations that never execute freshly-loaded code through it
         // (the QEMU `virt` boards, which are I-cache-coherent). A port whose
         // I-cache is not coherent with the loader's cacheable writes (the
-        // Pi 4's Cortex-A72) wires a `PhysMap` that performs the real
+        // Cortex-A72) wires a `PhysMap` that performs the real
         // clean-to-PoU + I-cache-invalidate instead — the aarch64
         // `ConfiguredPhysMap`.
     }

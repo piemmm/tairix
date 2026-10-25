@@ -108,7 +108,7 @@ impl Checksum {
     /// Fold the running sum to 16 bits **without** the final one's
     /// complement — the *partial* checksum a transmit-checksum-offload
     /// sender leaves in the checksum field for the device to complete
-    /// (virtio's `VIRTIO_NET_HDR_F_NEEDS_CSUM`, Linux `CHECKSUM_PARTIAL`).
+    /// (virtio's `VIRTIO_NET_HDR_F_NEEDS_CSUM`, virtio 1.2 §5.1.6.2).
     ///
     /// Seeded with a pseudo-header ([`Pseudo::seed`]) and taken *without*
     /// pushing the transport bytes, this is the folded one's-complement
@@ -258,8 +258,7 @@ pub enum ChecksumMode {
     /// (`plans/NETWORK.md` §2.3): the device splits the payload into
     /// MTU-sized segments of differing lengths and adds each segment's
     /// own length to the sum before folding, so the length must not be
-    /// pre-folded into the partial checksum (Linux `CHECKSUM_PARTIAL` for
-    /// GSO seeds the pseudo-header with length 0 identically).
+    /// pre-folded into the partial checksum.
     PartialGso,
 }
 

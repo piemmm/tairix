@@ -20,10 +20,17 @@ e negativo quando está acima, e não pode ser zero. `last` pode ser
 `inf` para contar para sempre. A precisão de saída por omissão segue a
 grafia dos operandos (`seq 1 0.25 2` imprime duas casas decimais), e as
 sequências de inteiros simples são geradas exatamente, por maiores que
-sejam os números.
+sejam os números. Um número hexadecimal com o expoente em maiúscula
+(`0X1P-1`) é lido do mesmo modo que um com o expoente em minúscula; o
+GNU `seq` lê a sua forma como a de um inteiro e imprime números errados.
 
 A análise de opções para no primeiro operando, e um número negativo
 inicial é um operando, não uma opção: `seq -5 5` conta a partir de -5.
+
+Um diagnóstico mostra o formato, e uma diretiva desconhecida que
+contenha, com qualquer carácter de controlo ou outro carácter invisível
+escrito como escape, de modo que nenhum consegue comandar o terminal; o
+GNU mostra a diretiva sem alterações.
 
 ## OPTIONS
 
@@ -53,10 +60,9 @@ inicial é um operando, não uma opção: `seq -5 5` conta a partir de -5.
 ## EXIT STATUS
 
 - `0` — a sequência (ou a ajuda curta pedida) foi escrita.
-- `1` — a saída deixou de aceitar bytes.
-- `2` — a linha de comandos não foi compreendida (uma opção
-  desconhecida, um número inválido, um incremento zero ou um formato
-  mau).
+- `1` — a saída deixou de aceitar bytes. Uma linha de comandos não
+  compreendida (uma opção desconhecida, um número inválido, um
+  incremento zero ou um formato mau) também termina com `1`.
 
 ## ENVIRONMENT
 

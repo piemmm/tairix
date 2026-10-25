@@ -23,13 +23,21 @@ nomme — chaque usage ultérieur est autorisé composant par composant
 sous votre propre identité.
 
 Un nom de lien déjà pris est refusé sauf si `-f` ou `-i` demande de le
-remplacer, et le remplacement **retire** d'abord ce nom, de sorte que
-rien ne passe à travers un lien déjà présent vers ce qu'il désigne. Un
-répertoire n'est jamais remplacé.
+remplacer. Le nouveau lien prend alors la place de ce nom en une seule
+étape, et seulement une fois qu'il existe, de sorte qu'un lien qui ne
+peut pas être créé — une cible absente, par exemple — laisse le nom tel
+qu'il était, et que rien ne passe à travers un lien déjà présent vers ce
+qu'il désigne. Un répertoire n'est jamais remplacé. Un lien qui
+prendrait la place du fichier même qu'il nomme est refusé comme étant le
+même fichier : un fichier lié de force à son propre nom, ou un lien
+symbolique dont la cible, lue depuis le répertoire du lien lui-même, est
+le fichier qu'il remplacerait. GNU lit plutôt cette cible depuis le
+répertoire courant et, après une question `-i` acceptée, remplace un
+fichier par un lien vers lui-même.
 
-Le premier échec arrête l'exécution avant toute cible suivante ; les
-liens déjà créés subsistent. `--` termine l'analyse des options : tout
-argument ultérieur est un opérande.
+Un lien qui ne peut pas être créé est signalé, et le suivant est tout de
+même créé. `--` termine l'analyse des options : tout argument ultérieur
+est un opérande.
 
 Sans `-s` le lien est **physique** : une seconde entrée de répertoire
 pour l'inode de la cible elle-même. Les deux noms atteignent un seul
@@ -62,15 +70,17 @@ invoquer.
 - `-d, -F, --directory` — accepter un opérande répertoire. Le lien
   reste refusé : aucun utilisateur ne peut donner un second nom à un
   répertoire.
-- `-f, --force` — retirer un nom de lien existant, puis créer le lien.
-- `-i, --interactive` — demander avant de retirer un nom de lien
-  existant ; seule une réponse commençant par `y`/`Y` consent. La
+- `-f, --force` — remplacer un nom de lien existant par le nouveau lien.
+- `-i, --interactive` — demander avant de remplacer un nom de lien
+  existant ; seule une réponse commençant par `y`/`Y` consent, et une
+  question refusée ignore ce lien et fait échouer l'exécution. La
   dernière de `-f` et `-i` l'emporte.
 - `-n, --no-dereference` — traiter une destination qui est un lien
   symbolique vers un répertoire comme le simple nom qu'elle est aussi,
   plutôt que comme un répertoire où créer les liens.
 - `-v, --verbose` — signaler chaque lien créé sous la forme
-  `'link' -> 'target'`.
+  `'link' -> 'target'` pour un lien symbolique et `'link' => 'target'`
+  pour un lien physique.
 - `-t dir, --target-directory=dir` — créer chaque lien dans `dir`, qui
   doit déjà être un répertoire. La valeur suit attachée (`-tdir`,
   `--target-directory=dir`) ou comme argument suivant.
@@ -92,10 +102,10 @@ invoquer.
 
 ## EXIT STATUS
 
-- `0` — tous les liens ont été créés (ou l'aide courte a été écrite) ;
-  une question `-i` refusée n'est pas un échec.
-- `1` — tout le reste, avec la raison affichée sur la sortie d'erreur.
-  Une ligne de commande non comprise sort aussi avec `1`.
+- `0` — tous les liens ont été créés (ou l'aide courte a été écrite).
+- `1` — tout le reste, y compris une question `-i` refusée, avec
+  l'éventuelle raison affichée sur la sortie d'erreur. Une ligne de
+  commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

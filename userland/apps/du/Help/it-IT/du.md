@@ -27,11 +27,21 @@ Un percorso illeggibile viene segnalato sull'errore standard e
 l'attraversamento continua con il resto; una directory illeggibile
 non contribuisce nulla anziché una somma parziale indovinata.
 
-Un file raggiunto da più di un nome è contato **una sola volta**, così
-il suo spazio non è riportato due volte; `-l` conta invece ogni nome.
-`-x` (un solo filesystem) non è ancora
-disponibile; le variabili d'ambiente della famiglia `DU_BLOCK_SIZE`
-non vengono lette — la scala si sceglie solo con le opzioni.
+Un collegamento simbolico è contato in quanto tale, a meno che `-H` o
+`-L` non dica di seguirlo. Tutto ciò che si incontra una seconda volta —
+un altro nome di un file già contato, un operando ripetuto o situato
+dentro un altro, una directory che `-L` raggiunge due volte — viene
+tralasciato, senza una riga propria, così il suo spazio non è riportato
+due volte; `-l` conta invece ogni incontro. `-x` (un solo filesystem)
+non è ancora disponibile; le variabili d'ambiente della famiglia
+`DU_BLOCK_SIZE` non vengono lette — la scala si sceglie solo con le
+opzioni.
+
+Su un terminale, ogni nome mostrato dall'output è virgolettato dove una
+shell lo richiederebbe, e ogni carattere di controllo o altro carattere
+invisibile che contiene è scritto come sequenza di escape, così un nome
+non può comandare lo schermo né riordinarlo; GNU lo mostra invariato.
+Una pipe, un file o l'output di `-0` ricevono il nome byte per byte.
 
 ## OPTIONS
 
@@ -47,6 +57,11 @@ non vengono lette — la scala si sceglie solo con le opzioni.
   sottodirectory.
 - `-l, --count-links` — contare un file con più nomi una volta per
   nome invece di una sola.
+- `-L, --dereference` — seguire ogni collegamento simbolico.
+- `-H, -D, --dereference-args` — seguire solo i collegamenti simbolici
+  indicati come operandi.
+- `-P, --no-dereference` — non seguire alcun collegamento simbolico (il
+  valore predefinito).
 - `--apparent-size` — misurare le lunghezze apparenti in byte, non lo
   spazio allocato.
 - `-b, --bytes` — dimensione apparente in singoli byte
@@ -75,8 +90,7 @@ non vengono lette — la scala si sceglie solo con le opzioni.
 - `0` — ogni operando è stato attraversato (o la guida breve è stata
   scritta).
 - `1` — un percorso non è stato leggibile, o l'output non è stato
-  consegnato.
-- `2` — la riga di comando non è stata compresa.
+  consegnato. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

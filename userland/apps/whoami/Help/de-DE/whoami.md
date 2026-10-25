@@ -36,8 +36,8 @@ Der Befehl nimmt keine Operanden an; ein Argument ist ein Fehler
 - `0` — der Name (oder die angeforderte kurze Hilfe) wurde geschrieben.
 - `1` — das Lesen der Identität, die Verzeichnisabfrage oder die
   Ausgabe schlug fehl, oder das Verzeichnis enthält keinen Namen für
-  die Benutzerkennung.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  die Benutzerkennung. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

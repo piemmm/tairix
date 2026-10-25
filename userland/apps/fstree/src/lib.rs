@@ -7,8 +7,9 @@
 //! hidden-entries toggle, the status/message lines, the `?` help overlay),
 //! the S2 file operations (copy, move, rename, delete, mkdir, and the
 //! permission-bits editor, each planned and validated before any I/O and
-//! driven by a resumable executor whose per-file overwrite questions run
-//! through the key loop), and the S3 tagging surface: multi-file tags
+//! carried out by the shared operation engine, `lib/fscopy`, whose per-file
+//! overwrite questions run through the key loop), and the S3 tagging
+//! surface: multi-file tags
 //! (`t`, tag-by-glob, invert, clear), batch copy/move/delete over the
 //! tagged set with a per-file continue-on-error report, the flattened
 //! branch view, and disk-usage statistics — both fed by one bounded,
@@ -30,9 +31,10 @@
 //!
 //! A fully host-testable session built from seams:
 //!
-//! * [`fs::Fs`] — the directory-listing and free-space channel; the `Run`
-//!   binary implements it over the kernel-authorised `fs_*` syscalls, the
-//!   tests over an in-memory tree.
+//! * [`fs::Fs`] — the directory-listing and free-space channel, and where
+//!   an operation is started; the `Run` binary implements it over the
+//!   kernel-authorised `fs_*` syscalls and the working directory, the tests
+//!   over in-memory trees.
 //! * `Tty` (from `tairix-curses`) — the terminal byte channel; an
 //!   in-memory channel makes the whole session drivable without a kernel.
 //! * `tairix_appdata::Settings` — this application's own app-data store,
@@ -48,7 +50,7 @@
 //!
 //! * [`fs`] — the [`fs::Fs`] seam and its listing vocabulary.
 //! * [`model`] — the tree/pane/sort/prompt state machine.
-//! * [`ops`] — the file-operation planner and resumable executor.
+//! * [`ops`] — the file-operation planner and the operations it starts.
 //! * [`tag`] — the tag set and the batch-operation driver.
 //! * [`walk`] — the bounded branch walker (flattened view, disk usage,
 //!   and the searches through its [`walk::Sieve`]).
@@ -80,6 +82,12 @@
 
 extern crate alloc;
 
+use alloc::string::String;
+use core::fmt;
+
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+use tairix_util::quote::quote_if_needed;
+
 pub mod app;
 pub mod fs;
 pub mod info;
@@ -98,7 +106,7 @@ pub mod walk;
 mod tests;
 
 pub use app::{handle_event, publish_settings, run, FstreeError};
-pub use fs::{Fs, FsEntry, RenameOutcome, VolumeInfo};
+pub use fs::{Fs, FsEntry, VolumeInfo};
 pub use info::{Info, NullInfo};
 pub use model::{Model, Pane, SettingsState, SortKey};
 pub use render::render;
@@ -115,3 +123,68 @@ pub use walk::{FlatEntry, Sieve, WalkPurpose, WalkState, Walker};
 /// share. The app-data store itself is keyed on the bundle identity the
 /// kernel attests, never on this.
 pub const OWN_WORD: &str = "fstree";
+
+/// What `fstree`'s command line asks for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Command {
+    /// The short-help switches (`-h`, `-?`).
+    Help,
+    /// A session starting in this directory: the operand, or the root view
+    /// `/` when none is named.
+    Open(String),
+}
+
+/// A command line `fstree` does not understand.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UsageError {
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// A second operand: a session starts in one directory.
+    ExtraOperand(String),
+}
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::ExtraOperand(operand) => {
+                write!(f, "unknown argument: {}", quote_if_needed(operand))
+            }
+        }
+    }
+}
+
+/// What `fstree`'s one option means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `fstree`'s options: its help switches alone.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::letter('h', Takes::Nothing, Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// Parse `args` (the tool's arguments, excluding the program name), read as
+/// GNU's `getopt_long` reads it ([`Scan`]): the help switches answer at once
+/// wherever they stand, `--` ends the options, and a second operand is
+/// refused where it stands.
+///
+/// # Errors
+///
+/// * [`UsageError::Option`] — an option `getopt` refuses, in its words.
+/// * [`UsageError::ExtraOperand`] — a second directory operand.
+pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
+    let mut root: Option<String> = None;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(UsageError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Operand(extra) if root.is_some() => {
+                return Err(UsageError::ExtraOperand(String::from(extra)));
+            }
+            Arg::Operand(directory) => root = Some(String::from(directory)),
+        }
+    }
+    Ok(Command::Open(root.unwrap_or_else(|| String::from("/"))))
+}

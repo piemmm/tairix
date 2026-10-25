@@ -19,6 +19,13 @@
 //! choice in one audited place instead of leaking that predicate into
 //! the crate body, which `cargo xtask cfg-check` forbids outside the
 //! architecture ports and the build glue.
+//!
+//! It also discovers the kernel's bootstrap floor: every driver crate whose
+//! [`FLOOR_MANIFEST`] declares it part of the floor, read with the program
+//! manifests' own grammar, and which of them each instruction set's floor
+//! holds. No list of floor drivers is kept anywhere. That half reads files
+//! and allocates, which both places this module compiles into — the build
+//! script and the host test build — can.
 
 /// The freestanding bare-metal target triples the production kernel
 /// builds for, paired with the per-board boot linker script (a path
@@ -171,9 +178,377 @@ pub fn short_content_hash<'a>(bytes: &[u8], out: &'a mut [u8; 12]) -> &'a str {
     core::str::from_utf8(out).unwrap_or("")
 }
 
+/// The program manifests' grammar and the walk of where crates live, shared
+/// with the bundle composer so a floor manifest reads as an `AppInfo.toml`
+/// does.
+#[expect(
+    dead_code,
+    reason = "the bundle composer's own helpers it carries have no use here"
+)]
+#[path = "../../../tools/syshelp/src/bundles.rs"]
+mod bundles;
+
+use std::path::Path;
+use std::string::{String, ToString};
+use std::vec::Vec;
+
+use tairix_abi::{DriverBindKey, HwMatchKey, DRIVER_MANIFEST_MAX_BIND_KEYS};
+
+/// The file whose presence beside a driver crate's `Cargo.toml` makes the
+/// driver part of the kernel's bootstrap floor.
+pub const FLOOR_MANIFEST: &str = "Floor.toml";
+
+/// How the kernel brings a floor driver's device up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloorKind {
+    /// A virtio device, on the transport the port provisions.
+    Virtio,
+    /// A device the kernel lends the driver a host for.
+    Host,
+}
+
+impl FloorKind {
+    /// The arm of the catalogue's `floor_driver!` macro the kind is entered
+    /// by.
+    #[must_use]
+    pub fn arm(self) -> &'static str {
+        match self {
+            Self::Virtio => "virtio",
+            Self::Host => "host",
+        }
+    }
+}
+
+/// One floor driver's declaration, as its manifest states it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FloorDeclaration {
+    /// How the kernel brings its device up.
+    pub kind: FloorKind,
+    /// The instruction sets whose floor holds it.
+    pub isas: Vec<&'static str>,
+    /// The bind table the build signs: its crate's `BIND_KEYS`, restated.
+    pub bind_keys: Vec<DriverBindKey>,
+    /// Why it sits below the driver store.
+    pub reason: String,
+}
+
+/// A floor driver the walk found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FloorDriver {
+    /// Its crate's package name.
+    pub package: String,
+    /// What its manifest declares.
+    pub declaration: FloorDeclaration,
+}
+
+impl FloorDriver {
+    /// The name generated code names its crate by.
+    #[must_use]
+    pub fn crate_name(&self) -> String {
+        self.package.replace('-', "_")
+    }
+}
+
+/// Every floor driver under `drivers`, in the walk's order.
+///
+/// # Errors
+///
+/// An unreadable tree or file, a crate whose `Cargo.toml` names no package,
+/// or a manifest [`parse_floor_manifest`] refuses, each naming its file: the
+/// build fails rather than leave a declared driver out of the floor.
+pub fn discover_floor_drivers(drivers: &Path) -> Result<Vec<FloorDriver>, String> {
+    let crates = bundles::manifest_crates(drivers, FLOOR_MANIFEST, |_| {})
+        .map_err(|e| std::format!("{}: {e}", drivers.display()))?;
+    crates
+        .iter()
+        .map(|dir| {
+            let read = |name: &str| {
+                let path = dir.join(name);
+                std::fs::read_to_string(&path)
+                    .map_err(|e| std::format!("{}: {e}", path.display()))
+                    .map(|text| (path, text))
+            };
+            let (manifest, text) = read(FLOOR_MANIFEST)?;
+            let declaration = parse_floor_manifest(&text)
+                .map_err(|e| std::format!("{}: {e}", manifest.display()))?;
+            let (cargo, text) = read("Cargo.toml")?;
+            let package = bundles::package_name(&text)
+                .ok_or_else(|| std::format!("{}: no `[package] name`", cargo.display()))?;
+            Ok(FloorDriver {
+                package: package.to_string(),
+                declaration,
+            })
+        })
+        .collect()
+}
+
+/// The floor drivers of `floor` that `isa`'s floor holds.
+#[must_use]
+pub fn floor_for_isa<'a>(floor: &'a [FloorDriver], isa: &str) -> Vec<&'a FloorDriver> {
+    floor
+        .iter()
+        .filter(|driver| driver.declaration.isas.contains(&isa))
+        .collect()
+}
+
+/// Parse a floor manifest: `bring-up`, `isas`, `bind` and `reason`, each
+/// once and each a plain quoted string, and nothing else.
+///
+/// # Errors
+///
+/// The first line the grammar refuses, by number, or the key it lacks.
+pub fn parse_floor_manifest(text: &str) -> Result<FloorDeclaration, String> {
+    let (mut kind, mut isas, mut bind_keys, mut reason) = (None, None, None, None);
+    for (line, entry) in bundles::manifest_entries(text) {
+        let at = |detail: String| std::format!("line {line}: {detail}");
+        let (key, value) = entry.ok_or_else(|| at("not `key = \"value\"`".to_string()))?;
+        let value = bundles::quoted_string(value)
+            .ok_or_else(|| at(std::format!("`{key}` is not a plain quoted string")))?;
+        let fresh = match key {
+            "bring-up" => kind.replace(parse_kind(value).map_err(at)?).is_none(),
+            "isas" => isas.replace(parse_isas(value).map_err(at)?).is_none(),
+            "bind" => bind_keys
+                .replace(parse_bind_keys(value).map_err(at)?)
+                .is_none(),
+            "reason" if value.trim().is_empty() => {
+                return Err(at("an empty `reason`".to_string()));
+            }
+            "reason" => reason.replace(value.to_string()).is_none(),
+            other => return Err(at(std::format!("unknown key `{other}`"))),
+        };
+        if !fresh {
+            return Err(at(std::format!("`{key}` given twice")));
+        }
+    }
+    let missing = |key: &str| std::format!("no `{key}`");
+    Ok(FloorDeclaration {
+        kind: kind.ok_or_else(|| missing("bring-up"))?,
+        isas: isas.ok_or_else(|| missing("isas"))?,
+        bind_keys: bind_keys.ok_or_else(|| missing("bind"))?,
+        reason: reason.ok_or_else(|| missing("reason"))?,
+    })
+}
+
+fn parse_kind(value: &str) -> Result<FloorKind, String> {
+    match value {
+        "virtio" => Ok(FloorKind::Virtio),
+        "host" => Ok(FloorKind::Host),
+        other => Err(std::format!("unknown bring-up `{other}`")),
+    }
+}
+
+/// Whitespace-separated instruction set names, each a native Tier-1 one,
+/// each once.
+fn parse_isas(value: &str) -> Result<Vec<&'static str>, String> {
+    let mut isas = Vec::new();
+    for name in value.split_whitespace() {
+        let isa = tairix_buildcfg::NATIVE_ARCHES
+            .into_iter()
+            .find(|&isa| isa == name)
+            .ok_or_else(|| std::format!("unknown instruction set `{name}`"))?;
+        if isas.contains(&isa) {
+            return Err(std::format!("`{name}` named twice"));
+        }
+        isas.push(isa);
+    }
+    if isas.is_empty() {
+        return Err("no instruction set".to_string());
+    }
+    Ok(isas)
+}
+
+/// Whitespace-separated `<kind>:<identity>@<priority>` entries, at least one
+/// and no more than a manifest carries.
+fn parse_bind_keys(value: &str) -> Result<Vec<DriverBindKey>, String> {
+    let keys = value
+        .split_whitespace()
+        .map(parse_bind_key)
+        .collect::<Result<Vec<_>, _>>()?;
+    if keys.is_empty() || keys.len() > usize::from(DRIVER_MANIFEST_MAX_BIND_KEYS) {
+        return Err(std::format!(
+            "a bind table holds 1..={DRIVER_MANIFEST_MAX_BIND_KEYS} keys, not {}",
+            keys.len()
+        ));
+    }
+    Ok(keys)
+}
+
+/// One bind entry: `compatible:<string>`, `virtio:<device id>`, or
+/// `pci:`/`usb:` with a vendor, a device and a class in hexadecimal, each
+/// `@` the decimal priority it binds at.
+fn parse_bind_key(entry: &str) -> Result<DriverBindKey, String> {
+    let refused = || std::format!("bind entry `{entry}` is not `<kind>:<identity>@<priority>`");
+    let (key, priority) = entry.rsplit_once('@').ok_or_else(refused)?;
+    let priority: u16 = priority.parse().map_err(|_| refused())?;
+    let (kind, identity) = key.split_once(':').ok_or_else(refused)?;
+    let key = match kind {
+        "compatible" if !identity.is_empty() => {
+            HwMatchKey::compatible(identity.as_bytes()).map_err(|_| refused())?
+        }
+        "virtio" => HwMatchKey::virtio(identity.parse().map_err(|_| refused())?),
+        "pci" | "usb" => {
+            let mut parts = identity.split(':');
+            let (Some(vendor), Some(device), Some(class), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                return Err(refused());
+            };
+            let vendor = u16::from_str_radix(vendor, 16).map_err(|_| refused())?;
+            let device = u16::from_str_radix(device, 16).map_err(|_| refused())?;
+            let class = u32::from_str_radix(class, 16)
+                .ok()
+                .filter(|&class| class <= 0x00ff_ffff)
+                .ok_or_else(refused)?;
+            if kind == "pci" {
+                HwMatchKey::pci(vendor, device, class)
+            } else {
+                HwMatchKey::usb(vendor, device, class)
+            }
+        }
+        _ => return Err(refused()),
+    };
+    Ok(DriverBindKey::new(priority, key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manifest stating every key once.
+    const MANIFEST: &str = "# a floor driver\n\
+                            bring-up = \"host\"\n\
+                            isas = \"aarch64 riscv64\"\n\
+                            bind = \"compatible:vendor,part@10 virtio:2@5\"\n\
+                            reason = \"it reads the root\"\n";
+
+    #[test]
+    fn a_floor_manifest_states_its_bring_up_isas_bind_table_and_reason() {
+        let declaration = parse_floor_manifest(MANIFEST).expect("parses");
+        assert_eq!(declaration.kind, FloorKind::Host);
+        assert_eq!(declaration.isas, ["aarch64", "riscv64"]);
+        assert_eq!(
+            declaration.bind_keys,
+            [
+                DriverBindKey::new(10, HwMatchKey::compatible(b"vendor,part").expect("fits")),
+                DriverBindKey::new(5, HwMatchKey::virtio(2)),
+            ]
+        );
+        assert_eq!(declaration.reason, "it reads the root");
+    }
+
+    #[test]
+    fn a_floor_manifest_missing_a_key_or_stating_one_twice_or_another_is_refused() {
+        let without = |key: &str| {
+            MANIFEST
+                .lines()
+                .filter(|line| !line.starts_with(key))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for key in ["bring-up", "isas", "bind", "reason"] {
+            assert!(parse_floor_manifest(&without(key)).is_err(), "{key}");
+        }
+        for extra in [
+            "reason = \"again\"",
+            "path = \"/System/Drivers/storage/part\"",
+            "[floor]",
+            "isas = aarch64",
+        ] {
+            let text = std::format!("{MANIFEST}{extra}\n");
+            assert!(parse_floor_manifest(&text).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn a_floor_manifest_refuses_each_value_it_cannot_mean() {
+        for (key, value) in [
+            ("bring-up", "pci"),
+            ("isas", ""),
+            ("isas", "wasm32"),
+            ("isas", "aarch64 aarch64"),
+            ("bind", ""),
+            ("bind", "compatible:@10"),
+            ("bind", "virtio:2"),
+            ("bind", "virtio:two@10"),
+            ("bind", "pci:8086:2922@10"),
+            ("bind", "usb:3434:0e21:1000000@10"),
+            ("bind", "serial:0@10"),
+            ("reason", " "),
+        ] {
+            let text = MANIFEST
+                .lines()
+                .map(|line| {
+                    if line.starts_with(key) {
+                        std::format!("{key} = \"{value}\"")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(parse_floor_manifest(&text).is_err(), "{key} = {value:?}");
+        }
+    }
+
+    #[test]
+    fn a_bind_table_names_each_kind_of_key() {
+        assert_eq!(
+            parse_bind_keys("pci:8086:2922:010601@3 usb:3434:0e21:030101@4"),
+            Ok(std::vec![
+                DriverBindKey::new(3, HwMatchKey::pci(0x8086, 0x2922, 0x01_06_01)),
+                DriverBindKey::new(4, HwMatchKey::usb(0x3434, 0x0e21, 0x03_01_01)),
+            ])
+        );
+        let crowded = std::vec!["virtio:2@1"; usize::from(DRIVER_MANIFEST_MAX_BIND_KEYS) + 1];
+        assert!(parse_bind_keys(&crowded.join(" ")).is_err());
+    }
+
+    #[test]
+    fn each_instruction_set_holds_the_floor_drivers_that_name_it() {
+        let declared = |isas: &[&'static str]| FloorDriver {
+            package: "tairix-drv-x".to_string(),
+            declaration: FloorDeclaration {
+                isas: isas.to_vec(),
+                ..parse_floor_manifest(MANIFEST).expect("parses")
+            },
+        };
+        let floor = [declared(&["aarch64"]), declared(&["aarch64", "x86_64"])];
+        assert_eq!(floor_for_isa(&floor, "aarch64").len(), 2);
+        assert_eq!(floor_for_isa(&floor, "x86_64"), [&floor[1]]);
+        assert!(floor_for_isa(&floor, "riscv64").is_empty());
+        assert_eq!(floor[0].crate_name(), "tairix_drv_x");
+        assert_eq!(
+            (FloorKind::Virtio.arm(), FloorKind::Host.arm()),
+            ("virtio", "host")
+        );
+    }
+
+    /// The tree's own manifests: every target boots from a virtio disk, the
+    /// aarch64 one from a host-attached disk too, and no target's floor binds
+    /// one key twice, which would leave the disk to a tie.
+    #[test]
+    fn every_target_boots_from_the_floor_its_drivers_declare() {
+        let drivers = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../drivers");
+        let floor = discover_floor_drivers(&drivers).expect("every floor manifest parses");
+        for isa in tairix_buildcfg::NATIVE_ARCHES {
+            let held = floor_for_isa(&floor, isa);
+            assert!(
+                held.iter()
+                    .any(|driver| driver.declaration.kind == FloorKind::Virtio),
+                "{isa} boots from a virtio disk"
+            );
+            let keys: Vec<_> = held
+                .iter()
+                .flat_map(|driver| driver.declaration.bind_keys.iter().map(|bind| bind.key))
+                .collect();
+            for (at, key) in keys.iter().enumerate() {
+                assert!(!keys[at + 1..].contains(key), "{isa} binds {key:?} twice");
+            }
+        }
+        assert!(floor_for_isa(&floor, "aarch64")
+            .iter()
+            .any(|driver| driver.declaration.kind == FloorKind::Host));
+    }
 
     #[test]
     fn x86_64_freestanding_selects_the_x86_64_linker_script() {

@@ -177,7 +177,7 @@ installed-system contract requires inside `/Users/<name>` —
 folders,
 `Documents`, `Music`, `Pictures` and `Videos`. The names are defined once in
 `tairix_abi::home`. `HOME_MODE` (`0o700`) is the owner-only mode the home
-and each of those directories is stamped with, so an account's storage is
+and each of those directories is created with, so an account's storage is
 private by construction rather than by per-file hardening.
 
 They are created **with the account**, not on first use, because the
@@ -232,5 +232,5 @@ its uid through the pure, allocation-free `system_account_uid()` at
 config-parse time and spawns each service with that concrete
 `target_uid`; `is_system_account_name()` / `is_system_group_name()` back
 the kernel merge's reserved-name refusals, and
-`system_account_directory()` supplies the `(uid, username)` rows the
+`system_account_directory()` supplies the `(uid, login group, username)` rows the
 user-directory introspection lists ahead of the on-disk half.

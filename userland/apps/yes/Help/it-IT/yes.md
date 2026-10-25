@@ -36,8 +36,8 @@ scrivere `yes -- -x` per stampare una stringa che sembra un'opzione.
 
 - `0` — la guida breve richiesta è stata servita.
 - `1` — l'output ha smesso di accettare byte (l'unica condizione di
-  arresto dello strumento).
-- `2` — la riga di comando non è stata compresa.
+  arresto dello strumento). Anche una riga di comando non compresa
+  termina con `1`.
 
 ## ENVIRONMENT
 

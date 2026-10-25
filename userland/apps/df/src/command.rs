@@ -12,11 +12,11 @@
 //! pair (plans/APPS.md §4); `-h` keeps its GNU meaning
 //! (human-readable), exactly as `ls` and `du`.
 
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 use tairix_util::size::{parse_block_size, SizeScale};
 
@@ -81,10 +81,8 @@ impl Default for Options {
 /// Why an argument vector was not a valid `df` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// An option that is not part of the surface.
-    UnknownOption(String),
-    /// An option that requires a value reached the end of the arguments.
-    MissingValue(&'static str),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A `--block-size`/`-B` value that is not a valid GNU size.
     BadBlockSize(String),
 }
@@ -92,10 +90,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownOption(opt) => write!(f, "unrecognized option {opt}", opt = quote(opt)),
-            Self::MissingValue(opt) => {
-                write!(f, "option {opt} requires an argument", opt = quote(opt))
-            }
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::BadBlockSize(value) => write!(
                 f,
                 "invalid --block-size argument {value}",
@@ -105,139 +100,125 @@ impl fmt::Display for ParseError {
     }
 }
 
+/// What each of `df`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    All,
+    BlockSize,
+    Inodes,
+    HumanReadable,
+    Si,
+    Kibibytes,
+    Local,
+    Portability,
+    PrintType,
+    Total,
+    Type,
+    ExcludeType,
+    Help,
+}
+
+/// `df`'s options, as GNU's `df` spells them, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('a', &["all"], Flag::All),
+    Opt::valued('B', &["block-size"], Flag::BlockSize),
+    Opt::flag('i', &["inodes"], Flag::Inodes),
+    Opt::flag('h', &["human-readable"], Flag::HumanReadable),
+    Opt::flag('H', &["si"], Flag::Si),
+    Opt::letter('k', Takes::Nothing, Flag::Kibibytes),
+    Opt::flag('l', &["local"], Flag::Local),
+    Opt::flag('P', &["portability"], Flag::Portability),
+    Opt::flag('T', &["print-type"], Flag::PrintType),
+    Opt::long(&["total"], Takes::Nothing, Flag::Total),
+    Opt::valued('t', &["type"], Flag::Type),
+    Opt::valued('x', &["exclude-type"], Flag::ExcludeType),
+    Opt::flag('?', &["help"], Flag::Help),
+];
+
 /// Parse an argument vector (without the program name).
 ///
-/// Options and operands may interleave; `--` ends option parsing. Later
-/// unit selections override earlier ones, exactly as in the GNU tool.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, clustered, a value attached (`-tarxfs`, `--type=arxfs`) or
+/// the next argument, a long option by any unambiguous prefix, `--` ending
+/// them. The help switches (`-?`, `--help`) answer at once. The later unit
+/// selection wins, exactly as in the GNU tool; `-t` and `-x` accumulate.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] naming the offending argument; the caller reports it
-/// with the usage banner and exits `2`.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::BadBlockSize`] — a `-B` value that is not a GNU size.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut options = Options::default();
-    let mut index = 0;
-    let mut options_ended = false;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if options_ended || arg == "-" || !arg.starts_with('-') {
-            options.paths.push(arg.to_string());
-            continue;
-        }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            let (name, attached) = match long.split_once('=') {
-                Some((name, value)) => (name, Some(value)),
-                None => (long, None),
-            };
-            match name {
-                "help" => return Ok(Command::Help),
-                "all" => options.all = true,
-                "print-type" => options.print_type = true,
-                "inodes" => options.inodes = true,
-                "portability" => options.portability = true,
-                "total" => options.grand_total = true,
-                "local" => {}
-                "human-readable" => options.scale = SizeScale::HumanBinary,
-                "si" => options.scale = SizeScale::HumanDecimal,
-                "type" => {
-                    let value = take_value(attached, args, &mut index, "--type")?;
-                    options.types.push(value.to_string());
-                }
-                "exclude-type" => {
-                    let value = take_value(attached, args, &mut index, "--exclude-type")?;
-                    options.exclude_types.push(value.to_string());
-                }
-                "block-size" => {
-                    let value = take_value(attached, args, &mut index, "--block-size")?;
-                    options.scale = parse_block_size(value)
-                        .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
-                }
-                _ => return Err(ParseError::UnknownOption(arg.to_string())),
-            }
-            continue;
-        }
-        // A short-option cluster; `-B`, `-t`, and `-x` consume the rest
-        // of the cluster (or the next argument) as their value.
-        let mut cluster = arg[1..].chars();
-        while let Some(flag) = cluster.next() {
-            match flag {
-                '?' => return Ok(Command::Help),
-                'a' => options.all = true,
-                'T' => options.print_type = true,
-                'i' => options.inodes = true,
-                'P' => options.portability = true,
-                'l' => {}
-                'h' => options.scale = SizeScale::HumanBinary,
-                'H' => options.scale = SizeScale::HumanDecimal,
-                'k' => options.scale = SizeScale::Blocks(1024),
-                'B' => {
-                    let value = take_cluster_value(cluster.as_str(), args, &mut index, "-B")?;
-                    options.scale = parse_block_size(value)
-                        .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
-                    break;
-                }
-                't' => {
-                    let value = take_cluster_value(cluster.as_str(), args, &mut index, "-t")?;
-                    options.types.push(value.to_string());
-                    break;
-                }
-                'x' => {
-                    let value = take_cluster_value(cluster.as_str(), args, &mut index, "-x")?;
-                    options.exclude_types.push(value.to_string());
-                    break;
-                }
-                other => return Err(ParseError::UnknownOption(format!("-{other}"))),
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(path) => options.paths.push(path.to_string()),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(flag, value) => options.set(flag, value.unwrap_or_default())?,
         }
     }
     Ok(Command::Report(options))
 }
 
-/// The value of a `--name value` / `--name=value` long option.
-fn take_value<'a>(
-    attached: Option<&'a str>,
-    args: &[&'a str],
-    index: &mut usize,
-    option: &'static str,
-) -> Result<&'a str, ParseError> {
-    if let Some(value) = attached {
-        return Ok(value);
+impl Options {
+    /// Apply the option `flag` names, with the value it took.
+    fn set(&mut self, flag: Flag, value: &str) -> Result<(), ParseError> {
+        match flag {
+            Flag::All => self.all = true,
+            Flag::BlockSize => {
+                self.scale = parse_block_size(value)
+                    .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
+            }
+            Flag::Inodes => self.inodes = true,
+            Flag::HumanReadable => self.scale = SizeScale::HumanBinary,
+            Flag::Si => self.scale = SizeScale::HumanDecimal,
+            Flag::Kibibytes => self.scale = SizeScale::Blocks(1024),
+            Flag::Local | Flag::Help => {}
+            Flag::Portability => self.portability = true,
+            Flag::PrintType => self.print_type = true,
+            Flag::Total => self.grand_total = true,
+            Flag::Type => self.types.push(value.to_string()),
+            Flag::ExcludeType => self.exclude_types.push(value.to_string()),
+        }
+        Ok(())
     }
-    let Some(value) = args.get(*index) else {
-        return Err(ParseError::MissingValue(option));
-    };
-    *index += 1;
-    Ok(value)
-}
-
-/// The value of a short option: the rest of its cluster (`-t arxfs` as
-/// `-tarxfs`) or the next argument.
-fn take_cluster_value<'a>(
-    rest: &'a str,
-    args: &[&'a str],
-    index: &mut usize,
-    option: &'static str,
-) -> Result<&'a str, ParseError> {
-    if !rest.is_empty() {
-        return Ok(rest);
-    }
-    let Some(value) = args.get(*index) else {
-        return Err(ParseError::MissingValue(option));
-    };
-    *index += 1;
-    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse, Command, Options, ParseError, SizeScale};
-    use alloc::string::ToString;
+    use alloc::string::{String, ToString};
     use alloc::vec;
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-Q"]), "invalid option -- 'Q'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-t"]), "option requires an argument -- 't'");
+        assert_eq!(
+            refused(&["--block-size"]),
+            "option '--block-size' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--all=x"]),
+            "option '--all' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `df --inod --print /` as `df --inodes --print-type /`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        let options = report(&["--inod", "--print", "/"]);
+        assert!(options.inodes && options.print_type);
+        assert_eq!(
+            refused(&["--p"]),
+            "option '--p' is ambiguous; possibilities: '--portability' '--print-type'"
+        );
+    }
 
     fn report(args: &[&str]) -> Options {
         match parse(args) {
@@ -326,16 +307,10 @@ mod tests {
             parse(&["-B", "banana"]),
             Err(ParseError::BadBlockSize("banana".to_string()))
         );
-        assert_eq!(parse(&["-B"]), Err(ParseError::MissingValue("-B")));
-        assert_eq!(parse(&["-t"]), Err(ParseError::MissingValue("-t")));
-        assert_eq!(
-            parse(&["--nonsense"]),
-            Err(ParseError::UnknownOption("--nonsense".to_string()))
-        );
-        assert_eq!(
-            parse(&["-z"]),
-            Err(ParseError::UnknownOption("-z".to_string()))
-        );
+        assert_eq!(refused(&["-B"]), "option requires an argument -- 'B'");
+        assert_eq!(refused(&["-t"]), "option requires an argument -- 't'");
+        assert_eq!(refused(&["--nonsense"]), "unrecognized option '--nonsense'");
+        assert_eq!(refused(&["-z"]), "invalid option -- 'z'");
     }
 
     #[test]

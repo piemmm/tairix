@@ -39,8 +39,10 @@ comandos escritos dentro de la sesión.
 
 ## EXIT STATUS
 
-- `0` — la sesión terminó limpiamente, o se mostró la ayuda corta.
-- `2` — la línea de comandos no fue comprendida.
+- `0` — la sesión terminó limpiamente, se imprimió el listado, o se
+  mostró la ayuda corta.
+- `1` — no se pudo leer el listado. Una línea de comandos no
+  comprendida también termina con `1`.
 
 ## ENVIRONMENT
 

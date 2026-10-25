@@ -2,8 +2,8 @@
 //! online.
 //!
 //! These are the shared bus-driver primitives a DMA-driving host-controller
-//! driver (the generic xHCI driver) and a root-complex bus driver (the
-//! BCM2711 PCIe driver) both need: find the function to bind, and assign /
+//! driver (the generic xHCI driver) and a root-complex bus driver both
+//! need: find the function to bind, and assign /
 //! decode / map its register BAR. They are defined here once, beside the
 //! configuration-access mechanism they drive, so the two callers share one
 //! definition rather than each carrying its own copy. Each operates over the `abi-v1` [`PciBus`] seam, so a caller never
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn bus_to_cpu_phys_translates_inside_the_window_and_fails_closed_outside() {
-        // Pi 4 outbound window: CPU 0x6_0000_0000 → PCIe 0xc000_0000, 1 GiB.
+        // An outbound window: CPU 0x6_0000_0000 → PCIe 0xc000_0000, 1 GiB.
         let outbound = (0x6_0000_0000, 0xc000_0000, 0x4000_0000);
         assert_eq!(bus_to_cpu_phys(outbound, 0xc000_0000), Some(0x6_0000_0000));
         assert_eq!(bus_to_cpu_phys(outbound, 0xc000_1000), Some(0x6_0000_1000));

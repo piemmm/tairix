@@ -36,8 +36,8 @@ Il comando non accetta operandi; un argomento è un errore
 - `0` — il nome (o la guida breve richiesta) è stato scritto.
 - `1` — la lettura dell'identità, la consultazione dell'elenco o
   l'output è fallita, oppure l'elenco non contiene alcun nome per
-  l'identificatore utente.
-- `2` — la riga di comando non è stata compresa.
+  l'identificatore utente. Anche una riga di comando non compresa
+  termina con `1`.
 
 ## ENVIRONMENT
 

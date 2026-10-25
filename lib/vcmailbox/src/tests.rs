@@ -1411,9 +1411,9 @@ fn firmware_revision_decode_fails_closed() {
 // --- Real-time clock registers -------------------------------------------
 
 /// The selectors are the firmware's register numbers, which this crate's own
-/// mock shares and so cannot check: they are pinned here to the enumeration
-/// Linux's `rtc-rpi` driver sends (`RTC_TIME` first, `RTC_BBAT_VOLTS`
-/// eighth), and the clock ids to `raspberrypi-firmware.h`.
+/// mock shares and so cannot check: the clock ids are pinned to the firmware
+/// wiki's list, and the RTC selectors to the values a Pi 5 answers to
+/// (`plans/TIMESYNC.md` TS-4).
 #[test]
 fn the_selectors_are_the_firmware_s_own_numbers() {
     assert_eq!(RtcRegister::Time.as_u32(), 0);

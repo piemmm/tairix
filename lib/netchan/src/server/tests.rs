@@ -19,9 +19,11 @@ use tairix_abi::driver::net_ring::{
     REGION_ALIGN_PADDING,
 };
 use tairix_abi::driver::BufferClass;
+use tairix_abi::net::NETSTACK_UID;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::DriverError;
 use tairix_abi::Errno;
+use tairix_abi::{CapabilitySummary, Origin, ProcId, TrustDomain, PROC_ID_LEN};
 
 /// A representative notify endpoint id (any non-reserved value).
 const NOTIFY_ENDPOINT: u64 = 0x4E45_5453_5430_3030;
@@ -98,6 +100,46 @@ fn attach_params(geometry: RingGeometry) -> AttachParams {
         notify_endpoint: NOTIFY_ENDPOINT,
     }
 }
+/// The stack instance the tests attach as.
+const STACK: ProcId = ProcId::from_raw([0x14; PROC_ID_LEN]);
+
+/// The network stack's attested origin, as `instance`.
+fn stack(instance: ProcId) -> Origin {
+    Origin::new(
+        TrustDomain::User,
+        NETSTACK_UID,
+        NETSTACK_UID,
+        3,
+        instance,
+        CapabilitySummary::EMPTY,
+        0,
+    )
+}
+
+/// `ping` as a user runs it: it holds `CAP_NET_RAW` for its echo socket.
+fn ping() -> Origin {
+    Origin::new(
+        TrustDomain::User,
+        1000,
+        1000,
+        9,
+        ProcId::from_raw([0x99; PROC_ID_LEN]),
+        CapabilitySummary::EMPTY,
+        0,
+    )
+}
+
+/// A request of every kind.
+fn every_request() -> [NetChannelRequest; 6] {
+    [
+        NetChannelRequest::Facts,
+        NetChannelRequest::Attach(attach_params(geometry())),
+        NetChannelRequest::Service,
+        NetChannelRequest::SetMulticast(McastGroups::empty()),
+        NetChannelRequest::SetRxFilter(RxFilterPolicy::admit_all()),
+        NetChannelRequest::Detach,
+    ]
+}
 
 #[test]
 fn facts_reply_reports_the_device() {
@@ -134,7 +176,7 @@ fn service_before_attach_fails_closed() {
 fn attach_stores_state_and_service_round_trips_a_frame() {
     let mut server = NetChannelServer::new(LoopbackNet::new());
     let geom = geometry();
-    assert!(decode_status_reply(&server.attach(attach_params(geom))).is_ok());
+    assert!(decode_status_reply(&server.attach(attach_params(geom), STACK)).is_ok());
     assert!(server.is_attached());
     assert_eq!(server.geometry(), Some(geom));
     assert_eq!(server.notify_endpoint(), Some(NOTIFY_ENDPOINT));
@@ -163,7 +205,7 @@ fn attach_rejects_a_geometry_too_small_for_the_device() {
     // A ring whose slots cannot carry the device's full frame (MTU+header).
     let small = RingGeometry::new(8, 8, MTU, MTU, 1).expect("valid but too small");
     assert_eq!(
-        decode_status_reply(&server.attach(attach_params(small))),
+        decode_status_reply(&server.attach(attach_params(small), STACK)),
         Err(Errno::OutOfRange)
     );
     assert!(!server.is_attached());
@@ -179,7 +221,7 @@ fn attach_rejects_a_transmit_slot_larger_than_the_driver_can_stage() {
     let cap = MTU + ETHERNET_HEADER_LEN;
     let wide = RingGeometry::new(8, 2, cap, cap * 8, 1).expect("valid geometry");
     assert_eq!(
-        decode_status_reply(&server.attach(attach_params(wide))),
+        decode_status_reply(&server.attach(attach_params(wide), STACK)),
         Err(Errno::OutOfRange)
     );
     assert!(!server.is_attached());
@@ -189,7 +231,7 @@ fn attach_rejects_a_transmit_slot_larger_than_the_driver_can_stage() {
 fn service_rejects_a_wrong_length_region() {
     let mut server = NetChannelServer::new(LoopbackNet::new());
     let geom = geometry();
-    let _ = server.attach(attach_params(geom));
+    let _ = server.attach(attach_params(geom), STACK);
     // A region a byte short of the agreed geometry is refused whole.
     let mut buffer = alloc::vec![0u8; geom.region_len() - 1 + REGION_ALIGN_PADDING];
     let region = aligned_region(&mut buffer, geom.region_len() - 1).expect("aligned region");
@@ -202,7 +244,7 @@ fn service_rejects_a_wrong_length_region() {
 #[test]
 fn detach_returns_to_the_detached_state() {
     let mut server = NetChannelServer::new(LoopbackNet::new());
-    let _ = server.attach(attach_params(geometry()));
+    let _ = server.attach(attach_params(geometry()), STACK);
     assert!(server.is_attached());
     assert!(decode_status_reply(&server.detach()).is_ok());
     assert!(!server.is_attached());
@@ -584,7 +626,7 @@ fn attached(net: OneFrameNet) -> (NetChannelServer<OneFrameNet>, alloc::vec::Vec
         class: BufferClass::NonSensitive,
         notify_endpoint: NOTIFY_ENDPOINT,
     };
-    assert_eq!(decode_status_reply(&server.attach(params)), Ok(()));
+    assert_eq!(decode_status_reply(&server.attach(params, STACK)), Ok(()));
     let buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
     (server, buffer)
 }
@@ -700,7 +742,7 @@ fn the_reported_link_tracks_what_the_device_last_said() {
         class: BufferClass::NonSensitive,
         notify_endpoint: NOTIFY_ENDPOINT,
     };
-    assert_eq!(decode_status_reply(&server.attach(params)), Ok(()));
+    assert_eq!(decode_status_reply(&server.attach(params, STACK)), Ok(()));
     let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
     let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
 
@@ -723,22 +765,8 @@ fn every_request_variant_has_a_reply() {
     // handler there is invisible to a host build. This asserts that every
     // variant has a server reply, which is what the loop dispatches to.
     let mut server = NetChannelServer::new(LoopbackNet::new());
-    let params = AttachParams {
-        geometry: geometry(),
-        region_grant: 0x1234,
-        class: BufferClass::NonSensitive,
-        notify_endpoint: NOTIFY_ENDPOINT,
-    };
-    let requests = [
-        NetChannelRequest::Facts,
-        NetChannelRequest::Attach(params),
-        NetChannelRequest::Service,
-        NetChannelRequest::SetMulticast(McastGroups::empty()),
-        NetChannelRequest::SetRxFilter(RxFilterPolicy::admit_all()),
-        NetChannelRequest::Detach,
-    ];
     let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
-    for request in requests {
+    for request in every_request() {
         // An exhaustive match: adding a variant without a reply here is a
         // compile error, exactly as it is in the serve loop.
         match request {
@@ -746,7 +774,7 @@ fn every_request_variant_has_a_reply() {
                 assert!(decode_facts_reply(&server.facts_reply()).is_ok());
             }
             NetChannelRequest::Attach(params) => {
-                assert_eq!(decode_status_reply(&server.attach(params)), Ok(()));
+                assert_eq!(decode_status_reply(&server.attach(params, STACK)), Ok(()));
             }
             NetChannelRequest::Service => {
                 let region =
@@ -839,7 +867,7 @@ fn a_completion_landing_as_the_sources_re_arm_is_still_found() {
         class: BufferClass::NonSensitive,
         notify_endpoint: NOTIFY_ENDPOINT,
     };
-    assert_eq!(decode_status_reply(&server.attach(params)), Ok(()));
+    assert_eq!(decode_status_reply(&server.attach(params, STACK)), Ok(()));
     let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
     let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
 
@@ -869,4 +897,70 @@ fn a_completion_landing_as_the_sources_re_arm_is_still_found() {
         rings.rx_ring(0).expect("rx0").pop(&mut out),
         Ok(Some(_))
     ));
+}
+
+#[test]
+fn a_caller_other_than_the_network_stack_is_refused_every_request() {
+    let mut server = NetChannelServer::new(LoopbackNet::new());
+    for request in every_request() {
+        assert_eq!(
+            server.admit(&request, &ping()),
+            Err(Errno::PermissionDenied),
+            "{request:?}"
+        );
+        assert_eq!(server.admit(&request, &stack(STACK)), Ok(()), "{request:?}");
+    }
+    assert_eq!(
+        decode_status_reply(&server.attach(attach_params(geometry()), STACK)),
+        Ok(())
+    );
+    for request in every_request() {
+        assert_eq!(
+            server.admit(&request, &ping()),
+            Err(Errno::PermissionDenied),
+            "{request:?}"
+        );
+    }
+}
+
+#[test]
+fn once_attached_only_the_instance_that_attached_drives_the_channel() {
+    let mut server = NetChannelServer::new(LoopbackNet::new());
+    assert_eq!(
+        decode_status_reply(&server.attach(attach_params(geometry()), STACK)),
+        Ok(())
+    );
+    let successor = stack(ProcId::from_raw([0x15; PROC_ID_LEN]));
+    for request in every_request() {
+        let opening = matches!(
+            request,
+            NetChannelRequest::Facts | NetChannelRequest::Attach(_)
+        );
+        let expected = if opening {
+            Ok(())
+        } else {
+            Err(Errno::PermissionDenied)
+        };
+        assert_eq!(server.admit(&request, &successor), expected, "{request:?}");
+        assert_eq!(server.admit(&request, &stack(STACK)), Ok(()), "{request:?}");
+    }
+}
+
+#[test]
+fn a_refused_re_attach_leaves_the_channel_detached() {
+    let mut server = NetChannelServer::new(LoopbackNet::new());
+    assert_eq!(
+        decode_status_reply(&server.attach(attach_params(geometry()), STACK)),
+        Ok(())
+    );
+    let small = RingGeometry::new(8, 8, MTU, MTU, 1).expect("valid but too small");
+    assert_eq!(
+        decode_status_reply(&server.attach(attach_params(small), STACK)),
+        Err(Errno::OutOfRange)
+    );
+    assert!(
+        !server.is_attached(),
+        "the earlier attachment went with its region"
+    );
+    assert_eq!(server.notify_endpoint(), None);
 }

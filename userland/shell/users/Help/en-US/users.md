@@ -38,8 +38,10 @@ typed inside the session.
 
 ## EXIT STATUS
 
-- `0` — the session ended cleanly, or the short help was shown.
-- `2` — the command line was not understood.
+- `0` — the session ended cleanly, the listing was printed, or the short
+  help was shown.
+- `1` — the listing could not be read. A command line that was not
+  understood exits `1` too.
 
 ## ENVIRONMENT
 

@@ -745,7 +745,7 @@ fn finds_gic_400_bases_in_a_raspi_tree() {
     // The Pi-shaped fixture carries a GIC-400 under `/soc` with bus
     // `reg` values; discovery translates them through the `ranges`
     // to the BCM2711 CPU-physical bases.
-    let blob = tairix_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
+    let blob = crate::raspi_fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
     let fdt = Fdt::new(&blob).expect("valid fdt");
     let gic = find_gic(&fdt).expect("a GIC is present");
     assert_eq!(gic.gicd_base, 0xff84_1000);
@@ -790,7 +790,7 @@ fn configure_from_fdt_applies_the_discovered_bases() {
     // back. This test owns the global GIC base slot for its duration;
     // the other tests here either exercise pure helpers (`find_gic`)
     // or the mock MMIO, so there is no cross-test interference.
-    let blob = tairix_fdt::fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
+    let blob = crate::raspi_fixture::raspi_like_arm(0x7e20_1000, 0x7e21_5040);
     let fdt = Fdt::new(&blob).expect("valid fdt");
     let applied = configure_from_fdt(&fdt).expect("GIC discovered");
     assert_eq!(applied.gicd_base, 0xff84_1000);

@@ -585,12 +585,12 @@ mod tests {
     /// lowered to exactly what the unit names and every other inherited.
     #[test]
     fn a_service_is_started_under_the_limits_its_unit_declares() {
-        let streams = tairix_abi::ResourceLimit::new(32, 64).expect("well-formed");
+        let files = tairix_abi::ResourceLimit::new(32, 64).expect("well-formed");
         let threads = tairix_abi::ResourceLimit::new(4, 4).expect("well-formed");
         let declared = [
             tairix_abi::ServiceLimit {
-                kind: tairix_abi::LimitKind::OpenStreams,
-                limit: streams,
+                kind: tairix_abi::LimitKind::OpenFiles,
+                limit: files,
             },
             tairix_abi::ServiceLimit {
                 kind: tairix_abi::LimitKind::Threads,
@@ -599,8 +599,8 @@ mod tests {
         ];
         let attach = service_attach(2, 13, &declared);
         assert_eq!(
-            attach.limits.get(tairix_abi::LimitKind::OpenStreams),
-            Some(streams)
+            attach.limits.get(tairix_abi::LimitKind::OpenFiles),
+            Some(files)
         );
         assert_eq!(
             attach.limits.get(tairix_abi::LimitKind::Threads),
@@ -694,7 +694,7 @@ mod tests {
 
         let limits = [
             ServiceLimit {
-                kind: LimitKind::OpenStreams,
+                kind: LimitKind::OpenFiles,
                 limit: ResourceLimit::new(32, 64).expect("well-formed"),
             },
             ServiceLimit {

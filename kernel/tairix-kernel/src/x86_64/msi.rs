@@ -7,8 +7,8 @@
 //! delivered once, and the waiter taking the fire in
 //! [`tairix_kernel_irq::IrqTable::try_wait_step`] is the whole re-arm
 //! interlock. Modelling one as a pin sharing its vector was the x86_64
-//! root-disk hang (`plans/OPEN-DEFECTS.md` D7); like Linux's MSI domain, every
-//! MSI has a vector of its own.
+//! root-disk hang (`plans/OPEN-DEFECTS.md` D7); every MSI has a vector of its
+//! own, named by its data word (Intel SDM Vol. 3A §13.11.2).
 //!
 //! * [`MSI_LINE_BASE`] — the base of the virtual interrupt lines MSIs raise,
 //!   far above any IO-APIC GSI, so the two never alias. Each line names one

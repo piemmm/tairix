@@ -2,6 +2,7 @@
 
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::getopt::Refusal;
 
 /// Why a `groupadd` invocation did not complete.
 ///
@@ -9,11 +10,12 @@ use tairix_abi::Errno;
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GroupaddError {
-    /// The command line carried an unrecognised option, a missing option
-    /// value, or did not name exactly one group. The caller should print
-    /// [`crate::USAGE`]. Nothing is created.
+    /// An option `getopt` refuses, worded as it words it. Nothing is
+    /// created.
+    Option(Refusal),
+    /// The command line did not name exactly one group. Nothing is created.
     Usage,
     /// The group name is not a valid `[a-z_][a-z0-9_-]*` within the length
     /// bound ([`MAX_NAME_LEN`](crate::MAX_NAME_LEN)). Nothing is created.
@@ -39,6 +41,7 @@ pub enum GroupaddError {
 impl fmt::Display for GroupaddError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
             Self::BadName => f.write_str("invalid group name"),
             Self::BadId => f.write_str("invalid numeric id"),

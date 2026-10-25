@@ -34,7 +34,6 @@ mod program {
     extern crate alloc;
 
     use alloc::collections::BTreeMap;
-    use alloc::format;
     use alloc::string::String;
     use core::cell::RefCell;
 
@@ -45,7 +44,7 @@ mod program {
     use tairix_procinfo::{for_each_process, IpcTransport, WalkStep};
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout};
     use tairix_rt::{waitset_create, waitset_ctl, waitset_wait, File};
-    use tairix_tail::{parse, run, FileSource, Input, Meta, Watcher, USAGE};
+    use tairix_tail::{parse, run, FileSource, Input, Meta, Watcher};
 
     /// The production [`FileSource`]: the kernel-authorised `fs_*` view of the
     /// filesystem. It adds no authority — every path resolution, per-inode
@@ -247,22 +246,18 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when every source was served (or the short help was
-    /// written), `1` when a source failed or output could not be delivered,
-    /// `2` on a usage error (a malformed argument vector, an unrecognised
-    /// option, or an invalid count).
+    /// written), `1` when a source failed, output could not be delivered, or
+    /// the command line was not understood (a malformed argument vector, an
+    /// unrecognised option, or an invalid count).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("tail") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("tail: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("tail", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -279,7 +274,7 @@ mod program {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("tail: {err}"));
+                write_stderr_line(format_args!("tail: {err}"));
                 1
             }
         }

@@ -229,7 +229,8 @@ fn encode_named(named: NamedKey, writer: &mut Writer<'_>) -> Result<(), KeymapEr
     }
 }
 
-/// The `DEL` (`0x7F`) byte a `Backspace` key sends, as Linux consoles expect.
+/// The `DEL` (`0x7F`) byte a `Backspace` key sends, as the VT220's `<X]` key
+/// does (DEC VT220 Programmer Reference Manual, chapter 3).
 const DEL: u8 = 0x7f;
 
 /// Map an editing / navigation / function [`NamedKey`] to its canonical

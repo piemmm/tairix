@@ -11,8 +11,8 @@ use tairix_procinfo::{
 use crate::command::Command;
 use crate::error::PsError;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `ps`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `ps`'s own Help tree
+/// is unavailable.
 pub const USAGE: &str = "\
 usage: ps [-e | -A | --all]
 

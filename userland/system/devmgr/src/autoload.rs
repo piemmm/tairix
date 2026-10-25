@@ -798,8 +798,8 @@ fn wait_components(waits: &Waits) -> Vec<usize> {
 /// A supplier no installed driver serves — a clock the firmware owns — holds
 /// nothing, or its consumers would wait forever. Nor does a link that closes
 /// a cycle, a clock controller fed by a PHY whose own clocks it makes: every
-/// member would wait on another, so as Linux's device links do, the links
-/// within a cycle order nothing and its members load together.
+/// member would wait on another, so the links within a cycle order nothing
+/// and its members load together.
 fn holding_supplier(pass: &Pass<'_>, at: usize, state: &AutoloadState) -> Option<u32> {
     links_of(&pass.nodes[at])
         .find(|&(supplier, role)| {

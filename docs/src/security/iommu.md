@@ -285,9 +285,8 @@ address. No IOVA lies where a PCI segment decodes memory: a root complex may
 route a device's request there to a peer before its unit sees it. At boot the
 probe reads each segment's root-bus memory BARs and what its root-bus
 bridges forward (`PciTopology::decoded_windows`), and every domain keeps
-those addresses out, widened to whole pages. This is the same rule Linux
-applies to a host bridge's windows, read from the segment itself, so no port
-needs firmware's description of them.
+those addresses out, widened to whole pages. The windows are read from the
+segment itself, so no port needs firmware's description of them.
 
 - **One owner per group.** A later generation's first carve ends the earlier
   owner's domain first; a live owner of another node in the group refuses
@@ -345,7 +344,7 @@ on another's only for room in the shared ring, and never on a stream being
 attached. A command the unit rejects fails the batch that held it and no
 other, and a table an unmap emptied is freed only once the batch confirming it
 is done. A virtio-iommu is the exception: its device answers one request at a
-time, as Linux drives it too, so every map and unmap on the unit waits its
+time, so every map and unmap on the unit waits its
 turn for the request in flight.
 
 Nothing is reused before the unit confirms the device lost it. An unmap the

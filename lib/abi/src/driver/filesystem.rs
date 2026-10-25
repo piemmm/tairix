@@ -205,16 +205,16 @@ impl NameMatching {
 /// How long a node keeps the [`NodeId`] a lookup answered for it.
 ///
 /// A consumer that keeps a name's node across operations — a lookup cache —
-/// looks the name up again after writing through it on a format whose ids
-/// follow its files' contents.
+/// keeps none on a format whose ids follow its files' contents.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NodeIdentity {
-    /// For as long as the node keeps its name: the format numbers its nodes.
+    /// A node is reported under one id for as long as it keeps its name, and
+    /// a pin does not change it (ARXFS, ext4, UDF, ISO 9660).
     Stable,
-    /// Possibly only until the next write or truncate through its name: the
-    /// format names a file by facts those rewrite (FAT32 packs a file's first
-    /// cluster and size into its id, and ADFS names an object with no
-    /// allocation by its name).
+    /// The id a node is reported under may change after a write, a truncate,
+    /// a rename, a pin or the last unpin: FAT32 and ADFS report a pinned node
+    /// under a token, and ADFS names any other object by where its data lies,
+    /// so a first allocation, a relocation and a truncate to nothing move it.
     ContentDerived,
 }
 
@@ -236,14 +236,23 @@ pub struct NodeInfo {
     ///
     /// A format that records no count reports `1`: a node reached through a
     /// directory entry has at least the one name the caller just walked, and
-    /// that is a fact rather than a guess. A directory's count includes its
-    /// own `.` and each child's `..`, so an empty directory is `2`.
+    /// that is a fact rather than a guess. A held node no entry names reports
+    /// `0` ([`FilesystemRead::pin`]). A directory's count includes its own `.`
+    /// and each child's `..`, so an empty directory is `2`.
     ///
     /// This is the driver's answer because only the format knows it. The VFS
     /// carries it up to [`FileStat`](crate::fs::FileStat) unchanged rather
     /// than counting names itself, which it could not do without walking
     /// every directory on the volume.
     pub nlink: u32,
+    /// The node's number as `stat` reports it, what
+    /// [`FileId::node`](crate::fs::FileId::node) holds: the format's own
+    /// number for it (an inode, a record address, an entry's location).
+    ///
+    /// Equal to the raw value of the node's natural id, the one lookups and
+    /// listings answer while no pin holds it; a format that reports a pinned
+    /// node under a token keeps this number for it.
+    pub ino: u64,
     /// File length in bytes. Always `0` for a directory.
     pub size: u64,
     /// Bytes of on-disk storage the node's data occupies — the real
@@ -337,14 +346,30 @@ pub enum DirVisit {
 /// `drivers/filesystem/*` driver. It is deliberately a *separate*
 /// trait from [`Filesystem`] (which remains mount/unmount only and
 /// frozen): new behaviour ships as a new trait, never by widening a
-/// shipped one. A future `FilesystemWrite`
-/// trait will add the mutating surface.
+/// shipped one. [`FilesystemWrite`] is the mutating surface.
 ///
 /// Implementations expose raw structural access and make **no**
 /// permission decisions: the VFS authorises every traversal against
 /// the model before calling here. Names are
 /// raw on-disk bytes; case-folding and Unicode normalisation policy
 /// belong to the VFS, not the driver.
+///
+/// # Holds
+///
+/// [`pin`](Self::pin) holds a node for the kernel. While a node is held,
+/// every id the driver reports for it — a lookup, a listing,
+/// [`parent`](Self::parent), the root — is the id `pin` answered.
+///
+/// A held node that loses its last name — a removal, or a rename replacing
+/// it — is kept with its data until its last [`unpin`](Self::unpin) frees it.
+/// Until then it takes byte reads and writes, truncates, `node_info`, and
+/// security and attribute reads and changes, while [`FilesystemWrite::link`]
+/// refuses it. A held directory that loses its name takes no entries: a
+/// lookup in it, its `parent`, and a create, link or rename into it answer
+/// [`DriverError::NotFound`], and it lists nothing.
+///
+/// A node no name and no hold reaches is [`DriverError::NotFound`] to every
+/// call.
 ///
 /// # Capabilities
 ///
@@ -383,6 +408,17 @@ pub trait FilesystemRead {
     /// * [`DriverError::NotFound`] if no child named `name` exists.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError>;
+
+    /// The directory holding directory `dir`'s name — its `..` as the format
+    /// records it. The root answers itself.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if `dir` names no live directory (one
+    ///   removed included).
+    /// * [`DriverError::Unsupported`] if `dir` is not a directory.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable read.
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError>;
 
     /// Read up to `buf.len()` bytes from `file` starting at byte
     /// `offset`, returning the number of bytes read.
@@ -486,6 +522,50 @@ pub trait FilesystemRead {
         after: &[u8],
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError>;
+
+    /// Hold `node` for the kernel. The id returned names this object until
+    /// the matching [`unpin`](Self::unpin): through renames of it and of its
+    /// ancestors, writes and truncates, and the loss of its last name; no
+    /// other node is given it within the mount while it is held. Holds count:
+    /// every `pin` is matched by one `unpin`, and every hold of one node
+    /// answers the same id.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if `node` names no live node.
+    /// * [`DriverError::OutOfMemory`] if the hold cannot be recorded.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable read.
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError>;
+
+    /// Release one hold of `pinned`, an id [`pin`](Self::pin) answered. When
+    /// the last hold of a node no name reaches goes, the node is freed here.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if no hold of `pinned` is outstanding.
+    /// * [`DriverError::DeviceFault`] if freeing the node failed; the hold is
+    ///   released all the same.
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError>;
+
+    /// Release every hold, freeing each held node no name reaches: the step
+    /// before a forced detach.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if a free failed; every hold is released
+    /// all the same.
+    fn release_pins(&mut self) -> Result<(), DriverError>;
+}
+
+/// What a [`FilesystemRead::unpin`] left behind.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Unpinned {
+    /// Other holds of the node remain.
+    Held,
+    /// That was the last hold; the node keeps a name.
+    Released,
+    /// That was the last hold of a node no name reached, which is now freed.
+    Freed,
 }
 
 /// What the host does for a mounted volume that the driver, which owns no
@@ -558,16 +638,26 @@ pub enum AllocationClass {
 /// mount/unmount surface or of [`FilesystemRead`]: new behaviour ships as
 /// a new trait.
 ///
-/// # The `(dir, name)` model
+/// # How a mutation names its target
 ///
-/// Every mutating method names its target as a (`dir`, `name`) pair rather
-/// than by an opaque [`NodeId`]. A [`NodeId`] minted by [`FilesystemRead`]
-/// is self-describing but carries no back-pointer to the directory entry
-/// that stores a file's length and starting location; filesystems such as
-/// FAT keep that metadata *in the parent directory*, so a mutation that
-/// grows, shrinks, or unlinks a node must address it through its parent.
-/// `name` is a single path component containing no separator and is
-/// neither `.` nor `..` (the VFS resolves those itself).
+/// A name mutation — [`create`](Self::create),
+/// [`create_link`](Self::create_link), [`link`](Self::link),
+/// [`remove`](Self::remove) and [`rename`](Self::rename) — changes a
+/// directory's entries, so it takes a (`dir`, `name`) pair. `name` is a
+/// single path component containing no separator and is neither `.` nor
+/// `..` (the VFS resolves those itself). A byte write —
+/// [`write_at`](Self::write_at), [`truncate`](Self::truncate) and
+/// [`punch`](Self::punch) — takes the node it changes.
+///
+/// A pinned id ([`FilesystemRead::pin`]) is valid for a byte write until its
+/// last unpin. An id a lookup or listing answered for an unheld node is valid
+/// only until the next name mutation in its directory, and on a
+/// [`NodeIdentity::ContentDerived`] format only until the next mutation of
+/// the node, so a write through one resolves the name under the same hold of
+/// the driver's lock.
+///
+/// A create hands over the whole record the node is born with, and a format
+/// keeps what of it it can store.
 ///
 /// # No permission decisions
 ///
@@ -586,8 +676,10 @@ pub trait FilesystemWrite {
     /// returning the new node's [`NodeId`].
     ///
     /// The child is created with zero length and (for a directory) with
-    /// its `.`/`..` links in place. Implementations need not allocate
-    /// on-disk data for a zero-length regular file.
+    /// its `.`/`..` links in place, born with `record` wherever the format
+    /// stores ownership and mode; a format that stores none ignores it, and
+    /// its crate docs say so. Implementations need not allocate on-disk data
+    /// for a zero-length regular file.
     ///
     /// # Errors
     ///
@@ -596,6 +688,8 @@ pub trait FilesystemWrite {
     ///   call has nowhere to put, so it is created only by
     ///   [`create_link`](Self::create_link) and never as a side effect of
     ///   an empty-child create.
+    /// * [`DriverError::NotFound`] if `dir` is a held directory that has lost
+    ///   its name.
     /// * [`DriverError::AlreadyExists`] if a child named `name` already
     ///   exists.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer
@@ -603,14 +697,21 @@ pub trait FilesystemWrite {
     /// * [`DriverError::NoSpace`] if the volume cannot allocate the inode
     ///   (or a directory's initial data block) because it is full.
     /// * [`DriverError::DeviceFault`] if a block write fails.
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError>;
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        record: &NodeSecurity,
+    ) -> Result<NodeId, DriverError>;
 
     /// Create a symbolic link named `name` in directory `dir` whose stored
     /// target is `target`, returning the new node's [`NodeId`].
     ///
     /// `target` is stored verbatim; the driver neither resolves nor
     /// validates it as a path, so a link may legitimately dangle. The VFS
-    /// bounds its length before the call.
+    /// bounds its length before the call. The link is born with `record` as
+    /// [`create`](Self::create)'s node is.
     ///
     /// A format that has no symbolic links leaves this defaulted, so it
     /// refuses creation rather than substituting a copy or an empty file.
@@ -619,6 +720,8 @@ pub trait FilesystemWrite {
     ///
     /// * [`DriverError::Unsupported`] if the format stores no links, or if
     ///   `dir` is not a directory.
+    /// * [`DriverError::NotFound`] if `dir` is a held directory that has lost
+    ///   its name.
     /// * [`DriverError::AlreadyExists`] if a child named `name` already
     ///   exists.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer than
@@ -631,8 +734,9 @@ pub trait FilesystemWrite {
         dir: NodeId,
         name: &[u8],
         target: &[u8],
+        record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
-        let _ = (dir, name, target);
+        let _ = (dir, name, target, record);
         Err(DriverError::Unsupported)
     }
 
@@ -642,7 +746,8 @@ pub trait FilesystemWrite {
     ///
     /// The node gains a name, not a copy: both entries reach one inode, so a
     /// write through either is visible through the other, and the node's
-    /// storage survives until the *last* name is unlinked. A driver that
+    /// storage survives until the *last* name is unlinked and no hold
+    /// remains. A driver that
     /// implements this must therefore make [`remove`](Self::remove) decrement
     /// the count and free only at zero — implementing one without the other
     /// leaks storage or frees data another name still reaches.
@@ -663,7 +768,8 @@ pub trait FilesystemWrite {
     ///   node, if `dir` is not a directory, or if `node` is a directory.
     /// * [`DriverError::AlreadyExists`] if a child named `name` already
     ///   exists.
-    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::NotFound`] if `node` names no node with a name left,
+    ///   or `dir` is a held directory that has lost its name.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer than
     ///   the filesystem's maximum component length.
     /// * [`DriverError::TooManyLinks`] if the node already carries as many
@@ -676,8 +782,8 @@ pub trait FilesystemWrite {
         Err(DriverError::Unsupported)
     }
 
-    /// Write `data` into the regular file `name` in directory `dir`
-    /// starting at byte `offset`, returning the number of bytes written.
+    /// Write `data` into the regular file `file` starting at byte `offset`,
+    /// returning the number of bytes written.
     ///
     /// Writing past the current end of the file extends it, allocating
     /// backing storage as needed and updating the recorded length. A
@@ -693,21 +799,16 @@ pub trait FilesystemWrite {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Unsupported`] if `name` resolves to a directory.
-    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    /// * [`DriverError::Unsupported`] if `file` is a directory, or a link the
+    ///   format refuses to write through.
+    /// * [`DriverError::NotFound`] if `file` names no live node.
     /// * [`DriverError::NoSpace`] if the volume cannot allocate a data
     ///   block to back the write because it is full.
     /// * [`DriverError::DeviceFault`] if a block write fails.
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError>;
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError>;
 
-    /// Write the whole of `data` into the regular file `name` in directory
-    /// `dir` starting at byte `offset`, resuming across short writes.
+    /// Write the whole of `data` into the regular file `file` starting at
+    /// byte `offset`, resuming across short writes.
     ///
     /// [`write_at`](Self::write_at) may legitimately store less than it was
     /// handed, so every caller that needs the whole value on the volume — a
@@ -722,19 +823,13 @@ pub trait FilesystemWrite {
     /// [`DriverError::NoSpace`] if a call stores nothing while bytes remain:
     /// an implementation that makes no progress is refusing the write, and
     /// retrying it forever is not an answer.
-    fn write_all(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<(), DriverError> {
+    fn write_all(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<(), DriverError> {
         let mut done = 0usize;
         while done < data.len() {
             let at = offset
                 .checked_add(done as u64)
                 .ok_or(DriverError::OutOfRange)?;
-            let written = self.write_at(dir, name, at, &data[done..])?;
+            let written = self.write_at(file, at, &data[done..])?;
             if written == 0 {
                 return Err(DriverError::NoSpace);
             }
@@ -748,21 +843,22 @@ pub trait FilesystemWrite {
         Ok(())
     }
 
-    /// Set the length of the regular file `name` in directory `dir` to
-    /// `size`, freeing or zero-extending its backing storage as needed.
+    /// Set the length of the regular file `file` to `size`, freeing or
+    /// zero-extending its backing storage as needed.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Unsupported`] if `name` resolves to a directory.
-    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    /// * [`DriverError::Unsupported`] if `file` is a directory, or a link the
+    ///   format refuses to write through.
+    /// * [`DriverError::NotFound`] if `file` names no live node.
     /// * [`DriverError::NoSpace`] if zero-extending the file cannot
     ///   allocate a data block because the volume is full.
     /// * [`DriverError::DeviceFault`] if a block write fails.
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError>;
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError>;
 
-    /// Make bytes `[offset, offset + len)` of the regular file `name` in
-    /// directory `dir` read as zeros and release the storage they occupied,
-    /// leaving the file's length unchanged: a punched hole.
+    /// Make bytes `[offset, offset + len)` of the regular file `file` read as
+    /// zeros and release the storage they occupied, leaving the file's length
+    /// unchanged: a punched hole.
     ///
     /// The range is clipped to the file's length — past the end there is
     /// nothing stored to release — and an empty range changes nothing. Part
@@ -774,25 +870,20 @@ pub trait FilesystemWrite {
     /// # Errors
     ///
     /// * [`DriverError::Unsupported`] if the format keeps no holes, or
-    ///   `name` resolves to a directory.
-    /// * [`DriverError::NotFound`] if no child named `name` exists.
+    ///   `file` is a directory.
+    /// * [`DriverError::NotFound`] if `file` names no live node.
     /// * [`DriverError::OutOfRange`] if `offset + len` overflows.
     /// * [`DriverError::NoSpace`] if releasing the range needs metadata the
     ///   volume cannot allocate (an extent split).
     /// * [`DriverError::DeviceFault`] on an unrecoverable block access.
-    fn punch(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        len: u64,
-    ) -> Result<(), DriverError> {
-        let _ = (dir, name, offset, len);
+    fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
+        let _ = (file, offset, len);
         Err(DriverError::Unsupported)
     }
 
     /// Unlink the child `name` from directory `dir`, freeing its backing
-    /// storage.
+    /// storage once no other name and no hold ([`FilesystemRead::pin`])
+    /// reaches it.
     ///
     /// # Errors
     ///
@@ -805,7 +896,9 @@ pub trait FilesystemWrite {
 
     /// Move the child `src_name` of directory `src_dir` so that it becomes
     /// the child `dst_name` of directory `dst_dir`, preserving the moved
-    /// node's identity, contents, and metadata.
+    /// node's contents and metadata. Its id survives the move only on a
+    /// format that numbers its nodes: FAT names a file by where its entry
+    /// lies, so a moved file answers a new one.
     ///
     /// `src_name` and `dst_name` are each a single path component
     /// containing no separator and neither `.` nor `..` (the VFS resolves
@@ -818,7 +911,8 @@ pub trait FilesystemWrite {
     /// If `dst_name` already names an entry in `dst_dir` it is atomically
     /// replaced, subject to kind compatibility: a regular file may replace
     /// a regular file, and a directory may replace an **empty** directory.
-    /// The replaced node's backing storage is freed. Replacing a directory
+    /// The replaced node's storage is freed as [`remove`](Self::remove) frees
+    /// it. Replacing a directory
     /// with a non-directory, or a non-directory with a directory, is
     /// refused.
     ///
@@ -837,7 +931,7 @@ pub trait FilesystemWrite {
     ///   directory, or a kind-incompatible replacement is attempted
     ///   (a file over a directory, or a directory over a file).
     /// * [`DriverError::NotFound`] if `src_name` does not exist in
-    ///   `src_dir`.
+    ///   `src_dir`, or `dst_dir` is a held directory that has lost its name.
     /// * [`DriverError::DirectoryNotEmpty`] if `dst_name` is a non-empty
     ///   directory.
     /// * [`DriverError::DirectoryCycle`] if the move would place a directory
@@ -1015,6 +1109,20 @@ impl NodeSecurity {
         Self::new(mode, 0, 0)
     }
 
+    /// The record a node of `kind` is born with, owned by `(uid, gid)`, when
+    /// its creator asks for no mode and keeps the initial umask: `0o755` for a
+    /// directory, `0o644` for a file, and `0o777` for a link, whose own mode
+    /// never gates access.
+    #[must_use]
+    pub const fn created(kind: NodeKind, uid: u32, gid: u32) -> Self {
+        let mode = match kind {
+            NodeKind::Directory => crate::fs::FS_NEW_DIR_MODE & !crate::fs::FS_INITIAL_UMASK,
+            NodeKind::RegularFile => crate::fs::FS_NEW_FILE_MODE & !crate::fs::FS_INITIAL_UMASK,
+            NodeKind::Symlink => crate::fs::FS_LINK_MODE,
+        };
+        Self::new(mode, uid, gid)
+    }
+
     /// The node's ACL entries.
     #[must_use]
     pub fn acl(&self) -> &[SecurityAcl] {
@@ -1078,26 +1186,6 @@ pub trait FilesystemSecurity {
     /// * [`DriverError::NotFound`] if `node` does not name a live node.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError>;
-
-    /// Record `(uid, gid)` as the owner of `node`, which the operation in
-    /// progress just created, before anything could have resolved a path
-    /// through it.
-    ///
-    /// A format that records no owner keeps none: the node is owned as every
-    /// node of the volume reports, and nothing is stored.
-    ///
-    /// No one's authority over anything already there changes, which a layer
-    /// that reports security changes relies on to leave it out.
-    ///
-    /// # Errors
-    ///
-    /// As [`set_security`](Self::set_security).
-    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
-        let mut security = self.security(node)?;
-        security.uid = uid;
-        security.gid = gid;
-        self.set_security(node, security)
-    }
 
     /// Whether the format records an owner and mode for `node`, rather than
     /// [`security`](Self::security) reporting the fixed record a format
@@ -1578,6 +1666,7 @@ mod tests {
                 Ok(NodeInfo {
                     kind: NodeKind::Directory,
                     nlink: 2,
+                    ino: ROOT.raw(),
                     size: 0,
                     allocated: 0,
                     times: NodeTimes::default(),
@@ -1587,6 +1676,7 @@ mod tests {
                 Ok(NodeInfo {
                     kind: NodeKind::RegularFile,
                     nlink: 1,
+                    ino: FILE.raw(),
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
                     times: NodeTimes::default(),
@@ -1603,6 +1693,16 @@ mod tests {
             }
             if name == FILE_NAME {
                 Ok(FILE)
+            } else {
+                Err(DriverError::NotFound)
+            }
+        }
+
+        fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+            if dir == ROOT {
+                Ok(ROOT)
+            } else if dir == FILE {
+                Err(DriverError::Unsupported)
             } else {
                 Err(DriverError::NotFound)
             }
@@ -1646,6 +1746,7 @@ mod tests {
                 info: NodeInfo {
                     kind: NodeKind::RegularFile,
                     nlink: 1,
+                    ino: FILE.raw(),
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
                     times: NodeTimes::default(),
@@ -1654,6 +1755,18 @@ mod tests {
                 next_cursor: 1,
             };
             visit(&entry, FILE_NAME);
+            Ok(())
+        }
+
+        fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+            self.node_info(node).map(|_| node)
+        }
+
+        fn unpin(&mut self, _pinned: NodeId) -> Result<Unpinned, DriverError> {
+            Ok(Unpinned::Released)
+        }
+
+        fn release_pins(&mut self) -> Result<(), DriverError> {
             Ok(())
         }
     }
@@ -1666,6 +1779,7 @@ mod tests {
         assert_eq!(file, FILE);
         let info = fs.node_info(file).expect("info");
         assert_eq!(info.kind, NodeKind::RegularFile);
+        assert_eq!(info.ino, file.raw());
         assert_eq!(info.size, 3);
 
         let mut buf = [0u8; 8];
@@ -1706,6 +1820,23 @@ mod tests {
         assert_eq!(fs.lookup(FILE, FILE_NAME), Err(DriverError::Unsupported));
     }
 
+    #[test]
+    fn mock_read_fs_parent_of_the_root_is_the_root() {
+        let mut fs = MockReadFs;
+        assert_eq!(fs.parent(ROOT), Ok(ROOT));
+        assert_eq!(fs.parent(FILE), Err(DriverError::Unsupported));
+        assert_eq!(fs.parent(NodeId::from_raw(9)), Err(DriverError::NotFound));
+    }
+
+    #[test]
+    fn mock_read_fs_holds_a_live_node_under_its_own_id() {
+        let mut fs = MockReadFs;
+        assert_eq!(fs.pin(FILE), Ok(FILE));
+        assert_eq!(fs.unpin(FILE), Ok(Unpinned::Released));
+        assert_eq!(fs.pin(NodeId::from_raw(9)), Err(DriverError::NotFound));
+        assert_eq!(fs.release_pins(), Ok(()));
+    }
+
     /// A `FilesystemWrite` that stores at most `step` bytes per call, as a
     /// driver bounding the memory one write may pin does.
     struct ShortWriteFs {
@@ -1716,17 +1847,17 @@ mod tests {
     }
 
     impl FilesystemWrite for ShortWriteFs {
-        fn create(&mut self, _: NodeId, _: &[u8], _: NodeKind) -> Result<NodeId, DriverError> {
+        fn create(
+            &mut self,
+            _: NodeId,
+            _: &[u8],
+            _: NodeKind,
+            _: &NodeSecurity,
+        ) -> Result<NodeId, DriverError> {
             Err(DriverError::Unsupported)
         }
 
-        fn write_at(
-            &mut self,
-            _dir: NodeId,
-            _name: &[u8],
-            offset: u64,
-            data: &[u8],
-        ) -> Result<usize, DriverError> {
+        fn write_at(&mut self, _: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
             self.calls += 1;
             let start = usize::try_from(offset).map_err(|_| DriverError::OutOfRange)?;
             let take = data.len().min(self.step);
@@ -1740,7 +1871,7 @@ mod tests {
             Ok(take)
         }
 
-        fn truncate(&mut self, _: NodeId, _: &[u8], _: u64) -> Result<(), DriverError> {
+        fn truncate(&mut self, _: NodeId, _: u64) -> Result<(), DriverError> {
             Err(DriverError::Unsupported)
         }
 
@@ -1765,7 +1896,7 @@ mod tests {
             len: 0,
             calls: 0,
         };
-        assert_eq!(fs.write_all(W_ROOT, W_NAME, 0, b"abcdef"), Ok(()));
+        assert_eq!(fs.write_all(W_FILE, 0, b"abcdef"), Ok(()));
         assert_eq!(&fs.body[..6], b"abcdef");
         assert_eq!(fs.calls, 3, "two bytes a call, six bytes, three calls");
         // Each resumed call must land at the offset the last one reached, not
@@ -1783,10 +1914,7 @@ mod tests {
             len: 0,
             calls: 0,
         };
-        assert_eq!(
-            fs.write_all(W_ROOT, W_NAME, 0, b"ab"),
-            Err(DriverError::NoSpace)
-        );
+        assert_eq!(fs.write_all(W_FILE, 0, b"ab"), Err(DriverError::NoSpace));
         assert_eq!(fs.calls, 1, "a stalled write is refused, never looped");
     }
 
@@ -1798,15 +1926,15 @@ mod tests {
             len: 0,
             calls: 0,
         };
-        assert_eq!(fs.write_all(W_ROOT, W_NAME, 0, &[]), Ok(()));
+        assert_eq!(fs.write_all(W_FILE, 0, &[]), Ok(()));
         assert_eq!(fs.calls, 0);
     }
 
-    /// A minimal `(dir, name)`-addressed `FilesystemWrite` holding one
-    /// regular file directly under a root directory. It exercises the
-    /// whole `abi-v1` write surface: create, extend via `write_at`,
-    /// `truncate`, `remove`, and `rename` (which re-labels the single
-    /// file within the root).
+    /// A minimal `FilesystemWrite` holding one regular file directly under a
+    /// root directory, its name mutations taking `(dir, name)` and its byte
+    /// writes the node. It exercises the whole `abi-v1` write surface:
+    /// create, extend via `write_at`, `truncate`, `remove`, and `rename`
+    /// (which re-labels the single file within the root, keeping its id).
     struct MockWriteFs {
         present: bool,
         name: [u8; 8],
@@ -1818,6 +1946,7 @@ mod tests {
     const W_ROOT: NodeId = NodeId::from_raw(1);
     const W_FILE: NodeId = NodeId::from_raw(2);
     const W_NAME: &[u8] = b"data";
+    const W_RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
 
     impl MockWriteFs {
         fn empty() -> Self {
@@ -1842,6 +1971,17 @@ mod tests {
             self.name_len = name.len();
             Ok(())
         }
+
+        /// Refuse a byte write to anything but the live file.
+        fn writable(&self, file: NodeId) -> Result<(), DriverError> {
+            if file == W_ROOT {
+                return Err(DriverError::Unsupported);
+            }
+            if file != W_FILE || !self.present {
+                return Err(DriverError::NotFound);
+            }
+            Ok(())
+        }
     }
 
     impl FilesystemWrite for MockWriteFs {
@@ -1850,6 +1990,7 @@ mod tests {
             dir: NodeId,
             name: &[u8],
             kind: NodeKind,
+            _record: &NodeSecurity,
         ) -> Result<NodeId, DriverError> {
             if dir != W_ROOT {
                 return Err(DriverError::Unsupported);
@@ -1868,20 +2009,11 @@ mod tests {
 
         fn write_at(
             &mut self,
-            dir: NodeId,
-            name: &[u8],
+            file: NodeId,
             offset: u64,
             data: &[u8],
         ) -> Result<usize, DriverError> {
-            if dir != W_ROOT {
-                return Err(DriverError::Unsupported);
-            }
-            if !self.present {
-                return Err(DriverError::NotFound);
-            }
-            if name != self.name() {
-                return Err(DriverError::Unsupported);
-            }
+            self.writable(file)?;
             let start = usize::try_from(offset).map_err(|_| DriverError::LengthOutOfRange)?;
             let end = start
                 .checked_add(data.len())
@@ -1897,16 +2029,8 @@ mod tests {
             Ok(data.len())
         }
 
-        fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-            if dir != W_ROOT {
-                return Err(DriverError::Unsupported);
-            }
-            if !self.present {
-                return Err(DriverError::NotFound);
-            }
-            if name != self.name() {
-                return Err(DriverError::Unsupported);
-            }
+        fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
+            self.writable(file)?;
             let new = usize::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
             if new > self.body.len() {
                 return Err(DriverError::DeviceFault);
@@ -1960,43 +2084,48 @@ mod tests {
     #[test]
     fn mock_write_fs_round_trip() {
         let mut fs = MockWriteFs::empty();
-        assert_eq!(fs.create(W_ROOT, W_NAME, NodeKind::RegularFile), Ok(W_FILE));
+        let file = fs
+            .create(W_ROOT, W_NAME, NodeKind::RegularFile, &W_RECORD)
+            .expect("create");
+        assert_eq!(file, W_FILE);
         // Creating it again is rejected as a taken name, never as a
         // transient a caller would retry.
         assert_eq!(
-            fs.create(W_ROOT, W_NAME, NodeKind::RegularFile),
+            fs.create(W_ROOT, W_NAME, NodeKind::RegularFile, &W_RECORD),
             Err(DriverError::AlreadyExists)
         );
-        assert_eq!(fs.write_at(W_ROOT, W_NAME, 0, b"abc"), Ok(3));
+        assert_eq!(fs.write_at(file, 0, b"abc"), Ok(3));
         assert_eq!(fs.len, 3);
         // Writing past the end zero-fills the gap and extends.
-        assert_eq!(fs.write_at(W_ROOT, W_NAME, 5, b"Z"), Ok(1));
+        assert_eq!(fs.write_at(file, 5, b"Z"), Ok(1));
         assert_eq!(&fs.body[..fs.len], b"abc\0\0Z");
-        fs.truncate(W_ROOT, W_NAME, 2).expect("shrink");
+        fs.truncate(file, 2).expect("shrink");
         assert_eq!(&fs.body[..fs.len], b"ab");
         assert!(fs.flush().is_ok());
         fs.remove(W_ROOT, W_NAME).expect("unlink");
-        assert_eq!(
-            fs.write_at(W_ROOT, W_NAME, 0, b"x"),
-            Err(DriverError::NotFound)
-        );
+        assert_eq!(fs.write_at(file, 0, b"x"), Err(DriverError::NotFound));
     }
 
     #[test]
     fn mock_write_fs_rejects_non_root_dir() {
         let mut fs = MockWriteFs::empty();
         assert_eq!(
-            fs.create(W_FILE, W_NAME, NodeKind::RegularFile),
+            fs.create(W_FILE, W_NAME, NodeKind::RegularFile, &W_RECORD),
             Err(DriverError::Unsupported)
         );
         assert_eq!(fs.remove(W_FILE, W_NAME), Err(DriverError::Unsupported));
+        // A directory's bytes are its entries, never a write's.
+        assert_eq!(fs.write_at(W_ROOT, 0, b"x"), Err(DriverError::Unsupported));
+        assert_eq!(fs.truncate(W_ROOT, 0), Err(DriverError::Unsupported));
     }
 
     #[test]
     fn mock_write_fs_rename_relabels_the_file() {
         let mut fs = MockWriteFs::empty();
-        assert_eq!(fs.create(W_ROOT, W_NAME, NodeKind::RegularFile), Ok(W_FILE));
-        assert_eq!(fs.write_at(W_ROOT, W_NAME, 0, b"hi"), Ok(2));
+        let file = fs
+            .create(W_ROOT, W_NAME, NodeKind::RegularFile, &W_RECORD)
+            .expect("create");
+        assert_eq!(fs.write_at(file, 0, b"hi"), Ok(2));
         // Renaming a missing source fails closed.
         assert_eq!(
             fs.rename(W_ROOT, b"absent", W_ROOT, b"moved"),
@@ -2004,13 +2133,14 @@ mod tests {
         );
         // The self-rename is a no-op success.
         assert_eq!(fs.rename(W_ROOT, W_NAME, W_ROOT, W_NAME), Ok(()));
-        // Moving to a new name re-labels the file and preserves contents.
+        // Moving to a new name re-labels the file: the old name is gone, and
+        // the node keeps its id and its contents.
         assert_eq!(fs.rename(W_ROOT, W_NAME, W_ROOT, b"moved"), Ok(()));
         assert_eq!(
-            fs.write_at(W_ROOT, W_NAME, 0, b"x"),
-            Err(DriverError::Unsupported)
+            fs.rename(W_ROOT, W_NAME, W_ROOT, b"again"),
+            Err(DriverError::NotFound)
         );
-        assert_eq!(fs.write_at(W_ROOT, b"moved", 2, b"!"), Ok(1));
+        assert_eq!(fs.write_at(file, 2, b"!"), Ok(1));
         assert_eq!(&fs.body[..fs.len], b"hi!");
         // A non-root directory is refused.
         assert_eq!(
@@ -2092,25 +2222,19 @@ mod tests {
     }
 
     #[test]
-    fn stamping_an_owner_changes_the_owner_alone() {
-        let mut sec = NodeSecurity::new(0o640, 0, 0);
-        sec.required_cap = Some(CapabilityId::AUDIT_READ);
-        sec.push_acl(SecurityAcl {
-            subject: SecuritySubject::Group(11),
-            perms: 0b100,
-        })
-        .expect("acl");
-        let mut fs = MockSecurityFs { sec };
+    fn a_created_node_s_mode_follows_its_kind() {
+        let dir = NodeSecurity::created(NodeKind::Directory, 7, 9);
+        assert_eq!((dir.mode, dir.uid, dir.gid), (0o755, 7, 9));
+        assert_eq!(dir.required_cap, None);
+        assert!(dir.acl().is_empty());
         assert_eq!(
-            fs.stamp_owner(NodeId::NONE, 7, 9),
-            Err(DriverError::NotFound)
+            NodeSecurity::created(NodeKind::RegularFile, 7, 9),
+            NodeSecurity::new(0o644, 7, 9)
         );
-        assert_eq!(fs.stamp_owner(NodeId::from_raw(1), 7, 9), Ok(()));
-        let stamped = fs.security(NodeId::from_raw(1)).expect("record");
-        assert_eq!((stamped.uid, stamped.gid), (7, 9));
-        assert_eq!(stamped.mode, sec.mode);
-        assert_eq!(stamped.required_cap, sec.required_cap);
-        assert_eq!(stamped.acl(), sec.acl());
+        assert_eq!(
+            NodeSecurity::created(NodeKind::Symlink, 7, 9),
+            NodeSecurity::new(0o777, 7, 9)
+        );
     }
 
     /// A node holding a single extended attribute in fixed buffers, enough to

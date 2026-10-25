@@ -1,101 +1,106 @@
 //! The special functions the statistical battery's p-values are expressed in.
 //!
 //! Every test in the battery reduces its statistic to a tail probability, and
-//! all of those tails are one of two functions: the regularised upper
-//! incomplete gamma `Q(a, x)` and the complementary error function
-//! `erfc(x)`. Only the first is implemented here — `erfc(x) = Q(1/2, x²)` —
-//! so there is one convergent series and one continued fraction to be right
-//! about rather than two of each.
-//!
-//! These are ordinary numerical algorithms (Press et al., *Numerical
-//! Recipes*, §6.2), not cryptographic primitives, and they are host test
-//! scaffolding that never enters a TAIRiX build.
+//! each tail is the regularised upper incomplete gamma `Q(a, x)`: `erfc(x)` is
+//! `Q(1/2, x²)` (DLMF §7.11), so there is one series and one continued
+//! fraction to be right about rather than two of each. `ln Γ` is Lanczos's
+//! approximation (Lanczos, 1964) with Godfrey's coefficients for `g = 7`;
+//! `P(a, x)` is its power series (DLMF §8.7) and `Q(a, x)` the continued
+//! fraction of DLMF §8.9, evaluated by the modified Lentz method (Thompson and
+//! Barnett, 1986). Host test scaffolding that never enters a TAIRiX build.
 
-/// Relative convergence target: near `f64` epsilon, so the iterations stop
-/// when further terms cannot move the result.
-const EPS: f64 = 3.0e-16;
+use core::f64::consts::PI;
 
-/// Smallest magnitude the continued fraction's denominators are allowed to
-/// take, so a near-zero term cannot become an infinity.
-const FPMIN: f64 = 1.0e-300;
+/// Relative change below which a series or fraction has converged: further
+/// terms cannot move an `f64` result.
+const EPSILON: f64 = 3.0e-16;
 
-/// Iteration ceiling. Both expansions converge in well under a hundred terms
-/// over the range the battery uses; the bound is what keeps a pathological
-/// argument from looping without end.
-const ITMAX: u32 = 1000;
+/// The terms a series or fraction may take; the battery's arguments converge
+/// in far fewer, so the bound only stops a runaway.
+const MAX_TERMS: u32 = 10_000;
 
-/// `ln Γ(x)` for `x > 0`, by the Lanczos series.
-///
-/// Relative accuracy is around `1e-10`, far inside what a p-value needs.
+/// What the Lentz method puts in place of a zero it would divide by.
+const TINY: f64 = 1.0e-300;
+
+/// Godfrey's Lanczos coefficients for `g = 7`, nine terms.
+const LANCZOS: [f64; 9] = [
+    0.999_999_999_999_809_9,
+    676.520_368_121_885_1,
+    -1_259.139_216_722_402_8,
+    771.323_428_777_653_1,
+    -176.615_029_162_140_6,
+    12.507_343_278_686_905,
+    -0.138_571_095_265_720_12,
+    9.984_369_578_019_572e-6,
+    1.505_632_735_149_311_6e-7,
+];
+
+/// The `g` the [`LANCZOS`] coefficients were fitted for.
+const LANCZOS_G: f64 = 7.0;
+
+/// `ln Γ(x)` for `x > 0`, by Lanczos's approximation, reflected below one
+/// half where it loses accuracy.
 fn ln_gamma(x: f64) -> f64 {
-    const COF: [f64; 6] = [
-        76.180_091_729_471_46,
-        -86.505_320_329_416_77,
-        24.014_098_240_830_91,
-        -1.231_739_572_450_155,
-        0.120_865_097_386_617_9e-2,
-        -0.539_523_938_495_3e-5,
-    ];
-    let mut y = x;
-    let mut tmp = x + 5.5;
-    tmp -= (x + 0.5) * tmp.ln();
-    let mut ser = 1.000_000_000_190_015;
-    for c in COF {
-        y += 1.0;
-        ser += c / y;
+    if x < 0.5 {
+        return (PI / (PI * x).sin()).ln() - ln_gamma(1.0 - x);
     }
-    -tmp + (2.506_628_274_631_000_5 * ser / x).ln()
+    let z = x - 1.0;
+    let series = LANCZOS[1..]
+        .iter()
+        .zip(1u32..)
+        .fold(LANCZOS[0], |sum, (&c, k)| sum + c / (z + f64::from(k)));
+    let t = z + LANCZOS_G + 0.5;
+    0.5 * (2.0 * PI).ln() + (z + 0.5) * t.ln() - t + series.ln()
 }
 
-/// `P(a, x)` — the regularised *lower* incomplete gamma — by its series,
-/// which converges quickly for `x < a + 1`.
+/// `ln(x^a e^(−x))`, the factor both expansions of the incomplete gamma share.
+fn ln_kernel(a: f64, x: f64) -> f64 {
+    a * x.ln() - x
+}
+
+/// `P(a, x)` by its power series,
+/// `x^a e^(−x) / Γ(a + 1) · Σ x^k / ((a + 1)…(a + k))`: every term is positive
+/// and they shrink once `k` passes `x − a`, so it suits `x < a + 1`.
 fn lower_by_series(a: f64, x: f64) -> f64 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    let mut ap = a;
-    let mut sum = 1.0 / a;
-    let mut del = sum;
-    for _ in 0..ITMAX {
-        ap += 1.0;
-        del *= x / ap;
-        sum += del;
-        if del.abs() < sum.abs() * EPS {
+    let (mut term, mut sum, mut next) = (1.0, 1.0, a);
+    for _ in 0..MAX_TERMS {
+        next += 1.0;
+        term *= x / next;
+        sum += term;
+        if term < sum * EPSILON {
             break;
         }
     }
-    sum * (-x + a * x.ln() - ln_gamma(a)).exp()
+    (ln_kernel(a, x) - ln_gamma(a + 1.0)).exp() * sum
 }
 
-/// `Q(a, x)` — the regularised *upper* incomplete gamma — by its continued
-/// fraction (modified Lentz), which converges quickly for `x >= a + 1`.
-fn upper_by_continued_fraction(shape: f64, point: f64) -> f64 {
-    // `b`, `c`, `d`, `h` are the modified-Lentz recurrence's own names; a
-    // reader checking this against the reference needs them to match it.
-    let mut b = point + 1.0 - shape;
-    let mut c = 1.0 / FPMIN;
-    let mut d = 1.0 / b;
-    let mut h = d;
-    for i in 1..ITMAX {
-        let term = f64::from(i);
-        let an = -term * (term - shape);
-        b += 2.0;
-        d = an * d + b;
-        if d.abs() < FPMIN {
-            d = FPMIN;
+/// `Q(a, x)` by the continued fraction
+/// `Γ(a, x) = x^a e^(−x) / (x + (1 − a)/(1 + 1/(x + (2 − a)/(1 + 2/(x + …)))))`,
+/// which converges fast for `x ≥ a + 1`.
+fn upper_by_continued_fraction(a: f64, x: f64) -> f64 {
+    // The fraction's partial numerators and denominators: 1 over x, then
+    // m − a over 1 and m over x in turn.
+    let part = |j: u32| -> (f64, f64) {
+        let m = f64::from(j / 2);
+        match j {
+            1 => (1.0, x),
+            _ if j.is_multiple_of(2) => (m - a, 1.0),
+            _ => (m, x),
         }
-        c = b + an / c;
-        if c.abs() < FPMIN {
-            c = FPMIN;
-        }
-        d = 1.0 / d;
-        let del = d * c;
-        h *= del;
-        if (del - 1.0).abs() < EPS {
+    };
+    let nonzero = |value: f64| if value == 0.0 { TINY } else { value };
+    let (mut value, mut c, mut d) = (TINY, TINY, 0.0);
+    for j in 1..=MAX_TERMS {
+        let (numerator, denominator) = part(j);
+        d = 1.0 / nonzero(denominator + numerator * d);
+        c = nonzero(denominator + numerator / c);
+        let step = c * d;
+        value *= step;
+        if (step - 1.0).abs() < EPSILON {
             break;
         }
     }
-    h * (-point + shape * point.ln() - ln_gamma(shape)).exp()
+    (ln_kernel(a, x) - ln_gamma(a)).exp() * value
 }
 
 /// `Q(a, x)`, the regularised upper incomplete gamma: the probability that a
@@ -166,6 +171,8 @@ mod tests {
         close(ln_gamma(6.0), 120.0_f64.ln(), 1e-11);
         // A large argument, as approximate entropy's 2^(m-1) supplies.
         close(ln_gamma(512.0), 2_679.822_147_001_309, 1e-6);
+        // Below one half, through the reflection: Γ(1/4) = 3.625 609 908 2…
+        close(ln_gamma(0.25), 3.625_609_908_221_908_f64.ln(), 1e-12);
     }
 
     #[test]
@@ -197,6 +204,8 @@ mod tests {
         close(chi_square_q(3.841_458_820_694_124, 1.0), 0.05, 1e-9);
         close(chi_square_q(16.918_977_604_620_448, 9.0), 0.05, 1e-9);
         close(chi_square_q(0.0, 9.0), 1.0, 1e-15);
+        // Many degrees of freedom: 124.342 is the 5% point for 100.
+        close(chi_square_q(124.342_113_404_066_9, 100.0), 0.05, 1e-9);
         // The far tail, where a rejected generator lands.
         assert!(chi_square_q(500.0, 9.0) < 1e-100);
     }

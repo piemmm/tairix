@@ -14,7 +14,9 @@ use tairix_abi::DriverError;
 use super::*;
 use crate::htree::Level;
 use crate::superblock::{COMPAT_DIR_INDEX, FLAG_SIGNED_HASH, SB_FLAGS, SUPERBLOCK_OFFSET};
-use crate::tests::{checksummed, SizedBlock, ONE_GROUP_SECTORS, TEST_UUID};
+use crate::tests::{
+    checksummed, SizedBlock, DIR_RECORD, FILE_RECORD, ONE_GROUP_SECTORS, TEST_UUID,
+};
 use crate::{le16, node_inode, put_le32, Child, FT_REG, INODE_FLAGS, INODE_FLAG_INDEX};
 
 /// The format's `half_md4` hash version.
@@ -98,13 +100,15 @@ fn set_index_flag<B: Block>(fs: &mut Ext4<B>, ino: u32, on: bool) {
 /// added to it can stand for.
 fn indexed_dir<B: Block>(fs: &mut Ext4<B>, name: &[u8]) -> (NodeId, u32, u32) {
     let root = fs.root();
-    let dir = fs.create(root, name, NodeKind::Directory).expect("mkdir");
+    let dir = fs
+        .create(root, name, NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
     let ino = node_inode(dir).expect("inode");
     index_directory(fs, ino, HALF_MD4);
     let mut file_name = b"target-".to_vec();
     file_name.extend_from_slice(name);
     let file = fs
-        .create(root, &file_name, NodeKind::RegularFile)
+        .create(root, &file_name, NodeKind::RegularFile, &FILE_RECORD)
         .expect("file");
     (dir, ino, node_inode(file).expect("inode"))
 }
@@ -480,13 +484,15 @@ fn files_come_and_go_in_an_indexed_directory() {
     let before = fs.stats().expect("stats");
     let made = names(0, 120, 30);
     for name in &made {
-        fs.create(dir, name, NodeKind::RegularFile).expect("create");
+        fs.create(dir, name, NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
     }
     assert_eq!(
-        fs.create(dir, &made[7], NodeKind::RegularFile),
+        fs.create(dir, &made[7], NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::AlreadyExists)
     );
-    fs.create(dir, b"sub", NodeKind::Directory).expect("mkdir");
+    fs.create(dir, b"sub", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
     fs.rename(dir, &made[3], dir, b"renamed").expect("rename");
     assert!(fs.lookup(dir, b"renamed").is_ok());
     assert_eq!(fs.lookup(dir, &made[3]), Err(DriverError::NotFound));
@@ -702,18 +708,18 @@ fn a_damaged_index_refuses_new_names_and_loses_nothing() {
     let mut fs = volume(FLAG_SIGNED_HASH);
     let root = fs.root();
     let dir = fs
-        .create(root, b"damaged", NodeKind::Directory)
+        .create(root, b"damaged", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir");
-    fs.create(dir, b"keep.txt", NodeKind::RegularFile)
+    fs.create(dir, b"keep.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
-    fs.create(root, b"hello.txt", NodeKind::RegularFile)
+    fs.create(root, b"hello.txt", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     let ino = node_inode(dir).expect("inode");
     set_index_flag(&mut fs, ino, true);
     let before = fs.stats().expect("stats");
 
     assert_eq!(
-        fs.create(dir, b"new.txt", NodeKind::RegularFile),
+        fs.create(dir, b"new.txt", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(
@@ -747,7 +753,7 @@ fn an_index_on_a_volume_naming_no_signedness_takes_no_new_name() {
     put_le32(&mut device.data, sb + SB_FLAGS, 0);
     let mut fs = Ext4::open(device).expect("remount");
     assert_eq!(
-        fs.create(dir, b"another", NodeKind::RegularFile),
+        fs.create(dir, b"another", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::Unsupported)
     );
     for name in &added {
@@ -765,11 +771,11 @@ fn without_dir_index_a_flagged_directory_is_linear_and_loses_its_flag() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
     let root = fs.root();
     let dir = fs
-        .create(root, b"plain", NodeKind::Directory)
+        .create(root, b"plain", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir");
     let ino = node_inode(dir).expect("inode");
     set_index_flag(&mut fs, ino, true);
-    fs.create(dir, b"file", NodeKind::RegularFile)
+    fs.create(dir, b"file", NodeKind::RegularFile, &FILE_RECORD)
         .expect("create");
     assert_eq!(
         fs.read_inode(ino).expect("inode").flags & INODE_FLAG_INDEX,
@@ -831,11 +837,10 @@ fn moving_an_indexed_directory_reseals_its_root() {
     add(&mut fs, ino, target, &names(0, 20, 60));
     let root = fs.root();
     let parent = fs
-        .create(root, b"home", NodeKind::Directory)
+        .create(root, b"home", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir");
     fs.rename(root, b"mover", parent, b"mover").expect("move");
-    let parent_ino = node_inode(parent).expect("inode");
-    assert_eq!(fs.dir_parent_ino(ino), Ok(parent_ino));
+    assert_eq!(fs.parent(dir), Ok(parent));
     check_tree(&mut fs, ino);
     assert_eq!(fs.lookup(parent, b"mover"), Ok(dir));
     assert_eq!(list(&mut fs, dir, 3).len(), 20);
@@ -874,7 +879,7 @@ fn indexed_growth_fits_a_kernel_sized_stack() {
                 add(&mut fs, ino, target, &long_names(added, 40, 200));
                 added += 40;
             }
-            fs.create(dir, b"one-more", NodeKind::RegularFile)
+            fs.create(dir, b"one-more", NodeKind::RegularFile, &FILE_RECORD)
                 .expect("create");
             assert!(fs.lookup(dir, b"one-more").is_ok());
             assert_eq!(list(&mut fs, dir, 64).len(), added + 1);

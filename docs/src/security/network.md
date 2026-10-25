@@ -33,7 +33,9 @@ The network capabilities are deliberately coarse and few (§5.2):
 - `CAP_NET_BIND_PRIVILEGED` — bind a listening port at or below the
   privileged-port bound (the Unix `CAP_NET_BIND_SERVICE` model).
 - `CAP_NET_RAW` — raw packet access (also the restricted-sender grant a
-  NIC driver's device channel carries).
+  NIC driver's device channel carries; the driver answers only the network
+  stack's service account there, so a tool holding the capability for its
+  echo socket cannot drive a NIC).
 - `CAP_NET_ADMIN` — the interface admin surface (address/route add, NIC
   channel bind).
 - `CAP_SYSINFO_GLOBAL` — the system-wide, cross-principal introspection

@@ -754,7 +754,7 @@ mod tests {
         let torn_down = fx.with_space(holder, crate::procspace::host_test_space!(Some(&REMOTE)));
         let revoker = fx.revoker(&shared);
         assert!(!revoker.kill(holder, None), "no space, nothing reachable");
-        fx.aspaces.write().withdraw(holder);
+        drop(fx.aspaces.write().withdraw(holder));
         let _successor = fx.with_space(holder, crate::procspace::host_test_space!(Some(&REMOTE)));
         assert!(
             !revoker.kill(holder, Some(&torn_down)),

@@ -3,11 +3,9 @@
 `drivers/filesystem/ext4` (`tairix-drv-fs-ext4`) reads and writes ext2,
 ext3 and ext4 volumes behind any [`Block`](../abi/driver_traits.md)
 device, through the versioned `FilesystemRead`, `FilesystemWrite`,
-`FilesystemSecurity` and `FilesystemStats` traits. ext4 is the format most
-removable drives formatted on Linux carry, so a volume `mke2fs` made is
-written as Linux would leave it: journaled where it has a journal, with
-every checksum it carries maintained, and readable by Linux and `e2fsck`
-afterwards.
+`FilesystemSecurity` and `FilesystemStats` traits. ext4 is the format many removable drives carry, so
+a volume `mke2fs` made is written journaled where it has a journal, with every
+checksum it carries maintained, and clean to `e2fsck` afterwards.
 
 ## On-disk support
 
@@ -73,13 +71,29 @@ A revision-0 superblock has no feature words and defines nothing past
 `s_rev_level`. Before the driver stores anything only the dynamic revision
 has — `large_file` for a file past 2 GiB, or the head of the orphan chain — it
 raises the volume to revision 1, keeping the first inode and inode size
-revision 0 fixes, as Linux does.
+revision 0 fixes.
 
 ## Nodes and mapping
 
 A `NodeId` is the on-disk inode number, so there is no in-memory inode
-table; each operation reads the inode on demand. Logical-to-physical
-block mapping covers both on-disk layouts:
+table; each operation reads the inode on demand. A byte write takes the
+file's `NodeId`, and `parent` reads a directory's `..`. A freed inode keeps
+its type, so its link count is what tells it from a live one: every call
+answers `NotFound` for an inode no link and no hold reaches, and a stale id
+never reads or writes a freed inode.
+
+`pin` holds an inode for the kernel under its number, the id every lookup and
+listing answers, and holds count. A held inode that loses its last link —
+unlinked, or replaced by a rename — is listed on the orphan chain in that same
+journalled operation and kept: it reports `nlink` 0 and takes reads, writes,
+truncates and record changes until its last `unpin` releases it (blocks, inode
+and chain entry, `Unpinned::Freed`). `release_pins` drops every hold and
+releases each such inode. A removed directory a hold keeps lists nothing and
+answers `NotFound` to `lookup`, `parent`, `create` and a rename into it. No
+hold outlives the mount, so after a crash the chain alone remains and the next
+writable mount releases what it lists, as `e2fsck` would.
+
+Logical-to-physical block mapping covers both on-disk layouts:
 
 - **Extent-mapped** inodes walk the extent tree from the inline root in
   `i_block`, descending interior index nodes up to the format's depth of
@@ -141,7 +155,7 @@ that position. Its cursor is a keyed digest of the name, never `0`.
   full interior node splits; with both levels full a name is refused with
   `NoSpace`, as is one whose hash already spans 16 leaves.
 - **A linear directory outgrowing its one block** on a `dir_index` volume
-  is given an index, as Linux does: its names move to a new leaf, block 0
+  is given an index: its names move to a new leaf, block 0
   becomes the root, hashed by the volume's default hash. A linear directory
   already longer than a block stays linear.
 - **One transaction.** An insert's blocks — the new leaf, the inode mapping
@@ -188,9 +202,10 @@ entry, named entries with no mask, a subject named twice, more named
 entries than the record holds — fails closed: the node cannot be judged,
 so it cannot be reached.
 
-`stamp_owner` records a new node's creator in the transaction that created
-it, so a crash cannot leave a new file with its default owner.
-`set_security` stores a mode and an owner: a mode change moves the ACL's
+`create` writes the owner, group and permission bits of the record it is
+given in the inode it lays down, so a new node is never seen with another
+owner; the format keeps no capability gate and a new node takes no ACL, so the
+rest of the record is not stored. `set_security` stores a mode and an owner: a mode change moves the ACL's
 owner, mask and other entries with it, copying an attribute block another
 inode shares first. A record asking for a capability gate or a changed ACL
 is refused whole rather than stored in part. A new file does not inherit
@@ -221,10 +236,10 @@ empties the log durably, and only then clears the mark, so an idle volume
 is clean and the mark never reads clear over a log holding a transaction.
 A replay is only ever of the newest transaction, whose blocks no later
 change can have reused: a block freed is reused only after the transaction
-freeing it commits. Recovery reads whatever Linux left — revoke records,
+freeing it commits. Recovery reads whatever any writer left — revoke records,
 64-bit tags, v2 and v3 checksums, escaped blocks, asynchronous commits —
 and the writer adopts 64-bit tags and v3 checksums where the volume needs
-them, as Linux does on mount. A journal whose transactions would hold too
+them. A journal whose transactions would hold too
 few blocks, or one a kernel aborted, leaves the volume read-only.
 
 **Unjournaled volumes.** The superblock is marked not clean behind a
@@ -253,7 +268,10 @@ depth. A write fills a hole with fresh zeroed blocks, converts an unwritten
 range as it writes it, and overwrites in place. A truncate or delete frees
 in bounded passes; one spanning transactions is put on the orphan chain
 first and finished at the next mount if a crash interrupts it, the orphan
-file a newer kernel keeps drained the same way.
+file a newer kernel keeps drained the same way. An orphan leaves the chain
+from wherever it sits: the mount keeps each listed orphan's predecessor in an
+index, rewound with the chain when an operation is undone or a transaction
+lost, so the removal never walks the chain.
 
 **Protected inodes.** The flags `chattr` sets hold against every principal,
 the owner included. An immutable inode refuses every change: a write, a
@@ -342,6 +360,13 @@ all-zero blocks left out):
   a shared block copied before it changes, malformed ACLs refused;
 - commits that fail before and after the medium changes, and a journaled
   commit torn after its commit block replayed at the next mount;
+- holds: a held file keeping its blocks past its last link until its last
+  unpin, holds counting, renames and a rename over a held file, a removed
+  held directory taking no entries, `release_pins`, an orphan leaving the
+  chain from its middle, tail and head, a lost commit leaving the chain and
+  its index whole, a truncate spanning transactions listing a held orphan
+  once, a held file a crash leaves unlinked released at mount, and an inode
+  neither linked nor held answering `NotFound` to every call;
 - and the read and write surfaces over the rest: listings, lookups,
   symbolic links, timestamps, hard links, renames, a kernel-sized stack.
 
@@ -351,8 +376,9 @@ with an independent crc after a write cycle.
 `tests/fuzz_ext4_mount.rs` is the fuzz harness `cargo xtask fuzz` runs: it
 mutates a formatted volume and the e2fsprogs fixtures — a journal needing
 recovery among them — and opens each read-only, then writable, replaying the
-journal and finishing orphans, walking, writing, committing and remounting;
-nothing may panic or hang.
+journal and finishing orphans, walking, writing — a file held across its
+unlink among the writes — committing and remounting; nothing may panic or
+hang.
 
 ## Extended-metadata representability
 

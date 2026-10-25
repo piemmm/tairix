@@ -59,13 +59,27 @@ never silently dropped.
   then relocates. Shrinking trims the boundary fragment and frees the
   rest. Shared fragments (small objects packed by share offset, e.g.
   the E-format root) are honoured: a shared fragment is freed only when
-  a bounded tree walk shows no other live entry references it, and a
-  shared object grows by relocating to its own fragment.
+  neither the directory holding the object nor another of its entries uses
+  it, the only objects `FileCore` shares one with, and a shared object
+  grows by relocating to its own fragment.
 - **Directories**: fixed directories never resize (47/77 entries is the
   format's bound, reported as `NoSpace`). Big directories grow in place
   by whole 2048-byte grains up to the format's 4 MiB ceiling; a grown
   root's size is rewritten into the disc record (and boot-block copy).
-  Directories never relocate, so directory node ids stay stable.
+  Directories never relocate, so directory node ids stay stable. A file's
+  id is its address in its parent, or a digest of its name while it has
+  no allocation, so a write that allocates or moves it, or a truncation to
+  nothing, gives it a new id; writes and truncations take the file's id.
+
+## Pins
+
+An object the kernel pins is reported under a token until its last unpin,
+since its own id moves with a write and a directory's carries its parent's
+address; the root keeps its own id. A removal deletes a pinned object's
+entry but keeps its fragments until then, a file sharing a fragment first
+taking one of its own. No pin outlives the mount, and `FileCore` keeps no
+orphan record, so a crash with a deleted object still pinned leaves its
+fragments to the format's checker (`docs/src/filesystem/adfs.md`, Pins).
 
 ## Security
 
@@ -74,9 +88,10 @@ in the VFS metadata layer that mounts this driver. The driver makes
 **no** permission decisions (the VFS is the policy point; this is raw
 structural I/O) — including the `FileCore` `L` (locked) bit, which is
 surfaced through `acorn.attr` for the policy layer rather than enforced
-here. All validation fails closed, tree walks are depth-bounded so a
-cyclic (corrupt) tree cannot spin the driver, and `#![forbid(unsafe_code)]`
-holds for the whole crate.
+here. A create ignores the record it is given, and a new object takes the
+access bits RISC OS gives one. All validation fails closed, tree walks are
+depth-bounded so a cyclic (corrupt) tree cannot spin the driver, and
+`#![forbid(unsafe_code)]` holds for the whole crate.
 
 ## Required capabilities
 
@@ -95,14 +110,18 @@ writes, truncate grow/shrink/zero, remove with full space reclaim,
 renames (move, replace, cycle refusal, parent-pointer fix-up),
 growth past a blocking neighbour (the relocation path), disc-full
 fail-closed behaviour, name validation, big-directory growth surviving
-remount, and the `acorn.*` metadata round-trips. A dedicated corruption
+remount, the `acorn.*` metadata round-trips, and pins (one token for every
+hold, kept through writes and renames, a removed or replaced pinned object
+kept until its last unpin, a removed pinned directory taking no entries,
+`release_pins`, the fragments a crash leaves). A dedicated corruption
 suite damages the old-map checksums, directory markers/check
 bytes/sequence numbers, zone checks, the cross-check, the boot block,
 big-directory headers/tails/heaps, and entry pointers, asserting the
 driver fails closed each time. `tests/fuzz_adfs_mount.rs` is the §19.6
 harness (registered with `cargo xtask fuzz`): seed-logged single-byte
 sweeps over valid images of each map flavour plus PRNG mutations, with
-the invariant that `open` and the read surface never panic.
+the invariant that `open`, the read surface and a file driven through a pin
+never panic.
 
 ## Public surface
 

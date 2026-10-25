@@ -30,7 +30,9 @@ use crate::registry::Board;
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
 use crate::saver::SaverEntry;
 use crate::shell::{Shell, ShellOutcome};
-use crate::test_support::{click, clicked, damage, opaque, row_at, rows, theme, WIDE};
+use crate::test_support::{
+    click, clicked, damage, opaque, raspberry_pi, row_at, rows, theme, WIDE,
+};
 use crate::volumes::VolumeReading;
 use tairix_controls::testkit::covers;
 
@@ -669,8 +671,7 @@ fn a_switch_reports_the_action_band_it_leaves() {
         Pane::TcpIp,
         Pane::RaspberryPi,
     ] {
-        let mut shell =
-            Shell::new(DesktopSettings::default(), Board::RASPBERRY_PI).expect("a shell");
+        let mut shell = Shell::new(DesktopSettings::default(), raspberry_pi()).expect("a shell");
         assert!(shell.go_to(from, WIDE, Scale::ONE, &theme, &mut damage()));
         shell.lay_out(WIDE, Scale::ONE, &theme);
         let band = shell
@@ -4711,7 +4712,7 @@ fn the_sound_effects_pane_reads_the_sessions_choices_and_asks_it_to_change_them(
         panic!("the master switch is a toggle");
     };
     assert!(!toggle.is_on(), "built from what the session answered");
-    let asked = shell.conclude_for_test(crate::FormOutcome::Effects {
+    let asked = Shell::conclude_for_test(crate::FormOutcome::Effects {
         ask: Some(crate::EffectsAsk::Apply {
             key: tairix_soundtheme::SoundKey::Enabled,
             line: alloc::string::String::from("sound.enabled = true\n"),
@@ -4741,23 +4742,47 @@ fn a_sound_effects_reading_landing_mid_drag_waits_for_the_settle() {
         };
         slider.value()
     };
-    let mut shell = shell_at(Location {
-        category: Category::Sound,
-        pane: Pane::SoundEffects,
-    });
-    shell.adopt_effects(Some(effects_reading("")));
-    let before = gain_shown(&shell);
-    shell.conclude_for_test(crate::FormOutcome::Effects {
-        ask: None,
-        settled: false,
-    });
-    shell.adopt_effects(Some(effects_reading("sound.gain = -30dB\n")));
-    assert_eq!(gain_shown(&shell), before, "held while the drag goes on");
-    shell.conclude_for_test(crate::FormOutcome::Effects {
-        ask: None,
-        settled: true,
-    });
-    assert_ne!(gain_shown(&shell), before, "adopted once it settles");
+    let theme = theme();
+    let effects_of = |document: &str| {
+        let mut shell = shell_at(Location {
+            category: Category::Sound,
+            pane: Pane::SoundEffects,
+        });
+        shell.adopt_effects(Some(effects_reading(document)));
+        shell.lay_out(WIDE, Scale::ONE, &theme);
+        shell
+    };
+    // -6 dB is 900 per mille, well clear of the middle a press lands on.
+    let landed = gain_shown(&effects_of("sound.gain = -6dB\n"));
+    let mut shell = effects_of("");
+    let volume = shell
+        .row_control_rect_for_test((0, 2), WIDE, Scale::ONE, &theme)
+        .expect("the volume shows");
+    let mut sink = damage();
+    for event in [
+        InputEvent::PointerMoved {
+            to: volume.center(),
+        },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        let _ = shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
+    }
+    let dragged = gain_shown(&shell);
+    assert_ne!(dragged, landed, "the drag and the reading disagree");
+    shell.adopt_effects(Some(effects_reading("sound.gain = -6dB\n")));
+    assert_eq!(gain_shown(&shell), dragged, "held while the drag goes on");
+    let _ = shell.on_pointer(
+        &InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert_eq!(gain_shown(&shell), landed, "adopted once it settles");
 }
 
 /// A sound reading landing while a level is dragged waits for the drag to
@@ -4770,7 +4795,6 @@ fn a_sound_reading_landing_mid_drag_waits_for_the_settle() {
     use tairix_abi::driver::audio::{
         AudioName, ChannelMap, JackState, Rate, RateSupport, SampleFormats, StreamDirection,
     };
-    use tairix_audio::stream::DeviceControl;
     let at = |millibel: i32| crate::SoundReading {
         devices: alloc::vec![AudioDeviceDescriptor {
             device_id: 1,
@@ -4804,27 +4828,45 @@ fn a_sound_reading_landing_mid_drag_waits_for_the_settle() {
         };
         slider.value()
     };
-    let mut shell = shell_at(Location {
-        category: Category::Sound,
-        pane: Pane::Sound,
-    });
-    assert!(shell.sound_wanted(), "coming on show asks for the devices");
-    shell.adopt_sound(Some(at(-1_200)));
-    let before = level_shown(&shell);
-    let level = |millibel| DeviceControl::Level(AudioGain::new(millibel).expect("attenuation"));
-    shell.conclude_for_test(crate::FormOutcome::Sound {
-        device_id: 1,
-        control: level(-300),
-        settled: false,
-    });
+    let theme = theme();
+    let sounding = |millibel: i32| {
+        let mut shell = shell_at(Location {
+            category: Category::Sound,
+            pane: Pane::Sound,
+        });
+        assert!(shell.sound_wanted(), "coming on show asks for the devices");
+        shell.adopt_sound(Some(at(millibel)));
+        shell.lay_out(WIDE, Scale::ONE, &theme);
+        shell
+    };
+    let landed = level_shown(&sounding(-300));
+    let mut shell = sounding(-1_200);
+    let level = shell
+        .row_control_rect_for_test((0, 1), WIDE, Scale::ONE, &theme)
+        .expect("the level shows");
+    let mut sink = damage();
+    for event in [
+        InputEvent::PointerMoved { to: level.center() },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        let _ = shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
+    }
+    let dragged = level_shown(&shell);
+    assert_ne!(dragged, landed, "the drag and the reading disagree");
     shell.adopt_sound(Some(at(-300)));
-    assert_eq!(level_shown(&shell), before, "held while the drag goes on");
-    shell.conclude_for_test(crate::FormOutcome::Sound {
-        device_id: 1,
-        control: level(-300),
-        settled: true,
-    });
-    assert_ne!(level_shown(&shell), before, "adopted where it settled");
+    assert_eq!(level_shown(&shell), dragged, "held while the drag goes on");
+    let _ = shell.on_pointer(
+        &InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert_eq!(level_shown(&shell), landed, "adopted where it settled");
     shell.sound_moved();
     assert!(
         shell.sound_wanted(),

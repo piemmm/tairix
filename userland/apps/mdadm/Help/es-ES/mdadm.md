@@ -88,8 +88,8 @@ principal.
 
 - `0` — la solicitud tuvo éxito (o se escribió la ayuda).
 - `1` — se denegó una capacidad, un nombre no se resolvió, el compositor
-  rechazó la solicitud, o no se pudo escribir la salida.
-- `2` — no se entendió la línea de órdenes.
+  rechazó la solicitud, o no se pudo escribir la salida. Una línea de
+  órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

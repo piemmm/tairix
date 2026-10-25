@@ -105,7 +105,7 @@ and a refused or failed creation as `UseraddError::Create`. A refused
 entropy draw creates nothing. There is no panic (`AGENTS.md` §2.9).
 
 Exit codes: `0` on success, `1` on a database, entropy, or output
-failure, `2` on a usage error.
+failure or a usage error.
 
 ## Tests
 

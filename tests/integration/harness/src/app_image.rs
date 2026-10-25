@@ -823,7 +823,7 @@ pub struct DiscoveredApp {
 }
 
 /// Parse the `AppInfo.toml` of every program crate the shared walk finds
-/// under `userland_root` (`tairix_syshelp::bundles::program_crates`),
+/// under `userland_root` (`tairix_syshelp::bundles::manifest_crates`),
 /// returning the discovered programs sorted by bundle name.
 ///
 /// This walk **is** the store's source of truth at build time: adding a
@@ -836,8 +836,9 @@ pub struct DiscoveredApp {
 /// crate whose `Cargo.toml` package name cannot be read, or two crates
 /// claiming the same bundle name.
 pub fn discover_app_manifests(userland_root: &Path) -> Result<Vec<DiscoveredApp>, AppImageError> {
-    let programs = tairix_syshelp::bundles::program_crates(userland_root, |_| {})
-        .map_err(|e| AppImageError::new(userland_root.display(), e))?;
+    let programs =
+        tairix_syshelp::bundles::manifest_crates(userland_root, APP_MANIFEST_SOURCE, |_| {})
+            .map_err(|e| AppImageError::new(userland_root.display(), e))?;
     let mut found: Vec<DiscoveredApp> = Vec::new();
     for crate_dir in programs {
         let Some(discovered) = discover_crate_manifest(&crate_dir)? else {
@@ -893,25 +894,9 @@ pub fn discover_crate_manifest(crate_dir: &Path) -> Result<Option<DiscoveredApp>
 fn read_package_name(crate_dir: &Path) -> Result<String, AppImageError> {
     let path = crate_dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&path).map_err(|e| AppImageError::new(path.display(), e))?;
-    let mut in_package = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.starts_with('[') {
-            in_package = line == "[package]";
-            continue;
-        }
-        if in_package {
-            if let Some(value) = line.strip_prefix("name") {
-                if let Some(value) = value.trim_start().strip_prefix('=') {
-                    return parse_string(&path.display().to_string(), value.trim());
-                }
-            }
-        }
-    }
-    Err(AppImageError::new(
-        path.display(),
-        "no `[package] name` found",
-    ))
+    tairix_syshelp::bundles::package_name(&text)
+        .map(str::to_string)
+        .ok_or_else(|| AppImageError::new(path.display(), "no `[package] name` found"))
 }
 
 /// How a composed manifest names the publisher its per-app state is owned by.
@@ -1514,6 +1499,7 @@ mod tests {
         "basename",
         "cat",
         "chmod",
+        "chown",
         "cinder",
         "clear",
         "confd",

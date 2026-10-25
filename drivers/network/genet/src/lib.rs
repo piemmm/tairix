@@ -48,7 +48,7 @@
 //! **Receive checksum.** `RBUF_RXCHK_EN` puts the checksum engine in front of
 //! the receiver; it parses the frame's L3/L4 headers and reports its verdict
 //! in bit 15 of the completed descriptor. The frame itself is untouched, so
-//! the 64-byte receive status block (`RBUF_64B_EN` in the reference driver)
+//! the 64-byte receive status block (`RBUF_64B_EN`, `RBUF_CTRL` bit 0)
 //! is deliberately **not** enabled and the receive-buffer layout is
 //! exactly what it was without the offload. A frame the engine verified is
 //! delivered as [`FrameOffload::Validated`]; anything it did not parse simply
@@ -62,8 +62,7 @@
 //! **Segmentation.** The GENET has no segmentation engine, so the driver
 //! splits a [`FrameOffload::TxSegment`] super-frame itself through the shared
 //! [`TcpSegmenter`] and hands each wire segment to the
-//! transmit checksum engine — the same shape Linux's `net/core/tso.c` gives
-//! `mvneta` and `fec`. The win is the offload's real one: one ring slot and
+//! transmit checksum engine. The win is the offload's real one: one ring slot and
 //! one stack transmit pass for tens of packets. A super-frame the ring cannot
 //! absorb in one doorbell stays staged and resumes at the next, so a full
 //! ring defers segments rather than dropping them.
@@ -97,8 +96,8 @@ use tairix_abi::driver::net_ring::{
 };
 use tairix_abi::driver::timing::Delay;
 use tairix_abi::{
-    BootFacts, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, Errno,
-    HwMatchKey, RegisterWindow,
+    compatible_key, BootFacts, CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost,
+    Errno, RegisterWindow,
 };
 
 pub mod mdio;
@@ -160,13 +159,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// from and a discovered node is resolved against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(GENET_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(GENET_COMPATIBLE),
 )];
 
 /// Bytes per frame buffer. The controller's receive buffer size must cover
@@ -293,12 +286,12 @@ const OFFLOADS: NetOffloads = match NetOffloads::from_bits(
 };
 
 /// Microseconds the reset pulses are held. The GENET reset paths are
-/// register-strobe resets that settle in a few controller clocks; the
-/// reference drivers hold each for 10 µs.
+/// register-strobe resets that settle in a few controller clocks; NetBSD's
+/// and FreeBSD's drivers hold each for 10 µs.
 const RESET_HOLD_US: u32 = 10;
 
 /// How long a DMA engine may take to report itself stopped, and how often it
-/// is asked: Linux's `bcmgenet` allows 5 ms in 1 µs steps.
+/// is asked: 5 ms in 1 µs steps.
 const DMA_STOP_TIMEOUT_US: u64 = 5_000;
 const DMA_STOP_POLL_US: u32 = 1;
 

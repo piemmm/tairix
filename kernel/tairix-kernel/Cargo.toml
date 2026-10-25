@@ -206,19 +206,14 @@ tairix-supervisor = { path = "../../lib/supervisor", version = "=0.0.0" }
 tairix-fsprobe = { path = "../../lib/fsprobe", version = "=0.0.0" }
 # The byte-addressed reader recognition reads an attach's extent through.
 tairix-bytedev = { path = "../../lib/bytedev", version = "=0.0.0" }
-# The bootstrap-floor storage path: the block driver
-# that must be up before the signed driver store under `/System/Drivers/`
-# is reachable. It is compiled in (not discovered from the store) and
-# registered in `driver_catalog::IN_KERNEL_DRIVERS` as a floor
-# discovery-match candidate. virtio-blk backs the QEMU `virt` / x86_64 /
-# riscv64 root volume on **every** target, so it is a common dependency;
-# the Raspberry-Pi-4 EMMC2 SD-host driver is floor **only on aarch64** and
-# is therefore an aarch64-only dependency (below), never linked into an
-# x86_64 / riscv64 image that has no such controller.
-# `tairix-kernel` (`Layer::Tooling`) is the one crate permitted to name
-# driver crates across strata; the engine is
-# architecture-neutral (it consumes only `lib/abi` / `lib/virtio` seams),
-# so its host tests run on the CI host.
+# The bootstrap floor's drivers: the storage that must be up before the
+# signed driver store under `/System/Drivers/` is reachable. Each declares
+# itself in its own `Floor.toml`, which `build.rs` discovers to generate the
+# floor table naming it, and is a dependency for exactly the instruction sets
+# its manifest names: virtio-blk on every target here, a driver serving only
+# some targets under theirs below. `tairix-kernel` (`Layer::Tooling`) is the
+# one crate permitted to name driver crates across strata. virtio-blk's
+# device id also keys the virtio-MMIO discovery probe.
 tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 # The canonical virtio-input device id (`VIRTIO_INPUT_DEVICE_ID = 18`) the
 # bootstrap-floor discovery walk (`hwdiscovery::observe_virtio_mmio_input_devices`)
@@ -289,19 +284,10 @@ tairix-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", def
 # discovery-fed `kernel_core` hand-off staged for P2–P4.
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 tairix-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
-# The Raspberry Pi 4 EMMC2 SD-host block driver is the aarch64 bootstrap
-# floor's second storage driver (`driver_catalog`, `#[cfg(kernel_isa =
-# "aarch64")]`). It backs the Pi 4 SD card, so it is compiled into the
-# aarch64 image alone — never into an x86_64 / riscv64 image that has no
-# such controller. Architecture-neutral in the sense
-# that it consumes only `lib/abi` seams; the aarch64 root-unlock bring-up
-# (`aarch64/root_unlock`) also names it.
+# A bootstrap-floor driver whose `Floor.toml` names this instruction set alone
+# (see the common floor dependency above); only the generated floor table
+# names it.
 tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
-# The VideoCore property channel the EMMC2 bring-up reaches the firmware
-# through: the controller's base clock and the card's supply switches. The
-# kernel uses it only before the driver store — and so the `vcmailbox`
-# service it holds — can be read.
-tairix-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 # The user-space device manager's autoload policy: the
 # aarch64 `driver_spawn_loader` implements its `DriverLoader` seam to spawn a
 # discovered user-space driver with the matched node's device-resource
@@ -379,27 +365,25 @@ tairix-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", def
 # Rust-only. `tairix-kernel` is the image-assembly seam
 # (`Layer::Tooling`), so naming the harness here is not a layering
 # violation.
-tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0" }
+# The shared signed driver-bundle composer (`driver-image`) signs each
+# bootstrap-floor driver's manifest image the in-kernel `driver_loader` admits
+# through `drvhost::Host::load` (`plans/PI.md` P10 5c-ii), the one definition
+# of how a bundle is assembled and signed.
+tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
+    "driver-image",
+] }
 tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
-# The build script also bakes the signed driver-manifest images the
-# in-kernel `driver_loader` admits through `drvhost::Host::load`
-# (`plans/PI.md` P10 5c-ii). It encodes each bootstrap-floor block driver's
-# `DriverManifest` from the one ABI definition (`tairix-abi`), stamps the
-# kernel's compiled-in `SYSCALL_TABLE_HASH` (`tairix-kernel-syscall`), copies
-# the driver crate's own canonical `BIND_KEYS` into the signed bind table (so
-# the match data never drifts), and signs with the
-# build's deterministic Ed25519 driver-signing key — the trust anchor the
-# kernel embeds. The compiled-in floor is storage-only:
-# the bus chain (`pcie_brcm` / `vl805` / `xhci` / `usb_hid`) is installed as signed
-# `/System/Drivers/` bundles by the image pipeline (`tools/xtask`), not baked
-# here. Host-only build glue; the production image stays
-# Rust-only.
+# The build script discovers the floor drivers from their own `Floor.toml`
+# manifests (`src/build_support.rs`), encodes each one's `DriverManifest` from
+# the one ABI definition (`tairix-abi`) with the bind table its manifest
+# declares, stamps the kernel's compiled-in `SYSCALL_TABLE_HASH`
+# (`tairix-kernel-syscall`), and signs with the build's driver-signing key —
+# the trust anchor the kernel embeds. Host-only build glue; the production
+# image stays Rust-only.
 # The build's secret signing key set, which the driver manifests baked in
 # here are signed with and the kernel's trust anchors derived from.
 tairix-signkeys = { path = "../../tools/signkeys", version = "=0.0.0" }
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
-tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
-tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
 # Deterministic Ed25519 signing of the baked driver manifests, through the
 # one crate in the workspace that names a cryptographic dependency.
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
@@ -413,6 +397,9 @@ tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
 
 [dev-dependencies]
 tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
+# The in-memory page table and simulated RAM the floor's DMA host is tested
+# over (`HostPageTable`, `SimPhysMap`).
+tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
 # The shared device-tree builder, for the generic ECAM host bring-up's tests.
 tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
 # The fatal bridge's host test returns the shared fatal latch to its boot

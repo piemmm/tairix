@@ -13,6 +13,7 @@
 //! command word.
 
 use alloc::vec::Vec;
+use core::fmt;
 
 use tairix_vt::encode_all_into;
 
@@ -49,6 +50,25 @@ pub fn own_short_help(
     let mut bytes = Vec::new();
     encode_all_into(&render_short(&loaded.doc, &ctx), &mut bytes);
     Some(bytes)
+}
+
+/// The status a command ends with when it does not understand its command
+/// line, as GNU's tools end theirs.
+pub const MISUSE: i32 = 1;
+
+/// Why a command could not read its command line at all: an argument that is
+/// not UTF-8.
+pub const UNREADABLE_ARGUMENTS: &str = "the argument vector is not valid UTF-8";
+
+/// The line GNU's tools end a command-line refusal with, naming where the
+/// command's own help is: `Try 'word --help' for more information.`
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TryHelp<'a>(pub &'a str);
+
+impl fmt::Display for TryHelp<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Try '{} --help' for more information.", self.0)
+    }
 }
 
 #[cfg(feature = "rt")]
@@ -115,7 +135,7 @@ mod rt_source {
             let Some(dir) = self
                 .help_roots()
                 .into_iter()
-                .find_map(|path| tairix_rt::open_dir(path.as_bytes()).ok())
+                .find_map(|path| tairix_rt::Dir::open(path.as_bytes()).ok())
             else {
                 return Ok(Vec::new());
             };
@@ -219,7 +239,28 @@ mod rt_source {
             }
         }
     }
+
+    /// Report that `word` did not understand its command line, as GNU's tools
+    /// do: `word: reason`, then [`TryHelp`](super::TryHelp), on standard
+    /// error. Best-effort: the command is already failing.
+    pub fn report_misuse(word: &str, reason: &dyn core::fmt::Display) {
+        use tairix_rt::io::write_stderr_line;
+
+        write_stderr_line(format_args!("{word}: {reason}"));
+        write_stderr_line(super::TryHelp(word));
+    }
+
+    /// The command's arguments, its own word excluded — or `None`, with the
+    /// refusal reported, when one is not UTF-8.
+    #[must_use]
+    pub fn arguments(word: &str) -> Option<Vec<&'static str>> {
+        let arguments = tairix_rt::args();
+        if arguments.is_none() {
+            report_misuse(word, &super::UNREADABLE_ARGUMENTS);
+        }
+        arguments
+    }
 }
 
 #[cfg(feature = "rt")]
-pub use rt_source::{print_own_short_help, user_locale, BundleHelp};
+pub use rt_source::{arguments, print_own_short_help, report_misuse, user_locale, BundleHelp};

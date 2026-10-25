@@ -70,6 +70,19 @@ pub(crate) enum Node {
     },
 }
 
+/// The heap `nodes` hold.
+pub(crate) fn heap_bytes(nodes: &Vec<Node>) -> usize {
+    let held = nodes.iter().map(|node| match node {
+        Node::Bracket { set, .. } => core::mem::size_of::<Bracket>() + set.heap_bytes(),
+        Node::Group { alts, .. } => {
+            alts.capacity() * core::mem::size_of::<Vec<Node>>()
+                + alts.iter().map(heap_bytes).sum::<usize>()
+        }
+        Node::Literal { .. } | Node::AnyOne { .. } | Node::AnySequence => 0,
+    });
+    nodes.capacity() * core::mem::size_of::<Node>() + held.sum::<usize>()
+}
+
 /// Turn pattern text into marks: `\` makes the next character literal.
 pub(crate) fn marks_of(pattern: &str) -> Result<Vec<Mark>, GlobError> {
     let mut marks = Vec::with_capacity(pattern.len());
@@ -87,69 +100,75 @@ pub(crate) fn marks_of(pattern: &str) -> Result<Vec<Mark>, GlobError> {
     Ok(marks)
 }
 
-/// Compile `marks` into components: one in all, or one per `/`-separated
-/// piece in pathname mode (every `/` separates, escaped or not, as a name can
-/// never hold one).
+/// Compile `marks` into components: one in all, or in pathname mode one per
+/// piece between the `/`s outside groups — escaped or not, as a name can
+/// never hold one. A `/` inside a group belongs to its alternative, as bash
+/// 5.2's filename generation reads it.
 pub(crate) fn compile(marks: &[Mark], options: Options) -> Result<Vec<Component>, GlobError> {
-    let mut tokens = 0;
-    if !options.contains(Options::PATHNAME) {
-        return Ok(vec![component(marks, options, &mut tokens)?]);
-    }
-    marks
-        .split(|mark| mark.ch == '/')
-        .map(|piece| component(piece, options, &mut tokens))
-        .collect()
-}
-
-fn component(input: &[Mark], options: Options, tokens: &mut usize) -> Result<Component, GlobError> {
     let mut parser = Parser {
-        input,
+        input: marks,
         at: 0,
         options,
-        tokens,
+        tokens: 0,
         leaves: 0,
         groups: 0,
         depth: 0,
         brackets: None,
     };
-    let nodes = parser.sequence(false)?;
-    // Every mark of an all-literal component became one literal node, so
-    // the marks spell the exact name it matches.
-    let literal = nodes
-        .iter()
-        .all(|node| matches!(node, Node::Literal { .. }))
-        .then(|| input.iter().map(|mark| mark.ch).collect::<String>());
-    let double_star = input.len() == 2 && input.iter().all(|m| !m.literal && m.ch == '*');
-    Ok(Component {
-        leaves: parser.leaves,
-        groups: parser.groups,
-        nodes,
-        literal,
-        double_star,
-        options,
-    })
+    let mut components = vec![parser.component()?];
+    while parser.peek(0).is_some() {
+        parser.at += 1;
+        components.push(parser.component()?);
+    }
+    Ok(components)
 }
 
 struct Parser<'a> {
     input: &'a [Mark],
     at: usize,
     options: Options,
-    tokens: &'a mut usize,
+    tokens: usize,
     leaves: usize,
     groups: usize,
     depth: usize,
-    /// Built at the component's first `[`, then shared by all of them.
+    /// Built at the pattern's first `[`, then shared by all of them.
     brackets: Option<Brackets>,
 }
 
 impl Parser<'_> {
+    /// The component from the cursor to the end, or in pathname mode to the
+    /// next `/` outside a group.
+    fn component(&mut self) -> Result<Component, GlobError> {
+        let begin = self.at;
+        self.leaves = 0;
+        self.groups = 0;
+        let nodes = self.sequence(false)?;
+        let all = self.input;
+        let input = &all[begin..self.at];
+        // Every mark of an all-literal component became one literal node, so
+        // the marks spell the exact name it matches.
+        let literal = nodes
+            .iter()
+            .all(|node| matches!(node, Node::Literal { .. }))
+            .then(|| input.iter().map(|mark| mark.ch).collect::<String>());
+        let double_star = input.len() == 2 && input.iter().all(|m| !m.literal && m.ch == '*');
+        Ok(Component {
+            leaves: self.leaves,
+            groups: self.groups,
+            nodes,
+            literal,
+            double_star,
+            options: self.options,
+        })
+    }
+
     fn peek(&self, offset: usize) -> Option<Mark> {
         self.input.get(self.at + offset).copied()
     }
 
     fn count_token(&mut self) -> Result<(), GlobError> {
-        *self.tokens += 1;
-        if *self.tokens > MAX_TOKENS {
+        self.tokens += 1;
+        if self.tokens > MAX_TOKENS {
             return Err(GlobError::TooManyTokens);
         }
         Ok(())
@@ -174,13 +193,16 @@ impl Parser<'_> {
     }
 
     /// Parse nodes up to the end of input, or — inside a group — up to the
-    /// `|` or `)` ending the alternative. Plain parentheses nest within an
-    /// alternative and are literal there, as bash's pattern scanner counts
-    /// them.
+    /// `|` or `)` ending the alternative, or — outside one in pathname mode —
+    /// up to a `/`. Plain parentheses nest within an alternative and are
+    /// literal there, as bash 5.2 reads them.
     fn sequence(&mut self, in_group: bool) -> Result<Vec<Node>, GlobError> {
         let mut nodes = Vec::new();
         let mut parens = 0usize;
         while let Some(mark) = self.peek(0) {
+            if !in_group && mark.ch == '/' && self.options.contains(Options::PATHNAME) {
+                break;
+            }
             if !mark.literal {
                 if let Some(op) = self.group_op(mark) {
                     nodes.push(self.group(op)?);
@@ -211,8 +233,11 @@ impl Parser<'_> {
                     }
                     '[' => {
                         let fold = self.options.contains(Options::CASE_INSENSITIVE);
+                        let pathname = self.options.contains(Options::PATHNAME);
                         let input = self.input;
-                        let brackets = self.brackets.get_or_insert_with(|| Brackets::new(input));
+                        let brackets = self
+                            .brackets
+                            .get_or_insert_with(|| Brackets::new(input, pathname));
                         if let Some(parsed) = bracket::parse(input, self.at, brackets, fold) {
                             let (set, width) = parsed?;
                             self.at += width;

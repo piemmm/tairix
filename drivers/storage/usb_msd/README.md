@@ -181,8 +181,8 @@ Any USB mass-storage device exposing an interface in the served set —
 SCSI-transparent bulk-only (`08:06:50`, essentially every USB flash stick
 and disk enclosure), UFI floppy drives over BOT (`08:04:50`) or CBI
 (`08:04:00`), and USB Attached SCSI (`08:06:62`) — that a host-controller
-driver enumerates and serves over the URB transport (the Pi 4's USB-A ports
-via the xHCI HCD). Up to 16 LUNs. Logical block sizes 512–4096 (powers of
+driver enumerates and serves over the URB transport (USB-A ports via the
+xHCI HCD). Up to 16 LUNs. Logical block sizes 512–4096 (powers of
 two). Deliberately not covered (per `plans/DEVICES.md` §3/D5): the
 interrupt-less CB variant (protocol `0x01`), tape, software eject and tray
 locking (`plans/FOREIGN-MEDIA.md`), UAS command queueing / task-management
@@ -191,7 +191,7 @@ streams (one command in flight serves the synchronous block service; a
 protocol violation fails the exchange closed), and the BOT→UAS alternate-
 setting switch (a dual BOT+UAS device runs its default BOT setting; UAS
 serves devices exposing it as the default interface). Media are polled for
-with `TEST UNIT READY` every two seconds, as Linux's `sd` does — an empty
+with `TEST UNIT READY` every two seconds — an empty
 unit for a medium, a serving removable one for its medium leaving — and MMC's
 media event notification is not used. Runtime unload is
 driven by `devmgr` through the kernel driver-unload mechanism; the driver

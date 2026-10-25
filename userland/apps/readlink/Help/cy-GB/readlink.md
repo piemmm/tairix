@@ -46,6 +46,12 @@ daflunio — ac mae'r offeryn hwn yn ei *alw* yn lle dilyn cysylltiadau ei
 hun. Byddai ail gopi o'r algorithm a anghytunai ag un rheol yn argraffu
 llwybr y mae'r system ffeiliau'n ei ddatrys yn wahanol.
 
+Wrth derfynell, dyfynnir pob llwybr a ddangosir yn yr allbwn lle byddai
+angen hynny ar gragen, ac ysgrifennir unrhyw nod rheoli neu nod
+anweledig arall sydd ynddo wedi'i ddianc, fel na all llwybr reoli nac
+aildrefnu'r sgrin; mae GNU yn ei ddangos heb ei newid. Mae pibell, ffeil
+neu allbwn `-z` yn derbyn y llwybr beit am feit.
+
 ## OPTIONS
 
 - `-f, --canonicalize` — argraffu'r llwybr canonaidd; mae'n rhaid i bob
@@ -76,8 +82,8 @@ llwybr y mae'r system ffeiliau'n ei ddatrys yn wahanol.
 ## EXIT STATUS
 
 - `0` — argraffwyd targed pob operand (neu ysgrifennwyd y cymorth byr).
-- `1` — gwrthodwyd un darlleniad o leiaf, neu methodd yr allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — gwrthodwyd un darlleniad o leiaf, neu methodd yr allbwn. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

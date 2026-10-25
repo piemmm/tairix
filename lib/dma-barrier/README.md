@@ -3,8 +3,8 @@
 DMA memory-ordering barriers for user-space drivers.
 
 A user-space driver shares memory with a device that is a separate, possibly
-non-I/O-coherent, bus master (the Raspberry Pi 4's PCIe root complex is the
-standing example). That shared memory is mapped Normal **Non-Cacheable**
+non-I/O-coherent, bus master (a non-snooping PCIe root complex, say). That
+shared memory is mapped Normal **Non-Cacheable**
 (`PageFlags::DMA_COHERENT`), which removes the cache-coherency problem but does
 **not** order the CPU's accesses with respect to the device. This crate is the
 single home (`AGENTS.md` §2.2) of the architecture-specific barrier the silicon

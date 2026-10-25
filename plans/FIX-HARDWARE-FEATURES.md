@@ -34,9 +34,9 @@ performance defect — *every* TAIRiX image is built and run against the
 lowest-common-denominator baseline of its architecture and never uses the
 extra instructions or the faster routine the booted CPU actually offers —
 into a first-class, modular, boot-time hardware-feature framework that is
-**better than Linux's** `raid6_algos` / `xor` self-benchmark and its
-`alternatives`/ifunc feature dispatch, because it splits the two decisions
-Linux tangles together and makes both auditable, deterministic where
+**better than** a boot self-benchmark coupled to runtime-patched or ifunc
+feature dispatch, because it splits the two decisions such a design tangles
+together and makes both auditable, deterministic where
 correctness demands it, and fail-closed.
 
 The framework selects, once per boot per distinct core type, the best
@@ -171,7 +171,7 @@ The fix is **layered**, and both layers are mandatory:
 7. **Select once into an ops table; do not runtime-patch.** The winner per
    family is stored as a struct of `extern "C" fn` pointers consumed on the
    hot path. A select-once fn-pointer table avoids the W^X churn (§19.2) of
-   Linux-style code patching and is far simpler. The indirect-call cost is
+   runtime code patching and is far simpler. The indirect-call cost is
    *measured* (§2.16), not assumed; only if a specific ultra-hot path
    provably cannot afford the indirect call is patching reconsidered, with
    evidence and a stop-and-ask (§15.7).
@@ -634,7 +634,7 @@ common feature set:
 
 **Why `ByPriority`, not `ByBenchmark`:** a block-zero primitive is
 unconditionally faster when present and bit-identical, so the choice is pure
-capability (as in Linux). A single kernel-wide routine (one set-once fn
+capability. A single kernel-wide routine (one set-once fn
 pointer, no per-call per-CPU table lookup) resolved against the *intersection*
 set is correct because a kernel routine may migrate between cores.
 

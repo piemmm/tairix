@@ -10,8 +10,8 @@ The design is binding in `plans/TIMESYNC.md`.
 
 ## Why a policy crate at all
 
-A Raspberry Pi 3/4 has no RTC, so it boots knowing nothing and must correct
-itself immediately. A Pi 5, or any machine with a battery-backed RTC, boots
+A board with no RTC boots knowing nothing and must correct
+itself immediately. A machine with a battery-backed RTC boots
 with a perfectly good time and must **not** query a public NTP server just
 because it rebooted. Those two requirements pull in opposite directions, and
 the rule that reconciles them is a policy — not a schedule, and not something

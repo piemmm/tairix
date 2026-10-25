@@ -531,7 +531,24 @@ impl<'a> AppLoader<'a> {
     }
 
     fn store_error(&self, bundle: &str, err: Errno) -> AppError {
-        self.audit(events::APP_STORE_ERROR, Level::Warn, bundle, "store error");
+        log(
+            self.cfg.sink,
+            &Event {
+                level: Level::Warn,
+                id: events::APP_STORE_ERROR,
+                message: event_message(events::APP_STORE_ERROR),
+                fields: &[
+                    Field {
+                        key: "bundle",
+                        value: tairix_log::FieldValue::Str(bundle),
+                    },
+                    Field {
+                        key: "errno",
+                        value: tairix_log::FieldValue::SignedInt(i64::from(err.as_i32())),
+                    },
+                ],
+            },
+        );
         AppError::Store(err)
     }
 
@@ -921,6 +938,8 @@ mod tests {
         loaded_bytes: RefCell<Option<u64>>,
         /// Whose key the last `APP_LOADED` record says admitted the bundle.
         loaded_signer: RefCell<Option<&'static str>>,
+        /// The `errno` the last `APP_STORE_ERROR` record carried.
+        store_errno: RefCell<Option<i64>>,
     }
     impl RecordingSink {
         fn new() -> Self {
@@ -929,6 +948,7 @@ mod tests {
                 loaded_phases: RefCell::new(None),
                 loaded_bytes: RefCell::new(None),
                 loaded_signer: RefCell::new(None),
+                store_errno: RefCell::new(None),
             }
         }
         fn count(&self, id: EventId) -> usize {
@@ -957,6 +977,13 @@ mod tests {
                     event.fields.iter().find_map(|f| match (f.key, f.value) {
                         ("signer", tairix_log::FieldValue::Str("own")) => Some("own"),
                         ("signer", tairix_log::FieldValue::Str("system")) => Some("system"),
+                        _ => None,
+                    });
+            }
+            if event.id == events::APP_STORE_ERROR {
+                *self.store_errno.borrow_mut() =
+                    event.fields.iter().find_map(|f| match (f.key, f.value) {
+                        ("errno", tairix_log::FieldValue::SignedInt(n)) => Some(n),
                         _ => None,
                     });
             }
@@ -1392,6 +1419,11 @@ mod tests {
             Err(AppError::Store(Errno::NotFound))
         );
         assert_eq!(sink.count(events::APP_STORE_ERROR), 1);
+        assert_eq!(
+            *sink.store_errno.borrow(),
+            Some(i64::from(Errno::NotFound.as_i32())),
+            "the record names why the store refused"
+        );
     }
 
     #[test]

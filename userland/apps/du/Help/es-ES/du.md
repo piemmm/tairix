@@ -27,11 +27,21 @@ Una ruta ilegible se informa en la salida de error estándar y el
 recorrido continúa con lo que queda; un directorio ilegible no aporta
 nada en lugar de una suma parcial adivinada.
 
-Un archivo alcanzado por más de un nombre se cuenta **una sola vez**, de
+Un enlace simbólico se cuenta como tal salvo que `-H` o `-L` indique
+seguirlo. Todo lo que se encuentra por segunda vez — otro nombre de un
+archivo ya contado, un operando repetido o situado dentro de otro, un
+directorio al que `-L` llega dos veces — se omite, sin fila propia, de
 modo que su almacenamiento no se informa dos veces; `-l` cuenta en
-cambio cada nombre. `-x` (un solo sistema de archivos) aún no está
-disponible; las variables de entorno de la familia `DU_BLOCK_SIZE` no
-se leen — la escala se elige solo mediante opciones.
+cambio cada aparición. `-x` (un solo sistema de archivos) aún no está
+disponible; las variables de entorno de la familia `DU_BLOCK_SIZE` no se
+leen — la escala se elige solo mediante opciones.
+
+En una terminal, cada nombre que muestra la salida se entrecomilla donde
+un shell lo necesitaría, y todo carácter de control u otro carácter
+invisible que contenga se escribe como secuencia de escape, de modo que
+un nombre no puede dar órdenes a la pantalla ni reorganizarla; GNU lo
+muestra sin cambios. Una tubería, un archivo o la salida de `-0` reciben
+el nombre byte a byte.
 
 ## OPTIONS
 
@@ -48,6 +58,11 @@ se leen — la escala se elige solo mediante opciones.
   subdirectorios.
 - `-l, --count-links` — contar un archivo con varios nombres una vez
   por nombre en lugar de una sola.
+- `-L, --dereference` — seguir cada enlace simbólico.
+- `-H, -D, --dereference-args` — seguir solo los enlaces simbólicos
+  nombrados como operandos.
+- `-P, --no-dereference` — no seguir ningún enlace simbólico (el valor
+  predeterminado).
 - `--apparent-size` — medir longitudes aparentes en bytes, no el
   almacenamiento asignado.
 - `-b, --bytes` — tamaño aparente en bytes sueltos
@@ -75,8 +90,8 @@ se leen — la escala se elige solo mediante opciones.
 
 - `0` — todos los operandos se recorrieron (o se escribió la ayuda
   breve).
-- `1` — no se pudo leer una ruta o no se pudo entregar la salida.
-- `2` — la línea de órdenes no se entendió.
+- `1` — no se pudo leer una ruta o no se pudo entregar la salida. Una
+  línea de órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

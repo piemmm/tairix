@@ -1,8 +1,8 @@
 //! Stream ciphers: `ChaCha12` keystream and 64-bit-nonce `ChaCha20`.
 //!
 //! `ChaCha12` — the twelve-round reduced variant of `ChaCha20` (RFC 8439) —
-//! is the construction OpenBSD's `arc4random` and Linux's `get_random_u64`
-//! expand their fast random output from. It backs `lib/rng`'s fast
+//! keys a fast-key-erasure generator, as OpenBSD's `arc4random` keys one
+//! with `ChaCha20`. It backs `lib/rng`'s fast
 //! generator; long-lived key material stays on the SP 800-90A DRBG there.
 //!
 //! The 64-bit-nonce `ChaCha20` below is djb's original construction, which

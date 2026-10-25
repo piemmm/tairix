@@ -240,7 +240,7 @@ fn exercise_never_panics(bytes: &[u8]) {
     }
 
     let _ = fdt.find_compatible("virtio,mmio");
-    let _ = fdt.find_compatible(b"brcm,bcm2711-emmc2");
+    let _ = fdt.find_compatible(b"vendor,sd-host");
 
     each_pci_host(&fdt, |host| {
         let _ = host.windows().count();

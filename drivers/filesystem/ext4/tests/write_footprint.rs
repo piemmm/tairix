@@ -11,7 +11,7 @@ use std::cell::Cell;
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_writeback::RUN_BYTES;
 
@@ -60,18 +60,21 @@ fn a_small_write_stages_no_more_than_the_blocks_it_lays_out() {
     };
     let mut fs = Ext4::format(device, 64, [0x5A; 16]).expect("format");
     let root = fs.root();
-    fs.create(root, b"f", NodeKind::RegularFile)
+    let f = fs
+        .create(
+            root,
+            b"f",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
         .expect("create");
-    fs.write_at(root, b"f", 0, &[1; 4096])
-        .expect("the first block");
+    fs.write_at(f, 0, &[1; 4096]).expect("the first block");
 
     let over = allocated_by(|| {
-        fs.write_at(root, b"f", 100, &[2; 100])
-            .expect("over data in place");
+        fs.write_at(f, 100, &[2; 100]).expect("over data in place");
     });
     let fresh = allocated_by(|| {
-        fs.write_at(root, b"f", 4096, &[3; 100])
-            .expect("into a fresh block");
+        fs.write_at(f, 4096, &[3; 100]).expect("into a fresh block");
     });
     assert!(
         over < RUN_BYTES / 2 && fresh < RUN_BYTES / 2,

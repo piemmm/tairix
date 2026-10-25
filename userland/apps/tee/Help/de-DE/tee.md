@@ -64,8 +64,8 @@ zu werden.
   angeforderte Kurzhilfe wurde ausgegeben); eine von einem
   `-nopipe`-Modus tolerierte Standardausgabe ändert daran nichts.
 - `1` — eine Ausgabe schlug auf eine Weise fehl, die der gewählte Modus
-  zählt, oder die Eingabe konnte nicht gelesen werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  zählt, oder die Eingabe konnte nicht gelesen werden. Eine nicht
+  verstandene Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

@@ -16,7 +16,8 @@ use core::fmt::Write as _;
 
 use tairix_abi::time::Time64;
 use tairix_abi::time::{civil_from_days, days_from_civil};
-use tairix_abi::FileKind;
+use tairix_abi::{FileId, FileKind};
+use tairix_fscopy::op::OpError as EngineError;
 use tairix_fscopy::Omissions;
 
 use crate::fs::Fs;
@@ -28,6 +29,8 @@ use crate::ops::{plan_target, Conflict, Decision, FileOp, OpError, OpKind, OpPro
 pub struct TagEntry {
     /// The entry's full path.
     pub path: String,
+    /// The node it was listed as when tagged: a batch refuses another.
+    pub id: FileId,
     /// The entry's kind (a tagged directory batches recursively).
     pub kind: FileKind,
     /// Apparent length in bytes as listed when tagged (`0` for a
@@ -130,7 +133,7 @@ pub enum BatchProgress {
 
 /// A batch operation over the tagged set: one [`FileOp`] per entry,
 /// processed in tag order, continuing past per-entry failures.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct Batch {
     kind: OpKind,
     /// Entries still to process, reversed so `pop` yields tag order.
@@ -139,9 +142,13 @@ pub struct Batch {
     dest: Option<String>,
     /// The entry in flight and its operation.
     current: Option<(String, FileOp)>,
-    /// Per-entry failures, in encounter order, as `path: reason` lines.
+    /// Why entries failed, in encounter order, as `path: reason` lines.
     failures: Vec<String>,
-    /// Sources whose operation completed uncancelled, for untagging.
+    /// How many entries failed: a move that kept several changed entries
+    /// fails with a line for each.
+    failed: usize,
+    /// Sources whose operation completed uncancelled with nothing kept, for
+    /// untagging.
     succeeded: Vec<String>,
     /// Files the user chose to skip at overwrite questions, summed across
     /// entries.
@@ -180,6 +187,7 @@ impl Batch {
             dest,
             current: None,
             failures: Vec::new(),
+            failed: 0,
             succeeded: Vec::new(),
             skipped: 0,
             omissions: Omissions::default(),
@@ -221,21 +229,21 @@ impl Batch {
     pub fn advance(&mut self, fs: &mut dyn Fs) -> BatchProgress {
         loop {
             if let Some((src, mut op)) = self.current.take() {
-                match op.advance(fs) {
+                match op.advance() {
+                    OpProgress::Done if op.cancelled() => self.fail(format!("{src}: cancelled")),
+                    OpProgress::Done if op.kept().is_empty() => self.succeeded.push(src),
                     OpProgress::Done => {
-                        if op.cancelled() {
-                            self.failures.push(format!("{src}: cancelled"));
-                        } else {
-                            self.succeeded.push(src);
+                        self.failed += 1;
+                        for kept in op.kept() {
+                            let changed = OpError::Engine(EngineError::Changed(kept.clone()));
+                            self.failures.push(failure_line(&src, &changed));
                         }
                     }
                     OpProgress::NeedsDecision => {
                         self.current = Some((src, op));
                         return BatchProgress::NeedsDecision;
                     }
-                    OpProgress::Failed(error) => {
-                        self.failures.push(failure_line(&src, &error));
-                    }
+                    OpProgress::Failed(error) => self.fail(failure_line(&src, &error)),
                 }
                 self.omissions.merge(op.omissions());
                 continue;
@@ -244,9 +252,10 @@ impl Batch {
                 return BatchProgress::Done;
             };
             match self.kind {
-                OpKind::Delete => {
-                    self.current = Some((item.path.clone(), FileOp::delete(&item.path, item.kind)));
-                }
+                OpKind::Delete => match FileOp::delete(fs, (&item.path, item.id)) {
+                    Ok(op) => self.current = Some((item.path, op)),
+                    Err(error) => self.fail(failure_line(&item.path, &error)),
+                },
                 OpKind::Copy | OpKind::Move => {
                     // The destination directory is fixed; each entry's
                     // landing spot is planned as it comes up, so earlier
@@ -254,25 +263,28 @@ impl Batch {
                     let Some(dest) = self.dest.clone() else {
                         // Unreachable by construction (copy/move carry a
                         // destination); fail closed per entry, never panic.
-                        self.failures.push(format!("{}: no destination", item.path));
+                        self.fail(format!("{}: no destination", item.path));
                         continue;
                     };
-                    match plan_target(fs, &item.path, item.kind, &dest) {
-                        Ok(target) => {
-                            let op = if self.kind == OpKind::Move {
-                                FileOp::move_to(&item.path, item.kind, &target)
-                            } else {
-                                FileOp::copy(&item.path, item.kind, &target)
-                            };
-                            self.current = Some((item.path, op));
+                    let started = match plan_target(fs, &item.path, item.kind, &dest) {
+                        Ok(target) if self.kind == OpKind::Move => {
+                            FileOp::move_to(fs, (&item.path, item.id), &target)
                         }
-                        Err(error) => {
-                            self.failures.push(failure_line(&item.path, &error));
-                        }
+                        Ok(target) => FileOp::copy(fs, (&item.path, item.id), &target),
+                        Err(error) => Err(error),
+                    };
+                    match started {
+                        Ok(op) => self.current = Some((item.path, op)),
+                        Err(error) => self.fail(failure_line(&item.path, &error)),
                     }
                 }
             }
         }
+    }
+
+    fn fail(&mut self, line: String) {
+        self.failed += 1;
+        self.failures.push(line);
     }
 
     /// The per-entry failure lines, in encounter order.
@@ -306,11 +318,11 @@ impl Batch {
             OpKind::Move => "moved",
             OpKind::Delete => "deleted",
         };
-        let total = self.succeeded.len() + self.failures.len();
+        let total = self.succeeded.len() + self.failed;
         let mut text = format!("batch: {verb} {} of {total} tagged", self.succeeded.len());
-        if !self.failures.is_empty() {
+        if self.failed > 0 {
             // Writing to a `String` cannot fail.
-            let _ = write!(text, ", {} failed", self.failures.len());
+            let _ = write!(text, ", {} failed", self.failed);
         }
         if self.skipped > 0 {
             let _ = write!(text, ", {} skipped", self.skipped);
@@ -467,12 +479,13 @@ fn parse_date(text: &str) -> Result<i64, String> {
 }
 
 /// One report line for a failed entry. An error that already names its
-/// failing path ([`OpError::Fs`], [`OpError::KindMismatch`]) stands alone;
-/// the rest are prefixed with the entry they refused so every line names
-/// exactly one subject, never the same path twice.
+/// failing path stands alone; the rest are prefixed with the entry they
+/// refused, so every line names exactly one subject, never the same path
+/// twice.
 fn failure_line(src: &str, error: &OpError) -> String {
-    match error {
-        OpError::Fs(..) | OpError::KindMismatch(_) | OpError::Attribute { .. } => error.describe(),
-        _ => format!("{src}: {}", error.describe()),
+    if matches!(error, OpError::Engine(refusal) if refusal.path().is_some()) {
+        error.describe()
+    } else {
+        format!("{src}: {}", error.describe())
     }
 }

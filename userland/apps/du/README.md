@@ -9,7 +9,8 @@ option surface follows GNU coreutils (`AGENTS.md` §16.7): `-a` adds a
 row per file, `-s` reports only the operands, `-c` appends a grand
 total, `-d` bounds the reported depth, `-S` excludes subdirectories from
 a directory's own row, `-l` counts a multiply-named file once per name,
-`--apparent-size`/`-b` measure apparent byte
+`-P` (the default) counts a link as itself while `-H`/`-D` follow the
+operands' links and `-L` every link, `--apparent-size`/`-b` measure apparent byte
 lengths, `-k`/`-m`/`-h`/`--si`/`-B <size>` select the reporting scale,
 and `-0` NUL-terminates rows. `-?`/`--help` render the tool's own short
 help from its bundled `Help/` tree through the shared `lib/help` engine
@@ -21,15 +22,20 @@ compressed files report what they really occupy; block counts round up
 through the shared GNU size vocabulary in `lib/util`
 (`tairix_util::size`), the same definition `df` renders with.
 
-A file reached through more than one name is summed **once**, as the GNU
+A node met a second time — another name for a file, a repeated or nested
+operand, a node `-L` reaches twice — is left out with no row, as the GNU
 tool does, and `-l`/`--count-links` opts out. The key is the node
-identity every `fs_readdir` and `fs_stat` record carries; only a node
-whose name count exceeds one is remembered, because a node named once
-cannot be reached twice, so the seen-set holds the hard links the walk
-actually meets rather than one entry per node on the volume
-(`AGENTS.md` §24.1, §26.6). It grows on demand from no fixed ceiling; a
-heap that refuses to grow it makes the walk count every name and report
-that on standard error (exit `1`), never a silently wrong total.
+identity every `fs_readdir` and `fs_stat` record carries, hashed under
+the process key since a hostile volume chooses it. Only what can be met
+twice is remembered: every node under `-L` or with more than one operand,
+otherwise just a file whose name count exceeds one, because one operand's
+tree reaches every other node once — so a single operand's seen-set holds
+the hard links the walk actually meets rather than one entry per node on
+the volume (`AGENTS.md` §24.1, §26.6). Under `-L` a link back to a
+directory the walk is inside is never entered, even under `-l`. The set
+grows on demand from no fixed ceiling; a heap that refuses to grow it
+makes the walk count every sighting and report that on standard error
+(exit `1`), never a silently wrong total.
 Documented divergences from GNU `du`: there are no device ids, so
 `-x`/`--one-file-system` is staged behind that kernel work rather than
 stubbed; and the `DU_BLOCK_SIZE`-family environment
@@ -38,8 +44,9 @@ variables are not read — the scale is selected by options alone.
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
 dependencies are the audited `tairix-abi` vocabulary, the shared
-`tairix-help` engine, and the shared `tairix-util` size vocabulary, so
-it never links a kernel or driver crate (`AGENTS.md` §17.4). Its
+`tairix-help` engine, the shared `tairix-util` size vocabulary, the
+`tairix-path` grammar, and the keyed set of `tairix-collections` and
+`tairix-hash`, so it never links a kernel or driver crate. Its
 manifest requests `CAP_CONSOLE_WRITE` plus `CAP_FS_ACCESS` — within the
 session baseline — and the secured VFS authorises every path per-inode
 under the caller's attested identity. An unreachable path is diagnosed

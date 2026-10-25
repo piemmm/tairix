@@ -51,8 +51,8 @@ la página completa fluye sin pausas.
 
 - `0` — la página se mostró.
 - `1` — no se encontró la orden o su documento de ayuda, o la página no
-  pudo entregarse.
-- `2` — no se entendió la línea de órdenes.
+  pudo entregarse. Una línea de órdenes no entendida también termina con
+  `1`.
 
 ## ENVIRONMENT
 

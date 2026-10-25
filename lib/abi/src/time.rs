@@ -5,9 +5,8 @@
 //! time as 32-bit seconds. The two canonical types live here:
 //!
 //! - [`Time64`] — an absolute instant, signed 64-bit seconds since the Unix
-//!   epoch plus a nanosecond field. It is TAIRiX's equivalent of Linux's
-//!   `timespec64` (seconds *and* nanoseconds), not a seconds-only
-//!   `time64_t`.
+//!   epoch plus a nanosecond field: seconds *and* nanoseconds, as POSIX's
+//!   `struct timespec` carries them, not seconds alone.
 //! - [`Duration64`] — a span of time, signed 64-bit seconds plus a
 //!   nanosecond field.
 //!

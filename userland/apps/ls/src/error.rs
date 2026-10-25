@@ -2,36 +2,32 @@
 
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::getopt::Refusal;
 
-/// Why an `ls` invocation did not complete.
-///
-/// The variants are deliberately coarse: the CLI surfaces enough to print a
-/// useful diagnostic and set a process exit status, while leaning on the
-/// frozen [`Errno`] for the wire-level cause so it invents no parallel error
-/// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Why an `ls` invocation did not complete: an operand or directory that
+/// cannot be reached is reported and listed past, never one of these.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LsError {
-    /// The command line carried an unrecognised option. The caller should
-    /// print [`crate::USAGE`]. No path is inspected.
+    /// An option `getopt` refuses, worded as it words it. No path is
+    /// inspected.
+    Option(Refusal),
+    /// An option's value `ls` cannot read: a width, a block size, a name
+    /// pattern, or a word outside the option's set. No path is inspected.
     Usage,
-    /// Inspecting an operand failed. Carries the underlying [`Errno`] — e.g.
-    /// [`Errno::NotFound`] for a missing path or [`Errno::PermissionDenied`]
-    /// when the caller may not reach it.
-    Stat(Errno),
-    /// Reading a directory's entries failed. Carries the underlying
-    /// [`Errno`].
-    Read(Errno),
     /// Writing to the terminal failed. Carries the underlying [`Errno`].
     Output(Errno),
+    /// A name filter's match needed more memory than the heap would give:
+    /// GNU's `memory exhausted`, which ends the run.
+    MemoryExhausted,
 }
 
 impl fmt::Display for LsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("invalid usage"),
-            Self::Stat(errno) => write!(f, "cannot access path: {errno}"),
-            Self::Read(errno) => write!(f, "cannot read directory: {errno}"),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
+            Self::MemoryExhausted => f.write_str("memory exhausted"),
         }
     }
 }

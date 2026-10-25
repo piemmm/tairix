@@ -29,9 +29,9 @@ visible consequence of the `long double` divergence is `%a`'s spelling —
 normalisation prints the same value as `0xcp-3`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
-`unwrap`/`expect`/`panic!` in production paths. Its only dependency is
-the shared `tairix-help` crate, so it never links a kernel or driver
-crate. Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
+`unwrap`/`expect`/`panic!` in production paths. It depends only on the
+shared `tairix-help` and `tairix-util` crates, so it never links a kernel
+or driver crate. Its manifest (`AppInfo.toml`) requests `CAP_CONSOLE_WRITE` and
 `CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
 authorises every path per-inode under the caller's attested identity.
 
@@ -50,8 +50,8 @@ seq [-f format] [-s string] [-w] [first [increment]] last
 ## Exit status
 
 - `0` — the sequence (or a requested short help) was written.
-- `1` — the output stopped accepting bytes.
-- `2` — the command line was not understood.
+- `1` — the output stopped accepting bytes. A command line that was not
+  understood exits `1` too.
 
 ## Stability
 

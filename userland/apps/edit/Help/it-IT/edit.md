@@ -76,8 +76,8 @@ detiene alcuna autorità speciale.
   stata mostrata la breve guida.
 - `1` — il file indicato non è stato caricato (non è testo, è troppo
   grande o è stato rifiutato), oppure il terminale è venuto meno; il
-  motivo è stampato sull'uscita di errore.
-- `2` — la riga di comando non è stata compresa.
+  motivo è stampato sull'uscita di errore. Anche una riga di comando
+  non compresa termina con `1`.
 
 ## ENVIRONMENT
 

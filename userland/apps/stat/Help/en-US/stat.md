@@ -49,6 +49,11 @@ is identified by a 16-byte id rather than a device number, so `%d` is
 that id in decimal and `%D` in hexadecimal; comparing two files' `%d`
 still answers exactly "are these on one volume?".
 
+On a terminal, each name the output shows is quoted where a shell would
+need it, and any control or other invisible character in it is written
+as an escape, so a name cannot command or rearrange the screen; GNU
+shows it unchanged. A pipe or a file receives the name byte for byte.
+
 ## OPTIONS
 
 - `-L, --dereference` — describe what a symbolic link names, rather than
@@ -72,9 +77,9 @@ still answers exactly "are these on one volume?".
 ## EXIT STATUS
 
 - `0` — every operand was described (or the short help was written).
-- `1` — at least one operand could not be read, or the output failed.
-- `2` — the command line was not understood, or its format named a
-  directive this system cannot serve.
+- `1` — at least one operand could not be read, or the output failed. A
+  command line that was not understood, or whose format named a
+  directive this system cannot serve, exits `1` too.
 
 ## ENVIRONMENT
 

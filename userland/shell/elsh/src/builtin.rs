@@ -4,24 +4,24 @@
 //! through the [`ProcessHost`], because it must read or
 //! mutate shell state the host cannot see: the working directory (`cd`,
 //! `pwd`), the variable table (`export`, `unset`), the job table (`jobs`,
-//! `fg`, `bg`), or the request to leave the shell (`exit`).
+//! `fg`, `bg`), the process's file mode creation mask (`umask`), or the
+//! request to leave the shell (`exit`).
 //!
 //! Each builtin returns an exit status; the caller stores it as `$?`. The
 //! recognised set is intentionally minimal (no bloat):
 //! `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-//! `ulimit`, `elevate`, `shopt`, and `help`. A name outside this set is not
-//! a builtin and is launched as an external program instead.
+//! `ulimit`, `umask`, `elevate`, `shopt`, and `help`. A name outside this
+//! set is not a builtin and is launched as an external program instead.
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
-use crate::elevate;
 use crate::env::{is_valid_name, Environment};
 use crate::host::{Console, Elevator, LimitStore, ProcessHost};
 use crate::job::{JobId, JobState, JobTable, Signal};
 use crate::options::{self, ShellOptions};
-use crate::ulimit;
-use tairix_util::quote::quote_if_needed;
+use crate::{cwd, elevate, ulimit, umask};
+use tairix_util::quote::quote_subject;
 
 /// Status returned by a builtin that completed without error.
 const OK: i32 = 0;
@@ -47,8 +47,8 @@ pub(crate) struct BuiltinContext<'a> {
 /// [`is_builtin`], [`dispatch`], and command completion share, so a name can
 /// never be completable but not runnable (or the reverse).
 pub(crate) const BUILTIN_NAMES: &[&str] = &[
-    "cd", "pwd", "exit", "export", "unset", "echo", "jobs", "fg", "bg", "ulimit", "elevate",
-    "shopt", "help",
+    "cd", "pwd", "exit", "export", "unset", "echo", "jobs", "fg", "bg", "ulimit", "umask",
+    "elevate", "shopt", "help",
 ];
 
 /// `true` if `name` is a shell builtin.
@@ -63,8 +63,8 @@ pub(crate) fn is_builtin(name: &str) -> bool {
 pub(crate) fn dispatch(ctx: &mut BuiltinContext<'_>, argv: &[String]) -> Option<i32> {
     let (name, operands) = argv.split_first()?;
     let status = match name.as_str() {
-        "cd" => cd(ctx, operands),
-        "pwd" => pwd(ctx),
+        "cd" => cwd::cd(ctx, operands),
+        "pwd" => cwd::pwd(ctx, operands),
         "exit" => exit(ctx, operands),
         "export" => export(ctx, operands),
         "unset" => unset(ctx, operands),
@@ -73,6 +73,7 @@ pub(crate) fn dispatch(ctx: &mut BuiltinContext<'_>, argv: &[String]) -> Option<
         "fg" => fg(ctx, operands),
         "bg" => bg(ctx, operands),
         "ulimit" => ulimit::ulimit(ctx, operands),
+        "umask" => umask::umask(ctx, operands),
         "elevate" => elevate::elevate(ctx, operands),
         "shopt" => options::shopt(ctx, operands),
         "help" => help(ctx),
@@ -81,47 +82,12 @@ pub(crate) fn dispatch(ctx: &mut BuiltinContext<'_>, argv: &[String]) -> Option<
     Some(status)
 }
 
-fn cd(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
-    // A pattern matching several directories must not pick one of them.
-    if args.len() > 1 {
-        ctx.console.write_stderr("cd: too many arguments\n");
-        return USAGE_ERROR;
-    }
-    let target = if let Some(path) = args.first() {
-        path.clone()
-    } else {
-        let Some(home) = ctx.env.get("HOME") else {
-            ctx.console.write_stderr("cd: HOME not set\n");
-            return USAGE_ERROR;
-        };
-        home.to_string()
-    };
-    match ctx.host.change_directory(&target) {
-        Ok(resolved) => {
-            ctx.env.set_cwd(resolved);
-            OK
-        }
-        Err(err) => {
-            ctx.console.write_stderr(&format!(
-                "cd: {target}: {err}\n",
-                target = quote_if_needed(&target)
-            ));
-            USAGE_ERROR
-        }
-    }
-}
-
-fn pwd(ctx: &mut BuiltinContext<'_>) -> i32 {
-    ctx.console.write_stdout(&format!("{}\n", ctx.env.cwd()));
-    OK
-}
-
 fn exit(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
     let code = match args.first() {
         Some(text) => text.parse::<i32>().unwrap_or_else(|_| {
             ctx.console.write_stderr(&format!(
                 "exit: {text}: numeric argument required\n",
-                text = quote_if_needed(text)
+                text = quote_subject(text)
             ));
             255
         }),
@@ -148,7 +114,7 @@ fn export(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
             } else {
                 ctx.console.write_stderr(&format!(
                     "export: {arg}: not a valid identifier\n",
-                    arg = quote_if_needed(arg)
+                    arg = quote_subject(arg)
                 ));
                 status = USAGE_ERROR;
             }
@@ -159,7 +125,7 @@ fn export(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
         } else {
             ctx.console.write_stderr(&format!(
                 "export: {arg}: not a valid identifier\n",
-                arg = quote_if_needed(arg)
+                arg = quote_subject(arg)
             ));
             status = USAGE_ERROR;
         }
@@ -175,7 +141,7 @@ fn unset(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
         } else {
             ctx.console.write_stderr(&format!(
                 "unset: {arg}: not a valid identifier\n",
-                arg = quote_if_needed(arg)
+                arg = quote_subject(arg)
             ));
             status = USAGE_ERROR;
         }
@@ -336,23 +302,15 @@ mod tests {
     }
 
     #[test]
-    fn cd_updates_cwd_via_host_and_reports_errors() {
+    fn cd_updates_pwd_through_the_host_and_reports_errors() {
         let mut fx = Fixture::new();
         fx.host.set_directory("/Users/ada");
         assert_eq!(fx.run(&["cd", "/Users/ada"]), Some(0));
-        assert_eq!(fx.env.cwd(), "/Users/ada");
-        // An unknown directory fails closed without changing cwd.
+        assert_eq!(fx.env.get("PWD"), Some("/Users/ada"));
+        // An unknown directory fails closed without changing the directory.
         assert_eq!(fx.run(&["cd", "/nope"]), Some(1));
-        assert_eq!(fx.env.cwd(), "/Users/ada");
+        assert_eq!(fx.env.get("PWD"), Some("/Users/ada"));
         assert!(fx.console.stderr().contains("cd: /nope"));
-    }
-
-    #[test]
-    fn pwd_prints_cwd() {
-        let mut fx = Fixture::new();
-        fx.env.set_cwd("/Storage");
-        assert_eq!(fx.run(&["pwd"]), Some(0));
-        assert_eq!(fx.console.stdout(), "/Storage\n");
     }
 
     #[test]
@@ -473,5 +431,35 @@ mod tests {
         assert_eq!(fx.run(&["help"]), Some(0));
         assert!(fx.console.stdout().contains("cd"));
         assert!(fx.console.stdout().contains("help"));
+    }
+
+    /// A name that needs quoting is quoted wherever a diagnostic names it.
+    #[test]
+    fn diagnostics_quote_a_name_that_needs_it() {
+        let cases: [(&[&str], &str); 5] = [
+            (&["cd", "no such"], "cd: 'no such': "),
+            (
+                &["exit", "not a number"],
+                "exit: 'not a number': numeric argument required\n",
+            ),
+            (
+                &["export", "a b=1"],
+                "export: 'a b=1': not a valid identifier\n",
+            ),
+            (
+                &["export", "a b"],
+                "export: 'a b': not a valid identifier\n",
+            ),
+            (&["unset", "a b"], "unset: 'a b': not a valid identifier\n"),
+        ];
+        for (words, expected) in cases {
+            let mut fx = Fixture::new();
+            assert!(fx.run(words).is_some_and(|status| status != 0), "{words:?}");
+            assert!(
+                fx.console.stderr().starts_with(expected),
+                "{}",
+                fx.console.stderr()
+            );
+        }
     }
 }

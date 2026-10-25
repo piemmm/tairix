@@ -65,8 +65,8 @@ staging list lives in the source tree's `plans/VIM.md`.
 
 - `0` — the session ended with a quit command, or the short help was
   shown.
-- `1` — the terminal failed; the reason is printed on standard error.
-- `2` — the command line was not understood.
+- `1` — the terminal failed; the reason is printed on standard error. A
+  command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

@@ -42,10 +42,10 @@ digest.
 
 ## `abi-v1` syscall table
 
-The table **grows by appending**: existing entries are never re-numbered,
-removed, or re-typed, and a new syscall takes the next free number. While
-`abi-v1` is unfrozen (TAIRiX has not shipped a release, `AGENTS.md` §9 /
-§2.13) a new row also requires regenerating the C header
+A number is never reused: an entry keeps its number, and a new syscall takes
+the next free one. While `abi-v1` is unfrozen (TAIRiX has not shipped a
+release, `AGENTS.md` §9 / §2.13) an entry's arguments change in place with
+every caller, and any change to the table requires regenerating the C header
 (`cargo xtask c-header --write`); `SYSCALL_TABLE_HASH` needs no manual
 step — it is re-derived from `ENCODED_TABLE` by the build script. The
 `abi-check` and `c-header` drift guards enforce both. From the first
@@ -65,7 +65,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |   9 | `irq_wait`     | `IrqHandle handle`, `u64 timeout_ns`    | `errno` | `CAP_IRQ_BIND`          | no      |
 |  10 | `random_get`   | `user_ptr`, `len`, `u32 flags`          | `u64`   | —                       | no      |
 |  11 | `stream_write` | `u32 fd`, `user_ptr`, `len`             | `u64`   | — (console arm: `CAP_CONSOLE_WRITE`) | no |
-|  12 | `spawn`        | `user_ptr` (path), `len`, `u64 attach`, `len` | `u64` (pid) | — (sandbox arm: `CAP_SANDBOX_SPAWN` or `CAP_PROC_SPAWN`; otherwise `CAP_PROC_SPAWN`) | yes |
+|  12 | `spawn`        | `user_ptr` (path), `len`, `user_ptr?` (attach), `len`, `user_ptr?` (strings), `len` | `u64` (pid) | — (sandbox arm: `CAP_SANDBOX_SPAWN` or `CAP_PROC_SPAWN`; otherwise `CAP_PROC_SPAWN`) | yes |
 |  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`, `u64 timeout_ns` | `u64` | — (console arm: `CAP_CONSOLE_READ`) | no |
 |  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
 |  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
@@ -99,7 +99,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  43 | `waitset_create` | —                                     | `Handle` (set) | —               | no      |
 |  44 | `waitset_ctl`  | `Handle` (set), `u32 op`, `u32 kind`, `u64 id`, `u64 token` | `errno` | —     | no      |
 |  45 | `waitset_wait` | `Handle` (set), `u64 timeout_ns`, `user_ptr` (token out) | `errno` | —        | no      |
-|  46 | `fs_open`      | `user_ptr` (path), `len`, `u32 flags`   | `u64` (fd)    | `CAP_FS_ACCESS` | yes   |
+|  46 | `fs_open`      | `u32 dirfd`, `user_ptr` (path), `len`, `u32 flags`, `u32 mode` | `u64` (fd) | `CAP_FS_ACCESS` | yes |
 |  47 | `fs_close`     | `u32 fd`                                | `errno`       | — (backing)     | no    |
 |  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | no  |
 |  49 | `fs_write`     | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | yes |
@@ -107,10 +107,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  51 | `fs_stat`      | `u32 fd`, `user_ptr` (out), `len`       | `u64` (bytes) | —             | no    |
 |  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | —             | yes   |
 |  53 | `fs_sync`      | `u32 fd`                                | `errno`       | —             | no    |
-|  54 | `fs_mkdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
-|  55 | `fs_unlink`    | `user_ptr` (path), `len`, `u32 flags`   | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  54 | `fs_mkdir`     | `u32 dirfd`, `user_ptr` (path), `len`, `u32 mode` | `errno` | `CAP_FS_ACCESS` | yes |
+|  55 | `fs_unlink`    | `u32 dirfd`, `user_ptr` (path), `len`, `u32 flags`, `user_ptr?` (`NodeExpect`) | `errno` | `CAP_FS_ACCESS` | yes |
 |  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
-|  57 | `fs_rename`    | `user_ptr` (src), `len`, `user_ptr` (dst), `len`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
+|  57 | `fs_rename`    | `user_ptr` (`PathAt` from), `user_ptr` (`PathAt` to), `u32 flags`, `user_ptr?` (`NodeExpect`) | `errno` | `CAP_FS_ACCESS` | yes |
 |  58 | `call_peer_origin` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |
 |  59 | `wall_time_get` | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 |  60 | `wall_time_set` | `user_ptr` (time), `len`, `u32 state`  | `errno` | `CAP_TIME_SET` | yes |
@@ -118,8 +118,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  62 | `sysinfo_introspect` | `u32 domain`, `u64 arg`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_SYSINFO_INTROSPECT` | no |
 |  63 | `terminal_size` | `u32 fd`, `user_ptr` (out), `len`      | `u64` (bytes) | — | no |
 |  64 | `signal`       | `i64 pid`, `u32 signal`                 | `errno`       | —               | yes   |
-|  65 | `fs_chdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
-|  66 | `fs_getcwd`    | `user_ptr` (buf), `len`                 | `u64` (bytes) | —               | no    |
+|  65 | `fs_chdir`     | `u32 dirfd`, `user_ptr?` (path), `len`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
+|  66 | `fs_getcwd`    | `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
 |  67 | `resource_open` | `user_ptr` (ref), `len`, `u32 flags`   | `u64` (fd)    | —               | yes   |
 |  68 | `self_origin`  | `user_ptr` (out), `len`                | `u64` (bytes) | —               | no    |
 |  69 | `users_admin`  | `user_ptr` (req), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_USER_ADMIN` | yes |
@@ -127,7 +127,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  71 | `seat_revoke`  | `u64 seat`                              | `errno`       | `CAP_SEAT_ADMIN` | yes |
 |  72 | `console_foreground` | `u32 fd`, `i64 pid`               | `errno`       | `CAP_CONSOLE_READ` | yes |
 |  73 | `pipe_create`  | `user_ptr` (out: two `u32` fds)         | `errno`       | —               | no    |
-|  74 | `fs_set_mode`  | `user_ptr` (path), `len`, `u32 mode`    | `errno`       | `CAP_FS_ACCESS` | yes   |
+|  74 | `fs_set_mode`  | `u32 dirfd`, `user_ptr?` (path), `len`, `u32 mode`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
 |  75 | `port_resolve` | `user_ptr` (name), `len`                | `endpoint`    | —               | no    |
 |  76 | `file_map`     | `u32 fd`, `u64 offset`, `u64 len`       | `u64` (base)  | —               | no    |
 |  77 | `file_unmap`   | `u64 base`, `u64 len`                   | `errno`       | —               | no    |
@@ -137,10 +137,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
 |  82 | `shm_grant`    | `Handle` (region), `IpcEndpoint`        | `u64` (handle) | `CAP_SHM`      | yes   |
 |  83 | `call_peer_seat` | `IpcEndpoint`, `Handle` (ticket), `u64 seat` | `u64` (generation) | —     | no    |
-|  84 | `fs_attr_get`  | `user_ptr` (path), `len`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
-|  85 | `fs_attr_set`  | `user_ptr` (path), `len`, `user_ptr` (key), `len`, `user_ptr` (value), `len` | `errno` | `CAP_FS_ACCESS` | yes |
-|  86 | `fs_attr_list` | `user_ptr` (path), `len`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
-|  87 | `fs_attr_remove` | `user_ptr` (path), `len`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+|  84 | `fs_attr_get`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+|  85 | `fs_attr_set`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (value), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+|  86 | `fs_attr_list` | `u32 fd`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+|  87 | `fs_attr_remove` | `u32 fd`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
 |  90 | `fd_grant`     | `u32 fd`, `u64 write_ceiling`, `*const ProcId recipient`, `usize len` | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
 |  91 | `fd_redeem`    | `Handle` (grant)                        | `u64` (fd)    | —             | yes   |
@@ -148,7 +148,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
 |  94 | `signal_intake` | `u32 op`                               | `u64` (value) | —             | yes   |
 |  95 | `sched_set_realtime` | `u32 realtime`                    | `errno`       | `CAP_SCHED_REALTIME` | yes |
-|  96 | `fs_set_owner` | `user_ptr` (path), `len`, `u32 uid`, `u32 gid` | `errno`       | `CAP_FS_ACCESS` (+ `CAP_FS_CHOWN` per-inode) | yes |
+|  96 | `fs_set_owner` | `u32 dirfd`, `user_ptr?` (path), `len`, `u32 uid`, `u32 gid`, `u32 flags` | `errno` | `CAP_FS_ACCESS` (+ `CAP_FS_CHOWN` per-inode) | yes |
 |  97 | `pty_create`   | `user_ptr` (out: two `u32` fds), `u32 rows`, `u32 cols` | `errno` | —           | no    |
 |  98 | `pty_set_size` | `u32 fd` (pty master), `u32 rows`, `u32 cols` | `errno` | —           | no    |
 |  99 | `call_post`    | `IpcEndpoint`, `user_ptr` (req), `len`, `user_ptr` (ticket out), `u64 deadline_ns` | `errno` | — | yes |
@@ -165,15 +165,15 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 110 | `thread_exit`  | —                                       | `unit`  | —                       | yes |
 | 111 | `futex_wait`   | `user_ptr uaddr`, `u32 expected`, `u64 timeout_ns` | `errno` | —             | no  |
 | 112 | `futex_wake`   | `user_ptr uaddr`, `u32 count`           | `u64` (woken) | —                 | no  |
-| 113 | `fs_symlink`   | `user_ptr` (target), `len`, `user_ptr` (link), `len` | `errno` | `CAP_FS_ACCESS` | yes |
-| 114 | `fs_readlink`  | `user_ptr` (path), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
-| 115 | `fs_link`      | `user_ptr` (existing), `len`, `user_ptr` (link), `len`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
-| 116 | `fs_realpath`  | `user_ptr` (path), `len`, `user_ptr` (out), `len`, `u32 mode` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+| 113 | `fs_symlink`   | `user_ptr` (target), `len`, `u32 dirfd`, `user_ptr` (link), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+| 114 | `fs_readlink`  | `u32 dirfd`, `user_ptr` (path), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+| 115 | `fs_link`      | `user_ptr` (`PathAt` existing), `user_ptr` (`PathAt` new), `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
+| 116 | `fs_realpath`  | `u32 dirfd`, `user_ptr` (path), `len`, `user_ptr` (out), `len`, `u32 mode` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 | 117 | `port_read`    | `Handle handle`, `len port`, `u32 width` | `u64` (value) | `CAP_MMIO_MAP`       | no      |
 | 118 | `port_write`   | `Handle handle`, `len port`, `u32 width`, `len value` | `errno` | `CAP_MMIO_MAP` | yes |
 | 119 | `latency_watch` | `u64 budget_ns`                        | `u64` (armed budget) | —          | no      |
-| 120 | `fs_lock`      | `u32 fd`, `u32 mode`, `u32 flags`, `u64 start`, `u64 len`, `u64 deadline` | `errno` | `CAP_FS_ACCESS` | no |
-| 121 | `fs_lock_query` | `u32 fd`, `u32 mode`, `u64 start`, `u64 len`, `user_ptr` (conflict), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+| 120 | `fs_lock`      | `u32 fd`, `u32 mode`, `u32 flags`, `u64 start`, `u64 len`, `u64 deadline` | `errno` | — (backing) | no |
+| 121 | `fs_lock_query` | `u32 fd`, `u32 mode`, `u64 start`, `u64 len`, `user_ptr` (conflict), `len` | `u64` (bytes) | — (backing) | no |
 | 122 | `cpufreq_bind` | `user_ptr` (limits)                     | `Handle`      | `CAP_CPUFREQ`           | yes     |
 | 123 | `cpufreq_wait` | `Handle handle`, `u64 last_seq`, `user_ptr` (target) | `errno` | `CAP_CPUFREQ`      | no      |
 | 124 | `notice_read`  | `u32 topic`, `user_ptr`, `len`          | `u64` (bytes) | —                       | no      |
@@ -205,6 +205,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 150 | `share_map`    | `user_ptr` (len out)                    | `u64` (base)  | — (the spawn grant)     | yes     |
 | 151 | `fs_seek_region` | `u32 fd`, `u64 offset`, `u32 region` | `u64` (offset) | — | no |
 | 152 | `fs_punch`     | `u32 fd`, `u64 offset`, `u64 len`       | `errno`       | —                       | yes     |
+| 153 | `fs_umask`     | `u32 mask`                              | `u64` (previous mask) | —               | no      |
+| 154 | `fs_access`    | `u32 dirfd`, `user_ptr?` (path), `len`, `u32 want`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | no |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -226,35 +228,77 @@ refused `NotSupported` where the format keeps no holes. Both are gated in the
 handler exactly as `fs_read` is, and they are what the copy engine
 (`lib/fscopy`) keeps a sparse file's holes through.
 
-`fs_chdir` (no. 65) and `fs_getcwd` (no. 66) give each process a working
-directory. A path handed to any path-taking filesystem call (`fs_open`,
-`fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, and `fs_chdir` itself)
-is resolved at
-the single kernel entry point (`copy_path_in`): an absolute `/`-view path is
-normalised through the shared path parser (`lib/path`), and a relative path
-is first joined onto the caller's current working directory, so `.`/`..` are
-collapsed and `..` can never escape the root. `fs_chdir` re-authorises its
-resolved target as a *searchable directory* through the secured VFS (the same
-resolve-only, `DIRECTORY`-flag check `fs_open` performs) under the caller's
-real credentials and only then records it as the new working directory — a
-refused change leaves the directory untouched (fail closed). A child inherits
-its spawner's working directory. `fs_getcwd` copies the stored directory out
-and needs no capability (reading one's own directory grants no authority).
-The per-process directory lives beside the task's streams and limits in
-`kernel/core::aspace::AddressSpaceRegistry` and is dropped when the task
-exits. An alias spelling (`Alias:/…` or the expanded `alias::Name/…`) names a
-first-class storage root: a *machine alias* (`System:`, `Users:`,
-`Storage:`) is the canonical root the `/` view projects as `/<Name>`, so
-`System:/Logs/a` resolves to the same object as `/System/Logs/a` and is then
-subject to the identical inode/mount-flag authorisation. `lib/path` already
-refuses any `..` that would escape the alias root. A name that is not a
-published root fails closed with `NotFound` before the VFS is touched; session
-and volume aliases are published by their owning services when those land.
+**Every path-taking call resolves its path one way.** A relative path starts
+at the directory its `dirfd` holds: a descriptor the caller holds on a
+directory or on the catalog, or `FD_CWD` for its working directory. Any other
+descriptor is `NotADirectory` and an unopened number `NotFound`; an absolute
+path ignores `dirfd`. The walk begins at the held node and is never spelled
+out as text: `..` names the directory the walk came through, and search
+permission is checked, as the caller, on every directory looked in, the start
+included. A descriptor confers no authority on a walk, since directories are
+never granted or conferred. An alias spelling (`Alias:/…` or the expanded
+`alias::Name/…`) or an `id::` root names a first-class storage root and starts
+there: a *machine alias* (`System:`, `Users:`, `Storage:`) is the canonical
+root the `/` view projects as `/<Name>`, so `System:/Logs/a` resolves to the
+same object as `/System/Logs/a` and is then subject to the identical
+inode/mount-flag authorisation. The path beneath an alias root is held to
+`lib/path`'s grammar, which refuses a spelling whose `..` climbs above that
+root, and is then walked as typed, each `..` applied to the directory the walk
+reached, as a view path's is; a name that is not a published root fails
+closed with `NotFound` before the VFS is touched; session and volume aliases are
+published by their owning services when those land. `fs_rename` and `fs_link`
+take two names, so each is a `PathAt` record (`dirfd`, length, address) the
+call reads from the caller's memory.
 
-`fs_set_mode` (no. 74) is the `chmod(2)` shape: it rewrites the permission
+`fs_chdir` (no. 65) and `fs_getcwd` (no. 66) give each process a working
+directory, held as a descriptor holds its node. `fs_chdir` resolves its target
+as a searchable directory under the caller's real credentials and pins it, so
+a rename moves the working directory with it; a refused change leaves the
+directory untouched (fail closed). `AtFlags::EMPTY_PATH`, naming no path (a
+null address and a zero length, as every `EMPTY_PATH` call does), makes the
+directory `dirfd` holds the working directory (`fchdir`), and
+`AtFlags::NO_FOLLOW` is refused, since a working directory is reached through
+its links. A child inherits its spawner's working directory, as it does its
+umask, unless the spawn names one or the child is a parser sandbox, which
+starts at the root holding none of its spawner's directories. `fs_getcwd`
+writes the path that names the directory now, however it has moved — the
+whole path or `BufferTooSmall` — and a removed directory is `NotFound`; it
+asks `CAP_FS_ACCESS`, since spelling the path reads every directory above
+it. The per-process directory lives beside the task's streams and
+limits in `kernel/core::aspace::AddressSpaceRegistry` and is released when the
+task exits.
+
+`fs_access` (no. 154) is `faccessat(2)` under the caller's real identity:
+whether the node a path reaches grants every `Access` bit asked (`READ`,
+`WRITE`, `EXEC`), or, with none, whether it can be reached at all. It answers
+what the operation itself would meet, so `WRITE` through a read-only
+projection is `ReadOnly` and `EXEC` of a regular file through a `noexec` one
+is `PermissionDenied` even where the node allows them. `AtFlags::NO_FOLLOW`
+asks about a final link itself; `AtFlags::EMPTY_PATH` asks about the node
+`dirfd` holds, as the identity that descriptor's own operations act as, judged
+on the mode as the path form judges it, so the owner of a read-only file is
+told it is read-only whichever form asks. It changes nothing and is not
+audited.
+
+`fs_unlink` (no. 55) and `fs_rename` (no. 57) can state what they expect to
+act on, so a tool removing or moving what it has inspected never acts on a
+node put at that name since. `UnlinkFlags::EXPECT_NODE` and
+`RenameFlags::EXPECT_NODE` carry the address of a `NodeExpect` naming only the
+node, by the volume it lives on and its number there, every other field zero;
+`UnlinkFlags::EXPECT_UNCHANGED` one naming it as `fs_stat` described it, its
+length, content generation and modification and change stamps included. A
+node of another volume never meets an expectation, so a medium swapped in
+under the same name is never acted on in place of the one looked at. The expectation is checked under the volume's lock
+with the change itself: a name that no longer meets it is `Stale`, and
+nothing is removed or moved. The `expect` slot is null exactly when no
+expectation bit is set, and anything else is `OutOfRange`.
+
+`fs_set_mode` (no. 74) is the `fchmodat(2)` shape: it rewrites the permission
 bits (the `rwx` triads plus setuid/setgid/sticky, at most `FS_MODE_MASK` =
 `0o7777`) of the file or directory at a path, leaving ownership, ACL, and
-any capability gate untouched. A mode word carrying any higher bit is
+any capability gate untouched. `AtFlags::NO_FOLLOW` names a final link
+itself, and `AtFlags::EMPTY_PATH` with no path the node `dirfd` holds
+(`fchmod`), decided as the caller whoever opened the descriptor. A mode word carrying any higher bit is
 refused at dispatch with `OutOfRange` — never silently masked. The
 per-inode rule is the secured VFS's: only the inode's **owner** may change
 its mode (write access does not imply chmod, and holding a capability grants
@@ -262,9 +306,27 @@ no override), the covering mount must be writable, and a node carrying a
 `required_cap` gate demands that capability for this change as for any other
 access. The `chmod` command app and `fstree`'s mode editor are its callers.
 
+`fs_open` (no. 46) and `fs_mkdir` (no. 54) take the mode a create asks for. It
+must fit `FS_MODE_MASK`, and an open without `OpenFlags::CREATE` passes `0`;
+dispatch refuses anything else with `OutOfRange`. `CREATE | DIRECTORY |
+EXCLUSIVE` with neither access bit makes a directory as `fs_mkdir` does and
+answers it open, bound to the directory it made rather than to whatever the
+name holds later; `CREATE | DIRECTORY` without `EXCLUSIVE`, or with `READ`,
+is `OutOfRange`. The node is born with that
+mode less its process's file mode creation mask, and a link with `0o777`.
+Made in a setgid directory it takes the directory's group, a directory its
+setgid bit too, and a file keeps setgid only in a group its creator belongs
+to; anywhere else it takes the creator's own group
+([permissions](../filesystem/permissions.md)). `fs_umask` (no. 153) sets the
+mask and returns the one it replaces, or with `FS_UMASK_QUERY` returns it
+unchanged; a mask carrying a bit past `FS_UMASK_BITS` is `OutOfRange`. The
+mask is per process, `0o022` in PID 1, inherited at spawn beside the working
+directory and dropped at exit. It needs no capability and is not audited: it
+decides only what the process's own creates are born with.
+
 `fs_symlink` (no. 113) and `fs_readlink` (no. 114) are the `symlink(2)` /
 `readlink(2)` pair. `fs_symlink` takes the **target first**, then the link's
-own path: the target is the link's stored body, so it is bounded by
+own `dirfd` and path: the target is the link's stored body, so it is bounded by
 `FS_SYMLINK_MAX`, UTF-8-checked, and grammar-checked, but never resolved —
 it may be relative and may carry `.`/`..`, and the resulting link may
 legitimately dangle. Creating one therefore authorises only the right to add
@@ -278,15 +340,16 @@ pure read and is not audited per call. A path that is not a link is
 `Errno::OutOfRange`, and a mount whose format has no link object type is
 `Errno::NotSupported` — never an approximation. There is no `lstat` operand:
 `fs_stat` is fd-based, so the follow posture is fixed once, at open, by
-`OpenFlags::NO_FOLLOW`, and every operation served for that descriptor
-re-derives it — so a stat can never contradict its own open. A `NO_FOLLOW`
-open asking for byte access to something that really is a link is
+`OpenFlags::NO_FOLLOW`, and every operation served for that descriptor is on
+the node that open reached — so a stat can never contradict its own open. A
+`NO_FOLLOW` open asking for byte access to something that really is a link is
 `Errno::LinkLoop`; the resolve-only handle is the `lstat` posture. The design
 is `plans/SYMLINKS.md`; the resolution rules are
 `docs/src/filesystem/overview.md`.
 
-`fs_rename` (no. 57) moves a name within one volume. An empty `RenameFlags`
-word is POSIX `rename(2)`: an occupied destination is replaced, kind for kind.
+`fs_rename` (no. 57) moves a name within one volume, each end a `PathAt`. An
+empty `RenameFlags` word is POSIX `rename(2)`: an occupied destination is
+replaced, kind for kind.
 `RenameFlags::NO_REPLACE` is `renameat2(RENAME_NOREPLACE)`: the move is
 refused with `Errno::AlreadyExists` when the destination names any entry but
 the source's own, decided by the VFS under the volume's lock with the volume's
@@ -298,7 +361,7 @@ that means to replace (a settings store, an overrides file) passes the empty
 word.
 
 `fs_link` (no. 115) adds a **second name** for a node that already has one —
-POSIX `link(2)`. Both operands are absolute paths, and with an empty
+POSIX `linkat(2)`. Each operand is a `PathAt`, and with an empty
 `LinkFlags` word *neither* final component is followed, so the inode that
 gains a name is the one the caller spelled and a symbolic link planted on the
 way cannot redirect the new name onto an object the caller never asked for;
@@ -331,8 +394,10 @@ for the whole path is `Errno::BufferTooSmall` rather than a prefix naming a
 different node. It is a pure read and is not audited per call. `readlink
 -f`/`-e`/`-m` and `ln -r` are its userland consumers.
 
-`fs_set_owner` (no. 96) is the `chown(2)` / `chgrp(2)` shape: it reassigns the
-owning user and/or group of the node at a path. Either `uid` or `gid` may be
+`fs_set_owner` (no. 96) is the `fchownat(2)` shape: it reassigns the
+owning user and/or group of the node at a path, or, under the same `AtFlags` as
+`fs_set_mode`, of a final link itself or of the node `dirfd` holds, decided as
+the caller. Either `uid` or `gid` may be
 `FS_OWNER_UNCHANGED` (`0xFFFF_FFFF`, the `(uid_t)-1` convention) to leave that
 field alone; a call changing neither is a well-formed no-op. Unlike
 `fs_set_mode`, it is a **privileged** operation, and the rule is the secured
@@ -351,9 +416,14 @@ is audited. The `chown` command app and the file manager's Info window
 are its callers.
 
 The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the
-`getxattr`/`setxattr`/`listxattr`/`removexattr` shapes over the per-inode
+`fgetxattr`/`fsetxattr`/`flistxattr`/`fremovexattr` shapes over the per-inode
 `namespace.rest` store `lib/fsmeta` defines and `docs/src/filesystem/arxfs-spec.md`
-§21 specifies. A key carries `1..=FS_ATTR_KEY_MAX` (255) bytes and a value at
+§21 specifies. Each acts on the node an open descriptor holds, so a caller
+opens the node (a resolve-only open suffices, `NO_FOLLOW` reaching a link
+itself) and every decision is made as the caller, whoever opened it. A
+descriptor on something other than a node is `OutOfRange`; on the catalog,
+which stores no attributes, a read or listing is `NotSupported` and a change
+`ReadOnly`. A key carries `1..=FS_ATTR_KEY_MAX` (255) bytes and a value at
 most `FS_ATTR_VALUE_MAX` (3072) opaque bytes; both bounds are refused at
 dispatch with `LengthOutOfRange` before any user memory beyond them is read.
 The secured VFS makes every decision: the ordinary namespaces (`user`, the
@@ -444,23 +514,60 @@ a resource fd can never collide with a file fd. That descriptor is read and
 written with `fs_read` / `fs_write` (positional) or `stream_read` /
 `stream_write` (sequential) and released with `fs_close`, exactly as a
 file handle is; the one shared read/write handler dispatches on the descriptor's backing
-(a path routes through the secured VFS and still requires `CAP_FS_ACCESS`; a
+(a node routes through the secured VFS and still requires `CAP_FS_ACCESS`; a
 resource routes to its subsystem — `sys:random` streams the CSPRNG reserve
 `random_get` draws from, `sys:null` reads as end of stream and discards
 writes). `fs_readdir` / `fs_stat` / `fs_truncate` / `fs_sync` on a
 resource-backed descriptor fail closed (`OutOfRange`) — those are filesystem
 operations with no meaning for a resource.
 
-**The descriptor's backing decides the authority**, so every
-descriptor-operating call is ungated at the dispatcher and applies the
-backing's own check in the handler: `fs_read`, `fs_write`, `fs_close`,
-`fs_stat`, `fs_truncate`, `fs_sync`, and `file_map`. A path-backed descriptor
-still requires `CAP_FS_ACCESS` there, so nothing widens; what it buys is that
-reading `sys:random` never demands filesystem access, and that the holder of a
-one-shot delegation — which is exercised under the *grantor's* captured set
-and may legitimately hold no filesystem capability at all — can use the whole
-descriptor rather than only read it. `fs_readdir` keeps its blanket gate,
+**A file descriptor is bound to a node.** `fs_open` resolves, authorises and
+pins the node its path reaches, and the open file description holds it for
+its whole life (`plans/OPENFILE.md`): a rename takes the node with it, a new
+file or a planted link at the old name is another node the descriptor never
+reaches, and an unlinked file stays readable through it until its last
+descriptor closes, its storage freed then. No operation on it resolves its
+path again. The catalog of attached volumes (`/Storage`), which no volume stores,
+opens as a descriptor of its own that lists and describes the catalog and
+holds nothing to flush. A descriptor whose volume was detached by force,
+recovered or re-inserted, or whose view mount left the table, answers `Stale`
+to its reads, writes, metadata and lock requests until it is closed, and never
+reaches what is attached under its old name later. `fs_close` releases the
+node's pin at once when its volume is free and otherwise leaves it to the
+write-back flusher; every other release — an exit, an unmap, a spawn unwind —
+leaves it to the flusher.
+
+**The descriptor decides the identity**, so every call operating a
+descriptor's contents is ungated at the dispatcher and applies the backing's
+own check in the handler: `fs_read`, `fs_write`, `fs_close`, `fs_stat`,
+`fs_truncate`, `fs_sync`, and `file_map`. The metadata calls that name a
+descriptor — `fs_set_mode` and `fs_set_owner` with `EMPTY_PATH`, and
+`fs_attr_*` — act as the caller instead, as `fchmod(2)` does, so a descriptor
+conferred at spawn never lends its opener's ownership. A descriptor the caller opened itself acts as the caller's own live
+identity, so a capability narrowed by `cap_delegate` stops working at its next
+call. One conferred at spawn or granted by `fd_grant` acts as the identity
+frozen into it then, and a grant carries its extent ceiling. Either way
+`CAP_FS_ACCESS` is required of that identity, so nothing widens; what it buys
+is that reading `sys:random` never demands filesystem access, and that the
+holder of a one-shot delegation — which may legitimately hold no filesystem
+capability at all — can use the whole descriptor rather than only read it.
+Every byte operation re-checks the node's capability gate, mode and ACL as
+that identity, except that the mode and ACL re-check is skipped where the
+identity owns the node and the descriptor is not a grant: an owner may restore
+any bit, so exempting it protects nothing, and it is what POSIX needs of a
+file created and then made read-only. A grant never has the exemption, so the
+owner's chmod revokes it. Search permission above a held node is never
+re-checked: a descriptor is not a name. `fs_readdir` keeps its blanket gate,
 because `fd_grant` refuses a directory and so no delegated listing exists.
+
+**Every descriptor counts against `open-files`.** The `LimitKind::OpenFiles`
+soft bound — one descriptor per 64 KiB of installed RAM, at least 1024, by
+default — caps the whole table: `fs_open`, `resource_open`, `fd_redeem`,
+`fd_redeem_from`, `pipe_create` and `pty_create` past it answer
+`LimitExceeded` and record nothing (a refused redemption stays pending). A
+pair is two places or none. The standard streams a spawner wires into a child
+are counted but never refused, since the spawner decides what a child starts
+with.
 
 `fs_readdir` reads a directory **a batch at a time**, as `getdents` does. It
 writes as many whole `DirEntry` records as fit into `buf` — at most
@@ -480,10 +587,9 @@ entry for, in name order.
   they reach the caller, so a failed copy loses no entry.
 - `BufferTooSmall` means the next record alone does not fit, and leaves the
   position where it was.
-- The position is fixed to the directory its first batch read. A later batch
-  that finds another directory at the path — it was renamed away and
-  replaced — fails `Stale` rather than resuming inside the new one;
-  `ReaddirFrom::Start` reads what the path names now.
+- The listing is of the directory the descriptor is bound to, however it has
+  been renamed since; a removed one lists nothing. `Stale` means the
+  descriptor no longer reaches it.
 - The stream keeps the POSIX contract: an entry present for the whole listing
   is returned exactly once, and one added or removed meanwhile may or may not
   be. Each filesystem driver's cursor upholds it (`docs/src/abi/driver_traits.md`).
@@ -503,7 +609,8 @@ device-flush primitive is one definition on the `Block` driver trait
 block cache, shared handle, the removable-volume journal) so a filesystem
 confined to a partition still reaches the real device. The fd only proves the
 caller holds a live handle on the mounted volume; the flush itself is
-volume-wide, so a resource-backed descriptor fails closed (`OutOfRange`).
+volume-wide, so a resource-backed descriptor fails closed (`OutOfRange`), and
+the catalog's, which stores nothing, has nothing to flush.
 
 A program that never calls it is not left unbounded. A filesystem that batches
 commits keeps one transaction open for the next operation to join, and the
@@ -546,7 +653,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), `fd_grant`, and — enforced *in the handler* on a path-backed descriptor, or against the grantor's captured set on a delegated one — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `file_map` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_access`, `fs_chdir` (the path-taking calls), `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fd_grant`, and — enforced *in the handler* against the identity a node-backed descriptor acts as: the caller's own, or the one frozen into a conferred or granted descriptor — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `fs_lock`, `fs_lock_query`, `file_map` |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
@@ -1063,7 +1170,7 @@ See `plans/APPDATA.md`. The first-party Rust wrapper is
 `tairix_rt::call_peer_origin`; the C stub is `tairix_sys_call_peer_origin`.
 
 `wall_time_get` (no. 59) and `wall_time_set` (no. 60) are the wall-clock
-pair (`PREREQUISITES.md` P-D). The kernel keeps an absolute wall-clock time
+pair. The kernel keeps an absolute wall-clock time
 beside the per-CPU monotonic clock: `wall_time_get` returns a
 `tairix_abi::WallClockReading` — a `Time64` instant plus a
 `tairix_abi::WallTimeState` byte (`Unset` / `Firmware` / `Trusted` /
@@ -1090,7 +1197,7 @@ wrappers are `tairix_rt::wall_time` /
 
 `boot_id_get` (no. 61) copies the kernel's per-boot identifier — a 128-bit
 `tairix_abi::BootId` — out to the caller's `(out, len)` buffer and returns
-its byte count (`PREREQUISITES.md` P-E). The boot id is a public per-boot
+its byte count. The boot id is a public per-boot
 nonce: it is stable for the lifetime of a boot, fresh across boots, and user
 space can neither supply nor influence it. It is **ungated** and unaudited,
 the same unprivileged observer baseline as `clock_get` / `wall_time_get`,
@@ -1354,23 +1461,24 @@ a service hand a caller direct, full-speed access to a file it owns without
 also handing it the volume (`plans/APPDATA.md` §3.8 — the app-data blob
 store).
 
-The kernel captures the *grantor's* uid and effective
-capability set beside the resolved path and mints a recipient-owner-bound
-handle the grantor forwards in-band (a window-channel `FilePicked`
-event, or an app-data reply); the number is useless to a bystander, and
-every mint is audited.
+The kernel freezes the *grantor's* uid and effective
+capability set into a new handle on the descriptor's node and mints a
+recipient-owner-bound handle the grantor forwards in-band (a window-channel
+`FilePicked` event, or an app-data reply); the number is useless to a
+bystander, and every mint is audited.
 `fd_redeem(handle)` is **ungated** — receiving user-mediated,
 already-checked authority is the point — and consumes the grant exactly
-once, atomically (a descriptor-table-full refusal leaves it intact),
-installing a delegated descriptor whose every operation is re-authorised
-through the secured VFS under the **grantor's** captured identity, so a
-permission change against the grantor revokes the delegation's reach
-too. `File::from_delegation` is the owned redemption, so the descriptor is
+once, atomically (a refusal at the redeemer's `open-files` bound leaves it
+intact), installing a delegated descriptor on that node whose every operation
+is re-authorised as the **grantor's** frozen identity, so a permission change
+against the grantor — the owner's chmod included — revokes the delegation's
+reach too. `File::from_delegation` is the owned redemption, so the descriptor is
 closed on every path out. An unredeemed delegation is reclaimed when
 either end exits: with the recipient's records, and with its grantor's.
 Minting is idempotent for the same reason the resource grants are: re-granting a
-delegation that is **still pending** returns the pending handle rather than
-appending a duplicate, so a grantor cannot grow a recipient's kernel-side
+delegation that is **still pending** — the same node, identity, ceiling and
+access, however the descriptor was spelled — returns the pending handle rather
+than appending a duplicate, so a grantor cannot grow a recipient's kernel-side
 table by repeating one call — a pending delegation conveys exactly one
 right, and these descriptors carry no position (every read names its own
 offset), so a second identical entry conveys nothing the first does not.
@@ -1399,12 +1507,13 @@ C stubs `tairix_sys_fd_grant` / `tairix_sys_fd_redeem` /
 one of the caller's own descriptors points, and hands it nothing to reach the
 file with: the recipient redeems the handle with
 `fd_redeem_location(handle, grantor, out)` (no. 147), which writes the absolute
-path, and opens nothing. A path is told only to a principal that could have
+path the descriptor was opened as — which a later rename can leave stale — and
+opens nothing. A path is told only to a principal that could have
 named it: the redemption needs `CAP_FS_ACCESS`, and refuses with
 `PermissionDenied` — consuming the location, which can never be told — when the
 descriptor reaches its file as another user than the reader. For a descriptor
-the holder opened that is the holder; for a delegation, the identity it
-captured. So an application holding no filesystem capability, handed one
+the holder opened that is the holder; for a delegation, the identity frozen
+into it. So an application holding no filesystem capability, handed one
 document, can have the desktop show the user where it lives
 ([`RevealDocument`](../desktop/session.md#showing-where-a-document-lives))
 without itself learning the path or passing the file on. Minting is ungated and
@@ -1580,9 +1689,10 @@ changes refuses with `NotFound`.
 
 It accepts a `DirWatch` member: `id` is a descriptor of the caller's own table
 carrying a watch armed by `fs_watch` (no. 136), ready when the watched
-directory has changes to drain or its path may now resolve differently — the
-mount table, or a directory or link on its volume, moved, or a directory's
-mode, owner or ACL changed. It is edge-triggered and paced in the kernel —
+directory has changes to drain, was removed, or the mount table moved. The
+watch is on the directory the descriptor is bound to, so renaming it or a
+directory above it changes nothing it reports. It is edge-triggered and paced
+in the kernel —
 an isolated change reports at once, a storm at most once per the latency the
 watch was armed with, the trailing report taken as the wait's one-shot
 deadline. A watch already spent (its directory gone) refuses with `NotFound`.
@@ -1624,7 +1734,7 @@ origin rather than a fabricated one. The Rust wrapper is
 backing a caller's standard stream — `fd` (typically `STDOUT`), then the
 `(out, len)` buffer the encoded `tairix_abi::TerminalSize` (rows, then columns,
 two little-endian `u16`s) is written to — so a full-screen terminal program
-(`top`) draws to the real display extents (`PREREQUISITES.md` P-C). It is
+(`top`) draws to the real display extents. It is
 **ungated** and unaudited, the same unprivileged observer baseline as
 `clock_get` / `wall_time_get`: asking how big one's own terminal is grants no
 authority. The handler resolves `fd` against the caller's descriptor table
@@ -2430,6 +2540,7 @@ declared in the source table:
 | `U64`          | Any value.                                                               | —                      |
 | `Cap`          | `>> 16 == 0` and within `CAPABILITY_ID_MAX` (`= 255`).                   | `OutOfRange`           |
 | `UserPtr`      | Non-null. Page-table walks are the owning subsystem's job.               | `BadAlignment`         |
+| `UserPtrOrNull` (`user_ptr?`) | Any value: null is an omitted operand, judged by the handler with everything else. | — |
 | `Len`          | Fits in `usize` on the target.                                           | `LengthOutOfRange`     |
 | `IpcEndpoint`  | Any value (opaque handle).                                               | —                      |
 | `Handle`       | Any value (opaque handle).                                               | —                      |
@@ -2522,7 +2633,7 @@ re-validates arguments — the dispatcher does that first.
 | `random_get`    | draws CSPRNG output from `KernelState.rng` (the `tairix_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
 | `stream_write` | routes **any** descriptor the caller holds — a file, resource, pipe end, or pty end, at a standard number (a spawn attach block wired it, `plans/SPAWN.md` SP10) or an ordinary one an open/create call minted — to its open entry first, through the *same* `descriptor_write` path `fs_write` uses (the two traps differ only in `StreamPos`: an explicit offset vs the shared cursor), so their direction gate, capability checks, and copy boundary cannot drift. The entry's own `OpenFlags` gate the direction, a path-backed stream writes at the shared open-file-description cursor (honouring `APPEND`), a pipe end parks while full with a live reader and fails closed with `BrokenPipe` once none remains, and **no console capability applies**. Otherwise — only a standard number with no open entry can reach here — it resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the in-handler `CAP_CONSOLE_WRITE` check, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's output line discipline (`ConsoleDevice::write_output`), which cooks a bare line feed to CR-LF (the ONLCR output translation, the counterpart to the input echo half) so a program that writes `\n` has the cursor return to column zero as it drops a line, then writes to the `ConsoleWrite` device | An **unattached** `stdinfo` (fd 3 `Closed`) → `Ok(len)` with the bytes discarded (advisory best-effort, `AGENTS.md` §20.1 — never a device fallback). Any other `fd` not a writable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_WRITE` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(input_bytes_consumed)` — the input count, not the larger device count a cooked newline expands to. |
 | `stream_read` | routes **any** descriptor the caller holds to its open entry first, through the same `descriptor_read` path `fs_read` uses (as `stream_write`: the entry's flags gate the direction; a pipe end parks on `STREAM_WAITQ` under its own ring's wake key while empty with a live writer, honours the `timeout_ns` bound, and reports end-of-stream once no writer remains; **no console capability applies**), otherwise resolves `fd` against the caller's per-process descriptor table — direction first, then the in-handler `CAP_CONSOLE_READ` check, then the descriptor's console index against the installed console list — then reads from that console's `ConsoleRead` device, wrapped by the init pipeline in kernel-core's `BlockingConsoleRead`, which parks the caller on the scheduler (`reschedule_current`, the `wait`-syscall poll-and-park loop) until the device yields input (`AGENTS.md` §20 — the backing owns blocking; each console's input is its own — the UART never feeds the video console's session, `plans/PI.md` P11) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user`. A non-zero `timeout_ns` (arg 3) bounds the park: the reader registers a one-shot deadline on the console wait queue (tickless — an unbounded read still arms no timer at all) and an elapsed bound surfaces as `TimedOut`, so a full-screen program refreshes a clock or status figure without a busy poll | `fd` not a readable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_READ` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. No input pending → blocks until input arrives (an unparkable caller → `NotImplemented`); a non-zero `timeout_ns` elapsing with no input → `TimedOut`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read ≥ 1)`. |
-| `spawn`         | stages and parses the optional `SpawnAttach` block fail-closed (`stage_spawn_attach`; a zero pointer = full inherit, `plans/SPAWN.md` SP10), lowers the child's inherited limits by the block's `limits` at admission (each intersected with the inherited one, never raised; `docs/src/architecture/resource-limits.md`), resolves its session selector against the caller's own session before any child state exists (`docs/src/architecture/sessions.md`), then its console selector (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), applies the per-descriptor wires onto that base (`apply_attach_wires`) — `Closed` and a slot-only `InheritSlot` reshape the console table; an inheriting wire over the caller's *own* base also clones the open entry wired behind that standard slot (a pty or pipe end), because the console table records console-backed slots only and a wired slot's is closed, so a command a pty-hosted shell spawns writes to the same terminal instead of a denied stream; every `Handle` wire resolves owner-checked against the caller's own open table into a cloned entry (direction-checked for its slot, and a **directory** handle refused — a standard slot is a byte stream, and `is_read()` alone would admit a directory, which is legitimately opened readable; the same reason `fd_grant` declines one); every resolved entry that is **path-backed** is conferred rather than copied (`OpenFile::conferred_to_child` re-expresses it as a delegation carrying the spawning parent's captured uid and effective set, sharing the one open file description, because a path is re-authorised under whoever holds it and a child handed a document is meant to need no filesystem capability — a delegation passes through carrying its own grantor's identity instead, so a spawn never launders authority); and each resolved entry is installed at the child's fd 0–3 with its console slot closed, so exactly one authority backs each descriptor and a pipe/pty-end clone registers one more live end — copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry` (the x86_64/riscv64 §18.6 boot floor) or — for an absolute `…/<Name>.app/Run` store-bundle path with an installed `AppStore` — loads and verifies the on-disk bundle through the shared `tairix_appload` gate (signature against the embedded app trust anchor, content hash, ABI/syscall hash), the bundle read running through the secured VFS under the caller's kernel-attested identity and a spawn racing the boot mount parking on the store's readiness latch (`plans/APPS.md` deliverable 8), then resolves the child's kernel-attested **credential** from the block's `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user, `PREREQUISITES.md` P-C), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table, wired entries, and credential) through `SpawnCtx::admit_process`, placed in its session at admission's last step, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Malformed / wrong-length attach block → `LengthOutOfRange` / `BadMagic` / `OutOfRange`. A join that cannot be honoured — naming no live instance within the caller's session, or one whose session is ending — → `NotFound`, whatever the cause; any other placement whose session is ending → `Interrupted`; the nesting bound → `LimitExceeded`. Console index with no installed console → `NotFound`. A `Handle` wire naming no descriptor of the caller → `NotFound`; one whose direction cannot serve its slot → `PermissionDenied`; a directory handle → `OutOfRange`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. A `SPAWN_FLAG_FOREGROUND` hand-over without `CAP_CONSOLE_READ` → `PermissionDenied`; with no terminal behind the caller's standard input, or one another party holds — checked before the child exists and again as it is admitted — → `NotForeground`, the child never having run. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
+| `spawn`         | stages and parses the optional `SpawnAttach` block fail-closed (`stage_spawn_attach`; a zero pointer = full inherit, `plans/SPAWN.md` SP10), lowers the child's inherited limits by the block's `limits` at admission (each intersected with the inherited one, never raised; `docs/src/architecture/resource-limits.md`), resolves its session selector against the caller's own session before any child state exists (`docs/src/architecture/sessions.md`), then its console selector (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), applies the per-descriptor wires onto that base (`apply_attach_wires`) — `Closed` and a slot-only `InheritSlot` reshape the console table; an inheriting wire over the caller's *own* base also clones the open entry wired behind that standard slot (a pty or pipe end), because the console table records console-backed slots only and a wired slot's is closed, so a command a pty-hosted shell spawns writes to the same terminal instead of a denied stream; every `Handle` wire resolves owner-checked against the caller's own open table into a cloned entry (direction-checked for its slot, and a **directory** handle refused — a standard slot is a byte stream, and `is_read()` alone would admit a directory, which is legitimately opened readable; the same reason `fd_grant` declines one); every resolved entry bound to a node is conferred rather than copied (`OpenFile::conferred_to_child` gives the child's entry the same node acting under the spawning parent's uid and effective set captured at the spawn, sharing the one open file description, because an own descriptor acts as whoever holds it and a child handed a document is meant to need no filesystem capability — an entry already acting under a frozen authority passes through with it, so a spawn never launders authority); and each resolved entry is installed at the child's fd 0–3 with its console slot closed, so exactly one authority backs each descriptor and a pipe/pty-end clone registers one more live end — copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry` (the x86_64/riscv64 §18.6 boot floor) or — for an absolute `…/<Name>.app/Run` store-bundle path with an installed `AppStore` — loads and verifies the on-disk bundle through the shared `tairix_appload` gate (signature against the embedded app trust anchor, content hash, ABI/syscall hash), the bundle read running through the secured VFS under the caller's kernel-attested identity and a spawn racing the boot mount parking on the store's readiness latch (`plans/APPS.md` deliverable 8), then resolves the child's kernel-attested **credential** from the block's `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user), resolves a working directory the block names as that credential from where its path starts for the caller, pinned for the child (so a spawner may start a child where only the child may go), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table, wired entries, and credential) through `SpawnCtx::admit_process`, placed in its session at admission's last step, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Malformed / wrong-length attach block → `LengthOutOfRange` / `BadMagic` / `OutOfRange`. A join that cannot be honoured — naming no live instance within the caller's session, or one whose session is ending — → `NotFound`, whatever the cause; any other placement whose session is ending → `Interrupted`; the nesting bound → `LimitExceeded`. Console index with no installed console → `NotFound`. A `Handle` wire naming no descriptor of the caller → `NotFound`; one whose direction cannot serve its slot → `PermissionDenied`; a directory handle → `OutOfRange`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A working directory the child may not search, or that names no directory → the resolution's refusal (`NotFound`, `PermissionDenied`, `NotADirectory`, `LinkLoop`), the child never existing; one on a sandbox block → `OutOfRange`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. A `SPAWN_FLAG_FOREGROUND` hand-over without `CAP_CONSOLE_READ` → `PermissionDenied`; with no terminal behind the caller's standard input, or one another party holds — checked before the child exists and again as it is admitted — → `NotForeground`, the child never having run. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, confirms **every page** of the range is one the caller holds anonymously (containment against `AddressSpaceRegistry::anon_region_holds`, not a match against one `mem_map` — a growable arena releases whatever came free at its top), then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4); on success the released pages leave the record, their bytes are credited back, and they are dropped from the registry snapshot | `len == 0` → `LengthOutOfRange`. Any page not held by the caller → `NotFound`, touching nothing. No producer wired → `NotImplemented`. Otherwise `Ok(0)`. |
 | `mem_pin`       | checks the caller's pinned footprint (mapped address space + committed stack, the one shared accounting) against its effective `pinned-memory-bytes` soft bound under one registry write guard, then stores the pin mark against the kernel-trusted caller id — idempotent: an already-pinned caller is in the requested state | Footprint past the soft bound → `OutOfRange`. Otherwise `Ok(0)`. |
@@ -2532,8 +2643,8 @@ re-validates arguments — the dispatcher does that first.
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space the spawn attach block's console selector draws from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
-| `pipe_create`   | mints one kernel pipe (`kernel/core::pipe` — a 64 KiB flow-control ring with Drop-counted ends) as a read/write descriptor pair in the caller's own open table (`AddressSpaceRegistry::open_pipe`, the same allocator `fs_open` draws from) and writes the two `u32` fds out through `copy_to_user`; the ends are served by `stream_read`/`stream_write` and `fs_read`/`fs_write` alike over the one descriptor path (a pipe has no position, so the offset is ignored; empty-with-writer and full-with-reader park on `STREAM_WAITQ` — registered *before* the first poll and until the transfer leaves the loop, on both directions, since a wake reaches only the tasks registered at that instant; the registration is keyed on *this* pipe's ring side, so a transfer here wakes this pipe's blocked reader or writer and no other stream's (`plans/OPEN-DEFECTS.md` D62); a writer-less drain is end-of-stream, a readerless write is `BrokenPipe`). Either direction stages at most one ring (`PIPE_CAPACITY`) per call whatever length the caller declares, so a program handing over a whole multi-megabyte payload is answered short and loops rather than making the kernel allocate, zero and copy a megabyte to move 64 KiB of it and released by `fs_close`/exit through the end handle's own drop (`plans/SPAWN.md` SP10) | Faulting out-pointer / no registered address space → `BadAddress`, with the half-built pair unwound whole. Otherwise `Ok(0)`. |
-| `pty_create`    | validates `rows`/`cols` (non-zero, `u16`-bounded) into a `TerminalSize`, then mints one kernel pseudo-terminal (`kernel/core::pty` — two `PIPE_CAPACITY` rings carrying the shared `lib/tty` line discipline + a `ForegroundOwnership`) as a master/slave read-write descriptor pair in the caller's own open table (`AddressSpaceRegistry::open_pty`) and writes the two `u32` fds out (master first) through `copy_to_user`; the ends are served by `stream_read`/`stream_write` and `fs_read`/`fs_write` alike, through the one shared parked read/write loop (a master write feeds the input discipline and delivers cooked `^C`/`^Z` to the slave's foreground job via `procsignal`; a master read drains cooked output; a slave read drains input, echoing in cooked mode; a slave write cooks `ONLCR`). The slave is a tty for `stream_input_mode`/`terminal_size`/`console_foreground` (`plans/PTY.md`) | Zero/oversized dimension → `OutOfRange`. Faulting out-pointer / no registered address space → `BadAddress`, with the half-built pair unwound whole. Otherwise `Ok(0)`. |
+| `pipe_create`   | mints one kernel pipe (`kernel/core::pipe` — a 64 KiB flow-control ring with Drop-counted ends) as a read/write descriptor pair in the caller's own open table (`AddressSpaceRegistry::open_pipe`, the same allocator `fs_open` draws from) and writes the two `u32` fds out through `copy_to_user`; the ends are served by `stream_read`/`stream_write` and `fs_read`/`fs_write` alike over the one descriptor path (a pipe has no position, so the offset is ignored; empty-with-writer and full-with-reader park on `STREAM_WAITQ` — registered *before* the first poll and until the transfer leaves the loop, on both directions, since a wake reaches only the tasks registered at that instant; the registration is keyed on *this* pipe's ring side, so a transfer here wakes this pipe's blocked reader or writer and no other stream's (`plans/OPEN-DEFECTS.md` D62); a writer-less drain is end-of-stream, a readerless write is `BrokenPipe`). Either direction stages at most one ring (`PIPE_CAPACITY`) per call whatever length the caller declares, so a program handing over a whole multi-megabyte payload is answered short and loops rather than making the kernel allocate, zero and copy a megabyte to move 64 KiB of it and released by `fs_close`/exit through the end handle's own drop (`plans/SPAWN.md` SP10) | Two more descriptors past the caller's `open-files` soft bound → `LimitExceeded`, nothing made. Faulting out-pointer / no registered address space → `BadAddress`, with the half-built pair unwound whole. Otherwise `Ok(0)`. |
+| `pty_create`    | validates `rows`/`cols` (non-zero, `u16`-bounded) into a `TerminalSize`, then mints one kernel pseudo-terminal (`kernel/core::pty` — two `PIPE_CAPACITY` rings carrying the shared `lib/tty` line discipline + a `ForegroundOwnership`) as a master/slave read-write descriptor pair in the caller's own open table (`AddressSpaceRegistry::open_pty`) and writes the two `u32` fds out (master first) through `copy_to_user`; the ends are served by `stream_read`/`stream_write` and `fs_read`/`fs_write` alike, through the one shared parked read/write loop (a master write feeds the input discipline and delivers cooked `^C`/`^Z` to the slave's foreground job via `procsignal`; a master read drains cooked output; a slave read drains input, echoing in cooked mode; a slave write cooks `ONLCR`). The slave is a tty for `stream_input_mode`/`terminal_size`/`console_foreground` (`plans/PTY.md`) | Zero/oversized dimension → `OutOfRange`. Two more descriptors past the caller's `open-files` soft bound → `LimitExceeded`, nothing made. Faulting out-pointer / no registered address space → `BadAddress`, with the half-built pair unwound whole. Otherwise `Ok(0)`. |
 | `stream_input_mode` | decodes the mode fail-closed, resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and selects that console's read discipline (`ConsoleDevice::set_input_mode`, which also resets the line-discipline column): cooked echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo, with CR/LF cooked to CR-LF and the column-bounded `BS SP BS` rub-out), secret suppresses echo and arms the activity indicator, raw suppresses both | Reserved/unknown `mode` → `OutOfRange`. `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
 | `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window and the `[offset, offset + len)` sub-region lies wholly inside it (`devres::mappable_subwindow` — `Mmio` / `BusWindow`, non-zero `len`, in-bounds, non-overflowing), then maps **only** that sub-region `(grant_base + offset, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address — so a large outbound bus-window grant maps just one enumerated BAR, not the whole window (`AGENTS.md` §24.1; `plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window grant or a sub-region escaping it → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame/virtual-window exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, narrows the grant's CPU-side `addr_limit` to the stated `reach` (`devres::carve_limit`), then carves a physically-contiguous, zeroed, coherent `RW` buffer below it (`FrameAllocator::alloc_order_under_user`) — on a translated node the pages wherever frames are free (`FrameAllocator::alloc_chunks_user`), mapped end to end below it in the domain — into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max, a reach of no bits or more than 64, a reach short of a translating viewport's bus side, a limit no RAM lies below, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. No free block below the limit, or frames the machine cannot spare past the kernel reserve and every commitment → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |

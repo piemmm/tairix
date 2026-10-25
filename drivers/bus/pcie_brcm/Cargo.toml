@@ -34,7 +34,7 @@ workspace = true
 # `DriverError` types it fails closed with — one ABI definition.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The PCI/PCIe configuration-access mechanism + shared bus-driver locate/BAR
-# primitives (`mechanism_brcm`, `find_function_by_class`, `assign_and_map_bar`,
+# primitives (`mechanism_supplied`, `find_function_by_class`, `assign_and_map_bar`,
 # `bus_to_cpu_phys`, `USB_CONTROLLER_CLASS`) the `emit_vl805_node` composition
 # drives once the link trains. `lib/* → lib/*`, no cycle.
 tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }

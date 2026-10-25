@@ -413,6 +413,12 @@ impl tairix_util::output::Output for Stdout {
     fn info(&self, record: &[u8]) {
         let _ = Write::write_all(&mut StdInfo, record);
     }
+
+    /// The kernel attests a size only for a console whose grid it knows, so a
+    /// pipe, a file or a byte-stream console is no terminal.
+    fn at_terminal(&self) -> bool {
+        crate::terminal_size(STDOUT).is_ok()
+    }
 }
 
 /// As for [`Stdout`].
@@ -424,19 +430,25 @@ impl tairix_util::output::Output for Stderr {
     fn info(&self, record: &[u8]) {
         let _ = Write::write_all(&mut StdInfo, record);
     }
+
+    fn at_terminal(&self) -> bool {
+        crate::terminal_size(STDERR).is_ok()
+    }
 }
 
 /// Write `line` and a trailing newline to standard error (fd 2), best-effort.
 ///
 /// A tool routes a diagnostic (a usage banner, a failed-query message) here so
 /// it never contaminates the standard-output data stream. Shared by every
-/// command app's `Run` binary, never re-derived per tool. Best-effort: a
-/// stream that accepts no more bytes ends the write rather than spinning, so
-/// the fail-closed result is discarded.
-pub fn write_stderr_line(line: &str) {
-    let mut err = Stderr;
-    let _ = err.write_all(line.as_bytes());
-    let _ = err.write_all(b"\n");
+/// command app's `Run` binary, never re-derived per tool. The line is formatted
+/// on the stack and written with its ending in one write when it fits
+/// [`DEFAULT_BUF_CAPACITY`], so a line built from many parts costs one syscall,
+/// not one a part. Best-effort: a stream that accepts no more bytes ends the
+/// write rather than spinning, so the fail-closed result is discarded.
+pub fn write_stderr_line(line: impl core::fmt::Display) {
+    let mut err: BufWriter<Stderr> = BufWriter::new(Stderr);
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
 }
 
 /// Default fixed capacity of a [`BufReader`] / [`BufWriter`] buffer, in bytes.
@@ -469,6 +481,23 @@ impl<const CAP: usize> FixedFmtBuf<CAP> {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
+    }
+
+    /// End the text with a line break, giving up its last character for one
+    /// when the buffer is full, so a truncated report still ends its line.
+    pub fn end_line(&mut self) {
+        if CAP == 0 {
+            return;
+        }
+        if self.len == CAP {
+            let last = (0..self.len)
+                .rev()
+                .find(|&at| self.bytes[at] & 0xC0 != 0x80)
+                .unwrap_or(0);
+            self.len = last;
+        }
+        self.bytes[self.len] = b'\n';
+        self.len += 1;
     }
 }
 
@@ -913,6 +942,40 @@ mod tests {
     }
 
     #[test]
+    fn a_stderr_line_is_one_write() {
+        seam::arm(1 << 16);
+        write_stderr_line("app: a reason");
+        let calls = seam::calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].0, crate::NUM_STREAM_WRITE);
+        assert_eq!(calls[0].1[0], u64::from(STDERR));
+        assert_eq!(calls[0].1[2], 14);
+    }
+
+    #[test]
+    fn a_formatted_stderr_line_is_one_write() {
+        seam::arm(1 << 16);
+        write_stderr_line(format_args!(
+            "{}: {}{}",
+            "app",
+            "a",
+            char::REPLACEMENT_CHARACTER
+        ));
+        let calls = seam::calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].1[2], 10);
+    }
+
+    #[test]
+    fn standard_output_is_a_terminal_only_when_the_kernel_attests_one() {
+        seam::arm(refusal(Errno::NotImplemented));
+        assert!(!tairix_util::output::Output::at_terminal(&Stdout));
+        let (number, args) = seam::last_call().expect("one trap");
+        assert_eq!(number, crate::NUM_TERMINAL_SIZE);
+        assert_eq!(args[0], u64::from(STDOUT));
+    }
+
+    #[test]
     fn stderr_marshals_fd_two() {
         seam::arm(3);
         assert_eq!(Stderr.write(b"err").expect("write"), 3);
@@ -1118,5 +1181,29 @@ mod tests {
         write!(buf, "éé").expect("infallible");
         assert_eq!(buf.as_bytes(), "é".as_bytes());
         assert!(core::str::from_utf8(buf.as_bytes()).is_ok());
+    }
+
+    /// A report that fills its buffer still ends its line, its last whole
+    /// character giving way to the break.
+    #[test]
+    fn a_full_report_still_ends_its_line() {
+        use fmt::Write as _;
+        let mut buf = FixedFmtBuf::<4>::new();
+        write!(buf, "ab").expect("infallible");
+        buf.end_line();
+        assert_eq!(buf.as_bytes(), b"ab\n");
+        let mut full = FixedFmtBuf::<4>::new();
+        write!(full, "abé").expect("infallible");
+        full.end_line();
+        assert_eq!(
+            full.as_bytes(),
+            b"ab\n",
+            "the whole of the last character goes"
+        );
+        let mut exact = FixedFmtBuf::<4>::new();
+        write!(exact, "abcd").expect("infallible");
+        exact.end_line();
+        assert_eq!(exact.as_bytes(), b"abc\n");
+        assert!(core::str::from_utf8(full.as_bytes()).is_ok());
     }
 }

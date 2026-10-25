@@ -1236,7 +1236,7 @@ fn add_member_fails_closed_on_an_occupied_slot_or_bad_geometry() {
 
 #[test]
 fn remove_then_add_is_the_full_disk_replacement_workflow() {
-    // The end-to-end Linux-md workflow: a failed disk is removed (vacating the
+    // The end-to-end replacement workflow: a failed disk is removed (vacating the
     // slot) and a fresh spare added into it, which rebuilds to full redundancy
     // without a reboot.
     let mut members = [

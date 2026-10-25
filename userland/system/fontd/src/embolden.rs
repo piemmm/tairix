@@ -3,9 +3,8 @@
 //!
 //! A face declaring a `wght` axis is instanced at the requested weight and
 //! never reaches here. Only a face without one is rasterised from its single
-//! outline and then thickened, exactly as a stroke-widening rasteriser would
-//! (`FreeType`'s `FT_Outline_Embolden` takes the equivalent approach on the
-//! outline). Thickening the 8-bit coverage
+//! outline and then thickened, as a stroke-widening rasteriser would.
+//! Thickening the 8-bit coverage
 //! rather than the outline keeps the whole operation inside the sandbox that
 //! already owns the raster, needs no second rasterisation pass, and cannot
 //! move a control point.
@@ -26,8 +25,7 @@ pub(crate) const SUBPIXEL: u32 = 256;
 const BOLD_AXIS_SPAN: u32 = 300;
 
 /// The em fraction a fully bold synthetic stroke is: one twenty-fourth, the
-/// strength a stroke-widening rasteriser applies (`FreeType`'s
-/// `FT_GlyphSlot_Embolden` uses the same em/24).
+/// strength TAIRiX gives a synthetic bold.
 const BOLD_EM_DIVISOR: u32 = 24;
 
 /// Fixed-point denominator the em fraction below is carried in, chosen so the

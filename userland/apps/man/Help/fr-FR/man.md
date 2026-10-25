@@ -51,8 +51,8 @@ entière défile.
 
 - `0` — la page a été affichée.
 - `1` — la commande ou son document d'aide est introuvable, ou la page n'a
-  pas pu être délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+  pas pu être délivrée. Une ligne de commande non comprise sort aussi avec
+  `1`.
 
 ## ENVIRONMENT
 

@@ -11,7 +11,7 @@ serve it, and the HID-over-I2C transport touchpads and touchscreens use.
 | I1 | `i2c-v1` (`lib/abi/src/driver/i2c.rs`), on shared memory: a transaction of up to 8 messages, each a read or a write of up to 4096 bytes, a repeated START between messages and a STOP at the end; the bus states its speed and which repeated STARTs it can issue; every length is checked against the channel's buffer; the controller side in `lib/i2cbus`, the client in `lib/linkclient` | done |
 | I2 | The `I2c` link role (`plans/SUPPLIERS.md` SL1): one endpoint per controller node; a child's link names its address and reaches that target alone, a `ddc` link names none and reaches its dedicated bus | done |
 | I3 | `lib/i2c` and its consumers — the I2C RTC drivers (ds3231, pcf8523, pcf85063a) and the PCM5122 codec — on the rebuilt protocol | done |
-| I4 | The BCM2835 BSC controller on the rebuilt protocol: transfers longer than its FIFO paced by its interrupts, the repeated START before each further message issued by starting it while the write before it is still active (the behaviour Linux's `i2c-bcm2835` uses), and the bus run at its declared speed | done |
+| I4 | The BCM2835 BSC controller on the rebuilt protocol: transfers longer than its FIFO paced by its interrupts, the repeated START before each further message issued by starting it while the write before it is still active (FreeBSD's BSD-2-Clause `bcm2835_bsc.c` documents the same workaround), and the bus run at its declared speed | done |
 | I5 | The DesignWare I2C controller driver (`drivers/bus/i2c/designware`): standard and fast mode, `RESTART` and `STOP` per command, interrupt-paced FIFOs, abort sources mapped to errors | planned |
 | I6 | Intel LPSS: the PCI functions that carry a DesignWare controller, their private reset and clock registers, SCL timing from ACPI `SSCN`/`FMCN` or the I2C specification's figures | planned |
 | I7 | I2C targets from ACPI: each `I2cSerialBusV2` an `I2cTarget` link to its controller by PCI address (`plans/ACPI.md` A4) | planned |
@@ -71,14 +71,14 @@ serve it, and the HID-over-I2C transport touchpads and touchscreens use.
 - **BCM2835.** The BSC's FIFO is 16 bytes, refilled or drained at its
   threshold interrupts. A repeated START is issued by starting the next
   message while the write before it is active, and before that write's last
-  byte is handed over: Linux starts it once the FIFO holds that byte, which
+  byte is handed over: it is started once the FIFO holds that byte, which
   only an interrupt handler can do before the controller ends the write,
   while a process may be preempted anywhere and the controller cannot finish
   a write it has not been given. Writes of any length may precede it; a read
   must end the transaction, so any other shape is refused on this
   controller. The step budget is a FIFO's worth of bytes at the bus's speed
-  and one second's stall, the Linux I²C core's default; the controller's own
-  stretch timeout is off, as Linux leaves it, so every stall is reported
+  and one second's stall; the controller's own clock-stretch timeout (BCM2835
+  ARM Peripherals, BSC `CLKT`) is off, so every stall is reported
   against the message it stalled. A fault names the earliest message the
   controller has not been seen to finish. Its divider is set from its parent
   clock — the VPU clock, described through its clock link, which the firmware

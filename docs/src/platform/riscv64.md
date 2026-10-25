@@ -1018,6 +1018,15 @@ line first, so a priority-only `unmask` would leave it enabled-never and its
 interrupt would never reach the S-mode context. `arm` is idempotent, so a
 re-arm of an already-enabled line is a plain pair of register writes.
 
+## Message-interrupt multiplexer (`MsiMultiplexer`) — n/a
+
+The optional Arch HAL `MsiMultiplexer` slice (`plans/WIRING.md` W18) is not
+applicable to riscv64: on an AIA board a function's messages land in the IMSIC
+files, each identity a line of its own, so no root complex the port discovers
+holds a bank of vectors behind one wired line. A root complex that does would
+implement the slice in this port and reuse `kernel/core::msimux::MsiMuxLines`
+unchanged; until then `msi_alloc` fails closed with `NotImplemented`.
+
 ## Timer programming (`Timer`)
 
 The riscv64 port implements the Arch HAL `Timer` slice (`AGENTS.md`

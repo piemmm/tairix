@@ -224,7 +224,8 @@ treated as `A` — the stub resolver looks up address and pointer records only.
 A name that does not exist prints `Host <name> not found: 3(NXDOMAIN)`; when
 no server can be reached, the timeout is reported on standard error. `host`
 exits `0` when at least one address was found, `1` when the name resolved to
-no address, and `2` on a usage or output error.
+no address or the command line was not understood, and `2` when no DNS socket
+could be opened or the output could not be written.
 
 `host` is a client of the shared userland stub resolver (`lib/resolver`): it
 reads the active recursive-server set through the same ungated
@@ -381,7 +382,7 @@ packet. The target resolves through the same shared policy `ping` and
   by name rather than ignored, since its output would describe a different
   path than the one asked about.
 * `packetlen` is honoured as the probe's total length, headers included, as
-  Linux counts it; its default is 60 for IPv4 and 80 for IPv6.
+  Linux `traceroute(8)` documents it; its default is 60 for IPv4 and 80 for IPv6.
 
 ## `telnet` — the Network Virtual Terminal client
 

@@ -3,9 +3,10 @@
 //!
 //! A disc is outside TAIRiX's trust boundary: any byte of its descriptors,
 //! directory records, system use, continuation areas, extended attribute
-//! records and zisofs streams may be hostile. Whatever it holds, mounting it
-//! and walking every tree must answer values or errors — never panic, read
-//! out of bounds, or fail to end. The run aborting *is* the failure.
+//! records and zisofs streams may be hostile. Whatever it holds, mounting it,
+//! walking every tree and holding its nodes must answer values or errors —
+//! never panic, read out of bounds, or fail to end. The run aborting *is* the
+//! failure.
 //!
 //! A per-run-seeded `Prng` mutates mastered discs carrying every extension
 //! and the `genisoimage` fixtures, biased towards the bytes that carry
@@ -171,6 +172,7 @@ fn exercise(bytes: Vec<u8>) {
     let mut visited = 0;
     let root = fs.root();
     visit(&mut fs, root, 0, &mut visited);
+    let _ = fs.release_pins();
 }
 
 fn visit(fs: &mut Iso9660<Image>, dir: NodeId, depth: usize, visited: &mut usize) {
@@ -193,7 +195,12 @@ fn visit(fs: &mut Iso9660<Image>, dir: NodeId, depth: usize, visited: &mut usize
         }
         let _ = fs.lookup(dir, &name);
         let _ = fs.node_info(node);
+        let _ = fs.parent(node);
         let _ = fs.security(node);
+        if let Ok(held) = fs.pin(node) {
+            let _ = fs.node_info(held);
+            let _ = fs.unpin(held);
+        }
         let mut value = [0u8; 64];
         for index in 0..12 {
             if let Ok(Some(len)) = fs.list_attr(node, index, &mut value) {

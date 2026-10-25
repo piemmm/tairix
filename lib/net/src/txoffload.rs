@@ -7,9 +7,8 @@
 //! [`NetOffloads::TX_SEGMENT_TCP`](tairix_abi::driver::net::NetOffloads::TX_SEGMENT_TCP)
 //! is handed one over-MTU TCP segment and must put MTU-sized packets on the
 //! wire. Where the silicon has a segmentation engine the driver forwards the
-//! request (the `virtio-net` path); where it has none — the Broadcom GENET,
-//! and the same case Linux's `net/core/tso.c` serves for `mvneta`, `mvpp2`,
-//! and `fec` — the driver splits the super-frame itself and still gets the
+//! request (the `virtio-net` path); where it has none, the driver splits the
+//! super-frame itself and still gets the
 //! win the offload exists for: one ring slot and one stack transmit path for
 //! tens of wire packets.
 //!
@@ -375,7 +374,7 @@ const IPV6_NEXT_HEADER: usize = 6;
 /// declares, or [`None`] when the frame is not IP or is too short to say.
 ///
 /// A transmit-checksum engine that must be told the transport reads it here
-/// rather than re-deriving the header layout: the GENET applies RFC 768's
+/// rather than re-deriving the header layout: an engine may apply RFC 768's
 /// "a computed zero is sent as `0xFFFF`" rule only when told the datagram is
 /// UDP, and getting that wrong would silently disable a UDP checksum.
 ///

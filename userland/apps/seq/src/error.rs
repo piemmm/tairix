@@ -2,21 +2,19 @@
 
 use alloc::string::String;
 use core::fmt;
-use tairix_util::quote::quote;
+use tairix_util::getopt::Refusal;
+use tairix_util::quote::{quote, quote_if_needed};
 
 /// Why a `seq` invocation did not complete.
 ///
-/// Usage failures mirror the GNU tool's diagnostics word for word; the one
-/// runtime failure is the output stream refusing bytes.
+/// Usage failures are the GNU tool's diagnostics word for word, save that a
+/// control or other hidden character in a rejected directive is escaped
+/// where GNU prints it raw; the one runtime failure is the output stream
+/// refusing bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SeqError {
-    /// An unrecognised long option; carries the token.
-    UnknownLong(String),
-    /// An unrecognised short option; carries the flag character.
-    UnknownShort(char),
-    /// `-f`/`-s` (or their long forms) were given without a value; carries
-    /// the option's spelling for the diagnostic.
-    MissingValue(&'static str),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// No operand was given.
     MissingOperand,
     /// More than three operands were given; carries the first extra one.
@@ -45,21 +43,7 @@ pub enum SeqError {
 impl fmt::Display for SeqError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => {
-                write!(f, "unrecognized option {token}", token = quote(token))
-            }
-            Self::UnknownShort(flag) => write!(
-                f,
-                "invalid option -- {}",
-                quote(flag.encode_utf8(&mut [0; 4]))
-            ),
-            Self::MissingValue(option) => {
-                write!(
-                    f,
-                    "option {option} requires an argument",
-                    option = quote(option)
-                )
-            }
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::MissingOperand => write!(f, "missing operand"),
             Self::ExtraOperand(text) => write!(f, "extra operand {text}", text = quote(text)),
             Self::InvalidNumber(text) => {
@@ -98,10 +82,14 @@ impl fmt::Display for SeqError {
                 write!(f, "format {fmt_str} ends in %", fmt_str = quote(fmt_str))
             }
             Self::FormatUnknownDirective(fmt_str, ch) => {
+                let mut directive = [0; 8];
+                directive[0] = b'%';
+                let spelled = 1 + ch.encode_utf8(&mut directive[1..]).len();
                 write!(
                     f,
-                    "format {fmt_str} has unknown %{ch} directive",
-                    fmt_str = quote(fmt_str)
+                    "format {} has unknown {} directive",
+                    quote(fmt_str),
+                    quote_if_needed(core::str::from_utf8(&directive[..spelled]).unwrap_or("%"))
                 )
             }
             Self::FormatTooManyDirectives(fmt_str) => {
@@ -113,5 +101,35 @@ impl fmt::Display for SeqError {
             }
             Self::Output => write!(f, "write error"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SeqError;
+    use alloc::string::{String, ToString};
+    use tairix_util::getopt::Refusal;
+
+    #[test]
+    fn an_unknown_directive_is_shown_with_its_hidden_characters_escaped() {
+        let escape = SeqError::FormatUnknownDirective(String::from("%\u{1b}"), '\u{1b}');
+        assert_eq!(
+            escape.to_string(),
+            "format '%'$'\\033' has unknown '%'$'\\033' directive"
+        );
+        let letter = SeqError::FormatUnknownDirective(String::from("%Q"), 'Q');
+        assert_eq!(letter.to_string(), "format '%Q' has unknown %Q directive");
+    }
+
+    #[test]
+    fn a_missing_value_is_named_as_getopt_names_it() {
+        assert_eq!(
+            SeqError::Option(Refusal::MissingShortValue('f')).to_string(),
+            "option requires an argument -- 'f'"
+        );
+        assert_eq!(
+            SeqError::Option(Refusal::MissingLongValue("separator")).to_string(),
+            "option '--separator' requires an argument"
+        );
     }
 }

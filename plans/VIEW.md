@@ -363,7 +363,7 @@ in a `Panel` for the thumbnail sidebar, a `FactList` for the info panel, and
 **`Run` (`src/run.rs`)** over the shared shell: the app-bar declaration, the
 wait-set extended with the worker channel and the animation deadline, document
 acquisition by `DOCUMENT_ROLE_ARG` + `STDIN` or `pick_file` — a wired
-path-backed descriptor is conferred, so it is operated on under the *spawning
+descriptor is conferred, so it is operated on under the *spawning
 parent's* captured identity (`OpenFile::conferred_to_child`), which is what
 lets the viewer read its document while requesting no `CAP_FS_ACCESS` of its
 own — menus via
@@ -1046,26 +1046,15 @@ read this paragraph first; the rustdoc on both types points here.
   binary, which no host test can enter, so the guest run is the only place
   this property can be held.
 
-- **The inherited-document hand-off now reaches a program with no filesystem
-  capability (D119) — done.** A wire cloned the parent's `OpenFile` with its
-  backing unchanged, so the child held an `OpenBacking::Path`, which
-  `PathAuthority::of` resolves under *the holder's* own identity — and a viewer
-  deliberately holds none, so `fs_read` and `fs_stat` were both
-  `PermissionDenied`. The picker route worked only because `fd_grant` mints a
-  backing that carries its grantor's captured identity.
-
-  The User took the decision the fix turns on: **any** wired path-backed handle
-  confers the parent's reach, not only one minted for the purpose.
-  `OpenFile::conferred_to_child` re-expresses a path backing as a delegation
-  carrying the spawning parent's captured uid and effective set, sharing the one
-  open file description so a redirected child still walks the file with its
-  parent, and it is applied to every resolved wire rather than only an explicit
-  handle — an inherited standard stream is the same descriptor reaching the same
-  child by a different spelling, and fixing one would have left its twin.
-  `DelegatedFile::write_ceiling` became `Option<u64>` so the two grantors read
-  honestly: `fd_grant` attenuates and always names a ceiling, a parent passing
-  on its own reach has none, and `PathAuthority` now reads the field rather than
-  re-wrapping it.
+- **The inherited-document hand-off reaches a program with no filesystem
+  capability (D119) — done.** Any wired descriptor confers the parent's reach:
+  `OpenFile::conferred_to_child` gives the child's entry the same node acting
+  as `Authority::Frozen` with the spawning parent's uid and effective set
+  captured at the spawn, sharing the one open file description so a redirected
+  child still walks the file with its parent. It applies to every resolved
+  wire, an inherited standard stream as much as an explicit handle. A grant
+  (`fd_grant`) attenuates and always names a ceiling; a parent passing on its
+  own reach has none.
 
   It never widens. The parent could perform every operation itself; a child
   holding *more* than its parent is attenuated to the parent's set; and a

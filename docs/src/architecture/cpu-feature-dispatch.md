@@ -115,8 +115,7 @@ Page-zero sits firmly on the **capability** axis: a block-zero primitive is
 unconditionally faster than a scalar loop when present and bit-identical in
 result, so the choice is `ByPriority` (hardware first, portable baseline last)
 — **never** benchmarked. Racing a page-zero benchmark at boot would be
-pointless churn, and Linux likewise selects `DC ZVA`/ERMS by feature, not by
-timing. The hardware candidate is self-verified against the byte fill — over a
+pointless churn. The hardware candidate is self-verified against the byte fill — over a
 fixed vector of lengths and alignments, including that it zeroes *exactly* the
 requested region and touches nothing past it — before it can be selected. Like
 CRC-32C, the kernel resolves one routine, after SMP bring-up, against the

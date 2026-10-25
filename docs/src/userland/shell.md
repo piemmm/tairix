@@ -26,7 +26,8 @@ the outside world are injected seams, mirroring `init`'s `Spawner`/
 `Reaper` design ([PID 1 service manager](./init.md)):
 
 - `ProcessHost` — `launch` / `wait` / `signal` / `poll` a job, and
-  `change_directory`. Every failure is reported as the stable `Errno` the
+  `change_directory` / `working_directory` / `directory_identity` for the
+  working directory. Every failure is reported as the stable `Errno` the
   kernel returns, so the shell invents no parallel error vocabulary
   (`AGENTS.md` §2.2).
 - `Console` — `write_stdout` / `write_stderr`.
@@ -81,7 +82,8 @@ alone, as do `export`'s `NAME=value` operands.
 fields and never read as a filename pattern — zsh's rule, not bash's — so a
 filename held in a variable cannot be re-read as a wildcard; only pattern
 characters written unquoted in the line are wildcards. Parameter expansion
-keeps each character's quoting as a `lib/glob` `Mark` for the next stage.
+keeps which of its text was typed unquoted, the only text the next stage
+reads as pattern syntax.
 
 **Braces** (`src/brace.rs`), as bash expands them, on unquoted text only:
 `a{b,c}d` → `abd acd`, nested and empty alternatives, and sequences
@@ -121,8 +123,9 @@ matches, sorted bytewise and deduplicated:
   that resolves nowhere, a node that lists nothing), lies past what a path can
   reach (too deep or too long for the kernel to resolve), or is not the
   session's to list contributes nothing. Any other failure — a volume gone, a
-  device failing — aborts the line naming the directory, as does any failure
-  once a listing has begun, so a result is never silently partial.
+  device failing — aborts the line naming the directory it could not read or
+  the path it could not look up, as does any failure once a listing has
+  begun, so a result is never silently partial.
 
 The options are bash's, under bash's names, all off by default, and set by
 the `shopt` builtin: `dotglob`, `failglob`, `nullglob`, `nocaseglob`
@@ -136,19 +139,27 @@ and `globskipdots` report on and cannot be turned off. The lexer always reads
 an extended group as one word (its `|` and blanks included); while `extglob`
 is off, a line holding one is refused whole, as bash refuses it as a syntax
 error. `GLOBIGNORE` names `:`-separated patterns whose matches are removed,
-compared against whole paths, along with any path ending in `.` or `..`. A
-non-empty one implies `dotglob` without setting it, so unsetting it never
-clears a `dotglob` the session chose, as bash's does. An entry that is no
-valid pattern fails a line whose pattern matched anything, rather than hiding
-nothing as bash's does, so a typo never exposes what it was meant to hide.
+compared against whole paths, along with any path ending in `.` or `..`;
+they are compiled once for each value, charged to the line that first needs
+them at what they hold. A non-empty one implies `dotglob` without setting it,
+so unsetting it never clears a `dotglob` the session chose, as bash's does.
+An entry that is no valid pattern fails a line whose pattern matched
+anything, rather than hiding nothing as bash's does, so a typo never exposes
+what it was meant to hide. So does an entry whose group holds a `/`, which
+bash lets reach across components: compared a component at a time it would
+hide less than it names.
 
 A line's expansions together — every pipeline member's words, redirection
-targets, here-strings, here-documents and assignment values — are bounded by
-the largest argument block a program can be handed
-(`PROCESS_START_MAX_TOTAL_LEN`, each word charged its bookkeeping too), and a
-word stops growing before a value would carry it past what the line has left:
-`{1..100000000}` or a line of `x=$x$x` doublings fails with `expansion
-exceeds the argument size limit` rather than exhausting memory. A command whose words all expand away runs
+targets, here-strings, here-documents and assignment values — may hold no
+more than the largest argument block a program can be handed
+(`PROCESS_START_MAX_TOTAL_LEN`). What they hold is charged before it is
+allocated: every byte of text, the words brace expansion makes on the way,
+and each list's room for words as it grows. A word is refused before a value
+would carry it past what the line has left: `{1..100000000}` or a line of
+`x=$x$x` doublings fails with `expansion exceeds the argument size limit`
+rather than exhausting memory. Memory the heap refuses on the way, there or
+in a pattern's match, fails the line with `out of memory`, never the session.
+A command whose words all expand away runs
 nothing, its assignments binding in the shell; with redirections, or inside a
 pipeline, it is refused (`command expanded to nothing`), since there is no
 program to apply them to.
@@ -162,6 +173,10 @@ understood before anything runs. The shell then *lowers* each parsed
 `Open { mode, target }`, a `Dup { source }`, or a `Close` — that the process
 host applies in source order. The host never re-derives redirection meaning;
 it only opens, duplicates, or closes a descriptor.
+
+A writing redirection creates a missing target `0o666` less the process's
+umask, as every POSIX shell does (`PlannedOpen::Path`'s `mode`); a read
+creates nothing.
 
 Supported operators (each may carry an explicit leading descriptor number, an
 IO number, e.g. `2>`, `3>>`, `0<`):
@@ -194,8 +209,11 @@ IO number, e.g. `2>`, `3>>`, `0<`):
 - **Dynamic descriptors (zsh):** `{var}>out` (and any other `<`/`>` operator
   with a `{name}` glued to it) allocates a fresh descriptor — always ≥ 10,
   never the reserved standard streams fd 0–3 — performs the redirection on
-  it, and binds the number to the shell parameter `var`; `{var}>&-` closes
-  the previously allocated descriptor read back from `$var`. A variable that
+  it, and binds the number to the shell parameter `var` once the target or
+  here-string has expanded, as bash does. A command that never launches — a
+  target that fails to expand, a launch the host refuses — leaves `var` as it
+  was. `{var}>&-` closes the previously allocated descriptor read back from
+  `$var`. A variable that
   does not hold an allocated number fails closed (the shell never closes a
   standard stream off a stale or mistyped value).
 - **Here-document:** `<< delim` (and `<<- delim`, which strips leading tabs
@@ -205,7 +223,10 @@ IO number, e.g. `2>`, `3>>`, `0<`):
   afterwards (`CommandList::feed_here_doc_line`, driven by the REPL with a
   `> ` continuation prompt), in source order when a line has several
   here-documents. If any part of the delimiter was quoted the body is
-  literal; otherwise it undergoes the same `$` expansion as a word. A
+  literal; otherwise it is read as POSIX reads it, as double-quoted text in
+  which only `\$`, `` \` `` and `\\` escape, and a line ending in an
+  unescaped `\` joins the next before it is compared with the delimiter
+  (`<<-` strips tabs where a joined line starts). A
   complete body lowers to the same `HereString` bytes-on-fd action as a
   here-string — one primitive, not two (`AGENTS.md` §2.2). Collection is
   bounded (`MAX_HERE_DOC_BYTES`, 64 KiB — a fixed security bound, §24.4):
@@ -301,10 +322,14 @@ serving half a request would silently downgrade it.
 Refused closed (tracked in `plans/SHELL.md`): process substitution — the
 stream forms `<(…)` / `>(…)` await the launch plumbing, and the
 temporary-file form `=(…)` is permanently unsupported (TAIRiX has no scratch
-filesystem) — and the compound commands `( list )` and `{ list; }`. Each is
+filesystem) — the compound commands `( list )` and `{ list; }`, and command
+substitution and arithmetic expansion (`$(…)`, `` `…` ``, `$((…))`), in a
+word, inside double quotes and in a here-document body. Each is
 *recognised* and aborts the line with a parse error, so a parenthesised
-command can never be misread as a filename and `{`/`(` can never run as a
-program name. A `Resource` target resolves at launch through the
+command can never be misread as a filename, `{`/`(` can never run as a
+program name, and a substitution is never handed on as text. An unquoted
+`(` or `)` inside a word is the operator bash refuses there too
+(`unexpected token`). A `Resource` target resolves at launch through the
 capability-checked `resource_open`, exactly as a `Path` target opens through
 `fs_open` (below).
 
@@ -473,14 +498,57 @@ write through the `Console` seam as before.
 ## Builtins
 
 `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`,
-`ulimit`, `elevate`, `shopt`, `help`. A builtin runs inside the shell process
-because it mutates or reads shell-side state — the environment, the
-working directory, the job table, the `exit` request a read-eval loop
-watches, the process's own resource limits, or (for `elevate`) the
-controlling terminal a password prompt must own; everything else is
-launched as an external program. `cd` refuses more than one operand
-(`cd: too many arguments`), so a pattern naming several directories never
-silently picks one.
+`ulimit`, `umask`, `elevate`, `shopt`, `help`. A builtin runs inside the
+shell process because it mutates or reads shell-side state — the
+environment, the working directory, the job table, the `exit` request a
+read-eval loop watches, the process's own resource limits and file mode
+creation mask, or (for `elevate`) the controlling terminal a password
+prompt must own; everything else is launched as an external program. `cd`
+refuses more than one operand (`cd: too many arguments`), so a pattern
+naming several directories never silently picks one.
+
+`cd [-L | -P [-e]] [directory]` and `pwd [-L | -P]` are POSIX's, over three
+`ProcessHost` calls — `change_directory` (`fs_chdir`), `working_directory`
+(`fs_getcwd`) and `directory_identity` (a directory's identity, a final link
+followed). The kernel's working directory holds the directory itself, so it
+follows the directory through a rename; `PWD` holds the path `cd` reached it
+by. `cd -L`, the default, joins a relative operand to `PWD` while `PWD` still
+names the working directory and to the directory's own path otherwise — and,
+where neither can be had, enters the operand as `-P` does — checks before
+removing each `..` that the component it removes names a directory, takes
+each `..` lexically, `/..` staying `/` as POSIX has it and a `..` beneath an
+alias root never climbing above it (`cd Home:/..` is refused), renders the
+result through `lib/path` and enters it, keeping the rendered path in `PWD`:
+`cd link` then `cd ..` returns to where the link is. `cd -P` enters the
+operand as the kernel resolves it and sets `PWD` to the directory's own path;
+`-e` makes a path it cannot learn a failure, the change standing either way.
+`cd` alone goes to `HOME`, `cd -` to `OLDPWD` and prints it, and every change
+sets `OLDPWD`. `pwd -L` prints `PWD` while it is a path spelled as the grammar
+renders one and reaches the working directory's own identity, and the
+directory's own path otherwise, as `pwd -P` always does. The prompt's `\w`
+shows `PWD`. Before the first prompt `Shell::settle_working_directory` keeps
+an inherited `PWD` naming the working directory and otherwise takes `PWD`
+from the working directory, as POSIX has it; it never changes directory to
+follow `PWD` (login starts a session in its home through the spawn itself).
+`CDPATH` is not read.
+
+`ulimit [-a] [-H | -S] [<resource> [<value>]]` reports and imposes the
+process's own limits ([Resource limits](../architecture/resource-limits.md));
+`-n` names `open-files`, the descriptor limit, as bash spells it, and flags
+may run together (`ulimit -Sn 256`).
+
+`umask [-S] [mode]` is bash's, over the `fs_umask` call through the
+`ProcessHost` seam: alone it prints the mask as four octal digits (`0022`),
+with `-S` the permissions it leaves (`u=rwx,g=rx,o=rx`); a `mode` sets it,
+and `-S` then prints the new one. An octal `mode` is the mask itself, its
+permission bits kept (`umask 1777` is `0777`); a symbolic one is read by the
+grammar `chmod` reads (`tairix_util::mode`) and edits the permissions the
+mask leaves, a clause naming no one acting on every field, so `umask g-w`
+adds `020` and `umask u=rwx,g=rx,o=` gives `0027`. Letters other than `r`,
+`w` and `x`, a copied field and an octal operator name nothing a mask holds
+and are refused, as bash refuses them; a refused mode, an unknown option or
+a second operand is reported with status 1 and changes nothing. The mask is
+the process's, so every command launched afterwards starts with it.
 
 `shopt [-pqsu] [-o] [optname ...]` is bash's: with `-s`/`-u` it sets or
 unsets the named options (and alone lists those on or off); otherwise it
@@ -533,7 +601,8 @@ next line, so output never interleaves mid-command.
 (unterminated quote, dangling escape), a grammatical one (empty
 command, a redirection with no target, an unterminated `${...}`), or an
 expansion that could not complete (a `failglob` miss, a malformed pattern,
-an over-large expansion, an unreadable directory). A line that does not
+an over-large expansion, memory refused, a directory it could not read or a
+path it could not look up). A line that does not
 parse or expand runs **nothing**; `$?` is `2` for a fault in the line as
 written and `1` for an expansion failure (`ParseError::status`).
 
@@ -551,10 +620,11 @@ it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
 - Expansion does not field-split, and a value is never re-read as a
   pattern: zsh's rules, deliberately, over bash's.
 - The supported parameter expansions are `$NAME`, `${NAME}`, and `$?`.
-  Command substitution, arithmetic expansion and tilde expansion are not
-  implemented yet; their spellings are inert word text except where running
-  them would change command meaning — process substitution and compound
-  commands fail closed with a parse error.
+  Tilde expansion is not implemented and `~` stays word text. Command
+  substitution and arithmetic expansion are not implemented either, and fail
+  closed with a parse error, as do process substitution and compound
+  commands, because reading any of them as text would change what the
+  command does.
 
 ## Tests
 
@@ -564,7 +634,9 @@ rules, the parser's pipelines/redirections/connectors and its fail-closed
 grammar errors, `$`-expansion, here-document collection (quoted/unquoted
 delimiters, `<<-` tab stripping, source-order filling, the size bound, and
 the unterminated/over-length fail-closed paths, including through the REPL),
-every builtin, foreground status propagation, the command-not-found path,
+every builtin (`cd -L`/`-P`/`-e`/`-` and `pwd -L`/`-P` over a tree holding a
+link, and the start-up settling of `PWD`), foreground status propagation,
+the command-not-found path,
 background job tracking, the `Done`-before-prompt reporting of finished
 jobs, connector short-circuiting, `!` status negation, `|&` lowering,
 prefix-assignment scoping (child environment only; temporary around a

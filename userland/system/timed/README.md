@@ -7,8 +7,8 @@ principal in the system granted `CAP_TIME_SET`, so every path that sets the
 clock from a network source runs through it (`plans/TIMESYNC.md`).
 
 The installed binary lives at `/System/Services/timed.app/Run`, started by PID 1
-from the enrolled tier before the root is mounted. A Raspberry Pi 3/4 has no RTC
-at all, so without this service such a machine boots with
+from the enrolled tier before the root is mounted. A board with no RTC at all,
+without this service, boots with
 `WallTimeState::Unset` for ever — and the audit log's hash chains, ARXFS
 `Time64` metadata, and certificate lifetimes all rest on the clock it
 establishes. Disabling the service stops the clock chip being read as well as

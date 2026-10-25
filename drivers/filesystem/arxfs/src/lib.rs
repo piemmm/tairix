@@ -60,7 +60,8 @@ use tairix_abi::driver::block::{Block, BlockClass, MAX_BLOCK_LEN};
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, VolumeHost, VolumeStats,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, Unpinned, VolumeHost,
+    VolumeStats,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -68,7 +69,7 @@ pub use tairix_abi::driver::filesystem::{
 use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
-use tairix_collections::{RangeKey, RangeSet};
+use tairix_collections::{RadixTree, RangeKey, RangeSet};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
 use zeroize::Zeroize;
@@ -161,7 +162,9 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// is the path *under `parent`* of the bundle's leaf file (for example,
 /// relative to the `/System` volume root,
 /// `&[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"]`). The bytes are the
-/// signed `.rxe` bundle exactly as the store scanner reads it back.
+/// signed `.rxe` bundle exactly as the store scanner reads it back. Every node
+/// it creates is born with the system user's creation default for its kind
+/// ([`Security::created`]).
 ///
 /// # Errors
 ///
@@ -183,11 +186,21 @@ where
     for dir in dirs {
         node = match fs.lookup(node, dir) {
             Ok(existing) => existing,
-            Err(_) => fs.create(node, dir, NodeKind::Directory)?,
+            Err(_) => fs.create(
+                node,
+                dir,
+                NodeKind::Directory,
+                &Security::created(NodeKind::Directory, 0, 0),
+            )?,
         };
     }
-    fs.create(node, file_name, NodeKind::RegularFile)?;
-    fs.write_all(node, file_name, 0, bytes)
+    let file = fs.create(
+        node,
+        file_name,
+        NodeKind::RegularFile,
+        &Security::created(NodeKind::RegularFile, 0, 0),
+    )?;
+    fs.write_all(file, 0, bytes)
 }
 
 /// Widest value any of the driver's B-trees stores beside a key.
@@ -774,6 +787,10 @@ pub struct ARXFS<B: Block> {
     /// finished by the next writable mount
     /// (`docs/src/filesystem/arxfs-spec.md` §4, §14).
     pending_delete_root: u64,
+    /// The kernel's holds, counted per inode. A held inode that loses its last
+    /// name stays in the pending-delete set, unreclaimed, until its last hold
+    /// goes; no pin outlives the mount, so the set alone is the crash record.
+    held: RadixTree<u32>,
     root_phys: u64,
     /// Free blocks in the committed volume, read straight from the transaction
     /// root at mount. A read-only handle holds no allocator, so this is the
@@ -2433,6 +2450,7 @@ impl<B: Block> ARXFS<B> {
             scrub_progress_root: 0,
             health_baseline_root: 0,
             pending_delete_root: 0,
+            held: RadixTree::new(),
             root_phys: 0,
             free_count: total_blocks,
             alloc: None,
@@ -3931,6 +3949,7 @@ impl<B: Block> ARXFS<B> {
             // Read from the inode, never counted: ARXFS maintains the field
             // for every kind, so a stat and a listing report the same names.
             nlink: inode.nlink,
+            ino: u64::from(ino),
             size: match inode.kind {
                 // A directory's entries are not a byte length.
                 InodeKind::Dir => 0,
@@ -4577,6 +4596,41 @@ impl<B: Block> ARXFS<B> {
         Ok(ino)
     }
 
+    /// Inode `ino`, or `NotFound` once neither a name nor a hold reaches it:
+    /// an inode awaiting its reclaim is no node to a stale id.
+    fn reached_inode(&mut self, ino: u32) -> Result<Inode, DriverError> {
+        let inode = self.read_inode(ino)?;
+        if inode.nlink == 0 && !self.held.contains_key(u64::from(ino)) {
+            return Err(DriverError::NotFound);
+        }
+        Ok(inode)
+    }
+
+    /// Directory `ino`, to look in or change. A removed directory a hold keeps
+    /// has no entries and takes none, so it is `NotFound` here too.
+    fn entries_dir(&mut self, ino: u32) -> Result<Inode, DriverError> {
+        let dir = self.reached_inode(ino)?;
+        if !dir.is_dir() {
+            return Err(DriverError::Unsupported);
+        }
+        if dir.nlink == 0 {
+            return Err(DriverError::NotFound);
+        }
+        Ok(dir)
+    }
+
+    /// Free inode `ino`, which no hold reaches any more, if no name does
+    /// either: the reclaim its last name's removal left to its last unpin.
+    fn free_if_nameless(&mut self, ino: u32) -> Result<Unpinned, DriverError> {
+        let inode = self.read_inode(ino).map_err(|_| DriverError::DeviceFault)?;
+        if inode.nlink != 0 {
+            return Ok(Unpinned::Released);
+        }
+        self.reclaim_whole(ino)
+            .map_err(|_| DriverError::DeviceFault)?;
+        Ok(Unpinned::Freed)
+    }
+
     /// Validate a single path-component name against the rules `ARXFS` shares
     /// with ext4 (`drivers/filesystem/ext4`,
     /// `docs/src/filesystem/arxfs-spec.md` §13):
@@ -4617,7 +4671,7 @@ impl<B: Block> ARXFS<B> {
 
     fn set_security_inner(&mut self, node: NodeId, sec: Security) -> Result<(), DriverError> {
         let ino = self.ino_of(node)?;
-        let mut inode = self.read_inode(ino)?;
+        let mut inode = self.reached_inode(ino)?;
         inode.sec = sec;
         inode.times.changed = self.now();
         self.write_inode(ino, &inode)?;
@@ -4629,25 +4683,23 @@ impl<B: Block> ARXFS<B> {
         dir: NodeId,
         name: &[u8],
         kind: NodeKind,
+        record: &Security,
     ) -> Result<NodeId, DriverError> {
         Self::check_name(name)?;
         let now = self.now();
         let dir_ino = self.ino_of(dir)?;
-        let mut dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        let mut dir_inode = self.entries_dir(dir_ino)?;
         if self.dir_lookup(&dir_inode, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
-        let (kind_val, mode) = match kind {
-            NodeKind::Directory => (InodeKind::Dir, 0o755),
-            NodeKind::RegularFile => (InodeKind::File, 0o644),
+        let kind_val = match kind {
+            NodeKind::Directory => InodeKind::Dir,
+            NodeKind::RegularFile => InodeKind::File,
             // A link carries a target this call has nowhere to put, so it
             // is created only by `create_link`.
             NodeKind::Symlink => return Err(DriverError::Unsupported),
         };
-        let mut child = Inode::empty(kind_val, Security::new(mode, 0, 0), now);
+        let mut child = Inode::empty(kind_val, *record, now);
         if kind_val == InodeKind::Dir {
             child.nlink = 2;
         } else {
@@ -4702,6 +4754,7 @@ impl<B: Block> ARXFS<B> {
         dir: NodeId,
         name: &[u8],
         target: &[u8],
+        record: &Security,
     ) -> Result<NodeId, DriverError> {
         Self::check_name(name)?;
         if target.is_empty() || target.len() > FS_SYMLINK_MAX {
@@ -4709,10 +4762,7 @@ impl<B: Block> ARXFS<B> {
         }
         let now = self.now();
         let dir_ino = self.ino_of(dir)?;
-        let mut dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        let mut dir_inode = self.entries_dir(dir_ino)?;
         if self.dir_lookup(&dir_inode, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
@@ -4720,10 +4770,7 @@ impl<B: Block> ARXFS<B> {
         // writes can be reached from a volume that has not admitted to
         // holding links; `rollback` restores it with the rest of the state.
         self.incompat |= superblock::INCOMPAT_SYMLINKS;
-        // A link's own mode never gates access — resolution authorises the
-        // target — so the conventional world-traversable `lrwxrwxrwx` is
-        // stored, which is also what a listing shows.
-        let mut child = Inode::empty(InodeKind::Link, Security::new(0o777, 0, 0), now);
+        let mut child = Inode::empty(InodeKind::Link, *record, now);
         child.content_gen = self.mint_content_gen()?;
         let child_ino = self.alloc_inode(&child)?;
         self.write_file(&mut child, child_ino, 0, target, WriteLength::Whole)?;
@@ -4759,18 +4806,14 @@ impl<B: Block> ARXFS<B> {
             InodeKind::File | InodeKind::Link => {}
             InodeKind::Dir => return Err(DriverError::Unsupported),
         }
-        // A node with no names left is being reclaimed. A stale handle must not
-        // be able to give it a new one: the reclaim would then free the blocks
-        // under a live name.
+        // A node with no names left is reclaimed, now or at its last unpin. A
+        // new name would put the blocks that reclaim frees under a live one.
         if target.nlink == 0 {
             return Err(DriverError::NotFound);
         }
         let now = self.now();
         let dir_ino = self.ino_of(dir)?;
-        let mut dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        let mut dir_inode = self.entries_dir(dir_ino)?;
         if self.dir_lookup(&dir_inode, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
@@ -4809,7 +4852,8 @@ impl<B: Block> ARXFS<B> {
     /// maximally fragmented very large file has no bound on. Instead the name's
     /// removal and the set entry are published *together*, in one bounded
     /// transaction, and [`Self::drain_pending_deletes`] then frees the blocks in
-    /// bounded steps with a commit between them. Every state that reaches the
+    /// bounded steps with a commit between them — or the last unpin does, for a
+    /// node the kernel holds. Every state that reaches the
     /// medium is lawful: the node is unreachable by name and named by the set,
     /// so a crash leaves a delete the next writable mount finishes rather than
     /// an orphan holding blocks for the life of the volume.
@@ -4839,21 +4883,28 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// The lowest inode number at or above `from` the pending-delete set
-    /// holds, or `None` when it holds none.
-    fn next_pending_delete(&mut self, from: u64) -> Result<Option<u32>, DriverError> {
-        let Some((key, _)) =
-            self.btree_get_ceil(self.pending_delete_root, from, pending_delete_spec())?
-        else {
-            return Ok(None);
-        };
-        u32::try_from(key)
-            .map(Some)
-            .map_err(|_| DriverError::DeviceFault)
+    /// The lowest inode at or after `walk`'s position that the pending-delete
+    /// set names and no hold keeps, or `None` when there is none. A leaf's
+    /// worth of held inodes is passed over in one read.
+    fn next_unheld_pending_delete(
+        &mut self,
+        walk: &mut TreeWalk,
+    ) -> Result<Option<u32>, DriverError> {
+        while self.btree_next_leaf(self.pending_delete_root, pending_delete_spec(), walk)? {
+            for (key, _) in walk.entries() {
+                if !self.held.contains_key(key) {
+                    return u32::try_from(key)
+                        .map(Some)
+                        .map_err(|_| DriverError::DeviceFault);
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Finish every delete the volume has published as pending, in bounded
-    /// steps, publishing between them.
+    /// steps, publishing between them. A node the kernel holds is left named,
+    /// for its last unpin to free.
     ///
     /// Called at mount before the volume serves a request, and at the end of
     /// every operation that detached a node from its last name. The ceiling a
@@ -4861,24 +4912,29 @@ impl<B: Block> ARXFS<B> {
     /// to, so there is one bound and one policy over a transaction's memory
     /// rather than a second for freeing.
     ///
-    /// The cursor only ever moves forward over *finished* inodes, so the loop
-    /// terminates on either the extent count of the inode being freed or the
-    /// inode space, never on a tree the device is lying about.
+    /// The cursor only ever moves forward, over finished or held inodes, so the
+    /// loop terminates on either the extent count of the inode being freed or
+    /// the inode space, never on a tree the device is lying about.
     ///
     /// # Errors
     ///
     /// Whatever a step's transaction reports. A failed step leaves the node
     /// still named by the set, so the reclaim resumes rather than leaking.
     pub(crate) fn drain_pending_deletes(&mut self) -> Result<(), DriverError> {
-        if self.read_only {
+        if self.read_only || self.pending_delete_root == 0 {
             return Ok(());
         }
-        let mut from = 0u64;
-        while let Some(ino) = self.next_pending_delete(from)? {
-            if self.reclaim_step(ino)? {
-                from = u64::from(ino).saturating_add(1);
-            }
+        let mut walk = TreeWalk::new(self.block_size)?;
+        while let Some(ino) = self.next_unheld_pending_delete(&mut walk)? {
+            self.reclaim_whole(ino)?;
+            walk.seek(u64::from(ino).saturating_add(1));
         }
+        Ok(())
+    }
+
+    /// Reclaim pending inode `ino` to the end, one bounded transaction a step.
+    fn reclaim_whole(&mut self, ino: u32) -> Result<(), DriverError> {
+        while !self.reclaim_step(ino)? {}
         Ok(())
     }
 
@@ -4981,10 +5037,7 @@ impl<B: Block> ARXFS<B> {
         Self::check_name(dst_name)?;
         let now = self.now();
         let dir_ino = self.ino_of(dir)?;
-        let mut dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        let mut dir_inode = self.entries_dir(dir_ino)?;
         let src_ino = self
             .dir_lookup(&dir_inode, src_name)?
             .ok_or(DriverError::NotFound)?;
@@ -5069,12 +5122,11 @@ impl<B: Block> ARXFS<B> {
 
     fn write_inner(
         &mut self,
-        dir: NodeId,
-        name: &[u8],
+        file: NodeId,
         offset: u64,
         data: &[u8],
     ) -> Result<usize, DriverError> {
-        let (child_ino, mut child) = self.resolve_file(dir, name)?;
+        let (child_ino, mut child) = self.file_inode(file)?;
         let written =
             self.write_file(&mut child, child_ino, offset, data, WriteLength::MayBeShort)?;
         let now = self.now();
@@ -5088,21 +5140,15 @@ impl<B: Block> ARXFS<B> {
         Ok(written)
     }
 
-    /// Resolve `name` in `dir` to the regular file it must name, refusing a
-    /// non-directory parent, an absent name, and a kind whose content is not a
-    /// byte stream.
-    fn resolve_file(&mut self, dir: NodeId, name: &[u8]) -> Result<(u32, Inode), DriverError> {
-        let dir_ino = self.ino_of(dir)?;
-        let dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
-        let child_ino = self
-            .dir_lookup(&dir_inode, name)?
-            .ok_or(DriverError::NotFound)?;
-        let child = self.read_inode(child_ino)?;
-        Self::deny_non_file_content(child.kind)?;
-        Ok((child_ino, child))
+    /// The regular file `file` names. One that has lost its last name takes
+    /// writes only while the kernel holds it, and answers `NotFound`
+    /// otherwise, as a freed one does; a kind whose content is not a byte
+    /// stream is `Unsupported`.
+    fn file_inode(&mut self, file: NodeId) -> Result<(u32, Inode), DriverError> {
+        let ino = self.ino_of(file)?;
+        let inode = self.reached_inode(ino)?;
+        Self::deny_non_file_content(inode.kind)?;
+        Ok((ino, inode))
     }
 
     /// One transaction of truncating file `ino` to `size`, returning `true`
@@ -5133,10 +5179,7 @@ impl<B: Block> ARXFS<B> {
 
     fn remove_inner(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         let dir_ino = self.ino_of(dir)?;
-        let mut dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        let mut dir_inode = self.entries_dir(dir_ino)?;
         let child_ino = self
             .dir_lookup(&dir_inode, name)?
             .ok_or(DriverError::NotFound)?;
@@ -5144,9 +5187,11 @@ impl<B: Block> ARXFS<B> {
         if child.is_dir() && !self.dir_is_empty(&child)? {
             return Err(DriverError::DirectoryNotEmpty);
         }
-        // Only the last name's removal frees the node: dropping one of several
-        // names must not lean on the reserve.
-        if !child.is_dir() && child.nlink > 1 {
+        let held = self.held.contains_key(u64::from(child_ino));
+        // Only the last name's removal of a node nothing holds frees it:
+        // dropping one of several names, or a held node's last, must not lean
+        // on the reserve.
+        if held || (!child.is_dir() && child.nlink > 1) {
             self.draw = Draw::of(self.class);
         }
         let now = self.now();
@@ -5161,10 +5206,16 @@ impl<B: Block> ARXFS<B> {
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
-        if child.nlink == 0 {
+        if child.nlink == 0 && !held {
             self.reclaim_pending_step(child_ino)?;
         }
         self.end_operation()
+    }
+
+    /// The directory `dir`'s `..` names. Every directory records one, so a
+    /// missing entry is damage.
+    fn parent_ino(&mut self, dir: &Inode) -> Result<u32, DriverError> {
+        self.dir_lookup(dir, b"..")?.ok_or(DriverError::DeviceFault)
     }
 
     /// Whether directory `candidate` is `ancestor` itself or lives anywhere
@@ -5180,9 +5231,7 @@ impl<B: Block> ARXFS<B> {
                 return Ok(false);
             }
             let inode = self.read_inode(candidate)?;
-            let parent = self
-                .dir_lookup(&inode, b"..")?
-                .ok_or(DriverError::DeviceFault)?;
+            let parent = self.parent_ino(&inode)?;
             if parent == candidate {
                 return Ok(false);
             }
@@ -5203,10 +5252,7 @@ impl<B: Block> ARXFS<B> {
         let dst_dir_ino = self.ino_of(dst_dir)?;
         let same_dir = src_dir_ino == dst_dir_ino;
 
-        let mut src_dir_inode = self.read_inode(src_dir_ino)?;
-        if !src_dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        let mut src_dir_inode = self.entries_dir(src_dir_ino)?;
         let src_ino = self
             .dir_lookup(&src_dir_inode, src_name)?
             .ok_or(DriverError::NotFound)?;
@@ -5225,11 +5271,7 @@ impl<B: Block> ARXFS<B> {
         let mut dst_dir_inode = if same_dir {
             None
         } else {
-            let d = self.read_inode(dst_dir_ino)?;
-            if !d.is_dir() {
-                return Err(DriverError::Unsupported);
-            }
-            Some(d)
+            Some(self.entries_dir(dst_dir_ino)?)
         };
 
         // Refuse moving a directory into itself or its own subtree.
@@ -5272,7 +5314,7 @@ impl<B: Block> ARXFS<B> {
                     None => src_dir_inode.nlink = src_dir_inode.nlink.saturating_sub(1),
                 }
             }
-            if dst_child.nlink == 0 {
+            if dst_child.nlink == 0 && !self.held.contains_key(u64::from(dst_ino)) {
                 replaced = Some(dst_ino);
             }
         }
@@ -5391,7 +5433,7 @@ impl<B: Block> ARXFS<B> {
         value: &[u8],
     ) -> Result<(), DriverError> {
         let ino = self.ino_of(node)?;
-        let mut inode = self.read_inode(ino)?;
+        let mut inode = self.reached_inode(ino)?;
         let mut set = self.read_attrs(&inode)?;
         set.set(key, AttrFlags::empty(), value)
             .map_err(DriverError::from)?;
@@ -5406,7 +5448,7 @@ impl<B: Block> ARXFS<B> {
     fn remove_attr_inner(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
         AttrKey::parse(key).map_err(DriverError::from)?;
         let ino = self.ino_of(node)?;
-        let mut inode = self.read_inode(ino)?;
+        let mut inode = self.reached_inode(ino)?;
         let mut set = self.read_attrs(&inode)?;
         if !set.remove(key) {
             return Err(DriverError::NotFound);
@@ -5520,25 +5562,29 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let ino = self.ino_of(node)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.reached_inode(ino)?;
         self.inode_info(ino, &inode)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
         let dir_ino = self.ino_of(dir)?;
-        let dir_inode = self.read_inode(dir_ino)?;
-        if !dir_inode.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        let dir_inode = self.entries_dir(dir_ino)?;
         let child = self
             .dir_lookup(&dir_inode, name)?
             .ok_or(DriverError::NotFound)?;
         Ok(NodeId::from_raw(u64::from(child)))
     }
 
+    fn parent(&mut self, dir: NodeId) -> Result<NodeId, DriverError> {
+        let ino = self.ino_of(dir)?;
+        let inode = self.entries_dir(ino)?;
+        let parent = self.parent_ino(&inode)?;
+        Ok(NodeId::from_raw(u64::from(parent)))
+    }
+
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         let ino = self.ino_of(file)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.reached_inode(ino)?;
         match inode.kind {
             InodeKind::File => self.read_file(&inode, offset, buf),
             // A directory's content is its entries; a link's is a path,
@@ -5554,14 +5600,14 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
         region: SeekRegion,
     ) -> Result<Option<u64>, DriverError> {
         let ino = self.ino_of(file)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.reached_inode(ino)?;
         Self::deny_non_file_content(inode.kind)?;
         self.region_after(&inode, offset, region)
     }
 
     fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
         let ino = self.ino_of(link)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.reached_inode(ino)?;
         match inode.kind {
             InodeKind::Link => {}
             InodeKind::Dir | InodeKind::File => return Err(DriverError::Unsupported),
@@ -5592,9 +5638,13 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<(), DriverError> {
         let dir_ino = self.ino_of(dir)?;
-        let dir_inode = self.read_inode(dir_ino)?;
+        let dir_inode = self.reached_inode(dir_ino)?;
         if !dir_inode.is_dir() {
             return Err(DriverError::Unsupported);
+        }
+        // A removed directory a hold keeps lists nothing.
+        if dir_inode.nlink == 0 {
+            return Ok(());
         }
         // The cursor is a global slot position, and slots never move while
         // they are occupied: removal empties one in place and insertion fills
@@ -5622,11 +5672,62 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
         }
         Ok(())
     }
+
+    /// The pinned id is the inode number, the id every lookup answers.
+    fn pin(&mut self, node: NodeId) -> Result<NodeId, DriverError> {
+        let ino = self.ino_of(node)?;
+        self.reached_inode(ino)?;
+        let key = u64::from(ino);
+        if let Some(holds) = self.held.get_mut(key) {
+            *holds = holds.checked_add(1).ok_or(DriverError::OutOfMemory)?;
+        } else {
+            self.held
+                .try_insert(key, 1)
+                .map_err(|_| DriverError::OutOfMemory)?;
+        }
+        Ok(node)
+    }
+
+    /// The last unpin of an inode with no name left runs the reclaim its
+    /// removal deferred, whole.
+    fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        let ino = u32::try_from(pinned.raw()).map_err(|_| DriverError::NotFound)?;
+        let key = u64::from(ino);
+        let holds = self.held.get_mut(key).ok_or(DriverError::NotFound)?;
+        if *holds > 1 {
+            *holds -= 1;
+            return Ok(Unpinned::Held);
+        }
+        self.held.remove(key);
+        self.free_if_nameless(ino)
+    }
+
+    fn release_pins(&mut self) -> Result<(), DriverError> {
+        let held = core::mem::take(&mut self.held);
+        let mut outcome = Ok(());
+        for (key, _) in &held {
+            let freed = u32::try_from(key)
+                .map_err(|_| DriverError::DeviceFault)
+                .and_then(|ino| self.free_if_nameless(ino));
+            if let Err(err) = freed {
+                outcome = Err(err);
+            }
+        }
+        outcome
+    }
 }
 
 impl<B: Block> FilesystemWrite for ARXFS<B> {
-    fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        self.mutation(|fs| fs.create_inner(dir, name, kind))
+    /// The node is born with the whole of `record` — mode, owner, group, ACL
+    /// and capability gate — in the inode write that mints it.
+    fn create(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: NodeKind,
+        record: &Security,
+    ) -> Result<NodeId, DriverError> {
+        self.mutation(|fs| fs.create_inner(dir, name, kind, record))
     }
 
     fn create_link(
@@ -5634,22 +5735,17 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         dir: NodeId,
         name: &[u8],
         target: &[u8],
+        record: &Security,
     ) -> Result<NodeId, DriverError> {
-        self.mutation(|fs| fs.create_link_inner(dir, name, target))
+        self.mutation(|fs| fs.create_link_inner(dir, name, target, record))
     }
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
         self.mutation(|fs| fs.link_inner(dir, name, node))
     }
 
-    fn write_at(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, DriverError> {
-        self.mutation(|fs| fs.write_inner(dir, name, offset, data))
+    fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
+        self.mutation(|fs| fs.write_inner(file, offset, data))
     }
 
     /// Shrinking a very large file cannot fit one transaction, so a truncate
@@ -5661,9 +5757,9 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     /// steps reached — shorter than it was, longer than asked for — and reports
     /// it. That is the honest outcome: the bytes below that boundary were never
     /// touched, and the caller may simply ask again.
-    fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+    fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         while !self.release(|fs| {
-            let (ino, _) = fs.resolve_file(dir, name)?;
+            let (ino, _) = fs.file_inode(file)?;
             fs.truncate_step(ino, size)
         })? {}
         Ok(())
@@ -5671,16 +5767,10 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
 
     /// Bounded like a truncate: a punch over a huge range is many
     /// transactions, each publishing the blocks it released.
-    fn punch(
-        &mut self,
-        dir: NodeId,
-        name: &[u8],
-        offset: u64,
-        len: u64,
-    ) -> Result<(), DriverError> {
+    fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
         let end = offset.checked_add(len).ok_or(DriverError::OutOfRange)?;
         while !self.release(|fs| {
-            let (ino, _) = fs.resolve_file(dir, name)?;
+            let (ino, _) = fs.file_inode(file)?;
             fs.punch_step(ino, offset, end)
         })? {}
         Ok(())
@@ -5748,7 +5838,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
 impl<B: Block> FilesystemSecurity for ARXFS<B> {
     fn security(&mut self, node: NodeId) -> Result<Security, DriverError> {
         let ino = self.ino_of(node)?;
-        Ok(self.read_inode(ino)?.sec)
+        Ok(self.reached_inode(ino)?.sec)
     }
 
     fn set_security(&mut self, node: NodeId, security: Security) -> Result<(), DriverError> {
@@ -5795,7 +5885,7 @@ impl<B: Block> FilesystemAttrs for ARXFS<B> {
         // is a fail-closed rejection rather than an "absent" result.
         AttrKey::parse(key).map_err(DriverError::from)?;
         let ino = self.ino_of(node)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.reached_inode(ino)?;
         let set = self.read_attrs(&inode)?;
         match set.get(key) {
             Some(value) => {
@@ -5820,7 +5910,7 @@ impl<B: Block> FilesystemAttrs for ARXFS<B> {
         key_out: &mut [u8],
     ) -> Result<Option<usize>, DriverError> {
         let ino = self.ino_of(node)?;
-        let inode = self.read_inode(ino)?;
+        let inode = self.reached_inode(ino)?;
         let set = self.read_attrs(&inode)?;
         let idx = usize::try_from(index).unwrap_or(usize::MAX);
         let Some(entry) = set.iter().nth(idx) else {

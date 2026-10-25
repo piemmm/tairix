@@ -34,8 +34,7 @@ detection answers nothing without an operating system
 ## `FastRng` — the invariants
 
 Bernstein's fast-key-erasure design over `lib/crypto`'s audited ChaCha12
-(`stream::chacha12_keystream`), as in OpenBSD `arc4random` and Linux
-`get_random_u64`.
+(`stream::chacha12_keystream`), as in OpenBSD `arc4random`.
 
 * One refill runs the cipher once for `FAST_REFILL_BYTES` (256 = exactly four
   cipher blocks, so none is generated and discarded): the first 32 keystream
@@ -66,7 +65,7 @@ Bernstein's fast-key-erasure design over `lib/crypto`'s audited ChaCha12
 entropy pool → CsRng (HMAC-DRBG) → FastRng<2048> (ChaCha12) → userland
 ```
 
-Linux's shape with an extra NIST-approved stage in front. `CsRng` is the
+A pooled fast-key-erasure generator with a NIST SP 800-90A stage in front. `CsRng` is the
 authority (it keys the fast generator at seed time and re-keys it at every
 boundary); `FastRng` is what every served byte comes from. The reserve's own
 byte buffer is **gone** — `FastRng` already is a buffered generator with

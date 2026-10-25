@@ -1,4 +1,4 @@
-//! aarch64 (Raspberry Pi 4) runtime `spawn` producer — `plans/SPAWN.md`
+//! aarch64 runtime `spawn` producer — `plans/SPAWN.md`
 //! `SP3b`.
 //!
 //! [`Aarch64ProcessSpawn`] implements the architecture-neutral

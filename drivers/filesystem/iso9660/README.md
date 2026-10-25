@@ -9,7 +9,8 @@ device through `FilesystemRead`, `FilesystemSecurity`, `FilesystemAttrs` and
 - ECMA-119 (ISO 9660) and High Sierra, read from the disc's last session.
 - Joliet levels 1–3 and the ISO 9660:1999 enhanced tree.
 - Rock Ridge (SUSP and RRIP): POSIX names, owners, modes, link counts,
-  symbolic links, relocated directories, time stamps, zisofs compression.
+  symbolic links, relocated directories (`CL`, `PL`, `RE`), time stamps,
+  zisofs compression.
 - Multi-extent and interleaved files, extended attribute records.
 - RISC OS `ARCHIMEDES` fields, Apple `AA`/`BA` entries and Amiga `AS`
   entries, surfaced as the shared `acorn.*`, `mac.*` and `amiga.*` attribute

@@ -3,7 +3,7 @@
 //! The grammar is the GNU `tee` surface: `-a`/`--append` (append to the
 //! file operands instead of overwriting them), `-p` (the pipe-tolerant
 //! diagnose mode, equivalent to `--output-error=warn-nopipe`),
-//! `--output-error[=MODE]` (matched like GNU `argmatch`: an exact name or
+//! `--output-error[=MODE]` (an exact name or
 //! an unambiguous prefix of `warn`, `warn-nopipe`, `exit`, `exit-nopipe`;
 //! the value arrives only attached with `=`, and a bare `--output-error`
 //! selects `warn-nopipe`, exactly as GNU's optional argument does), the
@@ -19,6 +19,9 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use tairix_util::argv::choose;
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
 use crate::error::TeeError;
 
@@ -52,34 +55,20 @@ pub enum OutputError {
     ExitNopipe,
 }
 
+/// The `--output-error` modes by the words naming them, in GNU's order.
+pub(crate) const MODES: [(&str, OutputError); 4] = [
+    ("warn", OutputError::Warn),
+    ("warn-nopipe", OutputError::WarnNopipe),
+    ("exit", OutputError::Exit),
+    ("exit-nopipe", OutputError::ExitNopipe),
+];
+
 impl OutputError {
-    /// Match `text` against the mode names the way GNU `argmatch` does: an
-    /// exact name or an unambiguous non-empty prefix (`warn` is exact even
-    /// though it also prefixes `warn-nopipe`; `w` is ambiguous between the
-    /// two and is refused; `warn-` unambiguously names `warn-nopipe`).
+    /// The mode `text` names: its word, or the only one it is a prefix of
+    /// (`warn` is exact even though it prefixes `warn-nopipe`; `w` prefixes
+    /// both and is refused; `warn-` names `warn-nopipe`).
     fn parse(text: &str) -> Result<Self, TeeError> {
-        const MODES: [(&str, OutputError); 4] = [
-            ("warn", OutputError::Warn),
-            ("warn-nopipe", OutputError::WarnNopipe),
-            ("exit", OutputError::Exit),
-            ("exit-nopipe", OutputError::ExitNopipe),
-        ];
-        if text.is_empty() {
-            return Err(TeeError::InvalidMode(String::new()));
-        }
-        let mut matched: Option<OutputError> = None;
-        for (name, mode) in MODES {
-            if *name == *text {
-                return Ok(mode);
-            }
-            if name.starts_with(text) {
-                if matched.is_some() {
-                    return Err(TeeError::InvalidMode(String::from(text)));
-                }
-                matched = Some(mode);
-            }
-        }
-        matched.ok_or_else(|| TeeError::InvalidMode(String::from(text)))
+        choose(&MODES, text).map_err(|miss| TeeError::BadMode(miss, String::from(text)))
     }
 }
 
@@ -105,51 +94,50 @@ pub enum Command {
     Help,
 }
 
+/// What each of `tee`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Append,
+    OutputError,
+    Help,
+}
+
+/// `tee`'s options, as GNU's `tee` spells them, and the reserved help
+/// switches. `-p` is `--output-error` without its value.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('a', &["append"], Flag::Append),
+    Opt::letter('p', Takes::Nothing, Flag::OutputError),
+    Opt::long(&["output-error"], Takes::Attached, Flag::OutputError),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// Options and operands may be interleaved (the GNU permutation); `--`
-/// ends option parsing; a lone `-` is an operand naming a file called `-`
-/// (GNU `tee` does not treat it specially). When `-p` and
-/// `--output-error` are both given, the last occurrence wins, exactly as
-/// repeated GNU options do.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, clustered, a long one by any unambiguous prefix, `--` ending
+/// them; a lone `-` is an operand naming a file called `-` (GNU `tee` does
+/// not treat it specially). The help switches (`-h`, `-?`, `--help`) answer
+/// at once. When `-p` and `--output-error` are both given, the last
+/// occurrence wins, exactly as repeated GNU options do.
 ///
 /// # Errors
 ///
-/// The [`TeeError`] usage variants, mirroring the GNU diagnostics.
+/// * [`TeeError::Option`] — an option `getopt` refuses, in its words.
+/// * [`TeeError::BadMode`] — an `--output-error` value naming no one mode.
 pub fn parse(args: &[&str]) -> Result<Command, TeeError> {
     let mut append = false;
     let mut on_error = OutputError::default();
     let mut files: Vec<String> = Vec::new();
-    let mut options_done = false;
 
-    for &arg in args {
-        if options_done || arg == "-" || !arg.starts_with('-') {
-            files.push(String::from(arg));
-            continue;
-        }
-        match arg {
-            "--" => options_done = true,
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "--append" => append = true,
-            // GNU's optional argument: a bare `--output-error` selects
-            // `warn-nopipe`; a value arrives only attached with `=` (a
-            // following word is an operand, never consumed as the value).
-            "--output-error" => on_error = OutputError::WarnNopipe,
-            _ if arg.starts_with("--output-error=") => {
-                on_error = OutputError::parse(&arg["--output-error=".len()..])?;
-            }
-            _ if arg.starts_with("--") => return Err(TeeError::UnknownLong(String::from(arg))),
-            _ => {
-                for flag in arg[1..].chars() {
-                    match flag {
-                        'a' => append = true,
-                        'p' => on_error = OutputError::WarnNopipe,
-                        '?' => return Ok(Command::Help),
-                        _ => return Err(TeeError::UnknownShort(flag)),
-                    }
-                }
-            }
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(TeeError::Option)? {
+            Arg::Operand(file) => files.push(String::from(file)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Append, _) => append = true,
+            Arg::Opt(Flag::OutputError, None) => on_error = OutputError::WarnNopipe,
+            Arg::Opt(Flag::OutputError, Some(mode)) => on_error = OutputError::parse(mode)?,
         }
     }
 
@@ -162,11 +150,12 @@ pub fn parse(args: &[&str]) -> Result<Command, TeeError> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
 
     use super::{parse, Command, Job, OutputError};
     use crate::error::TeeError;
+    use tairix_util::argv::WordMiss;
 
     fn job(append: bool, on_error: OutputError, files: &[&str]) -> Command {
         Command::Tee(Job {
@@ -216,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn output_error_modes_parse_like_argmatch() {
+    fn output_error_modes_take_a_word_or_the_one_prefix_naming_it() {
         assert_eq!(
             parse(&["--output-error=warn"]),
             Ok(job(false, OutputError::Warn, &[]))
@@ -250,20 +239,33 @@ mod tests {
         // ... and an ambiguous or unknown one is refused.
         assert_eq!(
             parse(&["--output-error=w"]),
-            Err(TeeError::InvalidMode(String::from("w")))
+            Err(TeeError::BadMode(WordMiss::Ambiguous, String::from("w")))
         );
         assert_eq!(
             parse(&["--output-error=e"]),
-            Err(TeeError::InvalidMode(String::from("e")))
+            Err(TeeError::BadMode(WordMiss::Ambiguous, String::from("e")))
         );
         assert_eq!(
             parse(&["--output-error=abort"]),
-            Err(TeeError::InvalidMode(String::from("abort")))
+            Err(TeeError::BadMode(WordMiss::Unknown, String::from("abort")))
         );
         assert_eq!(
             parse(&["--output-error="]),
-            Err(TeeError::InvalidMode(String::new()))
+            Err(TeeError::BadMode(WordMiss::Ambiguous, String::new()))
         );
+    }
+
+    #[test]
+    fn a_refused_mode_is_worded_as_gnu_words_it() {
+        assert_eq!(
+            alloc::format!("{}", TeeError::BadMode(WordMiss::Ambiguous, String::from("e"))),
+            "ambiguous argument 'e' for '--output-error'\nValid arguments are:\n  - 'warn'\n  - 'warn-nopipe'\n  - 'exit'\n  - 'exit-nopipe'"
+        );
+        assert!(alloc::format!(
+            "{}",
+            TeeError::BadMode(WordMiss::Unknown, String::from("x"))
+        )
+        .starts_with("invalid argument 'x' for '--output-error'\n"));
     }
 
     #[test]
@@ -308,20 +310,41 @@ mod tests {
         assert_eq!(parse(&["-a?"]), Ok(Command::Help));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_options_are_usage_errors() {
-        assert_eq!(
-            parse(&["--frob"]),
-            Err(TeeError::UnknownLong(String::from("--frob")))
-        );
-        assert_eq!(parse(&["-x"]), Err(TeeError::UnknownShort('x')));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
         // `-i` is deliberately staged behind signal-disposition kernel
         // work, never stubbed: today it is an unrecognised option.
-        assert_eq!(parse(&["-i"]), Err(TeeError::UnknownShort('i')));
+        assert_eq!(refused(&["-i"]), "invalid option -- 'i'");
         assert_eq!(
-            parse(&["--ignore-interrupts"]),
-            Err(TeeError::UnknownLong(String::from("--ignore-interrupts")))
+            refused(&["--ignore-interrupts"]),
+            "unrecognized option '--ignore-interrupts'"
         );
+        assert_eq!(
+            refused(&["--append=x"]),
+            "option '--append' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `tee --app --output=exit f` as
+    /// `tee --append --output-error=exit f`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--app", "--output=exit", "f"]),
+            Ok(job(true, OutputError::Exit, &["f"]))
+        );
+        assert_eq!(
+            parse(&["--o", "f"]),
+            Ok(job(false, OutputError::WarnNopipe, &["f"]))
+        );
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

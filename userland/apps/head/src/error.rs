@@ -3,6 +3,7 @@
 use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
+use tairix_util::getopt::Refusal;
 use tairix_util::quote::{quote, quote_if_needed};
 
 /// Why a `head` invocation did not complete.
@@ -14,10 +15,8 @@ use tairix_util::quote::{quote, quote_if_needed};
 /// operand, exactly as the GNU tool does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeadError {
-    /// An unrecognised long option; carries the token.
-    UnknownLong(String),
-    /// An unrecognised short option; carries the flag character.
-    UnknownShort(char),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// The `-n`/`--lines` value was not a valid count; carries the text.
     InvalidLines(String),
     /// The `-c`/`--bytes` value was not a valid count; carries the text.
@@ -26,9 +25,6 @@ pub enum HeadError {
     /// trailed an option, e.g. `head -5` given anywhere but as the first
     /// argument; carries the offending character.
     InvalidTrailing(char),
-    /// `-c`/`-n` (or their long forms) were given without a value; carries
-    /// the option's spelling for the diagnostic.
-    MissingValue(&'static str),
     /// Writing to standard output (or the diagnostic stream) failed.
     /// Carries the underlying [`Errno`].
     Output(Errno),
@@ -37,14 +33,7 @@ pub enum HeadError {
 impl fmt::Display for HeadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => {
-                write!(f, "unrecognized option {token}", token = quote(token))
-            }
-            Self::UnknownShort(flag) => write!(
-                f,
-                "invalid option -- {}",
-                quote(flag.encode_utf8(&mut [0; 4]))
-            ),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::InvalidLines(text) => {
                 write!(f, "invalid number of lines: {text}", text = quote(text))
             }
@@ -56,13 +45,6 @@ impl fmt::Display for HeadError {
                 "invalid trailing option -- {}",
                 quote_if_needed(flag.encode_utf8(&mut [0; 4]))
             ),
-            Self::MissingValue(option) => {
-                write!(
-                    f,
-                    "option {option} requires an argument",
-                    option = quote(option)
-                )
-            }
             Self::Output(errno) => write!(f, "write error: {errno}"),
         }
     }

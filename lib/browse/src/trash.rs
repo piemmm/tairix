@@ -7,7 +7,7 @@
 //! user empties it, in place of an irreversible recursive `fs_unlink`. Only a
 //! cross-volume removal (a rename cannot span volumes, exactly as `mv` decides
 //! from `st_dev`) or the absence of a usable Trash forces the irreversible
-//! unlink — the existing [`DeleteWalk`](crate::delete::DeleteWalk) path
+//! unlink — the same removal an ordinary permanent delete carries out
 //! (reused, not duplicated).
 //!
 //! This module is the pure decision behind that: it names *whether* an item can
@@ -47,7 +47,7 @@
 //! [`empty_trash_plan`] models that irreversible step. It turns the Trash
 //! directory's listing into a [`DeletePlan`] over its contents — never over the
 //! Trash directory itself — which the app carries out with the same recursive
-//! [`DeleteWalk`](crate::delete::DeleteWalk) an ordinary permanent delete uses.
+//! removal an ordinary permanent delete uses.
 //! It is the inverse of the move above: the move is only offered because
 //! emptying gives the user the way back to a permanent removal on their own
 //! terms.
@@ -60,7 +60,8 @@ use alloc::vec::Vec;
 
 use tairix_path::validate_file_name;
 
-use crate::delete::DeletePlan;
+use crate::delete::{DeletePlan, DeleteTarget};
+use crate::entry::{Entry, Listed};
 use crate::execute::VolumeId;
 use crate::media::Ending;
 
@@ -78,8 +79,8 @@ pub enum TrashStrategy {
     Move,
     /// The item is on a different volume from Trash (a rename cannot span
     /// volumes): fall back to the irreversible recursive
-    /// [`fs_unlink`](tairix_abi::SyscallNumber::FS_UNLINK), the existing
-    /// [`DeleteWalk`](crate::delete::DeleteWalk) path.
+    /// [`fs_unlink`](tairix_abi::SyscallNumber::FS_UNLINK) of an ordinary
+    /// permanent delete.
     Unlink,
 }
 
@@ -111,24 +112,23 @@ pub fn trash_dir(home: &[String]) -> Vec<String> {
 }
 
 /// Build the removal plan that **empties** the user's Trash: one
-/// [`DeleteTarget`](crate::delete::DeleteTarget) per immediate child of the
-/// Trash directory, in the source's listing order, each removed by the existing
-/// recursive [`DeleteWalk`](crate::delete::DeleteWalk) (no second removal
-/// engine). The Trash directory *itself* is never a target: emptying Trash
+/// [`DeleteTarget`] per immediate child of the
+/// Trash directory, in the source's listing order, each removed by the
+/// recursive removal an ordinary permanent delete carries out (no second
+/// removal engine). The Trash directory *itself* is never a target: emptying Trash
 /// removes its contents and leaves the (now-empty) Trash folder in place, ready
 /// to receive the next trashed item.
 ///
 /// `trash_dir` is the Trash directory's root-first component path (from
-/// [`trash_dir`]); `children` is each immediate child's leaf name and whether it
-/// is directory-backed, in listing order — an `fs_readdir` of the Trash
-/// directory the app performs under the user's own identity. Emptying is always
+/// [`trash_dir`]); `children` is its listing — an `fs_readdir` of the Trash
+/// directory the app performs under the user's own identity — so each target
+/// carries the node it was listed as. Emptying is always
 /// permanent (there is no trash-of-the-trash), so the caller confirms it as an
 /// irreversible removal.
 ///
-/// This model touches no filesystem and holds no authority — the app drives the
-/// returned plan's [`DeleteWalk`](crate::delete::DeleteWalk) with its own
-/// capability-checked `fs_readdir`/`fs_unlink` — so composing it grants nothing
-/// and the read-only picker never builds one.
+/// This model touches no filesystem and holds no authority — the app carries
+/// the returned plan out with its own capability-checked calls — so composing
+/// it grants nothing and the read-only picker never builds one.
 ///
 /// Returns `Ok(None)` when the Trash is already empty: emptying it is then a
 /// no-op the app can simply not offer, never an error.
@@ -147,7 +147,7 @@ pub fn trash_dir(home: &[String]) -> Vec<String> {
 ///   verb reports as emptied is genuinely emptied.
 pub fn empty_trash_plan(
     trash_dir: &[String],
-    children: &[(String, bool)],
+    children: &[Entry],
 ) -> Result<Option<DeletePlan>, TrashError> {
     if trash_dir.is_empty() {
         return Err(TrashError::RootTrash);
@@ -156,14 +156,18 @@ pub fn empty_trash_plan(
         return Ok(None);
     }
     let mut targets = Vec::with_capacity(children.len());
-    for (leaf, is_directory) in children {
-        if validate_file_name(leaf).is_err() {
+    for child in children {
+        if validate_file_name(child.name()).is_err() {
             return Err(TrashError::InvalidName);
         }
         let mut path = Vec::with_capacity(trash_dir.len() + 1);
         path.extend_from_slice(trash_dir);
-        path.push(leaf.clone());
-        targets.push((path, *is_directory));
+        path.push(String::from(child.name()));
+        let listed = Listed {
+            path,
+            id: child.id(),
+        };
+        targets.push(DeleteTarget::new(listed, child.is_directory_backed()));
     }
     // Every target path is `trash_dir` + a validated leaf, so none is empty and
     // the set is non-empty: `DeletePlan::new` yields `Some`. Threading the
@@ -189,9 +193,8 @@ pub enum DeleteDisposition {
     /// Every target moves into the user's Trash — a same-volume rename per
     /// item, recoverable until the Trash is emptied.
     Trash,
-    /// The targets are removed permanently (the existing irreversible
-    /// [`DeleteWalk`](crate::delete::DeleteWalk) unlink), because Trash is
-    /// cross-volume or unavailable.
+    /// The targets are removed permanently (the irreversible unlink of an
+    /// ordinary delete), because Trash is cross-volume or unavailable.
     Permanent,
 }
 

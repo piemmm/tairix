@@ -77,10 +77,10 @@ const COMPAT_EXCLUDE_BITMAP: u32 = 0x0100;
 pub(crate) const COMPAT_SPARSE_SUPER2: u32 = 0x0200;
 pub(crate) const COMPAT_ORPHAN_FILE: u32 = 0x1000;
 
-/// Incompatible features the mainline ext3 driver mounts; any other makes the
+/// Incompatible features an ext3 volume may carry; any other makes the
 /// volume ext4.
 const EXT3_INCOMPAT: u32 = INCOMPAT_FILETYPE | INCOMPAT_RECOVER | INCOMPAT_META_BG;
-/// Read-only-compatible features the mainline ext2 and ext3 drivers write,
+/// Read-only-compatible features an ext2 or ext3 volume may carry,
 /// `btree_dir` among them though nothing ever implemented it.
 const EXT3_RO_COMPAT: u32 = RO_COMPAT_SPARSE_SUPER | RO_COMPAT_LARGE_FILE | RO_COMPAT_BTREE_DIR;
 

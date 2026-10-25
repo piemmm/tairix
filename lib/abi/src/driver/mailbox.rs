@@ -4,27 +4,25 @@
 //! ([`DriverHost::mailbox`](super::DriverHost::mailbox)) so a driver can run a
 //! firmware property-channel exchange without knowing where the doorbell
 //! registers live, how the property buffer is carved, or how CPU-physical
-//! addresses alias onto the device's bus aperture. All of those board
-//! specifics stay behind the device's own crate (`lib/vcmailbox`, the
-//! BCM2711 `VideoCore` client carve-out); the host hands
-//! the driver a ready channel and the driver only marshals 32-word property
-//! messages through it.
+//! addresses alias onto the device's bus aperture. All of those platform
+//! specifics stay behind the mailbox device's own support crate; the host
+//! hands the driver a ready channel and the driver only marshals 32-word
+//! property messages through it.
 //!
-//! The trait lives in `lib/abi` (not in `lib/vcmailbox`) so the host
-//! accessor can name it without inverting the dependency direction: `lib/vcmailbox` depends on `lib/abi`, never the reverse.
-//! `lib/vcmailbox` adapts its low-level `MailboxTransport` (which is
-//! `&mut self`, for its own per-exchange bookkeeping) onto this `&self`
-//! channel; the host serialises concurrent callers behind its own lock so the
-//! shared-reference shape is sound.
+//! The trait lives here, not in the device's support crate, so the host
+//! accessor can name it without inverting the dependency direction: the support
+//! crate depends on `lib/abi` and adapts its `&mut self` transport onto this
+//! `&self` channel; the host serialises concurrent callers behind its own lock
+//! so the shared-reference shape is sound.
 
 use crate::DriverError;
 
-/// Number of 32-bit words in a `VideoCore` property-channel message.
+/// Number of 32-bit words in a firmware property-channel message.
 ///
 /// The property channel exchanges a fixed-size, word-aligned buffer: a header
 /// (buffer size, request/response code), a sequence of property tags, and an
-/// end marker. Both the encoder/decoder in `lib/vcmailbox` and this seam use
-/// the same width so the buffer shape is defined exactly once.
+/// end marker. The device's encoder/decoder and this seam use this one
+/// width, so the buffer shape is defined exactly once.
 pub const MAILBOX_PROPERTY_WORDS: usize = 32;
 
 /// Host-side seam for a firmware property-mailbox exchange.
@@ -41,7 +39,7 @@ pub trait MailboxChannel {
     /// Run one property-channel exchange.
     ///
     /// `message` is a [`MAILBOX_PROPERTY_WORDS`]-word property buffer encoded
-    /// by the caller (e.g. via `lib/vcmailbox`). On `Ok` the buffer is
+    /// by the caller. On `Ok` the buffer is
     /// overwritten in place with the firmware's response for the caller to
     /// decode; on `Err` the buffer contents are unspecified and the caller
     /// must treat the exchange as failed (fail closed).

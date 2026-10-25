@@ -42,8 +42,8 @@ opzioni, così un nome che inizia con un trattino resta rimovibile.
 
 - `0` — il nome è stato rimosso (o è stata scritta la guida breve).
 - `1` — il filesystem ha rifiutato la rimozione, o l'output è fallito;
-  la ragione è stampata sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+  la ragione è stampata sull'errore standard. Anche una riga di comando
+  non compresa termina con `1`.
 
 ## ENVIRONMENT
 

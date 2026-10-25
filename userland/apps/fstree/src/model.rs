@@ -15,9 +15,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::FileKind;
+use tairix_abi::{FileId, FileKind};
 use tairix_appconf::Keys;
-use tairix_glob::Pattern;
+use tairix_glob::{Pattern, Scratch};
 use tairix_path::join;
 use tairix_procinfo::VolumeBytes;
 
@@ -122,6 +122,9 @@ pub struct DirNode {
     pub name: String,
     /// The directory's full path.
     pub path: String,
+    /// The node its parent's listing named, or [`FileId::NONE`] for the
+    /// session root.
+    pub id: FileId,
     /// Whether the node's children are currently shown.
     pub expanded: bool,
     /// The child directories, or `None` while never yet read (lazy).
@@ -138,6 +141,8 @@ pub struct TreeRow {
     pub name: String,
     /// The directory's full path.
     pub path: String,
+    /// The node it was listed as ([`DirNode::id`]).
+    pub id: FileId,
     /// Whether the row is currently expanded.
     pub expanded: bool,
     /// The box-drawing branch prefix drawn before the name — the ancestor
@@ -152,7 +157,7 @@ pub struct TreeRow {
 
 /// The modal surface the message line carries while a question is open.
 /// While present, keys feed the prompt; the panes underneath stay drawn.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum Prompt {
     /// The mode editor (`m` inside the attributes editor).
     Mode(ModePrompt),
@@ -186,6 +191,8 @@ pub enum InputOp {
     CopyDest {
         /// Full path of the entry being copied.
         src: String,
+        /// The node it was listed as.
+        seen: FileId,
         /// The entry's name, shown in the prompt.
         name: String,
         /// The entry's kind.
@@ -195,6 +202,8 @@ pub enum InputOp {
     MoveDest {
         /// Full path of the entry being moved.
         src: String,
+        /// The node it was listed as.
+        seen: FileId,
         /// The entry's name, shown in the prompt.
         name: String,
         /// The entry's kind.
@@ -204,10 +213,10 @@ pub enum InputOp {
     RenameTo {
         /// Full path of the entry being renamed.
         src: String,
+        /// The node it was listed as.
+        seen: FileId,
         /// The entry's current name, shown in the prompt.
         name: String,
-        /// The entry's kind.
-        kind: FileKind,
     },
     /// The name of a directory created in the listed directory (`M`).
     MkdirName,
@@ -268,6 +277,8 @@ pub struct InputPrompt {
 pub struct ConfirmPrompt {
     /// Full path of the entry to delete.
     pub path: String,
+    /// The node it was listed as.
+    pub seen: FileId,
     /// The entry's name, shown in the question.
     pub name: String,
     /// The entry's kind (a directory is deleted with its contents, and
@@ -277,7 +288,7 @@ pub struct ConfirmPrompt {
 
 /// A paused [`FileOp`] whose next step would overwrite an existing file;
 /// the user answers o)verwrite, s)kip, or c)ancel per file.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct OverwritePrompt {
     /// The paused operation; its [`FileOp::conflict`] names the paths.
     pub op: FileOp,
@@ -289,7 +300,7 @@ pub struct OverwritePrompt {
 /// A paused [`Batch`] whose current entry would overwrite an existing
 /// file; the user answers o)verwrite, s)kip, or c)ancel — cancel drops
 /// the batch's remaining entries.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct BatchPrompt {
     /// The paused batch; its [`Batch::conflict`] names the paths.
     pub batch: Batch,
@@ -379,12 +390,16 @@ impl NameFilter {
         })
     }
 
-    /// Whether `name` passes the filter. A filter whose pattern did not
-    /// compile passes everything — the status line reports the bad
-    /// pattern instead of hiding entries behind it.
+    /// Whether `name` passes the filter, matched in `scratch`. A filter whose
+    /// pattern did not compile passes everything — the status line reports
+    /// the bad pattern instead of hiding entries behind it — and so does a
+    /// match the heap could not hold: the filter never hides what it could
+    /// not judge.
     #[must_use]
-    pub fn admits(&self, name: &str) -> bool {
-        self.pattern.as_ref().is_none_or(|p| p.matches(name))
+    pub fn admits(&self, name: &str, scratch: &mut Scratch) -> bool {
+        self.pattern
+            .as_ref()
+            .is_none_or(|p| p.matches_with(name, scratch).unwrap_or(true))
     }
 }
 
@@ -577,6 +592,7 @@ impl Model {
             root: DirNode {
                 name: String::from(root_path),
                 path: String::from(root_path),
+                id: FileId::NONE,
                 expanded: true,
                 children: None,
             },
@@ -683,6 +699,7 @@ impl Model {
             depth,
             name: node.name.clone(),
             path: node.path.clone(),
+            id: node.id,
             expanded: node.expanded,
             branch,
             fold,
@@ -713,10 +730,15 @@ impl Model {
     /// filename filter (`f`).
     #[must_use]
     pub fn visible_files(&self) -> Vec<&FsEntry> {
+        let mut scratch = Scratch::new();
         self.files
             .iter()
             .filter(|e| self.show_hidden || !e.name.starts_with('.'))
-            .filter(|e| self.filter.as_ref().is_none_or(|f| f.admits(&e.name)))
+            .filter(|e| {
+                self.filter
+                    .as_ref()
+                    .is_none_or(|f| f.admits(&e.name, &mut scratch))
+            })
             .collect()
     }
 
@@ -751,7 +773,7 @@ impl Model {
 
     /// Surface `errno` on the message line, spelling out the operation.
     pub fn report(&mut self, what: &str, errno: tairix_abi::Errno) {
-        self.message = Some(format!("{what}: {errno:?}"));
+        self.message = Some(format!("{what}: {errno}"));
     }
 }
 
@@ -783,6 +805,7 @@ pub(crate) fn child_dirs_of(parent: &str, entries: &[FsEntry]) -> Vec<DirNode> {
         .map(|e| DirNode {
             name: e.name.clone(),
             path: join(parent, &e.name),
+            id: e.id,
             expanded: false,
             children: None,
         })

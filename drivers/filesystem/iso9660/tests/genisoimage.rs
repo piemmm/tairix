@@ -139,6 +139,42 @@ fn a_directory_rock_ridge_relocated_is_found_at_its_depth() {
     );
 }
 
+/// A directory's parent is the one its `..` record names, found among the
+/// entries of the directory the parent's own `..` names, and the root's is
+/// the root, in each tree a disc records.
+#[test]
+fn a_directorys_parent_is_the_one_its_dot_dot_names() {
+    for fixture in [RR_JOLIET, PLAIN, JOLIET] {
+        let mut fs = mount(fixture);
+        let root = fs.root();
+        assert_eq!(fs.parent(root), Ok(root));
+        let d1 = walk(&mut fs, &["d1"]);
+        let d2 = walk(&mut fs, &["d1", "d2"]);
+        assert_eq!(fs.parent(d1), Ok(root));
+        assert_eq!(fs.parent(d2), Ok(d1));
+        let readme = walk(&mut fs, &["README.TXT"]);
+        assert_eq!(fs.parent(readme), Err(DriverError::Unsupported));
+        assert_eq!(fs.node_info(d2).expect("info").ino, d2.raw());
+    }
+}
+
+/// A directory Rock Ridge relocated has `rr_moved` as its `..`, and the
+/// `PL` entry there names the directory it belongs in: that is its parent,
+/// and its children climb through it to there.
+#[test]
+fn a_relocated_directorys_parent_is_the_directory_it_belongs_in() {
+    let mut fs = mount(RR_JOLIET);
+    let path = ["d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9"];
+    let d7 = walk(&mut fs, &path[..7]);
+    let d8 = walk(&mut fs, &path[..8]);
+    let d9 = walk(&mut fs, &path);
+    assert_eq!(fs.parent(d8), Ok(d7));
+    assert_eq!(fs.parent(d9), Ok(d8));
+    let root = fs.root();
+    let moved = walk(&mut fs, &["rr_moved"]);
+    assert_eq!(fs.parent(moved), Ok(root));
+}
+
 #[test]
 fn a_directory_of_several_sectors_lists_whole_and_resumes() {
     let mut fs = mount(RR_JOLIET);

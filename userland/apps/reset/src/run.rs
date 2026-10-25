@@ -30,28 +30,25 @@
 mod program {
     use tairix_abi::InputMode;
     use tairix_reset::{parse, reset_bytes, Command, USAGE};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{Stdout, Write};
     use tairix_termcap::from_term;
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` when the terminal was restored (or short help
-    /// served), `1` when the output could not be delivered, `2` on a usage
-    /// error.
+    /// served), `1` when the output could not be delivered or the command
+    /// line was not understood.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("reset") else {
+            return tairix_help::MISUSE;
         };
         match parse(&arguments) {
             Ok(Command::Run) => {}
             Ok(Command::Help) => return tairix_help::print_own_short_help("reset", Some(USAGE)),
-            Err(_) => {
-                write_stderr_line(USAGE);
-                return 2;
+            Err(err) => {
+                tairix_help::report_misuse("reset", &err);
+                return tairix_help::MISUSE;
             }
         }
 

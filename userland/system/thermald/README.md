@@ -21,22 +21,32 @@ fault its policy meets and otherwise sleeps.
 
 ## The policy
 
-- **Off** gives the line back undriven. **On** holds it asserted. **Automatic**
-  samples the hottest processor sensor once a second: the fan starts at
-  `cooling.fan.start` and stops once the processor has cooled by
-  `cooling.fan.hysteresis`. An automatic fan runs from its claim until its
-  first sample decides, and runs whenever a reading cannot be taken, the fault
-  stated, until readings return.
+- **Off** gives the line back undriven. **On** holds it asserted, whatever
+  an automatic sample last decided. **Automatic** samples the hottest
+  processor sensor once a second: the fan starts at `cooling.fan.start` and
+  stops once the processor has cooled by `cooling.fan.hysteresis`. An
+  automatic fan runs from its claim until its first sample decides, and runs
+  whenever a reading cannot be taken or no processor could be at it, the
+  fault stated, until readings return.
 - A policy naming a new line or polarity gives the old claim back before
   taking the new one. A header that leaves the tree takes the claim with it;
   the line is taken again when the header returns.
+- A call the header leaves unanswered keeps the claim and is asked again a
+  second later until it is answered; a line is claimed only once the header
+  has answered that it holds none of the fan's.
+- A header is believed only under a controller discovery states lends header
+  lines, its endpoint that controller's own entry, so no other driver can
+  stand in for it.
 
 ## Waking
 
-One wait set: the status endpoint, the configuration's directory watch (the
+Its wait set: the status endpoint, the configuration's directory watch (the
 mount table's notice until that directory exists), and the hardware tree's
-generation. The only deadline is an automatic fan's next sample; off, always
-on, or with no line to switch, the service arms none.
+generation. Its deadline is an automatic fan's next sample, or a call the
+header left unanswered asked again; off, always on, or with no line to
+switch, and owing the header no answer, the service arms none. A call to a
+driver parks on a second set, observing only its reply, for at most a
+quarter of a second.
 
 ## The status
 
@@ -46,6 +56,9 @@ no number of callers reads a sensor or the header more often than that.
 ## Testing
 
 Host tests drive the service over a fake machine: each mode, the hysteresis
-band, a sensor failure and its recovery, a missing sensor, a refused claim, a
-refused switch retried, a line or polarity change, the header leaving and
-returning, and the status's reading cache.
+band, a stopped automatic fan set always on, a sensor failure and its
+recovery, a reading no processor could be at, a missing sensor, a refused
+claim, a refused switch retried, a switch, claim and release the header
+leaves unanswered, a fault met again and again, a line or polarity change,
+the header leaving and returning, the channels the tree vouches for, a tree
+whose sensors cannot be held, and the status's reading cache.

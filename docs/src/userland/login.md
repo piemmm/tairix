@@ -527,11 +527,15 @@ program PID 1 `init`'s `session` directive launches and supervises
   holds no account database of its own to look the name up in.
   Login holds `CAP_SPAWN_AS_USER` and
   starts the program through the uid-switching spawn with the session
-  environment, in a session of its own, so the kernel resolves the user's full credential (uid,
+  environment, in the account's home — resolved as the account, which may
+  search it where login may not, so a session whose home cannot be entered
+  starts at the root instead, its `PWD` saying so and the refusal stated on
+  login's console and recorded as `SESSION_HOME_REFUSED` (10036) — in a
+  session of its own, so the kernel resolves the user's full credential (uid,
   primary gid, supplementary groups) from the authoritative identity
   table and snapshots it onto the child — privilege only ever switches
   user at process creation, never by a running process mutating its own
-  identity (there is no setuid-self, `PREREQUISITES.md` P-C). The child
+  identity (there is no setuid-self). The child
   still receives only its own manifest request intersected with the
   account ceiling — the desktop session's
   `CAP_DISPLAY`/`CAP_INPUT_READ`/`CAP_SHM` are its manifest's, admitted
@@ -662,6 +666,7 @@ because external audit-log consumers key off them.
 | 10033 | `AUTHORISERS_SENT`      | Info  | the presenting desktop was told which accounts may allow a system program: the program, whether its own account may, and how many may |
 | 10034 | `AUTHORISERS_REFUSED`   | Warn  | a listing of who may allow a program was withheld: another caller, a program outside the system stores, or an unreadable manifest |
 | 10035 | `AUTH_COOLING`          | Warn  | a text-prompt name was still cooling down; its password was neither asked for nor checked |
+| 10036 | `SESSION_HOME_REFUSED`  | Warn  | a session's home could not be entered as its account, so the session started at the root; the refusal is recorded |
 
 A refusal record names the account offered and the attested uid, never the
 offered secret, and never *which* credential fault it was: refusals stay

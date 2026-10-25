@@ -35,8 +35,8 @@ plays on POSIX systems.
 ## EXIT STATUS
 
 - `0` — the results (or short help) were written.
-- `1` — the output could not be delivered.
-- `2` — the command line was not understood.
+- `1` — the output could not be delivered. A command line that was not
+  understood exits `1` too.
 
 ## ENVIRONMENT
 

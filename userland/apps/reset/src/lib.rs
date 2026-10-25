@@ -35,13 +35,17 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use tairix_termcap::Capabilities;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
+use tairix_util::quote::quote;
 use tairix_vt::{encode_all_into, EraseMode, Op, Sgr};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `reset`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `reset`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: reset [-h | -?]";
 
 /// One thing the `reset` tool can do.
@@ -55,31 +59,55 @@ pub enum Command {
     Help,
 }
 
-/// The one failure [`parse`] reports.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Why [`parse`] refused a command line.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResetError {
-    /// The command line was not understood.
-    Usage,
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// An operand; the tool takes none (GNU `extra operand`).
+    ExtraOperand(String),
 }
+
+impl fmt::Display for ResetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::ExtraOperand(operand) => {
+                write!(f, "extra operand {operand}", operand = quote(operand))
+            }
+        }
+    }
+}
+
+/// What each of `reset`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `reset`'s options: the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `reset [-h | -?]`:
-///
-/// * `-h` / `-?` / `--help` — the reserved short-help switches
-///   (plans/APPS.md; they win immediately).
-/// * anything else — a [`ResetError::Usage`] error: the tool takes no
-///   operands.
+/// The grammar is `reset [-h | -?]`, read as GNU's `getopt_long` reads it
+/// ([`Scan`]); the first argument decides. The help switches (`-h`, `-?`,
+/// `--help`) answer at once, and the tool takes no operands.
 ///
 /// # Errors
 ///
-/// [`ResetError::Usage`] for any input outside the grammar above.
+/// * [`ResetError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ResetError::ExtraOperand`] — an operand.
 pub fn parse(args: &[&str]) -> Result<Command, ResetError> {
-    match args.first() {
+    let first = Scan::new(OPTIONS, args, Order::Permute).next().transpose();
+    match first.map_err(ResetError::Option)? {
         None => Ok(Command::Run),
-        Some(&("-h" | "-?" | "--help")) => Ok(Command::Help),
-        Some(_) => Err(ResetError::Usage),
+        Some(Arg::Opt(Flag::Help, _)) => Ok(Command::Help),
+        Some(Arg::Operand(operand)) => Err(ResetError::ExtraOperand(String::from(operand))),
     }
 }
 
@@ -125,6 +153,8 @@ pub fn reset_bytes(caps: &Capabilities) -> Vec<u8> {
 mod tests {
     extern crate std;
 
+    use alloc::string::{String, ToString};
+
     use tairix_termcap::TermType;
 
     use super::{parse, reset_bytes, Command, ResetError};
@@ -142,9 +172,33 @@ mod tests {
     }
 
     #[test]
-    fn any_other_argument_is_usage() {
-        assert_eq!(parse(&["-x"]), Err(ResetError::Usage));
-        assert_eq!(parse(&["operand"]), Err(ResetError::Usage));
+    fn an_operand_is_an_extra_operand() {
+        let err = parse(&["operand"]).expect_err("an operand is refused");
+        assert_eq!(err, ResetError::ExtraOperand(String::from("operand")));
+        assert_eq!(err.to_string(), "extra operand 'operand'");
+    }
+
+    /// GNU's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        match parse(args) {
+            Err(ResetError::Option(refusal)) => refusal.to_string(),
+            other => panic!("expected a refused option, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--help=1"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["--he"]), Ok(Command::Help));
     }
 
     #[test]

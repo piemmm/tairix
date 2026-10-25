@@ -35,7 +35,7 @@ Standard-Fehlerausgabe — er verdrängt niemals eine laufende Sitzung.
 ## EXIT STATUS
 
 - `0` — die Kurzhilfe wurde ausgegeben.
-- `2` — die Befehlszeile wurde nicht verstanden.
+- `1` — die Befehlszeile wurde nicht verstanden.
 - jeder andere Code ungleich null — die Sitzung konnte nicht starten
   (kein Arbeitsplatz, kein Anzeigedienst) oder endete (das
   Arbeitsplatz-Lease ging verloren); der Grund steht auf der

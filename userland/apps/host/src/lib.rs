@@ -68,10 +68,11 @@ use tairix_help::{own_short_help, HelpSource};
 use tairix_net::addr::IpAddr;
 use tairix_net::dns::{LookupType, Name, Resolution, ResolveStatus};
 use tairix_resolver::ResolveError;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 use tairix_util::quote::quote;
 
-/// The one-line usage banner, printed on a usage error and as the fallback
-/// when the bundled help document is unavailable.
+/// The one-line usage banner, printed as the fallback when the bundled help
+/// document is unavailable.
 pub const USAGE: &str = "usage: host [-t type] name|address";
 
 /// The command word this bundle is named by, for the own-help lookup.
@@ -128,12 +129,10 @@ pub enum ParseError {
     MissingName,
     /// More than one name operand was given.
     TooManyOperands,
-    /// An unrecognised option.
-    UnknownOption(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
     /// A `-t`/`--type` value that is not a supported record type.
     UnknownType(String),
-    /// A `-t`/`--type` with no value following it.
-    MissingTypeValue,
 }
 
 impl fmt::Display for ParseError {
@@ -141,7 +140,7 @@ impl fmt::Display for ParseError {
         match self {
             Self::MissingName => f.write_str("a name to look up is required"),
             Self::TooManyOperands => f.write_str("only one name may be given"),
-            Self::UnknownOption(opt) => write!(f, "unknown option {opt}", opt = quote(opt)),
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::UnknownType(ty) => {
                 write!(
                     f,
@@ -149,7 +148,6 @@ impl fmt::Display for ParseError {
                     ty = quote(ty)
                 )
             }
-            Self::MissingTypeValue => f.write_str("option '-t' requires a record type"),
         }
     }
 }
@@ -167,61 +165,55 @@ fn parse_record_type(value: &str) -> Option<LookupType> {
         .find(|record| record.label() == wanted)
 }
 
+/// What each of `host`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Type,
+    Help,
+}
+
+/// `host`'s options and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::valued('t', &["type"], Flag::Type),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse a `host` argument vector.
 ///
-/// Options precede the single operand; `--` ends option processing.
-/// `-t`/`--type` takes a record type, attached (`-tA`, `--type=A`) or as the
-/// following argument (`-t A`, `--type A`). `-?`, `-h`, and `--help` request
-/// the short help and win over any operand.
+/// Read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among the
+/// operands, clustered, `-t`/`--type`'s record type attached (`-tA`,
+/// `--type=A`) or the next argument, a long option by any unambiguous prefix,
+/// `--` ending them. `-?`, `-h` and `--help` ask for the short help, answered
+/// once the whole line is read.
 ///
 /// An operand that parses as an IPv4 or IPv6 address literal is rewritten to
 /// its reverse name and, absent `-t`, looked up as `PTR`.
 ///
 /// # Errors
 ///
-/// A [`ParseError`] describing the first malformed argument.
+/// * [`ParseError::Option`] — an option `getopt` refuses, in its words.
+/// * [`ParseError::UnknownType`] — a record type other than `A`, `AAAA` and
+///   `PTR`.
+/// * [`ParseError::TooManyOperands`] — a second name.
+/// * [`ParseError::MissingName`] — no name, and no help asked for.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut record_type: Option<LookupType> = None;
     let mut name: Option<String> = None;
-    let mut options_ended = false;
     let mut want_help = false;
 
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index];
-        index += 1;
-        if options_ended || !arg.starts_with('-') || arg == "-" {
-            // A bare `-` is an operand (a name), not an option.
-            if name.is_some() {
-                return Err(ParseError::TooManyOperands);
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ParseError::Option)? {
+            Arg::Operand(_) if name.is_some() => return Err(ParseError::TooManyOperands),
+            Arg::Operand(operand) => name = Some(operand.to_string()),
+            Arg::Opt(Flag::Help, _) => want_help = true,
+            Arg::Opt(Flag::Type, value) => {
+                let value = value.unwrap_or_default();
+                let ty = parse_record_type(value)
+                    .ok_or_else(|| ParseError::UnknownType(value.to_string()))?;
+                record_type = Some(ty);
             }
-            name = Some(arg.to_string());
-            continue;
         }
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if arg == "-?" || arg == "-h" || arg == "--help" {
-            want_help = true;
-            continue;
-        }
-        if let Some(value) = type_option_value(arg) {
-            // The value was attached (`-tA`, `--type=A`).
-            let ty = parse_record_type(value)
-                .ok_or_else(|| ParseError::UnknownType(value.to_string()))?;
-            record_type = Some(ty);
-            continue;
-        }
-        if arg == "-t" || arg == "--type" {
-            let value = args.get(index).ok_or(ParseError::MissingTypeValue)?;
-            index += 1;
-            let ty = parse_record_type(value)
-                .ok_or_else(|| ParseError::UnknownType((*value).to_string()))?;
-            record_type = Some(ty);
-            continue;
-        }
-        return Err(ParseError::UnknownOption(arg.to_string()));
     }
 
     if want_help {
@@ -239,21 +231,6 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
         (None, None) => alloc::vec![LookupType::A, LookupType::Aaaa],
     };
     Ok(Command::Lookup(Lookup { name, types }))
-}
-
-/// Extract an attached `-t`/`--type` value: `-tA` → `A`, `--type=A` → `A`.
-/// Returns [`None`] for the separate-argument forms (`-t`, `--type`) and for
-/// any other argument.
-fn type_option_value(arg: &str) -> Option<&str> {
-    if let Some(rest) = arg.strip_prefix("--type=") {
-        return Some(rest);
-    }
-    if let Some(rest) = arg.strip_prefix("-t") {
-        if !rest.is_empty() {
-            return Some(rest);
-        }
-    }
-    None
 }
 
 /// Run a parsed `host` command against the injected seams.

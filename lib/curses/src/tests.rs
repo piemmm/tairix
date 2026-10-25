@@ -85,6 +85,15 @@ fn a_control_character_is_written_as_a_glyph_never_as_itself() {
 }
 
 #[test]
+fn a_hidden_character_is_written_as_one_replacement_glyph() {
+    let mut win = Window::new(Pos::ORIGIN, Size::new(1, 10));
+    win.add_str("a\u{202e}b\u{200b}c\u{3164}d");
+    let row: String = (0..7).map(|col| glyph_at(&win, 0, col)).collect();
+    assert_eq!(row, "a\u{fffd}b\u{fffd}c\u{fffd}d");
+    assert_eq!(win.cursor(), Pos::new(0, 7));
+}
+
+#[test]
 fn writing_past_the_right_edge_wraps_to_the_next_line() {
     let mut win = Window::new(Pos::ORIGIN, Size::new(3, 3));
     win.add_str("abcd");

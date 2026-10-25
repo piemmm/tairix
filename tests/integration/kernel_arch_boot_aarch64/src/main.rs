@@ -1,5 +1,5 @@
-//! `plans/PI.md` P6c-2 QEMU integration test: boot the aarch64 (Raspberry
-//! Pi 4) `tairix-kernel` pipeline on the `virt` board to
+//! `plans/PI.md` P6c-2 QEMU integration test: boot the aarch64
+//! `tairix-kernel` pipeline on the `virt` board to
 //! `AuditEvent::BootCompleted` and report success to QEMU.
 //!
 //! ## What this test asserts

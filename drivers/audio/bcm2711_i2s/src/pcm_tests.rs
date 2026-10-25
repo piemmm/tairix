@@ -1,6 +1,6 @@
 //! The block against the model of its control register. The framings are
-//! checked against the register values Linux's `bcm2835-i2s` computes for the
-//! same link.
+//! checked against register values worked by hand from the `MODE_A` and
+//! `TXC_A` fields (BCM2711 ARM Peripherals, Tables 145 and 147).
 
 use tairix_abi::driver::codec::{ClockInversion, DaiFormat, DaiLink};
 use tairix_abi::{DriverError, RegisterBlock};
@@ -24,8 +24,8 @@ fn link(format: DaiFormat, bit: bool, frame: bool, inversion: ClockInversion) ->
     }
 }
 
-/// Check `link` at `width` frames as Linux programs it: `mode` in `MODE_A`
-/// and `channels` in `TXC_A`.
+/// Check `link` at `width` frames as the datasheet's fields give it: `mode`
+/// in `MODE_A` and `channels` in `TXC_A`.
 fn check(link: &DaiLink, width: u8, mode: u32, channels: u32) {
     let framing = Framing::new(link, width).expect("a framing");
     assert_eq!(
@@ -42,7 +42,7 @@ fn check(link: &DaiLink, width: u8, mode: u32, channels: u32) {
 }
 
 #[test]
-fn each_framing_width_and_clock_side_is_the_one_linux_programs() {
+fn each_framing_width_and_clock_side_sets_the_datasheet_fields() {
     use ClockInversion::Normal;
     // The flags say whether the codec drives the bit clock, then the frame
     // clock.
@@ -85,7 +85,7 @@ fn each_framing_width_and_clock_side_is_the_one_linux_programs() {
 }
 
 #[test]
-fn each_inversion_is_the_one_linux_programs() {
+fn each_inversion_sets_the_datasheet_fields() {
     use ClockInversion::{BitClock, Both, FrameClock};
     check(
         &link(DaiFormat::I2s, false, false, BitClock),

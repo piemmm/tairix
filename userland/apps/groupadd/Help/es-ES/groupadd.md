@@ -39,8 +39,8 @@ operando.
 - `0` — el grupo fue creado.
 - `1` — el registro rechazó la creación o esta falló (por ejemplo una
   capacidad ausente o un identificador duplicado); el motivo se imprime
-  en el error estándar.
-- `2` — la línea de órdenes no se entendió.
+  en el error estándar. Una línea de órdenes no entendida también
+  termina con `1`.
 
 ## ENVIRONMENT
 

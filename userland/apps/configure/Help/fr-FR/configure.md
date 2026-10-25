@@ -238,11 +238,10 @@ un périphérique ; elle est donc enregistrée, et le refus est énoncé.
   effectuée.
 - `1` — les paramètres n'ont pas pu être lus ou modifiés (par exemple
   l'appelant ne peut pas modifier les paramètres de la machine, ou ne
-  peut pas lire ses paramètres réseau), ou la sortie n'a pas pu être
-  délivrée.
-- `2` — la ligne de commande n'a pas été comprise, la clé est inconnue,
-  la valeur est hors de l'ensemble de la clé, ou la modification
-  laisserait la configuration réseau incohérente.
+  peut pas lire ses paramètres réseau), la clé est inconnue, la valeur est
+  hors de l'ensemble de la clé, la modification laisserait la
+  configuration réseau incohérente, ou la sortie n'a pas pu être délivrée.
+  Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

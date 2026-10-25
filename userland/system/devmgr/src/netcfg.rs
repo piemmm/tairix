@@ -719,7 +719,7 @@ mod tests {
         );
     }
 
-    /// The Pi 4 image configures a QEMU NIC by MAC beside the Pi's own by
+    /// An image configures one NIC by MAC beside another by
     /// node: the one never present is never offered, so nothing is refused.
     #[test]
     fn a_configuration_whose_nic_never_binds_is_never_offered() {

@@ -2,8 +2,8 @@
 //!
 //! A user-space driver shares a block of memory with a device that is a
 //! separate bus master (an xHCI controller, a virtio device, …). On a
-//! platform whose device DMA is **not** I/O-coherent — the Raspberry Pi 4's
-//! PCIe root complex is the standing example — that shared block is mapped
+//! platform whose device DMA is **not** I/O-coherent — a non-snooping
+//! PCIe root complex, say — that shared block is mapped
 //! Normal **Non-Cacheable** (`PageFlags::DMA_COHERENT`, see `kernel/arch`).
 //! Non-cacheable removes the *cache*-coherency problem, but it does **not**
 //! make the CPU's accesses *ordered* with respect to the device: without an
@@ -47,7 +47,7 @@
 #![deny(missing_docs)]
 // Every function here is a single barrier instruction, so a call sequence
 // around it would cost several times the barrier itself: the inline is a
-// requirement, not a hint (Linux spells the same thing `__always_inline`).
+// requirement, not a hint.
 #![allow(clippy::inline_always)]
 
 /// Order writes to device-shared memory before a following MMIO store.
@@ -59,8 +59,8 @@
 /// writes and act on stale memory.
 ///
 /// AArch64: `dmb oshst` — an outer-shareable store-store barrier, the domain
-/// that covers a non-coherent DMA master (the same choice Linux's `dma_wmb()`
-/// makes). It orders the Normal-Non-Cacheable data stores ahead of the
+/// that covers a non-coherent DMA master (Arm Architecture Reference Manual,
+/// `DMB`). It orders the Normal-Non-Cacheable data stores ahead of the
 /// Device-memory doorbell store.
 #[cfg(dma_barrier_aarch64)]
 #[inline(always)]
@@ -80,8 +80,8 @@ pub fn dma_wmb() {
 /// that entry. Without it the payload reads may observe bytes from before the
 /// device's write that the flag announced (a torn read of a ring entry).
 ///
-/// AArch64: `dmb oshld` — an outer-shareable load barrier (the same choice
-/// Linux's `dma_rmb()` makes), ordering the flag load ahead of the payload
+/// AArch64: `dmb oshld` — an outer-shareable load barrier, ordering the flag
+/// load ahead of the payload
 /// loads with respect to the non-coherent DMA master's writes.
 #[cfg(dma_barrier_aarch64)]
 #[inline(always)]

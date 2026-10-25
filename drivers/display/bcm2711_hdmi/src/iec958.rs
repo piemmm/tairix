@@ -1,8 +1,9 @@
-//! The MAI's samples: IEC 60958 subframes (IEC 60958-3) in the layout Linux's
-//! `IEC958_SUBFRAME_LE` gives them and the transmitter takes — the preamble in
-//! the low nibble, the 24-bit sample above it, then the validity, user,
-//! channel status and parity bits — each slot of a frame one subframe, in the
-//! order the audio `InfoFrame`'s speaker allocation places them.
+//! The MAI's samples: IEC 60958 subframes, each of IEC 60958-1's time slots a
+//! bit of a little-endian word as alsa-lib's IEC958 subframe plugin packs them
+//! — the preamble code in the low nibble (block start 0x8, first subframe 0x2,
+//! second 0x4), the 24-bit sample above it, then the validity, user, channel
+//! status and parity bits — each slot of a frame one subframe, in the order
+//! the audio `InfoFrame`'s speaker allocation places them.
 
 use tairix_abi::driver::audio::{Rate, SampleFormat};
 use tairix_audiochan::cyclic::FrameCodec;
@@ -29,8 +30,8 @@ const PARITY: u32 = 1 << 31;
 
 /// The channel status a stream's samples carry (IEC 60958-3 consumer
 /// format): linear PCM, copying permitted, no pre-emphasis, the sampling
-/// frequency and the word length, the rest unspecified — as Linux's
-/// `snd_pcm_create_iec958_consumer` states it.
+/// frequency and the word length, the rest unspecified (IEC 60958-3: bytes 0,
+/// 3 and 4).
 #[must_use]
 fn channel_status(rate: Rate, word_bits: u8) -> Option<[u8; STATUS_BYTES]> {
     let sampling = match rate.hz() {

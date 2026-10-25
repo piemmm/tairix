@@ -33,15 +33,13 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
-
     use alloc::string::String;
 
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
     use tairix_resolver::RtDnsTransport;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
-    use tairix_ss::{parse, run, NameLookup, USAGE};
+    use tairix_ss::{parse, run, NameLookup};
 
     /// The production reverse-lookup seam: the shared `lib/resolver` stub
     /// resolver over **one** transport reused across the whole listing, so
@@ -66,20 +64,18 @@ mod program {
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` when the query or output failed, `2`
-    /// on a usage error (a malformed argument vector or an unrecognised
-    /// option).
+    /// Exit codes: `0` on success, `1` when the query or output failed or
+    /// the command line was not understood (a malformed argument vector or
+    /// an unrecognised option).
     fn main() -> i32 {
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("ss") else {
+            return tairix_help::MISUSE;
         };
         let command = match parse(&arguments) {
             Ok(command) => command,
             Err(err) => {
-                write_stderr_line(&format!("ss: {err}"));
-                write_stderr_line(USAGE);
-                return 2;
+                tairix_help::report_misuse("ss", &err);
+                return tairix_help::MISUSE;
             }
         };
         let locale = tairix_help::user_locale();
@@ -94,7 +90,7 @@ mod program {
         ) {
             Ok(_) => 0,
             Err(err) => {
-                write_stderr_line(&format!("ss: {err}"));
+                write_stderr_line(format_args!("ss: {err}"));
                 1
             }
         }

@@ -54,7 +54,8 @@ other app — nothing is compiled into the kernel or the image builder.
 ## Layering & safety
 
 `no_std` (with `alloc`). It links only `lib/*` crates — `lib/abi`,
-`lib/procinfo`, and the OS `lib/curses`/`lib/termcap`/`lib/vt` — never a
-kernel or driver crate (`AGENTS.md` §17.4). No `unsafe`, no
-`unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9), and
-nothing writes to fd 3 (`stdinfo`, §20).
+`lib/procinfo`, `lib/help`, `lib/util`, and the OS
+`lib/curses`/`lib/termcap`/`lib/vt` — never a kernel or driver crate
+(`AGENTS.md` §17.4). No `unsafe`, no `unwrap`/`expect`/`panic!` in
+production paths (`AGENTS.md` §2.9), and nothing writes to fd 3
+(`stdinfo`, §20).

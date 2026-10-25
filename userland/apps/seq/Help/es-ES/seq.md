@@ -20,11 +20,18 @@ caso contrario, y no puede ser cero. `último` puede ser `inf` para
 contar sin fin. La precisión de salida predeterminada sigue la
 escritura de los operandos (`seq 1 0.25 2` imprime dos decimales), y
 las secuencias de enteros se generan de forma exacta, por grandes que
-sean los números.
+sean los números. Un número hexadecimal con el exponente en mayúscula
+(`0X1P-1`) se lee igual que uno con el exponente en minúscula; GNU `seq`
+lee su forma como la de un entero e imprime números erróneos.
 
 El análisis de opciones se detiene en el primer operando, y un número
 negativo inicial es un operando, no una opción: `seq -5 5` cuenta
 desde -5.
+
+Un diagnóstico muestra el formato, y una directiva desconocida que
+contenga, con cualquier carácter de control u otro carácter invisible
+escapado, de modo que ninguno puede controlar el terminal; GNU muestra
+la directiva sin cambios.
 
 ## OPTIONS
 
@@ -54,9 +61,9 @@ desde -5.
 ## EXIT STATUS
 
 - `0` — se escribió la secuencia (o la ayuda breve solicitada).
-- `1` — la salida dejó de aceptar bytes.
-- `2` — la línea de órdenes no se entendió (opción desconocida, número
-  inválido, incremento cero o formato incorrecto).
+- `1` — la salida dejó de aceptar bytes. Una línea de órdenes no
+  entendida (opción desconocida, número inválido, incremento cero o
+  formato incorrecto) también termina con `1`.
 
 ## ENVIRONMENT
 

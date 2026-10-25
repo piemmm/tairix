@@ -9,7 +9,9 @@
 //!   always terminates, including extended patterns against candidates at
 //!   and past [`tairix_glob::MAX_EXTENDED_LEN`];
 //! * the convenience match and a reused [`Scratch`] agree, so no state leaks
-//!   from one candidate into the next.
+//!   from one candidate into the next;
+//! * a heap refusing the matcher's working memory yields [`OutOfMemory`],
+//!   never an abort, and leaves the scratch answering truly.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws
 //! pseudo-random patterns, mutates real templates, and matches them against
@@ -17,11 +19,19 @@
 //! sweep once from a fresh, logged seed; `cargo xtask fuzz` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend it to a wall-clock budget.
 
+use tairix_fuzzseed::meter::{refusing_above, Metered};
 use tairix_fuzzseed::Prng;
-use tairix_glob::{Mark, Options, Pattern, Scratch, MAX_EXTENDED_LEN};
+use tairix_glob::{Mark, Options, OutOfMemory, Pattern, Scratch, MAX_EXTENDED_LEN};
+
+/// Every request the harness makes, refusable per thread, so a sweep can
+/// stand in for an exhausted heap.
+#[global_allocator]
+static ALLOC: Metered = Metered;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
-const SMOKE_ITERATIONS: u64 = 20_000;
+/// The sixteen option sets take turns, so each — `ls`'s and the tree file
+/// manager's among them — meets 6 250 of its inputs.
+const SMOKE_ITERATIONS: u64 = 100_000;
 
 /// Largest arbitrary byte string turned into a pattern or candidate.
 const MAX_NOISE: usize = 512;
@@ -49,6 +59,11 @@ const TEMPLATES: &[&str] = &[
     "@(a(b)c|[|)]x)",
     "@(unclosed|",
     "src/*/[!.]*.rs",
+    "@(src|docs/api)/*.md",
+    "!(build/keep)",
+    "@([d/x]|zz)ocs/[a/b]",
+    "[a-Z]*[[.minus.][.dash.]]",
+    "[α-ωа-я一-龥A-Za-z0-9_]*",
 ];
 
 /// Candidate strings compiled patterns are matched against.
@@ -62,6 +77,8 @@ const CANDIDATES: &[&str] = &[
     ".hidden",
     "ZZZ",
     "a(b)c",
+    "docs/api",
+    "-",
 ];
 
 /// Every combination of the four option flags.
@@ -101,8 +118,11 @@ fn compile_and_match_never_panic_for_any_input() {
     let mut scratch = Scratch::new();
 
     let mut iteration: u64 = 0;
+    let mut turns = [0u64; 16];
     loop {
-        let flags = options(rng.next_u8() & 0x0F);
+        let bits = u8::try_from(iteration % 16).expect("below sixteen");
+        turns[usize::from(bits)] += 1;
+        let flags = options(bits);
 
         // 1. A real template with a handful of bytes flipped at random.
         let template = *rng.pick(TEMPLATES);
@@ -150,11 +170,14 @@ fn compile_and_match_never_panic_for_any_input() {
             let _ = pat.matches_with(candidate, &mut scratch);
         }
 
-        // 4. An extended pattern against candidates at and past the bound.
-        if let Ok(pat) = Pattern::with_options("*(a|b*(a))!(c)", options(1)) {
-            let len = MAX_EXTENDED_LEN - 1 + rng.at_most(2);
-            let long: String = (0..len).map(|_| ['a', 'b', 'c'][rng.below(3)]).collect();
-            let _ = pat.matches_with(&long, &mut scratch);
+        // 4. An extended pattern against candidates at and past the bound:
+        //    the sweep's dearest step, checking one bound, so once a turn.
+        if bits == 0 {
+            if let Ok(pat) = Pattern::with_options("*(a|b*(a))!(c)", options(1)) {
+                let len = MAX_EXTENDED_LEN - 1 + rng.at_most(2);
+                let long: String = (0..len).map(|_| ['a', 'b', 'c'][rng.below(3)]).collect();
+                let _ = pat.matches_with(&long, &mut scratch);
+            }
         }
 
         // 5. Pure noise as the pattern (lossy UTF-8), and as the candidate.
@@ -163,9 +186,32 @@ fn compile_and_match_never_panic_for_any_input() {
         let noise = String::from_utf8_lossy(&noise);
         exercise(&noise, flags, &noise, &mut scratch);
 
+        // 6. The spliced pattern under a heap refusing every request past a
+        //    random size: a true answer or a refusal, never an abort, and the
+        //    reused scratch answers truly once the heap has room again.
+        if let Ok(pat) = Pattern::with_options(&spliced, flags) {
+            let fresh = pat.matches(candidate);
+            let squeezed = refusing_above(rng.at_most(512), || {
+                pat.matches_with(candidate, &mut scratch)
+            });
+            assert!(
+                squeezed == fresh || squeezed == Err(OutOfMemory),
+                "{spliced:?} against {candidate:?}"
+            );
+            assert_eq!(
+                pat.matches_with(candidate, &mut scratch),
+                fresh,
+                "{spliced:?} against {candidate:?}"
+            );
+        }
+
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }
+    assert!(
+        turns.iter().all(|&taken| taken >= SMOKE_ITERATIONS / 16),
+        "an option set was short of its turns: {turns:?}"
+    );
 }

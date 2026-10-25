@@ -3,7 +3,7 @@
 //! Buses are numbered depth first. Every BAR and bridge window is sized
 //! bottom up, a bridge window the sum of what lies below it, and placed top
 //! down, largest alignment first and naturally aligned, inside the host's
-//! windows: the order Linux's `pci_assign_unassigned_bus_resources` follows.
+//! windows.
 //! A function any of whose BARs of a space found no room is left decoding
 //! nothing of that space, so no BAR still at zero claims an address.
 

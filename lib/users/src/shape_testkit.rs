@@ -20,6 +20,8 @@ pub(crate) struct Tree {
     pub(crate) nodes: Vec<Node>,
     /// Refuse every create, as a full volume does.
     pub(crate) full: bool,
+    /// Records replaced on nodes already there.
+    pub(crate) stamps: usize,
 }
 
 /// The directory being shaped.
@@ -35,6 +37,7 @@ impl Tree {
         Self {
             nodes: alloc::vec![blank(), blank()],
             full: false,
+            stamps: 0,
         }
     }
 
@@ -72,16 +75,25 @@ impl ShapeTree for Tree {
             .map(|&id| (id, self.node(id).directory)))
     }
 
-    fn create_dir(&mut self, dir: NodeId, name: &str) -> Result<NodeId, DriverError> {
+    fn create_dir(
+        &mut self,
+        dir: NodeId,
+        name: &str,
+        security: NodeSecurity,
+    ) -> Result<NodeId, DriverError> {
         if self.full || !self.node(dir).directory {
             return Err(DriverError::NoSpace);
         }
-        Ok(self.add(dir, name, true))
+        let node = self.add(dir, name, true);
+        let at = usize::try_from(node.raw()).expect("an index");
+        self.nodes[at].security = Some(security);
+        Ok(node)
     }
 
     fn stamp(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
         let at = usize::try_from(node.raw()).expect("an index");
         self.nodes[at].security = Some(security);
+        self.stamps += 1;
         Ok(())
     }
 }

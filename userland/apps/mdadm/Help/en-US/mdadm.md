@@ -84,8 +84,8 @@ in the array view — is written to the standard information stream
 
 - `0` — the request succeeded (or the help was written).
 - `1` — a capability was refused, a name did not resolve, the composer
-  refused the request, or the output could not be written.
-- `2` — the command line was not understood.
+  refused the request, or the output could not be written. A command line
+  that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

@@ -1003,7 +1003,7 @@ fn a_sound_that_played_out_unread_is_never_cut() {
 }
 
 /// A burst of one sound — the nine disks attaching at once on the 2026-10-17
-/// Pi 4 boot — is heard once: each repeat joins the sound already sounding
+/// boot — is heard once: each repeat joins the sound already sounding
 /// rather than opening a stream over it, and every caller waiting on it is
 /// answered when it plays out.
 #[test]

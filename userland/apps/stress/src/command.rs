@@ -11,11 +11,13 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use crate::error::StressError;
-use crate::worker::WorkerSpec;
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `stress`'s own Help tree is unavailable.
+use crate::error::StressError;
+use crate::worker::{WorkerSpec, WORKER_FLAG};
+
+/// The usage banner the short-help switches print when `stress`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: stress [--cpu N] [--io N] [--vm N] [--vm-bytes B] [--hdd N] \
 [--hdd-bytes B] [--cache N] [--all N] [--overcommit P] [--timeout T] [--temp-path DIR] \
 [--monitor] [--quiet] [--background] [--help | --version]";
@@ -103,68 +105,113 @@ pub enum Command {
     Worker(WorkerSpec),
     /// Render `stress`'s own short help (`-h`/`-?`/`--help`).
     Help,
-    /// Print the tool's name and version (`--version`, per).
+    /// Print the tool's name and version (`--version`).
     Version,
 }
+
+/// What each of `stress`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Cpu,
+    Vm,
+    Io,
+    Hdd,
+    Cache,
+    All,
+    VmBytes,
+    HddBytes,
+    Overcommit,
+    Timeout,
+    TempPath,
+    Monitor,
+    Quiet,
+    Background,
+    Version,
+    Help,
+}
+
+/// `stress`'s options, and the reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::long(&["cpu"], Takes::Value, Flag::Cpu),
+    Opt::long(&["vm"], Takes::Value, Flag::Vm),
+    Opt::long(&["io"], Takes::Value, Flag::Io),
+    Opt::long(&["hdd"], Takes::Value, Flag::Hdd),
+    Opt::long(&["cache"], Takes::Value, Flag::Cache),
+    Opt::long(&["all"], Takes::Value, Flag::All),
+    Opt::long(&["vm-bytes"], Takes::Value, Flag::VmBytes),
+    Opt::long(&["hdd-bytes"], Takes::Value, Flag::HddBytes),
+    Opt::long(&["overcommit"], Takes::Value, Flag::Overcommit),
+    Opt::long(&["timeout"], Takes::Value, Flag::Timeout),
+    Opt::long(&["temp-path"], Takes::Value, Flag::TempPath),
+    Opt::long(&["monitor"], Takes::Nothing, Flag::Monitor),
+    Opt::flag('q', &["quiet"], Flag::Quiet),
+    Opt::long(&["background"], Takes::Nothing, Flag::Background),
+    Opt::long(&["version"], Takes::Nothing, Flag::Version),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
+/// A first argument of `--worker` is the internal worker re-entry, decoded by
+/// [`WorkerSpec::decode_argv`]. Any other command line is read as GNU's
+/// `getopt_long` reads it ([`Scan`]): a long option by any unambiguous prefix,
+/// its value attached (`--cpu=2`) or following (`--cpu 2`). The help switches
+/// (`-h`, `-?`, `--help`) and `--version` answer at once; the tool takes no
+/// operands.
+///
 /// # Errors
 ///
-/// [`StressError::Usage`] for anything outside the closed grammar: an
-/// unknown option, a missing or malformed value, a run with no workers
-/// requested, the `--monitor`/`--background` contradiction, or a malformed
-/// internal `--worker` block.
+/// * [`StressError::Option`] — an option `getopt` refuses, in its words.
+/// * [`StressError::Usage`] — an operand, a malformed value, a run with no
+///   workers requested, the `--monitor`/`--background` contradiction, or a
+///   malformed internal `--worker` block.
 pub fn parse(args: &[&str]) -> Result<Command, StressError> {
     // The internal worker re-entry is an exact, closed spelling decoded by
     // the worker codec; it never mixes with user options.
-    if args.first() == Some(&"--worker") {
+    if args.first() == Some(&WORKER_FLAG) {
         return WorkerSpec::decode_argv(&args[1..])
             .map(Command::Worker)
             .ok_or(StressError::Usage);
     }
 
     let mut spec = RunSpec::default();
-    let mut rest = args;
-    while let Some((&arg, tail)) = rest.split_first() {
-        rest = tail;
-        match arg {
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            "--version" => return Ok(Command::Version),
-            "-q" | "--quiet" => spec.quiet = true,
-            "--monitor" => spec.monitor = true,
-            "--background" => spec.background = true,
-            _ => {
-                let (name, value) = split_value(arg, &mut rest)?;
-                match name {
-                    "--cpu" => spec.workers.cpu = parse_count(value)?,
-                    "--vm" => spec.workers.vm = parse_count(value)?,
-                    "--io" => spec.workers.io = parse_count(value)?,
-                    "--hdd" => spec.workers.hdd = parse_count(value)?,
-                    "--cache" => spec.workers.cache = parse_count(value)?,
-                    "--all" => {
-                        let n = parse_count(value)?;
-                        spec.workers = Workers {
-                            cpu: n,
-                            vm: n,
-                            io: n,
-                            hdd: n,
-                            cache: n,
-                        };
-                    }
-                    "--vm-bytes" => spec.vm_bytes = Some(parse_bytes(value)?),
-                    "--hdd-bytes" => spec.hdd_bytes = Some(parse_bytes(value)?),
-                    "--overcommit" => spec.overcommit = Some(parse_percent(value)?),
-                    "--timeout" => spec.timeout_secs = Some(parse_timeout(value)?),
-                    "--temp-path" => {
-                        if value.is_empty() {
-                            return Err(StressError::Usage);
-                        }
-                        spec.temp_path = Some(value.to_string());
-                    }
-                    _ => return Err(StressError::Usage),
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        let Arg::Opt(flag, value) = arg.map_err(StressError::Option)? else {
+            return Err(StressError::Usage);
+        };
+        let value = value.unwrap_or_default();
+        match flag {
+            Flag::Help => return Ok(Command::Help),
+            Flag::Version => return Ok(Command::Version),
+            Flag::Quiet => spec.quiet = true,
+            Flag::Monitor => spec.monitor = true,
+            Flag::Background => spec.background = true,
+            Flag::Cpu => spec.workers.cpu = parse_count(value)?,
+            Flag::Vm => spec.workers.vm = parse_count(value)?,
+            Flag::Io => spec.workers.io = parse_count(value)?,
+            Flag::Hdd => spec.workers.hdd = parse_count(value)?,
+            Flag::Cache => spec.workers.cache = parse_count(value)?,
+            Flag::All => {
+                let n = parse_count(value)?;
+                spec.workers = Workers {
+                    cpu: n,
+                    vm: n,
+                    io: n,
+                    hdd: n,
+                    cache: n,
+                };
+            }
+            Flag::VmBytes => spec.vm_bytes = Some(parse_bytes(value)?),
+            Flag::HddBytes => spec.hdd_bytes = Some(parse_bytes(value)?),
+            Flag::Overcommit => spec.overcommit = Some(parse_percent(value)?),
+            Flag::Timeout => spec.timeout_secs = Some(parse_timeout(value)?),
+            Flag::TempPath => {
+                if value.is_empty() {
+                    return Err(StressError::Usage);
                 }
+                spec.temp_path = Some(value.to_string());
             }
         }
     }
@@ -183,17 +230,6 @@ pub fn parse(args: &[&str]) -> Result<Command, StressError> {
         spec.quiet = true;
     }
     Ok(Command::Run(spec))
-}
-
-/// Split `--name value` / `--name=value` into its name and value, consuming
-/// the following token from `rest` for the spaced form.
-fn split_value<'a>(arg: &'a str, rest: &mut &[&'a str]) -> Result<(&'a str, &'a str), StressError> {
-    if let Some(eq) = arg.find('=') {
-        return Ok((&arg[..eq], &arg[eq + 1..]));
-    }
-    let (&value, tail) = rest.split_first().ok_or(StressError::Usage)?;
-    *rest = tail;
-    Ok((arg, value))
 }
 
 /// Parse a worker count: a plain decimal `u32`.

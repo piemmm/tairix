@@ -47,9 +47,10 @@ mapping.
 
 The enumeration, capability-walk, BAR-sizing, and window/MSI-X
 hand-off core is parameterised over the `ConfigSpace` trait, so it is
-independent of how configuration space is reached. Two access
-mechanisms implement that trait; the caller picks one at construction
-(`mechanism_one` / `mechanism_ecam` / `mechanism_brcm`).
+independent of how configuration space is reached. The two standard
+mechanisms implement that trait, and a root complex that reaches
+configuration space another way supplies its own; the caller picks one at
+construction (`mechanism_one` / `mechanism_ecam` / `mechanism_supplied`).
 
 #### Mechanism #1 — legacy I/O ports (x86_64)
 
@@ -93,36 +94,14 @@ off the mapped buses fails closed rather than reading out of bounds
 contiguous MMCONFIG region uses; it carries no target-conditional
 `cfg` (`AGENTS.md` §17.2).
 
-#### BCM2711 windowed configuration access (Raspberry Pi 4)
+#### A supplied mechanism
 
-The Raspberry Pi 4's BCM2711 root complex does **not** map
-configuration space flat. Its own root-bus header (`bus 0`, `devfn 0`)
-is read directly at the controller base, but a downstream function
-(`bus >= 1`, e.g. the VL805 xHCI at `01:00.0`) is reached through an
-index/data window pair inside the controller's own register block:
-the function's `(bus << 20) | (devfn << 12)` block address is written
-to the `EXT_CFG_INDEX` register (`0x9000`), then the dword is accessed
-through the 4 KiB `EXT_CFG_DATA` window (`0x8000`) at the register
-byte offset. `BrcmConfigSpace` implements `ConfigSpace` with exactly
-this windowing — the *only* BCM2711-specific knowledge; the
-enumeration, BAR-sizing, and capability walk above it are unchanged.
-`mechanism_brcm(window, secondary_bus)` builds the bus over it. An
-access that lands outside the mapped window, or any function but `00.0`
-on the root bus, resolves to the same `0xFFFF_FFFF` sentinel
-(`AGENTS.md` §5.4). The link behind the bridge must be **up** before any
-downstream access — the `drivers/bus/pcie_brcm` root-complex bring-up
-(below) guarantees that before handing its register window here.
-
-The BCM2711 root port is a **single-device** link, so the accessor
-forwards a configuration transaction only to `device 0` on
-`secondary_bus` (the bus number the bring-up programmed into the bridge
-bus-number register) and resolves every other downstream target to the
-`0xFFFF_FFFF` sentinel *without* issuing a transaction. This is not just
-hygiene: once the root port forwards downstream, a config read to a
-non-existent target forwards a TLP that nothing answers, and the
-completion timeout becomes a CPU external abort — a flat 256-bus walk
-over forwarded config would wedge the boot CPU. The gate resolves a
-non-zero slot on a non-root bus to the sentinel without forwarding.
+A root complex that reaches configuration space neither through the legacy
+ports nor flat implements `ConfigSpace` in its own bus driver and hands it to
+`mechanism_supplied(config)`; the enumeration, BAR-sizing and capability walk
+above it are unchanged. The mechanism must resolve every target it cannot
+reach to the `0xFFFF_FFFF` sentinel without touching the link, so a flat walk
+never forwards a transaction nothing answers.
 
 ### Enumeration walk
 
@@ -167,16 +146,15 @@ default PCI tree:
 The same enumeration core is exercised by the `Bus::enumerate`
 implementation that the driver host wires up after `register`.
 
-### Acceptance: VL805 over ECAM
+### Acceptance: an xHCI over ECAM
 
-`tests::ecam_enumeration_finds_root_port_and_vl805` and
-`tests::ecam_capability_walk_decodes_vl805_msix` lay a flat ECAM
-region (a PCIe root-port bridge at 00:00.0 and the Pi 4's VL805 xHCI
-`1106:3483` at 01:00.0, with absent slots reading the all-ones
-sentinel as real hardware master-aborts) and drive the same
-enumeration and capability-walk core over `EcamConfigSpace`,
-asserting both devices are listed and the VL805's MSI-X capability
-decodes. The BAR *size* probe depends on hardware read-only BAR bits
+`tests::ecam_enumeration_finds_root_port_and_xhci` and
+`tests::ecam_capability_walk_decodes_xhci_msix` lay a flat ECAM
+region (a PCIe root-port bridge at 00:00.0 and an xHCI `abcd:1234` at
+01:00.0, with absent slots reading the all-ones sentinel as real hardware
+master-aborts) and drive the same enumeration and capability-walk core
+over `EcamConfigSpace`, asserting both devices are listed and the xHCI's
+MSI-X capability decodes. The BAR *size* probe depends on hardware read-only BAR bits
 and is covered by the mechanism-#1 fixtures, not the plain-memory
 ECAM backing.
 
@@ -191,6 +169,31 @@ bring-up engine is co-located in that driver crate, not a `lib/*`
 device-support crate: PCIe root-complex bring-up sits above the §18.6
 bootstrap floor, so it has no charter-legal non-driver consumer for the
 §2.20 carve-out, `AGENTS.md` §2.22.)
+
+### Windowed configuration access
+
+The root complex does **not** map configuration space flat. Its own
+root-bus header (`bus 0`, `devfn 0`) is read directly at the controller
+base, but a downstream function (`bus >= 1`, e.g. the VL805 xHCI at
+`01:00.0`) is reached through an index/data window pair inside the
+controller's own register block: the function's
+`(bus << 20) | (devfn << 12)` block address is written to the
+`EXT_CFG_INDEX` register (`0x9000`), then the dword is accessed through
+the 4 KiB `EXT_CFG_DATA` window (`0x8000`) at the register byte offset.
+`BrcmConfigSpace` (`src/config_window.rs`) implements `ConfigSpace` with
+exactly this windowing and is handed to `tairix_pci::mechanism_supplied`.
+An access that lands outside the mapped window, or any function but `00.0`
+on the root bus, resolves to the `0xFFFF_FFFF` sentinel. The link behind
+the bridge must be **up** before any downstream access; the bring-up below
+guarantees that before handing its register window over.
+
+The root port is a **single-device** link, so the accessor forwards a
+configuration transaction only to `device 0` on `secondary_bus` (the bus
+number the bring-up programmed into the bridge bus-number register) and
+resolves every other downstream target to the sentinel *without* issuing
+a transaction: a config read to a non-existent target forwards a TLP that
+nothing answers, and the completion timeout becomes a CPU external abort
+that would wedge a flat 256-bus walk.
 
 ### Seams
 
@@ -244,14 +247,14 @@ outbound PCIe range) so the port forwards *memory* transactions to the
 VL805's BAR — the BCM2711 ships that register empty, so without it BAR
 reads master-abort to the `0xdead_dead` poison even though config reads
 succeed (the bridge-window assignment a full PCI enumerator performs, which
-the windowed `mech_brcm` accessor does not); program the outbound (CPU→PCIe)
+the windowed `config_window` accessor does not); program the outbound (CPU→PCIe)
 MMIO window from the discovered `ranges`. Finally deassert `PERST#` and
 poll `MISC_PCIE_STATUS` for data-link-active + phy-link-up, bounded by
 `DEFAULT_LINK_POLLS` (100 ms), and confirm the link with a fail-closed
 `link_up()` (`DeviceFault` otherwise). **Only then** enable Memory Space
 + Bus Master in the bridge's *own* Command register (config offset
 `0x04`) — the standard PCI-PCI bridge enable a full enumerator performs,
-which the windowed `mech_brcm` accessor
+which the windowed `config_window` accessor
 does not. This is issued *after* the link is up, because a PCI-PCI bridge
 is enabled only once the link trains: the integrated RC latches
 Memory Space Enable against a live link, so an earlier write (with
@@ -287,7 +290,8 @@ autonomous bootstrap-floor entry that maps the window under `CAP_MMIO_MAP`
 and trains the link over it (`DriverError::NotFound` on an incomplete
 node). `wiring::open_discovered` is the lower seam they share with a
 caller that already holds the windows. The caller then recovers the
-window (`into_regs`) and builds `mechanism_brcm(window)` to enumerate the
+window (`into_regs`) and builds
+`mechanism_supplied(BrcmConfigSpace::new(window, secondary_bus))` to enumerate the
 VL805. The crate performs only the PCIe link bring-up and so never depends
 on another driver crate (`AGENTS.md` §17.4); the VL805 firmware reload is
 the separate `drivers/bus/usb/vl805` device crate's job and the xHCI
@@ -597,7 +601,7 @@ Before addressing anything behind it, the bring-up walk first
 **marks the hub as a hub** in its own slot context: it reads the hub
 descriptor (`bNbrPorts` and the
 `wHubCharacteristics` TT Think Time, `read_hub_topology` — requested at
-the full base-descriptor size production stacks send, only the bytes
+15 bytes — the seven fixed and both port bitmaps at four bytes each — only the bytes
 delivered decoded, by `HubDescriptor::decode` alone, and retried a bounded
 three attempts when the hub answers with a refusal STALL or a reply that is
 not a hub descriptor;
@@ -696,9 +700,8 @@ double enumeration, undersized or misaligned DMA region).
 
 A controller that latches `USBSTS.HSE` or `HCHalted` raises no further
 interrupt until it is reset (xHCI §4.24.1); on the Pi 4 the VL805 does so
-during a downstream hot-removal teardown. The HCD recovers it the way the
-Linux USB core's `usb_reset_and_verify_device` does: **a controller reset does
-not remove the controller's children.**
+during a downstream hot-removal teardown. The HCD recovers it on one rule:
+**a controller reset does not remove the controller's children.**
 
 - Each recovery attempt runs `UsbDevice::reset_and_reenumerate` with every
   interface node still published.
@@ -907,8 +910,8 @@ buffer.
   fixed clocks at or below the speed the node declares.
 
 Each gives a transaction up, and resets its controller, only once the bus has
-made no progress for a step's time on the wire and a one-second stall, the
-Linux I²C core's default. `plans/I2C.md` carries both designs.
+made no progress for a step's time on the wire and a one-second stall
+(`lib/i2cbus`). `plans/I2C.md` carries both designs.
 
 ## Register-window hand-off
 

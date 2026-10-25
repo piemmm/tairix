@@ -20,9 +20,8 @@
 //!
 //! # Discovery vs. bus enumeration
 //!
-//! A device that the firmware tree describes directly — the Raspberry Pi 4
-//! EMMC2 SD host (`compatible = "brcm,bcm2711-emmc2"`) — binds straight from
-//! the discovered tree. A device behind a bus that must be *probed* — a
+//! A device that the firmware tree describes directly — an SD host — binds
+//! straight from the discovered tree. A device behind a bus that must be *probed* — a
 //! virtio-blk disk, whose bind key is the virtio device id read from the
 //! transport, not a `compatible` string — appears only after the bus driver
 //! enumerates it and attaches the probed child node.
@@ -44,7 +43,7 @@ use tairix_devmatch::MatchResolution;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_util::fmt::format_hex_u64;
 
-use crate::driver_catalog;
+use crate::driver_catalog::{self, InKernelDriver};
 
 /// Audit event id for the root-storage bind gate (a
 /// stable id for the security-relevant bind decision). Sits beside the
@@ -58,10 +57,10 @@ const ROOT_STORAGE_AUTOLOAD: EventId = EventId(4135);
 /// so the bring-up that follows has the node's resource-grant requests
 /// (a driver receives only the resources its matched
 /// node requested) without re-walking the tree.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone)]
 pub struct RootBlockBinding {
-    /// The winning floor driver's `/System/Drivers/` image path.
-    pub driver_path: &'static str,
+    /// The winning floor driver.
+    pub driver: &'static InKernelDriver,
     /// The discovered hardware-tree node that bound it (with its
     /// capability-grant resource requests).
     pub node: HwNode,
@@ -69,33 +68,25 @@ pub struct RootBlockBinding {
     pub priority: u16,
 }
 
-/// Resolve one node against the floor catalogue, returning a binding only
-/// when the node binds a bootstrap-floor **block** driver
-/// ([`driver_catalog::is_root_block_driver`]).
+/// Resolve one node against the floor catalogue, returning a binding when
+/// the node binds a floor driver — every one of which is a block driver.
 ///
-/// A node that matches nothing, ties (a packaging defect — fail closed), or binds a floor driver that is not a block driver is not a
-/// root block device and yields [`None`] — the [`is_root_block_driver`]
-/// check is kept as defence-in-depth even though the floor is storage-only
-/// today.
-///
-/// [`is_root_block_driver`]: driver_catalog::is_root_block_driver
+/// A node that matches nothing, or ties (a packaging defect), yields
+/// [`None`]: it is not a root block device.
 #[must_use]
 fn classify(node: &HwNode) -> Option<RootBlockBinding> {
-    if let MatchResolution::Winner {
+    let MatchResolution::Winner {
         candidate,
         priority,
     } = driver_catalog::resolve_driver(node.match_keys())
-    {
-        let path = driver_catalog::driver_candidates()[candidate].path;
-        if driver_catalog::is_root_block_driver(path) {
-            return Some(RootBlockBinding {
-                driver_path: path,
-                node: *node,
-                priority,
-            });
-        }
-    }
-    None
+    else {
+        return None;
+    };
+    Some(RootBlockBinding {
+        driver: driver_catalog::IN_KERNEL_DRIVERS.get(candidate)?,
+        node: *node,
+        priority,
+    })
 }
 
 /// The streaming accumulator that selects the single root block device as
@@ -177,7 +168,7 @@ impl RootBlockSelection {
                 fields: &[
                     Field {
                         key: "driver",
-                        value: tairix_log::FieldValue::Str(binding.driver_path),
+                        value: tairix_log::FieldValue::Str(binding.driver.path),
                     },
                     Field {
                         key: "node_id_hex",
@@ -220,24 +211,13 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 mod tests {
     use super::*;
     use core::cell::RefCell;
-    use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode};
-    // `HwResource` is used only by the aarch64-only `emmc2_node` fixture
-    // (the directly-described EMMC2 disk carries an MMIO grant request); on
-    // every other target the floor is virtio-blk alone and nothing here
-    // constructs a resource.
-    #[cfg(kernel_isa = "aarch64")]
-    use tairix_abi::HwResource;
+    use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HwResource};
     use tairix_arch_api::{DiscoveryError, HwNodeSink};
     use tairix_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
     use tairix_kernel_virtio::MAX_SLOTS;
 
     use crate::discovery_test_bus::FakeBus;
-    use crate::driver_catalog::VIRTIO_BLK_PATH;
-    // EMMC2 is a floor block driver only on aarch64 (the Pi 4 SD host), so
-    // its path const and the directly-described-EMMC2 fixtures below exist
-    // only there; every other target's floor is virtio-blk alone.
-    #[cfg(kernel_isa = "aarch64")]
-    use crate::driver_catalog::EMMC2_PATH;
+    use crate::driver_catalog::{FloorBringUp, IN_KERNEL_DRIVERS};
     use crate::hwdiscovery::observe_virtio_mmio_block_devices;
     use crate::hwtree_node_ids::VIRTIO_BLOCK_PROBE_NODE_BASE_ID;
     use crate::iommu_fdt::SlotDma;
@@ -265,18 +245,10 @@ mod tests {
         }
     }
 
-    /// The EMMC2 SD host the Pi 4 firmware tree describes directly: a node
-    /// carrying the driver's own `compatible` bind key plus the MMIO window
-    /// it exposes as a capability-grant request. EMMC2 is a floor driver
-    /// only on aarch64, so this fixture is aarch64-only.
-    #[cfg(kernel_isa = "aarch64")]
-    fn emmc2_node(id: u32) -> HwNode {
-        let mut node = HwNode::new(id, 0, HwDeviceClass::Storage);
-        node.push_match_key(HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits"))
-            .expect("one key");
-        node.push_resource(HwResource::mmio(0xfe34_0000, 0x100))
-            .expect("one resource");
-        node
+    /// Whether the floor driver `binding` names is the one the port opens
+    /// over its virtio transport.
+    fn binds_virtio(binding: &RootBlockBinding) -> bool {
+        matches!(binding.driver.bring_up, FloorBringUp::Virtio)
     }
 
     /// A virtio-blk disk as it appears **after** the bus driver probes the
@@ -308,22 +280,32 @@ mod tests {
         node
     }
 
-    #[cfg(kernel_isa = "aarch64")]
+    /// A controller the firmware tree describes directly, carrying a floor
+    /// driver's own bind key and the MMIO window it exposes as a
+    /// capability-grant request, binds that driver — for every driver this
+    /// target's floor holds.
     #[test]
-    fn a_directly_described_emmc2_node_binds_the_emmc2_driver() {
-        let audit = RecordingSink::default();
-        let tree = [
-            HwNode::new(0, tairix_abi::HW_NODE_ROOT, HwDeviceClass::Root),
-            emmc2_node(3),
-        ];
-        let binding = resolve_root_block_driver(&tree, &audit).expect("emmc2 binds");
-        assert_eq!(binding.driver_path, EMMC2_PATH);
-        assert_eq!(binding.node.id(), 3);
-        // The node's MMIO grant request travels with the binding.
-        assert_eq!(binding.node.resources().len(), 1);
-        let (id, level) = audit.only();
-        assert_eq!(id, ROOT_STORAGE_AUTOLOAD.0);
-        assert_eq!(level, Level::Info);
+    fn a_directly_described_controller_binds_its_floor_driver() {
+        for driver in &IN_KERNEL_DRIVERS {
+            let audit = RecordingSink::default();
+            let mut node = HwNode::new(3, 0, HwDeviceClass::Storage);
+            node.push_match_key(driver.bind_keys[0].key)
+                .expect("one key");
+            node.push_resource(HwResource::mmio(0x1000_0000, 0x100))
+                .expect("one resource");
+            let tree = [
+                HwNode::new(0, tairix_abi::HW_NODE_ROOT, HwDeviceClass::Root),
+                node,
+            ];
+            let binding = resolve_root_block_driver(&tree, &audit).expect("binds");
+            assert_eq!(binding.driver.path, driver.path);
+            assert_eq!(binding.node.id(), 3);
+            // The node's MMIO grant request travels with the binding.
+            assert_eq!(binding.node.resources().len(), 1);
+            let (id, level) = audit.only();
+            assert_eq!(id, ROOT_STORAGE_AUTOLOAD.0);
+            assert_eq!(level, Level::Info);
+        }
     }
 
     #[test]
@@ -331,7 +313,7 @@ mod tests {
         let audit = RecordingSink::default();
         let tree = [virtio_blk_node(5)];
         let binding = resolve_root_block_driver(&tree, &audit).expect("virtio-blk binds");
-        assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
+        assert!(binds_virtio(&binding));
         assert_eq!(binding.node.id(), 5);
         assert_eq!(audit.only().1, Level::Info);
     }
@@ -379,7 +361,7 @@ mod tests {
         let audit = RecordingSink::default();
         let tree = [hid_node(1), virtio_blk_node(2)];
         let binding = resolve_root_block_driver(&tree, &audit).expect("virtio-blk binds");
-        assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
+        assert!(binds_virtio(&binding));
     }
 
     #[test]
@@ -440,7 +422,7 @@ mod tests {
         )
         .expect("enumerate");
         let binding = selection.finish(&audit).expect("virtio-blk binds");
-        assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
+        assert!(binds_virtio(&binding));
         assert_eq!(binding.node.id(), VIRTIO_BLOCK_PROBE_NODE_BASE_ID);
         assert_eq!(audit.only().1, Level::Info);
     }
@@ -477,7 +459,7 @@ mod tests {
         )
         .expect("enumerate");
         let binding = selection.finish(&audit).expect("virtio-blk binds");
-        assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
+        assert!(binds_virtio(&binding));
     }
 
     #[test]

@@ -1102,8 +1102,9 @@ pub fn fswatch_wake_all() {
 /// mounted volume has published and parks off the run queue; the timed
 /// [`WaitQueue::sweep`] releases it when that deadline arrives, and
 /// [`writeback_wake`] releases it early when a volume takes on a *sooner*
-/// one. A machine with no dirty volume registers [`NO_DEADLINE`], so it arms
-/// nothing and takes no wakeup at all.
+/// one, and [`request_writeback_reap`] when a dropped descriptor queued a pin
+/// for release. A machine with no dirty volume registers [`NO_DEADLINE`], so
+/// it arms nothing and takes no wakeup at all.
 pub static WRITEBACK_WAITQ: WaitQueue = WaitQueue::new();
 
 /// Request a wake of the write-back flusher because a volume published a
@@ -1125,6 +1126,13 @@ pub fn writeback_wake(deadline_ns: Option<u64>) {
     if let Some(deadline) = deadline_ns {
         WRITEBACK_WAITQ.wake_by(deadline);
     }
+}
+
+/// Ask the write-back flusher to reap: a dropped descriptor queued its node's
+/// pin for release. Lock-free, because a descriptor may drop with any lock
+/// held; the flusher's next pass releases what was queued.
+pub fn request_writeback_reap() {
+    WRITEBACK_WAITQ.request_wake();
 }
 
 /// The wait-queue the IOMMU facility's deferred-free flusher parks on
@@ -2147,7 +2155,7 @@ mod tests {
         // never re-parks to deregister; if `sweep` left its entry,
         // `earliest_deadline` would keep returning an already-elapsed time,
         // the timer one-shot would re-arm in the past and fire immediately,
-        // and the dispatch loop would spin without ever idling — the Pi 4
+        // and the dispatch loop would spin without ever idling — the
         // console-starving hard-lockup this regresses.
         let arch = MockArch::new();
         let q = WaitQueue::new();
@@ -2328,6 +2336,18 @@ mod tests {
             NOTICE_WAITQ.take_wake_pending(),
             "the drain consumes the owed wake"
         );
+    }
+
+    /// A released pin only flags the flusher's queue; the dispatcher-context
+    /// drain is what unparks it. Monotone in the shared flag, as above.
+    #[test]
+    fn a_reap_request_flags_the_flusher_without_unparking() {
+        request_writeback_reap();
+        assert!(
+            WRITEBACK_WAITQ.wake_is_pending(),
+            "the request owes the flusher a wake"
+        );
+        assert!(has_pending_deferred_wake());
     }
 
     /// The one-shot flag semantics the pressure hook relies on, proved on

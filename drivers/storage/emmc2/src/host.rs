@@ -171,7 +171,8 @@ pub fn sd_clock(base_hz: u32, target_hz: u32, divided: bool) -> Option<SdClock> 
 mod tests {
     use super::*;
 
-    /// The BCM2711 EMMC2 as Linux dumps it: SDHCI 3.00, a 100 MHz base,
+    /// The BCM2711 EMMC2 as a Raspberry Pi 4's registers read: SDHCI 3.00, a
+    /// 100 MHz base,
     /// ADMA2, High Speed, DDR50, and SDR50 only with tuning.
     fn bcm2711() -> HostCaps {
         HostCaps::decode(0x1002_0000, 0x45ee_6432, 0x0000_a525, 0x0008_0008)

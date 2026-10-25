@@ -91,10 +91,10 @@ use tairix_help::{own_short_help, HelpSource};
 use tairix_netconfig::{IfaceKey, InterfaceConfigPlan, NetworkConfig};
 use tairix_sysconfig::{Key, SystemConfig};
 use tairix_util::conf::ValueShape;
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `configure`'s own Help tree is
-/// unavailable.
+/// The usage banner the short-help switches print when `configure`'s own
+/// Help tree is unavailable.
 pub const USAGE: &str = "usage: configure [<key> [<value> [<key> <value>]...]] [-h | -?]";
 
 /// Most `<key> <value>` pairs one invocation may set.
@@ -129,9 +129,12 @@ pub enum Command<'a> {
 /// Every variant is a fail-closed refusal: nothing was changed, and the
 /// rendered message states the reason (and, for a value refusal, the valid
 /// choices).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigureError {
-    /// The command line was not understood.
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// The operands were not understood: a key left without its value, more
+    /// pairs than [`MAX_PAIRS`], or one key named twice.
     Usage,
     /// The named key is outside the closed registry.
     UnknownKey,
@@ -168,6 +171,7 @@ pub enum ConfigureError {
 impl fmt::Display for ConfigureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("command line not understood"),
             Self::UnknownKey => f.write_str("unknown setting (run `configure` to list them)"),
             Self::InvalidValue(key) => match key.shape() {
@@ -290,29 +294,44 @@ pub trait NetPolicy {
 
 pub use tairix_util::output::Output;
 
+/// What each of `configure`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Help,
+}
+
+/// `configure`'s options: the reserved help switches alone.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `configure [<key> [<value>]] [-h | -?]`:
+/// The grammar is `configure [<key> [<value> [<key> <value>]...]] [-h | -?]`,
+/// read as GNU's `getopt_long` reads it ([`Scan`]): options anywhere among
+/// the operands, `--` ending them, so a value that begins with a dash can
+/// still be given.
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches
 ///   (plans/APPS.md; they win immediately).
 /// * no operand — list every setting.
 /// * one operand — show that setting.
-/// * two operands — set that setting.
-/// * anything else — a [`ConfigureError::Usage`] error: the tool defines
-///   no other options.
+/// * pairs of operands — set each setting to the value beside it.
 ///
 /// # Errors
 ///
-/// [`ConfigureError::Usage`] for any input outside the grammar above.
-pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, ConfigureError> {
+/// * [`ConfigureError::Option`] — an option `getopt` refuses, in its words:
+///   the tool defines no other options.
+/// * [`ConfigureError::Usage`] — a key left without its value, or more pairs
+///   than [`MAX_PAIRS`].
+pub fn parse<'a>(args: &'a [&'a str]) -> Result<Command<'a>, ConfigureError> {
     let mut operands: Vec<&'a str> = Vec::new();
-    for arg in args {
-        match *arg {
-            "-h" | "-?" | "--help" => return Ok(Command::Help),
-            other if other.starts_with('-') => return Err(ConfigureError::Usage),
-            other => operands.push(other),
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(ConfigureError::Option)? {
+            Arg::Operand(operand) => operands.push(operand),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
         }
     }
     match operands.len() {
@@ -1062,10 +1081,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_refuses_extra_operands_and_unknown_options() {
+    fn parse_refuses_extra_operands() {
         assert_eq!(parse(&["a", "b", "c"]), Err(ConfigureError::Usage));
-        assert_eq!(parse(&["--frob"]), Err(ConfigureError::Usage));
-        assert_eq!(parse(&["-x"]), Err(ConfigureError::Usage));
+    }
+
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+        assert_eq!(refused(&["--frob"]), "unrecognized option '--frob'");
+        assert_eq!(
+            refused(&["--help=x"]),
+            "option '--help' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `configure os.loginType --he` as
+    /// `configure os.loginType --help`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(parse(&["os.loginType", "--he"]), Ok(Command::Help));
     }
 
     #[test]

@@ -72,8 +72,7 @@ successive; l'elenco vive in `plans/VIM.md` dell'albero dei sorgenti.
 - `0` — la sessione è terminata con un comando di uscita, oppure è
   stata mostrata la guida breve.
 - `1` — il terminale ha fallito; il motivo è stampato sull'uscita
-  d'errore.
-- `2` — la riga di comando non è stata compresa.
+  d'errore. Anche una riga di comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

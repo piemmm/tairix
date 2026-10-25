@@ -23,3 +23,7 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # this dependency needs no target-conditional gate for the client to stay
 # host-testable end to end.
 tairix-rt = { path = "../rt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The host trap seam, so a test can watch the transport's syscalls.
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }

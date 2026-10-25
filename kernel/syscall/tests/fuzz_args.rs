@@ -28,10 +28,10 @@
 use core::cell::RefCell;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
-    MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags, RealpathMode, SeekRegion,
+    spec_for, AbiType, AtFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode,
+    LockRange, MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags, RealpathMode, SeekRegion,
     SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
+    FS_ATTR_VALUE_MAX, FS_MODE_MASK, FS_UMASK_BITS, FS_UMASK_QUERY, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_fuzzseed::Prng;
@@ -792,9 +792,11 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_open(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _flags: OpenFlags,
+        _mode: u32,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -882,16 +884,29 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn fs_mkdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_mkdir(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _mode: u32,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_umask(&self, _c: &CallerContext<'_>, _mask: Option<u32>) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
     fn fs_unlink(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _flags: UnlinkFlags,
+        _expect: u64,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -899,11 +914,10 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_rename(
         &self,
         _c: &CallerContext<'_>,
-        _src: u64,
-        _src_len: usize,
-        _dst: u64,
-        _dst_len: usize,
+        _from: u64,
+        _to: u64,
         _flags: tairix_abi::RenameFlags,
+        _expect: u64,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -913,6 +927,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _c: &CallerContext<'_>,
         _target: u64,
         _target_len: usize,
+        _dirfd: u32,
         _link: u64,
         _link_len: usize,
     ) -> SyscallResult {
@@ -922,6 +937,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_readlink(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _out: u64,
@@ -934,9 +950,7 @@ impl SyscallHandlers for AcceptingHandlers {
         &self,
         _c: &CallerContext<'_>,
         _existing: u64,
-        _existing_len: usize,
-        _link: u64,
-        _link_len: usize,
+        _new: u64,
         _flags: LinkFlags,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
@@ -969,6 +983,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_realpath(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _out: u64,
@@ -981,9 +996,11 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_set_mode(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _mode: u32,
+        _flags: AtFlags,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -991,10 +1008,24 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_set_owner(
         &self,
         _c: &CallerContext<'_>,
+        _dirfd: u32,
         _path: u64,
         _path_len: usize,
         _uid: u32,
         _gid: u32,
+        _flags: AtFlags,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_access(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _want: tairix_abi::Access,
+        _flags: AtFlags,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -1002,8 +1033,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_attr_get(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
         _value_out: u64,
@@ -1015,8 +1045,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_attr_set(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
         _value: u64,
@@ -1028,8 +1057,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_attr_list(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _index: u64,
         _key_out: u64,
         _key_out_len: usize,
@@ -1040,8 +1068,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn fs_attr_remove(
         &self,
         _c: &CallerContext<'_>,
-        _path: u64,
-        _path_len: usize,
+        _fd: u32,
         _key: u64,
         _key_len: usize,
     ) -> SyscallResult {
@@ -1108,7 +1135,14 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn fs_chdir(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn fs_chdir(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _flags: AtFlags,
+    ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -1226,11 +1260,11 @@ fn filelock_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
     // decode and additionally refuses `Unlock`, which names no request that
     // could be blocked.
     if spec.number == SyscallNumber::FS_LOCK {
-        let mode = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        let mode = low_word(args[1]);
         if LockMode::from_u32(mode).is_err() {
             return false;
         }
-        let flags = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        let flags = low_word(args[2]);
         if LockFlags::from_bits(flags).is_err() {
             return false;
         }
@@ -1239,7 +1273,7 @@ fn filelock_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
         }
     }
     if spec.number == SyscallNumber::FS_LOCK_QUERY {
-        let mode = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        let mode = low_word(args[1]);
         match LockMode::from_u32(mode) {
             Ok(LockMode::Unlock) | Err(_) => return false,
             Ok(_) => {}
@@ -1249,6 +1283,79 @@ fn filelock_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
         }
     }
     true
+}
+
+/// Whether the dispatcher's create-mode and umask decodes accept `args`.
+///
+/// Split out of [`operand_semantics_accept`] for its length, like
+/// [`filelock_operands_accept`].
+fn create_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) -> bool {
+    // A create's mode — `fs_open`'s arg 4, `fs_mkdir`'s arg 3 — must fit
+    // `FS_MODE_MASK`, and an open that does not create may name none.
+    // `fs_umask`'s word is the query sentinel or a mask within
+    // `FS_UMASK_BITS`.
+    let mode = u64::from(FS_MODE_MASK);
+    match spec.number {
+        SyscallNumber::FS_OPEN => {
+            let creates = args[3] & u64::from(OpenFlags::CREATE.bits()) != 0;
+            args[4] & !mode == 0 && (creates || args[4] == 0)
+        }
+        SyscallNumber::FS_MKDIR => args[3] & !mode == 0,
+        SyscallNumber::FS_UMASK => {
+            args[0] == u64::from(FS_UMASK_QUERY) || args[0] & !u64::from(FS_UMASK_BITS) == 0
+        }
+        _ => true,
+    }
+}
+
+/// The low word of a `U32` slot, as the dispatcher narrows it.
+fn low_word(raw: u64) -> u32 {
+    u32::try_from(raw & 0xFFFF_FFFF).unwrap_or(u32::MAX)
+}
+
+/// Whether the dispatcher's path-form decodes accept `args`: the `AtFlags`
+/// word and the empty path it pairs with, `fs_access`'s `Access` word, and
+/// the expectation address `fs_unlink` and `fs_rename` name exactly when their
+/// flags ask for one.
+///
+/// Split out of [`operand_semantics_accept`] for its length, like
+/// [`filelock_operands_accept`].
+fn path_form_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) -> bool {
+    let at_flags_slot = match spec.number {
+        SyscallNumber::FS_CHDIR => Some(3),
+        SyscallNumber::FS_SET_MODE | SyscallNumber::FS_ACCESS => Some(4),
+        SyscallNumber::FS_SET_OWNER => Some(5),
+        _ => None,
+    };
+    if let Some(slot) = at_flags_slot {
+        let Ok(flags) = AtFlags::from_bits(low_word(args[slot])) else {
+            return false;
+        };
+        let names_no_path = args[1] == 0 && args[2] == 0;
+        let names_a_path = args[1] != 0 && args[2] != 0;
+        if flags.contains(AtFlags::EMPTY_PATH) {
+            if !names_no_path {
+                return false;
+            }
+        } else if !names_a_path {
+            return false;
+        }
+        if spec.number == SyscallNumber::FS_CHDIR && flags.contains(AtFlags::NO_FOLLOW) {
+            return false;
+        }
+    }
+    if spec.number == SyscallNumber::FS_ACCESS
+        && tairix_abi::Access::from_bits(low_word(args[3])).is_err()
+    {
+        return false;
+    }
+    match spec.number {
+        SyscallNumber::FS_UNLINK => UnlinkFlags::from_bits(low_word(args[3]))
+            .is_ok_and(|flags| flags.expects() == (args[4] != 0)),
+        SyscallNumber::FS_RENAME => tairix_abi::RenameFlags::from_bits(low_word(args[2]))
+            .is_ok_and(|flags| flags.expects() == (args[3] != 0)),
+        _ => true,
+    }
 }
 
 /// One `U32` operand the dispatcher runs through a closed enum's decode, which
@@ -1333,9 +1440,7 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
         }
     }
     for &(number, arg, admits) in CLOSED_U32_ARGS {
-        if spec.number == number
-            && !admits(u32::try_from(args[arg] & 0xFFFF_FFFF).unwrap_or(u32::MAX))
-        {
+        if spec.number == number && !admits(low_word(args[arg])) {
             return false;
         }
     }
@@ -1352,20 +1457,25 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
             return false;
         }
     }
-    // `fs_open`'s flags argument (arg 2) runs through `OpenFlags::from_bits`,
+    // `fs_open`'s flags argument (arg 3) runs through `OpenFlags::from_bits`,
     // which rejects both a reserved bit and an illegal dependent combination
     // (TRUNCATE/APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with
-    // WRITE). That decode is canonical ABI logic, so mirror it through the same
-    // predicate the dispatcher uses rather than re-deriving the rule set.
-    // `resource_open`'s flags argument is also arg 2 and runs through the same
-    // `OpenFlags::from_bits` decode.
-    if spec.number == SyscallNumber::FS_OPEN || spec.number == SyscallNumber::RESOURCE_OPEN {
-        let raw = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if OpenFlags::from_bits(raw).is_err() {
-            return false;
-        }
+    // WRITE, a directory create that is not exclusive or asks an access). That
+    // decode is canonical ABI logic, so mirror it through the same predicate
+    // the dispatcher uses rather than re-deriving the rule set.
+    // `resource_open`'s flags argument (arg 2) runs through the same decode.
+    let open_flags_slot = match spec.number {
+        SyscallNumber::FS_OPEN => Some(3),
+        SyscallNumber::RESOURCE_OPEN => Some(2),
+        _ => None,
+    };
+    if open_flags_slot.is_some_and(|slot| OpenFlags::from_bits(low_word(args[slot])).is_err()) {
+        return false;
     }
-    if !filelock_operands_accept(spec, args) {
+    if !filelock_operands_accept(spec, args)
+        || !create_operands_accept(spec, args)
+        || !path_form_operands_accept(spec, args)
+    {
         return false;
     }
     // A filesystem flags word runs through its own type's `from_bits`, which
@@ -1374,37 +1484,35 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
     // Mirror the dispatcher through those same predicates rather than
     // re-listing each accepted value here.
     let flags_arg: Option<FlagsArg> = match spec.number {
-        SyscallNumber::FS_UNLINK => Some((2, |b| UnlinkFlags::from_bits(b).is_ok())),
-        SyscallNumber::FS_RENAME => Some((4, |b| tairix_abi::RenameFlags::from_bits(b).is_ok())),
-        SyscallNumber::FS_LINK => Some((4, |b| LinkFlags::from_bits(b).is_ok())),
-        SyscallNumber::FS_REALPATH => Some((4, |b| RealpathMode::from_raw(b).is_ok())),
+        SyscallNumber::FS_LINK => Some((2, |b| LinkFlags::from_bits(b).is_ok())),
+        SyscallNumber::FS_REALPATH => Some((5, |b| RealpathMode::from_raw(b).is_ok())),
         SyscallNumber::FS_SEEK_REGION => Some((2, |b| SeekRegion::from_raw(b).is_ok())),
         _ => None,
     };
     if let Some((slot, accepts)) = flags_arg {
-        let raw = u32::try_from(args[slot] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        let raw = low_word(args[slot]);
         if !accepts(raw) {
             return false;
         }
     }
-    // `fs_set_mode`'s mode argument (arg 2) carries the same extra semantic
+    // `fs_set_mode`'s mode argument (arg 3) carries the same extra semantic
     // check: the dispatcher refuses any bit above `FS_MODE_MASK` (the
     // permission triads plus setuid/setgid/sticky) rather than masking it.
     // Mirror that here.
-    if spec.number == SyscallNumber::FS_SET_MODE && args[2] & !u64::from(FS_MODE_MASK) != 0 {
+    if spec.number == SyscallNumber::FS_SET_MODE && args[3] & !u64::from(FS_MODE_MASK) != 0 {
         return false;
     }
-    // The attribute calls bound their key length (arg 3) to
+    // The attribute calls bound their key length (arg 2) to
     // `1..=FS_ATTR_KEY_MAX` at dispatch, and `fs_attr_set` additionally
-    // bounds its value length (arg 5) to `FS_ATTR_VALUE_MAX`. Mirror both.
+    // bounds its value length (arg 4) to `FS_ATTR_VALUE_MAX`. Mirror both.
     if matches!(
         spec.number,
         SyscallNumber::FS_ATTR_GET | SyscallNumber::FS_ATTR_SET | SyscallNumber::FS_ATTR_REMOVE
-    ) && (args[3] == 0 || args[3] > FS_ATTR_KEY_MAX as u64)
+    ) && (args[2] == 0 || args[2] > FS_ATTR_KEY_MAX as u64)
     {
         return false;
     }
-    if spec.number == SyscallNumber::FS_ATTR_SET && args[5] > FS_ATTR_VALUE_MAX as u64 {
+    if spec.number == SyscallNumber::FS_ATTR_SET && args[4] > FS_ATTR_VALUE_MAX as u64 {
         return false;
     }
     // `display_release`'s disposition argument (arg 1) carries the same extra
@@ -1446,10 +1554,15 @@ fn narrow_for(ty: AbiType, raw: u64) -> u64 {
                 raw
             }
         }
-        // Every bit pattern is already a valid full-width slot, `I64`
-        // included, so the raw draw is well-typed and narrowing it would only
-        // shrink the space explored.
-        AbiType::Len | AbiType::U64 | AbiType::I64 | AbiType::Handle | AbiType::IpcEndpoint => raw,
+        // Every bit pattern is already a valid full-width slot, `I64` and a
+        // pointer that may be null included, so the raw draw is well-typed
+        // and narrowing it would only shrink the space explored.
+        AbiType::Len
+        | AbiType::U64
+        | AbiType::I64
+        | AbiType::Handle
+        | AbiType::IpcEndpoint
+        | AbiType::UserPtrOrNull => raw,
     }
 }
 
@@ -1470,8 +1583,14 @@ fn arg_is_well_typed(ty: AbiType, raw: u64) -> bool {
         AbiType::U32 => raw >> 32 == 0,
         // I64, U64, Handle, IpcEndpoint and Len all accept any 64-bit value
         // verbatim on a 64-bit host — there is no reserved half to police,
-        // and the dispatcher's `usize::try_from` for Len is infallible there.
-        AbiType::I64 | AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint | AbiType::Len => true,
+        // and the dispatcher's `usize::try_from` for Len is infallible there —
+        // and so does a pointer the call may omit.
+        AbiType::I64
+        | AbiType::U64
+        | AbiType::Handle
+        | AbiType::IpcEndpoint
+        | AbiType::Len
+        | AbiType::UserPtrOrNull => true,
         AbiType::Cap => raw >> 16 == 0 && raw <= u64::from(tairix_abi::CAPABILITY_ID_MAX),
         AbiType::UserPtr => raw != 0,
         AbiType::Errno => false,
@@ -1676,7 +1795,7 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
             if spec.number == SyscallNumber::CONSOLE_ADOPT {
                 args[3] = 64;
             }
-            // The attribute calls bound their key length (arg 3) to
+            // The attribute calls bound their key length (arg 2) to
             // `1..=FS_ATTR_KEY_MAX` at dispatch; seed the zeroed slot with
             // the minimal in-bounds value so the pointer contract stays the
             // thing under test.
@@ -1686,7 +1805,7 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
                     | SyscallNumber::FS_ATTR_SET
                     | SyscallNumber::FS_ATTR_REMOVE
             ) {
-                args[3] = 1;
+                args[2] = 1;
             }
 
             let result = dispatcher.dispatch(&ctx, raw_number, RawArgs(args));

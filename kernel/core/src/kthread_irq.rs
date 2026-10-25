@@ -7,7 +7,7 @@
 //! shared [`tairix_kernel_irq::block_until_ready`] loop with a park on the
 //! IRQ wait queue + `KernelArch::monotonic_ns`. An in-kernel
 //! service kthread — the INCREMENT (2) root-unlock kthread, which must
-//! drive interrupt-driven [`VirtioBlk`]/EMMC2 block I/O before any login
+//! drive interrupt-driven [`VirtioBlk`] or SD-host block I/O before any login
 //! can authenticate — has no syscall frame and no `Scheduler` borrow: it
 //! suspends cooperatively through the object-safe
 //! [`YieldHandle`] the core hands its body.

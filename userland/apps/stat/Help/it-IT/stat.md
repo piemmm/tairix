@@ -54,6 +54,13 @@ quindi `%d` è quell'id in decimale e `%D` in esadecimale; confrontare il
 `%d` di due file risponde ancora esattamente a «stanno sullo stesso
 volume?».
 
+Su un terminale, ogni nome che compare nell'output viene messo tra
+virgolette dove una shell ne avrebbe bisogno, e ogni carattere di
+controllo o altro carattere invisibile al suo interno viene scritto in
+forma di escape, così che un nome non possa comandare né riordinare lo
+schermo; GNU lo mostra invariato. Una pipe o un file riceve il nome byte
+per byte.
+
 ## OPTIONS
 
 - `-L, --dereference` — descrivere ciò che un collegamento simbolico
@@ -79,8 +86,8 @@ volume?».
 - `0` — ogni operando è stato descritto (o è stata scritta la guida
   breve).
 - `1` — almeno un operando non è stato leggibile, o l'output è fallito.
-- `2` — la riga di comando non è stata compresa, o il suo formato
-  nominava una direttiva che questo sistema non può servire.
+  Anche una riga di comando non compresa, o il cui formato nominava una
+  direttiva che questo sistema non può servire, termina con `1`.
 
 ## ENVIRONMENT
 

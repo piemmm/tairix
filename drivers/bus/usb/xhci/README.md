@@ -25,7 +25,7 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
 
 ## What lives here
 
-- `BIND_KEYS` — the bind table: the `compatible(usb,xhci)` key the VL805 bus
+- `BIND_KEYS` — the bind table: the `compatible(usb,xhci)` key a bus
   driver's emitted node carries, and the xHCI PCI class code (`0x0C0330`), so
   it also autoloads against a function the kernel discovered on a PCI host it
   owns. The class key binds below a driver naming the exact part, which brings
@@ -137,15 +137,14 @@ and the stream regions delegated to it.
 
 | Platform | Controller                    | Status |
 |----------|-------------------------------|--------|
-| Pi 4     | VL805 PCIe xHCI (USB-A ports) | protocol + bring-up + URB-serve logic host-proven; live enumerate/serve is the metal acceptance item (`plans/USB.md` U5) |
 | QEMU (x86_64, aarch64, riscv64) | `qemu-xhci` on the kernel-owned PCI host | enumerates and serves `usb-audio` end to end (`tests/integration/audio_qemu_*`) |
 
 The register window and DMA constraint arrive as grants on the matched node —
 never a compiled-in base (`AGENTS.md` §18.1). On a kernel-owned PCI host the
 window stops short of the MSI-X table and pending bits, which only the kernel
 programs (`PciBus::driver_window`), and the function's DMA grant states no
-constraint (`HwResource::dma(0, 0, …)`). QEMU models no Pi USB timing, so the
-Pi's live controller behaviour stays a metal checklist (`plans/PI.md` §0.4).
+constraint (`HwResource::dma(0, 0, …)`). A controller QEMU does not model
+stays a metal checklist (`plans/PI.md` §0.4).
 
 ## Limitations
 

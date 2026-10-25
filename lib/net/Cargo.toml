@@ -28,7 +28,7 @@ tairix-hash = { path = "../hash", version = "=0.0.0" }
 tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The one rule for which characters hide or reorder text, so a label a peer
 # chose is escaped exactly as every other display escapes text from elsewhere.
-tairix-util = { path = "../util", version = "=0.0.0" }
+tairix-visible = { path = "../visible", version = "=0.0.0" }
 
 [lints]
 workspace = true

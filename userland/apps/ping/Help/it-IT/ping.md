@@ -82,9 +82,10 @@ la risposta è arrivata in un campo `ttl=`, come fa `iputils`.
 ## EXIT STATUS
 
 - `0` — è stata ricevuta almeno una risposta (o è stata scritta la guida).
-- `1` — nessuna richiesta ha ricevuto risposta.
-- `2` — riga di comando non compresa, destinazione non risolta, o socket
-  non apribile.
+- `1` — nessuna richiesta ha ricevuto risposta. Anche una riga di
+  comando non compresa termina con `1`.
+- `2` — la destinazione non si è risolta, il socket non si è potuto
+  aprire, o una risposta non si è potuta ricevere o scrivere.
 
 ## ENVIRONMENT
 

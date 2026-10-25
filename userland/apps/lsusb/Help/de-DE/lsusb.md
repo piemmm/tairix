@@ -64,8 +64,8 @@ erscheint.
 
 - `0` — die Auflistung (oder die Kurzhilfe) wurde geschrieben.
 - `1` — die Hardware-Baum-Abfrage wurde abgelehnt oder schlug fehl,
-  oder die Ausgabe konnte nicht geschrieben werden.
-- `2` — die Kommandozeile wurde nicht verstanden.
+  oder die Ausgabe konnte nicht geschrieben werden. Eine nicht
+  verstandene Kommandozeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

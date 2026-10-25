@@ -58,8 +58,8 @@ when it lists only your own streams.
 ## EXIT STATUS
 
 - `0` — the command completed.
-- `1` — it was refused, or could not be carried out.
-- `2` — the command line was not understood.
+- `1` — it was refused, or could not be carried out. A command line that
+  was not understood exits `1` too.
 
 ## ENVIRONMENT
 

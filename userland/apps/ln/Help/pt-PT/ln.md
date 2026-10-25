@@ -23,13 +23,21 @@ sobre o que ela nomeia — cada uso posterior é autorizado componente a
 componente sob a sua própria identidade.
 
 Um nome de ligação já ocupado é recusado a menos que `-f` ou `-i` mande
-substituí-lo, e a substituição **remove** primeiro esse nome, para que
-nada atravesse uma ligação já presente até ao que ela aponta. Um
-directório nunca é substituído.
+substituí-lo. A nova ligação toma então o lugar desse nome num só passo,
+e só depois de existir, pelo que uma ligação que não possa ser criada —
+um alvo inexistente, por exemplo — deixa o nome como estava, e nada
+atravessa uma ligação já presente até ao que ela aponta. Um directório
+nunca é substituído. Uma ligação que tomaria o lugar do próprio ficheiro
+que nomeia é recusada por se tratar do mesmo ficheiro: um ficheiro
+ligado à força ao seu próprio nome, ou uma ligação simbólica cujo alvo,
+lido a partir do directório da própria ligação, é o ficheiro que ela
+substituiria. O GNU, em vez disso, lê esse alvo a partir do directório
+de trabalho e, após uma pergunta `-i` aceite, substitui um ficheiro por
+uma ligação para si próprio.
 
-A primeira falha pára a execução antes de qualquer alvo seguinte; as
-ligações já criadas mantêm-se. `--` termina a análise de opções: todo o
-argumento posterior é um operando.
+Uma ligação que não possa ser criada é comunicada, e a seguinte é criada
+na mesma. `--` termina a análise de opções: todo o argumento posterior é
+um operando.
 
 Sem `-s` a ligação é **fixa**: uma segunda entrada de directório para o
 próprio inode do alvo. Ambos os nomes alcançam um só ficheiro, uma
@@ -62,16 +70,18 @@ segurança.
 - `-d, -F, --directory` — aceitar um operando directório. A ligação é
   recusada na mesma: nenhum utilizador pode dar a um directório um
   segundo nome.
-- `-f, --force` — remover um nome de ligação existente e criar então a
+- `-f, --force` — substituir um nome de ligação existente pela nova
   ligação.
-- `-i, --interactive` — perguntar antes de remover um nome de ligação
-  existente; só consente uma resposta que comece por `y`/`Y`. Ganha a
+- `-i, --interactive` — perguntar antes de substituir um nome de ligação
+  existente; só consente uma resposta que comece por `y`/`Y`, e uma
+  pergunta recusada salta essa ligação e faz falhar a execução. Ganha a
   última de `-f` e `-i`.
 - `-n, --no-dereference` — tratar um destino que é uma ligação
   simbólica para um directório como o simples nome que também é, em vez
   de um directório onde criar as ligações.
 - `-v, --verbose` — comunicar cada ligação criada como
-  `'link' -> 'target'`.
+  `'link' -> 'target'` se for simbólica e como `'link' => 'target'` se
+  for fixa.
 - `-t dir, --target-directory=dir` — criar cada ligação em `dir`, que
   tem de ser já um directório. O valor segue anexado (`-tdir`,
   `--target-directory=dir`) ou como argumento seguinte.
@@ -93,10 +103,10 @@ segurança.
 
 ## EXIT STATUS
 
-- `0` — todas as ligações foram criadas (ou a ajuda breve foi escrita);
-  uma pergunta `-i` recusada não é uma falha.
-- `1` — qualquer outro caso, com o motivo na saída de erro. Uma linha de
-  comandos não compreendida também termina com `1`.
+- `0` — todas as ligações foram criadas (ou a ajuda breve foi escrita).
+- `1` — qualquer outro caso, incluindo uma pergunta `-i` recusada, com o
+  motivo, se houver, na saída de erro. Uma linha de comandos não
+  compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

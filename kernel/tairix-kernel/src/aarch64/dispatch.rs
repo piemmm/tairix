@@ -1,4 +1,4 @@
-//! Production syscall-dispatch callback for the aarch64 (Raspberry Pi 4)
+//! Production syscall-dispatch callback for the aarch64
 //! `tairix-kernel` binary — the aarch64 sibling of
 //! `crate::x86_64::dispatch` (`plans/PI.md` P6c-2).
 //!

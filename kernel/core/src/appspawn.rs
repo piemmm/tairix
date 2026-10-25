@@ -47,8 +47,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use tairix_abi::{
-    digest_bundle_contents, BundleFileDigest, CapabilityQuery, Errno, FileKind, ProgramKind,
-    APPINFO_WIRE_MAX, BUNDLE_SUFFIX,
+    digest_bundle_contents, Access, BundleFileDigest, CapabilityQuery, Errno, FileKind, OpenFlags,
+    ProgramKind, APPINFO_WIRE_MAX, BUNDLE_SUFFIX,
 };
 use tairix_appload::{AppError, BundleContents, BundleStore, Clock, LoadedApp, Verifier};
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
@@ -56,8 +56,11 @@ use tairix_log::Sink;
 use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::RwLock;
 
+use crate::aspace::OpenBacking;
 use crate::bootinfo::KernelArch;
-use crate::fs::{FilesystemService, FinalLink};
+use crate::fs::{
+    Acting, At, CreateMode, FilesystemService, FinalLink, NodeHandle, Start, VfsError,
+};
 use crate::launch_cache::LaunchCache;
 use crate::sched::SchedulerArch;
 
@@ -272,10 +275,10 @@ const WALK_FILES_MAX: usize = 4096;
 /// Every read happens under the **caller's** kernel-attested identity
 /// (`uid` + effective capability set), so the per-inode owner/mode/ACL
 /// checks stay kernel-side and a caller can never launch a bundle it could
-/// not read. Every file is read as a program
-/// ([`FilesystemService::read_program`]), so a bundle served by a `noexec`
-/// mount is refused at its first byte. The store adds no authority and trusts
-/// no result: sizes, depths, and file counts are bounded fail-closed.
+/// not read. Every file is read as a program, so a bundle served by a
+/// `noexec` mount is refused before its first byte. The store adds no
+/// authority and trusts no result: sizes, depths, and file counts are
+/// bounded fail-closed.
 pub struct FsBundleStore<'a> {
     fs: &'a dyn FilesystemService,
     uid: u32,
@@ -292,30 +295,59 @@ impl<'a> FsBundleStore<'a> {
     /// Read the whole regular file at `path`, refusing one longer than
     /// `max_len` rather than allocating without bound.
     ///
-    /// The exact size is learned from `stat` first, so the destination is
-    /// reserved **once, to the exact length**, through the fallible
-    /// [`Vec::try_reserve_exact`] — never grown by the infallible
-    /// doubling `extend_from_slice` uses, which both wastes up to a whole
-    /// second copy of a large image (a `Run` binary near `max_len` would
-    /// double a heap request to the next power of two) and aborts the
-    /// kernel on exhaustion instead of failing closed. Bytes are read
-    /// straight into that buffer, so a `max_len`-sized bundle file is one
-    /// allocation of its own length and no bounce copy. A read that is
-    /// short of the stated size (a file truncated under us) is honoured by
-    /// returning only what was read; one that runs past it (a file that
-    /// grew) stops at the stated size and the extra is refused closed by
-    /// the caller's own length checks.
+    /// The file is opened once, its final component never followed, and its
+    /// size and bytes are then read through the node that open pinned, so a
+    /// name swapped for a link meanwhile is never read through.
     fn read_file(&self, path: &str, max_len: usize) -> Result<Vec<u8>, Errno> {
-        // A bundle is self-contained, so this read keeps a final link rather
-        // than following one: every part of the app is a real file inside its
-        // own folder, and a link could name something outside the bundle that
-        // the signature never covered. Enforced here, at the one read every
-        // bundle file goes through, rather than depending on each caller
-        // having checked a listing's kind first.
-        let stat = self.fs.stat(self.uid, self.caps, path, FinalLink::Keep)?;
-        if stat.kind == FileKind::Symlink {
-            return Err(Errno::NotSupported);
-        }
+        // A bundle is self-contained: every part of the app is a real file
+        // inside its own folder, and a link could name something outside the
+        // bundle the signature never covered. Refused here, at the one open
+        // every bundle file goes through, rather than depending on each
+        // caller having checked a listing's kind first.
+        let at = At {
+            start: Start::Root,
+            path,
+        };
+        let flags = OpenFlags::READ.union(OpenFlags::NO_FOLLOW);
+        let opened = self
+            .fs
+            .open(self.uid, self.caps, at, flags, CreateMode::NONE)?;
+        let OpenBacking::Node(file) = OpenBacking::opened(opened) else {
+            // The catalog of attached volumes holds no bytes.
+            return Err(Errno::IsADirectory);
+        };
+        let read = self.read_held(&file, max_len);
+        let volume = Arc::clone(file.node.volume());
+        drop(file);
+        self.fs.reap(&volume);
+        read
+    }
+
+    /// Every byte of the regular file `file` holds, refusing more than
+    /// `max_len`, read as a program.
+    ///
+    /// The exact size is learned first, so the destination is reserved
+    /// **once, to the exact length**, through the fallible
+    /// [`Vec::try_reserve_exact`] — never grown by the infallible doubling
+    /// `extend_from_slice` uses, which both wastes up to a whole second copy
+    /// of a large image (a `Run` binary near `max_len` would double a heap
+    /// request to the next power of two) and aborts the kernel on exhaustion
+    /// instead of failing closed. Bytes are read straight into that buffer,
+    /// so a `max_len`-sized bundle file is one allocation of its own length
+    /// and no bounce copy. A read short of the stated size (a file truncated
+    /// under us) is honoured by returning only what was read; one that runs
+    /// past it (a file that grew) stops at the stated size and the extra is
+    /// refused closed by the caller's own length checks.
+    fn read_held(&self, file: &NodeHandle, max_len: usize) -> Result<Vec<u8>, Errno> {
+        file.projection
+            .admits(file.node.kind(), Access::EXEC)
+            .map_err(VfsError::to_errno)?;
+        let who = Acting {
+            uid: self.uid,
+            caps: self.caps,
+            granted: false,
+        };
+        let stat = self.fs.stat_node(file, &who)?;
         let size = usize::try_from(stat.size).map_err(|_| Errno::LengthOutOfRange)?;
         if size > max_len {
             return Err(Errno::LengthOutOfRange);
@@ -330,13 +362,9 @@ impl<'a> FsBundleStore<'a> {
         out.resize(size, 0);
         let mut filled = 0usize;
         while filled < size {
-            let read = self.fs.read_program(
-                self.uid,
-                self.caps,
-                path,
-                filled as u64,
-                &mut out[filled..],
-            )?;
+            let read = self
+                .fs
+                .read_node(file, &who, filled as u64, &mut out[filled..])?;
             if read == 0 {
                 break;
             }
@@ -365,13 +393,14 @@ impl<'a> FsBundleStore<'a> {
         } else {
             format!("{root}/{rel_dir}")
         };
-        for mut entry in self.fs.readdir_bounded(
-            self.uid,
-            self.caps,
-            &abs_dir,
-            FinalLink::Follow,
-            WALK_FILES_MAX,
-        )? {
+        let dir = At {
+            start: Start::Root,
+            path: &abs_dir,
+        };
+        for mut entry in
+            self.fs
+                .readdir_bounded(self.uid, self.caps, dir, FinalLink::Follow, WALK_FILES_MAX)?
+        {
             let name = core::mem::take(&mut entry.name);
             let rel = if rel_dir.is_empty() {
                 name.clone()
@@ -409,15 +438,13 @@ impl<'a> FsBundleStore<'a> {
 
 impl BundleStore for FsBundleStore<'_> {
     fn entries(&self, bundle: &str) -> Result<Vec<String>, Errno> {
+        let at = At {
+            start: Start::Root,
+            path: bundle,
+        };
         Ok(self
             .fs
-            .readdir_bounded(
-                self.uid,
-                self.caps,
-                bundle,
-                FinalLink::Follow,
-                WALK_FILES_MAX,
-            )?
+            .readdir_bounded(self.uid, self.caps, at, FinalLink::Follow, WALK_FILES_MAX)?
             .into_iter()
             .map(|mut entry| core::mem::take(&mut entry.name))
             .collect())
@@ -694,10 +721,31 @@ mod tests {
             let linked = fs.with_link(path);
             assert_eq!(
                 load(&linked, anchor),
-                Err(AppError::Store(Errno::NotSupported)),
+                Err(AppError::Store(Errno::LinkLoop)),
                 "a symlinked {path} must be refused, never read through"
             );
+            assert_eq!(linked.read_calls(path), 0);
         }
+    }
+
+    /// Regression: the store checked a bundle file by path and then read it
+    /// by path, following a final link, so a name swapped for a link between
+    /// the two had it read whatever the link named.
+    #[test]
+    fn a_bundle_file_swapped_for_a_link_once_opened_is_read_as_the_node_opened() {
+        let manifest = "/System/Commands/ps.app/AppInfo";
+        let outside = "/Users/mallory/forged";
+        let (fs, _, _) = composed_bundle(vec![]);
+        let genuine = fs.files.get(manifest).expect("the manifest").clone();
+        let mut fs = fs.with_swap(manifest, outside);
+        fs.files.insert(outside.to_string(), b"forged".to_vec());
+        let store = FsBundleStore::new(&fs, 1000, &NoCaps);
+        assert_eq!(store.read_appinfo("/System/Commands/ps.app"), Ok(genuine));
+        assert_eq!(
+            fs.read_calls(outside),
+            0,
+            "nothing outside the bundle is read"
+        );
     }
 
     /// Regression: a validly signed bundle on a `noexec` mount ran, since no

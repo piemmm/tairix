@@ -303,9 +303,9 @@ impl KernelArch for Aarch64BinArch {
         // before the idle `wfi` — so the log drains at the loop's rate even
         // while runnable tasks keep the loop from idling, and
         // independent of whether the PL011 transmit interrupt self-sustains
-        // the drain on real silicon (it does not reliably on the Pi 4's
-        // flow-blocked UART — the metal stall this fixes). On a host build
-        // there is no PL011, so this is a benign no-op.
+        // the drain on real silicon (it does not reliably on a flow-blocked
+        // UART — the metal stall this fixes). On a host build there is no
+        // PL011, so this is a benign no-op.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
             serial::pump_tx();
@@ -372,13 +372,14 @@ impl KernelArch for Aarch64BinArch {
     fn msi_alloc_facility(
         &self,
     ) -> Option<&'static (dyn tairix_kernel_core::MsiAllocFacility + 'static)> {
-        // The Pi 4's BCM2711 root-complex MSI controller backs `msi_alloc` so
-        // a user-space bus driver can wire the VL805 xHCI for message-signalled
-        // interrupts. On a host build there is no `VolatileMsiMmio`, so no
-        // facility is offered and `msi_alloc` stays fail-closed.
+        // The chained message multiplexer the boot path discovered backs
+        // `msi_alloc`, so a user-space bus driver can wire a function behind
+        // it for message-signalled interrupts. A board without one, and a
+        // host build, offer none, and `msi_alloc` stays fail-closed.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
-            Some(&crate::aarch64::gic_irq::BRCM_MSI_ALLOC_FACILITY)
+            let lines = crate::aarch64::gic_irq::msi_mux()?;
+            Some(lines)
         }
         #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
         {
@@ -572,7 +573,7 @@ impl KernelArch for Aarch64BinArch {
         // mechanism stays confined to that one path. The takeover never resets
         // the board itself — the `memtest` sweep tests RAM continuously until
         // the operator resets the machine — so it needs no PSCI reset conduit
-        // and is available on every aarch64 board, including a spin-table Pi 4
+        // and is available on every aarch64 board, including a spin-table one
         // whose firmware tree declares no `/psci` node.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
@@ -716,8 +717,8 @@ impl ConsoleRead for UartConsoleRead {
 pub static UART_CONSOLE_READ: UartConsoleRead = UartConsoleRead;
 
 /// The console-0 read half of the UART console, gated on the unlock
-/// ownership latch for the UART-only (QEMU `virt`, headless Pi) layout where
-/// the UART *is* the primary console.
+/// ownership latch for the UART-only (QEMU `virt`, a headless board) layout
+/// where the UART *is* the primary console.
 ///
 /// It reads the interrupt-fed [`UART_INPUT`] queue (not the raw FIFO): once
 /// the gate opens the receive interrupt is unmasked and a parked `login`
@@ -729,7 +730,7 @@ static GATED_UART_READ: crate::unlock_service::GatedConsoleRead =
     );
 
 /// The console list installed when no display came up (QEMU `virt`, a
-/// headless Pi): the discovered UART is the only console, so it is the
+/// headless board): the discovered UART is the only console, so it is the
 /// primary console and its read half is gated on the unlock latch.
 pub static UART_ONLY_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] =
     [tairix_kernel_core::ConsoleDevice::with_input(

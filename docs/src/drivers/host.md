@@ -145,9 +145,10 @@ The host's driver view carries the driver's granted capabilities and its
 kind, and nothing else: it lends no DMA host and no register mapper. A
 driver that drives hardware does so from its own process, where `lib/drvrt`'s
 `RtDriverHost` lends it the capability-gated DMA and `MmioMapper` seams
-(`DriverHost::mmio_mapper`), and the in-kernel floor drivers are handed
-theirs by the floor bring-up that drives their device (`root_unlock`), so a
-load through this gate never widens what a driver can reach.
+(`DriverHost::mmio_mapper`), and the floor bring-up hands an in-kernel floor
+driver the seams of its own device alone (`floor_host::FloorDriverHost` for a
+driver that opens its device itself), so a load through this gate never widens
+what a driver can reach.
 
 ### In-kernel floor admission
 
@@ -159,10 +160,14 @@ full pipeline (manifest parse, syscall-table-hash match, trust-anchor and
 Ed25519 signature check, the `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates,
 bind-table validation) and then the driver's in-process `register()`. The
 signed manifests and the trust anchor are produced at build time by
-`build.rs` (`emit_signed_driver_manifests`): each `DriverManifest` is `kind =
-InKernel`, stamped with the kernel's `SYSCALL_TABLE_HASH`, requests
-`CAP_DRV_LOAD`, carries the driver crate's own `BIND_KEYS`, and is
-Ed25519-signed with the driver-signing seed of the build's secret key set
+`build.rs` (`emit_floor_drivers`), one manifest for each driver whose
+`Floor.toml` places it in the target's floor
+([the bootstrap floor](block.md#discovery-and-the-bootstrap-floor)): each
+`DriverManifest` is `kind = InKernel`, stamped with the kernel's
+`SYSCALL_TABLE_HASH`, requests `CAP_DRV_LOAD`, carries the bind table the
+`Floor.toml` restates — the build fails unless it is the crate's own
+`BIND_KEYS` — and is Ed25519-signed with the driver-signing seed of the build's
+secret key set
 (`tools/signkeys`); the matching public key is embedded as the kernel's sole
 driver trust anchor. The image build signs every kernel-trusted driver bundle
 from the same key set. The key set lives outside the source tree, readable by

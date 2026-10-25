@@ -71,8 +71,8 @@ dawel.
 
 - `0` — cynhyrchwyd y rhestr (neu ysgrifennwyd y cymorth byr).
 - `1` — gwrthodwyd yr ymholiad socedau neu methodd, neu ni ellid
-  ysgrifennu'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  ysgrifennu'r allbwn. Mae llinell orchymyn na ddeallwyd hefyd yn
+  gorffen â `1`.
 
 ## ENVIRONMENT
 

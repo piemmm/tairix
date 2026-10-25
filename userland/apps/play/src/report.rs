@@ -14,6 +14,7 @@ use tairix_sound::SoundInfo;
 
 use tairix_player::Span;
 use tairix_player::{Outcome, Skip, Status};
+use tairix_util::quote::quote_subject;
 
 /// The command word every record and line names.
 pub const PRODUCER: &str = "play";
@@ -32,12 +33,13 @@ pub fn describe(info: &SoundInfo) -> String {
     text
 }
 
-/// `file` as a line names it: a chained file's later links by their place,
-/// counted from one as people count.
+/// `file` as a line leads with it ([`quote_subject`]), a chained file's later
+/// links by their place, counted from one as people count.
 #[must_use]
 pub fn naming(file: &str, link: u32) -> String {
+    let file = quote_subject(file);
     if link == 0 {
-        String::from(file)
+        format!("{file}")
     } else {
         format!("{file} (link {})", u64::from(link) + 1)
     }
@@ -79,12 +81,12 @@ pub fn left_out(file: &str, why: Skip, whole: bool) -> Vec<u8> {
     let (code, human) = if whole {
         (
             "audio.file_skipped",
-            format!("{file} was not played: {why}."),
+            format!("{} was not played: {why}.", quote_subject(file)),
         )
     } else {
         (
             "audio.file_cut_short",
-            format!("{file} stopped early: {why}."),
+            format!("{} stopped early: {why}.", quote_subject(file)),
         )
     };
     let ai = format!(

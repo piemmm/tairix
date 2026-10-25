@@ -10,7 +10,7 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::driver::sole_register_window;
-    use tairix_abi::driver::thermal::{ThermalCalibration, ThermalZone};
+    use tairix_abi::driver::thermal::ThermalCalibration;
     use tairix_abi::{HwProperty, MmioMapper};
     use tairix_drv_sensor_bcm2711_thermal::{AvsSensor, REQUIRED_CAPABILITIES};
     use tairix_drvrt::exit::{end, step, DriverExit};
@@ -48,7 +48,7 @@ mod program {
                 &[step("sensor: the window is shorter than the registers")],
             );
         };
-        tairix_drvrt::serve::thermal_sensor(&mut sensor, ThermalZone::Processor)
+        tairix_drvrt::serve::thermal_sensor(&mut sensor)
     }
 
     tairix_rt::entry!(main);

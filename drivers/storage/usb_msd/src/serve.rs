@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn blk_blocks_derived_from_distinct_grants_never_overlap() {
-        // The Pi 4 metal defect: ten concurrently spawned driver
+        // The metal defect: ten concurrently spawned driver
         // processes (a multi-drive enclosure binds one per bridge) probed
         // a shared id range for a free block, and every taken probe
         // logged a kernel-side rejected `call_create`. The block is now

@@ -40,7 +40,7 @@ use core::fmt::{self, Write};
 
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 
 use crate::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::timeutil::{from_nanos, nanos, NEVER, ONE_SEC_NANOS};

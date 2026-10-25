@@ -106,7 +106,7 @@ instances, and a byte-budgeted coverage cache, and turns one decoded
    order, then U+FFFD from the family's primary face. A scalar is never
    refused for lack of coverage; an *unknown family key* is refused with
    `Errno::NotFound` and never silently substituted. A scalar that draws
-   nothing (`tairix_util::utf8::is_hidden`: a control, a separator, a
+   nothing (`tairix_visible::is_hidden`: a control, a separator, a
    default-ignorable) is answered with an empty, zero-advance glyph or outline
    without consulting any face.
 2. Rasterise once at the geometry the family's **primary** face defines at the

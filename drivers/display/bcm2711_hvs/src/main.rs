@@ -226,8 +226,8 @@ mod program {
 
     /// Tell the firmware the display is the ARM's, and record its answer.
     ///
-    /// The engine takes the display over whatever the answer, as Linux's
-    /// `vc4` does: nothing of the ARM's is left in the firmware's memory, and
+    /// The engine takes the display over whatever the answer: nothing of the
+    /// ARM's is left in the firmware's memory, and
     /// a firmware that kept the display would only fight the engine where a
     /// refusal would leave the screen with no driver at all.
     fn release_firmware(host: &RtDriverHost<RtGrantSyscalls>) {

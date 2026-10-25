@@ -814,7 +814,7 @@ impl<B: Block> Ext4<B> {
     /// Give linear directory `dir_ino`, whose one block is full, an index,
     /// and add `child` through it: its names move to a new leaf, block 0
     /// becomes the root naming that leaf, and the leaf splits as `child`
-    /// needs — the shape Linux gives a directory outgrowing its first block.
+    /// needs; the root stays in block 0, where the format reads it.
     pub(super) fn index_directory(
         &mut self,
         dir_ino: u32,

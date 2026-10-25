@@ -1065,34 +1065,37 @@ connects `cmd | cmd`. Binding design decisions:
   handle is refused (`OutOfRange`): a standard slot is a byte stream, and a
   directory's authority is a listing and a namespace to open through, which
   is the same reason `fd_grant` declines one.
-- **A wired path backing is conferred, carrying the parent's captured
-  identity.** An `OpenBacking::Path` is re-resolved and re-authorised against
-  whoever *uses* it, so cloning one into the child unchanged handed over a
-  descriptor the child could not read: `admit()` demands `CAP_FS_ACCESS`
-  against the child's own set, and the programs the hand-off exists for
-  deliberately request none. Crossing into the child therefore re-expresses
-  the backing as an `OpenBacking::Delegated` carrying the parent's
-  kernel-attested uid and effective set (`OpenFile::conferred_to_child`),
-  exactly as `fd_grant` captures its grantor's — one capture at the single
-  point every parent open entry funnels through, so an inheriting wire
-  behaves as an explicit `Handle` does. The one open file description is
-  shared, so a redirected child still walks the file with its parent. It
-  confers nothing the parent could not confer anyway (a parent that can wire
-  a pipe can pump the file's bytes down it), and it carries **no** extent
-  ceiling — `DelegatedFile::write_ceiling` is `None`, where an `fd_grant`
-  always names one: that bound guards a service against an untrusted caller,
-  where a parent could fill the volume itself, so the bound is the parent's
-  own limits.
-- **Conferral never widens, and never re-captures.** A backing that is
-  already a delegation passes through carrying its own grantor's identity, so
-  a spawn cannot launder authority its holder was never given; a child
-  holding *more* than its parent is attenuated to the parent's captured set;
-  and a pipe, pty, or resource end has an authority model of its own and is
-  cloned untouched. What may be conferred is the one question
-  `OpenFile::delegatable_path` answers, shared with `fd_grant`, so the
-  one-shot hand-off and the spawn wire can never disagree — which is also
-  why a conferred descriptor is not a lock or watch subject, exactly as a
-  granted one is not.
+- **The child's working directory.** The block's `working_directory`, a
+  `PathAt`, names the directory the child starts in, resolved as the child
+  from where the path starts for the spawner and pinned before the child
+  exists, so a spawner may start a child where only the child may go — login
+  starting a session in a home it may not search. Sixteen zero bytes share
+  the spawner's directory; a sandbox spawn names none.
+- **A wired file is conferred, acting as the parent's frozen identity.** A
+  descriptor the parent opened itself acts as whoever *holds* it, so cloning
+  one into the child unchanged handed over a descriptor the child could not
+  read: `admit()` demands `CAP_FS_ACCESS` of the child's own set, and the
+  programs the hand-off exists for deliberately request none. Crossing into
+  the child therefore gives its entry the same node (`NodeRef` clone) acting
+  as `Authority::Frozen` with the parent's kernel-attested uid and effective
+  set captured at the spawn (`OpenFile::conferred_to_child`) — one capture at
+  the single point every parent open entry funnels through, so an inheriting
+  wire behaves as an explicit `Handle` does. The one open file description is
+  shared, so a redirected child still walks the file with its parent, and
+  descriptors sharing a description may differ in identity. It confers
+  nothing the parent could not confer anyway (a parent that can wire a pipe
+  can pump the file's bytes down it), and it carries **no** grant — so no
+  extent ceiling, where an `fd_grant` always names one: that bound guards a
+  service against an untrusted caller, where a parent could fill the volume
+  itself, so the bound is the parent's own limits.
+- **Conferral never widens, and never re-captures.** A descriptor that was
+  itself conferred or granted passes through with the identity frozen into
+  it, so a spawn cannot launder authority its holder was never given; a child
+  holding *more* than its parent is attenuated to the parent's set; and a
+  pipe, pty, resource or catalog end has an authority model of its own and is
+  cloned untouched. A conferred descriptor shares its description's locks, as
+  POSIX open file descriptions do; a granted one is not a lock subject, and
+  neither is a watch subject.
 - **Wired child streams live in the child's own open table at fd 0–3.**
   For each `Handle` wire the kernel clones the parent's open entry into the
   child's `OpenFileTable` at the standard fd number itself (the entries
@@ -1317,7 +1320,7 @@ this plan.
   beside `file_region` / `wild`. Host tests cover span shapes, record
   lifecycle, growth, bounds, the limit gate, the race/OOM folds, and the
   fault classes; `resource-limits.md`'s "not yet wired" list is down to
-  `OpenStreams` / `Processes`.
+  `Processes`.
 - **SP11c — policy flip + `-M virt` verticals `[x]`.** **Landed.**
   `USER_STACK_RESERVE_PAGES` is 2048 pages (8 MiB), derived from the one
   default stack policy value — `tairix_kernel_core::DEFAULT_STACK_LIMIT_BYTES`

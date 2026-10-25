@@ -358,23 +358,22 @@ to Trash** (`ManagerTool::Trash`) navigates the browser to the user's
 primitive, and **Empty Trash** (`ManagerTool::EmptyTrash`) — enabled only in a
 non-empty Trash via the new `chrome::ManagerToolModel` threaded through
 `render`/`manager_tool_at` — builds `empty_trash_plan`, asks the
-`DeleteDisposition::Permanent` question, and hands the plan's `DeleteWalk` to
-the operations worker a delete uses (`ProgressOp::Delete`). Each tool carries a new built-in `lib/icon` glyph
+`DeleteDisposition::Permanent` question, and hands the plan to the operations
+worker a delete uses (`ProgressOp::Delete`). Each tool carries a new built-in `lib/icon` glyph
 (`IconKind::Trash` / `IconKind::EmptyTrash`). Host-tested in `lib/browse`
 (`navigate_to` off-spine/no-op/fail-closed; the Empty Trash enable-gate
 hit-test) and `lib/icon`; the freestanding files app builds + lints clean.
 **FM11a — the pure empty-Trash model.** `lib/browse::trash::empty_trash_plan` turns the Trash
 directory's `fs_readdir` listing into a `delete::DeletePlan` over its *contents*
 (never the Trash directory itself, so emptying leaves the now-empty folder in
-place), carried out by the same recursive `DeleteWalk` a permanent delete uses
+place), carried out by the same recursive removal a permanent delete uses
 (no second removal engine, §2.2). Emptying is always permanent, so the app
 confirms it with `DeleteDisposition::Permanent`; it returns `None` for an
 already-empty Trash (a no-op the app just does not offer, never an error) and is
 fail closed — a root Trash dir (`RootTrash`) or an invalid child leaf
 (`InvalidName`) refuses the whole empty rather than remove outside Trash or
 silently skip an item (§5.4). It touches no filesystem and holds no authority
-(the app drives the plan with its own `fs_readdir`/`fs_unlink` under the user's
-identity), so composing it grants nothing and the read-only picker never builds
+(the app carries the plan out under the user's identity), so composing it grants nothing and the read-only picker never builds
 one. Host-tested in `lib/browse` (contents-not-the-dir removal, empty=no-op,
 root-trash refusal, invalid-child refusal). Now justified rather than
 speculative: the move that fills the Trash (FM10) has landed, so the way back to
@@ -388,7 +387,7 @@ and — when Trash and every target share a volume — carries the removal out a
 recoverable **move to Trash** (`Job::Trash`: one `fs_rename` per target into its
 collision-free `trash_dest_path`, carried out by the operations worker),
 falling back fail-closed to the irreversible
-`DeleteWalk` unlink when Trash is unavailable or cross-volume. The delete
+removal when Trash is unavailable or cross-volume. The delete
 question is disposition-aware (`DeleteDisposition` passed to
 `render::delete_alert`, a desktop alert): a recoverable *Move to Trash*, its
 default answer, vs an irreversible *Delete Permanently*, which `Enter` never
@@ -399,9 +398,8 @@ manager locate the per-user Trash. **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chr
 FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
-FM7b's pure delete model, FM7b's pure recursive-delete execution model
-(`DeleteWalk`), FM7b's pure recursive-copy execution model (`CopyWalk`),
-FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
+FM7b's pure delete model, the removal and copy of a tree carried out by the
+shared engine (`lib/fscopy::op`), FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
 `Ctrl+Shift+N` (create + inline-rename, wired end-to-end),
 FM8a's properties view model, FM8b's pure permission-edit model,
 FM8b's drawn permission (mode) control + its click-to-toggle/commit app wiring,
@@ -410,13 +408,13 @@ kernel primitive, FM8b's drawn ownership control + its click-to-edit/commit app
 wiring,
 FM4b's pure context-menu chrome model,
 FM7b's app-side move/copy verbs (`Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut/copy/paste
-driving `plan_paste`→`paste_strategy`→`fs_rename` / `lib/fscopy`+`CopyWalk` /
-copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
+driving `plan_paste` and an engine operation per item over the user's own VFS
+seams, fail-closed and fail-loud),
 and FM7b's app-side Delete verb (the `Delete`-key confirmation alert
-+ the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`),
++ an engine removal per target under the user's own identity),
 FM7b's app-side **progress + cancel** for both Delete and copy/paste (each
-confirmed operation a `Job` — a `DeleteWalk`, a `TrashRun` or a `Paste` state
-machine — the operations worker carries out a unit at a time, the window
+confirmed operation a `Job` — a `Removal`, a `TrashRun` or a `Paste` — the
+operations worker carries out a unit at a time, the window
 drawing the shared `lib/browse::progress` panel and taking a cancel between
 units, so even a large recursive delete or a multi-gigabyte copy never freezes
 the window, FM20),
@@ -1357,16 +1355,17 @@ exactly as the paste-execution and new-folder models landed): the
 `lib/browse::delete` module (`DeletePlan` + `DeleteTarget`) plus
 `Browser::plan_delete`. `plan_delete` captures the current multi-selection into
 a `DeletePlan` (`None` when nothing is selected), one `DeleteTarget` per marked
-entry in listing order, each carrying the entry's absolute component path (the
-one shared spelling, so a target names exactly the node the browser shows) and
-whether it is directory-backed on disk — a directory *or* a sealed `<Name>.app`
-bundle, via the new `EntryKind::is_directory_backed`, so either is removed with
-`UnlinkFlags::DIRECTORY` and recursed into while a regular file is a leaf.
+entry in listing order, each carrying the entry as `Listed` — its absolute
+component path and the node the listing showed there, so a removal finding
+another node under the name leaves it alone — and whether it was listed as
+directory-backed — a directory *or* a sealed `<Name>.app` bundle, via
+`EntryKind::is_directory_backed` — which the confirmation's folder warning
+reads.
 `DeletePlan::new` is fail closed: an empty selection, or any target naming the
 root (an empty component list), yields no plan rather than one that could
 remove nothing or the root itself (§5.4). `len`/`has_directories` are the
 honest figures a delete confirmation reports (§2.24). The model names *what*
-would be removed; the app performs each `fs_unlink` under the user's own
+would be removed; the app carries each target out under the user's own
 identity (**no new capability**), so composing it grants nothing and the
 read-only picker never builds one. Host-tested in `lib/browse` (capture +
 per-target path/kind, none-on-empty-selection, a bundle marked
@@ -1374,29 +1373,15 @@ directory-backed, a files-only plan reporting no directories, and the
 fail-closed `DeletePlan::new` empty/root refusals). Docs:
 `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The pure recursive-delete *execution* model** (§2.19 — host-proven
-ahead of the app verb, the delete-side analogue of the paste-side
-`execute::CopyWalk`): the `lib/browse::delete::DeleteWalk` driven cursor.
-`DeleteWalk::from_plan` begins a removal of a `DeletePlan`; `next_action` yields
-the next `DeleteAction` — `List(path)` (the app reads that directory and reports
-its children with `expand`, so contents are removed before their container) or
-`Remove { path, is_directory }` (the app `fs_unlink`s the leaf or now-empty
-directory and reports it with `complete_removal`), depth-first. It does no I/O,
-keeps its own explicit stack (so a deep tree cannot overflow the call stack),
-is bounded by `MAX_DELETE_DEPTH` (a fail-closed defence — a deeper tree is
-`DeleteError::TooDeep`, never descended without limit, §26.6/§24.4), and holds
-its exact position between steps so the app can cancel or be preempted without
-losing or repeating work (§2.23 — no unbounded buffer, no spin); driving it
-against the wrong step is `DeleteError::OutOfStep`, leaving the walk unchanged.
-`removed` is the walk's own count of what it has removed, which the progress
-window shows as a share of the whole a preparing pass counted (`Survey`). It is
-the browser engine's own component-path traversal, deliberately distinct from
-`rm`'s coreutils removal engine — two consumers with two data models, not one
-algorithm copied twice (§2.2). Host-tested in `lib/browse` (single file, empty
-directory listed-then-removed, contents-before-container depth-first order,
-multiple targets in listing order, the `TooDeep` bound, out-of-step fail-closed
-refusals leaving the walk put, and the interruption/resume holding its exact
-position). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
+**Carrying a delete or a paste out.** Each target of a `DeletePlan`, each
+item of a paste, and each move to Trash is one operation of the shared engine
+(`lib/fscopy::op`), not a walk of the browser's own: the operation starts only
+while the name holds the node the listing showed, reaches every entry by name
+from a directory it holds, holds its place between units, and removes a
+directory's entries before the directory, each only while it is the node its
+listing read. The plan chose every paste destination free, so the file manager
+runs its operations under `Taken::Refuse`, a name taken since refusing the
+item.
 
 **The app-side Delete verb.** The `files.app` `Run` binary binds `Delete` to a
 question before any removal. `begin_delete` captures the selection with
@@ -1404,10 +1389,9 @@ question before any removal. `begin_delete` captures the selection with
 `render::delete_alert` builds the question as a desktop alert: it names a single
 target or the honest count, warns when folders are among the removals, and its
 destructive answer is never the one `Enter` gives. On the removal's answer the
-app drives a `DeleteWalk` to completion — reading each directory with the same
-capability-checked listing call and shared decode the browser navigates with
-(`tairix_browse::vfs`), and `fs_unlink`ing each node depth-first under the
-user's own identity, **no new capability** — then re-lists so a partial removal
+app removes each target through the shared engine, each node unlinked
+depth-first by name from the folder holding it under the user's own identity,
+**no new capability** — then re-lists so a partial removal
 is shown honestly. The first refused read or unlink stops the removal and states
 its reason in an alert, leaving what was already removed removed rather than
 claiming a success. Only the write-capable file manager builds and drives this;
@@ -1417,34 +1401,6 @@ the read-only picker never deletes. Host-tested in `lib/browse`
 `a_delete_question_about_a_very_long_name_still_asks`). Docs:
 `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
 
-**The pure recursive-copy *walk* model** (§2.19 — host-proven ahead of
-the app move/copy verbs, the copy-side analogue of the delete-side
-`delete::DeleteWalk`): the `lib/browse::execute::CopyWalk` driven cursor, which
-copies a whole *tree*:
-`from_items` begins a copy of resolved `(source, dest, is_directory)` items (the
-app supplies each item's kind, which the path-only `Clipboard` does not carry)
-and is fail closed — an empty set, or a source/dest naming the root, yields no
-walk (§5.4). `next_action` yields the next `CopyAction` — `MakeDir { source,
-dest }` (the app `fs_mkdir`s the destination *before* its contents, so a child
-always has a parent, gives it the source's attributes, and reports it with
-`created`), `List { source }` (the app reads it and reports children with
-`expand`), or `CopyFile { source, dest }` (the app copies it through the copy
-engine, reported with `copied_file`), depth-first. It
-does no I/O, keeps its own explicit stack (so a deep tree cannot overflow the
-call stack), is bounded by `MAX_COPY_DEPTH` — the one shared `MAX_WALK_DEPTH`
-recursion bound `DeleteWalk` also obeys, hoisted so the two walks cannot drift
-(§2.2, §26.6) — and holds its exact position between steps so the app can cancel
-or be preempted without losing or repeating work (§2.23); a deeper tree is
-`CopyWalkError::TooDeep` and driving it against the wrong step is
-`CopyWalkError::OutOfStep`, both leaving the walk unchanged. `copied` is the
-honest rising count a progress indicator shows (§2.24). The model holds no
-authority, so the read-only picker never runs one. Host-tested in `lib/browse`
-(single file, container-before-contents depth-first order, multiple items in
-order, empty-directory create-then-empty-list, the `TooDeep` bound, the
-out-of-step fail-closed refusals leaving the walk put, the interruption/resume
-holding its exact position, `from_items` empty/root fail-closed, and the error
-messages). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
-
 **The app-side move/copy verbs are done.** The `files.app` `Run` binary holds
 one `Clipboard` in its overlay state, captured by `Ctrl+X` (a move clipboard)
 or `Ctrl+C` (a copy clipboard) from the current selection
@@ -1453,13 +1409,12 @@ into the current directory by `Ctrl+V`. Paste validates the plan with
 `plan_paste` (a paste of a folder into itself is refused outright, nothing
 touched), stats the destination directory for its `VolumeId`, and carries out
 each item under the user's own identity — **no new capability**:
-`execute::paste_strategy` picks `fs_rename` for a same-volume move,
-copy-then-delete for a cross-volume move (the source removed through the shared
-delete path only after its copy fully succeeds), and a stream for a copy — a
-file through `lib/fscopy`'s `DataCopy`, its bytes with their holes and then its
-extended attributes, and a directory (or sealed `.app` bundle) through an
-`execute::CopyWalk` — with one reused, fixed-size (`FS_IO_MAX`) buffer, so a
-copy of any size holds no unbounded buffer and never spins (§2.23, §26.6). It is bounded and fail closed:
+each item one operation of the shared engine — one `fs_rename` for a
+same-volume move, a copy for a cross-volume move whose originals the operation
+removes, only what it copied while unchanged, once the copy is whole and on the
+medium, and a stream for a copy, each file with its holes and then its extended
+attributes, through one reused buffer of at most a chunk, so a copy of any size
+holds no unbounded buffer and never spins (§2.23, §26.6). It is bounded and fail closed:
 the first refused operation stops the paste, states the reason in the window
 naming the item (fail loud, §2.24), and leaves what already landed in place
 (§5.4); the view is re-listed so a partial paste is shown honestly. A completed
@@ -1475,11 +1430,11 @@ autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
 
 **Progress + cancel covers both the Delete verb and copy/paste.** Neither
 interactive verb drives its walk on the window's loop: the confirmed work is a
-`Job` the operations worker carries out one unit at a time — one directory
-read, one unlink, one `fs_mkdir`, one copy chunk, or one rename — while its own
+`Job` the operations worker carries out one unit at a time — one entry acted
+on, one copy chunk, or one rename — while its own
 modeless progress window, a dialog of the folder window, shows its progress and
-takes a cancel (FM20). One `Job` carries a `DeleteWalk`, a `TrashRun` or the
-app-side `Paste` state machine, so all three run through one path (§2.2).
+takes a cancel (FM20). One `Job` carries a `Removal` or a `Paste` — an engine
+operation per item — or a `TrashRun`, so all three run through one path (§2.2).
 
 **The whole is counted before the work begins.** A delete and a paste first run
 a preparing pass on the same worker (`lib/browse::Survey`): one look at a source
@@ -1489,7 +1444,7 @@ of every file a copy streams; a move a rename carries counts its item and no
 bytes. A move to Trash knows its whole at once (one rename each). Where part of
 a tree cannot be listed, or runs past the walks' depth, the whole stays
 uncounted and the window states what has been done and no share — counted,
-never estimated. The walks report what they have done in the same units (items,
+never estimated. The operations report what they have done in the same units (items,
 and a paste's bytes including the file in flight), so the share reaches the
 whole as the work does.
 
@@ -1516,26 +1471,18 @@ cancelled/refused run alike re-lists so a partial result is shown honestly
 The **copy/paste** slice runs over the *existing* engine models and drawn
 surface (§2.19). `run_paste` validates the plan and hands a `Paste` to the
 operations worker as a `Job`, whose first unit reads the destination volume.
-The `Paste` machine holds its exact position between units in a `PasteStage`
-(`Idle` → begin the next item; `Copying` — a per-item
-`CopyWalk` with an in-flight leaf-file `Transfer` streamed one bounded chunk at a
-time so a single huge file cannot block the loop; `Deleting` — a cross-volume
-move's source removal over the *same* shared `DeleteWalk`, so a move's cleanup
-and an interactive delete can never diverge, §2.2), decides each item's mechanism
-with `paste_strategy` as it runs, and reuses one fixed-size `FS_IO_MAX` buffer
-(§2.23, §26.6). It is fail closed: the first refusal stops the paste, states the
+The `Paste` holds the item in hand's engine operation between units, a file
+streamed a bounded chunk a unit so a single huge file cannot block the loop,
+and a cross-volume move's originals removed by the engine's one removal, so a
+move's cleanup and an interactive delete can never diverge (§2.2). It is fail closed: the first refusal stops the paste, states the
 reason in the window naming the item (fail loud, §2.24), and leaves what already
 landed in place (§5.4). Initiating a `Cut` paste clears the clipboard (its
-sources are being moved); a `Copy` keeps it. The now-dead synchronous
-`run_paste_item`/`copy_tree`/`copy_file`/`copy_dir`/`delete_source` helpers are
-deleted (§2.14).
+sources are being moved); a `Copy` keeps it.
 
 The engine models are host-tested in `lib/browse` (FM7a + the `execute` model
-above: strategy per op × volume, chunked-copy completion/short-transfer/resume/
-overrun, the `CopyWalk`/`DeleteWalk` order + `TooDeep` + out-of-step, and the
-`ProgressModel` count/verb/no-percentage + latched cancel + `progress_cancel_at`
-mirror); the operation desk is host-tested in `files.app`'s `operations`
-module, and the app-side drive rides the FM9 autoload vertical. Docs: `docs/src/desktop/apps.md`, `lib/browse`
+above: strategy per op × volume, and the `ProgressModel` count/verb/no-percentage + latched cancel + `progress_cancel_at`
+mirror), the operations themselves in `lib/fscopy`'s `op` tests; the operation
+desk is host-tested in `files.app`'s `operations` module, and the app-side drive rides the FM9 autoload vertical. Docs: `docs/src/desktop/apps.md`, `lib/browse`
 README + rustdoc, `files.app` `run.rs` rustdoc.
 
 (**New Folder** — its drawn manager-only tool + `Ctrl+Shift+N` +
@@ -1922,7 +1869,7 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   irreversible decision from the item's and the user's Trash directory's
   `execute::VolumeId`s — `TrashStrategy::Move` (a single same-volume `fs_rename`
   carrying the item into Trash intact, recoverable until emptied) when they
-  share a volume, else `TrashStrategy::Unlink` (the existing `DeleteWalk` path,
+  share a volume, else `TrashStrategy::Unlink` (a permanent delete's removal,
   since a rename cannot cross a volume, exactly as `mv` decides from `st_dev`) —
   reusing the same volume identity `paste_strategy` compares, one definition
   (§2.2). `trash_dest_path(trash_dir, leaf, taken)` resolves a collision-free
@@ -1951,7 +1898,7 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   a recoverable removal is a `Job::Trash` (one `fs_rename` per target into
   Trash, carried out by the operations worker as delete and paste are,
   `ProgressOp::Trash`); an unavailable or cross-volume Trash falls back, fail
-  closed, to the existing `DeleteWalk` unlink. The delete question is
+  closed, to the irreversible removal. The delete question is
   disposition-aware (`DeleteDisposition` passed to `render::delete_alert`): a
   recoverable *Move to Trash* vs the destructive *Delete Permanently*, so the
   wording always matches what will happen. The prerequisite — the desktop
@@ -1974,7 +1921,7 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   over its *contents* — one target per immediate child, in
   listing order — never the Trash directory itself, so emptying removes the
   contents and leaves the now-empty folder in place. The removal is carried out
-  by the *same* recursive `DeleteWalk` an ordinary permanent delete uses, so
+  by the *same* recursive removal an ordinary permanent delete uses, so
   there is no second removal engine (§2.2), and it is always permanent (there is
   no trash-of-the-trash), so the app confirms it with
   `DeleteDisposition::Permanent`. It returns `None` for an already-empty Trash —
@@ -2009,9 +1956,8 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
     recomputes the Trash location (so a stale click can never empty the wrong
     directory), builds `empty_trash_plan` from the listing the window shows,
     confirms with the `DeleteDisposition::Permanent` alert, and hands the
-    plan's `DeleteWalk` to the operations worker a delete uses
-    (`ProgressOp::Delete`), under the user's own `fs_readdir`/`fs_unlink` (no new
-    capability). An already-empty Trash is a silent no-op; a refusal is stated
+    plan to the operations worker a delete uses (`ProgressOp::Delete`), under
+    the user's own identity (no new capability). An already-empty Trash is a silent no-op; a refusal is stated
     in the window.
 
   Host-tested in `lib/browse` (`navigate_to` off-spine/no-op/fail-closed; the

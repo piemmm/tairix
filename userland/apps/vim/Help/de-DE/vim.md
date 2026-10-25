@@ -70,8 +70,8 @@ Stufen vorgesehen; die Liste führt `plans/VIM.md` im Quellbaum.
 - `0` — die Sitzung endete mit einem Beenden-Befehl, oder die
   Kurzhilfe wurde gezeigt.
 - `1` — das Terminal versagte; der Grund steht auf der
-  Standardfehlerausgabe.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Standardfehlerausgabe. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

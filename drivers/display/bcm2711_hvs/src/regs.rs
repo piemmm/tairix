@@ -1,5 +1,6 @@
-//! The fifth-generation HVS and the pixel valve registers the engine drives,
-//! as the Linux `vc4` driver's `vc4_regs.h` names them.
+//! The fifth-generation HVS and the pixel valve registers the engine drives.
+//! No public document describes them; the metal run confirms each
+//! (`plans/SOUND.md` `SND19q`).
 
 /// A `width`-bit field holding `value` at `shift`.
 pub(crate) const fn field(value: u32, shift: u32, width: u32) -> u32 {
@@ -86,8 +87,7 @@ pub(crate) mod hvs {
     }
 
     /// The composite output buffer each channel's lines pass through: pixels,
-    /// channel 0 taking the largest share for the 4K output it feeds. The
-    /// BCM2711's buffer, as Linux's `vc4_hvs_cob_init` divides it.
+    /// channel 0 taking the largest share for the 4K output it feeds.
     pub const COB: [(u32, u32); CHANNELS] = [(24_608, 44_416), (12_304, 24_592), (0, 12_288)];
 
     /// The display-list memory: byte offset in the window, and its words.

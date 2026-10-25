@@ -1,20 +1,23 @@
-//! The mode-changing engine: stat each operand, compute its new mode, apply
-//! it, and — with `-R` — descend into directories applying the same mode.
+//! The mode-changing engine: open each operand through its final link, read
+//! its mode and set the new one through that one descriptor, and — with
+//! `-R` — walk its tree through the directories the run holds open, leaving
+//! every link met there alone.
 
 use alloc::format;
 use alloc::string::String;
-use alloc::vec::Vec;
 
+use tairix_abi::{Errno, FileKind, FileStat, FS_MODE_MASK};
+use tairix_fscopy::tree::{each_node, untouched_link, EachNode, Node, Roots, ViewRoot};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_path::join;
-
-use crate::command::{Command, Mode, Options, Verbosity};
-use crate::error::ChmodError;
-use crate::io::{Entry, EntryKind, FileSystem, Output};
+use tairix_util::mode::Mode;
+use tairix_util::output::{Carried, Output};
 use tairix_util::quote::quote;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `chmod`'s own Help tree is unavailable.
+use crate::command::{Command, Options, Verbosity};
+use crate::error::ChmodError;
+
+/// The usage banner the short-help switches print when `chmod`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: chmod [-cfRv] [--] MODE file...
 
@@ -22,73 +25,93 @@ usage: chmod [-cfRv] [--] MODE file...
   -c, --changes         report only files whose mode actually changed
   -v, --verbose         report every file processed
   -f, --silent, --quiet suppress most error messages
+  --preserve-root       with -R, refuse to change '/'
+  --no-preserve-root    treat '/' like any other directory (the default)
   -h, -?, --help        show this message
 
 MODE is either an octal value (e.g. 644, 0755) or a comma-separated list of
-symbolic clauses [ugoa]*[-+=][rwxXst]* (e.g. g+w, o-rx, a=rx, u+s). `--` ends
-option parsing: every later argument is an operand. To set a mode beginning
-with `-`, write it without the dash (a-w) or end options first (chmod -- -w f).
+symbolic clauses [ugoa]*([-+=]([rwxXst]*|[ugo]))+ or [-+=][0-7]+ (e.g. g+w,
+o-rx, a=rx, u+s, g=u, =644); a clause naming no one leaves the umask's bits
+alone. `--` ends option parsing: every later argument is an operand. To set a
+mode beginning with `-`, write it without the dash (a-w) or end options first
+(chmod -- -w f).
 ";
 
 /// `chmod`'s own command word: the short-help switches render its own Help
 /// document through the same engine as any other command's.
 const OWN_WORD: &str = "chmod";
 
-/// Run one [`Command`], changing the mode of its files through `fs`.
-/// `locale` is the user's `LANG` preference, if set; `help` is the tool's
-/// own `Help/` tree, read by the short-help switches.
+/// Run one [`Command`], changing the mode of its files through `roots`.
+/// `locale` is the user's `LANG` preference, if set; `umask` is the
+/// process's creation mask, whose bits a clause naming no field leaves
+/// alone; `help` is the tool's own `Help/` tree, read by the short-help
+/// switches.
 ///
-/// Each file is inspected, its new mode computed from the parsed [`Mode`] and
-/// the file's current mode/kind, and the result applied. With `-R` a directory
-/// is changed and then its contents are changed recursively. `-v` reports
-/// every file processed on `out` and `-c` only those whose mode actually
-/// changed; otherwise `chmod` writes nothing on success beyond the
-/// [`Command::Help`] banner.
+/// Each file is opened through its final link, as GNU's `chmod` reaches an
+/// operand, and its new mode — computed from the parsed [`Mode`] and the
+/// file's current mode and kind — is set through the very descriptor its
+/// current mode was read from. With `-R` a directory's tree is then walked
+/// through the directories the run holds open: each entry is opened by name
+/// from its own directory, read and changed through that descriptor, and a
+/// link met there — listed as one, or swapped in since — is left alone with
+/// what it names. `-v` reports every file processed on `out` and `-c` only
+/// those whose mode actually changed; otherwise `chmod` writes nothing on
+/// success beyond the [`Command::Help`] banner.
 ///
-/// The first failure stops the run before any later operand (fail closed) —
-/// except under `-f`, which suppresses each failing operand's diagnostic,
-/// continues with the remaining operands, and fails the whole run afterwards
-/// as the message-less [`ChmodError::Silenced`].
+/// A file that cannot be inspected, changed or listed ([`ChmodError::Stat`],
+/// [`ChmodError::Dangling`], [`ChmodError::Apply`], [`ChmodError::Read`]) is
+/// reported on `err` in GNU's words — silently under `-f` — and the rest are
+/// still changed, the rest of its directory too, as GNU's are, answering
+/// `Ok(false)` at the end; every file changed answers `Ok(true)`.
 ///
 /// # Errors
 ///
-/// * [`ChmodError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](tairix_abi::Errno).
-/// * [`ChmodError::Apply`] — applying the new mode failed.
-/// * [`ChmodError::Read`] — a directory's entries could not be read during a
-///   recursive descent.
-/// * [`ChmodError::Silenced`] — one or more operands failed under `-f`.
-/// * [`ChmodError::Output`] — writing the usage banner or a report failed.
-pub fn run(
+/// [`ChmodError::Output`] — writing the usage banner, a report or a
+/// diagnostic failed.
+pub fn run<R: Roots>(
     command: Command,
     locale: Option<&str>,
-    fs: &dyn FileSystem,
+    roots: &R,
+    umask: u32,
     help: &dyn HelpSource,
     out: &dyn Output,
-) -> Result<(), ChmodError> {
+    err: &dyn Output,
+) -> Result<bool, ChmodError> {
     match command {
-        Command::Help => short_help(locale, help, out),
+        Command::Help => short_help(locale, help, out).map(|()| true),
         Command::Change {
             options,
             mode,
             files,
         } => {
-            let mut silenced = false;
+            let mut changing = Changing {
+                roots,
+                applied: Applied { mode: &mode, umask },
+                options,
+                out,
+                // `-f` silences filesystem failures, never a dead terminal.
+                carried: Carried::new(err, OWN_WORD).silenced(options.quiet),
+                view_root: ViewRoot::default(),
+            };
             for file in &files {
-                match change(file, &mode, options, fs, out) {
-                    Ok(()) => {}
-                    // A report that cannot be written is never suppressed:
-                    // `-f` silences filesystem failures, not a dead terminal.
-                    Err(ChmodError::Output(errno)) => return Err(ChmodError::Output(errno)),
-                    Err(_) if options.quiet => silenced = true,
-                    Err(err) => return Err(err),
-                }
+                each_node(roots, file, options.recursive, &mut changing)?;
             }
-            if silenced {
-                return Err(ChmodError::Silenced);
-            }
-            Ok(())
+            Ok(changing.carried.clean())
         }
+    }
+}
+
+/// The mode a run applies, with the umask its clauses naming no field spare.
+#[derive(Clone, Copy)]
+struct Applied<'a> {
+    mode: &'a Mode,
+    umask: u32,
+}
+
+impl Applied<'_> {
+    /// The bits a node holding `current`, a directory when `dir`, is given.
+    fn bits_for(self, current: u32, dir: bool) -> u32 {
+        self.mode.resolve(current, dir, self.umask)
     }
 }
 
@@ -107,49 +130,126 @@ fn short_help(
     out.write_all(&bytes).map_err(ChmodError::Output)
 }
 
-/// Apply `mode` to `path`, then — when `-R` and `path` is a directory —
-/// to each of its entries in turn, reporting per the verbosity policy.
-fn change(
-    path: &str,
-    mode: &Mode,
+/// One run's mode, its reporting, and the failures it carries past.
+struct Changing<'a, R> {
+    roots: &'a R,
+    applied: Applied<'a>,
     options: Options,
-    fs: &dyn FileSystem,
-    out: &dyn Output,
-) -> Result<(), ChmodError> {
-    let meta = fs.stat(path).map_err(ChmodError::Stat)?;
-    let is_dir = meta.kind == EntryKind::Directory;
-    let old_mode = meta.mode & 0o7777;
-    let new_mode = mode.resolve(meta.mode, is_dir);
-    fs.set_mode(path, new_mode).map_err(ChmodError::Apply)?;
-    report(path, old_mode, new_mode, options, out)?;
-    if options.recursive && is_dir {
-        for entry in read_children(path, fs)? {
-            let child = join(path, &entry.name);
-            change(&child, mode, options, fs, out)?;
+    out: &'a dyn Output,
+    carried: Carried<'a>,
+    view_root: ViewRoot,
+}
+
+impl<R: Roots> Changing<'_, R> {
+    /// Under `-v`, name a file whose mode could not be read or changed.
+    fn inaccessible(&self, path: &str) -> Result<(), ChmodError> {
+        if self.options.verbosity != Verbosity::All {
+            return Ok(());
         }
+        let line = format!("{} could not be accessed\n", quote(path));
+        self.out
+            .write_all(line.as_bytes())
+            .map_err(ChmodError::Output)
     }
-    Ok(())
+}
+
+impl<R: Roots> EachNode<R::Dir> for Changing<'_, R> {
+    type Error = ChmodError;
+
+    /// Give `node`, at `path` and read as `stat`, the run's mode through
+    /// itself, reporting per the verbosity policy; a refusal is carried past.
+    fn node(&mut self, node: &dyn Node, stat: &FileStat, path: &str) -> Result<(), ChmodError> {
+        let old_mode = stat.mode & FS_MODE_MASK;
+        let new_mode = self
+            .applied
+            .bits_for(stat.mode, stat.kind == FileKind::Directory);
+        let set = node.set_mode(new_mode).map_err(|errno| ChmodError::Apply {
+            path: String::from(path),
+            errno,
+        });
+        let changed = self.carried.absorb(set)?.is_some();
+        report(path, old_mode, new_mode, changed, self.options, self.out)
+    }
+
+    fn link(&mut self, path: &str) -> Result<(), ChmodError> {
+        if self.options.verbosity != Verbosity::All {
+            return Ok(());
+        }
+        self.out
+            .write_all(untouched_link(path).as_bytes())
+            .map_err(ChmodError::Output)
+    }
+
+    fn dangling(&mut self, path: &str) -> Result<(), ChmodError> {
+        self.carried
+            .carry(ChmodError::Dangling(String::from(path)))?;
+        self.inaccessible(path)
+    }
+
+    fn unopened(&mut self, path: &str, errno: Errno) -> Result<(), ChmodError> {
+        self.carried.carry(ChmodError::Stat {
+            path: String::from(path),
+            errno,
+        })?;
+        self.inaccessible(path)
+    }
+
+    fn unread(&mut self, path: &str, errno: Errno) -> Result<(), ChmodError> {
+        self.carried.carry(ChmodError::Read {
+            path: String::from(path),
+            errno,
+        })
+    }
+
+    fn refuses(&mut self, dir: &R::Dir, path: &str) -> Result<bool, ChmodError> {
+        if !self.options.preserve_root {
+            return Ok(false);
+        }
+        let refusal = if ViewRoot::spelled(path) {
+            ChmodError::PreserveRoot(String::from(path))
+        } else {
+            match self.view_root.holds(self.roots, dir) {
+                Ok(false) => return Ok(false),
+                Ok(true) => ChmodError::PreserveRoot(String::from(path)),
+                Err(errno) => ChmodError::Stat {
+                    path: String::from(path),
+                    errno,
+                },
+            }
+        };
+        self.carried.carry(refusal)?;
+        Ok(true)
+    }
 }
 
 /// Report one processed file in the GNU wording, per the verbosity policy:
-/// `-v` reports every file, `-c` only an actual change.
+/// `-v` reports every file, a refused change included, and `-c` only an
+/// actual change.
 fn report(
     path: &str,
     old_mode: u32,
     new_mode: u32,
+    applied: bool,
     options: Options,
     out: &dyn Output,
 ) -> Result<(), ChmodError> {
     let changed = old_mode != new_mode;
     let wanted = match options.verbosity {
         Verbosity::None => false,
-        Verbosity::Changes => changed,
+        Verbosity::Changes => applied && changed,
         Verbosity::All => true,
     };
     if !wanted {
         return Ok(());
     }
-    let line = if changed {
+    let line = if !applied {
+        format!(
+            "failed to change mode of {path} from {old_mode:04o} ({}) to {new_mode:04o} ({})\n",
+            perm_string(old_mode),
+            perm_string(new_mode),
+            path = quote(path)
+        )
+    } else if changed {
         format!(
             "mode of {path} changed from {old_mode:04o} ({}) to {new_mode:04o} ({})\n",
             perm_string(old_mode),
@@ -186,29 +286,24 @@ fn perm_string(mode: u32) -> String {
     s
 }
 
-/// Read all entries of the directory `path` into a vector, so the recursive
-/// descent does not depend on entry indices staying stable as modes change.
-fn read_children(path: &str, fs: &dyn FileSystem) -> Result<Vec<Entry>, ChmodError> {
-    let mut entries = Vec::new();
-    let mut index: u64 = 0;
-    while let Some(entry) = fs.read_dir(path, index).map_err(ChmodError::Read)? {
-        index = index.saturating_add(1);
-        entries.push(entry);
-    }
-    Ok(entries)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{run as engine_run, USAGE};
     use crate::command::parse;
     use crate::error::ChmodError;
-    use crate::io::{Entry, EntryKind, FileSystem, Metadata, Output};
-    use alloc::string::{String, ToString};
+    use alloc::boxed::Box;
+    use alloc::format;
+    use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::Errno;
+    use tairix_fscopy::fixture::Tree;
+    use tairix_fscopy::tree::Kind;
     use tairix_help::{HelpSource, SourceError};
+    use tairix_util::output::Output;
+
+    /// The creation mask the runs are under unless a test says otherwise.
+    const UMASK: u32 = 0o022;
 
     /// A Help tree with no documents at all: the short-help fallback path.
     struct NoHelp;
@@ -248,153 +343,6 @@ mod tests {
         }
     }
 
-    /// An in-memory tree. Each node carries its kind and current mode; a
-    /// directory's children are derived by parent path. Failure injection
-    /// covers the stat/apply/read fail-closed paths.
-    struct MemFs {
-        state: RefCell<State>,
-    }
-
-    struct State {
-        nodes: Vec<(String, EntryKind, u32)>,
-        stat_fail: Option<(String, Errno)>,
-        set_fail: Option<(String, Errno)>,
-        read_fail: Option<(String, Errno)>,
-        applied: Vec<(String, u32)>,
-    }
-
-    impl MemFs {
-        fn new() -> Self {
-            Self {
-                state: RefCell::new(State {
-                    nodes: Vec::new(),
-                    stat_fail: None,
-                    set_fail: None,
-                    read_fail: None,
-                    applied: Vec::new(),
-                }),
-            }
-        }
-
-        fn file(self, path: &str, mode: u32) -> Self {
-            self.state
-                .borrow_mut()
-                .nodes
-                .push((path.to_string(), EntryKind::File, mode));
-            self
-        }
-
-        fn dir(self, path: &str, mode: u32) -> Self {
-            self.state
-                .borrow_mut()
-                .nodes
-                .push((path.to_string(), EntryKind::Directory, mode));
-            self
-        }
-
-        fn stat_fails(self, path: &str, errno: Errno) -> Self {
-            self.state.borrow_mut().stat_fail = Some((path.to_string(), errno));
-            self
-        }
-
-        fn set_fails(self, path: &str, errno: Errno) -> Self {
-            self.state.borrow_mut().set_fail = Some((path.to_string(), errno));
-            self
-        }
-
-        fn read_fails(self, path: &str, errno: Errno) -> Self {
-            self.state.borrow_mut().read_fail = Some((path.to_string(), errno));
-            self
-        }
-
-        fn mode_of(&self, path: &str) -> Option<u32> {
-            self.state
-                .borrow()
-                .nodes
-                .iter()
-                .find(|(p, _, _)| p == path)
-                .map(|(_, _, m)| *m)
-        }
-
-        fn applied(&self) -> Vec<(String, u32)> {
-            self.state.borrow().applied.clone()
-        }
-    }
-
-    /// The immediate parent of an absolute path: `/a/b` maps to `/a`, and a
-    /// top-level `/a` maps to the empty string (its children sit at the root).
-    fn parent_of(path: &str) -> &str {
-        match path.rfind('/') {
-            Some(slash) => &path[..slash],
-            None => "",
-        }
-    }
-
-    /// The final component of a path.
-    fn name_of(path: &str) -> &str {
-        match path.rfind('/') {
-            Some(slash) => &path[slash + 1..],
-            None => path,
-        }
-    }
-
-    impl FileSystem for MemFs {
-        fn stat(&self, path: &str) -> Result<Metadata, Errno> {
-            let state = self.state.borrow();
-            if let Some((p, errno)) = &state.stat_fail {
-                if p == path {
-                    return Err(*errno);
-                }
-            }
-            state
-                .nodes
-                .iter()
-                .find(|(p, _, _)| p == path)
-                .map(|(_, kind, mode)| Metadata {
-                    kind: *kind,
-                    mode: *mode,
-                })
-                .ok_or(Errno::NotFound)
-        }
-
-        fn set_mode(&self, path: &str, mode: u32) -> Result<(), Errno> {
-            let mut state = self.state.borrow_mut();
-            if let Some((p, errno)) = &state.set_fail {
-                if p == path {
-                    return Err(*errno);
-                }
-            }
-            match state.nodes.iter_mut().find(|(p, _, _)| p == path) {
-                Some((_, _, stored)) => *stored = mode,
-                None => return Err(Errno::NotFound),
-            }
-            state.applied.push((path.to_string(), mode));
-            Ok(())
-        }
-
-        fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno> {
-            let state = self.state.borrow();
-            if let Some((p, errno)) = &state.read_fail {
-                if p == path {
-                    return Err(*errno);
-                }
-            }
-            let mut children: Vec<Entry> = state
-                .nodes
-                .iter()
-                .filter(|(p, _, _)| parent_of(p) == path && p.as_str() != path)
-                .map(|(p, kind, _)| Entry {
-                    name: name_of(p).to_string(),
-                    kind: *kind,
-                })
-                .collect();
-            children.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(children
-                .into_iter()
-                .nth(usize::try_from(index).unwrap_or(usize::MAX)))
-        }
-    }
-
     /// A terminal that records every byte written to it.
     struct Recorder {
         bytes: RefCell<Vec<u8>>,
@@ -410,6 +358,10 @@ mod tests {
         fn written(&self) -> Vec<u8> {
             self.bytes.borrow().clone()
         }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.written()).expect("utf-8 output")
+        }
     }
 
     impl Output for Recorder {
@@ -419,35 +371,72 @@ mod tests {
         }
     }
 
-    fn run_args(args: &[&str], fs: &MemFs, out: &Recorder) -> Result<(), ChmodError> {
-        engine_run(parse(args).expect("valid command"), None, fs, &NoHelp, out)
+    /// The engine over `args` under `umask`, answering what it reported on
+    /// its error stream when it did not run clean: a failed operand is
+    /// reported (or, under `-f`, not) and the next still changed.
+    fn run_under(args: &[&str], umask: u32, tree: &Tree, out: &Recorder) -> Result<(), String> {
+        let err = Recorder::new();
+        match engine_run(
+            parse(args).expect("valid command"),
+            None,
+            tree,
+            umask,
+            &NoHelp,
+            out,
+            &err,
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(err.text()),
+            Err(fatal) => Err(format!("chmod: {fatal}\n")),
+        }
+    }
+
+    /// [`run_under`] the usual mask.
+    fn run_args(args: &[&str], tree: &Tree, out: &Recorder) -> Result<(), String> {
+        run_under(args, UMASK, tree, out)
+    }
+
+    /// `failure` as the tool reports it.
+    fn shown(failure: &ChmodError) -> Result<(), String> {
+        Err(format!("chmod: {failure}\n"))
+    }
+
+    /// Every node the run set a mode on, in order.
+    fn changed(tree: &Tree) -> Vec<String> {
+        tree.calls()
+            .iter()
+            .filter_map(|call| call.strip_prefix("set_mode "))
+            .map(String::from)
+            .collect()
     }
 
     #[test]
     fn help_prints_the_usage_banner() {
         // With no Help documents available the tool's own usage banner
         // stands in — never fabricated help content.
-        let fs = MemFs::new();
+        let tree = Tree::new();
         let out = Recorder::new();
-        assert_eq!(run_args(&["--help"], &fs, &out), Ok(()));
+        assert_eq!(run_args(&["--help"], &tree, &out), Ok(()));
         assert_eq!(out.written(), USAGE.as_bytes());
     }
 
     #[test]
     fn help_renders_the_short_help_from_the_document() {
-        let fs = MemFs::new();
+        let tree = Tree::new();
         let out = Recorder::new();
         assert_eq!(
             engine_run(
                 parse(&["-h"]).expect("valid command"),
                 None,
-                &fs,
+                &tree,
+                UMASK,
                 &OneDoc,
-                &out
+                &out,
+                &Recorder::new()
             ),
-            Ok(())
+            Ok(true)
         );
-        let written = String::from_utf8(out.written()).expect("utf-8 help");
+        let written = out.text();
         assert!(
             written.contains("chmod — change file mode bits"),
             "{written}"
@@ -460,137 +449,483 @@ mod tests {
 
     #[test]
     fn an_octal_mode_replaces_a_file_mode() {
-        let fs = MemFs::new().file("/f", 0o600);
+        let tree = Tree::new().file("/f", b"").with_mode("/f", 0o600);
         let out = Recorder::new();
-        assert_eq!(run_args(&["644", "/f"], &fs, &out), Ok(()));
-        assert_eq!(fs.mode_of("/f"), Some(0o644));
-        assert_eq!(fs.applied(), [("/f".to_string(), 0o644)]);
+        assert_eq!(run_args(&["644", "/f"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/f"), Some(0o644));
+        assert_eq!(changed(&tree), ["/f"]);
         assert!(out.written().is_empty());
     }
 
     #[test]
     fn a_symbolic_mode_transforms_the_current_mode() {
-        let fs = MemFs::new().file("/f", 0o644);
+        let tree = Tree::new().file("/f", b"").with_mode("/f", 0o644);
         let out = Recorder::new();
-        assert_eq!(run_args(&["g+w", "/f"], &fs, &out), Ok(()));
-        assert_eq!(fs.mode_of("/f"), Some(0o664));
+        assert_eq!(run_args(&["g+w", "/f"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/f"), Some(0o664));
+    }
+
+    /// GNU 9.4 under umask `022`: a clause naming no field acts as `a` would,
+    /// save that the bits the umask holds are not changed — silently, as GNU
+    /// changes a mode given after `--`.
+    #[test]
+    fn a_clause_naming_no_field_spares_the_umask() {
+        for (spec, current, want) in [
+            ("-w", 0o777, 0o577),
+            ("+w", 0o600, 0o600),
+            ("+rwx", 0o600, 0o755),
+            ("=r", 0o600, 0o444),
+            ("a-w", 0o777, 0o555),
+        ] {
+            let tree = Tree::new().file("/f", b"").with_mode("/f", current);
+            let out = Recorder::new();
+            assert_eq!(run_args(&["--", spec, "/f"], &tree, &out), Ok(()), "{spec}");
+            assert_eq!(tree.mode("/f"), Some(want), "{spec}");
+        }
+        let tree = Tree::new().file("/f", b"").with_mode("/f", 0);
+        assert_eq!(
+            run_under(&["+rwx", "/f"], 0o077, &tree, &Recorder::new()),
+            Ok(())
+        );
+        assert_eq!(tree.mode("/f"), Some(0o700));
+    }
+
+    /// GNU 9.4: an octal mode of fewer than five digits leaves a directory's
+    /// set-group-ID bit, which keeps its new entries in its group.
+    #[test]
+    fn a_directorys_set_id_bits_stay_unless_the_mode_names_them() {
+        let tree = Tree::new()
+            .dir("/shared")
+            .with_mode("/shared", 0o2775)
+            .file("/f", b"")
+            .with_mode("/f", 0o2755);
+        let out = Recorder::new();
+        assert_eq!(run_args(&["755", "/shared", "/f"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/shared"), Some(0o2755));
+        assert_eq!(tree.mode("/f"), Some(0o755), "a file keeps no such bit");
+        assert_eq!(run_args(&["00755", "/shared"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/shared"), Some(0o755));
     }
 
     #[test]
     fn several_files_are_all_changed() {
-        let fs = MemFs::new()
-            .file("/a", 0o600)
-            .file("/b", 0o600)
-            .file("/c", 0o600);
+        let tree = Tree::new()
+            .file("/a", b"")
+            .with_mode("/a", 0o600)
+            .file("/b", b"")
+            .with_mode("/b", 0o600)
+            .file("/c", b"")
+            .with_mode("/c", 0o600);
         let out = Recorder::new();
-        assert_eq!(run_args(&["640", "/a", "/b", "/c"], &fs, &out), Ok(()));
-        assert_eq!(fs.mode_of("/a"), Some(0o640));
-        assert_eq!(fs.mode_of("/b"), Some(0o640));
-        assert_eq!(fs.mode_of("/c"), Some(0o640));
+        assert_eq!(run_args(&["640", "/a", "/b", "/c"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/a"), Some(0o640));
+        assert_eq!(tree.mode("/b"), Some(0o640));
+        assert_eq!(tree.mode("/c"), Some(0o640));
     }
 
     #[test]
     fn without_recursive_only_the_named_directory_changes() {
-        let fs = MemFs::new().dir("/d", 0o755).file("/d/f", 0o644);
+        let tree = Tree::new().dir("/d").file("/d/f", b"");
         let out = Recorder::new();
-        assert_eq!(run_args(&["700", "/d"], &fs, &out), Ok(()));
-        assert_eq!(fs.mode_of("/d"), Some(0o700));
+        assert_eq!(run_args(&["700", "/d"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/d"), Some(0o700));
         // The child is untouched.
-        assert_eq!(fs.mode_of("/d/f"), Some(0o644));
+        assert_eq!(tree.mode("/d/f"), Some(0o644));
     }
 
     #[test]
     fn recursive_changes_the_directory_then_its_contents() {
-        let fs = MemFs::new()
-            .dir("/d", 0o700)
-            .file("/d/f", 0o600)
-            .dir("/d/sub", 0o700)
-            .file("/d/sub/g", 0o600);
+        let tree = Tree::new()
+            .dir("/d")
+            .with_mode("/d", 0o700)
+            .file("/d/f", b"")
+            .with_mode("/d/f", 0o600)
+            .dir("/d/sub")
+            .with_mode("/d/sub", 0o700)
+            .file("/d/sub/g", b"")
+            .with_mode("/d/sub/g", 0o600);
         let out = Recorder::new();
-        assert_eq!(run_args(&["-R", "go+r", "/d"], &fs, &out), Ok(()));
-        assert_eq!(fs.mode_of("/d"), Some(0o744));
-        assert_eq!(fs.mode_of("/d/f"), Some(0o644));
-        assert_eq!(fs.mode_of("/d/sub"), Some(0o744));
-        assert_eq!(fs.mode_of("/d/sub/g"), Some(0o644));
-        // The directory itself is changed before its contents.
-        let applied = fs.applied();
-        assert_eq!(applied[0].0, "/d");
+        assert_eq!(run_args(&["-R", "go+r", "/d"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/d"), Some(0o744));
+        assert_eq!(tree.mode("/d/f"), Some(0o644));
+        assert_eq!(tree.mode("/d/sub"), Some(0o744));
+        assert_eq!(tree.mode("/d/sub/g"), Some(0o644));
+        // Each directory is changed before its contents.
+        assert_eq!(changed(&tree), ["/d", "/d/f", "/d/sub", "/d/sub/g"]);
     }
 
     #[test]
     fn recursive_conditional_execute_uses_each_node_kind() {
         // `a+X` gives a directory execute but leaves a non-executable file.
-        let fs = MemFs::new().dir("/d", 0o644).file("/d/f", 0o644);
+        let tree = Tree::new()
+            .dir("/d")
+            .with_mode("/d", 0o644)
+            .file("/d/f", b"")
+            .with_mode("/d/f", 0o644);
         let out = Recorder::new();
-        assert_eq!(run_args(&["-R", "a+X", "/d"], &fs, &out), Ok(()));
-        assert_eq!(fs.mode_of("/d"), Some(0o755));
-        assert_eq!(fs.mode_of("/d/f"), Some(0o644));
+        assert_eq!(run_args(&["-R", "a+X", "/d"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/d"), Some(0o755));
+        assert_eq!(tree.mode("/d/f"), Some(0o644));
     }
 
     #[test]
-    fn a_missing_operand_is_stat_and_stops_the_run() {
-        let fs = MemFs::new().file("/b", 0o600);
+    fn a_missing_operand_is_reported_and_the_next_still_changed() {
+        // GNU 9.4: `chmod 600 missing b` names the missing one, still changes
+        // `b` and exits 1.
+        let tree = Tree::new().file("/b", b"").with_mode("/b", 0o600);
         let out = Recorder::new();
-        // `/a` does not exist: the run fails before reaching `/b`.
         assert_eq!(
-            run_args(&["644", "/a", "/b"], &fs, &out),
-            Err(ChmodError::Stat(Errno::NotFound))
+            run_args(&["644", "/a", "/b"], &tree, &out),
+            shown(&ChmodError::Stat {
+                path: String::from("/a"),
+                errno: Errno::NotFound
+            })
         );
-        assert_eq!(fs.mode_of("/b"), Some(0o600));
+        assert_eq!(tree.mode("/b"), Some(0o644));
     }
 
     #[test]
     fn a_stat_permission_error_surfaces() {
-        let fs = MemFs::new()
-            .file("/f", 0o600)
-            .stat_fails("/f", Errno::PermissionDenied);
+        let tree = Tree::new()
+            .file("/f", b"")
+            .with_mode("/f", 0o600)
+            .refuse("stat /f", Errno::PermissionDenied);
         let out = Recorder::new();
         assert_eq!(
-            run_args(&["644", "/f"], &fs, &out),
-            Err(ChmodError::Stat(Errno::PermissionDenied))
+            run_args(&["644", "/f"], &tree, &out),
+            shown(&ChmodError::Stat {
+                path: String::from("/f"),
+                errno: Errno::PermissionDenied
+            })
         );
+        assert_eq!(tree.mode("/f"), Some(0o600));
     }
 
     #[test]
     fn an_apply_error_surfaces() {
-        let fs = MemFs::new()
-            .file("/f", 0o600)
-            .set_fails("/f", Errno::PermissionDenied);
+        let tree = Tree::new()
+            .file("/f", b"")
+            .with_mode("/f", 0o600)
+            .refuse("set_mode /f", Errno::PermissionDenied);
         let out = Recorder::new();
         assert_eq!(
-            run_args(&["644", "/f"], &fs, &out),
-            Err(ChmodError::Apply(Errno::PermissionDenied))
+            run_args(&["644", "/f"], &tree, &out),
+            shown(&ChmodError::Apply {
+                path: String::from("/f"),
+                errno: Errno::PermissionDenied
+            })
         );
         // The mode is unchanged.
-        assert_eq!(fs.mode_of("/f"), Some(0o600));
+        assert_eq!(tree.mode("/f"), Some(0o600));
     }
 
     #[test]
     fn a_read_dir_error_during_recursion_surfaces() {
-        let fs = MemFs::new()
-            .dir("/d", 0o700)
-            .file("/d/f", 0o600)
-            .read_fails("/d", Errno::PermissionDenied);
+        let tree = Tree::new()
+            .dir("/d")
+            .with_mode("/d", 0o755)
+            .file("/d/f", b"")
+            .with_mode("/d/f", 0o600)
+            .refuse("entries /d", Errno::PermissionDenied);
         let out = Recorder::new();
         assert_eq!(
-            run_args(&["-R", "700", "/d"], &fs, &out),
-            Err(ChmodError::Read(Errno::PermissionDenied))
+            run_args(&["-R", "700", "/d"], &tree, &out),
+            shown(&ChmodError::Read {
+                path: String::from("/d"),
+                errno: Errno::PermissionDenied
+            })
         );
         // The directory itself was changed before the read failed.
-        assert_eq!(fs.mode_of("/d"), Some(0o700));
+        assert_eq!(tree.mode("/d"), Some(0o700));
+        assert_eq!(tree.mode("/d/f"), Some(0o600));
+    }
+
+    #[test]
+    fn an_entry_that_fails_is_reported_and_the_rest_of_its_directory_still_changed() {
+        let tree = Tree::new()
+            .dir("/d")
+            .with_mode("/d", 0o700)
+            .dir("/d/a")
+            .with_mode("/d/a", 0o700)
+            .file("/d/a/f", b"")
+            .with_mode("/d/a/f", 0o600)
+            .file("/d/b", b"")
+            .with_mode("/d/b", 0o600)
+            .dir("/d/c")
+            .with_mode("/d/c", 0o700)
+            .file("/d/c/g", b"")
+            .with_mode("/d/c/g", 0o600)
+            .file("/d/e", b"")
+            .with_mode("/d/e", 0o600)
+            .refuse("set_mode /d/a", Errno::PermissionDenied)
+            .refuse("entries /d/c", Errno::PermissionDenied);
+        let out = Recorder::new();
+        let refused = ChmodError::Apply {
+            path: String::from("/d/a"),
+            errno: Errno::PermissionDenied,
+        };
+        let unread = ChmodError::Read {
+            path: String::from("/d/c"),
+            errno: Errno::PermissionDenied,
+        };
+        assert_eq!(
+            run_args(&["-R", "go+r", "/d"], &tree, &out),
+            Err(format!("chmod: {refused}\nchmod: {unread}\n"))
+        );
+        assert_eq!(tree.mode("/d/a"), Some(0o700));
+        assert_eq!(tree.mode("/d/a/f"), Some(0o644));
+        assert_eq!(tree.mode("/d/b"), Some(0o644));
+        assert_eq!(tree.mode("/d/c"), Some(0o744));
+        assert_eq!(tree.mode("/d/c/g"), Some(0o600));
+        assert_eq!(tree.mode("/d/e"), Some(0o644));
+    }
+
+    #[test]
+    fn preserve_root_refuses_the_view_root_however_reached() {
+        let volume = "id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001";
+        let tree = Tree::new()
+            .file("/f", b"")
+            .with_mode("/f", 0o600)
+            .named_root(volume, "/");
+        let by_volume = format!("{volume}/");
+        for spelled in ["/", "//", by_volume.as_str()] {
+            let out = Recorder::new();
+            let refusal = ChmodError::PreserveRoot(String::from(spelled));
+            assert_eq!(
+                run_args(&["-R", "--preserve-root", "go+r", spelled], &tree, &out),
+                shown(&refusal),
+                "{spelled}"
+            );
+            assert!(changed(&tree).is_empty(), "{spelled}");
+        }
+        assert_eq!(
+            shown(&ChmodError::PreserveRoot(by_volume.clone())),
+            Err(format!(
+                "chmod: it is dangerous to operate recursively on '{by_volume}' (same as '/')\n\
+                 chmod: use --no-preserve-root to override this failsafe\n"
+            ))
+        );
+        let out = Recorder::new();
+        assert_eq!(
+            run_args(
+                &["-R", "--preserve-root", "--no-pres", "go+r", "/"],
+                &tree,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            tree.mode("/f"),
+            Some(0o644),
+            "the default is GNU's: no failsafe"
+        );
+    }
+
+    #[test]
+    fn a_directory_swapped_after_its_change_is_not_gone_into() {
+        let tree = Tree::new()
+            .dir("/d/sub")
+            .file("/d/sub/f", b"")
+            .with_mode("/d/sub/f", 0o600)
+            .dir("/other")
+            .file("/other/g", b"")
+            .with_mode("/other/g", 0o600);
+        tree.before_line(
+            "open_dir /d/sub",
+            Box::new(|tree: &Tree| {
+                tree.rename("/d/sub", "/d/old");
+                tree.rename("/other", "/d/sub");
+            }),
+        );
+        let out = Recorder::new();
+        let unread = ChmodError::Read {
+            path: String::from("/d/sub"),
+            errno: Errno::Stale,
+        };
+        assert_eq!(run_args(&["-R", "go+r", "/d"], &tree, &out), shown(&unread));
+        assert_eq!(
+            tree.mode("/d/sub/g"),
+            Some(0o600),
+            "what came in is untouched"
+        );
+        assert_eq!(tree.mode("/d/old/f"), Some(0o600));
+    }
+
+    #[test]
+    fn verbose_names_an_entry_that_could_not_be_reached_as_gnu_does() {
+        let tree = Tree::new()
+            .file("/d/f", b"")
+            .refuse("open_node /d/f", Errno::PermissionDenied);
+        let out = Recorder::new();
+        let refused = ChmodError::Stat {
+            path: String::from("/d/f"),
+            errno: Errno::PermissionDenied,
+        };
+        assert_eq!(
+            run_args(&["-Rv", "755", "/d"], &tree, &out),
+            shown(&refused)
+        );
+        assert!(
+            out.text().ends_with("'/d/f' could not be accessed\n"),
+            "{}",
+            out.text()
+        );
+    }
+
+    /// A tree holding links to a directory and a file beside it.
+    fn linking_out() -> Tree {
+        Tree::new()
+            .dir("/d")
+            .with_mode("/d", 0o700)
+            .link("/d/dlink", "/out")
+            .link("/d/flink", "/out/secret")
+            .dir("/out")
+            .with_mode("/out", 0o700)
+            .file("/out/secret", b"")
+            .with_mode("/out/secret", 0o600)
+    }
+
+    #[test]
+    fn a_link_met_in_the_walk_is_left_alone_with_what_it_names() {
+        let tree = linking_out();
+        let out = Recorder::new();
+        assert_eq!(run_args(&["-R", "-v", "go+r", "/d"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/out"), Some(0o700));
+        assert_eq!(tree.mode("/out/secret"), Some(0o600));
+        assert_eq!(
+            out.text(),
+            "mode of '/d' changed from 0700 (rwx------) to 0744 (rwxr--r--)\n\
+             neither symbolic link '/d/dlink' nor referent has been changed\n\
+             neither symbolic link '/d/flink' nor referent has been changed\n"
+        );
+        // `-c` reports changes only, and a link left alone is none.
+        let tree = linking_out();
+        let out = Recorder::new();
+        assert_eq!(run_args(&["-R", "-c", "go+r", "/d"], &tree, &out), Ok(()));
+        assert_eq!(
+            out.text(),
+            "mode of '/d' changed from 0700 (rwx------) to 0744 (rwxr--r--)\n"
+        );
+    }
+
+    #[test]
+    fn a_link_named_as_an_operand_changes_what_it_names() {
+        let tree = Tree::new()
+            .link("/flink", "/secret")
+            .file("/secret", b"")
+            .with_mode("/secret", 0o600);
+        let out = Recorder::new();
+        assert_eq!(run_args(&["go+r", "/flink"], &tree, &out), Ok(()));
+        assert_eq!(tree.mode("/secret"), Some(0o644));
+    }
+
+    #[test]
+    fn an_operand_that_cannot_be_reached_is_named_as_gnu_names_it() {
+        let tree = Tree::new().link("/dl", "/nowhere");
+        let out = Recorder::new();
+        assert_eq!(
+            run_args(&["-v", "600", "/dl", "/missing"], &tree, &out),
+            Err(format!(
+                "chmod: {}\nchmod: {}\n",
+                ChmodError::Dangling(String::from("/dl")),
+                ChmodError::Stat {
+                    path: String::from("/missing"),
+                    errno: Errno::NotFound,
+                }
+            ))
+        );
+        assert_eq!(
+            out.text(),
+            "'/dl' could not be accessed\n'/missing' could not be accessed\n"
+        );
+    }
+
+    /// `/d` holding a file and a directory, and beside it a victim with a
+    /// link to it and to its file waiting outside the tree.
+    fn beside_a_victim() -> Tree {
+        Tree::new()
+            .dir("/d")
+            .with_mode("/d", 0o700)
+            .file("/d/f", b"")
+            .with_mode("/d/f", 0o600)
+            .dir("/d/sub")
+            .with_mode("/d/sub", 0o700)
+            .file("/d/sub/g", b"")
+            .with_mode("/d/sub/g", 0o600)
+            .dir("/victim")
+            .with_mode("/victim", 0o700)
+            .file("/victim/secret", b"")
+            .with_mode("/victim/secret", 0o600)
+            .link("/to_dir", "/victim")
+            .link("/to_file", "/victim/secret")
+    }
+
+    /// Swap `/d/sub` and `/d/f`, each while it is still what it was, for the
+    /// links to the victim.
+    fn swap_both_for_links(tree: &Tree) {
+        if tree.kind("/d/sub") == Some(Kind::Directory) {
+            tree.rename("/d/sub", "/sub_aside");
+            tree.rename("/to_dir", "/d/sub");
+        }
+        if tree.kind("/d/f") == Some(Kind::File) {
+            tree.rename("/d/f", "/f_aside");
+            tree.rename("/to_file", "/d/f");
+        }
+    }
+
+    /// Wherever among the seam calls the swap lands — between a node's read
+    /// and its change included — the change never reaches what a link names.
+    #[test]
+    fn an_entry_swapped_for_a_link_mid_walk_never_carries_the_change() {
+        let args = ["-R", "go+r", "/d"];
+        let undisturbed = beside_a_victim();
+        assert_eq!(run_args(&args, &undisturbed, &Recorder::new()), Ok(()));
+        for call in 0..undisturbed.calls().len() {
+            let tree = beside_a_victim();
+            tree.before_call(call, Box::new(swap_both_for_links));
+            let ran = engine_run(
+                parse(&args).expect("valid command"),
+                None,
+                &tree,
+                UMASK,
+                &NoHelp,
+                &Recorder::new(),
+                &Recorder::new(),
+            );
+            assert!(ran.is_ok(), "the swap before call {call} ended the run");
+            assert_eq!(tree.mode("/victim"), Some(0o700), "swap before call {call}");
+            assert_eq!(
+                tree.mode("/victim/secret"),
+                Some(0o600),
+                "swap before call {call}"
+            );
+        }
+    }
+
+    /// A name's control bytes are escaped where GNU escapes them, never
+    /// written raw to the terminal.
+    #[test]
+    fn a_report_names_its_file_escaped() {
+        let tree = Tree::new().file("/f\u{1b}", b"");
+        let out = Recorder::new();
+        assert_eq!(run_args(&["-v", "644", "/f\u{1b}"], &tree, &out), Ok(()));
+        assert_eq!(
+            out.written(),
+            b"mode of '/f'$'\\033' retained as 0644 (rw-r--r--)\n"
+        );
     }
 
     #[test]
     fn verbose_reports_changed_and_retained_in_gnu_wording() {
-        let fs = MemFs::new().file("/f", 0o644);
+        let tree = Tree::new().file("/f", b"");
         let out = Recorder::new();
-        assert_eq!(run_args(&["-v", "644", "/f"], &fs, &out), Ok(()));
+        assert_eq!(run_args(&["-v", "644", "/f"], &tree, &out), Ok(()));
         assert_eq!(
             out.written(),
             b"mode of '/f' retained as 0644 (rw-r--r--)\n"
         );
         let out = Recorder::new();
-        assert_eq!(run_args(&["-v", "664", "/f"], &fs, &out), Ok(()));
+        assert_eq!(run_args(&["-v", "664", "/f"], &tree, &out), Ok(()));
         assert_eq!(
             out.written(),
             b"mode of '/f' changed from 0644 (rw-r--r--) to 0664 (rw-rw-r--)\n"
@@ -598,14 +933,43 @@ mod tests {
     }
 
     #[test]
+    fn verbose_reports_a_refused_change_after_its_diagnostic_as_gnu_does() {
+        let tree = Tree::new()
+            .file("/f", b"")
+            .refuse("set_mode /f", Errno::PermissionDenied);
+        let refused = ChmodError::Apply {
+            path: String::from("/f"),
+            errno: Errno::PermissionDenied,
+        };
+        let out = Recorder::new();
+        assert_eq!(run_args(&["-v", "600", "/f"], &tree, &out), shown(&refused));
+        assert_eq!(
+            out.written(),
+            b"failed to change mode of '/f' from 0644 (rw-r--r--) to 0600 (rw-------)\n"
+        );
+        let out = Recorder::new();
+        assert_eq!(
+            run_args(&["-v", "-f", "600", "/f"], &tree, &out),
+            Err(String::new())
+        );
+        assert_eq!(
+            out.written(),
+            b"failed to change mode of '/f' from 0644 (rw-r--r--) to 0600 (rw-------)\n"
+        );
+        let out = Recorder::new();
+        assert!(run_args(&["-c", "600", "/f"], &tree, &out).is_err());
+        assert!(out.written().is_empty(), "-c reports no refused change");
+    }
+
+    #[test]
     fn changes_reports_only_an_actual_change() {
-        let fs = MemFs::new().file("/f", 0o644);
+        let tree = Tree::new().file("/f", b"");
         let out = Recorder::new();
         // The mode is already 644: `-c` reports nothing.
-        assert_eq!(run_args(&["-c", "644", "/f"], &fs, &out), Ok(()));
+        assert_eq!(run_args(&["-c", "644", "/f"], &tree, &out), Ok(()));
         assert!(out.written().is_empty());
         let out = Recorder::new();
-        assert_eq!(run_args(&["-c", "600", "/f"], &fs, &out), Ok(()));
+        assert_eq!(run_args(&["-c", "600", "/f"], &tree, &out), Ok(()));
         assert_eq!(
             out.written(),
             b"mode of '/f' changed from 0644 (rw-r--r--) to 0600 (rw-------)\n"
@@ -614,15 +978,15 @@ mod tests {
 
     #[test]
     fn quiet_suppresses_the_failure_but_still_fails_the_run() {
-        let fs = MemFs::new().file("/b", 0o600);
+        let tree = Tree::new().file("/b", b"").with_mode("/b", 0o600);
         let out = Recorder::new();
-        // `/a` is missing: `-f` keeps going (so `/b` is still changed) and
-        // the run fails afterwards with the message-less error.
+        // `/a` is missing: `-f` says nothing, `/b` is still changed, and the
+        // run fails.
         assert_eq!(
-            run_args(&["-f", "644", "/a", "/b"], &fs, &out),
-            Err(ChmodError::Silenced)
+            run_args(&["-f", "644", "/a", "/b"], &tree, &out),
+            Err(String::new())
         );
-        assert_eq!(fs.mode_of("/b"), Some(0o644));
+        assert_eq!(tree.mode("/b"), Some(0o644));
         assert!(out.written().is_empty());
     }
 }

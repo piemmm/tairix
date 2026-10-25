@@ -19,10 +19,18 @@ et négatif dans le cas contraire, et ne peut pas être nul. `dernier`
 peut être `inf` pour compter sans fin. La précision d'affichage par
 défaut suit l'écriture des opérandes (`seq 1 0.25 2` affiche deux
 décimales), et les suites de nombres entiers sont générées exactement,
-quelle que soit leur taille.
+quelle que soit leur taille. Un nombre hexadécimal dont l'exposant est
+en majuscule (`0X1P-1`) est lu comme l'est celui dont l'exposant est en
+minuscule ; GNU `seq` en lit la forme comme celle d'un entier et affiche
+des nombres erronés.
 
 L'analyse des options s'arrête au premier opérande, et un nombre négatif
 en tête est un opérande, pas une option : `seq -5 5` compte depuis -5.
+
+Un diagnostic montre le format, et une directive inconnue qu'il
+contient, avec tout caractère de contrôle ou autre caractère invisible
+échappé, de sorte qu'aucun ne peut commander le terminal ; GNU affiche
+la directive telle quelle.
 
 ## OPTIONS
 
@@ -52,9 +60,9 @@ en tête est un opérande, pas une option : `seq -5 5` compte depuis -5.
 ## EXIT STATUS
 
 - `0` — la suite (ou l'aide courte demandée) a été écrite.
-- `1` — la sortie n'a plus accepté d'octets.
-- `2` — la ligne de commande n'a pas été comprise (option inconnue,
-  nombre invalide, pas nul ou format incorrect).
+- `1` — la sortie n'a plus accepté d'octets. Une ligne de commande non
+  comprise (option inconnue, nombre invalide, pas nul ou format
+  incorrect) sort aussi avec `1`.
 
 ## ENVIRONMENT
 

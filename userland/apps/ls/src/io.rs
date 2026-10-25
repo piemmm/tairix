@@ -17,23 +17,9 @@ use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::{Errno, NodeTimes};
 
 /// Whether a stat describes a final symbolic link itself or what it resolves
-/// to — POSIX `lstat` versus `stat`.
-///
-/// `ls` selects this **per path**, not once per listing: the GNU `-H` posture
-/// dereferences command-line operands while describing the links inside a
-/// directory as themselves, so one listing takes both readings. The spelling
-/// is the VFS's own (`docs/src/filesystem/overview.md`), so the tool and the
-/// kernel name the same distinction the same way.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FinalLink {
-    /// Describe the link itself: the `l` type letter, the target the long
-    /// format prints, and the only reading under which a *dangling* link can
-    /// be described at all.
-    Keep,
-    /// Describe what the link resolves to. A dangling link is then simply
-    /// absent, exactly as `stat(2)` reports it.
-    Follow,
-}
+/// to, chosen **per path**: GNU's `-H` dereferences command-line operands
+/// while describing the links inside a directory as themselves.
+pub use tairix_abi::fs::FinalLink;
 
 /// The metadata `ls` renders for a path: its kind, permission bits, size,
 /// stable node number, and four timestamps — the

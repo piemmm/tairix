@@ -44,13 +44,11 @@
 //! * [`clipboard`](mod@clipboard) — the cut/copy [`Clipboard`] and
 //!   [`plan_paste`] paste-target validation (`plans/NEW-FILEMANAGER.md` FM7).
 //! * [`delete`](mod@delete) — the delete model: the [`DeletePlan`] naming what
-//!   the Delete verb would remove, captured from the selection, and the
-//!   [`DeleteWalk`] driven cursor that carries the recursive removal out
-//!   depth-first, bounded and interruptible (`plans/NEW-FILEMANAGER.md` `FM7b`).
+//!   the Delete verb would remove, captured from the selection
+//!   (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`execute`](mod@execute) — the pure paste-execution model: the
-//!   [`paste_strategy`] move-vs-copy volume decision and the depth-first,
-//!   depth-bounded [`CopyWalk`] recursive directory-copy cursor the management
-//!   verbs run (`plans/NEW-FILEMANAGER.md` `FM7b`).
+//!   [`paste_strategy`] move-vs-copy volume decision a paste's count reads
+//!   (`plans/NEW-FILEMANAGER.md` `FM7b`).
 //! * [`media`](mod@media) — the one closed content-type [`MediaType`] registry
 //!   the manager and picker share: it drives both the file-type
 //!   [`IconKind`](tairix_icon::IconKind) glyph and the "Open With…" association
@@ -172,20 +170,15 @@ pub use clipboard::{
 };
 pub use column::ScrollColumn;
 pub use create::{validate_new_entry_name, CreateError, NewEntry, NEW_FOLDER_BASE};
-pub use delete::{
-    DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
-};
+pub use delete::{DeletePlan, DeleteTarget};
 pub use desk::{ListingDesk, ListingJob};
 pub use drive::{Drive, DriveChange, DrivePanels, DriveSample};
 pub use entry::{
     bundle_stem, is_bundle_name, resolve_target, DriveMark, Entry, EntryKind, LinkResolution,
-    LinkTarget, Occupancy,
+    LinkTarget, Listed, Occupancy,
 };
 pub use error::BrowseError;
-pub use execute::{
-    paste_strategy, CopyAction, CopyKind, CopyWalk, CopyWalkError, PasteStrategy, VolumeId,
-    MAX_COPY_DEPTH,
-};
+pub use execute::{paste_strategy, PasteStrategy, VolumeId};
 pub use format::{format_datetime, format_minute, format_size};
 pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
 pub use marquee::Marquee;
@@ -437,17 +430,13 @@ pub const MANAGER_WINDOW_GROUND: SurfaceGround = SurfaceGround::Frosted;
 /// the script clicks and the row the desktop draws in step.
 pub const MANAGER_MENU_TITLE: &str = "Files";
 
-/// The deepest directory nesting any of the file manager's recursive
-/// component-path filesystem walks will descend, counted in root-first path
-/// components.
+/// The deepest directory nesting the count of what an operation will touch
+/// ([`Survey`]) descends, counted in root-first path components.
 ///
-/// A fixed fail-closed *bound*, not a hardware-scaled capacity: it caps how far
-/// a recursive removal ([`DeleteWalk`]) or a recursive copy ([`CopyWalk`])
-/// descends, so a pathological or adversarial tree can never make the traversal
-/// recurse without limit. Both walks share this single definition rather than
-/// each carrying their own copy of the value; a tree deeper than the bound is
-/// refused rather than followed. Chosen far beyond any legitimate directory
-/// depth while staying comfortably bounded.
+/// A fixed fail-closed *bound*, not a hardware-scaled capacity: a pathological
+/// or adversarial tree can never make the count recurse without limit. Chosen
+/// far beyond any legitimate directory depth while staying comfortably
+/// bounded.
 pub(crate) const MAX_WALK_DEPTH: usize = 256;
 
 #[cfg(test)]

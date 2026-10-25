@@ -58,8 +58,8 @@ que le compte appelant ne détient pas lui-même.
 
 - `0` — toutes les modifications demandées ont été faites.
 - `1` — la base a refusé ou échoué une modification ; l'étape et la raison
-  sont écrites sur la sortie d'erreur.
-- `2` — la ligne de commande n'a pas été comprise.
+  sont écrites sur la sortie d'erreur. Une ligne de commande non comprise
+  sort aussi avec `1`.
 
 ## ENVIRONMENT
 

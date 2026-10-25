@@ -82,6 +82,7 @@ use crate::sched::{
 use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::DirVisit;
+use tairix_abi::driver::filesystem::NodeKind;
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
@@ -99,16 +100,16 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::{
-    decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
-    DescriptorTable, DirChange, DirChangeBatch, DirWatchStatus, Errno, FdWire, FileId, FileStat,
-    InputMode, IntrospectDomain, IrqHandle, LimitKind, LockConflict, LockFlags, LockMode,
-    LockRange, MapFlags, OpenFlags, PeerWatchOp, PortName, PortWidth, PowerAction, ProcId,
+    decode_log_record, AtFlags, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
+    DescriptorTable, DirChange, DirChangeBatch, DirWatchStatus, Errno, FdWire, FileStat, InputMode,
+    IntrospectDomain, IrqHandle, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags,
+    NodeExpect, OpenFlags, PathAt, PeerWatchOp, PortName, PortWidth, PowerAction, ProcId,
     ProcessStart, RandomFlags, ReaddirFrom, RenameFlags, ResourceLimit, SchedPriority, Signal,
     SignalIntakeOp, SpawnAttach, SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64,
     UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CALL_DEADLINE_NONE, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
-    PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
+    BOOT_ID_LEN, CALL_DEADLINE_NONE, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FD_CWD,
+    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX,
+    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
     RANDOM_REQUEST_MAX_BYTES, READDIR_BATCH_MAX, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
     SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
@@ -140,6 +141,7 @@ use tairix_util::fmt::{format_hex_u64, format_usize};
 use tairix_util::secret::WipedBuf;
 use zeroize::Zeroize;
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
@@ -159,11 +161,11 @@ use crate::devres::{
     NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
-use crate::filelock::{Held, OwnerId, Refusal, Request as LockRequest, Wakes};
+use crate::filelock::{Held, LockedNode, OwnerId, Refusal, Request as LockRequest, Wakes};
 use crate::filemap::{FileMap, NULL_FILE_MAP};
 use crate::fs::{
-    FilesystemService, LateIdentity, VolumeForest, VolumeService, NULL_FILESYSTEM,
-    NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
+    Acting, At, Authority, Cwd, FilesystemService, LateIdentity, NodeHandle, Start, VolumeForest,
+    VolumeService, NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::introspect::{IntrospectSource, NULL_INTROSPECT};
@@ -505,7 +507,7 @@ where
     /// seeded. Held as a `'static` borrow, exactly like the users database.
     hw_tree: &'static (dyn HwTreeSource + 'static),
     /// The kernel-held live introspection source the `sysinfo_introspect`
-    /// syscall serves (`PREREQUISITES.md` P-C). Defaults to
+    /// syscall serves. Defaults to
     /// [`NULL_INTROSPECT`] (every domain fails closed with
     /// [`Errno::NotImplemented`]); the boot path installs the real
     /// `CapTable`/scheduler/allocator/mount-backed source through
@@ -522,8 +524,8 @@ where
     /// `kernel/mem`-backed producer through [`Self::with_shared_mem_facility`].
     /// Held as a `'static` borrow, exactly like the MMIO-map producer.
     shared_mem_facility: &'static (dyn SharedMemFacility + 'static),
-    /// The kernel filesystem service the `fs_*` syscalls route through
-    /// (`PREREQUISITES.md` P-A). Defaults to [`NULL_FILESYSTEM`] (every
+    /// The kernel filesystem service the `fs_*` syscalls route through.
+    /// Defaults to [`NULL_FILESYSTEM`] (every
     /// operation fails closed with [`Errno::NotImplemented`]); the boot path
     /// that owns the mounted volume installs the real disk-backed service
     /// through [`Self::with_filesystem`]. Held as a `'static` borrow, exactly
@@ -548,15 +550,15 @@ where
     /// like the filesystem service.
     volume_service: &'static (dyn VolumeService + 'static),
     /// The kernel wall clock the `wall_time_get` / `wall_time_set` syscalls
-    /// read and drive (`PREREQUISITES.md` P-D). Defaults to the fail-closed
+    /// read and drive. Defaults to the fail-closed
     /// [`NULL_WALL_CLOCK`] (reads report `Unset`, a set returns
     /// `NotImplemented`); the boot path installs the production
     /// [`crate::wallclock::KernelWallClock`] through [`Self::with_wall_clock`].
     /// Held `'static` because the leaked clock lives for the running kernel's
     /// lifetime, exactly like the other boot-installed seams.
     wall_clock: &'static (dyn WallClockSource + 'static),
-    /// The per-boot identifier the `boot_id_get` syscall reports
-    /// (`PREREQUISITES.md` P-E). Defaults to [`BootId::UNSET`]; the boot path
+    /// The per-boot identifier the `boot_id_get` syscall reports.
+    /// Defaults to [`BootId::UNSET`]; the boot path
     /// mints the real value from the seeded CSPRNG reserve and installs it
     /// through [`Self::with_boot_id`]. While unset (no boot path ran, or the
     /// reserve could not be seeded in time) `boot_id_get` fails closed with
@@ -573,7 +575,7 @@ where
     /// plain immutable value, not a live seam, exactly like the boot id.
     boot_facts: Option<BootFacts>,
     /// The authoritative identity table the `spawn` handler resolves a
-    /// spawn-as-user switch against (`PREREQUISITES.md` P-C). Defaults to the
+    /// spawn-as-user switch against. Defaults to the
     /// fail-closed [`NULL_IDENTITY`]; the boot path that unlocks the root
     /// volume installs the verified table through [`Self::with_identity`]
     /// (the same `&'static LateIdentity` the filesystem service resolves
@@ -643,7 +645,7 @@ fn stream_stage_len(len: usize) -> usize {
 /// [`KernelSyscallHandlers::descriptor_read`] /
 /// [`KernelSyscallHandlers::descriptor_write`].
 ///
-/// Only a path-backed descriptor has a position at all; a resource, pipe, or
+/// Only a node-backed descriptor has a position at all; a resource, pipe, or
 /// pty backing is a positionless byte stream and ignores this.
 #[derive(Clone, Copy)]
 enum StreamPos {
@@ -689,68 +691,100 @@ struct CarveTerms {
     hand_over: bool,
 }
 
-/// The path a filesystem-backed descriptor names and the authority every
-/// operation on it runs under.
+/// The node a filesystem-backed descriptor is bound to and the identity every
+/// operation on it acts as.
 ///
-/// A descriptor is either one the caller opened itself — exercised under the
-/// caller's own attested identity — or a delegation exercised under the
-/// identity its grantor captured, whether that grantor was a one-shot
-/// `fd_grant` or the parent that wired the descriptor into this task at
-/// spawn. All are filesystem paths re-resolved and re-authorised through the
-/// secured VFS on every operation; they differ only in the credential, and in
-/// the extent ceiling a writable `fd_grant` delegation carries.
-struct PathAuthority<'a> {
-    /// The absolute path the descriptor resolves to.
-    path: &'a str,
-    /// The uid every VFS re-check runs under.
+/// A descriptor the caller opened itself acts as the caller's own live
+/// identity, so a capability narrowed since the open stops working at once.
+/// One conferred at spawn or granted by `fd_grant` acts as the identity frozen
+/// into it, and a grant carries the extent ceiling it was given. Every byte
+/// operation re-checks the node's mode and ACL as that identity, except where
+/// the owner exemption applies, which a grant never has.
+struct NodeAuthority<'a> {
+    /// The descriptor's node.
+    handle: &'a NodeHandle,
+    /// The uid every check runs under.
     uid: u32,
-    /// The capability set every VFS re-check runs under.
+    /// The capability set every check runs under.
     caps: &'a CapabilitySet,
     /// The highest file length a write or truncate may produce, or [`None`]
     /// for an unbounded reach — a descriptor the caller opened itself, or one
     /// a parent conferred whole at spawn.
     write_ceiling: Option<u64>,
+    /// Whether the descriptor is a grant.
+    granted: bool,
 }
 
-impl<'a> PathAuthority<'a> {
-    /// Resolve the path a filesystem-backed descriptor names together with
-    /// the authority every operation on it runs under, or [`None`] for a
-    /// backing that is not a filesystem object.
+impl<'a> NodeAuthority<'a> {
+    /// The node a filesystem-backed descriptor reaches together with the
+    /// identity every operation on it acts as, or [`None`] for a backing that
+    /// is not a node.
     ///
-    /// This is the **one** place that decision is made. A descriptor the
-    /// caller opened runs under the caller's own attested identity; a
-    /// delegation runs under the identity its grantor captured when it was
-    /// minted, because the delegation *is* the authority and its holder may
-    /// legitimately hold no filesystem capability at all. Resolving that per
-    /// operation would be one chance per operation to read the wrong one.
+    /// This is the **one** place that decision is made: the successor of the
+    /// per-operation choice of identity, so no operation can read the wrong
+    /// one.
     fn of(entry: &'a crate::aspace::OpenFile, caller: &'a CallerContext<'_>) -> Option<Self> {
-        match &entry.backing {
-            OpenBacking::Path(path) => Some(Self {
-                path,
-                uid: caller.caps.owner().0,
-                caps: caller.caps.effective(),
+        Some(Self::acting_on(
+            entry.node()?,
+            caller.caps.owner().0,
+            caller.caps.effective(),
+        ))
+    }
+
+    /// `handle` acting as its authority names, where `uid` and `caps` are the
+    /// live identity of the process using it.
+    fn acting_on(handle: &'a NodeHandle, uid: u32, caps: &'a CapabilitySet) -> Self {
+        match &handle.authority {
+            Authority::Holder => Self {
+                handle,
+                uid,
+                caps,
                 // A descriptor the caller opened is bounded by the volume and
                 // by the caller's own limits, not by a delegated extent.
                 write_ceiling: None,
-            }),
-            OpenBacking::Delegated(file) => Some(Self {
-                path: &file.path,
-                uid: file.uid,
-                caps: &file.caps,
-                write_ceiling: file.write_ceiling,
-            }),
-            OpenBacking::Resource(_)
-            | OpenBacking::Pipe(_)
-            | OpenBacking::PtyMaster(_)
-            | OpenBacking::PtySlave(_) => None,
+                granted: false,
+            },
+            Authority::Frozen(frozen) => Self {
+                handle,
+                uid: frozen.uid,
+                caps: &frozen.caps,
+                write_ceiling: frozen.grant.as_ref().and_then(|grant| grant.write_ceiling),
+                granted: frozen.grant.is_some(),
+            },
         }
     }
 
-    /// Refuse a principal whose resolved authority carries no filesystem
-    /// capability.
+    /// `handle` as a metadata operation acts on it: as the caller, whatever
+    /// identity the descriptor carries, so a child handed a descriptor cannot
+    /// change the node with its opener's rights, but still a grant — barred
+    /// from the owner's exemption and bounded by its ceiling.
+    fn as_caller(handle: &'a NodeHandle, caller: &'a CallerContext<'_>) -> Self {
+        let grant = match &handle.authority {
+            Authority::Holder => None,
+            Authority::Frozen(frozen) => frozen.grant.as_ref(),
+        };
+        Self {
+            handle,
+            uid: caller.caps.owner().0,
+            caps: caller.caps.effective(),
+            write_ceiling: grant.and_then(|grant| grant.write_ceiling),
+            granted: grant.is_some(),
+        }
+    }
+
+    /// The identity the node operations act as.
+    fn acting(&self) -> Acting<'_> {
+        Acting {
+            uid: self.uid,
+            caps: self.caps,
+            granted: self.granted,
+        }
+    }
+
+    /// Refuse a principal whose identity carries no filesystem capability.
     ///
     /// The same coarse gate a caller's own `fs_open` faced, applied against
-    /// whichever set the backing resolved to — so a delegation whose grantor
+    /// whichever set the descriptor acts as — so a delegation whose grantor
     /// has since been refused the capability loses its reach too.
     fn admit(&self) -> Result<(), Errno> {
         if self.caps.holds(CapabilityId::FS_ACCESS) {
@@ -791,6 +825,129 @@ impl<'a> PathAuthority<'a> {
             _ => Ok(()),
         }
     }
+}
+
+/// One path a caller named and the start it resolves from, both held for the
+/// call so no registry lock is held while the filesystem walks.
+struct NamedPath {
+    /// The text the resolver walks.
+    path: String,
+    /// Where a relative `path` starts: the view root for an absolute one.
+    start: Cwd,
+}
+
+impl NamedPath {
+    /// The path as the filesystem service takes it.
+    fn at(&self) -> At<'_> {
+        At {
+            start: self.start.start(),
+            path: &self.path,
+        }
+    }
+
+    /// How the audit trail records the path: as typed, beside the label of
+    /// the start a relative one resolved from.
+    fn audit_place(&self) -> AuditPlace<'_> {
+        let from = (!self.path.starts_with('/')).then(|| start_label(&self.start));
+        AuditPlace {
+            from,
+            path: Cow::Borrowed(&self.path),
+        }
+    }
+}
+
+/// A path as the audit trail records it: as typed, and for a relative one the
+/// label of the start it resolved from — the path that start was reached by,
+/// which a rename since may have made stale — kept apart, so a record never
+/// names a location the walk did not take.
+struct AuditPlace<'a> {
+    from: Option<Cow<'a, str>>,
+    path: Cow<'a, str>,
+}
+
+/// The label of `start`: the path it was reached by, or `?` when the heap
+/// cannot spell a catalog's.
+fn start_label(start: &Cwd) -> Cow<'_, str> {
+    let catalog = match start {
+        Cwd::Root => return Cow::Borrowed("/"),
+        Cwd::Dir(handle) => return Cow::Borrowed(&handle.opened_as),
+        Cwd::Catalog(catalog) => catalog,
+    };
+    let names = catalog.path().components();
+    let mut label = String::new();
+    let len = names.iter().map(|name| name.len() + 1).sum::<usize>();
+    if label.try_reserve_exact(len.max(1)).is_err() {
+        return Cow::Borrowed("?");
+    }
+    for name in names {
+        label.push('/');
+        label.push_str(name);
+    }
+    if label.is_empty() {
+        label.push('/');
+    }
+    Cow::Owned(label)
+}
+
+/// What an [`AtFlags::EMPTY_PATH`] call acts on, held for the call.
+enum EmptyPath {
+    /// The node a descriptor of the caller's holds, acted on through the node
+    /// forms: a byte operation or a query as that descriptor's authority, a
+    /// mode, owner or attribute change as the caller.
+    Node(NodeHandle),
+    /// The working directory or a catalog descriptor's catalog, acted on as
+    /// the path `.` from itself: as the caller, which is what a directory's
+    /// holder acts as anyway.
+    Start(Cwd),
+}
+
+impl EmptyPath {
+    /// How the audit trail records the node: by the label it was reached by.
+    fn audit_place(&self) -> AuditPlace<'_> {
+        let path = match self {
+            Self::Node(handle) => Cow::Borrowed(handle.opened_as.as_str()),
+            Self::Start(start) => start_label(start),
+        };
+        AuditPlace { from: None, path }
+    }
+}
+
+/// The path `.` from `start`: the start itself.
+fn itself(start: &Cwd) -> At<'_> {
+    At {
+        start: start.start(),
+        path: ".",
+    }
+}
+
+/// Refuse a caller holding no filesystem capability an operation on a catalog
+/// descriptor, the gate its own `fs_open` faced, and refuse a catalog that has
+/// left the mount table as [`Errno::Stale`].
+fn admit_catalog(caller: &CallerContext<'_>, catalog: &crate::fs::Projection) -> Result<(), Errno> {
+    if !caller.caps.effective().holds(CapabilityId::FS_ACCESS) {
+        return Err(Errno::PermissionDenied);
+    }
+    if !catalog.is_live() {
+        return Err(Errno::Stale);
+    }
+    Ok(())
+}
+
+/// The caller acting as itself, as on a descriptor it opened.
+fn own_acting<'a>(caller: &'a CallerContext<'_>) -> Acting<'a> {
+    Acting {
+        uid: caller.caps.owner().0,
+        caps: caller.caps.effective(),
+        granted: false,
+    }
+}
+
+/// What an `fs_readdir` batch lists.
+enum Listed<'a> {
+    /// A directory the caller opened itself.
+    Node(&'a NodeHandle),
+    /// The catalog of attached volumes.
+    Catalog(&'a crate::fs::Projection),
 }
 
 /// The `fs_watch_read` batch reporting `names`, each paired with the record
@@ -838,7 +995,7 @@ fn dir_member_state(
     m.table
         .as_ref()
         .map_or(crate::fswatch::MemberState::Idle, |table| {
-            table.0.dir_state(m.file.node, &m.pacing, mounts, now)
+            table.0.dir_state(m.node, &m.pacing, mounts, now)
         })
 }
 
@@ -1061,8 +1218,8 @@ where
             // never fabricating a region.
             shared_mem_facility: &NULL_SHARED_MEM_FACILITY,
             // The filesystem service is unwired until the boot path that owns
-            // the mounted volume installs the disk-backed producer
-            // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed with
+            // the mounted volume installs the disk-backed producer:
+            // every `fs_*` syscall fails closed with
             // `NotImplemented`, never fabricating a handle or a read.
             filesystem: &NULL_FILESYSTEM,
             // The volume forest is unwired until the boot path that mounts
@@ -1072,19 +1229,19 @@ where
             volumes: &NULL_VOLUME_FOREST,
             volume_service: &NULL_VOLUME_SERVICE,
             // The wall clock is unwired until the boot path installs the
-            // production `KernelWallClock` (`PREREQUISITES.md` P-D):
+            // production `KernelWallClock`:
             // `wall_time_get` reports `Unset` and `wall_time_set` fails closed
             // with `NotImplemented` through `NULL_WALL_CLOCK`.
             wall_clock: &NULL_WALL_CLOCK,
             // No per-boot id until the boot path mints one from the seeded
-            // CSPRNG reserve and installs it (`PREREQUISITES.md` P-E):
+            // CSPRNG reserve and installs it:
             // `boot_id_get` fails closed with `EntropyNotReady` until then.
             boot_id: BootId::UNSET,
             // `boot_facts_get` fails closed with `NotImplemented` until the
             // boot path installs the discovered machine summary.
             boot_facts: None,
             // The identity table is unwired until the boot path installs the
-            // verified one (`PREREQUISITES.md` P-C): a spawn-as-user switch
+            // verified one: a spawn-as-user switch
             // fails closed with `NotImplemented` until then, never resolving
             // a guessed credential.
             identity: &NULL_IDENTITY,
@@ -1670,8 +1827,7 @@ where
     }
 
     /// Install the authoritative identity table the `spawn` handler resolves
-    /// a spawn-as-user switch against, consuming and returning `self`
-    /// (`PREREQUISITES.md` P-C).
+    /// a spawn-as-user switch against, consuming and returning `self`.
     ///
     /// Called once by the boot path that unlocked the root volume, with the
     /// **same** `&'static LateIdentity` the filesystem service was built over
@@ -1689,8 +1845,8 @@ where
     /// Install the kernel filesystem service the `fs_*` syscalls route
     /// through, consuming and returning `self`.
     ///
-    /// Called once by the boot path that owns the mounted volume
-    /// (`PREREQUISITES.md` P-A). Until this is called the handler holds the
+    /// Called once by the boot path that owns the mounted volume.
+    /// Until this is called the handler holds the
     /// fail-closed [`NULL_FILESYSTEM`] and every `fs_*` syscall returns
     /// [`Errno::NotImplemented`]. The service must be `'static` because the
     /// boot path leaks it alongside `KernelState`, which lives for the
@@ -1738,8 +1894,7 @@ where
     }
 
     /// Install the kernel wall clock the `wall_time_get` / `wall_time_set`
-    /// syscalls read and drive, consuming and returning `self`
-    /// (`PREREQUISITES.md` P-D).
+    /// syscalls read and drive, consuming and returning `self`.
     ///
     /// Called once by the boot path with the leaked production
     /// [`crate::wallclock::KernelWallClock`]. Until then the handler holds the
@@ -1758,7 +1913,7 @@ where
     }
 
     /// Install the per-boot identifier the `boot_id_get` syscall reports,
-    /// consuming and returning `self` (`PREREQUISITES.md` P-E).
+    /// consuming and returning `self`.
     ///
     /// Called once by the boot path with the [`BootId`] it minted from the
     /// seeded CSPRNG reserve. Until then — and on a port whose entropy source
@@ -1992,7 +2147,7 @@ where
     }
 
     /// Install the live introspection source the `sysinfo_introspect` syscall
-    /// serves, consuming and returning `self` (`PREREQUISITES.md` P-C).
+    /// serves, consuming and returning `self`.
     ///
     /// Called once by the boot path after it wires the `CapTable`, scheduler,
     /// allocators, and mount table. Until this is called the handler holds
@@ -2508,41 +2663,36 @@ where
         }
     }
 
-    /// The blocking half of `futex_wait`: re-test the word the caller named and,
-    /// if it still holds `expected`, park until woken, timed out, or terminated.
+    /// Resolve `fd` to its advisory-lock owner and the node it is bound to.
     ///
-    /// The caller has already registered on the key's wait queue, which is what
-    /// makes the test-then-park sequence race-free. The word is read through the
-    /// fault-aware `copy_from_user` boundary, so a *first-touch* futex word —
-    /// one whose page the process has reserved but never written — is faulted in
-    /// and read rather than reported as a bad address.
-    ///
-    /// A single park is correct and deliberate: a wake (real or spurious)
-    /// returns `Ok(0)` and the caller re-tests its own condition, which is the
-    /// contract `futex_wait` publishes. Looping here instead would hide a
-    /// genuine wake from the userland lock that has to see it.
-    /// Resolve `fd` to its advisory-lock owner and the identity of the file
-    /// it names, authorising the request under the caller's own credentials.
-    ///
-    /// Fails closed on a descriptor whose backing has no file to lock, on
-    /// access the descriptor was not opened for, and on a backing with no
-    /// stable identity — locking one would let two unrelated nodes share an
-    /// owner's records.
+    /// Fails closed on a descriptor whose backing has no file to lock, on a
+    /// grant, on access the descriptor was not opened for or its authority may
+    /// not now exercise on the node, and with [`Errno::Stale`] on one whose
+    /// node it no longer reaches. Nothing is
+    /// resolved per request: the lock is keyed on the pinned node, so a
+    /// rename moves nothing and a write that changes the id a format reports
+    /// keeps the key.
     fn resolve_lock_target(
         &self,
         caller: &CallerContext<'_>,
         fd: u32,
         mode: LockMode,
-    ) -> Result<(OwnerId, FileId), Errno> {
+    ) -> Result<(OwnerId, LockedNode), Errno> {
         let handle = self
             .aspaces
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // A pipe, pty, or resource has no file two participants could agree
-        // on, and a delegation is a bounded one-shot byte access under
-        // someone else's captured identity — not a coordination role.
-        let path = handle.own_path().ok_or(Errno::NotSupported)?;
+        // A pipe, pty, resource or catalog has no file two participants could
+        // agree on, and a grant is a bounded one-shot byte access under
+        // someone else's frozen identity — not a coordination role. A
+        // descriptor shared by spawn is the description's, as POSIX locks are.
+        let node = handle
+            .node()
+            .filter(|node| {
+                !matches!(&node.authority, Authority::Frozen(frozen) if frozen.grant.is_some())
+            })
+            .ok_or(Errno::NotSupported)?;
         let permitted = match mode {
             LockMode::Shared => handle.flags.is_read(),
             LockMode::Exclusive => handle.flags.is_write(),
@@ -2552,19 +2702,28 @@ where
         if !permitted {
             return Err(Errno::PermissionDenied);
         }
-        // Re-resolve and re-authorise the path under the caller's attested
-        // identity on every call, exactly as a read or a write does: the
-        // descriptor caches no authority.
-        let stat = self.filesystem.stat(
-            caller.caps.owner().0,
-            caller.caps.effective(),
-            path,
-            crate::fs::FinalLink::for_open(handle.flags),
-        )?;
-        if stat.id.is_none() {
-            return Err(Errno::NotSupported);
+        if !node.projection.is_live() || node.node.volume().is_retired() {
+            return Err(Errno::Stale);
         }
-        Ok((handle.lock_owner(), stat.id))
+        // A lock reaches no further than the bytes it guards: judged on the
+        // node, under the descriptor's authority, as a read for a shared lock
+        // and a write for an exclusive one. Releasing asks nothing.
+        let want = match mode {
+            LockMode::Shared => Some(crate::fs::Access::Read),
+            LockMode::Exclusive => Some(crate::fs::Access::Write),
+            LockMode::Unlock => None,
+        };
+        if let Some(want) = want {
+            let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+            authority.admit()?;
+            self.filesystem.access_node(
+                authority.handle,
+                &authority.acting(),
+                want,
+                crate::fs::Judged::AsOperation,
+            )?;
+        }
+        Ok((handle.lock_owner(), LockedNode::of(&node.node)))
     }
 
     /// Release `owner`'s locks over `range`, waking whoever the freed bytes
@@ -2573,7 +2732,7 @@ where
         &self,
         caller: &CallerContext<'_>,
         owner: OwnerId,
-        file: FileId,
+        file: LockedNode,
         range: LockRange,
     ) -> SyscallResult {
         let limit = self.soft_limit(caller, LimitKind::FileLocks);
@@ -2591,6 +2750,19 @@ where
         }
     }
 
+    /// The blocking half of `futex_wait`: re-test the word the caller named and,
+    /// if it still holds `expected`, park until woken, timed out, or terminated.
+    ///
+    /// The caller has already registered on the key's wait queue, which is what
+    /// makes the test-then-park sequence race-free. The word is read through the
+    /// fault-aware `copy_from_user` boundary, so a *first-touch* futex word —
+    /// one whose page the process has reserved but never written — is faulted in
+    /// and read rather than reported as a bad address.
+    ///
+    /// A single park is correct and deliberate: a wake (real or spurious)
+    /// returns `Ok(0)` and the caller re-tests its own condition, which is the
+    /// contract `futex_wait` publishes. Looping here instead would hide a
+    /// genuine wake from the userland lock that has to see it.
     fn futex_park(
         &self,
         caller: &CallerContext<'_>,
@@ -2818,14 +2990,14 @@ where
     /// end); dropping them on any later failure path releases everything
     /// (nothing leaks).
     ///
-    /// A **path-backed** descriptor is conferred rather than copied
+    /// A **file** the parent opened itself is conferred rather than copied
     /// ([`OpenFile::conferred_to_child`](crate::aspace::OpenFile::conferred_to_child)):
-    /// it reaches the child as a delegation carrying the parent's captured
-    /// identity, because a path is re-authorised under whoever holds it and
-    /// the point of handing a child a document is that the child need hold no
-    /// filesystem capability. Every wire form converts, not just an explicit
-    /// handle — an inherited standard stream is the same descriptor reaching
-    /// the same child by a different spelling.
+    /// it reaches the child on the same open file description, acting as the
+    /// parent's identity frozen here, because the parent's own descriptor acts
+    /// as whoever holds it and the point of handing a child a document is that
+    /// the child need hold no filesystem capability. Every wire form converts,
+    /// not just an explicit handle — an inherited standard stream is the same
+    /// descriptor reaching the same child by a different spelling.
     ///
     /// A **directory** is refused where it can arrive: an explicit handle. It
     /// cannot arrive by inheritance, because a wire is the only thing that
@@ -3549,12 +3721,13 @@ where
     /// resident and the access should simply be retried.
     ///
     /// The demand-paging heart of `file_map`: if `fault_va` lies inside a
-    /// region the task mapped, the single covering page is read through
-    /// the secured VFS **under the mapping-time identity** (uid +
-    /// capability snapshot — the secured VFS re-applies the owner/mode/ACL
-    /// checks on every fault, so a permission change on the file is
-    /// honoured for pages not yet resident) and mapped read-only into the
-    /// task's live space. Everything else is refused (fail closed): an
+    /// region the task mapped, the single covering page is read as the
+    /// descriptor it was mapped from would read it — as the process's live
+    /// identity for its own descriptor, as the captured identity of one
+    /// conferred or granted — and mapped read-only into the task's live
+    /// space. The filesystem capability and the node's mode and ACL are
+    /// checked at every fault, so a narrowing reaches every page not yet
+    /// resident. Everything else is refused (fail closed): an
     /// address outside every region, a page wholly at/past end-of-file
     /// (the `SIGBUS` analogue), a filesystem error, or frame exhaustion
     /// all report `false`, and the arch port terminates the task rather
@@ -3571,14 +3744,23 @@ where
         else {
             return false;
         };
+        // Copied out, so no table lock is held across the read.
+        let Some((uid, caps)) = self
+            .caps
+            .read()
+            .caps_of_process(process)
+            .map(|record| (record.owner().0, *record.effective()))
+        else {
+            return false;
+        };
+        let authority = NodeAuthority::acting_on(&region.handle, uid, &caps);
+        if authority.admit().is_err() {
+            return false;
+        }
         let mut page = vec![0u8; PAGE_SIZE];
-        let read = self.filesystem.read(
-            region.uid,
-            &region.caps,
-            &region.path,
-            file_offset,
-            &mut page,
-        );
+        let read =
+            self.filesystem
+                .read_node(&region.handle, &authority.acting(), file_offset, &mut page);
         match read {
             // A page wholly at/past end-of-file is never backed; a short
             // read is the page straddling end-of-file, zero-filled past it
@@ -3954,8 +4136,8 @@ where
     /// released no request can name the process by pid or by instance.
     ///
     /// Withdrawing the address-space registry entry drops the task's
-    /// standard streams, resource limits, working directory, device
-    /// grants, and — crucially — its **open-file table**: an open pipe
+    /// standard streams, resource limits, working directory and umask,
+    /// device grants, and — crucially — its **open-file table**: an open pipe
     /// end's `Drop` decrements the ring's end count and, on the last one,
     /// wakes that ring's waiters, so a peer parked on the pipe observes
     /// end-of-stream or broken-pipe instead of waiting forever on a dead partner
@@ -4158,17 +4340,17 @@ where
             WaitSourceKind::PeerExit => {
                 m.id == 0 && self.peer_watch.is_some_and(|peers| peers.ready(sched_task))
             }
-            // The node the descriptor named at add time has changed since
-            // this member last observed it — an edge peek against the
-            // per-`FileId` change generation. The generation is keyed on the
-            // node's stable identity, not the descriptor, so a followed file
-            // that grows (or a watched directory whose entries change) makes
-            // exactly its watchers ready. The wait loop advances the observed
-            // generation when it reports the member (the edge consume).
+            // The node the descriptor is bound to has changed since this
+            // member last observed it — an edge peek against the node's change
+            // generation, keyed on its pinned id rather than the descriptor,
+            // so a followed file that grows (or a watched directory whose
+            // entries change) makes exactly its watchers ready. The wait loop
+            // advances the observed generation when it reports the member
+            // (the edge consume).
             WaitSourceKind::File => m
                 .table
                 .as_ref()
-                .is_some_and(|table| table.0.file_ready(m.file.node, m.observed)),
+                .is_some_and(|table| table.0.file_ready(m.node, m.observed)),
             // A recorded change the member has not reported, once the watch's
             // latency since its previous report has run; one held for that
             // latency is due when it has.
@@ -4412,16 +4594,14 @@ where
     }
 
     /// Copy a filesystem path of `len` bytes from the caller's address space
-    /// at `ptr` and validate it as a UTF-8 string, for the `fs_open` /
-    /// `fs_mkdir` / `fs_unlink` handlers.
+    /// at `ptr`, as the resolver takes it ([`Self::rooted`]).
     ///
-    /// Validates every input before use: an empty path or one longer than
-    /// [`FS_PATH_MAX`] is refused with [`Errno::LengthOutOfRange`] before any
-    /// allocation; a copy fault — or a caller with no registered address
-    /// space — fails closed with [`Errno::BadAddress`], never leaking which;
-    /// non-UTF-8 bytes are [`Errno::OutOfRange`]. The path's structural
-    /// validity (absolute, no `.`/`..`, component bounds) is the secured
-    /// VFS's to judge under the caller's credentials, not this copy step's.
+    /// An empty path or one longer than [`FS_PATH_MAX`] is refused with
+    /// [`Errno::LengthOutOfRange`] before any allocation; a copy fault — or a
+    /// caller with no registered address space — fails closed with
+    /// [`Errno::BadAddress`], never leaking which; non-UTF-8 bytes are
+    /// [`Errno::OutOfRange`]. The grammar of the rest is the resolver's to
+    /// judge under the caller's credentials.
     fn copy_path_in(
         &self,
         caller: &CallerContext<'_>,
@@ -4431,12 +4611,184 @@ where
         if len == 0 || len > FS_PATH_MAX {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut buf = vec![0u8; len];
+        let mut buf = filled(len, 0u8).ok_or(Errno::OutOfMemory)?;
         self.copy_in_user(caller, ptr, &mut buf)?;
-        let Ok(raw) = core::str::from_utf8(&buf) else {
-            return Err(Errno::OutOfRange);
+        let raw = String::from_utf8(buf).map_err(|_| Errno::OutOfRange)?;
+        self.rooted(raw)
+    }
+
+    /// The path of `len` bytes at `ptr` and the start it resolves from:
+    /// `dirfd`'s directory for a relative one, nothing for an absolute one,
+    /// which ignores `dirfd` and so cannot be refused for it.
+    fn copy_at(
+        &self,
+        caller: &CallerContext<'_>,
+        dirfd: u32,
+        ptr: u64,
+        len: usize,
+    ) -> Result<NamedPath, Errno> {
+        let path = self.copy_path_in(caller, ptr, len)?;
+        let start = if path.starts_with('/') {
+            Cwd::Root
+        } else {
+            self.dir_of(caller, dirfd)?
         };
-        self.resolve_against_cwd(caller, raw)
+        Ok(NamedPath { path, start })
+    }
+
+    /// The path a [`PathAt`] at `ptr` names, and its start, as
+    /// [`Self::copy_at`] takes them.
+    fn copy_at_in(&self, caller: &CallerContext<'_>, ptr: u64) -> Result<NamedPath, Errno> {
+        let mut raw = [0u8; PathAt::WIRE_LEN];
+        self.copy_in_user(caller, ptr, &mut raw)?;
+        let named = PathAt::from_le_bytes(&raw)?;
+        let len = usize::try_from(named.len).map_err(|_| Errno::LengthOutOfRange)?;
+        self.copy_at(caller, named.dirfd, named.path, len)
+    }
+
+    /// The directory `dirfd` names for `caller`, held as a working directory
+    /// is: its own working directory under [`FD_CWD`], else what its
+    /// descriptor `dirfd` holds, cloned out of the registry so no lock is held
+    /// while the filesystem resolves from it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a number naming no descriptor of the caller's,
+    /// and [`Errno::NotADirectory`] for one holding anything but a directory
+    /// or the catalog.
+    fn dir_of(&self, caller: &CallerContext<'_>, dirfd: u32) -> Result<Cwd, Errno> {
+        if dirfd == FD_CWD {
+            return Ok(self.aspaces.read().cwd(caller.process()));
+        }
+        let entry = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), dirfd)
+            .ok_or(Errno::NotFound)?;
+        match &entry.backing {
+            OpenBacking::Node(handle) if handle.node.kind() == NodeKind::Directory => {
+                Ok(Cwd::Dir(handle.clone()))
+            }
+            OpenBacking::Catalog(catalog) => Ok(Cwd::Catalog(alloc::sync::Arc::clone(catalog))),
+            _ => Err(Errno::NotADirectory),
+        }
+    }
+
+    /// What an [`AtFlags::EMPTY_PATH`] call names by `dirfd`: the node a
+    /// descriptor holds, or the working directory under [`FD_CWD`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a number naming no descriptor of the caller's,
+    /// [`Errno::OutOfRange`] for a descriptor no filesystem node backs, and
+    /// [`admit_catalog`]'s refusals for a catalog.
+    fn empty_path_of(&self, caller: &CallerContext<'_>, dirfd: u32) -> Result<EmptyPath, Errno> {
+        if dirfd == FD_CWD {
+            return Ok(EmptyPath::Start(self.aspaces.read().cwd(caller.process())));
+        }
+        let entry = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), dirfd)
+            .ok_or(Errno::NotFound)?;
+        match &entry.backing {
+            OpenBacking::Node(handle) => Ok(EmptyPath::Node(handle.clone())),
+            OpenBacking::Catalog(catalog) => {
+                admit_catalog(caller, catalog)?;
+                Ok(EmptyPath::Start(Cwd::Catalog(alloc::sync::Arc::clone(
+                    catalog,
+                ))))
+            }
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The [`NodeExpect`] at `ptr` when the call `expects` one, copied in and
+    /// validated, or [`None`] without reading the caller's memory. An
+    /// expectation of the node alone (`node_only`) must name nothing else.
+    ///
+    /// # Errors
+    ///
+    /// The copy's refusal, [`Errno::TimestampOutOfRange`] for a stamp that
+    /// is not canonical, and [`Errno::OutOfRange`] for a node-only
+    /// expectation carrying another field.
+    fn copy_expect_in(
+        &self,
+        caller: &CallerContext<'_>,
+        expects: bool,
+        node_only: bool,
+        ptr: u64,
+    ) -> Result<Option<NodeExpect>, Errno> {
+        if !expects {
+            return Ok(None);
+        }
+        let mut raw = [0u8; NodeExpect::WIRE_LEN];
+        self.copy_in_user(caller, ptr, &mut raw)?;
+        let expect = NodeExpect::from_le_bytes(&raw)?;
+        if node_only && !expect.names_only_the_node() {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Some(expect))
+    }
+
+    /// Whether `handle`'s node grants every access `want` asks, under the
+    /// authority its descriptor's own operations run as: the node's verdict
+    /// for each, then the projection's flags. No access asked is a question
+    /// of reach alone, which a node whose volume has left answers
+    /// [`Errno::Stale`].
+    fn access_held(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: &NodeHandle,
+        want: tairix_abi::Access,
+    ) -> Result<(), Errno> {
+        let authority =
+            NodeAuthority::acting_on(handle, caller.caps.owner().0, caller.caps.effective());
+        authority.admit()?;
+        if want.bits() == 0 {
+            return self
+                .filesystem
+                .stat_node(handle, &authority.acting())
+                .map(drop);
+        }
+        for access in crate::fs::Access::asked_by(want) {
+            self.filesystem.access_node(
+                handle,
+                &authority.acting(),
+                access,
+                crate::fs::Judged::AsQuery,
+            )?;
+        }
+        handle
+            .projection
+            .admits(handle.node.kind(), want)
+            .map_err(crate::fs::VfsError::to_errno)
+    }
+
+    /// Run `op` on the node the descriptor `fd` holds as an attribute call
+    /// acts on it ([`NodeAuthority::as_caller`]). The catalog stores no
+    /// attributes and answers `on_catalog`.
+    fn with_attr_node<R>(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        on_catalog: Errno,
+        op: impl FnOnce(&NodeHandle, &Acting<'_>) -> Result<R, Errno>,
+    ) -> Result<R, Errno> {
+        let entry = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        if let OpenBacking::Catalog(catalog) = &entry.backing {
+            admit_catalog(caller, catalog)?;
+            return Err(on_catalog);
+        }
+        // A resource, pipe or pty carries no attributes of a node.
+        let handle = entry.node().ok_or(Errno::OutOfRange)?;
+        let authority = NodeAuthority::as_caller(handle, caller);
+        authority.admit()?;
+        op(handle, &authority.acting())
     }
 
     /// Copy a symbolic-link target of `len` bytes from the caller's address
@@ -4961,13 +5313,13 @@ where
         if len == 0 {
             return Ok(0);
         }
-        // A filesystem-backed descriptor — the caller's own or a delegation —
-        // reads through the secured VFS under the authority the backing
-        // decides. The coarse `CAP_FS_ACCESS` gate is applied there rather
+        // A node-backed descriptor — the caller's own or a delegation — reads
+        // its node through the secured VFS as the identity the descriptor
+        // acts as. The coarse `CAP_FS_ACCESS` gate is applied there rather
         // than at dispatch, so a resource or pipe read is not forced to hold
         // it and neither is a delegation's holder.
-        if let Some(authority) = PathAuthority::of(entry, caller) {
-            return self.read_path_backing(caller, entry, pos, &authority, buf, len);
+        if let Some(authority) = NodeAuthority::of(entry, caller) {
+            return self.read_node_backing(caller, entry, pos, &authority, buf, len);
         }
         match &entry.backing {
             // A resource-backed descriptor was authorised at open; its read
@@ -4979,34 +5331,34 @@ where
             OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, timeout_ns),
             OpenBacking::PtyMaster(end) => self.pty_master_read(caller, end, buf, len, timeout_ns),
             OpenBacking::PtySlave(end) => self.pty_slave_read(caller, end, buf, len, timeout_ns),
+            // The catalog stores nothing to read.
+            OpenBacking::Catalog(_) => Err(Errno::IsADirectory),
             // Served above; fail closed rather than trust the construction.
-            OpenBacking::Path(_) | OpenBacking::Delegated(_) => Err(Errno::OutOfRange),
+            OpenBacking::Node(_) => Err(Errno::OutOfRange),
         }
     }
 
-    /// Read a path-backed descriptor under the authority its backing decides
-    /// and copy the bytes out — the arm the caller-owned and delegated
-    /// backings share, so they differ in the resolved credential and in
-    /// nothing else.
+    /// Read a node-backed descriptor as the identity it acts as and copy the
+    /// bytes out — the arm the caller-owned and delegated descriptors share,
+    /// so they differ in the identity and in nothing else.
     ///
     /// The description cursor advances only once the bytes have reached the
     /// caller, so a faulting destination buffer re-reads rather than
     /// silently skipping the data it never received.
-    fn read_path_backing(
+    fn read_node_backing(
         &self,
         caller: &CallerContext<'_>,
         entry: &crate::aspace::OpenFile,
         pos: StreamPos,
-        authority: &PathAuthority<'_>,
+        authority: &NodeAuthority<'_>,
         buf: u64,
         len: usize,
     ) -> SyscallResult {
         authority.admit()?;
         let mut data = vec![0u8; len];
-        let n = self.filesystem.read(
-            authority.uid,
-            authority.caps,
-            authority.path,
+        let n = self.filesystem.read_node(
+            authority.handle,
+            &authority.acting(),
             pos.offset(entry),
             &mut data,
         )?;
@@ -5019,8 +5371,8 @@ where
                 pos.advance(entry, n as u64);
                 // Credit the *calling* task with the bytes the VFS actually
                 // moved, not the length it asked for — the delegated arm
-                // routes through this same function under the grantor's
-                // uid/caps, but `caller` is always the task that issued the
+                // routes through this same function as the grantor's
+                // identity, but `caller` is always the task that issued the
                 // syscall, so a delegation never attributes its bytes to the
                 // grantor.
                 caller.caps.record_bytes_read(n as u64);
@@ -5040,7 +5392,7 @@ where
     ///
     /// `pos` distinguishes the positional `fs_write` from the sequential
     /// `stream_write` exactly as it does for [`Self::descriptor_read`]. A
-    /// path-backed sequential write lands at the shared description cursor
+    /// node-backed sequential write lands at the shared description cursor
     /// (honouring `APPEND`), so two descriptors cloned from one description
     /// interleave at one position instead of overwriting each other.
     fn descriptor_write(
@@ -5058,11 +5410,10 @@ where
         if len == 0 {
             return Ok(0);
         }
-        // As on the read path, a filesystem-backed descriptor — the caller's
-        // own or a delegation — writes under the authority the backing
-        // decides, and a delegation is additionally bounded by the extent its
-        // grant fixed.
-        if let Some(authority) = PathAuthority::of(entry, caller) {
+        // As on the read path, a node-backed descriptor — the caller's own or
+        // a delegation — writes as the identity it acts as, and a grant is
+        // additionally bounded by the extent it fixed.
+        if let Some(authority) = NodeAuthority::of(entry, caller) {
             authority.admit()?;
             let offset = pos.offset(entry);
             authority.admit_extent(entry, offset, len)?;
@@ -5076,10 +5427,9 @@ where
             // delegation never carries the flag, which is what makes the
             // extent check above exact.
             let append = entry.flags.contains(OpenFlags::APPEND);
-            let n = self.filesystem.write(
-                authority.uid,
-                authority.caps,
-                authority.path,
+            let n = self.filesystem.write_node(
+                authority.handle,
+                &authority.acting(),
                 offset,
                 append,
                 &data,
@@ -5099,75 +5449,58 @@ where
             OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
             OpenBacking::PtyMaster(end) => self.pty_master_write(caller, end, buf, len),
             OpenBacking::PtySlave(end) => self.pty_slave_write(caller, end, buf, len),
+            // The catalog stores nothing to write.
+            OpenBacking::Catalog(_) => Err(Errno::IsADirectory),
             // Served above; fail closed rather than trust the construction.
-            OpenBacking::Path(_) | OpenBacking::Delegated(_) => Err(Errno::OutOfRange),
+            OpenBacking::Node(_) => Err(Errno::OutOfRange),
         }
     }
 
-    /// Turn a caller-supplied path string into a normalised, absolute
-    /// `/`-view path, resolving a relative path against the caller's current
-    /// working directory.
+    /// `raw` as the resolver takes it: the caller's own text, each `..` in it
+    /// walked rather than collapsed, with an alias or `id::` root replaced by
+    /// the view location it backs once `lib/path`'s grammar has the spelling
+    /// climb no `..` above that root.
     ///
-    /// This is the single place a filesystem path enters the kernel from a
-    /// caller, so relative-path resolution and `.`/`..` normalisation live
-    /// here once (never a second normaliser). An absolute path (`/…`) stands
-    /// on its own; any other spelling is joined onto the caller's working
-    /// directory (the root `/` when none is established). The joined string
-    /// is normalised through the shared path parser, which collapses
-    /// `.`/`..` and refuses to let `..` escape the root, so the result the
-    /// secured VFS then re-authorises is always a clean absolute path.
+    /// # Errors
     ///
-    /// Fails closed: a malformed path (including one whose `..` would escape
-    /// its root) is [`Errno::OutOfRange`] (matching the VFS's own invalid-path
-    /// code), and an alias spelling naming a root that does not exist is
-    /// [`Errno::NotFound`].
-    fn resolve_against_cwd(&self, caller: &CallerContext<'_>, raw: &str) -> Result<String, Errno> {
-        let parsed = tairix_path::parse(raw).map_err(|_| Errno::OutOfRange)?;
-        match parsed.root() {
-            // An absolute `/`-view path is already normalised (`.`/`..`
-            // collapsed, no escape); its components are the answer.
-            tairix_path::Root::View => Ok(crate::fs::spell(parsed.components())),
-            // A relative path is joined onto the caller's current working
-            // directory and re-normalised as one absolute `/`-view string, so
-            // a leading `..` pops the working directory and cannot escape the
-            // root. The joined string always begins with `/`, so it parses as
-            // a view path; its components are the normalised absolute path.
-            tairix_path::Root::Relative => {
-                let cwd = self.aspaces.read().cwd(caller.process());
-                let mut joined = cwd;
-                if !joined.ends_with('/') {
-                    joined.push('/');
-                }
-                joined.push_str(raw);
-                let abs = tairix_path::parse(&joined).map_err(|_| Errno::OutOfRange)?;
-                Ok(crate::fs::spell(abs.components()))
-            }
-            // An alias spelling (`Alias:/…` or `alias::Name/…`) names a
-            // first-class storage root; a machine alias is the canonical root
-            // the `/` view projects as `/<Name>`, so it resolves to the same
-            // backing location as that projected view path. `lib/path` has
-            // already refused any `..` that would escape the alias root, so the
-            // inner components sit safely beneath the alias's top-level
-            // component. A name that is not a published root fails closed.
-            tairix_path::Root::Alias(name) => {
-                let base = crate::fs::resolve_machine_alias(name).ok_or(Errno::NotFound)?;
-                let mut components = Vec::with_capacity(parsed.components().len() + 1);
-                components.push(String::from(base));
-                components.extend(parsed.components().iter().cloned());
-                Ok(crate::fs::spell(&components))
-            }
-            // A durable volume-identity spelling (`id::<volume-id>/…`)
-            // resolves through the volume forest to the `/`-view location
-            // the published volume's root backs; the result is then
-            // authorised by the secured VFS exactly as the equivalent view
-            // path would be, so the durable form is never a policy bypass.
-            // An unpublished identity fails closed — never a guessed root.
-            tairix_path::Root::VolumeId(id) => {
-                let mut components = self.volumes.resolve(id.as_bytes()).ok_or(Errno::NotFound)?;
-                components.extend(parsed.components().iter().cloned());
-                Ok(crate::fs::spell(&components))
-            }
+    /// [`Errno::OutOfRange`] for a malformed path, or an alias or `id::` path
+    /// spelling a `..` above its root; [`Errno::NotFound`] for a root naming
+    /// nothing published.
+    fn rooted(&self, raw: String) -> Result<String, Errno> {
+        let root = tairix_path::root_len(&raw).map_err(|_| Errno::OutOfRange)?;
+        if raw.starts_with('/') || root == 0 {
+            return Ok(raw);
         }
+        let parsed = tairix_path::parse(&raw).map_err(|_| Errno::OutOfRange)?;
+        let push = |path: &mut String, part: &str| -> Result<(), Errno> {
+            path.try_reserve(part.len() + 1)
+                .map_err(|_| Errno::OutOfMemory)?;
+            path.push('/');
+            path.push_str(part);
+            Ok(())
+        };
+        let mut rooted = String::new();
+        match parsed.root() {
+            tairix_path::Root::Alias(name) => push(
+                &mut rooted,
+                crate::fs::resolve_machine_alias(name).ok_or(Errno::NotFound)?,
+            )?,
+            tairix_path::Root::VolumeId(id) => {
+                for component in self.volumes.resolve(id.as_bytes()).ok_or(Errno::NotFound)? {
+                    push(&mut rooted, &component)?;
+                }
+            }
+            tairix_path::Root::View | tairix_path::Root::Relative => return Ok(raw),
+        }
+        let rest = &raw[root..];
+        if !rest.is_empty() {
+            push(&mut rooted, rest)?;
+        }
+        if rooted.is_empty() {
+            // A volume shown at the view root itself, named with nothing after.
+            push(&mut rooted, "")?;
+        }
+        Ok(rooted)
     }
 
     /// Record a refused `spawn` on the audit trail, naming which
@@ -5293,10 +5626,15 @@ where
             return Ok(());
         }
         let (uid, effective) = credential.read_authority();
-        match self
-            .filesystem
-            .stat(uid, &effective, bundle, crate::fs::FinalLink::Follow)
-        {
+        match self.filesystem.stat(
+            uid,
+            &effective,
+            At {
+                start: Start::Root,
+                path: bundle,
+            },
+            crate::fs::FinalLink::Follow,
+        ) {
             // A definitive absence lets the caller's search advance; every
             // other outcome — the bundle is present, or present but its
             // metadata lookup was refused — admits the loading child so the
@@ -5305,6 +5643,31 @@ where
             Err(Errno::NotFound) => Err(Errno::NotFound),
             _ => Ok(()),
         }
+    }
+
+    /// The directory a spawn names for its child: `at`'s path, starting where
+    /// it starts for `caller`, resolved and checked searchable as
+    /// `credential`'s account with only the capabilities `caller` holds too,
+    /// so a spawner places its child nowhere either of them could not go.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] unless both may reach the filesystem at
+    /// all, and the resolution's refusals.
+    fn spawn_working_directory(
+        &self,
+        caller: &CallerContext<'_>,
+        credential: &SpawnCredential,
+        at: PathAt,
+    ) -> Result<Cwd, Errno> {
+        let (uid, authority) = credential.delegated_authority(caller.caps.effective());
+        if !authority.holds(CapabilityId::FS_ACCESS) {
+            self.audit_spawn_denied("working_directory_denied");
+            return Err(Errno::PermissionDenied);
+        }
+        let len = usize::try_from(at.len).map_err(|_| Errno::LengthOutOfRange)?;
+        let named = self.copy_at(caller, at.dirfd, at.path, len)?;
+        self.filesystem.chdir(uid, &authority, named.at())
     }
 
     /// Decide whether `caller` may signal the process `pid` names when that
@@ -5594,18 +5957,17 @@ struct PriorityDecision {
 /// destination of a rename, the new mode of a chmod, the new owner of a
 /// chown — so the audit trail records not just that state changed but what it
 /// changed to, without a capability token or secret ever reaching the log.
-#[derive(Clone, Copy)]
 enum FsAuditDetail<'a> {
     /// A `mkdir` or `unlink`: the target path alone is the whole record.
     None,
     /// A `rename`: `to` is the destination path.
-    Rename { to: &'a str },
+    Rename { to: &'a AuditPlace<'a> },
     /// A `symlink`: `target` is the path the new link stores.
     Symlink { target: &'a str },
     /// A `link`: `existing` is the name whose node gains a second one. The
     /// record's own `path` is the new name, so the pair reads as
     /// "`existing` also became `path`".
-    Link { existing: &'a str },
+    Link { existing: &'a AuditPlace<'a> },
     /// A `set_mode` (chmod): `mode` is the new permission word.
     Mode { mode: u32 },
     /// A `set_owner` (chown): the new owner and owning group ids.
@@ -5666,12 +6028,11 @@ fn emit_fs_mutation(
     sink: &dyn Sink,
     op: &'static str,
     uid: u32,
-    path: &str,
+    place: &AuditPlace<'_>,
     detail: &FsAuditDetail<'_>,
     outcome: Result<(), Errno>,
 ) {
     let mut uid_buf = [0u8; 12];
-    let uid_s = format_usize(uid as usize, &mut uid_buf);
     let mut errno_buf = [0u8; 12];
     let (event, level, errno) = match outcome {
         Ok(()) => (AuditEvent::FsNodeMutated, Level::Info, ""),
@@ -5681,69 +6042,70 @@ fn emit_fs_mutation(
             format_usize(err as usize, &mut errno_buf),
         ),
     };
-    let op_f = Field {
-        key: "op",
-        value: tairix_log::FieldValue::Str(op),
-    };
-    let uid_f = Field {
-        key: "uid",
-        value: tairix_log::FieldValue::Str(uid_s),
-    };
-    let path_f = Field {
-        key: "path",
-        value: tairix_log::FieldValue::Str(audit_path_field(path)),
-    };
-    let errno_f = Field {
-        key: "errno",
-        value: tairix_log::FieldValue::Str(errno),
-    };
-    // Three mutations name a second path and differ only in the field key
-    // that says what that path is to them, so the record is built once.
-    let emit_second_path = |key: &'static str, value: &str| {
-        let second_f = Field {
-            key,
-            value: tairix_log::FieldValue::Str(audit_path_field(value)),
-        };
-        crate::audit::emit(
-            sink,
-            level,
-            event,
-            &[op_f, uid_f, path_f, second_f, errno_f],
-        );
-    };
     let mut mode_buf = [0u8; 12];
     let mut owner_buf = [0u8; 12];
     let mut group_buf = [0u8; 12];
-    match *detail {
-        FsAuditDetail::None => {
-            crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, errno_f]);
-        }
-        FsAuditDetail::Rename { to } => emit_second_path("to", to),
-        FsAuditDetail::Symlink { target } => emit_second_path("target", target),
-        FsAuditDetail::Link { existing } => emit_second_path("existing", existing),
+    let mut record = AuditRecord::of("op", op);
+    record.push("uid", format_usize(uid as usize, &mut uid_buf));
+    record.place("path", "from", place);
+    match detail {
+        FsAuditDetail::None => {}
+        FsAuditDetail::Rename { to } => record.place("to", "to_from", to),
+        FsAuditDetail::Link { existing } => record.place("existing", "existing_from", existing),
+        FsAuditDetail::Symlink { target } => record.push("target", target),
         FsAuditDetail::Mode { mode } => {
-            let mode_f = Field {
-                key: "mode",
-                value: tairix_log::FieldValue::Str(format_mode_octal(mode, &mut mode_buf)),
-            };
-            crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, mode_f, errno_f]);
+            record.push("mode", format_mode_octal(*mode, &mut mode_buf));
         }
         FsAuditDetail::Owner { owner, group } => {
-            let owner_f = Field {
-                key: "owner",
-                value: tairix_log::FieldValue::Str(format_usize(owner as usize, &mut owner_buf)),
-            };
-            let group_f = Field {
-                key: "group",
-                value: tairix_log::FieldValue::Str(format_usize(group as usize, &mut group_buf)),
-            };
-            crate::audit::emit(
-                sink,
-                level,
-                event,
-                &[op_f, uid_f, path_f, owner_f, group_f, errno_f],
-            );
+            record.push("owner", format_usize(*owner as usize, &mut owner_buf));
+            record.push("group", format_usize(*group as usize, &mut group_buf));
         }
+    }
+    record.push("errno", errno);
+    crate::audit::emit(sink, level, event, record.fields());
+}
+
+/// The fields of one filesystem-mutation audit record, each value bounded to
+/// what a field may carry.
+struct AuditRecord<'a> {
+    fields: [Field<'a>; 8],
+    len: usize,
+}
+
+impl<'a> AuditRecord<'a> {
+    /// A record whose first field is `key` = `value`.
+    fn of(key: &'static str, value: &'a str) -> Self {
+        Self {
+            fields: [Self::field(key, value); 8],
+            len: 1,
+        }
+    }
+
+    fn field(key: &'static str, value: &'a str) -> Field<'a> {
+        Field {
+            key,
+            value: tairix_log::FieldValue::Str(audit_path_field(value)),
+        }
+    }
+
+    /// Add `key` = `value`; a ninth field, which no record has, is dropped.
+    fn push(&mut self, key: &'static str, value: &'a str) {
+        if let Some(slot) = self.fields.get_mut(self.len) {
+            *slot = Self::field(key, value);
+            self.len += 1;
+        }
+    }
+
+    /// Add `at` as `path_key`, and where a relative path started as `from_key`.
+    fn place(&mut self, path_key: &'static str, from_key: &'static str, at: &'a AuditPlace<'_>) {
+        self.push(path_key, &at.path);
+        if let Some(from) = &at.from {
+            self.push(from_key, from);
+        }
+    }
+
+    fn fields(&self) -> &[Field<'a>] {
+        &self.fields[..self.len]
     }
 }
 
@@ -7167,6 +7529,14 @@ where
             }
         }
 
+        // A named working directory is resolved as the child, so a spawner
+        // may start it where only the child may go, and pinned before any
+        // child state exists.
+        let working_directory = attach
+            .working_directory
+            .map(|at| self.spawn_working_directory(caller, &credential, at))
+            .transpose()?;
+
         // Hand the validated `rxe` to the architecture spawn producer,
         // which builds a fresh hardware-isolated address space and admits
         // it as a runnable process through `ctx`, returning the new PID.
@@ -7237,32 +7607,14 @@ where
         } else {
             ctx
         };
-        // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
-        // boot-floor program is a **prebuilt** plan carrying its already-
-        // verified `'static` image and manifest request, so the child only
-        // builds an address space; a store bundle is a **bundle** plan the
-        // child reads and verifies itself, on its own task, under its own
-        // credential. A syntactically valid path always matches exactly one
-        // (the resolve step above returned on every other shape).
-        let plan = if let Some(program) = program {
-            LoadPlan::Prebuilt {
-                rxe: alloc::borrow::Cow::Borrowed(program.rxe),
-                requested: program.capability_set(),
-            }
-        } else if let Some(parsed) = &bundle {
-            LoadPlan::Bundle {
-                bundle: String::from(parsed.bundle),
-                command: String::from(parsed.command),
-                mode: if attach.is_drawing() {
-                    tairix_appload::LoadMode::Drawing
-                } else {
-                    tairix_appload::LoadMode::Ordinary
-                },
-            }
-        } else {
-            // Unreachable by construction; keep the arm fail-closed.
-            return Err(Errno::NotFound);
+        let ctx = match working_directory {
+            Some(cwd) => ctx.with_working_directory(cwd),
+            None => ctx,
         };
+        // A syntactically valid path always matches exactly one source (the
+        // resolve step above returned on every other shape).
+        let plan =
+            load_plan(program, bundle.as_ref(), attach.is_drawing()).ok_or(Errno::NotFound)?;
 
         // Admit the child in its loading state and return its PID at once — the
         // caller keeps running while the child performs the disk read,
@@ -7392,11 +7744,17 @@ where
             Some(Ok(())) => Ok(0),
             outcome => {
                 // The caller can never learn the descriptor numbers, so
-                // unwind the pair whole (fail closed — the dropped entries
-                // close both ends through their handles).
-                let mut aspaces = self.aspaces.write();
-                aspaces.close_file(caller.process(), read_fd);
-                aspaces.close_file(caller.process(), write_fd);
+                // unwind the pair whole (fail closed — the entries close both
+                // ends through their handles as they drop, once the registry
+                // guard is released).
+                let unwound = {
+                    let mut aspaces = self.aspaces.write();
+                    (
+                        aspaces.close_file(caller.process(), read_fd),
+                        aspaces.close_file(caller.process(), write_fd),
+                    )
+                };
+                drop(unwound);
                 match outcome {
                     Some(Err(err)) => Err(copy_fault_errno(err)),
                     _ => Err(Errno::BadAddress),
@@ -7435,11 +7793,17 @@ where
             Some(Ok(())) => Ok(0),
             outcome => {
                 // The caller can never learn the descriptor numbers, so
-                // unwind the pair whole (fail closed — the dropped entries
-                // close both ends through their handles).
-                let mut aspaces = self.aspaces.write();
-                aspaces.close_file(caller.process(), master_fd);
-                aspaces.close_file(caller.process(), slave_fd);
+                // unwind the pair whole (fail closed — the entries close both
+                // ends through their handles as they drop, once the registry
+                // guard is released).
+                let unwound = {
+                    let mut aspaces = self.aspaces.write();
+                    (
+                        aspaces.close_file(caller.process(), master_fd),
+                        aspaces.close_file(caller.process(), slave_fd),
+                    )
+                };
+                drop(unwound);
                 match outcome {
                     Some(Err(err)) => Err(copy_fault_errno(err)),
                     _ => Err(Errno::BadAddress),
@@ -8098,7 +8462,7 @@ where
         // Resolve the device-visible base the driver programs into its
         // hardware. For a coherent (untranslated) constraint it is the carved
         // CPU-physical base; for a translating inbound viewport
-        // (`dma_translated`, e.g. the Pi 4's
+        // (`dma_translated`, e.g.
         // `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`) it is that base re-based
         // onto the far side of the viewport — checked, never wrapped. The carve
         // already lies below the limit, so this only re-bases it; a base
@@ -8345,12 +8709,12 @@ where
         offset: u64,
         len: u64,
     ) -> SyscallResult {
-        // The dispatcher enforced `CAP_FS_ACCESS`. Validate the shape before
-        // touching any state: a zero length names nothing; the file offset
-        // must be page-aligned (each faulting page reads the file at
-        // `offset + page_index · PAGE_SIZE`); and the page-rounded extent
-        // must not overflow either the address space or the file-offset
-        // arithmetic the fault path performs.
+        // Ungated at the dispatcher: the descriptor's authority is admitted
+        // below. Validate the shape before touching any state: a zero length
+        // names nothing; the file offset must be page-aligned (each faulting
+        // page reads the file at `offset + page_index · PAGE_SIZE`); and the
+        // page-rounded extent must not overflow either the address space or
+        // the file-offset arithmetic the fault path performs.
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
         }
@@ -8364,10 +8728,10 @@ where
         offset.checked_add(charged).ok_or(Errno::OutOfRange)?;
         // Resolve the caller's own descriptor (owner-checked against the
         // kernel-trusted caller id). It must be open for reading, and only a
-        // filesystem-backed descriptor can page: a resource or pipe is a
+        // node-backed descriptor can page: a resource or pipe is a
         // sequential stream with no positional bytes to map. A delegation
-        // maps under the grantor's captured identity, so the holder maps the
-        // file it was handed without holding a filesystem capability itself.
+        // maps as the grantor's frozen identity, so the holder maps the file
+        // it was handed without holding a filesystem capability itself.
         let handle = self
             .aspaces
             .read()
@@ -8376,7 +8740,7 @@ where
         if !handle.flags.is_read() {
             return Err(Errno::PermissionDenied);
         }
-        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::PermissionDenied)?;
+        let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::PermissionDenied)?;
         authority.admit()?;
         // Charge the caller's growth bounds *before* reserving — the same
         // charge `mem_map` takes over the same shared accounting, so the
@@ -8397,37 +8761,36 @@ where
                 return Err(errno);
             }
         };
-        // Record the region under the kernel-trusted caller id, carrying the
-        // mapping-time identity (uid + effective capability snapshot) the
-        // fault path re-checks every demand-paged read under — the same
-        // authority model as the open descriptor itself, so the mapping
-        // survives a later `fs_close` of `fd`. Charge the page-rounded
-        // extent, the figure `file_unmap` later credits.
+        // Record the region under the kernel-trusted caller id with the
+        // descriptor's own handle, so the node outlives a later `fs_close` of
+        // `fd` and an unlink, and a fault reads as the descriptor would. Charge
+        // the page-rounded extent, the figure `file_unmap` later credits.
         let region = FileRegion {
-            path: String::from(authority.path),
+            handle: authority.handle.clone(),
             offset,
-            uid: authority.uid,
-            caps: *authority.caps,
         };
-        {
+        let recorded = {
             let mut aspaces = self.aspaces.write();
-            if let Err(refused) =
-                aspaces.record_file_region(caller.process(), base, pages_spanning(charged), region)
-            {
-                // The producer placed the region but it overlaps a mapping the
-                // task already holds, or its extent does not fit the address
-                // space, so it is handed straight back: two records over one
-                // address would make a fault's backing, and a release's
-                // extent, a choice between them. The release undoes exactly
-                // what the reserve above did; its own failure has no further
-                // recovery and leaves the record absent.
+            let recorded =
+                aspaces.record_file_region(caller.process(), base, pages_spanning(charged), region);
+            if recorded.is_err() {
                 aspaces.credit_aspace_bytes(caller.process(), charged);
-                drop(aspaces);
-                let _ = self.retiring(caller.process(), |retire| {
-                    self.file_map.release(base, len, retire)
-                });
-                return Err(region_errno(refused));
             }
+            recorded
+        };
+        if let Err((refused, region)) = recorded {
+            // The producer placed the region but it overlaps a mapping the
+            // task already holds, or its extent does not fit the address
+            // space, so it is handed straight back: two records over one
+            // address would make a fault's backing, and a release's extent, a
+            // choice between them. The release undoes exactly what the
+            // reserve above did; its own failure has no further recovery and
+            // leaves the record absent.
+            drop(region);
+            let _ = self.retiring(caller.process(), |retire| {
+                self.file_map.release(base, len, retire)
+            });
+            return Err(region_errno(refused));
         }
         Ok(base)
     }
@@ -8525,11 +8888,16 @@ where
                 self.file_map.release(base, len, retire)
             })
             .map(|_resident| 0);
-        // Only on success: drop the record and credit the accounting.
+        // Only on success: drop the record and credit the accounting. The
+        // record, and the node it holds, are released once the registry
+        // guard is.
         if result.is_ok() {
-            let mut aspaces = self.aspaces.write();
-            aspaces.remove_file_region(caller.process(), base);
-            aspaces.credit_aspace_bytes(caller.process(), charged);
+            let removed = {
+                let mut aspaces = self.aspaces.write();
+                aspaces.credit_aspace_bytes(caller.process(), charged);
+                aspaces.remove_file_region(caller.process(), base)
+            };
+            drop(removed);
         }
         result
     }
@@ -8796,7 +9164,7 @@ where
     /// refusal; there is nothing further to record for those cases.
     fn system_power(&self, caller: &CallerContext<'_>, action: PowerAction) -> SyscallResult {
         let uid = caller.caps.owner().0;
-        self.filesystem.sync(uid, caller.caps.effective())?;
+        self.filesystem.sync_all(uid, caller.caps.effective())?;
         self.audit_system_power(caller.task_id, action);
         match action {
             PowerAction::PowerOff => self.arch.poweroff(),
@@ -11079,9 +11447,11 @@ where
         let kind = WaitSourceKind::from_u32(kind)?;
         match op {
             WaitSetOp::Add => {
-                // For a File member, the node identity resolved from the
-                // caller's descriptor below; `NONE` for every other kind.
-                let mut member_file = FileId::NONE;
+                // For a File or DirWatch member, the id the node its
+                // descriptor is bound to is pinned under, and for a File
+                // member that pin, which it holds; zero for every other kind.
+                let mut member_node = 0;
+                let mut member_pin: Option<crate::fs::NodeRef> = None;
                 // A DirWatch member starts from its watcher's cursor and the
                 // mount epoch it last drained under, so a change between the
                 // arm and this add still reports.
@@ -11254,48 +11624,41 @@ where
                     WaitSourceKind::File => {
                         // A wait-set may observe a file only through the
                         // caller's **own** open table: `id` must be a
-                        // descriptor number holding a path-backed handle (a
-                        // file or directory). A resource- or pipe-backed
+                        // descriptor number holding a node the caller opened
+                        // (a file or directory). A resource- or pipe-backed
                         // descriptor, an unopened number, an id outside the
                         // descriptor width, and another task's descriptor all
                         // collapse to the same oracle-free `NotFound` the
-                        // other kinds use. The node's stable identity is
-                        // resolved under the caller's attested credentials
+                        // other kinds use. The node is checked as the caller
                         // (the same per-inode read check `fs_stat` applies),
-                        // so a path the caller may not reach also refuses.
+                        // so a node the caller may not reach also refuses.
                         let Ok(fd) = u32::try_from(id) else {
                             return Err(Errno::NotFound);
                         };
-                        // The descriptor's own follow posture travels with
-                        // its path, so the watched node is the one the open
-                        // named — a `NO_FOLLOW` handle watches the link, not
-                        // whatever it currently points at.
-                        let (path, final_link) = {
-                            let Some(handle) =
-                                self.aspaces.read().open_file_entry(caller.process(), fd)
-                            else {
-                                return Err(Errno::NotFound);
-                            };
-                            let link = crate::fs::FinalLink::for_open(handle.flags);
-                            match handle.own_path() {
-                                Some(path) => (String::from(path), link),
-                                None => return Err(Errno::NotFound),
-                            }
-                        };
-                        let uid = caller.caps.owner().0;
-                        // A stat refusal (a raced removal, a permission
-                        // denial) collapses onto the same `NotFound`; a
-                        // backing with no distinct identity is not watchable.
-                        let Ok(stat) =
-                            self.filesystem
-                                .stat(uid, caller.caps.effective(), &path, final_link)
+                        let Some(handle) =
+                            self.aspaces.read().open_file_entry(caller.process(), fd)
                         else {
                             return Err(Errno::NotFound);
                         };
-                        if stat.id.is_none() {
+                        let Some(node) = handle.own_node() else {
+                            return Err(Errno::NotFound);
+                        };
+                        // A refusal (a node no longer reached, a permission
+                        // denial) collapses onto the same `NotFound`, as does
+                        // a node on a volume nothing reports changes for.
+                        if self
+                            .filesystem
+                            .stat_node(node, &own_acting(caller))
+                            .is_err()
+                        {
                             return Err(Errno::NotFound);
                         }
-                        member_file = stat.id;
+                        // The pin's own registration's table, held with the
+                        // pin, so the id names this node for the member's life.
+                        let table = self.filesystem.watch_table(node).ok_or(Errno::NotFound)?;
+                        member_table = Some(crate::waitset::WatchTable(table));
+                        member_node = node.node.pinned().raw();
+                        member_pin = Some(node.node.clone());
                     }
                     WaitSourceKind::Foreground => {
                         // A wait-set may watch the ownership only of a
@@ -11327,21 +11690,21 @@ where
                             // A spent watch would only ever sit idle.
                             let at = watch.position()?;
                             Some((
-                                watch.dir(),
+                                watch.node(),
                                 crate::fswatch::Pacing {
                                     watcher: watch.watcher(),
                                     observed: at.at,
-                                    epochs: at.epochs,
+                                    mounts: at.mounts,
                                     latency_ns: watch.latency_ns(),
                                     reported_at: None,
                                 },
                                 alloc::sync::Arc::clone(watch.table()),
                             ))
                         });
-                        let Some((dir, pacing, table)) = armed else {
+                        let Some((node, pacing, table)) = armed else {
                             return Err(Errno::NotFound);
                         };
-                        member_file = dir;
+                        member_node = node;
                         member_pacing = pacing;
                         member_table = Some(crate::waitset::WatchTable(table));
                     }
@@ -11387,11 +11750,8 @@ where
                 // on a volume nothing reports changes for is refused rather
                 // than left to park for ever, and a rejected add releases the
                 // registration so none leaks.
-                if kind == WaitSourceKind::File {
-                    let fswatch = self.fswatch.ok_or(Errno::NotFound)?;
-                    let (table, baseline) = fswatch.file_member_add(member_file)?;
-                    member_observed = baseline;
-                    member_table = Some(crate::waitset::WatchTable(table));
+                if let (WaitSourceKind::File, Some(table)) = (kind, &member_table) {
+                    member_observed = table.0.file_member_add(member_node)?;
                 }
                 let added = crate::waitset::add(
                     caller.process().0,
@@ -11400,16 +11760,17 @@ where
                         kind,
                         id,
                         token,
-                        file: member_file,
+                        node: member_node,
                         observed: member_observed,
                         pacing: member_pacing,
                         table: member_table.clone(),
+                        pin: member_pin,
                     },
                     self.soft_limit(caller, LimitKind::WaitSetMembers),
                 );
                 if added.is_err() && kind == WaitSourceKind::File {
                     if let Some(table) = &member_table {
-                        table.0.file_member_remove(member_file.node);
+                        table.0.file_member_remove(member_node);
                     }
                 }
                 added?;
@@ -11652,23 +12013,19 @@ where
         }
         let paced = members.iter().any(|m| m.kind == WaitSourceKind::DirWatch);
         // File and DirWatch members wait on `FSWATCH_WAITQ` under the key of
-        // the node each watches, and a DirWatch member under the epoch key
-        // too, registered *before* the first scan so a change in the
-        // register/park window is not lost. The scan marks a node parked only
-        // while its member has nothing pending, so a storm of changes wakes
-        // this task once, not once per change. A key that cannot be recorded
-        // fails the wait rather than leaving it to park deaf to that key.
-        let epoch_key = self
-            .fswatch
-            .filter(|_| paced)
-            .map(crate::fswatch::WatchRegistry::epoch_key);
+        // the node each watches, registered *before* the first scan so a
+        // change in the register/park window is not lost; a mount move wakes
+        // the whole queue. The scan marks a node parked only while its member
+        // has nothing pending, so a storm of changes wakes this task once, not
+        // once per change. A key that cannot be recorded fails the wait rather
+        // than leaving it to park deaf to that key.
         let node_keys = members
             .iter()
             .filter(|m| matches!(m.kind, WaitSourceKind::File | WaitSourceKind::DirWatch))
-            .filter_map(|m| m.table.as_ref().and_then(|t| t.0.key(m.file.node)));
+            .filter_map(|m| m.table.as_ref().and_then(|t| t.0.key(m.node)));
         let mut watch_keys: Vec<crate::waitq::WakeKey> = Vec::new();
         let mut deaf = false;
-        for key in epoch_key.into_iter().chain(node_keys) {
+        for key in node_keys {
             if watch_keys.contains(&key) {
                 continue;
             }
@@ -11907,7 +12264,7 @@ where
                 let generation = m
                     .table
                     .as_ref()
-                    .map_or(0, |table| table.0.generation(m.file.node));
+                    .map_or(0, |table| table.0.generation(m.node));
                 let _ = crate::waitset::advance_observed(
                     caller.process().0,
                     set,
@@ -11927,15 +12284,16 @@ where
                 .find(|m| m.kind == WaitSourceKind::DirWatch && m.id == id)
             {
                 let mounts = self.filesystem.mount_epoch();
-                let (seq, epochs) = m.table.as_ref().map_or_else(Default::default, |table| {
-                    (table.0.journal_seq(m.file.node), table.0.epochs(mounts))
-                });
+                let seq = m
+                    .table
+                    .as_ref()
+                    .map_or(0, |table| table.0.journal_seq(m.node));
                 let _ = crate::waitset::advance_paced(
                     caller.process().0,
                     set,
                     id,
                     seq,
-                    epochs,
+                    mounts,
                     self.arch.monotonic_ns(cpu),
                 );
             }
@@ -12006,26 +12364,30 @@ where
     fn fs_open(
         &self,
         caller: &CallerContext<'_>,
+        dirfd: u32,
         path: u64,
         path_len: usize,
         flags: OpenFlags,
+        mode: u32,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
-        // non-null `UserPtr`, and rejected any illegal `OpenFlags`. Copy the
-        // path in, then resolve+authorise it through the secured VFS under
-        // the caller's kernel-attested identity (uid + effective caps), which
-        // performs the create/exclusive/truncate/directory semantics and
-        // every per-inode and mount-flag check. Only on success is a
-        // descriptor recorded, so a refused open never produces a handle.
-        let path = self.copy_path_in(caller, path, path_len)?;
+        // The descriptor is promised before the volume is touched, so an open
+        // refused at the descriptor bound has created or truncated nothing; a
+        // refused record releases the node once the registry guard is.
+        let named = self.copy_at(caller, dirfd, path, path_len)?;
         let uid = caller.caps.owner().0;
-        self.filesystem
-            .open(uid, caller.caps.effective(), &path, flags)?;
-        let fd = self
-            .aspaces
-            .write()
-            .open_file(caller.process(), path, flags)?;
-        Ok(u64::from(fd))
+        // Only an open that may create reads its process's umask.
+        let create = if flags.contains(OpenFlags::CREATE) {
+            let umask = self.aspaces.read().umask(caller.process());
+            crate::fs::CreateMode::new(mode, umask)?
+        } else {
+            crate::fs::CreateMode::NONE
+        };
+        let promise = crate::aspace::FdPromise::new(self.aspaces, caller.process())?;
+        let opened =
+            self.filesystem
+                .open(uid, caller.caps.effective(), named.at(), flags, create)?;
+        let recorded = promise.keep(opened, flags);
+        Ok(u64::from(recorded?))
     }
 
     fn resource_open(
@@ -12046,11 +12408,11 @@ where
         let reference = self.copy_reference_in(caller, reference, reference_len)?;
         let backing = crate::resource::resolve(&reference, flags)
             .map_err(crate::resource::ResolveError::to_errno)?;
-        let fd = self
+        let recorded = self
             .aspaces
             .write()
-            .open_resource(caller.process(), backing, flags)?;
-        Ok(u64::from(fd))
+            .open_resource(caller.process(), backing, flags);
+        Ok(u64::from(recorded?))
     }
 
     fn fs_lock(
@@ -12062,8 +12424,8 @@ where
         range: LockRange,
         timeout_ns: u64,
     ) -> SyscallResult {
-        // The dispatcher checked `CAP_FS_ACCESS` and decoded the mode, flags
-        // and range, so the span is representable before anything is read.
+        // The dispatcher decoded the mode, flags and range, so the span is
+        // representable before anything is read.
         let (owner, file) = self.resolve_lock_target(caller, fd, mode)?;
         let Some(held) = Held::from_mode(mode) else {
             return self.release_file_lock(caller, owner, file, range);
@@ -12182,12 +12544,22 @@ where
     fn fs_close(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
         // Release the caller's own descriptor. `fd` is resolved against the
         // kernel-trusted caller id, so one task cannot close another's
-        // handle; an unopened descriptor fails closed with `NotFound`.
-        if self.aspaces.write().close_file(caller.process(), fd) {
-            Ok(0)
-        } else {
-            Err(Errno::NotFound)
+        // handle; an unopened descriptor fails closed with `NotFound`. The
+        // entry is released once the registry guard is, and a pin it held
+        // last goes back now if its volume is free, else to the flusher.
+        let closed = self
+            .aspaces
+            .write()
+            .close_file(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        let volume = closed
+            .node()
+            .map(|handle| alloc::sync::Arc::clone(handle.node.volume()));
+        drop(closed);
+        if let Some(volume) = volume {
+            self.filesystem.reap(&volume);
         }
+        Ok(0)
     }
 
     fn fd_grant(
@@ -12209,16 +12581,6 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // What the descriptor may be handed on as — the same question the
-        // spawn conferral asks, so both read the one answer. A plain file the
-        // caller opened itself captures the *caller's* kernel-attested
-        // identity, so every later operation on the redeemed descriptor is
-        // re-authorised under exactly that, never the recipient's and never
-        // anything claimed on a wire. A delegation the caller was itself
-        // given is passed on with the first grantor's authority intact.
-        let handed = handle
-            .handed_on(caller.caps.owner().0, *caller.caps.effective())
-            .ok_or(Errno::OutOfRange)?;
         // The delegation carries the descriptor's *own* read/write access and
         // nothing more, so it can never widen what the grantor opened. The
         // open-time flags are dropped because the file is already open, and
@@ -12236,17 +12598,22 @@ where
         if access.is_write() != (write_ceiling > 0) {
             return Err(Errno::OutOfRange);
         }
-        // A hand-off attenuates or preserves, never widens: a ceiling stated
+        // What the descriptor may be handed on as: a new handle on the same
+        // node. A plain file the caller opened itself freezes the *caller's*
+        // kernel-attested identity, so every later operation on the redeemed
+        // descriptor acts as exactly that, never the recipient's and never
+        // anything claimed on a wire. A delegation the caller was itself
+        // given is passed on with the first grantor's identity intact, and a
+        // hand-off attenuates or preserves, never widens: a ceiling stated
         // above the one the caller was itself handed is met from what the
         // caller actually holds.
-        let ceiling = match handed.write_ceiling {
-            Some(held) => write_ceiling.min(held),
-            None => write_ceiling,
-        };
-        let file = crate::aspace::DelegatedFile {
-            write_ceiling: Some(ceiling),
-            ..handed
-        };
+        let file = handle
+            .handed_on(
+                caller.caps.owner().0,
+                *caller.caps.effective(),
+                write_ceiling,
+            )
+            .ok_or(Errno::OutOfRange)?;
         // The recipient is named by its attested process *instance*, not by
         // a task id: a number is redrawn once its task is gone, so one the
         // grantor read from an `Origin` may name a later holder by now,
@@ -12286,7 +12653,7 @@ where
                 instance,
                 caller.process(),
                 caller.caps.proc_id(),
-                file,
+                &file,
                 access,
             )
         })
@@ -12470,11 +12837,14 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // A resource-backed descriptor is not a directory (it has no path to
+        // A resource-backed descriptor is not a directory (it has nothing to
         // list), and neither is a delegation — `fd_grant` refuses one, so no
         // delegated listing exists to authorise. Fail closed as an invalid
         // operation for the descriptor's kind.
-        let path = handle.own_path().ok_or(Errno::OutOfRange)?;
+        let listed = match &handle.backing {
+            OpenBacking::Catalog(projection) => Listed::Catalog(projection),
+            _ => Listed::Node(handle.own_node().ok_or(Errno::OutOfRange)?),
+        };
         let uid = caller.caps.owner().0;
         // Batches on one description serialise here, so callers sharing it
         // take distinct, consecutive batches.
@@ -12494,35 +12864,39 @@ where
         let mut unfit = false;
         let mut malformed = None;
         if !at.is_done() {
-            // The secured VFS enforces that the path is a directory the
-            // caller may list; a non-directory fails closed there. A
-            // `NO_FOLLOW` descriptor names its final component itself, so a
-            // link is not a directory to it and the target is never listed
-            // in its place.
-            self.filesystem.readdir(
-                uid,
-                caller.caps.effective(),
-                path,
-                crate::fs::FinalLink::for_open(handle.flags),
-                &mut at,
-                &mut |entry| {
-                    let taken = out.len();
-                    let Some(record) = out.extend_zeroed(entry.encoded_len()) else {
-                        unfit = taken == 0;
-                        return DirVisit::Stop;
-                    };
-                    match entry.encode_into(record) {
-                        Ok(_) => DirVisit::Take,
-                        // A name the driver reports that is empty or longer
-                        // than `FS_NAME_MAX` fails the whole call closed,
-                        // never a truncated record.
-                        Err(err) => {
-                            malformed = Some(err);
-                            DirVisit::Stop
-                        }
+            let mut take = |entry: &tairix_abi::DirEntry<'_>| {
+                let taken = out.len();
+                let Some(record) = out.extend_zeroed(entry.encoded_len()) else {
+                    unfit = taken == 0;
+                    return DirVisit::Stop;
+                };
+                match entry.encode_into(record) {
+                    Ok(_) => DirVisit::Take,
+                    // A name the driver reports that is empty or longer than
+                    // `FS_NAME_MAX` fails the whole call closed, never a
+                    // truncated record.
+                    Err(err) => {
+                        malformed = Some(err);
+                        DirVisit::Stop
                     }
-                },
-            )?;
+                }
+            };
+            // The secured VFS enforces that the node is a directory the
+            // caller may list; a non-directory — a link a `NO_FOLLOW` open
+            // reached included — fails closed there.
+            match listed {
+                Listed::Node(node) => {
+                    self.filesystem
+                        .readdir_node(node, &own_acting(caller), &mut at, &mut take)?;
+                }
+                Listed::Catalog(catalog) => self.filesystem.readdir_catalog(
+                    uid,
+                    caller.caps.effective(),
+                    catalog,
+                    &mut at,
+                    &mut take,
+                )?,
+            }
         }
         if let Some(err) = malformed {
             return Err(err);
@@ -12549,42 +12923,46 @@ where
         if latency_ns > DIR_WATCH_LATENCY_MAX_NS {
             return Err(Errno::OutOfRange);
         }
-        let fswatch = self.fswatch.ok_or(Errno::NotImplemented)?;
         let handle = self
             .aspaces
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
+        // The catalog is changed by no driver, so nothing could be reported.
+        if matches!(handle.backing, OpenBacking::Catalog(_)) {
+            return Err(Errno::NotImplemented);
+        }
         // Only a directory the caller opened itself: a resource or stream has
         // no listing, and `fd_grant` never delegates a directory.
-        let path = handle.own_path().ok_or(Errno::OutOfRange)?;
+        let node = handle.own_node().ok_or(Errno::OutOfRange)?;
         if handle.armed_watch().is_some() {
             return Err(Errno::AlreadyExists);
         }
-        // Read before the path resolves, so a move while it does readies the
-        // watch at once rather than hiding in its baseline.
-        let epochs = fswatch.epochs(self.filesystem.mount_epoch());
-        // The listing's own authorisation, and the directory's identity: a
-        // watch observes no more than `fs_readdir` on the descriptor shows.
-        let found = self.filesystem.lookup_entries(
-            caller.caps.owner().0,
-            caller.caps.effective(),
-            path,
-            crate::fs::FinalLink::for_open(handle.flags),
-            &[],
-        )?;
+        // Read before the directory is looked up, so a mount moving while it
+        // is readies the watch at once rather than hiding in its baseline.
+        let mounts = self.filesystem.mount_epoch();
+        // The listing's own authorisation, and the volume the directory is
+        // on: a watch observes no more than `fs_readdir` on the descriptor
+        // shows.
+        let found = self
+            .filesystem
+            .lookup_entries_node(node, &own_acting(caller), &[])?;
         if found.dir.is_none() {
             return Err(Errno::NotImplemented);
         }
+        let table = self
+            .filesystem
+            .watch_table(node)
+            .ok_or(Errno::NotImplemented)?;
         let limit = self.soft_limit(caller, LimitKind::DirWatches);
         let watch = crate::fswatch::ArmedWatch::arm(
-            fswatch,
-            found.dir,
+            table,
+            node.node.pinned().raw(),
             latency_ns,
             caller.caps.charges(),
             limit,
             crate::fswatch::Resolved {
-                epochs,
+                mounts,
                 children: found.children,
             },
         )?;
@@ -12609,50 +12987,42 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        let path = handle.own_path().ok_or(Errno::OutOfRange)?;
+        let node = handle.own_node().ok_or(Errno::OutOfRange)?;
         let watch = handle.armed_watch().ok_or(Errno::NotFound)?;
         let table = watch.table();
-        // Read before the path resolves, so a move after it is the next
-        // drain's to see.
-        let epochs = table.epochs(self.filesystem.mount_epoch());
-        let last = watch.position().map_or(epochs, |at| at.epochs);
+        // Read before the directory is looked up, so a move after it is the
+        // next drain's to see.
+        let mounts = self.filesystem.mount_epoch();
         let last_children = watch.children();
-        // A directory's authority moved since the last drain: what the journal
-        // recorded meanwhile may be names this watcher could not have listed.
-        let drain = watch.take(
-            len - DirChangeBatch::HEADER_LEN,
-            epochs.access != last.access,
-        )?;
+        let drain = watch.take(len - DirChangeBatch::HEADER_LEN, false)?;
         let names: Vec<&[u8]> = match &drain {
             Some(crate::fswatch::Drain::Names { names, .. }) => {
                 collected(names.len(), names.iter()).ok_or(Errno::OutOfMemory)?
             }
             _ => Vec::new(),
         };
-        // Every drain re-resolves the descriptor's path under its authority,
+        // Every drain re-checks only the watched directory, as the caller and
         // exactly as `fs_readdir` would: what it reports is what a listing
-        // would show now, and a path that no longer reaches the watched
-        // directory — or no longer may list it — ends the watch.
-        let looked = self.filesystem.lookup_entries(
-            caller.caps.owner().0,
-            caller.caps.effective(),
-            path,
-            crate::fs::FinalLink::for_open(handle.flags),
-            &names,
-        );
+        // would show now, and a directory removed, no longer the caller's to
+        // list, or no longer reached ends the watch. A rename of it or of any
+        // directory above it changes none of that.
+        let looked = self
+            .filesystem
+            .lookup_entries_node(node, &own_acting(caller), &names);
         let found = match looked {
-            Ok(found) if found.dir == watch.dir() && !table.retired() => Ok(found),
-            Ok(_) | Err(Errno::NotFound | Errno::NotADirectory | Errno::PermissionDenied) => {
-                Err(DirWatchStatus::Gone)
-            }
+            Ok(found) if !table.retired() => Ok(found),
+            Ok(_)
+            | Err(
+                Errno::NotFound | Errno::NotADirectory | Errno::PermissionDenied | Errno::Stale,
+            ) => Err(DirWatchStatus::Gone),
             // A fault reading an entry is the directory's: it is read whole,
             // which reports the fault, rather than every drain failing on it.
             Err(_) => Err(DirWatchStatus::Rescan),
         };
-        // A re-read happens after this drain, so it settles the epochs read
+        // A re-read happens after this drain, so it settles the epoch read
         // before it whatever the directory's mounts did.
         let reread = crate::fswatch::Resolved {
-            epochs,
+            mounts,
             children: last_children,
         };
         let (status, more, records, upto, resolved) = match (found, &drain) {
@@ -12663,7 +13033,7 @@ where
             (Err(status), Some(drain)) => (status, false, Vec::new(), Some(drain.upto()), reread),
             (Ok(found), Some(drain)) => {
                 let resolved = crate::fswatch::Resolved {
-                    epochs,
+                    mounts,
                     children: found.children,
                 };
                 match drain {
@@ -12720,27 +13090,30 @@ where
             .ok_or(Errno::NotFound)?;
         // A resource-, pipe-, or pty-backed descriptor has no filesystem
         // metadata to report; fail closed as an invalid operation for its
-        // kind. A delegation resolves to the grantor's captured identity, so
-        // the holder describes the file it was handed without holding a
-        // filesystem capability of its own.
-        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
-        authority.admit()?;
-        // The descriptor's own follow posture decides what is described: a
-        // handle opened `NO_FOLLOW` names the link, so this is `lstat` and
-        // reports the link itself — including a dangling one. Re-derived from
-        // the handle rather than taken as an operand, so a stat can never
-        // contradict the open that produced the descriptor.
-        //
-        // What this does not change: the descriptor records a *path*, so it
-        // re-resolves, and a rename between the open and the stat can still
-        // name a different node. That holds for every path-backed handle and
-        // is not something links introduce.
-        let stat = self.filesystem.stat(
-            authority.uid,
-            authority.caps,
-            authority.path,
-            crate::fs::FinalLink::for_open(handle.flags),
-        )?;
+        // kind. A delegation acts as the grantor's frozen identity, so the
+        // holder describes the file it was handed without holding a
+        // filesystem capability of its own. What is described is the node
+        // the open reached — under `NO_FOLLOW` the link itself — however it
+        // has been renamed since.
+        // The catalog is stored on no volume: it is described as the view
+        // mount it is.
+        let stat = if let OpenBacking::Catalog(projection) = &handle.backing {
+            admit_catalog(caller, projection)?;
+            self.filesystem.stat(
+                caller.caps.owner().0,
+                caller.caps.effective(),
+                At {
+                    start: Start::Catalog(projection),
+                    path: ".",
+                },
+                crate::fs::FinalLink::Follow,
+            )?
+        } else {
+            let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+            authority.admit()?;
+            self.filesystem
+                .stat_node(authority.handle, &authority.acting())?
+        };
         // The whole record or nothing: an undersized buffer fails closed.
         if out_len < FileStat::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -12770,14 +13143,14 @@ where
         }
         // A resource-, pipe-, or pty-backed descriptor cannot be truncated;
         // fail closed as an invalid operation for its kind.
-        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
         authority.admit()?;
         // Growing a file by truncation is a write of the same extent, so a
         // delegation's ceiling bounds it exactly as it bounds `fs_write`;
         // shrinking is always within it.
         authority.admit_length(size)?;
         self.filesystem
-            .truncate(authority.uid, authority.caps, authority.path, size)?;
+            .truncate_node(authority.handle, &authority.acting(), size)?;
         Ok(0)
     }
 
@@ -12800,15 +13173,10 @@ where
             return Err(Errno::PermissionDenied);
         }
         // A resource, pipe or pty has no regions to report.
-        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
         authority.admit()?;
-        self.filesystem.seek_region(
-            authority.uid,
-            authority.caps,
-            authority.path,
-            offset,
-            region,
-        )
+        self.filesystem
+            .seek_region_node(authority.handle, &authority.acting(), offset, region)
     }
 
     /// `fs_punch(fd, offset, len)` — release the storage of a range of an
@@ -12830,10 +13198,10 @@ where
             return Err(Errno::PermissionDenied);
         }
         offset.checked_add(len).ok_or(Errno::OutOfRange)?;
-        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
         authority.admit()?;
         self.filesystem
-            .punch(authority.uid, authority.caps, authority.path, offset, len)?;
+            .punch_node(authority.handle, &authority.acting(), offset, len)?;
         Ok(0)
     }
 
@@ -12849,9 +13217,8 @@ where
     /// than reporting durability it cannot vouch for.
     fn fs_sync(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
         // The descriptor must be one of the caller's own open handles (a
-        // forged or foreign number fails closed); the flush itself is
-        // filesystem-wide, so the path is not needed beyond proving the
-        // caller holds a live handle on the mounted volume.
+        // forged or foreign number fails closed); only its own volume is
+        // flushed.
         let handle = self
             .aspaces
             .read()
@@ -12859,27 +13226,40 @@ where
             .ok_or(Errno::NotFound)?;
         // Syncing is a filesystem operation; a resource-, pipe-, or pty-backed
         // descriptor has nothing to flush and fails closed as an invalid
-        // operation for its kind. The holder of a delegation must be able to
-        // force its own writes to the medium, so the flush runs under the
-        // authority the backing resolved to.
-        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        // operation for its kind, and the catalog stores nothing to flush.
+        // The holder of a delegation must be able to force its own writes to
+        // the medium, so the flush acts as the identity the descriptor does.
+        if let OpenBacking::Catalog(catalog) = &handle.backing {
+            admit_catalog(caller, catalog)?;
+            return Ok(0);
+        }
+        let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
         authority.admit()?;
-        self.filesystem.sync(authority.uid, authority.caps)?;
+        self.filesystem
+            .sync_node(authority.handle, &authority.acting())?;
         Ok(0)
     }
 
-    fn fs_mkdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
-        // non-null `UserPtr`. Resolution and the permission/mount-flag model
-        // are the secured VFS's, under the caller's attested identity.
-        let path = self.copy_path_in(caller, path, path_len)?;
+    fn fs_mkdir(
+        &self,
+        caller: &CallerContext<'_>,
+        dirfd: u32,
+        path: u64,
+        path_len: usize,
+        mode: u32,
+    ) -> SyscallResult {
+        let named = self.copy_at(caller, dirfd, path, path_len)?;
         let uid = caller.caps.owner().0;
-        let outcome = self.filesystem.mkdir(uid, caller.caps.effective(), &path);
+        let umask = self.aspaces.read().umask(caller.process());
+        let create = crate::fs::CreateMode::new(mode, umask)?;
+        let outcome = self
+            .filesystem
+            .mkdir(uid, caller.caps.effective(), named.at(), create);
         emit_fs_mutation(
             self.audit,
             "mkdir",
             uid,
-            &path,
+            &named.audit_place(),
             &FsAuditDetail::None,
             outcome,
         );
@@ -12887,28 +13267,57 @@ where
         Ok(0)
     }
 
+    fn fs_umask(&self, caller: &CallerContext<'_>, mask: Option<u32>) -> SyscallResult {
+        // The dispatcher bounded the mask. A process's own mask reaches no
+        // other principal, so nothing gates it.
+        let process = caller.process();
+        let previous = match mask {
+            Some(mask) => self.aspaces.write().set_umask(process, mask),
+            None => self.aspaces.read().umask(process),
+        };
+        Ok(u64::from(previous))
+    }
+
     fn fs_unlink(
         &self,
         caller: &CallerContext<'_>,
+        dirfd: u32,
         path: u64,
         path_len: usize,
         flags: UnlinkFlags,
+        expect: u64,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, that `path` is a
-        // non-null `UserPtr`, and rejected any reserved `UnlinkFlags` bit.
         // With `DIRECTORY` the filesystem removes the name only if it is an
-        // (empty) directory, decided under its own lock.
-        let path = self.copy_path_in(caller, path, path_len)?;
+        // (empty) directory, and with an expectation only if the name still
+        // meets it, each decided under its own lock.
+        let named = self.copy_at(caller, dirfd, path, path_len)?;
+        let expected = self.copy_expect_in(
+            caller,
+            flags.expects(),
+            flags.contains(UnlinkFlags::EXPECT_NODE),
+            expect,
+        )?;
         let uid = caller.caps.owner().0;
         let op = if flags.is_directory_only() {
             "rmdir"
         } else {
             "unlink"
         };
-        let outcome = self
-            .filesystem
-            .unlink(uid, caller.caps.effective(), &path, flags);
-        emit_fs_mutation(self.audit, op, uid, &path, &FsAuditDetail::None, outcome);
+        let outcome = self.filesystem.unlink(
+            uid,
+            caller.caps.effective(),
+            named.at(),
+            flags,
+            expected.as_ref(),
+        );
+        emit_fs_mutation(
+            self.audit,
+            op,
+            uid,
+            &named.audit_place(),
+            &FsAuditDetail::None,
+            outcome,
+        );
         outcome?;
         Ok(0)
     }
@@ -12916,29 +13325,33 @@ where
     fn fs_rename(
         &self,
         caller: &CallerContext<'_>,
-        src: u64,
-        src_len: usize,
-        dst: u64,
-        dst_len: usize,
+        from: u64,
+        to: u64,
         flags: RenameFlags,
+        expect: u64,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, that both `src`
-        // and `dst` are non-null `UserPtr`s, and rejected any reserved flag
-        // bit. Both paths are copied in and validated; resolution, the
-        // permission/mount-flag model, and the no-replace check are the
-        // secured VFS's, under the caller's attested identity.
-        let src = self.copy_path_in(caller, src, src_len)?;
-        let dst = self.copy_path_in(caller, dst, dst_len)?;
+        // Resolution, the cross-projection refusal, the no-replace check and
+        // the expectation are the secured VFS's, under the caller's attested
+        // identity.
+        let src = self.copy_at_in(caller, from)?;
+        let dst = self.copy_at_in(caller, to)?;
+        let expected = self.copy_expect_in(caller, flags.expects(), true, expect)?;
         let uid = caller.caps.owner().0;
-        let outcome = self
-            .filesystem
-            .rename(uid, caller.caps.effective(), &src, &dst, flags);
+        let outcome = self.filesystem.rename(
+            uid,
+            caller.caps.effective(),
+            src.at(),
+            dst.at(),
+            flags,
+            expected.as_ref(),
+        );
+        let to = dst.audit_place();
         emit_fs_mutation(
             self.audit,
             "rename",
             uid,
-            &src,
-            &FsAuditDetail::Rename { to: &dst },
+            &src.audit_place(),
+            &FsAuditDetail::Rename { to: &to },
             outcome,
         );
         outcome?;
@@ -12950,26 +13363,24 @@ where
         caller: &CallerContext<'_>,
         target: u64,
         target_len: usize,
+        dirfd: u32,
         link: u64,
         link_len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and that both
-        // pointers are non-null `UserPtr`s. The target is the link's stored
-        // body, so it is bounded and UTF-8-checked but never resolved; the
-        // link's own path is an ordinary absolute path. Resolution, the
-        // target grammar, and the permission/mount-flag model are the secured
-        // VFS's, under the caller's attested identity.
+        // The target is the link's stored body, so it is bounded and
+        // UTF-8-checked but never resolved; the link's own name resolves as
+        // any path does.
         let target = self.copy_link_target_in(caller, target, target_len)?;
-        let link = self.copy_path_in(caller, link, link_len)?;
+        let named = self.copy_at(caller, dirfd, link, link_len)?;
         let uid = caller.caps.owner().0;
         let outcome = self
             .filesystem
-            .symlink(uid, caller.caps.effective(), &target, &link);
+            .symlink(uid, caller.caps.effective(), &target, named.at());
         emit_fs_mutation(
             self.audit,
             "symlink",
             uid,
-            &link,
+            &named.audit_place(),
             &FsAuditDetail::Symlink { target: &target },
             outcome,
         );
@@ -12981,19 +13392,14 @@ where
         &self,
         caller: &CallerContext<'_>,
         existing: u64,
-        existing_len: usize,
-        link: u64,
-        link_len: usize,
+        new: u64,
         flags: tairix_abi::LinkFlags,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, that both pointers
-        // are non-null `UserPtr`s, and rejected any reserved flag bit. Both
-        // operands are ordinary absolute paths; the directory and
-        // cross-volume refusals are the secured VFS's, and the new name is
-        // authorised as a create in its own parent under the caller's
-        // attested identity.
-        let existing = self.copy_path_in(caller, existing, existing_len)?;
-        let link = self.copy_path_in(caller, link, link_len)?;
+        // The directory and cross-projection refusals are the secured VFS's,
+        // and the new name is authorised as a create in its own parent under
+        // the caller's attested identity.
+        let existing = self.copy_at_in(caller, existing)?;
+        let new = self.copy_at_in(caller, new)?;
         let existing_link = if flags.follows() {
             crate::fs::FinalLink::Follow
         } else {
@@ -13003,15 +13409,16 @@ where
         let outcome = self.filesystem.link(
             uid,
             caller.caps.effective(),
-            &existing,
-            &link,
+            existing.at(),
+            new.at(),
             existing_link,
         );
+        let existing = existing.audit_place();
         emit_fs_mutation(
             self.audit,
             "link",
             uid,
-            &link,
+            &new.audit_place(),
             &FsAuditDetail::Link {
                 existing: &existing,
             },
@@ -13024,151 +13431,220 @@ where
     fn fs_readlink(
         &self,
         caller: &CallerContext<'_>,
+        dirfd: u32,
         path: u64,
         path_len: usize,
         out: u64,
         out_len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and that both
-        // pointers are non-null `UserPtr`s. The final component is never
-        // followed; a path naming anything but a link fails closed in the
-        // secured VFS.
-        let path = self.copy_path_in(caller, path, path_len)?;
+        // The final component is never followed; a path naming anything but
+        // a link fails closed in the secured VFS.
+        let named = self.copy_at(caller, dirfd, path, path_len)?;
         let uid = caller.caps.owner().0;
         let target = self
             .filesystem
-            .readlink(uid, caller.caps.effective(), &path)?;
+            .readlink(uid, caller.caps.effective(), named.at())?;
         // The whole target or nothing: a truncated path would name somewhere
         // else entirely, so an undersized buffer fails closed and the caller
         // retries with a larger one.
         if target.len() > out_len {
             return Err(Errno::BufferTooSmall);
         }
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), target.as_bytes())
-        }) {
-            Some(Ok(())) => Ok(target.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, target.as_bytes())?;
+        Ok(target.len() as u64)
     }
 
     fn fs_realpath(
         &self,
         caller: &CallerContext<'_>,
+        dirfd: u32,
         path: u64,
         path_len: usize,
         out: u64,
         out_len: usize,
         mode: tairix_abi::RealpathMode,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, that both pointers
-        // are non-null `UserPtr`s, and refused an undefined mode. Resolution
-        // — every link hop, every `..`, and the per-directory search check —
-        // is the secured VFS's under the caller's attested identity.
-        let path = self.copy_path_in(caller, path, path_len)?;
+        // Every link hop, every `..` and the per-directory search check are
+        // the secured VFS's, from where `dirfd`'s directory stands now.
+        let named = self.copy_at(caller, dirfd, path, path_len)?;
         let uid = caller.caps.owner().0;
         let canonical = self
             .filesystem
-            .realpath(uid, caller.caps.effective(), &path, mode)?;
+            .realpath(uid, caller.caps.effective(), named.at(), mode)?;
         // The whole path or nothing: a prefix of a canonical path names a
         // different node, so an undersized buffer fails closed and the
         // caller retries with a larger one.
         if canonical.len() > out_len {
             return Err(Errno::BufferTooSmall);
         }
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(out), canonical.as_bytes())
-        }) {
-            Some(Ok(())) => Ok(canonical.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, out, canonical.as_bytes())?;
+        Ok(canonical.len() as u64)
     }
 
     fn fs_set_mode(
         &self,
         caller: &CallerContext<'_>,
+        dirfd: u32,
         path: u64,
         path_len: usize,
         mode: u32,
+        flags: AtFlags,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, that `path` is a
-        // non-null `UserPtr`, and rejected any `mode` bit above the
-        // permission mask. The owner-only rule is the secured VFS's, applied
-        // under the caller's attested identity.
-        let path = self.copy_path_in(caller, path, path_len)?;
+        // The owner-only rule is the secured VFS's, applied under the caller's
+        // attested identity whichever form names the node.
         let uid = caller.caps.owner().0;
-        let outcome = self
-            .filesystem
-            .set_mode(uid, caller.caps.effective(), &path, mode);
-        emit_fs_mutation(
-            self.audit,
-            "chmod",
-            uid,
-            &path,
-            &FsAuditDetail::Mode { mode },
-            outcome,
-        );
-        outcome?;
+        let caps = caller.caps.effective();
+        let audited = |place: &AuditPlace<'_>, outcome: Result<(), Errno>| {
+            emit_fs_mutation(
+                self.audit,
+                "chmod",
+                uid,
+                place,
+                &FsAuditDetail::Mode { mode },
+                outcome,
+            );
+            outcome
+        };
+        if flags.contains(AtFlags::EMPTY_PATH) {
+            let target = self.empty_path_of(caller, dirfd)?;
+            let outcome = match &target {
+                EmptyPath::Node(handle) => {
+                    let authority = NodeAuthority::as_caller(handle, caller);
+                    authority.admit().and_then(|()| {
+                        self.filesystem
+                            .set_mode_node(handle, &authority.acting(), mode)
+                    })
+                }
+                EmptyPath::Start(start) => self.filesystem.set_mode(
+                    uid,
+                    caps,
+                    itself(start),
+                    mode,
+                    crate::fs::FinalLink::Keep,
+                ),
+            };
+            audited(&target.audit_place(), outcome)?;
+        } else {
+            let named = self.copy_at(caller, dirfd, path, path_len)?;
+            let outcome = self
+                .filesystem
+                .set_mode(uid, caps, named.at(), mode, flags.final_link());
+            audited(&named.audit_place(), outcome)?;
+        }
         Ok(0)
     }
 
     fn fs_set_owner(
         &self,
         caller: &CallerContext<'_>,
+        dirfd: u32,
         path: u64,
         path_len: usize,
         owner: u32,
         group: u32,
+        flags: AtFlags,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
-        // non-null `UserPtr`. The whole ownership authority rule (the
-        // `CAP_FS_CHOWN` gate for reassigning the uid or setting a foreign
-        // gid, the unprivileged owner-only group change, the set-*id* strip)
-        // is the secured VFS's, applied under the caller's attested identity
-        // and capability set — never a caller-supplied one.
-        let path = self.copy_path_in(caller, path, path_len)?;
+        // The whole ownership authority rule (the `CAP_FS_CHOWN` gate for
+        // reassigning the uid or setting a foreign gid, the unprivileged
+        // owner-only group change, the set-*id* strip) is the secured VFS's,
+        // applied under the caller's attested identity and capability set.
         let uid = caller.caps.owner().0;
-        let outcome = self
-            .filesystem
-            .set_owner(uid, caller.caps.effective(), &path, owner, group);
-        emit_fs_mutation(
-            self.audit,
-            "chown",
-            uid,
-            &path,
-            &FsAuditDetail::Owner { owner, group },
-            outcome,
-        );
-        outcome?;
+        let caps = caller.caps.effective();
+        let audited = |place: &AuditPlace<'_>, outcome: Result<(), Errno>| {
+            emit_fs_mutation(
+                self.audit,
+                "chown",
+                uid,
+                place,
+                &FsAuditDetail::Owner { owner, group },
+                outcome,
+            );
+            outcome
+        };
+        if flags.contains(AtFlags::EMPTY_PATH) {
+            let target = self.empty_path_of(caller, dirfd)?;
+            let outcome = match &target {
+                EmptyPath::Node(handle) => {
+                    let authority = NodeAuthority::as_caller(handle, caller);
+                    authority.admit().and_then(|()| {
+                        self.filesystem
+                            .set_owner_node(handle, &authority.acting(), owner, group)
+                    })
+                }
+                EmptyPath::Start(start) => self.filesystem.set_owner(
+                    uid,
+                    caps,
+                    itself(start),
+                    owner,
+                    group,
+                    crate::fs::FinalLink::Keep,
+                ),
+            };
+            audited(&target.audit_place(), outcome)?;
+        } else {
+            let named = self.copy_at(caller, dirfd, path, path_len)?;
+            let outcome =
+                self.filesystem
+                    .set_owner(uid, caps, named.at(), owner, group, flags.final_link());
+            audited(&named.audit_place(), outcome)?;
+        }
+        Ok(0)
+    }
+
+    fn fs_access(
+        &self,
+        caller: &CallerContext<'_>,
+        dirfd: u32,
+        path: u64,
+        path_len: usize,
+        want: tairix_abi::Access,
+        flags: AtFlags,
+    ) -> SyscallResult {
+        // A pure query: the node answers first, then the projection's flags.
+        let uid = caller.caps.owner().0;
+        let caps = caller.caps.effective();
+        if !flags.contains(AtFlags::EMPTY_PATH) {
+            let named = self.copy_at(caller, dirfd, path, path_len)?;
+            self.filesystem
+                .access(uid, caps, named.at(), want, flags.final_link())?;
+            return Ok(0);
+        }
+        match &self.empty_path_of(caller, dirfd)? {
+            EmptyPath::Node(handle) => self.access_held(caller, handle, want)?,
+            EmptyPath::Start(start) => {
+                self.filesystem.access(
+                    uid,
+                    caps,
+                    itself(start),
+                    want,
+                    crate::fs::FinalLink::Keep,
+                )?;
+            }
+        }
         Ok(0)
     }
 
     fn fs_attr_get(
         &self,
         caller: &CallerContext<'_>,
-        path: u64,
-        path_len: usize,
+        fd: u32,
         key: u64,
         key_len: usize,
         value_out: u64,
         value_out_len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, the pointers, and
-        // the key bound. The key grammar and the read-permission rule are
-        // the secured VFS's, applied under the caller's attested identity.
-        let path = self.copy_path_in(caller, path, path_len)?;
+        // The key grammar and the read-permission rule are the secured VFS's,
+        // applied under the caller's attested identity.
         let key = self.copy_attr_key_in(caller, key, key_len)?;
-        let uid = caller.caps.owner().0;
         // Stage at most the fixed value bound: no stored value can exceed
         // it, and a smaller caller buffer must be reported as too small by
         // the service (never truncated), so the stage mirrors the caller's
         // own capacity up to that bound.
-        let mut stage = vec![0u8; value_out_len.min(FS_ATTR_VALUE_MAX)];
-        let read =
-            self.filesystem
-                .attr_get(uid, caller.caps.effective(), &path, &key, &mut stage)?;
+        let mut stage =
+            filled(value_out_len.min(FS_ATTR_VALUE_MAX), 0u8).ok_or(Errno::OutOfMemory)?;
+        let read = self.with_attr_node(caller, fd, Errno::NotSupported, |handle, who| {
+            self.filesystem.attr_get_node(handle, who, &key, &mut stage)
+        })?;
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(value_out), &stage[..read])
         }) {
@@ -13181,47 +13657,41 @@ where
     fn fs_attr_set(
         &self,
         caller: &CallerContext<'_>,
-        path: u64,
-        path_len: usize,
+        fd: u32,
         key: u64,
         key_len: usize,
         value: u64,
         value_len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, the pointers, the
-        // key bound, and the value bound; the bound is re-applied here so no
-        // in-kernel caller can stage an oversize payload (defence in depth).
+        // The value bound is re-applied here so no in-kernel caller can stage
+        // an oversize payload.
         if value_len > FS_ATTR_VALUE_MAX {
             return Err(Errno::LengthOutOfRange);
         }
-        let path = self.copy_path_in(caller, path, path_len)?;
         let key = self.copy_attr_key_in(caller, key, key_len)?;
-        let mut payload = vec![0u8; value_len];
+        let mut payload = filled(value_len, 0u8).ok_or(Errno::OutOfMemory)?;
         self.copy_in_user(caller, value, &mut payload)?;
-        let uid = caller.caps.owner().0;
-        self.filesystem
-            .attr_set(uid, caller.caps.effective(), &path, &key, &payload)?;
+        self.with_attr_node(caller, fd, Errno::ReadOnly, |handle, who| {
+            self.filesystem.attr_set_node(handle, who, &key, &payload)
+        })?;
         Ok(0)
     }
 
     fn fs_attr_list(
         &self,
         caller: &CallerContext<'_>,
-        path: u64,
-        path_len: usize,
+        fd: u32,
         index: u64,
         key_out: u64,
         key_out_len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and the pointers.
-        // Read permission and the visibility filtering are the secured
-        // VFS's; `0` is the end-of-list answer (a real key is never empty).
-        let path = self.copy_path_in(caller, path, path_len)?;
-        let uid = caller.caps.owner().0;
-        let mut stage = vec![0u8; key_out_len.min(FS_ATTR_KEY_MAX)];
-        let Some(read) =
+        // Read permission and the visibility filtering are the secured VFS's;
+        // `0` is the end-of-list answer (a real key is never empty).
+        let mut stage = filled(key_out_len.min(FS_ATTR_KEY_MAX), 0u8).ok_or(Errno::OutOfMemory)?;
+        let Some(read) = self.with_attr_node(caller, fd, Errno::NotSupported, |handle, who| {
             self.filesystem
-                .attr_list(uid, caller.caps.effective(), &path, index, &mut stage)?
+                .attr_list_node(handle, who, index, &mut stage)
+        })?
         else {
             return Ok(0);
         };
@@ -13237,19 +13707,14 @@ where
     fn fs_attr_remove(
         &self,
         caller: &CallerContext<'_>,
-        path: u64,
-        path_len: usize,
+        fd: u32,
         key: u64,
         key_len: usize,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS`, the pointers, and
-        // the key bound. Write permission and the key grammar are the
-        // secured VFS's, applied under the caller's attested identity.
-        let path = self.copy_path_in(caller, path, path_len)?;
         let key = self.copy_attr_key_in(caller, key, key_len)?;
-        let uid = caller.caps.owner().0;
-        self.filesystem
-            .attr_remove(uid, caller.caps.effective(), &path, &key)?;
+        self.with_attr_node(caller, fd, Errno::ReadOnly, |handle, who| {
+            self.filesystem.attr_remove_node(handle, who, &key)
+        })?;
         Ok(0)
     }
 
@@ -13381,52 +13846,87 @@ where
         crate::waitset::close(caller.process().0, set).map(|()| 0)
     }
 
-    fn fs_chdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and that `path` is a
-        // non-null `UserPtr`. `copy_path_in` copies the path in and resolves
-        // it (relative to the caller's current working directory) into a
-        // normalised absolute path. Re-authorise it as a *searchable
-        // directory* through the secured VFS under the caller's real
-        // identity — the same resolve-only, directory-required check an
-        // `fs_open` with `DIRECTORY` (and neither read nor write) performs —
-        // before it becomes the new working directory. A path that is not a
-        // searchable directory fails closed here and the working directory is
-        // left unchanged (only a successful authorisation reaches
-        // `set_cwd`).
-        let abs = self.copy_path_in(caller, path, path_len)?;
+    fn fs_chdir(
+        &self,
+        caller: &CallerContext<'_>,
+        dirfd: u32,
+        path: u64,
+        path_len: usize,
+        flags: AtFlags,
+    ) -> SyscallResult {
+        // The target is resolved, checked as a directory the caller may
+        // search and pinned before it replaces the working directory, so a
+        // refusal leaves the old one in place. `EMPTY_PATH` changes to what
+        // `dirfd` holds: the path `.` from it.
         let uid = caller.caps.owner().0;
-        self.filesystem
-            .open(uid, caller.caps.effective(), &abs, OpenFlags::DIRECTORY)?;
-        self.aspaces.write().set_cwd(caller.process(), abs);
+        let cwd = if flags.contains(AtFlags::EMPTY_PATH) {
+            let start = self.dir_of(caller, dirfd)?;
+            self.filesystem
+                .chdir(uid, caller.caps.effective(), itself(&start))?
+        } else {
+            let named = self.copy_at(caller, dirfd, path, path_len)?;
+            self.filesystem
+                .chdir(uid, caller.caps.effective(), named.at())?
+        };
+        // Bound rather than discarded, so the old directory's pin is released
+        // after the registry lock rather than under it.
+        let previous = self.aspaces.write().set_cwd(caller.process(), cwd);
+        drop(previous);
         Ok(0)
     }
 
     fn fs_getcwd(&self, caller: &CallerContext<'_>, buf: u64, buf_cap: usize) -> SyscallResult {
         // Reading one's own working directory grants no authority, so the
-        // dispatcher required no capability. Resolve the caller's stored cwd
-        // (the root `/` when none was established) and copy it out through
-        // the validated boundary. The whole path is delivered or none: a
-        // buffer too small fails closed rather than truncating the path.
+        // dispatcher required no capability. The answer is the path that names
+        // the directory now, however it has moved, and the whole path is
+        // delivered or none.
         let cwd = self.aspaces.read().cwd(caller.process());
-        let bytes = cwd.as_bytes();
-        if bytes.len() > buf_cap {
+        let path = self.filesystem.canonical_of(
+            caller.caps.owner().0,
+            caller.caps.effective(),
+            cwd.start(),
+        )?;
+        if path.len() > buf_cap {
             return Err(Errno::BufferTooSmall);
         }
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), bytes)
-        }) {
-            Some(Ok(())) => Ok(bytes.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        self.copy_out_user(caller, buf, path.as_bytes())?;
+        Ok(path.len() as u64)
     }
+}
+
+/// The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a boot-floor
+/// `program` is a prebuilt plan carrying its already-verified `'static` image
+/// and manifest request, so the child only builds an address space; a store
+/// `bundle` is a plan the child reads and verifies itself, on its own task,
+/// under its own credential. `None` for a path naming neither.
+fn load_plan(
+    program: Option<&'static crate::spawn::EmbeddedProgram>,
+    bundle: Option<&crate::appspawn::BundleRunPath<'_>>,
+    drawing: bool,
+) -> Option<LoadPlan> {
+    if let Some(program) = program {
+        return Some(LoadPlan::Prebuilt {
+            rxe: alloc::borrow::Cow::Borrowed(program.rxe),
+            requested: program.capability_set(),
+        });
+    }
+    bundle.map(|parsed| LoadPlan::Bundle {
+        bundle: String::from(parsed.bundle),
+        command: String::from(parsed.command),
+        mode: if drawing {
+            tairix_appload::LoadMode::Drawing
+        } else {
+            tairix_appload::LoadMode::Ordinary
+        },
+    })
 }
 
 /// Tear down the process-bookkeeping subset a task holds regardless of
 /// whether it ever reached user mode: its signal-intake and kill-gate
 /// state, its own parent/child wait rows, its capability
 /// record, and its address-space registry entry (streams, open files,
-/// limits, grants, cwd, and — when registered — the frozen space snapshot).
+/// limits, grants, cwd and umask, and — when registered — the frozen space
+/// snapshot).
 ///
 /// Factored out of [`KernelSyscallHandlers::reclaim_process_resources`] so the
 /// full task teardown and the asynchronous-launch loading-child teardown
@@ -13489,12 +13989,14 @@ fn reclaim_process_bookkeeping(
     for thread in threads {
         crate::procsignal::clear_kill_gate(thread);
     }
-    // Withdraw the address-space registry entry last: streams, open files
-    // (pipe ends wake their parked peers as they drop), limits, grants, cwd,
-    // and any frozen space snapshot all go together, so no stale entry
-    // outlives the process.
+    // Withdraw the address-space registry entry last: streams, open files,
+    // limits, grants, cwd and umask, and any frozen space snapshot all go
+    // together, so no stale entry outlives the process. What it held is
+    // released once the registry guard is: pipe ends wake their parked peers,
+    // locks are released and pins queued for the flusher as they drop.
     let driver = aspaces.read().loaded_driver(process);
-    aspaces.write().withdraw(process);
+    let withdrawn = aspaces.write().withdraw(process);
+    drop(withdrawn);
     crate::hwtree::driver_released(driver, ending);
     match removed {
         Some(removed) => Departed {
@@ -13564,7 +14066,7 @@ pub(crate) fn retire_number(
 }
 
 /// The kernel-attested identity a freshly spawned child is admitted under:
-/// its owning user and full group set (`PREREQUISITES.md` P-C, spawn-as-user).
+/// its owning user and full group set.
 ///
 /// This is the credential the kernel *vouches for* — resolved kernel-side and
 /// snapshotted onto the child's [`TaskCapabilities`] record at admit, never a
@@ -13669,6 +14171,17 @@ impl SpawnCredential {
             self.ceiling
                 .unwrap_or_else(|| CapabilitySet::from_words([u64::MAX; 4])),
         )
+    }
+
+    /// The `(uid, effective)` authority a spawner acting for this credential
+    /// passes on: the credential's uid, and only the capabilities of
+    /// `spawner`'s own that the credential's account may be granted.
+    #[must_use]
+    fn delegated_authority(&self, spawner: &CapabilitySet) -> (u32, CapabilitySet) {
+        let caps = self
+            .ceiling
+            .map_or(*spawner, |ceiling| ceiling.intersection(spawner));
+        (self.uid.0, caps)
     }
 }
 
@@ -13835,7 +14348,7 @@ where
     /// kernel-side at the call site, never from caller-supplied bytes.
     spawn_path: Vec<u8>,
     /// The kernel-attested credential (uid + group set) the child is admitted
-    /// under (`PREREQUISITES.md` P-C, spawn-as-user). Resolved kernel-side at
+    /// under. Resolved kernel-side at
     /// the call site — inherited from the spawning parent's own record, or
     /// switched to a target user by a [`CapabilityId::SPAWN_AS_USER`] holder,
     /// or the fixed system credential for a boot principal — never a
@@ -13868,6 +14381,9 @@ where
     /// The shared region a drawing sandbox is handed, and the spawner's own
     /// instance it is delegated from; `None` for every other spawn.
     share: Option<(u64, ProcId)>,
+    /// The working directory the spawn resolved for the child; `None` to
+    /// share the parent's.
+    working_directory: Option<Cwd>,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -13934,6 +14450,7 @@ where
             lowered: tairix_abi::SpawnLimits::INHERIT,
             foreground: None,
             share: None,
+            working_directory: None,
         }
     }
 
@@ -13973,6 +14490,14 @@ where
     #[must_use]
     pub(crate) fn with_share(mut self, region: u64, grantor: ProcId) -> Self {
         self.share = Some((region, grantor));
+        self
+    }
+
+    /// Start the child in `cwd`, which the spawn resolved for it, rather than
+    /// in its parent's working directory.
+    #[must_use]
+    pub(crate) fn with_working_directory(mut self, cwd: Cwd) -> Self {
+        self.working_directory = Some(cwd);
         self
     }
 
@@ -14318,9 +14843,13 @@ fn body_load_bundle(
         if let Some(app) = store.cached(bundle) {
             // Re-authorised as a program read: the caller must still be able
             // to read the entry point, and its mount still run programs.
+            let run = At {
+                start: Start::Root,
+                path: app.run_path(),
+            };
             services
                 .filesystem()
-                .read_program(uid, effective, app.run_path(), 0, &mut [])?;
+                .read_program(uid, effective, run, 0, &mut [])?;
             tairix_appload::admit_cached(&app, mode, services.audit())
                 .map_err(crate::appspawn::app_error_errno)?;
             return Ok(app);
@@ -14668,13 +15197,6 @@ fn retire_loading_child(
     );
 }
 
-/// Audit a deferred load refusal, attributed to the failing child `sec_id`.
-///
-/// The heavy load failures (missing bundle bytes, tampered signature,
-/// malformed `rxe`, OOM) are discovered on the child's own task, so the
-/// refusal is recorded here — beside the child's reserved-status exit — with
-/// the stable errno that classified it, rather than surfacing as a `spawn`
-/// return value (`plans/FIX-DESKTOP.md` §2.3).
 /// The driver loaded for `node` is refused DMA: the node is behind `unit`,
 /// which translates nothing, or its record could not be read.
 fn audit_stranded(audit: &(dyn Sink + Sync), node: u32, unit: Option<u32>) {
@@ -14701,6 +15223,13 @@ fn audit_stranded(audit: &(dyn Sink + Sync), node: u32, unit: Option<u32>) {
     );
 }
 
+/// Audit a deferred load refusal, attributed to the failing child `sec_id`.
+///
+/// The heavy load failures (missing bundle bytes, tampered signature,
+/// malformed `rxe`, OOM) are discovered on the child's own task, so the
+/// refusal is recorded here — beside the child's reserved-status exit — with
+/// the stable errno that classified it, rather than surfacing as a `spawn`
+/// return value (`plans/FIX-DESKTOP.md` §2.3).
 fn emit_load_refusal(audit: &(dyn Sink + Sync), sec_id: ProcessId, errno: Errno) {
     crate::audit::emit(
         audit,
@@ -14720,6 +15249,10 @@ fn emit_load_refusal(audit: &(dyn Sink + Sync), sec_id: ProcessId, errno: Errno)
                 value: tairix_log::FieldValue::SignedInt(i64::from(
                     tairix_abi::load_failure_status(errno),
                 )),
+            },
+            Field {
+                key: "errno",
+                value: tairix_log::FieldValue::SignedInt(i64::from(errno.as_i32())),
             },
         ],
     );
@@ -14790,8 +15323,9 @@ where
     /// The child is registered as a parked plain kernel kthread carrying
     /// only the manifest-*independent* admit state — a placeholder empty
     /// capability record, the spawner-resolved standard streams and wired
-    /// open entries, inherited resource limits and working directory, any
-    /// device-resource grants + matched node, and the parent/child wait link
+    /// open entries, inherited resource limits, working directory and umask,
+    /// any device-resource grants + matched node, and the parent/child wait
+    /// link
     /// — all resolved synchronously on the calling task so the spawner learns
     /// the PID immediately. The child then materialises its own image on its
     /// first scheduled slice, on its *own* kernel stack: it reads and
@@ -14945,39 +15479,37 @@ where
         // mode. The stream/limit/cwd install below operates on the aspaces
         // registry keyed by `sec_id` independently of a registered address
         // space, so it stands.
-        {
+        let limits = self.child_limits();
+        let start = if self.sandbox {
+            Some(Cwd::Root)
+        } else {
+            self.working_directory.clone()
+        };
+        let replaced = {
             let mut aspaces = self.aspaces.write();
             aspaces.set_streams(sec_id, self.streams);
             for (fd, file) in &self.wired {
                 // `fd` is a standard slot by construction (the wire loop
-                // indexes the fixed table); a refusal here would signal a
-                // kernel invariant violation, so fail the admit closed
-                // rather than start a child missing a wired stream.
-                if aspaces
-                    .install_std_entry(sec_id, *fd, file.clone())
-                    .is_err()
-                {
+                // indexes the fixed table), and a fresh child holds nothing
+                // there to replace; either refusal would signal a kernel
+                // invariant violation, so fail the admit closed rather than
+                // start a child missing a wired stream.
+                let installed = aspaces.install_std_entry(sec_id, *fd, file.clone());
+                if !matches!(installed, Ok(None)) {
                     drop(aspaces);
+                    drop(installed);
                     self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
                     return Err(AdmitError::AspaceConflict);
                 }
             }
-        }
-
-        // Read and write are separate lock acquisitions because a fresh child
-        // id is never concurrently mutated by another path.
-        let limits = self.child_limits();
-        self.aspaces.write().set_limits(sec_id, limits);
-
-        // Inherit the parent's current working directory (POSIX: a child
-        // starts in its parent's directory), so a relative path a spawned
-        // program is handed resolves the same way it would for the spawner.
-        // A parent with none established resolves to the root `/` via
-        // `cwd`, so the child starts at the root too. Read and write are
-        // separate acquisitions because a fresh child id is never
-        // concurrently mutated by another path.
-        let parent_cwd = self.aspaces.read().cwd(self.parent);
-        self.aspaces.write().set_cwd(sec_id, parent_cwd);
+            aspaces.set_limits(sec_id, limits);
+            // A child starts in its parent's working directory under its
+            // parent's umask, as POSIX has it, unless the spawn named one. A
+            // parser sandbox starts at the root, holding none of the
+            // spawner's directories.
+            aspaces.inherit_fs(self.parent, sec_id, start)
+        };
+        drop(replaced);
 
         if let Err(err) = self.install_child_grants(sec_id) {
             if err == AdmitError::ShareNotHeld {
@@ -15499,8 +16031,7 @@ where
     }
 
     /// Install the authoritative identity table the `spawn` handler resolves
-    /// a spawn-as-user switch against, consuming and returning `self`
-    /// (`PREREQUISITES.md` P-C).
+    /// a spawn-as-user switch against, consuming and returning `self`.
     ///
     /// The hook-level mirror of [`KernelSyscallHandlers::with_identity`]:
     /// called once by the boot path that unlocked the root volume, with the
@@ -15527,7 +16058,7 @@ where
     }
 
     /// Install the disk-backed filesystem service the `fs_*` syscalls route
-    /// through, consuming and returning `self` (`PREREQUISITES.md` P-A).
+    /// through, consuming and returning `self`.
     ///
     /// The hook-level mirror of [`KernelSyscallHandlers::with_filesystem`]:
     /// called once by the boot path that owns a mounted volume. A boot path
@@ -15576,8 +16107,7 @@ where
     }
 
     /// Install the kernel wall clock the `wall_time_get` / `wall_time_set`
-    /// syscalls read and drive, consuming and returning `self`
-    /// (`PREREQUISITES.md` P-D).
+    /// syscalls read and drive, consuming and returning `self`.
     ///
     /// The hook-level mirror of [`KernelSyscallHandlers::with_wall_clock`]:
     /// the boot path passes the leaked production
@@ -15592,8 +16122,7 @@ where
     }
 
     /// Install the live kernel introspection source the `sysinfo_introspect`
-    /// syscall serves, consuming and returning `self` (`PREREQUISITES.md`
-    /// P-C).
+    /// syscall serves, consuming and returning `self`.
     ///
     /// The hook-level mirror of [`KernelSyscallHandlers::with_introspect`]:
     /// the boot path passes the leaked
@@ -15611,7 +16140,7 @@ where
     }
 
     /// Install the per-boot identifier the `boot_id_get` syscall reports,
-    /// consuming and returning `self` (`PREREQUISITES.md` P-E).
+    /// consuming and returning `self`.
     ///
     /// The hook-level mirror of [`KernelSyscallHandlers::with_boot_id`]: the
     /// boot path passes the [`BootId`] it minted from the seeded CSPRNG
@@ -16296,6 +16825,7 @@ fn reschedule_action_for(number: Option<SyscallNumber>) -> Option<RescheduleActi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::test_volume::at;
     use crate::sched::SchedulerConfig;
     use crate::test_arch::TestArch;
     use crate::test_sink::TestSink;
@@ -16338,6 +16868,61 @@ mod tests {
 
     fn make_sink() -> &'static TestSink {
         crate::forever(Box::new(TestSink::new()))
+    }
+
+    /// A working directory held by node, labelled with the path it was
+    /// reached by.
+    fn directory(volume: &Arc<crate::fs::VolumeNodes>, path: &str) -> Cwd {
+        Cwd::Dir(crate::test_bundle::node_handle(
+            crate::test_bundle::opened_node(volume, 1, NodeKind::Directory, path),
+        ))
+    }
+
+    /// The label of `process`'s working directory, `/` for the view root.
+    fn cwd_label(aspaces: &RwLock<AddressSpaceRegistry>, process: ProcessId) -> String {
+        match aspaces.read().cwd(process) {
+            Cwd::Root => String::from("/"),
+            Cwd::Dir(handle) => String::from(&*handle.opened_as),
+            Cwd::Catalog(catalog) => {
+                crate::fs::spell(catalog.path().components()).expect("spelled")
+            }
+        }
+    }
+
+    /// `paths` staged as a caller hands them to `fs_rename` or `fs_link` at
+    /// `0x1000`: a `PathAt` each from the working directory, one after the
+    /// other, then the paths themselves.
+    fn staged_path_ats(paths: &[&str]) -> Vec<u8> {
+        let records = PathAt::WIRE_LEN * paths.len();
+        let mut next = 0x1000 + u64::try_from(records).unwrap();
+        let mut staged = Vec::new();
+        for path in paths {
+            let record = PathAt {
+                dirfd: FD_CWD,
+                len: u32::try_from(path.len()).unwrap(),
+                path: next,
+            };
+            staged.extend_from_slice(&record.to_le_bytes());
+            next += u64::try_from(path.len()).unwrap();
+        }
+        for path in paths {
+            staged.extend_from_slice(path.as_bytes());
+        }
+        staged
+    }
+
+    /// How the recording doubles log a path: as spelled, with the label of
+    /// the start a relative one resolves from.
+    fn shown(at: At<'_>) -> String {
+        if at.path.starts_with('/') {
+            return String::from(at.path);
+        }
+        let start = match at.start {
+            Start::Root => "/",
+            Start::Dir(handle) => &handle.opened_as,
+            Start::Catalog(_) => "<catalog>",
+        };
+        alloc::format!("{} from={start}", at.path)
     }
 
     fn caps_with(items: &[CapabilityId]) -> CapabilitySet {
@@ -21519,10 +22104,9 @@ mod tests {
 
     /// A deferred load refusal is audited against the *failing child*, not the
     /// spawning caller: a `ProcessSpawnDenied` event carrying the
-    /// `deferred_load_failed` cause, the child's task id, and the reserved
+    /// `deferred_load_failed` cause, the child's task id, the reserved
     /// load-failure exit status the errno maps to (`plans/FIX-DESKTOP.md`
-    /// §2.3) — the record beside the child's reserved-status exit, since the
-    /// heavy load fails on the child's own task rather than a `spawn` errno.
+    /// §2.3), and the errno itself, which the status alone cannot recover.
     #[test]
     fn emit_load_refusal_audits_the_failing_child() {
         install_trace_filter();
@@ -21543,6 +22127,11 @@ mod tests {
                 "{}",
                 tairix_abi::load_failure_status(Errno::SignatureInvalid)
             )));
+        assert!(event
+            .fields
+            .iter()
+            .any(|(k, v)| k == "errno"
+                && v == &alloc::format!("{}", Errno::SignatureInvalid.as_i32())));
     }
 
     /// A [`FilesystemService`] over the shared [`MemFs`] fixture that counts
@@ -21603,30 +22192,48 @@ mod tests {
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             flags: OpenFlags,
-        ) -> Result<(), Errno> {
+            mode: crate::fs::CreateMode,
+        ) -> Result<crate::fs::Opened, Errno> {
             self.readable()?;
-            self.inner.open(uid, caps, path, flags)
+            self.inner.open(uid, caps, at, flags, mode)
         }
 
-        fn read(
+        fn chdir(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
+        ) -> Result<Cwd, Errno> {
+            self.inner.chdir(uid, caps, at)
+        }
+
+        fn canonical_of(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            start: Start<'_>,
+        ) -> Result<String, Errno> {
+            self.inner.canonical_of(uid, caps, start)
+        }
+
+        fn read_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             offset: u64,
             buf: &mut [u8],
         ) -> Result<usize, Errno> {
             self.readable()?;
-            self.counted(self.inner.read(uid, caps, path, offset, buf))
+            self.counted(self.inner.read_node(node, who, offset, buf))
         }
 
         fn read_program(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             offset: u64,
             buf: &mut [u8],
         ) -> Result<usize, Errno> {
@@ -21634,41 +22241,86 @@ mod tests {
             if self.noexec.load(core::sync::atomic::Ordering::Relaxed) {
                 return Err(Errno::PermissionDenied);
             }
-            self.counted(self.inner.read_program(uid, caps, path, offset, buf))
+            self.counted(self.inner.read_program(uid, caps, at, offset, buf))
         }
 
-        fn write(
+        fn write_node(
             &self,
-            uid: u32,
-            caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             offset: u64,
             append: bool,
             data: &[u8],
         ) -> Result<usize, Errno> {
-            self.inner.write(uid, caps, path, offset, append, data)
+            self.inner.write_node(node, who, offset, append, data)
         }
 
-        fn readdir(
+        fn readdir_node(
             &self,
-            uid: u32,
-            caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
-            final_link: crate::fs::FinalLink,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             at: &mut crate::fs::Listing,
             each: &mut dyn FnMut(&tairix_abi::DirEntry<'_>) -> DirVisit,
         ) -> Result<(), Errno> {
-            self.inner.readdir(uid, caps, path, final_link, at, each)
+            self.inner.readdir_node(node, who, at, each)
+        }
+
+        fn readdir_bounded(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            at: At<'_>,
+            final_link: crate::fs::FinalLink,
+            limit: usize,
+        ) -> Result<Vec<crate::fs::ReaddirEntry>, Errno> {
+            self.inner.readdir_bounded(uid, caps, at, final_link, limit)
+        }
+
+        fn lookup_entries_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
+            names: &[&[u8]],
+        ) -> Result<crate::fs::LookedUp, Errno> {
+            self.inner.lookup_entries_node(node, who, names)
+        }
+
+        fn stat_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
+        ) -> Result<FileStat, Errno> {
+            self.inner.stat_node(node, who)
+        }
+
+        fn seek_region_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
+            offset: u64,
+            region: tairix_abi::SeekRegion,
+        ) -> Result<u64, Errno> {
+            self.inner.seek_region_node(node, who, offset, region)
+        }
+
+        fn punch_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
+            offset: u64,
+            len: u64,
+        ) -> Result<(), Errno> {
+            self.inner.punch_node(node, who, offset, len)
         }
 
         fn stat(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             final_link: crate::fs::FinalLink,
         ) -> Result<FileStat, Errno> {
-            self.inner.stat(uid, caps, path, final_link)
+            self.inner.stat(uid, caps, at, final_link)
         }
 
         fn symlink(
@@ -21676,136 +22328,104 @@ mod tests {
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
             target: &str,
-            path: &str,
+            at: At<'_>,
         ) -> Result<(), Errno> {
-            self.inner.symlink(uid, caps, target, path)
+            self.inner.symlink(uid, caps, target, at)
         }
 
         fn readlink(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
         ) -> Result<alloc::string::String, Errno> {
-            self.inner.readlink(uid, caps, path)
+            self.inner.readlink(uid, caps, at)
         }
 
         fn realpath(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             mode: tairix_abi::RealpathMode,
         ) -> Result<alloc::string::String, Errno> {
-            self.inner.realpath(uid, caps, path, mode)
+            self.inner.realpath(uid, caps, at, mode)
         }
 
         fn link(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            existing: &str,
-            link: &str,
+            existing: At<'_>,
+            new: At<'_>,
             existing_link: crate::fs::FinalLink,
         ) -> Result<(), Errno> {
-            self.inner.link(uid, caps, existing, link, existing_link)
+            self.inner.link(uid, caps, existing, new, existing_link)
         }
 
-        fn truncate(
+        fn truncate_node(
             &self,
-            uid: u32,
-            caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             size: u64,
         ) -> Result<(), Errno> {
-            self.inner.truncate(uid, caps, path, size)
+            self.inner.truncate_node(node, who, size)
         }
 
-        fn sync(&self, uid: u32, caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
-            self.inner.sync(uid, caps)
+        fn sync_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
+        ) -> Result<(), Errno> {
+            self.inner.sync_node(node, who)
+        }
+
+        fn sync_all(&self, uid: u32, caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
+            self.inner.sync_all(uid, caps)
         }
 
         fn mkdir(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
+            mode: crate::fs::CreateMode,
         ) -> Result<(), Errno> {
-            self.inner.mkdir(uid, caps, path)
+            self.inner.mkdir(uid, caps, at, mode)
         }
 
         fn unlink(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             flags: UnlinkFlags,
+            expect: Option<&NodeExpect>,
         ) -> Result<(), Errno> {
-            self.inner.unlink(uid, caps, path, flags)
+            self.inner.unlink(uid, caps, at, flags, expect)
         }
 
         fn rename(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            src: &str,
-            dst: &str,
+            src: At<'_>,
+            dst: At<'_>,
             flags: RenameFlags,
+            expect: Option<&NodeExpect>,
         ) -> Result<(), Errno> {
-            self.inner.rename(uid, caps, src, dst, flags)
+            self.inner.rename(uid, caps, src, dst, flags, expect)
         }
 
         fn set_mode(
             &self,
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             mode: u32,
+            final_link: crate::fs::FinalLink,
         ) -> Result<(), Errno> {
-            self.inner.set_mode(uid, caps, path, mode)
-        }
-
-        fn attr_get(
-            &self,
-            uid: u32,
-            caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
-            key: &[u8],
-            value_out: &mut [u8],
-        ) -> Result<usize, Errno> {
-            self.inner.attr_get(uid, caps, path, key, value_out)
-        }
-
-        fn attr_set(
-            &self,
-            uid: u32,
-            caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
-            key: &[u8],
-            value: &[u8],
-        ) -> Result<(), Errno> {
-            self.inner.attr_set(uid, caps, path, key, value)
-        }
-
-        fn attr_list(
-            &self,
-            uid: u32,
-            caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
-            index: u64,
-            key_out: &mut [u8],
-        ) -> Result<Option<usize>, Errno> {
-            self.inner.attr_list(uid, caps, path, index, key_out)
-        }
-
-        fn attr_remove(
-            &self,
-            uid: u32,
-            caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
-            key: &[u8],
-        ) -> Result<(), Errno> {
-            self.inner.attr_remove(uid, caps, path, key)
+            self.inner.set_mode(uid, caps, at, mode, final_link)
         }
     }
 
@@ -22484,6 +23104,48 @@ mod tests {
         assert_eq!(second.resource, dma);
     }
 
+    /// A child starts in its parent's working directory under its parent's
+    /// umask, read from the parent as it is admitted.
+    #[test]
+    fn a_spawned_child_inherits_its_parents_directory_and_umask() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        table.write().insert(session_record(1, 0x41));
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let parent = ProcessId(1);
+        let volume = crate::test_bundle::test_volume();
+        aspaces
+            .write()
+            .set_cwd(parent, directory(&volume, "/Users/bob"));
+        aspaces.write().set_umask(parent, 0o077);
+        let ctx = KernelSpawnCtx::new(
+            sink,
+            &sched,
+            &table,
+            &aspaces,
+            arch.as_ref(),
+            parent,
+            &NULL_PROCESS_WAIT,
+            DescriptorTable::standard(),
+            Vec::new(),
+            &[],
+            None,
+            tairix_abi::ProcId::from_raw([0x42; 16]),
+            ProcName::from_bytes_truncating(b"child"),
+            SPAWN_PATH.to_vec(),
+            SpawnCredential::system(),
+            false,
+        );
+
+        let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("admitted");
+        assert_eq!(aspaces.read().umask(ProcessId(pid)), 0o077);
+        assert_eq!(cwd_label(&aspaces, ProcessId(pid)), "/Users/bob");
+        assert_eq!(volume.outstanding(), 1, "the child shares its parent's pin");
+    }
+
     /// A node has at most one live driver: a second load for it is refused
     /// before the child is given anything, so it leaves no record, grant or
     /// claim behind, and the first driver keeps the node.
@@ -22803,7 +23465,7 @@ mod tests {
         // admission refuses rather than start a child without its stream.
         let wired = alloc::vec![(
             7,
-            crate::aspace::OpenFile::new(OpenBacking::Path(String::from("/x")), OpenFlags::READ),
+            node_entry("/x", crate::fs::Authority::Holder, OpenFlags::READ),
         )];
         let ctx = KernelSpawnCtx::new(
             sink,
@@ -23889,7 +24551,7 @@ mod tests {
                     LimitKind::Processes,
                     ResourceLimit::new(8, 8).expect("well-formed"),
                 )
-                .lowering(LimitKind::OpenStreams, streams),
+                .lowering(LimitKind::OpenFiles, streams),
             ..SpawnAttach::INHERIT
         };
         let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
@@ -23946,7 +24608,7 @@ mod tests {
             parent_cap,
             "never above the parent"
         );
-        assert_eq!(child.get(LimitKind::OpenStreams), streams, "lowered");
+        assert_eq!(child.get(LimitKind::OpenFiles), streams, "lowered");
         assert_eq!(
             child.get(LimitKind::StackBytes),
             LimitSet::DEFAULT.get(LimitKind::StackBytes),
@@ -23955,8 +24617,8 @@ mod tests {
         let parent = aspaces.read().limits(ProcessId(2));
         assert_eq!(parent.get(LimitKind::Processes), parent_cap);
         assert_eq!(
-            parent.get(LimitKind::OpenStreams),
-            LimitSet::DEFAULT.get(LimitKind::OpenStreams)
+            parent.get(LimitKind::OpenFiles),
+            LimitSet::DEFAULT.get(LimitKind::OpenFiles)
         );
     }
 
@@ -24896,18 +25558,18 @@ mod tests {
         );
     }
 
-    /// A **path-backed** descriptor wired into a child is *conferred*, not
-    /// copied: the child holds it as a delegation carrying the spawning
-    /// parent's captured identity, and the two still share one open file
-    /// description (`plans/SPAWN.md` SP10, `plans/NEW-FILEMANAGER.md` `FM6b`).
+    /// A **file** descriptor the parent opened itself, wired into a child, is
+    /// *conferred*, not copied: the child holds it acting as the spawning
+    /// parent's identity frozen at the spawn, and the two still share one
+    /// open file description (`plans/SPAWN.md` SP10,
+    /// `plans/NEW-FILEMANAGER.md` `FM6b`).
     ///
-    /// The regression: a plain clone left the child an `OpenBacking::Path`,
-    /// which every operation re-authorises under *the holder's* own identity.
-    /// The file manager's hand-off of a document to a viewer that
-    /// deliberately requests no filesystem capability was therefore refused
-    /// on every read — the one case the hand-off exists for.
+    /// The regression: a plain clone left the child a descriptor acting as
+    /// *its holder's* own identity. The file manager's hand-off of a document
+    /// to a viewer that deliberately requests no filesystem capability was
+    /// therefore refused on every read — the one case the hand-off exists for.
     #[test]
-    fn spawn_confers_the_parents_reach_on_a_wired_path_descriptor() {
+    fn spawn_confers_the_parents_reach_on_a_wired_file_descriptor() {
         /// The document the parent opens and wires behind the child's stdin.
         const DOC_PATH: &[u8] = b"/f";
 
@@ -24969,7 +25631,7 @@ mod tests {
         .with_filesystem(fs);
 
         let doc_fd = u32::try_from(
-            h.fs_open(&ctx, doc_addr, DOC_PATH.len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, doc_addr, DOC_PATH.len(), OpenFlags::READ, 0)
                 .expect("the parent opens the document"),
         )
         .expect("a descriptor number");
@@ -24991,25 +25653,21 @@ mod tests {
             .read()
             .open_file_entry(ProcessId(pid), tairix_abi::STDIN)
             .expect("wired child entry");
-        match &child_entry.backing {
-            crate::aspace::OpenBacking::Delegated(file) => {
-                assert_eq!(file.path, "/f");
-                assert_eq!(file.uid, 1000, "the spawning parent's uid was captured");
-                assert!(
-                    file.caps.holds(CapabilityId::FS_ACCESS),
-                    "the parent's effective set was captured, not the child's"
-                );
-                assert_eq!(
-                    file.write_ceiling, None,
-                    "a conferred descriptor carries the parent's own unbounded reach"
-                );
-            }
-            other => panic!("expected a conferred delegation, got {other:?}"),
-        }
+        let frozen = frozen_of(&child_entry);
+        assert_eq!(opened_as(&child_entry), "/f");
+        assert_eq!(frozen.uid, 1000, "the spawning parent's uid was captured");
+        assert!(
+            frozen.caps.holds(CapabilityId::FS_ACCESS),
+            "the parent's effective set was captured, not the child's"
+        );
+        assert!(
+            frozen.grant.is_none(),
+            "a conferred descriptor carries the parent's own unbounded reach"
+        );
         assert!(child_entry.flags.is_read());
-        // Nothing may run a conferred descriptor under the holder's own
-        // credentials, so it answers no own path.
-        assert!(child_entry.own_path().is_none());
+        // Nothing may run a conferred descriptor as the holder's own
+        // identity, so it answers no own node.
+        assert!(child_entry.own_node().is_none());
 
         // The hand-off outlives the hand: the parent closing its own
         // descriptor leaves the child's intact.
@@ -25084,9 +25742,11 @@ mod tests {
         let dir_fd = u32::try_from(
             h.fs_open(
                 &ctx,
+                FD_CWD,
                 dir_addr,
                 dir_path.len(),
                 OpenFlags::READ.union(OpenFlags::DIRECTORY),
+                0,
             )
             .expect("the parent opens the directory"),
         )
@@ -25097,7 +25757,7 @@ mod tests {
                 .read()
                 .open_file_entry(ProcessId(2), dir_fd)
                 .expect("parent entry")
-                .delegatable_path()
+                .handed_on(1000, CapabilitySet::empty(), 0)
                 .is_none(),
             "a directory is not a delegatable byte descriptor"
         );
@@ -25164,7 +25824,7 @@ mod tests {
         .with_filesystem(fs);
 
         let fd = u32::try_from(
-            h.fs_open(&pctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&pctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("the parent opens the document"),
         )
         .expect("a descriptor number");
@@ -25250,9 +25910,11 @@ mod tests {
         let fd = u32::try_from(
             h.fs_open(
                 &pctx,
+                FD_CWD,
                 0x1000,
                 "/f".len(),
                 OpenFlags::WRITE.union(OpenFlags::APPEND),
+                0,
             )
             .expect("the parent opens the log for append"),
         )
@@ -25285,55 +25947,52 @@ mod tests {
         );
     }
 
-    /// Conferring re-expresses only a **path** backing. A delegation reaching
-    /// a grandchild keeps the identity its own grantor captured, so a spawn
-    /// can never launder a descriptor into authority its holder was never
-    /// given; a pipe, pty, or resource end has its own authority model and is
-    /// cloned untouched.
+    /// Conferring freezes only a file the parent opened itself. A delegation
+    /// reaching a grandchild keeps the identity its own grantor froze, so a
+    /// spawn can never launder a descriptor into authority its holder was
+    /// never given; a pipe, pty, or resource end has its own authority model
+    /// and is cloned untouched.
     #[test]
-    fn conferring_widens_no_backing_but_a_path() {
-        let grantor = CapabilitySet::empty();
-        let delegated = crate::aspace::OpenFile::new(
-            crate::aspace::OpenBacking::Delegated(crate::aspace::DelegatedFile {
-                path: String::from("/granted"),
+    fn conferring_widens_no_backing_but_an_own_file() {
+        let granted = node_entry(
+            "/granted",
+            crate::fs::Authority::Frozen(crate::fs::FrozenAuthority {
                 uid: 1000,
-                caps: grantor,
-                write_ceiling: Some(64),
+                caps: CapabilitySet::empty(),
+                grant: Some(crate::fs::Grant {
+                    write_ceiling: Some(64),
+                }),
             }),
             OpenFlags::READ.union(OpenFlags::WRITE),
         );
-        let passed_on = delegated.conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]));
-        match &passed_on.backing {
-            crate::aspace::OpenBacking::Delegated(file) => {
-                assert_eq!(file.uid, 1000, "the original grantor's identity stands");
-                assert!(!file.caps.holds(CapabilityId::FS_ACCESS));
-                assert_eq!(
-                    file.write_ceiling,
-                    Some(64),
-                    "the grant's extent ceiling is not lifted by passing it on"
-                );
-            }
-            other => panic!("expected the delegation to pass through, got {other:?}"),
-        }
-
-        // A path backing is the one that converts, and it takes the
-        // conferring task's identity whole.
-        let own = crate::aspace::OpenFile::new(
-            crate::aspace::OpenBacking::Path(String::from("/own")),
-            OpenFlags::WRITE,
+        let passed_on =
+            frozen_of(&granted.conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS])));
+        assert_eq!(
+            passed_on.uid, 1000,
+            "the original grantor's identity stands"
         );
-        match &own
-            .conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]))
-            .backing
-        {
-            crate::aspace::OpenBacking::Delegated(file) => {
-                assert_eq!(file.path, "/own");
-                assert_eq!(file.uid, 4242);
-                assert!(file.caps.holds(CapabilityId::FS_ACCESS));
-                assert_eq!(file.write_ceiling, None);
-            }
-            other => panic!("expected a conferred delegation, got {other:?}"),
-        }
+        assert!(!passed_on.caps.holds(CapabilityId::FS_ACCESS));
+        assert_eq!(
+            ceiling_of(&passed_on),
+            Some(64),
+            "the grant's extent ceiling is not lifted by passing it on"
+        );
+
+        // A file the parent opened itself is the one that converts, and it
+        // takes the conferring task's identity whole, on the same node.
+        let own = node_entry("/own", crate::fs::Authority::Holder, OpenFlags::WRITE);
+        let conferred = own.conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]));
+        let frozen = frozen_of(&conferred);
+        assert_eq!(opened_as(&conferred), "/own");
+        assert_eq!(frozen.uid, 4242);
+        assert!(frozen.caps.holds(CapabilityId::FS_ACCESS));
+        assert!(frozen.grant.is_none());
+        assert!(
+            conferred.node().zip(own.node()).is_some_and(|(a, b)| {
+                a.node.instance() == b.node.instance() && a.node.pinned() == b.node.pinned()
+            }),
+            "the conferred descriptor is bound to the parent's node"
+        );
 
         // Conferring re-expresses the authority, never the description: the
         // two handles still walk the file together, so a child a shell
@@ -25346,19 +26005,18 @@ mod tests {
             "a conferred handle shares the open file description"
         );
 
-        // A directory stays a path. A delegation expresses byte access to one
-        // file, so conferring a listing would turn a working directory
-        // descriptor into one `fs_readdir` refuses.
-        let dir = crate::aspace::OpenFile::new(
-            crate::aspace::OpenBacking::Path(String::from("/dir")),
+        // A directory stays its holder's own. A delegation expresses byte
+        // access to one file, so conferring a listing would turn a working
+        // directory descriptor into one `fs_readdir` refuses.
+        let dir = node_entry(
+            "/dir",
+            crate::fs::Authority::Holder,
             OpenFlags::READ.union(OpenFlags::DIRECTORY),
         );
         assert!(
-            matches!(
-                dir.conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]))
-                    .backing,
-                crate::aspace::OpenBacking::Path(ref p) if p == "/dir"
-            ),
+            dir.conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]))
+                .own_node()
+                .is_some(),
             "a directory descriptor must not be conferred as a byte delegation"
         );
     }
@@ -25835,6 +26493,13 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
         )
         .with_process_wait(wait_producer);
+        let volume = crate::test_bundle::test_volume();
+        aspaces.write().set_cwd(
+            ProcessId(2),
+            Cwd::Dir(crate::test_bundle::node_handle(
+                crate::test_bundle::opened_node(&volume, 1, NodeKind::Directory, "/Users/bob"),
+            )),
+        );
 
         let pid = h
             .spawn(
@@ -25854,6 +26519,9 @@ mod tests {
             *wait_producer.last_register.lock(),
             Some((2, pid, crate::procwait::ChildListing::Private))
         );
+        // It starts at the root, holding none of the spawner's directories.
+        assert!(matches!(aspaces.read().cwd(ProcessId(pid)), Cwd::Root));
+        assert_eq!(volume.outstanding(), 1, "only the spawner pins its own");
         let guard = table.read();
         let record = guard.caps_for(SecTaskId(pid)).expect("child record");
         assert!(record.is_sandboxed());
@@ -26518,9 +27186,11 @@ mod tests {
         assert_eq!(
             h.fs_open(
                 &ctx,
+                FD_CWD,
                 0x1000,
                 SPAWN_PATH.len(),
-                OpenFlags::READ.union(OpenFlags::DIRECTORY)
+                OpenFlags::READ.union(OpenFlags::DIRECTORY),
+                0,
             ),
             Ok(6)
         );
@@ -29215,6 +29885,191 @@ mod tests {
         assert_eq!(child.supplementary_gids(), &[GroupId(99)]);
     }
 
+    /// The kernel a spawn into a working directory runs in: `ProcessId(2)`
+    /// spawning as uid 2000, whose account may be granted `CAP_FS_ACCESS`,
+    /// with `/Users/ada` named as the child's directory.
+    struct ChdirSpawnRig {
+        sink: &'static TestSink,
+        arch: Arc<TestArch>,
+        sched: Scheduler<TestArch>,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        frames: FrameAllocator,
+        identity: &'static LateIdentity,
+        programs: &'static ProgramRegistry,
+    }
+
+    impl ChdirSpawnRig {
+        const HOME: &'static [u8] = b"/Users/ada";
+
+        fn new() -> Self {
+            use tairix_kernel_sec::{GroupRecord, IdentityTableBuilder, UserRecord};
+            install_trace_filter();
+            let sink = make_sink();
+            let arch = Arc::new(TestArch::with_cpus(1));
+            let in_home = SpawnAttach {
+                working_directory: Some(PathAt {
+                    dirfd: FD_CWD,
+                    len: u32::try_from(Self::HOME.len()).expect("a short path"),
+                    path: 0x1000 + SPAWN_PATH.len() as u64,
+                }),
+                ..as_user_2000()
+            };
+            let payload = [SPAWN_PATH, Self::HOME].concat();
+            let (space, physmap) = send_aspace_with_attach(&payload, &[in_home]);
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            aspaces
+                .write()
+                .register(ProcessId(2), space, physmap)
+                .expect("caller registration");
+            let mut builder = IdentityTableBuilder::new();
+            builder.push_group(GroupRecord { gid: GroupId(88) });
+            let mut grants = CapabilitySet::empty();
+            grants.insert(CapabilityId::FS_ACCESS);
+            grants.insert(CapabilityId::USER_ADMIN);
+            builder.push_user(UserRecord {
+                uid: UserId(2000),
+                primary_gid: GroupId(88),
+                supplementary_gids: alloc::vec::Vec::new(),
+                capability_grants: grants,
+            });
+            let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+            identity
+                .install(builder.verify(sink).expect("valid identity table"))
+                .expect("identity install");
+            let programs =
+                crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
+                    EmbeddedProgram {
+                        path: SPAWN_PATH,
+                        rxe: SPAWN_RXE,
+                        caps: &[],
+                        args: &[],
+                    },
+                ])))));
+            Self {
+                sink,
+                sched: make_sched(arch.clone()),
+                arch,
+                table: RwLock::new(CapTable::new()),
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                frames: spawn_test_frames(),
+                identity,
+                programs,
+            }
+        }
+
+        /// The spawner, holding `caps` besides the right to spawn as uid 2000.
+        fn spawner(&self, caps: &[CapabilityId]) -> TaskCapabilities {
+            let held = [
+                &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER][..],
+                caps,
+            ]
+            .concat();
+            let record = make_caps_record(2, &held, self.sink);
+            self.table.write().insert(record.clone());
+            record
+        }
+
+        fn spawn(&self, caps: &TaskCapabilities, fs: &'static RecordingFs) -> Result<u64, Errno> {
+            let ctx = CallerContext {
+                task_id: SecTaskId(2),
+                caps,
+            };
+            spawn_handler(
+                &self.sched,
+                &self.table,
+                &self.arch,
+                self.sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+                &self.frames,
+                self.programs,
+            )
+            .with_identity(self.identity)
+            .with_filesystem(fs)
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+        }
+
+        fn admitted(&self) -> usize {
+            self.table.read().iter().count()
+        }
+    }
+
+    /// A spawn naming a working directory resolves it as the child — the
+    /// target user, not the spawner — and starts the child there.
+    #[test]
+    fn a_spawn_starts_its_child_in_the_directory_it_names_as_the_child() {
+        let rig = ChdirSpawnRig::new();
+        let caps = rig.spawner(&[CapabilityId::FS_ACCESS, CapabilityId::AUDIT_READ]);
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let pid = rig
+            .spawn(&caps, fs)
+            .expect("a spawn into a directory the child may enter");
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::string::String::from(
+                "chdir uid=2000 path=/Users/ada"
+            )],
+            "resolved as the child"
+        );
+        assert_eq!(
+            fs.chdir_caps(),
+            alloc::vec![alloc::vec![CapabilityId::FS_ACCESS]],
+            "with only what both the spawner holds and the account may be granted"
+        );
+        let cwd = rig.aspaces.read().cwd(ProcessId(pid));
+        match cwd {
+            Cwd::Dir(handle) => assert_eq!(&*handle.opened_as, "/Users/ada"),
+            other => panic!("the child starts where the spawn named, not {other:?}"),
+        }
+    }
+
+    /// A directory the child may not enter refuses the spawn and admits
+    /// nothing.
+    #[test]
+    fn a_spawn_into_a_directory_the_child_may_not_enter_admits_nothing() {
+        let rig = ChdirSpawnRig::new();
+        let caps = rig.spawner(&[CapabilityId::FS_ACCESS]);
+        let mut refusing = RecordingFs::new();
+        refusing.open_err = Some(Errno::PermissionDenied);
+        let refusing: &'static RecordingFs = crate::forever(Box::new(refusing));
+        let admitted = rig.admitted();
+        assert_eq!(rig.spawn(&caps, refusing), Err(Errno::PermissionDenied));
+        assert_eq!(rig.admitted(), admitted, "nothing admitted");
+    }
+
+    /// A spawner with no filesystem authority of its own names no directory,
+    /// whatever the account may reach.
+    #[test]
+    fn a_spawner_without_filesystem_authority_names_no_directory() {
+        let rig = ChdirSpawnRig::new();
+        let caps = rig.spawner(&[]);
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let admitted = rig.admitted();
+        assert_eq!(rig.spawn(&caps, fs), Err(Errno::PermissionDenied));
+        assert!(fs.calls().is_empty(), "nothing is resolved for it");
+        assert_eq!(rig.admitted(), admitted, "nothing admitted");
+    }
+
     /// Regression test for defect B1 (`plans/CAPABILITY_USE.md`): a
     /// spawn-as-user switch derives the child's effective set as
     /// `manifest request ∩ the target account's capability ceiling` — the
@@ -30246,27 +31101,8 @@ mod tests {
         }
     }
 
-    /// Build the shared file-mapping fixture: a task with `/big` staged in
-    /// its user page (so `fs_open` can read the path), a recording
-    /// filesystem serving `read_data`, and a recording file-map producer.
-    /// The identity the lock fixture's filesystem reports, so a lock keys on
-    /// a real node rather than the fail-closed placeholder.
-    ///
-    /// The lock registry is one process-global table keyed by [`FileId`], so
-    /// every test names its **own** node: sharing one made a lock taken in one
-    /// test visible to a query in another running beside it, which is a flaky
-    /// test rather than a lock defect.
-    ///
-    /// [`FileId`]: tairix_abi::FileId
-    const fn lock_file_id(node: u64) -> tairix_abi::FileId {
-        tairix_abi::FileId {
-            volume: [3u8; 16],
-            node,
-        }
-    }
-
-    /// A handler over a filesystem that reports one regular file at `/big`
-    /// with a real identity, ready for the lock calls.
+    /// A handler over a filesystem whose every open of `/big` reaches the one
+    /// node pinned as `node`, ready for the lock calls.
     /// The handlers, the caller and the guard serialising the process-global
     /// advisory-lock registry, which the returned tuple holds for the test's
     /// duration: a sibling case resets that registry on entry, and a reset
@@ -30322,7 +31158,7 @@ mod tests {
             caps,
         };
         let mut mock = RecordingFs::new();
-        mock.stat.id = lock_file_id(node);
+        mock.pinned = node;
         let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_filesystem(fs);
@@ -30335,8 +31171,11 @@ mod tests {
         ctx: &CallerContext<'_>,
         flags: OpenFlags,
     ) -> u32 {
-        u32::try_from(h.fs_open(ctx, 0x1000, "/big".len(), flags).expect("open"))
-            .expect("a descriptor fits a u32")
+        u32::try_from(
+            h.fs_open(ctx, FD_CWD, 0x1000, "/big".len(), flags, 0)
+                .expect("open"),
+        )
+        .expect("a descriptor fits a u32")
     }
 
     /// A whole-file request, the shape most of the cases use.
@@ -30575,43 +31414,14 @@ mod tests {
         }
     }
 
+    /// A grant is a bounded byte access as someone else's frozen identity,
+    /// not a coordination role: its holder takes no lock through it, while a
+    /// descriptor a parent conferred at spawn shares its description's locks.
     #[test]
-    fn a_backing_with_no_stable_identity_is_refused_rather_than_aliased() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch: &'static Arc<TestArch> =
-            crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
-        let sched = crate::forever(Box::new(make_sched(arch.clone())));
-        let table = crate::forever(Box::new(RwLock::new(CapTable::new())));
-        let ipc = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
-        let (space, physmap) =
-            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/big");
-        let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng = crate::forever(Box::new(unseeded_rng()));
-        aspaces
-            .write()
-            .register(ProcessId(2), space, physmap)
-            .expect("registration succeeds");
-        let irq = crate::forever(Box::new(IrqTable::new(31)));
-        let ctl = crate::forever(Box::new(UnsupportedController));
-        let caps = crate::forever(Box::new(make_caps_record(
-            2,
-            &[CapabilityId::FS_ACCESS],
-            sink,
-        )));
-        let ctx = CallerContext {
-            task_id: SecTaskId(2),
-            caps,
-        };
-        // The default mock reports `FileId::NONE`: no identity to key a lock
-        // on, so two unrelated nodes would share one owner's records.
-        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
-        let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
-            .with_filesystem(fs);
-        let fd = lock_open(&h, &ctx, OpenFlags::READ);
+    fn a_granted_descriptor_is_not_a_lock_subject() {
+        let (aspaces, h, ctx, _registry) = lock_fixture(46);
         let (start, len) = whole();
-        assert_eq!(
+        let lock = |fd| {
             h.fs_lock(
                 &ctx,
                 fd,
@@ -30619,9 +31429,150 @@ mod tests {
                 LockFlags::NONBLOCK,
                 LockRange::new(start, len).expect("range"),
                 tairix_abi::LOCK_WAIT_FOREVER,
+            )
+        };
+        let frozen = |grant| {
+            crate::fs::Authority::Frozen(crate::fs::FrozenAuthority {
+                uid: 1000,
+                caps: caps_with(&[CapabilityId::FS_ACCESS]),
+                grant,
+            })
+        };
+        for (fd, grant, answer) in [
+            (
+                0,
+                Some(crate::fs::Grant {
+                    write_ceiling: Some(0),
+                }),
+                Err(Errno::NotSupported),
             ),
-            Err(Errno::NotSupported)
+            (1, None, Ok(0)),
+        ] {
+            let installed = aspaces.write().install_std_entry(
+                ProcessId(2),
+                fd,
+                node_entry("/big", frozen(grant), OpenFlags::READ),
+            );
+            assert!(installed.is_ok());
+            assert_eq!(lock(fd), answer);
+        }
+    }
+
+    /// A lock is judged on the descriptor's authority, not on the caller's
+    /// own capabilities: a descriptor conferred at spawn locks for a child
+    /// holding no filesystem capability, while the opener's own descriptor
+    /// locks only while its opener holds one.
+    #[test]
+    fn a_lock_is_judged_on_the_descriptors_authority() {
+        let (aspaces, h, ctx, _registry) = lock_fixture(48);
+        let bare: &'static TaskCapabilities =
+            crate::forever(Box::new(make_caps_record(2, &[], make_sink())));
+        let child = CallerContext {
+            task_id: SecTaskId(2),
+            caps: bare,
+        };
+        let (start, len) = whole();
+        let lock = |caller: &CallerContext<'_>, fd| {
+            h.fs_lock(
+                caller,
+                fd,
+                LockMode::Shared,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            )
+        };
+        let conferred = crate::fs::Authority::Frozen(crate::fs::FrozenAuthority {
+            uid: 1000,
+            caps: caps_with(&[CapabilityId::FS_ACCESS]),
+            grant: None,
+        });
+        assert!(aspaces
+            .write()
+            .install_std_entry(
+                ProcessId(2),
+                0,
+                node_entry("/big", conferred, OpenFlags::READ)
+            )
+            .is_ok());
+        assert_eq!(lock(&child, 0), Ok(0), "the conferred authority locks");
+        let own = lock_open(&h, &ctx, OpenFlags::READ);
+        assert_eq!(
+            lock(&child, own),
+            Err(Errno::PermissionDenied),
+            "an opener with no filesystem capability locks nothing"
         );
+        assert_eq!(lock(&ctx, own), Ok(0));
+    }
+
+    /// A lock reaches no further than the bytes it guards: once the owner's
+    /// chmod shuts another user's writes out, that user's exclusive lock is
+    /// refused too, while its shared lock still stands on its read access.
+    #[test]
+    fn a_chmod_that_shuts_a_writer_out_refuses_its_exclusive_lock() {
+        let _registry = crate::filelock::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xD4; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.create("/Storage/vol/shared.db");
+        fx.svc
+            .set_mode(
+                uid,
+                &caps,
+                at("/Storage/vol/shared.db"),
+                0o666,
+                crate::fs::FinalLink::Follow,
+            )
+            .expect("its owner opens it to all");
+        // The system user owns nothing here, so it reaches the file as "other".
+        let other_caps = make_owned_caps_record(fx.owner, 0, &[CapabilityId::FS_ACCESS], sink);
+        let other = CallerContext {
+            task_id: SecTaskId(fx.owner),
+            caps: &other_caps,
+        };
+        h.copy_out_user(&other, 0x1000, b"/Storage/vol/shared.db")
+            .expect("staged");
+        let fd = h
+            .fs_open(
+                &other,
+                FD_CWD,
+                0x1000,
+                "/Storage/vol/shared.db".len(),
+                OpenFlags::READ.union(OpenFlags::WRITE),
+                0,
+            )
+            .expect("opens for reading and writing");
+        let fd = u32::try_from(fd).expect("a descriptor");
+        let lock = |mode| {
+            h.fs_lock(
+                &other,
+                fd,
+                mode,
+                LockFlags::NONBLOCK,
+                LockRange::new(0, tairix_abi::LOCK_LEN_TO_END).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            )
+        };
+        assert_eq!(lock(LockMode::Exclusive), Ok(0));
+        assert_eq!(lock(LockMode::Unlock), Ok(0));
+        fx.svc
+            .set_mode(
+                uid,
+                &caps,
+                at("/Storage/vol/shared.db"),
+                0o444,
+                crate::fs::FinalLink::Follow,
+            )
+            .expect("its owner shuts writers out");
+        assert_eq!(lock(LockMode::Exclusive), Err(Errno::PermissionDenied));
+        assert_eq!(lock(LockMode::Shared), Ok(0));
+        assert_eq!(lock(LockMode::Unlock), Ok(0));
+        assert_eq!(h.fs_close(&other, fd), Ok(0));
     }
 
     #[test]
@@ -30734,14 +31685,11 @@ mod tests {
             .expect("registration succeeds");
         let irq = crate::forever(Box::new(IrqTable::new(31)));
         let ctl = crate::forever(Box::new(UnsupportedController));
-        let caps = crate::forever(Box::new(make_caps_record(
-            2,
-            &[CapabilityId::FS_ACCESS],
-            sink,
-        )));
+        let record = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        table.write().insert(record.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
-            caps,
+            caps: crate::forever(Box::new(record)),
         };
         let mut mock = RecordingFs::new();
         mock.read_data = read_data;
@@ -30886,7 +31834,7 @@ mod tests {
     fn file_map_validates_reserves_and_records_the_region() {
         let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -30904,7 +31852,7 @@ mod tests {
         assert!(fm.reserves.lock().is_empty());
 
         // A sub-page length maps: reserved with the raw length, recorded
-        // and charged page-rounded, at the mapping-time identity.
+        // and charged page-rounded.
         let base = h.file_map(&ctx, fd, 0x3000, 0x1001).expect("maps");
         assert_eq!(base, FILE_REGION_BASE);
         assert_eq!(*fm.reserves.lock(), std::vec![0x1001]);
@@ -30917,7 +31865,7 @@ mod tests {
             .read()
             .file_page_source(ProcessId(2), base)
             .expect("the first page reads from the mapping's own offset");
-        assert_eq!(region.path, "/big");
+        assert_eq!(&*region.handle.opened_as, "/big");
         assert_eq!(offset, 0x3000);
     }
 
@@ -30928,7 +31876,7 @@ mod tests {
     fn file_map_refuses_unreadable_and_non_file_descriptors() {
         let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         let wo = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::WRITE)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::WRITE, 0)
                 .expect("open write-only"),
         )
         .unwrap();
@@ -30958,7 +31906,7 @@ mod tests {
             ResourceLimit::new(0x1000, u64::MAX).expect("well-formed"),
         );
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -30985,7 +31933,7 @@ mod tests {
     fn file_unmap_releases_only_the_exact_owned_region() {
         let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -31008,13 +31956,12 @@ mod tests {
     }
 
     /// The fault resolver backs exactly the faulting page: it reads the
-    /// covering page through the secured VFS at the region's file offset
-    /// under the mapping-time identity and maps it at the page base.
+    /// covering page at the region's file offset and maps it at the page base.
     #[test]
     fn resolve_file_fault_reads_and_maps_the_covering_page() {
         let (fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![0xCD; 100]);
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -31041,7 +31988,7 @@ mod tests {
         // No region at all.
         assert!(!h.resolve_file_fault(ProcessId(2), 0x9999_0000));
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -31064,7 +32011,7 @@ mod tests {
     fn resolve_file_fault_folds_the_already_resident_race_as_resolved() {
         let (_fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![1; 8]);
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -31073,6 +32020,67 @@ mod tests {
         assert!(h.resolve_file_fault(ProcessId(2), base));
         *fm.map_page_result.lock() = Err(Errno::OutOfMemory);
         assert!(!h.resolve_file_fault(ProcessId(2), base));
+    }
+
+    /// A mapping of the opener's own descriptor faults as the opener is now:
+    /// a page not yet resident is read as its current uid, and refused once
+    /// it holds no filesystem capability.
+    #[test]
+    fn a_mapping_faults_as_its_openers_live_identity() {
+        let (fs, fm, _aspaces, h, ctx, sink) = file_map_fixture(std::vec![0xAB; 3 * PAGE_SIZE]);
+        let fd = u32::try_from(
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0, 0x3000).expect("maps");
+        let page = PAGE_SIZE as u64;
+        h.caps.write().insert(make_owned_caps_record(
+            2,
+            3000,
+            &[CapabilityId::FS_ACCESS],
+            sink,
+        ));
+        assert!(h.resolve_file_fault(ProcessId(2), base + page));
+        let calls = fs.calls();
+        let read_call = calls.iter().rev().find(|c| c.starts_with("read")).unwrap();
+        assert!(read_call.contains("uid=3000"), "got: {read_call}");
+        h.caps.write().insert(make_caps_record(2, &[], sink));
+        assert!(!h.resolve_file_fault(ProcessId(2), base + 2 * page));
+        assert_eq!(*fm.pages.lock(), std::vec![(base + page, PAGE_SIZE)]);
+    }
+
+    /// A mapping of a conferred descriptor faults as the identity conferred
+    /// with it, which the holder's own lack of a filesystem capability does
+    /// not reach.
+    #[test]
+    fn a_conferred_mapping_faults_as_its_conferred_identity() {
+        let (fs, fm, aspaces, h, _ctx, sink) = file_map_fixture(std::vec![0xAB; PAGE_SIZE]);
+        let unprivileged = make_caps_record(2, &[], sink);
+        h.caps.write().insert(unprivileged.clone());
+        let child = CallerContext {
+            task_id: SecTaskId(2),
+            caps: crate::forever(Box::new(unprivileged)),
+        };
+        let conferred = crate::fs::Authority::Frozen(crate::fs::FrozenAuthority {
+            uid: 2000,
+            caps: caps_with(&[CapabilityId::FS_ACCESS]),
+            grant: None,
+        });
+        assert!(aspaces
+            .write()
+            .install_std_entry(
+                ProcessId(2),
+                0,
+                node_entry("/big", conferred, OpenFlags::READ)
+            )
+            .is_ok());
+        let base = h.file_map(&child, 0, 0, 0x1000).expect("maps");
+        assert!(h.resolve_file_fault(ProcessId(2), base));
+        assert_eq!(*fm.pages.lock(), std::vec![(base, PAGE_SIZE)]);
+        let calls = fs.calls();
+        let read_call = calls.iter().rev().find(|c| c.starts_with("read")).unwrap();
+        assert!(read_call.contains("uid=2000"), "got: {read_call}");
     }
 
     /// A `copy_in_user` miss inside a live file region is offered to the
@@ -31084,7 +32092,7 @@ mod tests {
     fn copy_in_user_offers_the_miss_to_the_file_resolver_and_stays_bounded() {
         let (fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![0xEE; PAGE_SIZE]);
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -31180,7 +32188,7 @@ mod tests {
     fn record_fault_exit_audits_the_kill_with_a_fault_class() {
         let (_fs, _fm, _aspaces, h, ctx, sink) = file_map_fixture(Vec::new());
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -31341,10 +32349,19 @@ mod tests {
                 region_base,
                 1,
                 crate::aspace::FileRegion {
-                    path: String::from("/big"),
+                    handle: node_entry(
+                        "/big",
+                        crate::fs::Authority::Frozen(crate::fs::FrozenAuthority {
+                            uid: 1000,
+                            caps: tairix_caps::CapabilitySet::empty(),
+                            grant: None,
+                        }),
+                        OpenFlags::READ,
+                    )
+                    .node()
+                    .cloned()
+                    .expect("a node"),
                     offset: 0,
-                    uid: 1000,
-                    caps: tairix_caps::CapabilitySet::empty(),
                 },
             )
             .expect("a disjoint extent is recorded");
@@ -33587,7 +34604,7 @@ mod tests {
             caps: &caps,
         };
 
-        // A 1 GiB outbound bus window (the BCM2711 PCIe geometry): CPU base
+        // A 1 GiB outbound bus window: CPU base
         // 0x6_0000_0000, PCIe-space base 0xC000_0000.
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
@@ -33794,8 +34811,8 @@ mod tests {
         assert!(facility.last.lock().is_none());
     }
 
-    /// A translating inbound-viewport DMA grant (`dma_translated`, e.g. the
-    /// Pi 4's `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`) now reaches the
+    /// A translating inbound-viewport DMA grant (`dma_translated`, e.g.
+    /// `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`) now reaches the
     /// carve mechanism: it is no longer rejected pre-carve. The carve runs
     /// bounded by the grant's CPU-side `addr_limit` (never a caller-supplied
     /// bound); with no caller address space registered the
@@ -36020,7 +37037,7 @@ mod tests {
         );
         assert_eq!(
             fs.calls(),
-            alloc::vec![alloc::string::String::from("sync uid=1000")],
+            alloc::vec![alloc::string::String::from("sync_all uid=1000")],
             "the flush ran once under the caller's attested uid"
         );
         let flushed = fs.sync_stamp().expect("the flush was asked for");
@@ -38990,12 +40007,12 @@ mod tests {
         assert_eq!(alloc(first, 0x1000), granted);
         assert!(holds(first, 77) && holds(first, 78));
         assert_eq!(msi.minted(), 2);
-        assert!(aspaces.write().withdraw(ProcessId(first)));
+        assert!(aspaces.write().withdraw(ProcessId(first)).was_present());
         for _ in 0..8 {
             let restarted = load(Some(9));
             assert_eq!(alloc(restarted, 0x1000), granted);
             assert!(holds(restarted, 77));
-            assert!(aspaces.write().withdraw(ProcessId(restarted)));
+            assert!(aspaces.write().withdraw(ProcessId(restarted)).was_present());
         }
         assert_eq!(msi.minted(), 2, "restarts mint nothing");
 
@@ -39574,7 +40591,7 @@ mod tests {
         }
     }
 
-    /// The firmware's 1080p console surface on a Pi 4.
+    /// A firmware's 1080p console surface.
     fn firmware_console() -> crate::console::ConsoleSurface {
         crate::console::ConsoleSurface {
             phys: 0x3E40_2000,
@@ -39731,7 +40748,7 @@ mod tests {
         )))
     }
 
-    /// The Pi 4 display engine's aperture onto its peripherals: a window that
+    /// A display engine's aperture onto its peripherals: a window that
     /// starts above the bottom of memory.
     fn peripheral_window() -> HwResource {
         HwResource::dma_translated(
@@ -40597,8 +41614,8 @@ mod tests {
             tairix_abi::HwDeviceClass::Display,
         );
         let keys = [
-            tairix_abi::HwMatchKey::compatible(b"brcm,bcm2711-hdmi0").expect("fits"),
-            tairix_abi::HwMatchKey::compatible(b"brcm,hdmi").expect("fits"),
+            tairix_abi::HwMatchKey::compatible(b"vendor,hdmi0").expect("fits"),
+            tairix_abi::HwMatchKey::compatible(b"vendor,hdmi").expect("fits"),
         ];
         for key in keys {
             node.push_match_key(key).expect("room");
@@ -41512,7 +42529,7 @@ mod tests {
             Err(Errno::Busy),
             "not while the earlier instance lives"
         );
-        aspaces.write().withdraw(ProcessId(3));
+        drop(aspaces.write().withdraw(ProcessId(3)));
         aspaces
             .write()
             .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Untranslated)
@@ -44962,10 +45979,11 @@ mod tests {
             kind: WaitSourceKind::PeerExit,
             id: 0,
             token: 7,
-            file: FileId::NONE,
+            node: 0,
             observed: 0,
             pacing: crate::fswatch::Pacing::default(),
             table: None,
+            pin: None,
         };
         let ready =
             || h.waitset_member_state(&ctx, &member, 0, 0) == crate::fswatch::MemberState::Ready;
@@ -45024,9 +46042,11 @@ mod tests {
         let dir = u32::try_from(
             h.fs_open(
                 &ctx,
+                FD_CWD,
                 0x1000,
                 "/f".len(),
                 OpenFlags::READ.union(OpenFlags::DIRECTORY),
+                0,
             )
             .expect("open directory"),
         )
@@ -45042,7 +46062,7 @@ mod tests {
         // A resolve-only handle conveys neither reading nor writing, so
         // there is nothing to delegate.
         let bare = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::empty())
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::empty(), 0)
                 .expect("open resolve-only"),
         )
         .unwrap();
@@ -45053,7 +46073,7 @@ mod tests {
         // names no one process, are both the same `NotFound` as an unopened
         // descriptor, so the reply shape confirms nothing about who exists.
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open read-only"),
         )
         .unwrap();
@@ -45089,9 +46109,11 @@ mod tests {
         let rw = u32::try_from(
             h.fs_open(
                 &ctx,
+                FD_CWD,
                 0x1000,
                 "/f".len(),
                 OpenFlags::READ.union(OpenFlags::WRITE),
+                0,
             )
             .expect("open read-write"),
         )
@@ -45116,7 +46138,7 @@ mod tests {
         let recipient_caps = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
 
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open read-only"),
         )
         .unwrap();
@@ -45167,13 +46189,12 @@ mod tests {
             .open_file_entry(ProcessId(3), rfd)
             .expect("descriptor recorded");
         assert_eq!(entry.flags, OpenFlags::READ);
-        match &entry.backing {
-            crate::aspace::OpenBacking::Delegated(file) => {
-                assert_eq!(file.path, "/f");
-                assert_eq!(file.uid, 1000, "the grantor's uid was captured");
-            }
-            other => panic!("expected a delegated backing, got {other:?}"),
-        }
+        assert_eq!(opened_as(&entry), "/f");
+        assert_eq!(
+            frozen_of(&entry).uid,
+            1000,
+            "the grantor's uid was captured"
+        );
 
         // One-shot: a second redemption of the same handle is refused.
         assert_eq!(h.fd_redeem(&rctx, handle), Err(Errno::NotFound));
@@ -45203,7 +46224,7 @@ mod tests {
         let h = rig.handlers(fs);
 
         let fd = u32::try_from(
-            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&gctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("grantor opens"),
         )
         .unwrap();
@@ -45249,7 +46270,7 @@ mod tests {
         let second = h
             .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
             .expect("second grant mints");
-        rig.aspaces.write().withdraw(ProcessId(3));
+        drop(rig.aspaces.write().withdraw(ProcessId(3)));
         assert_eq!(
             rig.aspaces.write().redeem_fd_delegation(
                 ProcessId(3),
@@ -45308,7 +46329,7 @@ mod tests {
         };
 
         let fd = u32::try_from(
-            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&gctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("grantor opens"),
         )
         .unwrap();
@@ -45339,17 +46360,13 @@ mod tests {
             .open_file_entry(GRANT_ONWARD.process, ofd)
             .expect("descriptor recorded");
         assert_eq!(entry.flags, OpenFlags::READ);
-        match &entry.backing {
-            crate::aspace::OpenBacking::Delegated(file) => {
-                assert_eq!(file.path, "/f");
-                assert_eq!(
-                    file.uid, 1000,
-                    "the relayed delegation keeps the first grantor's identity"
-                );
-                assert_eq!(file.write_ceiling, Some(0));
-            }
-            other => panic!("expected a delegated backing, got {other:?}"),
-        }
+        let frozen = frozen_of(&entry);
+        assert_eq!(opened_as(&entry), "/f");
+        assert_eq!(
+            frozen.uid, 1000,
+            "the relayed delegation keeps the first grantor's identity"
+        );
+        assert_eq!(ceiling_of(&frozen), Some(0));
 
         // And the onward read runs under that first grantor's identity, not
         // the relay's — the relay added nothing by holding it.
@@ -45381,9 +46398,11 @@ mod tests {
         let fd = u32::try_from(
             h.fs_open(
                 &gctx,
+                FD_CWD,
                 0x1000,
                 "/f".len(),
                 OpenFlags::READ.union(OpenFlags::WRITE),
+                0,
             )
             .expect("grantor opens read-write"),
         )
@@ -45404,13 +46423,9 @@ mod tests {
             .open_file_entry(GRANT_RECIPIENT.process, held)
             .expect("descriptor recorded");
         assert_eq!(entry.flags, OpenFlags::READ.union(OpenFlags::WRITE));
-        match &entry.backing {
-            crate::aspace::OpenBacking::Delegated(file) => {
-                assert_eq!(file.uid, 1000, "operated on as the grantor");
-                assert_eq!(file.write_ceiling, Some(tairix_abi::GRANT_EXTENT_INHERIT));
-            }
-            other => panic!("expected a delegated backing, got {other:?}"),
-        }
+        let frozen = frozen_of(&entry);
+        assert_eq!(frozen.uid, 1000, "operated on as the grantor");
+        assert_eq!(ceiling_of(&frozen), Some(tairix_abi::GRANT_EXTENT_INHERIT));
         assert_eq!(
             h.fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN),
             Err(Errno::OutOfRange),
@@ -45449,9 +46464,11 @@ mod tests {
         let fd = u32::try_from(
             h.fs_open(
                 &gctx,
+                FD_CWD,
                 0x1000,
                 "/f".len(),
                 OpenFlags::READ.union(OpenFlags::WRITE),
+                0,
             )
             .expect("grantor opens read-write"),
         )
@@ -45481,13 +46498,9 @@ mod tests {
                 .open_file_entry(GRANT_ONWARD.process, ofd)
                 .expect("descriptor recorded");
             assert_eq!(entry.flags, OpenFlags::READ.union(OpenFlags::WRITE));
-            match &entry.backing {
-                crate::aspace::OpenBacking::Delegated(file) => {
-                    assert_eq!(file.uid, 1000, "the first grantor's identity is kept");
-                    file.write_ceiling
-                }
-                other => panic!("expected a delegated backing, got {other:?}"),
-            }
+            let frozen = frozen_of(&entry);
+            assert_eq!(frozen.uid, 1000, "the first grantor's identity is kept");
+            ceiling_of(&frozen)
         };
         assert_eq!(onward_ceiling(tairix_abi::GRANT_EXTENT_INHERIT), Some(HELD));
         assert_eq!(
@@ -45519,7 +46532,7 @@ mod tests {
             caps: &recipient_caps,
         };
         let fd = u32::try_from(
-            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&gctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("grantor opens"),
         )
         .unwrap();
@@ -45587,7 +46600,7 @@ mod tests {
             caps: &other_caps,
         };
         let fd = u32::try_from(
-            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&gctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("grantor opens"),
         )
         .unwrap();
@@ -45679,7 +46692,7 @@ mod tests {
             caps: &reader_caps,
         };
         let fd = u32::try_from(
-            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&gctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("grantor opens"),
         )
         .unwrap();
@@ -45756,9 +46769,11 @@ mod tests {
         let fd = u32::try_from(
             h.fs_open(
                 &gctx,
+                FD_CWD,
                 0x1000,
                 "/blob".len(),
                 OpenFlags::READ.union(OpenFlags::WRITE),
+                0,
             )
             .expect("grantor opens read-write"),
         )
@@ -45843,9 +46858,11 @@ mod tests {
         let fd = u32::try_from(
             h.fs_open(
                 &gctx,
+                FD_CWD,
                 0x1000,
                 "/blob".len(),
                 OpenFlags::READ.union(OpenFlags::WRITE),
+                0,
             )
             .expect("grantor opens read-write"),
         )
@@ -45882,6 +46899,11 @@ mod tests {
             fs.calls()
         );
         assert_eq!(h.fs_sync(&rctx, rfd), Ok(0));
+        assert!(
+            fs.calls().iter().any(|c| c == "sync uid=1000 path=/blob"),
+            "only the descriptor's own volume, under the grantor's identity: {:?}",
+            fs.calls()
+        );
 
         // A mapping records the *grantor's* credential, so every
         // demand-paged read the fault path later authorises uses the
@@ -45894,9 +46916,12 @@ mod tests {
             .read()
             .file_page_source(ProcessId(3), base)
             .expect("region recorded");
-        assert_eq!(region.path, "/blob");
-        assert_eq!(region.uid, 1000);
-        assert!(region.caps.contains(CapabilityId::FS_ACCESS));
+        assert_eq!(&*region.handle.opened_as, "/blob");
+        assert!(matches!(
+            &region.handle.authority,
+            Authority::Frozen(frozen)
+                if frozen.uid == 1000 && frozen.caps.contains(CapabilityId::FS_ACCESS)
+        ));
     }
 
     /// `call_peer_seat` answers only while the ticket is in service, only
@@ -46177,7 +47202,7 @@ mod tests {
         record: &[u8],
         duty: Option<tairix_abi::HwResource>,
     ) {
-        aspaces.write().withdraw(ProcessId(server));
+        drop(aspaces.write().withdraw(ProcessId(server)));
         let (space, physmap) = call_aspace(record);
         aspaces
             .write()
@@ -46618,7 +47643,7 @@ mod tests {
 
         // Once the caller has ended, nothing is minted and no grant table is
         // recreated for a task that draws its id later.
-        aspaces.write().withdraw(ProcessId(client));
+        drop(aspaces.write().withdraw(ProcessId(client)));
         assert_eq!(
             h.shm_grant_peer(&ctx, region, id, ticket.0),
             Err(Errno::NotFound)
@@ -46643,7 +47668,7 @@ mod tests {
 
     /// The fixture every `shm_create_dma` test builds on: a registered,
     /// loaded driver holding `SHM` and a DMA grant, reaching memory through
-    /// the Pi 4 legacy engine's window (CPU `0..1 GiB` at bus `0xC000_0000`).
+    /// a legacy engine's window (CPU `0..1 GiB` at bus `0xC000_0000`).
     struct DmaRegionScene {
         arch: Arc<TestArch>,
         table: RwLock<CapTable>,
@@ -46882,7 +47907,7 @@ mod tests {
         );
         assert_eq!(create(&ctx, high, 4096), Err(Errno::OutOfRange));
         // A caller not loaded for a node has no custody to bind.
-        scene.aspaces.write().withdraw(ProcessId(scene.task));
+        drop(scene.aspaces.write().withdraw(ProcessId(scene.task)));
         let (space, physmap) = call_aspace(b"");
         scene
             .aspaces
@@ -49591,26 +50616,30 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
-        // A foreign task's pipe first, then the caller's own path-backed
+        // A foreign task's pipe first, then the caller's own node-backed
         // descriptor and pipe. Descriptor numbers are per-task, so the
         // foreign read end's *number* resolves in the caller's own table
-        // (here to the path-backed entry) — a member id can never reach
+        // (here to the node-backed entry) — a member id can never reach
         // another task's resource, only mis-name one of the caller's own.
         let (foreign_read_fd, _foreign_write_fd) = aspaces
             .write()
             .open_pipe(ProcessId(0x570C))
             .expect("foreign pipe minted");
-        let file_fd = aspaces
-            .write()
-            .open_file(
-                ProcessId(owner),
-                alloc::string::String::from("/Storage/x"),
+        let file_fd = crate::aspace::FdPromise::new(&aspaces, ProcessId(owner))
+            .expect("a descriptor")
+            .keep(
+                crate::test_bundle::opened_node(
+                    &crate::test_bundle::test_volume(),
+                    1,
+                    NodeKind::RegularFile,
+                    "/Storage/x",
+                ),
                 OpenFlags::READ,
             )
             .expect("file opened");
         assert_eq!(
             foreign_read_fd, file_fd,
-            "the foreign number lands on the caller's path-backed entry"
+            "the foreign number lands on the caller's node-backed entry"
         );
         let (read_fd, write_fd) = aspaces
             .write()
@@ -49645,7 +50674,7 @@ mod tests {
 
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
-        assert!(aspaces.write().withdraw(ProcessId(0x570C)));
+        assert!(aspaces.write().withdraw(ProcessId(0x570C)).was_present());
     }
 
     /// A `Stream` member reports readiness as a non-consuming peek when
@@ -49737,13 +50766,16 @@ mod tests {
         // Closing every write end leaves the member ready for its EOF
         // read (the shell-exited wake), never parked forever.
         drop(write_end);
-        assert!(aspaces.write().close_file(ProcessId(owner), write_fd));
+        assert!(aspaces
+            .write()
+            .close_file(ProcessId(owner), write_fd)
+            .is_some());
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Eof);
 
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
-        assert!(aspaces.write().withdraw(ProcessId(owner)));
+        assert!(aspaces.write().withdraw(ProcessId(owner)).was_present());
     }
 
     /// A handler over one console whose input is an interrupt-style
@@ -49874,8 +50906,8 @@ mod tests {
 
         assert_eq!(crate::waitset::release_owned_by(reader), 1);
         assert_eq!(crate::waitset::release_owned_by(blind), 1);
-        assert!(aspaces.write().withdraw(ProcessId(reader)));
-        assert!(aspaces.write().withdraw(ProcessId(blind)));
+        assert!(aspaces.write().withdraw(ProcessId(reader)).was_present());
+        assert!(aspaces.write().withdraw(ProcessId(blind)).was_present());
     }
 
     /// A console member reports pushed input as a peek: it stays ready until
@@ -49923,7 +50955,7 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
-        assert!(aspaces.write().withdraw(ProcessId(owner)));
+        assert!(aspaces.write().withdraw(ProcessId(owner)).was_present());
     }
 
     /// Pending console input shows only to a reader `stream_read` would
@@ -49982,8 +51014,8 @@ mod tests {
 
         assert_eq!(crate::waitset::release_owned_by(shell), 1);
         assert_eq!(crate::waitset::release_owned_by(child), 1);
-        assert!(aspaces.write().withdraw(ProcessId(shell)));
-        assert!(aspaces.write().withdraw(ProcessId(child)));
+        assert!(aspaces.write().withdraw(ProcessId(shell)).was_present());
+        assert!(aspaces.write().withdraw(ProcessId(child)).was_present());
     }
 
     /// Adding a `StreamRoom` member is owner- and descriptor-checked
@@ -50023,11 +51055,15 @@ mod tests {
             .write()
             .open_pipe(ProcessId(0x5715))
             .expect("foreign pipe minted");
-        let file_fd = aspaces
-            .write()
-            .open_file(
-                ProcessId(owner),
-                alloc::string::String::from("/Storage/x"),
+        let file_fd = crate::aspace::FdPromise::new(&aspaces, ProcessId(owner))
+            .expect("a descriptor")
+            .keep(
+                crate::test_bundle::opened_node(
+                    &crate::test_bundle::test_volume(),
+                    1,
+                    NodeKind::RegularFile,
+                    "/Storage/x",
+                ),
                 OpenFlags::WRITE,
             )
             .expect("file opened");
@@ -50072,8 +51108,8 @@ mod tests {
 
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
-        assert!(aspaces.write().withdraw(ProcessId(owner)));
-        assert!(aspaces.write().withdraw(ProcessId(0x5715)));
+        assert!(aspaces.write().withdraw(ProcessId(owner)).was_present());
+        assert!(aspaces.write().withdraw(ProcessId(0x5715)).was_present());
     }
 
     /// A `StreamRoom` member reports room as a non-consuming peek, goes
@@ -50174,18 +51210,24 @@ mod tests {
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
         drop(read_end);
-        assert!(aspaces.write().close_file(ProcessId(owner), read_fd));
+        assert!(aspaces
+            .write()
+            .close_file(ProcessId(owner), read_fd)
+            .is_some());
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         assert_eq!(write_end.try_write(b"x"), crate::pipe::WriteStep::Broken);
 
         // A closed write descriptor simply stops reporting, never errs.
         drop(write_end);
-        assert!(aspaces.write().close_file(ProcessId(owner), write_fd));
+        assert!(aspaces
+            .write()
+            .close_file(ProcessId(owner), write_fd)
+            .is_some());
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
-        assert!(aspaces.write().withdraw(ProcessId(owner)));
+        assert!(aspaces.write().withdraw(ProcessId(owner)).was_present());
     }
 
     /// Task-exit reclamation tears down every port the dead task bound:
@@ -50656,7 +51698,7 @@ mod tests {
 
     /// Task-exit reclamation cancels the calls the dead task *posted*: a
     /// queued request from a killed caller is never later handed to the
-    /// server (the Pi 4 keyboard-wedge regression — a dead class driver's
+    /// server (the keyboard-wedge regression — a dead class driver's
     /// final URB submit was held by the HCD after a fault recovery and
     /// refused its replacement's every submit as `AlreadyExists`).
     #[test]
@@ -51390,15 +52432,57 @@ mod tests {
     // --- filesystem syscalls (P-A) ----------------
 
     // `DirEntry`, `FileStat`, and `OpenFlags` are already in scope through
-    // `use super::*`; only `FileKind` is additionally needed here.
+    // `use super::*`; only `FileKind` and `NodeKind` are additionally needed
+    // here.
+    use tairix_abi::driver::filesystem::NodeKind;
     use tairix_abi::FileKind;
+
+    /// A descriptor on a node of a fixture volume, opened as `path` and acting
+    /// as `authority`.
+    fn node_entry(
+        path: &str,
+        authority: crate::fs::Authority,
+        flags: OpenFlags,
+    ) -> crate::aspace::OpenFile {
+        let kind = if flags.contains(OpenFlags::DIRECTORY) {
+            NodeKind::Directory
+        } else {
+            NodeKind::RegularFile
+        };
+        let volume = crate::test_bundle::test_volume();
+        let mut handle = crate::test_bundle::node_handle(crate::test_bundle::opened_node(
+            &volume, 1, kind, path,
+        ));
+        handle.authority = authority;
+        crate::aspace::OpenFile::new(crate::aspace::OpenBacking::Node(handle), flags)
+    }
+
+    /// The identity frozen into a descriptor conferred at spawn or granted.
+    fn frozen_of(entry: &crate::aspace::OpenFile) -> crate::fs::FrozenAuthority {
+        match entry.node().map(|handle| &handle.authority) {
+            Some(crate::fs::Authority::Frozen(frozen)) => frozen.clone(),
+            _ => panic!("expected a frozen identity, got {:?}", entry.backing),
+        }
+    }
+
+    /// The write ceiling a frozen identity's grant carries.
+    fn ceiling_of(frozen: &crate::fs::FrozenAuthority) -> Option<u64> {
+        frozen.grant.as_ref().and_then(|grant| grant.write_ceiling)
+    }
+
+    /// The path a node-backed descriptor was opened as.
+    fn opened_as(entry: &crate::aspace::OpenFile) -> &str {
+        entry.node().map_or("", |handle| &handle.opened_as)
+    }
 
     /// A recording [`FilesystemService`] double: it logs each call's
     /// attested uid and arguments (so a test can prove the handler attested
     /// the caller and forwarded the right path/offset/append), serves
     /// canned read/readdir/stat results, and can be set to fail a chosen op
-    /// closed. Recording goes through a [`std::sync::Mutex`] because the
-    /// service must be `Send + Sync`.
+    /// closed. A node operation logs the path its descriptor was opened as.
+    /// Every open reaches the one node `pinned` of its own volume, so two
+    /// descriptors on one file are keyed alike. Recording goes through a
+    /// [`std::sync::Mutex`] because the service must be `Send + Sync`.
     struct RecordingFs {
         read_data: Vec<u8>,
         entries: Vec<crate::fs::ReaddirEntry>,
@@ -51427,7 +52511,29 @@ mod tests {
         /// an orderly `hw_remove_node` test can make the busy check refuse.
         busy_endpoints: Vec<u64>,
         log: std::sync::Mutex<Vec<String>>,
+        volume: Arc<crate::fs::VolumeNodes>,
+        pinned: u64,
+        /// The watch table its nodes' changes report to, if any.
+        watch: Option<Arc<crate::fswatch::VolumeWatch>>,
+        /// The flags of the projection every open reaches its node through.
+        flags: tairix_abi::driver::filesystem::MountFlags,
+        /// The refusal `access` and `access_node` answer, or [`None`] to grant.
+        access_err: Option<Errno>,
+        /// Whether `access_node` logs its calls; off for the lock tests, which
+        /// assert their own logs.
+        record_access: bool,
+        /// What `canonical_of` answers, or [`None`] for the start's own label.
+        canonical: Option<Result<String, Errno>>,
+        /// Which of [`CHDIR_PROBES`] each `chdir` was asked with.
+        chdir_caps: std::sync::Mutex<Vec<Vec<CapabilityId>>>,
     }
+
+    /// The capabilities a `chdir`'s authority is read for.
+    const CHDIR_PROBES: [CapabilityId; 3] = [
+        CapabilityId::FS_ACCESS,
+        CapabilityId::AUDIT_READ,
+        CapabilityId::USER_ADMIN,
+    ];
 
     impl RecordingFs {
         fn new() -> Self {
@@ -51456,7 +52562,19 @@ mod tests {
                 sync_stamp: core::sync::atomic::AtomicU64::new(0),
                 busy_endpoints: Vec::new(),
                 log: std::sync::Mutex::new(Vec::new()),
+                volume: crate::test_bundle::test_volume(),
+                pinned: 1,
+                watch: None,
+                flags: tairix_abi::driver::filesystem::MountFlags::default(),
+                access_err: None,
+                record_access: false,
+                canonical: None,
+                chdir_caps: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn chdir_caps(&self) -> Vec<Vec<CapabilityId>> {
+            self.chdir_caps.lock().expect("chdir log").clone()
         }
 
         /// A service that reports `endpoints` as backing still-attached
@@ -51486,33 +52604,125 @@ mod tests {
     }
 
     impl FilesystemService for RecordingFs {
+        fn watch_table(&self, _node: &NodeHandle) -> Option<Arc<crate::fswatch::VolumeWatch>> {
+            self.watch.clone()
+        }
+
+        fn access_node(
+            &self,
+            node: &NodeHandle,
+            who: &Acting<'_>,
+            want: crate::fs::Access,
+            judged: crate::fs::Judged,
+        ) -> Result<(), Errno> {
+            if self.record_access {
+                self.record(alloc::format!(
+                    "access_node uid={} path={} want={want:?} granted={} {judged:?}",
+                    who.uid,
+                    node.opened_as,
+                    who.granted
+                ));
+            }
+            self.access_err.map_or(Ok(()), Err)
+        }
+
+        fn access(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            at: At<'_>,
+            want: tairix_abi::Access,
+            final_link: crate::fs::FinalLink,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "access uid={uid} path={} want={} link={final_link:?}",
+                shown(at),
+                want.bits()
+            ));
+            self.access_err.map_or(Ok(()), Err)
+        }
+
         fn open(
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             flags: OpenFlags,
-        ) -> Result<(), Errno> {
+            _mode: crate::fs::CreateMode,
+        ) -> Result<crate::fs::Opened, Errno> {
             self.record(alloc::format!(
-                "open uid={uid} path={path} flags={}",
+                "open uid={uid} path={} flags={}",
+                shown(at),
                 flags.bits()
             ));
-            match self.open_err {
-                Some(err) => Err(err),
-                None => Ok(()),
+            if let Some(err) = self.open_err {
+                return Err(err);
             }
+            let kind = if flags.contains(OpenFlags::DIRECTORY) {
+                NodeKind::Directory
+            } else {
+                NodeKind::RegularFile
+            };
+            Ok(crate::test_bundle::opened_node_in(
+                &self.volume,
+                self.pinned,
+                kind,
+                &crate::test_bundle::fixture_path(at)?,
+                crate::test_bundle::projection_with(self.flags),
+            ))
         }
 
-        fn read(
+        fn chdir(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            at: At<'_>,
+        ) -> Result<Cwd, Errno> {
+            self.record(alloc::format!("chdir uid={uid} path={}", shown(at)));
+            self.chdir_caps.lock().expect("chdir log").push(
+                CHDIR_PROBES
+                    .into_iter()
+                    .filter(|cap| caps.holds(*cap))
+                    .collect(),
+            );
+            if let Some(err) = self.open_err {
+                return Err(err);
+            }
+            Ok(Cwd::Dir(crate::test_bundle::node_handle(
+                crate::test_bundle::opened_node(
+                    &self.volume,
+                    self.pinned,
+                    NodeKind::Directory,
+                    &crate::test_bundle::fixture_path(at)?,
+                ),
+            )))
+        }
+
+        fn canonical_of(
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            start: Start<'_>,
+        ) -> Result<String, Errno> {
+            let at = At { start, path: "." };
+            self.record(alloc::format!("canonical_of uid={uid} start={}", shown(at)));
+            match &self.canonical {
+                Some(answer) => answer.clone(),
+                None => crate::test_bundle::fixture_path(at),
+            }
+        }
+
+        fn read_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             offset: u64,
             buf: &mut [u8],
         ) -> Result<usize, Errno> {
             self.record(alloc::format!(
-                "read uid={uid} path={path} off={offset} len={}",
+                "read uid={} path={} off={offset} len={}",
+                who.uid,
+                node.opened_as,
                 buf.len()
             ));
             let n = self.read_data.len().min(buf.len());
@@ -51520,17 +52730,18 @@ mod tests {
             Ok(n)
         }
 
-        fn write(
+        fn write_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             offset: u64,
             append: bool,
             data: &[u8],
         ) -> Result<usize, Errno> {
             self.record(alloc::format!(
-                "write uid={uid} path={path} off={offset} append={append} data={data:?}"
+                "write uid={} path={} off={offset} append={append} data={data:?}",
+                who.uid,
+                node.opened_as
             ));
             Ok(match self.write_accept {
                 Some(cap) => data.len().min(cap),
@@ -51538,31 +52749,54 @@ mod tests {
             })
         }
 
-        fn readdir(
+        fn readdir_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
-            final_link: crate::fs::FinalLink,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             at: &mut crate::fs::Listing,
             each: &mut dyn FnMut(&tairix_abi::DirEntry<'_>) -> DirVisit,
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "readdir uid={uid} path={path} link={final_link:?}"
+                "readdir uid={} path={}",
+                who.uid,
+                node.opened_as
             ));
             crate::fs::listing::serve_fixed(&self.entries, at, each);
             Ok(())
+        }
+
+        fn lookup_entries_node(
+            &self,
+            _node: &crate::fs::NodeHandle,
+            _who: &crate::fs::Acting<'_>,
+            _names: &[&[u8]],
+        ) -> Result<crate::fs::LookedUp, Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn stat_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
+        ) -> Result<FileStat, Errno> {
+            self.record(alloc::format!(
+                "stat uid={} path={}",
+                who.uid,
+                node.opened_as
+            ));
+            Ok(self.stat)
         }
 
         fn stat(
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             final_link: crate::fs::FinalLink,
         ) -> Result<FileStat, Errno> {
             self.record(alloc::format!(
-                "stat uid={uid} path={path} link={final_link:?}"
+                "stat uid={uid} path={} link={final_link:?}",
+                shown(at)
             ));
             Ok(self.stat)
         }
@@ -51572,10 +52806,11 @@ mod tests {
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
             target: &str,
-            path: &str,
+            at: At<'_>,
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "symlink uid={uid} target={target} path={path}"
+                "symlink uid={uid} target={target} path={}",
+                shown(at)
             ));
             match self.symlink_err {
                 Some(err) => Err(err),
@@ -51587,9 +52822,9 @@ mod tests {
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
         ) -> Result<alloc::string::String, Errno> {
-            self.record(alloc::format!("readlink uid={uid} path={path}"));
+            self.record(alloc::format!("readlink uid={uid} path={}", shown(at)));
             match self.readlink_target.clone() {
                 Some(target) => Ok(target),
                 None => Err(Errno::OutOfRange),
@@ -51600,11 +52835,12 @@ mod tests {
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
             mode: tairix_abi::RealpathMode,
         ) -> Result<alloc::string::String, Errno> {
             self.record(alloc::format!(
-                "realpath uid={uid} path={path} mode={mode:?}"
+                "realpath uid={uid} path={} mode={mode:?}",
+                shown(at)
             ));
             self.realpath.clone().ok_or(Errno::NotFound)
         }
@@ -51613,12 +52849,14 @@ mod tests {
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            existing: &str,
-            link: &str,
+            existing: At<'_>,
+            new: At<'_>,
             existing_link: crate::fs::FinalLink,
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "link uid={uid} existing={existing} link={link} follow={existing_link:?}"
+                "link uid={uid} existing={} link={} follow={existing_link:?}",
+                shown(existing),
+                shown(new)
             ));
             match self.link_err {
                 Some(err) => Err(err),
@@ -51626,47 +52864,65 @@ mod tests {
             }
         }
 
-        fn truncate(
+        fn truncate_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             size: u64,
         ) -> Result<(), Errno> {
-            self.record(alloc::format!("truncate uid={uid} path={path} size={size}"));
+            self.record(alloc::format!(
+                "truncate uid={} path={} size={size}",
+                who.uid,
+                node.opened_as
+            ));
             Ok(())
         }
 
-        fn seek_region(
+        fn seek_region_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             offset: u64,
             region: tairix_abi::SeekRegion,
         ) -> Result<u64, Errno> {
             self.record(alloc::format!(
-                "seek uid={uid} path={path} offset={offset} region={region:?}"
+                "seek uid={} path={} offset={offset} region={region:?}",
+                who.uid,
+                node.opened_as
             ));
             Ok(offset)
         }
 
-        fn punch(
+        fn punch_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
             offset: u64,
             len: u64,
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "punch uid={uid} path={path} offset={offset} len={len}"
+                "punch uid={} path={} offset={offset} len={len}",
+                who.uid,
+                node.opened_as
             ));
             Ok(())
         }
 
-        fn sync(&self, uid: u32, _caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
-            self.record(alloc::format!("sync uid={uid}"));
+        fn sync_node(
+            &self,
+            node: &crate::fs::NodeHandle,
+            who: &crate::fs::Acting<'_>,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "sync uid={} path={}",
+                who.uid,
+                node.opened_as
+            ));
+            Ok(())
+        }
+
+        fn sync_all(&self, uid: u32, _caps: &dyn tairix_abi::CapabilityQuery) -> Result<(), Errno> {
+            self.record(alloc::format!("sync_all uid={uid}"));
             self.sync_stamp.store(
                 crate::test_arch::next_event_stamp(),
                 core::sync::atomic::Ordering::Relaxed,
@@ -51681,9 +52937,10 @@ mod tests {
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
+            _mode: crate::fs::CreateMode,
         ) -> Result<(), Errno> {
-            self.record(alloc::format!("mkdir uid={uid} path={path}"));
+            self.record(alloc::format!("mkdir uid={uid} path={}", shown(at)));
             Ok(())
         }
 
@@ -51691,10 +52948,16 @@ mod tests {
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
-            _flags: UnlinkFlags,
+            at: At<'_>,
+            flags: UnlinkFlags,
+            expect: Option<&NodeExpect>,
         ) -> Result<(), Errno> {
-            self.record(alloc::format!("unlink uid={uid} path={path}"));
+            self.record(alloc::format!(
+                "unlink uid={uid} path={} flags={} expect={:?}",
+                shown(at),
+                flags.bits(),
+                expect.map(|expect| expect.id.node)
+            ));
             Ok(())
         }
 
@@ -51702,13 +52965,17 @@ mod tests {
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            src: &str,
-            dst: &str,
+            src: At<'_>,
+            dst: At<'_>,
             flags: RenameFlags,
+            expect: Option<&NodeExpect>,
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "rename uid={uid} src={src} dst={dst} flags={}",
-                flags.bits()
+                "rename uid={uid} src={} dst={} flags={} expect={:?}",
+                shown(src),
+                shown(dst),
+                flags.bits(),
+                expect.map(|expect| expect.id.node)
             ));
             Ok(())
         }
@@ -51717,11 +52984,28 @@ mod tests {
             &self,
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            at: At<'_>,
+            mode: u32,
+            final_link: crate::fs::FinalLink,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "set_mode uid={uid} path={} mode={mode:o} link={final_link:?}",
+                shown(at)
+            ));
+            Ok(())
+        }
+
+        fn set_mode_node(
+            &self,
+            node: &NodeHandle,
+            who: &Acting<'_>,
             mode: u32,
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "set_mode uid={uid} path={path} mode={mode:o}"
+                "set_mode_node uid={} path={} mode={mode:o} granted={}",
+                who.uid,
+                node.opened_as,
+                who.granted
             ));
             Ok(())
         }
@@ -51729,16 +53013,17 @@ mod tests {
         // The attribute methods record the marshalled call and serve one
         // canned attribute (`user.demo` = `v1`), so the handler tests can
         // assert both the copy-in wiring and the copy-out path.
-        fn attr_get(
+        fn attr_get_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &NodeHandle,
+            who: &Acting<'_>,
             key: &[u8],
             value_out: &mut [u8],
         ) -> Result<usize, Errno> {
             self.record(alloc::format!(
-                "attr_get uid={uid} path={path} key={}",
+                "attr_get uid={} path={} key={}",
+                who.uid,
+                node.opened_as,
                 core::str::from_utf8(key).unwrap_or("<bad>")
             ));
             if key != b"user.demo" {
@@ -51752,32 +53037,34 @@ mod tests {
             Ok(value.len())
         }
 
-        fn attr_set(
+        fn attr_set_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &NodeHandle,
+            who: &Acting<'_>,
             key: &[u8],
             value: &[u8],
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "attr_set uid={uid} path={path} key={} value_len={}",
+                "attr_set uid={} path={} key={} value_len={}",
+                who.uid,
+                node.opened_as,
                 core::str::from_utf8(key).unwrap_or("<bad>"),
                 value.len()
             ));
             Ok(())
         }
 
-        fn attr_list(
+        fn attr_list_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &NodeHandle,
+            who: &Acting<'_>,
             index: u64,
             key_out: &mut [u8],
         ) -> Result<Option<usize>, Errno> {
             self.record(alloc::format!(
-                "attr_list uid={uid} path={path} index={index}"
+                "attr_list uid={} path={} index={index}",
+                who.uid,
+                node.opened_as
             ));
             if index != 0 {
                 return Ok(None);
@@ -51788,15 +53075,16 @@ mod tests {
             Ok(Some(key.len()))
         }
 
-        fn attr_remove(
+        fn attr_remove_node(
             &self,
-            uid: u32,
-            _caps: &dyn tairix_abi::CapabilityQuery,
-            path: &str,
+            node: &NodeHandle,
+            who: &Acting<'_>,
             key: &[u8],
         ) -> Result<(), Errno> {
             self.record(alloc::format!(
-                "attr_remove uid={uid} path={path} key={}",
+                "attr_remove uid={} path={} key={}",
+                who.uid,
+                node.opened_as,
                 core::str::from_utf8(key).unwrap_or("<bad>")
             ));
             Ok(())
@@ -51851,7 +53139,14 @@ mod tests {
         .with_filesystem(fs);
 
         let fd = h
-            .fs_open(&ctx, 0x1000, "/System/Logs/a".len(), OpenFlags::READ)
+            .fs_open(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                "/System/Logs/a".len(),
+                OpenFlags::READ,
+                0,
+            )
             .expect("open succeeds");
         assert_eq!(fd, 4, "the first descriptor follows the standard streams");
         assert_eq!(
@@ -51891,11 +53186,11 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.fs_open(&ctx, 0x1000, "/Storage/x".len(), OpenFlags::READ),
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/Storage/x".len(), OpenFlags::READ, 0),
             Err(Errno::NotImplemented)
         );
         // No descriptor was recorded for the caller.
-        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
+        assert!(aspaces.read().open_file_entry(ProcessId(2), 4).is_none());
     }
 
     /// A refused open (e.g. exclusive-create clash) yields no descriptor.
@@ -51929,10 +53224,10 @@ mod tests {
         )
         .with_filesystem(fs);
         assert_eq!(
-            h.fs_open(&ctx, 0x1000, "/Storage/x".len(), OpenFlags::READ),
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/Storage/x".len(), OpenFlags::READ, 0),
             Err(Errno::AlreadyExists)
         );
-        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
+        assert!(aspaces.read().open_file_entry(ProcessId(2), 4).is_none());
     }
 
     /// `fs_read` re-authorises through the service and copies the read bytes
@@ -51972,7 +53267,7 @@ mod tests {
         assert_eq!(h.fs_read(&ctx, 99, 0, 0x1000, 5), Err(Errno::NotFound));
 
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -51989,7 +53284,7 @@ mod tests {
 
         // A handle opened without READ refuses fs_read.
         let wo = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::WRITE)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::WRITE, 0)
                 .expect("open write-only"),
         )
         .unwrap();
@@ -52033,12 +53328,12 @@ mod tests {
         .with_filesystem(fs);
 
         let ro = u32::try_from(
-            h.fs_open(&ctx, 0x1000, 2, OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, 2, OpenFlags::READ, 0)
                 .expect("open ro"),
         )
         .unwrap();
         let wo = u32::try_from(
-            h.fs_open(&ctx, 0x1000, 2, OpenFlags::WRITE)
+            h.fs_open(&ctx, FD_CWD, 0x1000, 2, OpenFlags::WRITE, 0)
                 .expect("open wo"),
         )
         .unwrap();
@@ -52097,8 +53392,15 @@ mod tests {
 
         // Open append+write; page 0x1000 holds the two payload bytes "AB".
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, 2, OpenFlags::WRITE.union(OpenFlags::APPEND))
-                .expect("open append"),
+            h.fs_open(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                2,
+                OpenFlags::WRITE.union(OpenFlags::APPEND),
+                0,
+            )
+            .expect("open append"),
         )
         .unwrap();
         // The path was 2 bytes ("AB" doubles as the path and the payload here).
@@ -52114,7 +53416,7 @@ mod tests {
 
         // A read-only handle refuses fs_write.
         let ro = u32::try_from(
-            h.fs_open(&ctx, 0x1000, 2, OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, 2, OpenFlags::READ, 0)
                 .expect("open ro"),
         )
         .unwrap();
@@ -52171,9 +53473,11 @@ mod tests {
         let fd = u32::try_from(
             h.fs_open(
                 &ctx,
+                FD_CWD,
                 0x1000,
                 "/f".len(),
                 OpenFlags::READ.union(OpenFlags::WRITE),
+                0,
             )
             .expect("open"),
         )
@@ -52201,7 +53505,7 @@ mod tests {
         // A refused call counts nothing: a read-only handle's write is
         // rejected on the descriptor's own flags.
         let ro = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open ro"),
         )
         .unwrap();
@@ -52251,7 +53555,7 @@ mod tests {
         .with_filesystem(fs);
 
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -52286,7 +53590,7 @@ mod tests {
         // Direction is enforced on the ordinary descriptor exactly as it is
         // on the positional path.
         let wo = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::WRITE)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::WRITE, 0)
                 .expect("open write-only"),
         )
         .unwrap();
@@ -52336,8 +53640,11 @@ mod tests {
         )
         .with_filesystem(fs);
 
-        let fd =
-            u32::try_from(h.fs_open(&ctx, 0x1000, 2, OpenFlags::WRITE).expect("open")).unwrap();
+        let fd = u32::try_from(
+            h.fs_open(&ctx, FD_CWD, 0x1000, 2, OpenFlags::WRITE, 0)
+                .expect("open"),
+        )
+        .unwrap();
         assert_eq!(h.stream_write(&ctx, fd, 0x1000, 2), Ok(2));
         assert_eq!(h.stream_write(&ctx, fd, 0x1000, 2), Ok(2));
         let writes: Vec<String> = fs
@@ -52354,7 +53661,7 @@ mod tests {
         );
 
         let ro = u32::try_from(
-            h.fs_open(&ctx, 0x1000, 2, OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, 2, OpenFlags::READ, 0)
                 .expect("open ro"),
         )
         .unwrap();
@@ -52454,7 +53761,7 @@ mod tests {
         .with_filesystem(fs);
 
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/d".len(), OpenFlags::DIRECTORY)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/d".len(), OpenFlags::DIRECTORY, 0)
                 .expect("open dir"),
         )
         .unwrap();
@@ -52561,7 +53868,7 @@ mod tests {
         .with_filesystem(fs);
 
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -52596,12 +53903,12 @@ mod tests {
         );
     }
 
-    /// `fs_stat` describes what the *descriptor* names: a handle opened
-    /// `NO_FOLLOW` is the `lstat` posture, so the service is asked to keep a
-    /// final link rather than report its target. Re-derived from the handle,
-    /// never taken as an operand, so a stat cannot contradict its open.
+    /// `fs_stat` describes the node the descriptor's open reached: a handle
+    /// opened `NO_FOLLOW` reached the link itself, so its stat is the `lstat`
+    /// posture. The posture is the open's, decided once, so a stat or a
+    /// listing can never contradict the open that produced the descriptor.
     #[test]
-    fn fs_stat_honours_the_handles_no_follow_posture() {
+    fn fs_stat_describes_the_node_its_open_reached() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -52631,12 +53938,12 @@ mod tests {
 
         // A resolve-only `NO_FOLLOW` handle — what `lstat` holds.
         let kept = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/link".len(), OpenFlags::NO_FOLLOW)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/link".len(), OpenFlags::NO_FOLLOW, 0)
                 .expect("open the link itself"),
         )
         .unwrap();
         let followed = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/link".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/link".len(), OpenFlags::READ, 0)
                 .expect("open through the link"),
         )
         .unwrap();
@@ -52649,19 +53956,37 @@ mod tests {
         let _ = h.fs_readdir(&ctx, kept, 0x1000, 96, ReaddirFrom::Next.as_u32());
         let _ = h.fs_readdir(&ctx, followed, 0x1000, 96, ReaddirFrom::Next.as_u32());
 
-        let seen: Vec<String> = fs
-            .calls()
-            .into_iter()
+        let calls = fs.calls();
+        let opens: Vec<&str> = calls
+            .iter()
+            .map(String::as_str)
+            .filter(|c| c.starts_with("open "))
+            .collect();
+        assert_eq!(
+            opens,
+            [
+                alloc::format!(
+                    "open uid=1000 path=/link flags={}",
+                    OpenFlags::NO_FOLLOW.bits()
+                ),
+                alloc::format!("open uid=1000 path=/link flags={}", OpenFlags::READ.bits()),
+            ],
+            "the posture rode on each open"
+        );
+        let served: Vec<&str> = calls
+            .iter()
+            .map(String::as_str)
             .filter(|c| c.starts_with("stat ") || c.starts_with("readdir "))
             .collect();
-        assert!(
-            seen.iter().map(String::as_str).eq([
-                "stat uid=1000 path=/link link=Keep",
-                "stat uid=1000 path=/link link=Follow",
-                "readdir uid=1000 path=/link link=Keep",
-                "readdir uid=1000 path=/link link=Follow",
-            ]),
-            "each operation carried its own descriptor's posture: {seen:?}"
+        assert_eq!(
+            served,
+            [
+                "stat uid=1000 path=/link",
+                "stat uid=1000 path=/link",
+                "readdir uid=1000 path=/link",
+                "readdir uid=1000 path=/link",
+            ],
+            "each operation was served on its descriptor's own node"
         );
     }
 
@@ -52706,7 +54031,7 @@ mod tests {
 
         let link_ptr = 0x1000 + target.len() as u64;
         assert_eq!(
-            h.fs_symlink(&ctx, 0x1000, target.len(), link_ptr, link.len()),
+            h.fs_symlink(&ctx, 0x1000, target.len(), FD_CWD, link_ptr, link.len()),
             Ok(0)
         );
         assert_eq!(
@@ -52739,15 +54064,12 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        // One page holding the existing name then the new one, back to back.
+        // One page holding a `PathAt` for each name, then the names.
         let existing = "/Users/me/notes";
         let link = "/Users/me/alias";
-        let mut staged = alloc::string::String::from(existing);
-        staged.push_str(link);
-        let (space, physmap) = send_aspace(
-            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
-            staged.as_bytes(),
-        );
+        let staged = staged_path_ats(&[existing, link]);
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &staged);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -52767,29 +54089,14 @@ mod tests {
         )
         .with_filesystem(fs);
 
-        let link_ptr = 0x1000 + existing.len() as u64;
         // An empty flag word is POSIX `link()`: neither name is followed.
         assert_eq!(
-            h.fs_link(
-                &ctx,
-                0x1000,
-                existing.len(),
-                link_ptr,
-                link.len(),
-                tairix_abi::LinkFlags::empty()
-            ),
+            h.fs_link(&ctx, 0x1000, 0x1010, tairix_abi::LinkFlags::empty()),
             Ok(0)
         );
         // `FOLLOW` is the `ln -L` posture and reaches the service as one.
         assert_eq!(
-            h.fs_link(
-                &ctx,
-                0x1000,
-                existing.len(),
-                link_ptr,
-                link.len(),
-                tairix_abi::LinkFlags::FOLLOW
-            ),
+            h.fs_link(&ctx, 0x1000, 0x1010, tairix_abi::LinkFlags::FOLLOW),
             Ok(0)
         );
         assert_eq!(
@@ -52826,12 +54133,9 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let existing = "/Users/me/dir";
         let link = "/Users/me/alias";
-        let mut staged = alloc::string::String::from(existing);
-        staged.push_str(link);
-        let (space, physmap) = send_aspace(
-            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
-            staged.as_bytes(),
-        );
+        let staged = staged_path_ats(&[existing, link]);
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &staged);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -52853,16 +54157,8 @@ mod tests {
         )
         .with_filesystem(fs);
 
-        let link_ptr = 0x1000 + existing.len() as u64;
         assert_eq!(
-            h.fs_link(
-                &ctx,
-                0x1000,
-                existing.len(),
-                link_ptr,
-                link.len(),
-                tairix_abi::LinkFlags::empty()
-            ),
+            h.fs_link(&ctx, 0x1000, 0x1010, tairix_abi::LinkFlags::empty()),
             Err(Errno::IsADirectory)
         );
         let event = sink
@@ -52915,7 +54211,7 @@ mod tests {
         .with_filesystem(fs);
 
         assert_eq!(
-            h.fs_symlink(&ctx, 0x1000, 2, 0x1002, "/System/x".len()),
+            h.fs_symlink(&ctx, 0x1000, 2, FD_CWD, 0x1002, "/System/x".len()),
             Err(Errno::PermissionDenied)
         );
         let event = sink
@@ -52967,16 +54263,16 @@ mod tests {
 
         // Empty and over-long targets are length refusals.
         assert_eq!(
-            h.fs_symlink(&ctx, 0x1000, 0, 0x1001, 2),
+            h.fs_symlink(&ctx, 0x1000, 0, FD_CWD, 0x1001, 2),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(
-            h.fs_symlink(&ctx, 0x1000, FS_SYMLINK_MAX + 1, 0x1001, 2),
+            h.fs_symlink(&ctx, 0x1000, FS_SYMLINK_MAX + 1, FD_CWD, 0x1001, 2),
             Err(Errno::LengthOutOfRange)
         );
         // A non-UTF-8 target is a shape refusal.
         assert_eq!(
-            h.fs_symlink(&ctx, 0x1000, 1, 0x1001, 2),
+            h.fs_symlink(&ctx, 0x1000, 1, FD_CWD, 0x1001, 2),
             Err(Errno::OutOfRange)
         );
         assert!(
@@ -53023,7 +54319,7 @@ mod tests {
         // Write the target into the tail of the page, clear of the path.
         let out = 0x1000 + 0x100;
         assert_eq!(
-            h.fs_readlink(&ctx, 0x1000, "/alias".len(), out, 64),
+            h.fs_readlink(&ctx, FD_CWD, 0x1000, "/alias".len(), out, 64),
             Ok(target.len() as u64)
         );
         let written = h
@@ -53037,7 +54333,7 @@ mod tests {
 
         // One byte short of the whole target is refused, never truncated.
         assert_eq!(
-            h.fs_readlink(&ctx, 0x1000, "/alias".len(), out, target.len() - 1),
+            h.fs_readlink(&ctx, FD_CWD, 0x1000, "/alias".len(), out, target.len() - 1),
             Err(Errno::BufferTooSmall)
         );
         // A path that is not a link fails closed from the service.
@@ -53047,7 +54343,7 @@ mod tests {
         )
         .with_filesystem(plain);
         assert_eq!(
-            h2.fs_readlink(&ctx, 0x1000, "/alias".len(), out, 64),
+            h2.fs_readlink(&ctx, FD_CWD, 0x1000, "/alias".len(), out, 64),
             Err(Errno::OutOfRange)
         );
     }
@@ -53093,11 +54389,12 @@ mod tests {
         assert_eq!(
             h.fs_realpath(
                 &ctx,
+                FD_CWD,
                 0x1000,
                 "/alias".len(),
                 out,
                 64,
-                tairix_abi::RealpathMode::Final
+                tairix_abi::RealpathMode::Final,
             ),
             Ok(canonical.len() as u64)
         );
@@ -53122,11 +54419,12 @@ mod tests {
         assert_eq!(
             h.fs_realpath(
                 &ctx,
+                FD_CWD,
                 0x1000,
                 "/alias".len(),
                 out,
                 canonical.len() - 1,
-                tairix_abi::RealpathMode::Final
+                tairix_abi::RealpathMode::Final,
             ),
             Err(Errno::BufferTooSmall)
         );
@@ -53139,20 +54437,87 @@ mod tests {
         assert_eq!(
             h2.fs_realpath(
                 &ctx,
+                FD_CWD,
                 0x1000,
                 "/alias".len(),
                 out,
                 64,
-                tairix_abi::RealpathMode::Existing
+                tairix_abi::RealpathMode::Existing,
             ),
             Err(Errno::NotFound)
         );
     }
 
-    /// A `WaitSourceKind::File` member resolves an open path-backed
-    /// descriptor to its node identity, is not ready until that node's
-    /// change generation advances (`fswatch::note_change`), then reports the
-    /// member once and consumes the edge — the `tail -f` wake path.
+    /// A path answer bound for a page the caller reserved but never touched
+    /// is offered to the fault resolvers, as a store to that page would be,
+    /// rather than refused out of hand. The recording producer installs no
+    /// translation, so each copy still ends at its retry budget.
+    #[test]
+    fn a_path_answer_for_an_untouched_page_offers_the_miss_to_the_resolvers() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/alias");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let untouched = 0x30_0000;
+        aspaces
+            .write()
+            .record_anon_region(ProcessId(2), untouched, 1)
+            .expect("a disjoint extent is recorded");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.readlink_target = Some(String::from("../real"));
+        mock.realpath = Some(String::from("/Storage/vol/real"));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs)
+        .with_mem_map(producer);
+
+        let offered = Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), untouched));
+        assert_eq!(h.fs_getcwd(&ctx, untouched, 64), Err(Errno::BadAddress));
+        assert_eq!(producer.mapping.lock().take(), offered, "fs_getcwd");
+        assert_eq!(
+            h.fs_readlink(&ctx, FD_CWD, 0x1000, "/alias".len(), untouched, 64),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(producer.mapping.lock().take(), offered, "fs_readlink");
+        assert_eq!(
+            h.fs_realpath(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                "/alias".len(),
+                untouched,
+                64,
+                tairix_abi::RealpathMode::Final,
+            ),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(producer.mapping.lock().take(), offered, "fs_realpath");
+    }
+
+    /// A `WaitSourceKind::File` member keys on the node its descriptor pins,
+    /// is not ready until that node's change generation advances, then
+    /// reports the member once and consumes the edge — the `tail -f` wake
+    /// path.
     #[test]
     fn waitset_file_member_reports_a_node_change_and_consumes_the_edge() {
         install_trace_filter();
@@ -53207,6 +54572,8 @@ mod tests {
             times: tairix_abi::NodeTimes::default(),
             content_gen: 0,
         };
+        mock.pinned = owner;
+        mock.watch = Some(Arc::clone(&watch_table));
         let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -53215,7 +54582,7 @@ mod tests {
         .with_fswatch(fswatch);
 
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -53247,13 +54614,18 @@ mod tests {
         // The edge was consumed: the next wait expires until a further change.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1000), Err(Errno::TimedOut));
 
-        // Removing the member drops the watch; teardown leaves no registry
-        // entry (the `fswatch` refcount returned to zero).
+        // The member holds the node's pin as a descriptor does, so the id it
+        // watches names this node however soon the descriptor closes.
+        let volume = Arc::clone(&fs.volume);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        assert_eq!(volume.outstanding(), 1, "the member keeps its node pinned");
+        // Removing the member drops the watch and the pin; teardown leaves no
+        // registry entry (the `fswatch` refcount returned to zero).
         assert_eq!(h.waitset_ctl(&ctx, set, WS_OP_DEL, kind, member, 0), Ok(0));
+        assert_eq!(volume.outstanding(), 0);
         assert_eq!(watch_table.generation(owner), 0);
         assert!(!watch_table.active(), "no node is left watched");
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
-        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
         drop(claim);
     }
 
@@ -53294,7 +54666,7 @@ mod tests {
         )
         .with_filesystem(fs);
         let fd = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
                 .expect("open"),
         )
         .unwrap();
@@ -53402,8 +54774,9 @@ mod tests {
                 .open(
                     crate::fs::test_volume::TEST_UID,
                     &caps,
-                    path,
+                    at(path),
                     OpenFlags::CREATE.union(OpenFlags::WRITE),
+                    crate::fs::test_volume::new_file(),
                 )
                 .expect("another program writes the directory");
         }
@@ -53421,7 +54794,7 @@ mod tests {
         .expect("caller space")
         .expect("writable");
         u32::try_from(
-            h.fs_open(ctx, 0x1000, path.len(), OpenFlags::DIRECTORY)
+            h.fs_open(ctx, FD_CWD, 0x1000, path.len(), OpenFlags::DIRECTORY, 0)
                 .expect("open dir"),
         )
         .unwrap()
@@ -53458,6 +54831,564 @@ mod tests {
             buf
         })
         .expect("caller space")
+    }
+
+    /// Stage `path` in `ctx`'s page and open it with `flags`, a create
+    /// asking the mode a creator that names none passes.
+    fn open_path(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        path: &str,
+        flags: OpenFlags,
+    ) -> Result<u32, Errno> {
+        h.copy_out_user(ctx, 0x1000, path.as_bytes())?;
+        let mode = if flags.contains(OpenFlags::CREATE) {
+            0o666
+        } else {
+            0
+        };
+        h.fs_open(ctx, FD_CWD, 0x1000, path.len(), flags, mode)
+            .map(|fd| u32::try_from(fd).expect("a descriptor fits a u32"))
+    }
+
+    /// Write `bytes` at `offset` through `fd`.
+    fn write_fd(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        fd: u32,
+        offset: u64,
+        bytes: &[u8],
+    ) -> SyscallResult {
+        h.copy_out_user(ctx, 0x1A00, bytes)?;
+        h.fs_write(ctx, fd, offset, 0x1A00, bytes.len())
+    }
+
+    /// Read up to `len` bytes at `offset` through `fd`.
+    fn read_fd(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        fd: u32,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, Errno> {
+        let read = h.fs_read(ctx, fd, offset, 0x1C00, len)?;
+        let mut out = alloc::vec![0u8; usize::try_from(read).expect("fits")];
+        h.copy_in_user(ctx, 0x1C00, &mut out)?;
+        Ok(out)
+    }
+
+    /// The metadata `fs_stat` reports for `fd`.
+    fn stat_fd(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        fd: u32,
+    ) -> Result<FileStat, Errno> {
+        h.fs_stat(ctx, fd, 0x1E00, FileStat::WIRE_LEN)?;
+        let mut buf = [0u8; FileStat::WIRE_LEN];
+        h.copy_in_user(ctx, 0x1E00, &mut buf)?;
+        FileStat::decode(&buf)
+    }
+
+    /// A descriptor reaches the node its open reached for its whole life: a
+    /// rename takes the node with it, and a new file at the old name is
+    /// another node the descriptor never sees.
+    #[test]
+    fn an_open_descriptor_follows_its_node_through_a_rename() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC1; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let a = open_path(&h, &ctx, "/Storage/vol/a", rw.union(OpenFlags::CREATE)).expect("a");
+        assert_eq!(write_fd(&h, &ctx, a, 0, b"original"), Ok(8));
+        fx.svc
+            .rename(
+                uid,
+                &caps,
+                at("/Storage/vol/a"),
+                at("/Storage/vol/b"),
+                RenameFlags::empty(),
+                None,
+            )
+            .expect("rename");
+        fx.create("/Storage/vol/a");
+        assert_eq!(
+            read_fd(&h, &ctx, a, 0, 8),
+            Ok(b"original".to_vec()),
+            "the descriptor reads the node it opened"
+        );
+        assert_eq!(write_fd(&h, &ctx, a, 8, b"+more"), Ok(5));
+        let b = open_path(&h, &ctx, "/Storage/vol/b", OpenFlags::READ).expect("b");
+        assert_eq!(
+            read_fd(&h, &ctx, b, 0, 13),
+            Ok(b"original+more".to_vec()),
+            "its writes landed in the renamed file"
+        );
+        let fresh = open_path(&h, &ctx, "/Storage/vol/a", OpenFlags::READ).expect("new a");
+        assert_eq!(
+            read_fd(&h, &ctx, fresh, 0, 8),
+            Ok(Vec::new()),
+            "the new file is untouched"
+        );
+        for fd in [a, b, fresh] {
+            assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        }
+    }
+
+    /// A link planted at a descriptor's old name is a new name the descriptor
+    /// never resolves: its writes cannot be steered into what the link names.
+    #[test]
+    fn a_link_planted_at_an_old_name_never_redirects_its_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC2; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let victim =
+            open_path(&h, &ctx, "/Storage/vol/victim", rw.union(OpenFlags::CREATE)).expect("v");
+        assert_eq!(write_fd(&h, &ctx, victim, 0, b"precious"), Ok(8));
+        let f = open_path(&h, &ctx, "/Storage/vol/f", rw.union(OpenFlags::CREATE)).expect("f");
+        fx.svc
+            .rename(
+                uid,
+                &caps,
+                at("/Storage/vol/f"),
+                at("/Storage/vol/away"),
+                RenameFlags::empty(),
+                None,
+            )
+            .expect("rename away");
+        fx.svc
+            .symlink(uid, &caps, "/Storage/vol/victim", at("/Storage/vol/f"))
+            .expect("plant a link");
+        assert_eq!(write_fd(&h, &ctx, f, 0, b"clobber!"), Ok(8));
+        assert_eq!(
+            read_fd(&h, &ctx, victim, 0, 8),
+            Ok(b"precious".to_vec()),
+            "the victim is untouched"
+        );
+        let away = open_path(&h, &ctx, "/Storage/vol/away", OpenFlags::READ).expect("away");
+        assert_eq!(read_fd(&h, &ctx, away, 0, 8), Ok(b"clobber!".to_vec()));
+        for fd in [victim, f, away] {
+            assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        }
+    }
+
+    /// An unlinked file an open descriptor holds keeps its bytes and reports
+    /// that no name reaches it.
+    #[test]
+    fn an_unlinked_open_file_still_reads_and_reports_no_name() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC3; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let fd = open_path(&h, &ctx, "/Storage/vol/gone", rw.union(OpenFlags::CREATE)).expect("o");
+        assert_eq!(write_fd(&h, &ctx, fd, 0, b"kept"), Ok(4));
+        fx.svc
+            .unlink(
+                crate::fs::test_volume::TEST_UID,
+                &caps,
+                at("/Storage/vol/gone"),
+                UnlinkFlags::empty(),
+                None,
+            )
+            .expect("unlink");
+        assert_eq!(read_fd(&h, &ctx, fd, 0, 4), Ok(b"kept".to_vec()));
+        assert_eq!(stat_fd(&h, &ctx, fd).map(|stat| stat.nlink), Ok(0));
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A volume giving a freed number to the next node made never gives it a
+    /// held one: the next file is another node, and the held one still reads
+    /// its own bytes.
+    #[test]
+    fn a_held_number_is_never_handed_to_a_new_file() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC4; 16], sink);
+        let cell: &'static crate::fs::LateFilesystem<crate::fs::memfs::RwMockFs> =
+            crate::forever(Box::new(crate::fs::LateFilesystem::new()));
+        cell.install_vfs(crate::fs::test_volume::vfs(false))
+            .expect("install vfs");
+        cell.register(
+            tairix_abi::driver::DriverHandle::from_raw(9).expect("handle"),
+            crate::fs::test_volume::driver().with_reused_numbers(),
+            "vol",
+            "memfs",
+            [0xC4; 16],
+            None,
+        )
+        .expect("register");
+        let identity: &'static crate::fs::LateIdentity =
+            crate::forever(Box::new(crate::fs::LateIdentity::new()));
+        identity
+            .install(crate::fs::test_volume::identity_table())
+            .expect("identity");
+        let svc: &'static crate::fs::MountedFilesystemService<crate::fs::memfs::RwMockFs> =
+            crate::forever(Box::new(crate::fs::MountedFilesystemService::new(
+                cell, identity,
+            )));
+        let h = fx.handlers(&sched, &arch, sink).with_filesystem(svc);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let held =
+            open_path(&h, &ctx, "/Storage/vol/held", rw.union(OpenFlags::CREATE)).expect("o");
+        assert_eq!(write_fd(&h, &ctx, held, 0, b"held"), Ok(4));
+        let number = stat_fd(&h, &ctx, held).expect("stat").id;
+        svc.unlink(
+            uid,
+            &caps,
+            at("/Storage/vol/held"),
+            UnlinkFlags::empty(),
+            None,
+        )
+        .expect("unlink");
+        let next =
+            open_path(&h, &ctx, "/Storage/vol/next", rw.union(OpenFlags::CREATE)).expect("n");
+        assert_ne!(
+            stat_fd(&h, &ctx, next).expect("stat").id,
+            number,
+            "a held number is not reused"
+        );
+        assert_eq!(read_fd(&h, &ctx, held, 0, 4), Ok(b"held".to_vec()));
+        for fd in [held, next] {
+            assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        }
+    }
+
+    /// A volume detached by force revokes every descriptor on it, and another
+    /// volume attached under the same name later is never reached through
+    /// one.
+    #[test]
+    fn a_forced_detach_revokes_its_descriptors_for_good() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC5; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let fd = open_path(&h, &ctx, "/Storage/vol/f", rw.union(OpenFlags::CREATE)).expect("f");
+        assert_eq!(write_fd(&h, &ctx, fd, 0, b"one"), Ok(3));
+        let handle = tairix_abi::driver::DriverHandle::from_raw(9).expect("handle");
+        let vfs = fx.mounted.vfs().expect("installed");
+        vfs.mounts_write().detach(handle).expect("detach");
+        drop(fx.mounted.unregister(handle));
+        assert_eq!(read_fd(&h, &ctx, fd, 0, 3), Err(Errno::Stale));
+        let returning = crate::fs::CachedFs::new(
+            crate::fs::test_volume::driver(),
+            tairix_reclaim::CacheBudget::from_backing(16 << 20),
+            tairix_reclaim::ReclaimOwner::FilesystemVolume { volume: 9 },
+            crate::test_pressure::unpressured(),
+            sink,
+        );
+        fx.mounted
+            .register(handle, returning, "vol", "memfs", [0xC6; 16], None)
+            .expect("another volume registers");
+        vfs.mounts_write()
+            .attach_at(
+                crate::fs::Attachment::new(
+                    handle,
+                    None,
+                    tairix_abi::driver::filesystem::MountFlags::default(),
+                ),
+                crate::fs::Path::parse(crate::fs::test_volume::MOUNT).expect("a path"),
+                crate::fs::Metadata::new(
+                    UserId(crate::fs::test_volume::TEST_UID),
+                    GroupId(crate::fs::test_volume::TEST_GID),
+                    crate::fs::Mode::from_bits(0o755),
+                ),
+            )
+            .expect("attached under the same name");
+        let other = open_path(&h, &ctx, "/Storage/vol/f", rw.union(OpenFlags::CREATE)).expect("f");
+        assert_eq!(write_fd(&h, &ctx, other, 0, b"two"), Ok(3));
+        assert_eq!(
+            read_fd(&h, &ctx, fd, 0, 3),
+            Err(Errno::Stale),
+            "the revoked descriptor never reaches the new volume"
+        );
+        for fd in [fd, other] {
+            assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        }
+    }
+
+    /// A grant has no owner exemption, so the owner's chmod revokes it, while
+    /// the owner's own descriptor keeps reading: the owner could restore any
+    /// bit, so exempting it protects nothing.
+    #[test]
+    fn an_owners_chmod_revokes_a_grant_but_not_its_own_descriptor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC7; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let own = open_path(&h, &ctx, "/Storage/vol/doc", rw.union(OpenFlags::CREATE)).expect("o");
+        assert_eq!(write_fd(&h, &ctx, own, 0, b"doc"), Ok(3));
+        let entry = fx
+            .aspaces
+            .read()
+            .open_file_entry(ProcessId(fx.owner), own)
+            .expect("the owner's entry");
+        let grant = entry
+            .handed_on(uid, caps_with(&[CapabilityId::FS_ACCESS]), 0)
+            .expect("a file is granted");
+        let installed = fx.aspaces.write().install_std_entry(
+            ProcessId(fx.owner),
+            tairix_abi::STDIN,
+            crate::aspace::OpenFile::new(crate::aspace::OpenBacking::Node(grant), OpenFlags::READ),
+        );
+        assert!(installed.is_ok());
+        assert_eq!(
+            read_fd(&h, &ctx, tairix_abi::STDIN, 0, 3),
+            Ok(b"doc".to_vec())
+        );
+        fx.svc
+            .set_mode(
+                uid,
+                &caps,
+                at("/Storage/vol/doc"),
+                0o000,
+                crate::fs::FinalLink::Follow,
+            )
+            .expect("chmod");
+        assert_eq!(
+            read_fd(&h, &ctx, own, 0, 3),
+            Ok(b"doc".to_vec()),
+            "the owner's own descriptor keeps reading"
+        );
+        assert_eq!(
+            read_fd(&h, &ctx, tairix_abi::STDIN, 0, 3),
+            Err(Errno::PermissionDenied),
+            "the grant is revoked"
+        );
+        assert_eq!(h.fs_close(&ctx, own), Ok(0));
+    }
+
+    /// Every byte operation re-checks the node's mode: a non-owner's own
+    /// descriptor stops reading once the owner takes the read bit away.
+    #[test]
+    fn a_non_owners_own_descriptor_loses_read_after_a_chmod() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC8; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let own =
+            open_path(&h, &ctx, "/Storage/vol/shared", rw.union(OpenFlags::CREATE)).expect("o");
+        assert_eq!(write_fd(&h, &ctx, own, 0, b"seen"), Ok(4));
+        // The system user owns nothing here, so it reads through "other".
+        let other_caps = make_owned_caps_record(fx.owner, 0, &[CapabilityId::FS_ACCESS], sink);
+        let other = CallerContext {
+            task_id: SecTaskId(fx.owner),
+            caps: &other_caps,
+        };
+        let theirs = open_path(&h, &other, "/Storage/vol/shared", OpenFlags::READ).expect("theirs");
+        assert_eq!(read_fd(&h, &other, theirs, 0, 4), Ok(b"seen".to_vec()));
+        fx.svc
+            .set_mode(
+                uid,
+                &caps,
+                at("/Storage/vol/shared"),
+                0o600,
+                crate::fs::FinalLink::Follow,
+            )
+            .expect("chmod");
+        assert_eq!(
+            read_fd(&h, &other, theirs, 0, 4),
+            Err(Errno::PermissionDenied)
+        );
+        for fd in [own, theirs] {
+            assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        }
+    }
+
+    /// `open(O_CREAT, 0444)` then `write` is POSIX: a file its creator made
+    /// read-only still takes the writes of the descriptor that created it.
+    #[test]
+    fn a_file_its_owner_made_read_only_takes_the_creating_descriptors_writes() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xC9; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let fd = open_path(
+            &h,
+            &ctx,
+            "/Storage/vol/ro",
+            OpenFlags::WRITE.union(OpenFlags::CREATE),
+        )
+        .expect("create");
+        fx.svc
+            .set_mode(
+                crate::fs::test_volume::TEST_UID,
+                &caps,
+                at("/Storage/vol/ro"),
+                0o444,
+                crate::fs::FinalLink::Follow,
+            )
+            .expect("chmod");
+        assert_eq!(write_fd(&h, &ctx, fd, 0, b"still"), Ok(5));
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A descriptor the caller opened acts as the caller's live identity, so
+    /// a capability narrowed away since the open stops its next read.
+    #[test]
+    fn a_narrowed_capability_stops_an_own_descriptors_next_read() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xCA; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let fd = open_path(&h, &ctx, "/Storage/vol/f", rw.union(OpenFlags::CREATE)).expect("f");
+        assert_eq!(write_fd(&h, &ctx, fd, 0, b"live"), Ok(4));
+        let narrowed_caps = make_caps_record(fx.owner, &[], sink);
+        let narrowed = CallerContext {
+            task_id: SecTaskId(fx.owner),
+            caps: &narrowed_caps,
+        };
+        assert_eq!(
+            read_fd(&h, &narrowed, fd, 0, 4),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(read_fd(&h, &ctx, fd, 0, 4), Ok(b"live".to_vec()));
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A lock is the node's: a rename moves nothing, so the renamed
+    /// descriptor still releases what it took and a descriptor opened at the
+    /// new name meets the same lock.
+    #[test]
+    fn a_lock_follows_its_node_through_a_rename() {
+        let _registry = crate::filelock::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xCB; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let holder =
+            open_path(&h, &ctx, "/Storage/vol/db", rw.union(OpenFlags::CREATE)).expect("o");
+        let range = LockRange::new(0, tairix_abi::LOCK_LEN_TO_END).expect("range");
+        let lock = |fd, mode, flags| {
+            h.fs_lock(&ctx, fd, mode, flags, range, tairix_abi::LOCK_WAIT_FOREVER)
+        };
+        assert_eq!(lock(holder, LockMode::Exclusive, LockFlags::empty()), Ok(0));
+        fx.svc
+            .rename(
+                crate::fs::test_volume::TEST_UID,
+                &caps,
+                at("/Storage/vol/db"),
+                at("/Storage/vol/db.old"),
+                RenameFlags::empty(),
+                None,
+            )
+            .expect("rename");
+        let other = open_path(&h, &ctx, "/Storage/vol/db.old", rw).expect("the new name");
+        assert_eq!(
+            lock(other, LockMode::Shared, LockFlags::NONBLOCK),
+            Err(Errno::WouldBlock),
+            "the new name reaches the locked node"
+        );
+        assert_eq!(lock(holder, LockMode::Unlock, LockFlags::empty()), Ok(0));
+        assert_eq!(lock(other, LockMode::Shared, LockFlags::NONBLOCK), Ok(0));
+        for fd in [holder, other] {
+            assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        }
+    }
+
+    /// The next open past the `open-files` soft bound is refused, and the
+    /// node it pinned is let go rather than leaked.
+    #[test]
+    fn an_open_past_the_open_files_bound_is_refused() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/fsys:null");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_limit(
+            ProcessId(2),
+            LimitKind::OpenFiles,
+            ResourceLimit::new(1, 1).expect("well-formed"),
+        );
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+        assert_eq!(
+            h.fs_open(&ctx, FD_CWD, 0x1000, 2, OpenFlags::READ, 0),
+            Ok(4)
+        );
+        assert_eq!(
+            h.fs_open(&ctx, FD_CWD, 0x1000, 2, OpenFlags::READ, 0),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(
+            h.resource_open(&ctx, 0x1002, "sys:null".len(), OpenFlags::READ),
+            Err(Errno::LimitExceeded),
+            "every descriptor counts against one bound"
+        );
+        assert_eq!(
+            fs.volume.outstanding(),
+            1,
+            "the refused descriptor's node was let go"
+        );
+        assert_eq!(h.fs_close(&ctx, 4), Ok(0));
     }
 
     /// A watch is armed once per description within its latency bound, is
@@ -53553,10 +55484,179 @@ mod tests {
         assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
 
-    /// A directory moved away from the watched path ends the watch: its
-    /// watcher learns once, and a spent watch never reports again.
+    /// A create through the handlers is born with the mode it asked for less
+    /// its process's umask, a file's and a directory's alike.
     #[test]
-    fn a_moved_directory_ends_its_watch() {
+    fn a_create_is_born_with_its_mode_less_the_callers_umask() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xD1; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        assert_eq!(h.fs_umask(&ctx, Some(0o027)), Ok(0o022));
+
+        let create = OpenFlags::WRITE.union(OpenFlags::CREATE);
+        h.copy_out_user(&ctx, 0x1000, b"/Storage/vol/f")
+            .expect("staged");
+        let fd = h
+            .fs_open(&ctx, FD_CWD, 0x1000, "/Storage/vol/f".len(), create, 0o666)
+            .expect("created");
+        h.copy_out_user(&ctx, 0x1000, b"/Storage/vol/d")
+            .expect("staged");
+        assert_eq!(
+            h.fs_mkdir(&ctx, FD_CWD, 0x1000, "/Storage/vol/d".len(), 0o777),
+            Ok(0)
+        );
+        let caps = crate::fs::test_volume::caps();
+        let mode = |path| {
+            fx.svc
+                .stat(
+                    crate::fs::test_volume::TEST_UID,
+                    &caps,
+                    at(path),
+                    crate::fs::FinalLink::Follow,
+                )
+                .expect("stat")
+                .mode
+        };
+        assert_eq!(mode("/Storage/vol/f"), 0o640);
+        assert_eq!(mode("/Storage/vol/d"), 0o750);
+        assert_eq!(
+            h.fs_close(&ctx, u32::try_from(fd).expect("a descriptor")),
+            Ok(0)
+        );
+    }
+
+    /// An open's descriptor is promised before the volume is touched: at the
+    /// `open-files` bound a truncating open leaves the file's bytes and an
+    /// exclusive create makes nothing, and the refused promises are given
+    /// back.
+    #[test]
+    fn an_open_refused_at_the_descriptor_bound_changes_nothing() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xD2; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.create("/Storage/vol/kept");
+        crate::fs::test_volume::write_path(
+            fx.svc,
+            uid,
+            &caps,
+            "/Storage/vol/kept",
+            0,
+            false,
+            b"kept",
+        )
+        .expect("fill");
+        let process = ProcessId(fx.owner);
+        let bound = |files: u64| {
+            fx.aspaces.write().set_limit(
+                process,
+                tairix_abi::LimitKind::OpenFiles,
+                tairix_abi::ResourceLimit::new(files, files).expect("well-formed"),
+            );
+        };
+        let held = fx.aspaces.read().open_file_count(process);
+        bound(held);
+        let open = |path: &[u8], flags, mode| {
+            h.copy_out_user(&ctx, 0x1000, path).expect("staged");
+            h.fs_open(&ctx, FD_CWD, 0x1000, path.len(), flags, mode)
+        };
+        assert_eq!(
+            open(
+                b"/Storage/vol/kept",
+                OpenFlags::WRITE.union(OpenFlags::TRUNCATE),
+                0
+            ),
+            Err(Errno::LimitExceeded)
+        );
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            crate::fs::test_volume::read_path(fx.svc, uid, &caps, "/Storage/vol/kept", 0, &mut buf),
+            Ok(4),
+            "the truncate never ran"
+        );
+        let exclusive = OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::EXCLUSIVE);
+        assert_eq!(
+            open(b"/Storage/vol/new", exclusive, 0o666),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(
+            fx.svc
+                .stat(
+                    uid,
+                    &caps,
+                    at("/Storage/vol/new"),
+                    crate::fs::FinalLink::Keep
+                )
+                .map(|_| ()),
+            Err(Errno::NotFound),
+            "nothing was created"
+        );
+        bound(held + 1);
+        let fd = open(b"/Storage/vol/new", exclusive, 0o666).expect("the promises were given back");
+        assert_eq!(
+            h.fs_close(&ctx, u32::try_from(fd).expect("a descriptor")),
+            Ok(0)
+        );
+    }
+
+    /// A catalog descriptor whose projection has left the mount table
+    /// answers a stat and a sync `Stale`, as its listing does, rather than
+    /// describing whatever stands at the path now.
+    #[test]
+    fn a_departed_catalog_descriptor_is_stale() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xD3; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        h.copy_out_user(&ctx, 0x1000, b"/Storage").expect("staged");
+        let fd = h
+            .fs_open(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                "/Storage".len(),
+                OpenFlags::DIRECTORY,
+                0,
+            )
+            .expect("the catalog opens");
+        let fd = u32::try_from(fd).expect("a descriptor");
+        assert_eq!(h.fs_sync(&ctx, fd), Ok(0));
+        {
+            let vfs = fx.mounted.vfs().expect("installed");
+            let mut mounts = vfs.mounts_write();
+            mounts
+                .unmount(&crate::fs::Path::parse("/Storage/vol").expect("a path"))
+                .expect("the volume beneath leaves first");
+            mounts
+                .unmount(&crate::fs::Path::parse("/Storage").expect("a path"))
+                .expect("the catalog leaves the table");
+        }
+        assert_eq!(
+            h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN),
+            Err(Errno::Stale)
+        );
+        assert_eq!(h.fs_sync(&ctx, fd), Err(Errno::Stale));
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A watch is on the directory, not on its name: moved, it goes on
+    /// reporting what changes inside it.
+    #[test]
+    fn a_moved_directory_keeps_its_watch() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -53566,7 +55666,12 @@ mod tests {
         let ctx = fx.context();
         let caps = crate::fs::test_volume::caps();
         fx.svc
-            .mkdir(crate::fs::test_volume::TEST_UID, &caps, "/Storage/vol/sub")
+            .mkdir(
+                crate::fs::test_volume::TEST_UID,
+                &caps,
+                at("/Storage/vol/sub"),
+                crate::fs::test_volume::new_dir(),
+            )
             .expect("mkdir");
         let sub = open_watch_dir(&h, &ctx, "/Storage/vol/sub");
         let set = watched_set(&h, &ctx, sub, 0, 0xD3);
@@ -53574,11 +55679,57 @@ mod tests {
             .rename(
                 crate::fs::test_volume::TEST_UID,
                 &caps,
-                "/Storage/vol/sub",
-                "/Storage/vol/moved",
+                at("/Storage/vol/sub"),
+                at("/Storage/vol/moved"),
                 RenameFlags::empty(),
+                None,
             )
             .expect("rename");
+        fx.create("/Storage/vol/moved/after.txt");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        let batch = read_watch_batch(&h, &ctx, sub);
+        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
+        assert_eq!(batch.status, DirWatchStatus::Changes);
+        assert!(matches!(
+            batch.changes().collect::<Vec<_>>().as_slice(),
+            [DirChange::Present(entry)] if entry.name == b"after.txt"
+        ));
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
+        assert_eq!(h.fs_close(&ctx, sub), Ok(0));
+    }
+
+    /// A watched directory removed is gone: its watcher learns once, and a
+    /// spent watch never reports again.
+    #[test]
+    fn a_removed_watched_directory_reports_gone() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xBB; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/sub"),
+                crate::fs::test_volume::new_dir(),
+            )
+            .expect("mkdir");
+        let sub = open_watch_dir(&h, &ctx, "/Storage/vol/sub");
+        let set = watched_set(&h, &ctx, sub, 0, 0xDA);
+        fx.svc
+            .unlink(
+                uid,
+                &caps,
+                at("/Storage/vol/sub"),
+                UnlinkFlags::DIRECTORY,
+                None,
+            )
+            .expect("rmdir");
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
         let gone = read_watch_batch(&h, &ctx, sub);
         assert_eq!(
@@ -53598,7 +55749,7 @@ mod tests {
                 WS_OP_ADD,
                 WaitSourceKind::DirWatch.as_u32(),
                 u64::from(sub),
-                0xD4
+                0xDB
             ),
             Err(Errno::NotFound),
             "a spent watch takes no new member"
@@ -53609,9 +55760,9 @@ mod tests {
     }
 
     /// Renaming a directory above the watched one moves nothing inside it,
-    /// yet its path no longer reaches it: the watcher is woken and told.
+    /// so its watcher hears nothing of the rename and goes on watching.
     #[test]
-    fn renaming_an_ancestor_tells_its_watchers_their_directory_is_gone() {
+    fn renaming_an_ancestor_leaves_its_watchers_watching() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -53621,65 +55772,100 @@ mod tests {
         let ctx = fx.context();
         let caps = crate::fs::test_volume::caps();
         let uid = crate::fs::test_volume::TEST_UID;
-        fx.svc.mkdir(uid, &caps, "/Storage/vol/a").expect("mkdir");
-        fx.svc.mkdir(uid, &caps, "/Storage/vol/a/b").expect("mkdir");
+        fx.svc
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/a"),
+                crate::fs::test_volume::new_dir(),
+            )
+            .expect("mkdir");
+        fx.svc
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/a/b"),
+                crate::fs::test_volume::new_dir(),
+            )
+            .expect("mkdir");
         let b = open_watch_dir(&h, &ctx, "/Storage/vol/a/b");
         let set = watched_set(&h, &ctx, b, 0, 0xD5);
         fx.svc
             .rename(
                 uid,
                 &caps,
-                "/Storage/vol/a",
-                "/Storage/vol/x",
+                at("/Storage/vol/a"),
+                at("/Storage/vol/x"),
                 RenameFlags::empty(),
+                None,
             )
             .expect("rename");
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
         assert_eq!(
-            DirChangeBatch::decode(&read_watch_batch(&h, &ctx, b)).map(|b| b.status),
-            Ok(DirWatchStatus::Gone)
+            h.waitset_wait(&ctx, set, 0, 0x1080),
+            Err(Errno::TimedOut),
+            "nothing inside the watched directory changed"
         );
+        fx.create("/Storage/vol/x/b/later.txt");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        let batch = read_watch_batch(&h, &ctx, b);
+        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
+        assert_eq!(batch.status, DirWatchStatus::Changes);
+        assert!(matches!(
+            batch.changes().collect::<Vec<_>>().as_slice(),
+            [DirChange::Present(entry)] if entry.name == b"later.txt"
+        ));
         assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
         assert_eq!(h.fs_close(&ctx, b), Ok(0));
     }
 
-    /// A directory whose authority changed is read whole rather than by name:
-    /// a name recorded while its watcher could not list it is never handed
-    /// out, and a watcher that may no longer list it at all is told it is
-    /// gone.
+    /// A drain re-checks that its watcher may still list the directory: the
+    /// owner's chmod readies its watchers, and one it shut out is told the
+    /// directory is gone, with no name recorded meanwhile handed out.
     #[test]
-    fn a_directorys_authority_moving_drops_its_names_and_its_denied_watchers() {
+    fn a_watcher_shut_out_of_its_directory_is_told_it_is_gone() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let fx = WatchFixture::new([0xB6; 16], sink);
         let h = fx.handlers(&sched, &arch, sink);
-        let ctx = fx.context();
         let caps = crate::fs::test_volume::caps();
         let uid = crate::fs::test_volume::TEST_UID;
         fx.svc
-            .mkdir(uid, &caps, "/Storage/vol/shared")
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/shared"),
+                crate::fs::test_volume::new_dir(),
+            )
             .expect("mkdir");
+        // The system user owns nothing here, so it lists through "other".
+        let watcher_caps = make_owned_caps_record(fx.owner, 0, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(fx.owner),
+            caps: &watcher_caps,
+        };
         let fd = open_watch_dir(&h, &ctx, "/Storage/vol/shared");
         let set = watched_set(&h, &ctx, fd, 0, 0xD6);
-        fx.create("/Storage/vol/shared/secret-plan.txt");
         fx.svc
-            .set_mode(uid, &caps, "/Storage/vol/shared", 0o755)
+            .set_mode(
+                uid,
+                &caps,
+                at("/Storage/vol/shared"),
+                0o700,
+                crate::fs::FinalLink::Follow,
+            )
             .expect("chmod");
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x1080),
+            Ok(0),
+            "the directory's own security changing readies its watchers"
+        );
+        fx.create("/Storage/vol/shared/secret-plan.txt");
         let batch = read_watch_batch(&h, &ctx, fd);
         let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
-        assert_eq!(batch.status, DirWatchStatus::Rescan);
+        assert_eq!(batch.status, DirWatchStatus::Gone);
         assert_eq!(batch.changes().count(), 0, "no recorded name is handed out");
-        fx.svc
-            .set_mode(uid, &caps, "/Storage/vol/shared", 0o000)
-            .expect("chmod");
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
-        assert_eq!(
-            DirChangeBatch::decode(&read_watch_batch(&h, &ctx, fd)).map(|b| b.status),
-            Ok(DirWatchStatus::Gone)
-        );
         assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
         assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
@@ -53698,14 +55884,24 @@ mod tests {
         let caps = crate::fs::test_volume::caps();
         let uid = crate::fs::test_volume::TEST_UID;
         fx.svc
-            .mkdir(uid, &caps, "/Storage/vol/other")
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/other"),
+                crate::fs::test_volume::new_dir(),
+            )
             .expect("mkdir");
         let root = open_watch_dir(&h, &ctx, "/Storage/vol");
         let other = open_watch_dir(&h, &ctx, "/Storage/vol/other");
         let root_set = watched_set(&h, &ctx, root, 0, 0xD7);
         let other_set = watched_set(&h, &ctx, other, 0, 0xD8);
         fx.svc
-            .mkdir(uid, &caps, "/Storage/vol/made")
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/made"),
+                crate::fs::test_volume::new_dir(),
+            )
             .expect("mkdir");
         assert_eq!(
             h.waitset_wait(&ctx, other_set, 0, 0x1080),
@@ -53724,10 +55920,10 @@ mod tests {
         assert_eq!(h.fs_close(&ctx, other), Ok(0));
     }
 
-    /// A reported move is not followed by a report of every later change: the
-    /// member waits for its watcher's drain, which delivers what it held.
+    /// A rename elsewhere on the volume changes nothing a watch reports, so it
+    /// wakes no watcher; the next change in the watched directory does.
     #[test]
-    fn a_reported_move_waits_for_the_drain() {
+    fn a_move_elsewhere_wakes_no_watcher() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -53737,9 +55933,21 @@ mod tests {
         let ctx = fx.context();
         let caps = crate::fs::test_volume::caps();
         let uid = crate::fs::test_volume::TEST_UID;
-        fx.svc.mkdir(uid, &caps, "/Storage/vol/a").expect("mkdir");
         fx.svc
-            .mkdir(uid, &caps, "/Storage/vol/watched")
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/a"),
+                crate::fs::test_volume::new_dir(),
+            )
+            .expect("mkdir");
+        fx.svc
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/watched"),
+                crate::fs::test_volume::new_dir(),
+            )
             .expect("mkdir");
         let fd = open_watch_dir(&h, &ctx, "/Storage/vol/watched");
         let set = watched_set(&h, &ctx, fd, 0, 0xD9);
@@ -53747,18 +55955,19 @@ mod tests {
             .rename(
                 uid,
                 &caps,
-                "/Storage/vol/a",
-                "/Storage/vol/b",
+                at("/Storage/vol/a"),
+                at("/Storage/vol/b"),
                 RenameFlags::empty(),
+                None,
             )
             .expect("rename");
-        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
-        fx.create("/Storage/vol/watched/later.txt");
         assert_eq!(
             h.waitset_wait(&ctx, set, 0, 0x1080),
             Err(Errno::TimedOut),
-            "held until the drain"
+            "the watched directory did not change"
         );
+        fx.create("/Storage/vol/watched/later.txt");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
         let batch = read_watch_batch(&h, &ctx, fd);
         let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
         assert_eq!(batch.status, DirWatchStatus::Changes);
@@ -53767,68 +55976,6 @@ mod tests {
             [DirChange::Present(entry)] if entry.name == b"later.txt"
         ));
         assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
-        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
-    }
-
-    /// A volume mounted beneath a watched directory moves its listing where
-    /// no name records it, so the next drain asks for the directory to be
-    /// read whole; that re-read settles the mount, and the drain after it
-    /// reports changes again.
-    #[test]
-    fn a_mount_beneath_a_watched_directory_asks_for_a_rescan() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let fx = WatchFixture::new([0xBA; 16], sink);
-        let h = fx.handlers(&sched, &arch, sink);
-        let ctx = fx.context();
-        let fd = open_watch_dir(&h, &ctx, "/Storage/vol");
-        assert_eq!(h.fs_watch(&ctx, fd, 0), Ok(0));
-        let status = |batch: Vec<u8>| {
-            DirChangeBatch::decode(&batch)
-                .expect("a valid batch")
-                .status
-        };
-        assert_eq!(
-            status(read_watch_batch(&h, &ctx, fd)),
-            DirWatchStatus::Changes
-        );
-        let backing = tairix_abi::driver::DriverHandle::from_raw(10).expect("handle");
-        {
-            let vfs = fx.mounted.vfs().expect("installed");
-            let mut mounts = vfs.mounts_write();
-            mounts
-                .attach(crate::fs::Attachment::new(
-                    backing,
-                    None,
-                    tairix_abi::driver::filesystem::MountFlags::NOEXEC,
-                ))
-                .expect("attach");
-            mounts
-                .mount(
-                    crate::fs::Path::parse("/Storage/vol/usb").expect("a path"),
-                    tairix_abi::driver::filesystem::MountFlags::default(),
-                    Some(backing),
-                )
-                .expect("mounted beneath");
-        }
-        assert_eq!(
-            status(read_watch_batch(&h, &ctx, fd)),
-            DirWatchStatus::Rescan
-        );
-        fx.create("/Storage/vol/after.txt");
-        let batch = read_watch_batch(&h, &ctx, fd);
-        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
-        assert_eq!(
-            batch.status,
-            DirWatchStatus::Changes,
-            "the re-read settled it"
-        );
-        assert!(matches!(
-            batch.changes().collect::<Vec<_>>().as_slice(),
-            [DirChange::Present(entry)] if entry.name == b"after.txt"
-        ));
         assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
 
@@ -53903,9 +56050,9 @@ mod tests {
         assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
 
-    /// `fs_chdir` re-authorises the target as a searchable directory through
-    /// the VFS and, only on success, records it as the caller's new working
-    /// directory (against which later relative paths resolve).
+    /// `fs_chdir` has the service resolve, authorise and pin the target and,
+    /// only on success, records the directory it answered as the caller's
+    /// working directory, from which later relative paths resolve.
     #[test]
     fn fs_chdir_authorises_a_directory_and_sets_the_cwd() {
         install_trace_filter();
@@ -53934,16 +56081,18 @@ mod tests {
         )
         .with_filesystem(fs);
 
-        assert_eq!(h.fs_chdir(&ctx, 0x1000, "/Users/bob".len()), Ok(0));
-        assert_eq!(aspaces.read().cwd(ProcessId(2)), "/Users/bob");
-        // The target was re-authorised as a directory (resolve-only, the
-        // `DIRECTORY` flag, neither read nor write).
+        assert_eq!(
+            h.fs_chdir(&ctx, FD_CWD, 0x1000, "/Users/bob".len(), AtFlags::empty()),
+            Ok(0)
+        );
+        assert_eq!(cwd_label(&aspaces, ProcessId(2)), "/Users/bob");
         assert_eq!(
             fs.calls(),
-            alloc::vec![alloc::format!(
-                "open uid=1000 path=/Users/bob flags={}",
-                OpenFlags::DIRECTORY.bits()
-            )]
+            alloc::vec![String::from("chdir uid=1000 path=/Users/bob")]
+        );
+        assert!(
+            matches!(aspaces.read().cwd(ProcessId(2)), Cwd::Dir(_)),
+            "the working directory holds the node the service pinned"
         );
     }
 
@@ -53965,9 +56114,10 @@ mod tests {
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // A directory the caller is already sitting in.
+        let volume = crate::test_bundle::test_volume();
         aspaces
             .write()
-            .set_cwd(ProcessId(2), alloc::string::String::from("/Users"));
+            .set_cwd(ProcessId(2), directory(&volume, "/Users"));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -53984,15 +56134,46 @@ mod tests {
         .with_filesystem(fs);
 
         assert_eq!(
-            h.fs_chdir(&ctx, 0x1000, "/Storage/x".len()),
+            h.fs_chdir(&ctx, FD_CWD, 0x1000, "/Storage/x".len(), AtFlags::empty()),
             Err(Errno::PermissionDenied)
         );
         // The refused chdir never reached `set_cwd`.
-        assert_eq!(aspaces.read().cwd(ProcessId(2)), "/Users");
+        assert_eq!(cwd_label(&aspaces, ProcessId(2)), "/Users");
     }
 
-    /// A relative path handed to `fs_open` resolves against the caller's
-    /// current working directory before the VFS sees it.
+    /// A process starts with the initial umask, reads it with the query and
+    /// sets it, each call answering the mask held before.
+    #[test]
+    fn fs_umask_answers_the_mask_it_replaces() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        assert_eq!(h.fs_umask(&ctx, None), Ok(0o022));
+        assert_eq!(h.fs_umask(&ctx, Some(0o077)), Ok(0o022));
+        assert_eq!(h.fs_umask(&ctx, None), Ok(0o077));
+        assert_eq!(h.fs_umask(&ctx, Some(0)), Ok(0o077));
+        assert_eq!(aspaces.read().umask(ProcessId(2)), 0);
+    }
+
+    /// A relative path handed to `fs_open` reaches the service as the caller
+    /// wrote it, from the caller's working directory: no text is joined onto
+    /// the directory's name.
     #[test]
     fn fs_open_resolves_a_relative_path_against_the_cwd() {
         install_trace_filter();
@@ -54008,9 +56189,10 @@ mod tests {
             .write()
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
+        let volume = crate::test_bundle::test_volume();
         aspaces
             .write()
-            .set_cwd(ProcessId(2), alloc::string::String::from("/Users"));
+            .set_cwd(ProcessId(2), directory(&volume, "/Users"));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -54024,14 +56206,14 @@ mod tests {
         )
         .with_filesystem(fs);
 
-        h.fs_open(&ctx, 0x1000, "bob/notes".len(), OpenFlags::READ)
+        h.fs_open(&ctx, FD_CWD, 0x1000, "bob/notes".len(), OpenFlags::READ, 0)
             .expect("open succeeds");
         assert_eq!(
             fs.calls(),
             alloc::vec![alloc::string::String::from(
-                "open uid=1000 path=/Users/bob/notes flags=1"
+                "open uid=1000 path=bob/notes from=/Users flags=1"
             )],
-            "the relative path resolved against the caller's working directory"
+            "the relative path reached the service from the working directory"
         );
     }
 
@@ -54066,8 +56248,15 @@ mod tests {
         )
         .with_filesystem(fs);
 
-        h.fs_open(&ctx, 0x1000, "System:/Logs/a".len(), OpenFlags::READ)
-            .expect("open succeeds");
+        h.fs_open(
+            &ctx,
+            FD_CWD,
+            0x1000,
+            "System:/Logs/a".len(),
+            OpenFlags::READ,
+            0,
+        )
+        .expect("open succeeds");
         assert_eq!(
             fs.calls(),
             alloc::vec![alloc::string::String::from(
@@ -54108,14 +56297,14 @@ mod tests {
         .with_filesystem(fs);
 
         assert_eq!(
-            h.fs_open(&ctx, 0x1000, "Nope:/x".len(), OpenFlags::READ),
+            h.fs_open(&ctx, FD_CWD, 0x1000, "Nope:/x".len(), OpenFlags::READ, 0),
             Err(Errno::NotFound)
         );
         assert!(
             fs.calls().is_empty(),
             "resolution failed before the VFS was touched"
         );
-        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
+        assert!(aspaces.read().open_file_entry(ProcessId(2), 4).is_none());
     }
 
     /// An `id::<volume-id>/…` path opens the same backing object as the
@@ -54158,7 +56347,7 @@ mod tests {
         .with_filesystem(fs)
         .with_volumes(forest);
 
-        h.fs_open(&ctx, 0x1000, raw.len(), OpenFlags::READ)
+        h.fs_open(&ctx, FD_CWD, 0x1000, raw.len(), OpenFlags::READ, 0)
             .expect("open succeeds");
         assert_eq!(
             fs.calls(),
@@ -54202,14 +56391,14 @@ mod tests {
         .with_filesystem(fs);
 
         assert_eq!(
-            h.fs_open(&ctx, 0x1000, raw.len(), OpenFlags::READ),
+            h.fs_open(&ctx, FD_CWD, 0x1000, raw.len(), OpenFlags::READ, 0),
             Err(Errno::NotFound)
         );
         assert!(
             fs.calls().is_empty(),
             "resolution failed before the VFS was touched"
         );
-        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
+        assert!(aspaces.read().open_file_entry(ProcessId(2), 4).is_none());
     }
 
     /// `fs_set_mode` copies the path in, resolves it, and reaches the
@@ -54242,20 +56431,28 @@ mod tests {
         )
         .with_filesystem(fs);
 
-        h.fs_set_mode(&ctx, 0x1000, "/Users/bob/notes".len(), 0o640)
-            .expect("set_mode succeeds");
+        h.fs_set_mode(
+            &ctx,
+            FD_CWD,
+            0x1000,
+            "/Users/bob/notes".len(),
+            0o640,
+            AtFlags::empty(),
+        )
+        .expect("set_mode succeeds");
         assert_eq!(
             fs.calls(),
             alloc::vec![alloc::string::String::from(
-                "set_mode uid=1000 path=/Users/bob/notes mode=640"
+                "set_mode uid=1000 path=/Users/bob/notes mode=640 link=Follow"
             )],
-            "the service saw the attested uid, the resolved path, and the mode"
+            "the service saw the attested uid, the resolved path, the mode and the link posture"
         );
     }
 
-    /// The four `fs_attr_*` handlers copy the path and key in, reach the
-    /// service under the caller's attested uid, and copy the value/key
-    /// results back out through the validated boundary.
+    /// The four `fs_attr_*` handlers act on the node a descriptor holds: they
+    /// copy the key in, reach the service under the caller's attested uid,
+    /// and copy the value/key results back out through the validated
+    /// boundary.
     #[test]
     fn fs_attr_calls_attest_the_caller_and_round_trip_through_the_service() {
         install_trace_filter();
@@ -54288,30 +56485,41 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_filesystem(fs);
-        let (path, path_len) = (0x1000, "/Users/bob/notes".len());
+        let fd = u32::try_from(
+            h.fs_open(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                "/Users/bob/notes".len(),
+                OpenFlags::empty(),
+                0,
+            )
+            .expect("open"),
+        )
+        .unwrap();
         let (key, key_len) = (0x1010, "user.demo".len());
 
         // set: the payload ("us", two bytes of the mapped page) reaches the
         // service with the attested uid.
-        h.fs_attr_set(&ctx, path, path_len, key, key_len, 0x1010, 2)
+        h.fs_attr_set(&ctx, fd, key, key_len, 0x1010, 2)
             .expect("attr_set succeeds");
         // get: the canned two-byte value is copied out and its length
         // returned.
         let n = h
-            .fs_attr_get(&ctx, path, path_len, key, key_len, 0x1100, 64)
+            .fs_attr_get(&ctx, fd, key, key_len, 0x1100, 64)
             .expect("attr_get succeeds");
         assert_eq!(n, 2);
         // list: index 0 yields the canned key, index 1 is end-of-list (0).
         let n = h
-            .fs_attr_list(&ctx, path, path_len, 0, 0x1100, 64)
+            .fs_attr_list(&ctx, fd, 0, 0x1100, 64)
             .expect("attr_list succeeds");
         assert_eq!(usize::try_from(n).unwrap(), "user.demo".len());
         assert_eq!(
-            h.fs_attr_list(&ctx, path, path_len, 1, 0x1100, 64),
+            h.fs_attr_list(&ctx, fd, 1, 0x1100, 64),
             Ok(0),
             "past the last visible attribute the answer is 0, never an error"
         );
-        h.fs_attr_remove(&ctx, path, path_len, key, key_len)
+        h.fs_attr_remove(&ctx, fd, key, key_len)
             .expect("attr_remove succeeds");
 
         let copied = h
@@ -54329,6 +56537,7 @@ mod tests {
         assert_eq!(
             fs.calls(),
             alloc::vec![
+                alloc::string::String::from("open uid=1000 path=/Users/bob/notes flags=0"),
                 alloc::string::String::from(
                     "attr_set uid=1000 path=/Users/bob/notes key=user.demo value_len=2"
                 ),
@@ -54365,9 +56574,12 @@ mod tests {
             .write()
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
+        // The directory was reached as `/Users/robert` and is `/Users/bob`
+        // now: the answer is where it stands.
+        let volume = crate::test_bundle::test_volume();
         aspaces
             .write()
-            .set_cwd(ProcessId(2), alloc::string::String::from("/Users/bob"));
+            .set_cwd(ProcessId(2), directory(&volume, "/Users/robert"));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         // No `CAP_FS_ACCESS`: reading one's own directory needs no capability.
@@ -54376,7 +56588,9 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let mut mock = RecordingFs::new();
+        mock.canonical = Some(Ok(String::from("/Users/bob")));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -54384,6 +56598,12 @@ mod tests {
 
         let n = usize::try_from(h.fs_getcwd(&ctx, 0x1000, 64).expect("getcwd")).unwrap();
         assert_eq!(n, "/Users/bob".len());
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![String::from(
+                "canonical_of uid=1000 start=. from=/Users/robert"
+            )]
+        );
         let written = h
             .with_caller_aspace(&ctx, |space, physmap| {
                 let mut buf = alloc::vec![0u8; n];
@@ -54395,6 +56615,755 @@ mod tests {
 
         // A buffer too small for the whole path fails closed.
         assert_eq!(h.fs_getcwd(&ctx, 0x1000, 2), Err(Errno::BufferTooSmall));
+    }
+
+    /// A caller holding `CAP_FS_ACCESS` and one user page at `0x1000`, over
+    /// a recording filesystem double.
+    struct RecordingFixture {
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        caps: TaskCapabilities,
+        fs: &'static RecordingFs,
+    }
+
+    impl RecordingFixture {
+        fn new(fs: RecordingFs, sink: &'static (dyn Sink + Sync)) -> Self {
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/");
+            aspaces
+                .write()
+                .register(ProcessId(2), space, physmap)
+                .expect("registration succeeds");
+            Self {
+                table: RwLock::new(CapTable::new()),
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                caps: make_caps_record(2, &[CapabilityId::FS_ACCESS], sink),
+                fs: crate::forever(Box::new(fs)),
+            }
+        }
+
+        fn context(&self) -> CallerContext<'_> {
+            CallerContext {
+                task_id: SecTaskId(2),
+                caps: &self.caps,
+            }
+        }
+
+        fn handlers<'a>(
+            &'a self,
+            sched: &'a Scheduler<TestArch>,
+            arch: &'a Arc<TestArch>,
+            sink: &'a (dyn Sink + Sync),
+        ) -> KernelSyscallHandlers<'a, TestArch> {
+            KernelSyscallHandlers::new(
+                sched,
+                &self.table,
+                arch,
+                sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+            .with_filesystem(self.fs)
+        }
+
+        /// Plant `file`, a descriptor conferred or granted to the caller, as
+        /// its standard output.
+        fn hand_over(&self, file: crate::aspace::OpenFile) {
+            assert!(self
+                .aspaces
+                .write()
+                .install_std_entry(ProcessId(2), tairix_abi::STDOUT, file)
+                .expect("a standard slot")
+                .is_none());
+        }
+    }
+
+    /// Stage `path` at `0x1800` and open it from `dirfd` with `flags`.
+    fn open_at(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        dirfd: u32,
+        path: &str,
+        flags: OpenFlags,
+    ) -> Result<u32, Errno> {
+        h.copy_out_user(ctx, 0x1800, path.as_bytes())?;
+        h.fs_open(ctx, dirfd, 0x1800, path.len(), flags, 0)
+            .map(|fd| u32::try_from(fd).expect("a descriptor fits a u32"))
+    }
+
+    /// A relative path resolves from the directory a descriptor holds; an
+    /// absolute one ignores the descriptor, even one never opened; and a
+    /// descriptor that is not a directory, or no descriptor at all, starts
+    /// nothing.
+    #[test]
+    fn a_relative_path_resolves_from_the_directory_a_descriptor_holds() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let dir = open_at(&h, &ctx, FD_CWD, "/Users/bob", OpenFlags::DIRECTORY).expect("dir");
+        let file = open_at(&h, &ctx, FD_CWD, "/Users/bob/f", OpenFlags::READ).expect("file");
+        assert!(open_at(&h, &ctx, dir, "notes", OpenFlags::READ).is_ok());
+        assert!(open_at(&h, &ctx, 99, "/abs", OpenFlags::READ).is_ok());
+        assert_eq!(
+            open_at(&h, &ctx, 99, "notes", OpenFlags::READ),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            open_at(&h, &ctx, file, "notes", OpenFlags::READ),
+            Err(Errno::NotADirectory)
+        );
+        assert_eq!(
+            fx.fs.calls(),
+            alloc::vec![
+                String::from("open uid=1000 path=/Users/bob flags=32"),
+                String::from("open uid=1000 path=/Users/bob/f flags=1"),
+                String::from("open uid=1000 path=notes from=/Users/bob flags=1"),
+                String::from("open uid=1000 path=/abs flags=1"),
+            ],
+            "the refused starts never reached the service"
+        );
+    }
+
+    /// An alias root becomes the location it backs and the path beneath it
+    /// reaches the resolver normalised there, so no `..` in it, whatever a
+    /// link on the way names, climbs above the root.
+    #[test]
+    fn an_alias_path_walks_its_dot_dots_beneath_its_root() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        assert!(open_at(
+            &h,
+            &ctx,
+            FD_CWD,
+            "System:/Logs/../Kernel/x",
+            OpenFlags::READ
+        )
+        .is_ok());
+        assert_eq!(
+            open_at(&h, &ctx, FD_CWD, "System:/../Users/x", OpenFlags::READ),
+            Err(Errno::OutOfRange)
+        );
+        // Each `..` reaches the walk, which applies it to the directory it
+        // stands in rather than to the text before it.
+        assert_eq!(
+            fx.fs.calls(),
+            alloc::vec![String::from(
+                "open uid=1000 path=/System/Logs/../Kernel/x flags=1"
+            )]
+        );
+    }
+
+    /// `EMPTY_PATH` changes the mode of the node a descriptor holds, as the
+    /// caller, and the audit trail names it by the path it was opened as.
+    #[test]
+    fn fchmod_acts_on_the_node_its_descriptor_holds() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let fd = open_at(&h, &ctx, FD_CWD, "/Users/bob/notes", OpenFlags::READ).expect("open");
+        assert_eq!(
+            h.fs_set_mode(&ctx, fd, 0, 0, 0o640, AtFlags::EMPTY_PATH),
+            Ok(0)
+        );
+        assert_eq!(
+            fx.fs.calls().last().map(String::as_str),
+            Some("set_mode_node uid=1000 path=/Users/bob/notes mode=640 granted=false")
+        );
+        let event = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::FsNodeMutated.id())
+            .expect("the mutation is audited");
+        assert_eq!(field_of(&event, "op"), "chmod");
+        assert_eq!(field_of(&event, "path"), "/Users/bob/notes");
+    }
+
+    /// A descriptor a parent conferred at spawn reads as the parent, but its
+    /// node's mode changes only as the caller: a child cannot chmod with its
+    /// opener's rights. `fs_access` through it asks as the descriptor acts.
+    #[test]
+    fn metadata_through_a_conferred_descriptor_acts_as_the_caller() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let mut fs = RecordingFs::new();
+        fs.record_access = true;
+        let fx = RecordingFixture::new(fs, sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let opened = crate::test_bundle::opened_node(
+            &fx.fs.volume,
+            7,
+            NodeKind::RegularFile,
+            "/System/Logs/boot",
+        );
+        let file = crate::aspace::OpenFile::new(OpenBacking::opened(opened), OpenFlags::WRITE)
+            .conferred_to_child(0, caps_with(&[CapabilityId::FS_ACCESS]));
+        fx.hand_over(file);
+        assert_eq!(
+            h.fs_set_mode(&ctx, tairix_abi::STDOUT, 0, 0, 0o777, AtFlags::EMPTY_PATH),
+            Ok(0)
+        );
+        let write = tairix_abi::Access::WRITE;
+        assert_eq!(
+            h.fs_access(&ctx, tairix_abi::STDOUT, 0, 0, write, AtFlags::EMPTY_PATH),
+            Ok(0)
+        );
+        assert_eq!(
+            fx.fs.calls(),
+            alloc::vec![
+                String::from(
+                    "set_mode_node uid=1000 path=/System/Logs/boot mode=777 granted=false"
+                ),
+                String::from(
+                    "access_node uid=0 path=/System/Logs/boot want=Write granted=false AsQuery"
+                ),
+            ]
+        );
+    }
+
+    /// `fs_access` through a grant asks as its grantor and without the
+    /// owner's exemption, for each access asked.
+    #[test]
+    fn fs_access_through_a_grant_asks_as_its_grantor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let mut fs = RecordingFs::new();
+        fs.record_access = true;
+        let fx = RecordingFixture::new(fs, sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let opened =
+            crate::test_bundle::opened_node(&fx.fs.volume, 7, NodeKind::RegularFile, "/doc");
+        let granted = crate::aspace::OpenFile::new(OpenBacking::opened(opened), OpenFlags::READ)
+            .handed_on(4242, caps_with(&[CapabilityId::FS_ACCESS]), 0)
+            .expect("a file hands on");
+        fx.hand_over(crate::aspace::OpenFile::new(
+            OpenBacking::Node(granted),
+            OpenFlags::READ,
+        ));
+        let read_exec = tairix_abi::Access::from_bits(5).expect("read and run");
+        assert_eq!(
+            h.fs_access(
+                &ctx,
+                tairix_abi::STDOUT,
+                0,
+                0,
+                read_exec,
+                AtFlags::EMPTY_PATH
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            fx.fs.calls(),
+            alloc::vec![
+                String::from("access_node uid=4242 path=/doc want=Read granted=true AsQuery"),
+                String::from("access_node uid=4242 path=/doc want=Execute granted=true AsQuery"),
+            ]
+        );
+    }
+
+    /// Once the node grants an access, the projection it is held through
+    /// still refuses writing when read-only and running a file when `noexec`;
+    /// searching a directory there is not running it.
+    #[test]
+    fn fs_access_answers_the_projection_after_the_node() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let mut fs = RecordingFs::new();
+        fs.flags = tairix_abi::driver::filesystem::MountFlags::READ_ONLY
+            .union(tairix_abi::driver::filesystem::MountFlags::NOEXEC);
+        let fx = RecordingFixture::new(fs, sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let file = open_at(&h, &ctx, FD_CWD, "/Storage/cd/run", OpenFlags::READ).expect("file");
+        let dir = open_at(&h, &ctx, FD_CWD, "/Storage/cd", OpenFlags::DIRECTORY).expect("dir");
+        let ask = |fd, want| h.fs_access(&ctx, fd, 0, 0, want, AtFlags::EMPTY_PATH);
+        assert_eq!(ask(file, tairix_abi::Access::READ), Ok(0));
+        assert_eq!(ask(file, tairix_abi::Access::WRITE), Err(Errno::ReadOnly));
+        assert_eq!(
+            ask(file, tairix_abi::Access::EXEC),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(ask(dir, tairix_abi::Access::EXEC), Ok(0));
+    }
+
+    /// The path form asks the service with the access and the final-link
+    /// posture the flags name; no access at all through a descriptor asks
+    /// only that its node is still reached.
+    #[test]
+    fn fs_access_names_its_path_or_asks_only_for_reach() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        h.copy_out_user(&ctx, 0x1000, b"/Users/bob/link")
+            .expect("staged");
+        let read_write = tairix_abi::Access::from_bits(6).expect("read and write");
+        assert_eq!(
+            h.fs_access(&ctx, FD_CWD, 0x1000, 15, read_write, AtFlags::NO_FOLLOW),
+            Ok(0)
+        );
+        let fd = open_at(&h, &ctx, FD_CWD, "/Users/bob/f", OpenFlags::empty()).expect("open");
+        let none = tairix_abi::Access::from_bits(0).expect("existence");
+        assert_eq!(
+            h.fs_access(&ctx, fd, 0, 0, none, AtFlags::EMPTY_PATH),
+            Ok(0)
+        );
+        assert_eq!(
+            fx.fs.calls(),
+            alloc::vec![
+                String::from("access uid=1000 path=/Users/bob/link want=6 link=Keep"),
+                String::from("open uid=1000 path=/Users/bob/f flags=0"),
+                String::from("stat uid=1000 path=/Users/bob/f"),
+            ]
+        );
+    }
+
+    /// An expectation is copied in exactly when the flags ask for one, and an
+    /// expectation of the node alone naming anything else is refused before
+    /// the service.
+    #[test]
+    fn an_expectation_reaches_the_service_only_when_asked() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        h.copy_out_user(&ctx, 0x1000, b"/f").expect("staged");
+        let node = NodeExpect {
+            id: tairix_abi::FileId {
+                volume: [0; 16],
+                node: 42,
+            },
+            ..NodeExpect::default()
+        };
+        h.copy_out_user(&ctx, 0x1100, &node.to_le_bytes())
+            .expect("staged");
+        let sized = NodeExpect { size: 5, ..node };
+        h.copy_out_user(&ctx, 0x1200, &sized.to_le_bytes())
+            .expect("staged");
+        assert_eq!(
+            h.fs_unlink(&ctx, FD_CWD, 0x1000, 2, UnlinkFlags::EXPECT_NODE, 0x1100),
+            Ok(0)
+        );
+        assert_eq!(
+            h.fs_unlink(&ctx, FD_CWD, 0x1000, 2, UnlinkFlags::EXPECT_NODE, 0x1200),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            h.fs_unlink(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                2,
+                UnlinkFlags::EXPECT_UNCHANGED,
+                0x1200
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            h.fs_unlink(&ctx, FD_CWD, 0x1000, 2, UnlinkFlags::empty(), 0),
+            Ok(0)
+        );
+        assert_eq!(
+            fx.fs.calls(),
+            alloc::vec![
+                String::from("unlink uid=1000 path=/f flags=2 expect=Some(42)"),
+                String::from("unlink uid=1000 path=/f flags=4 expect=Some(42)"),
+                String::from("unlink uid=1000 path=/f flags=0 expect=None"),
+            ]
+        );
+    }
+
+    /// `fs_rename` takes each name from its own `PathAt`, a relative one from
+    /// its own start, and the audit trail names both.
+    #[test]
+    fn fs_rename_takes_each_name_from_its_own_start() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let dir = open_at(&h, &ctx, FD_CWD, "/Users/bob", OpenFlags::DIRECTORY).expect("dir");
+        h.copy_out_user(&ctx, 0x1400, b"a/Users/bob/b")
+            .expect("staged");
+        let src = PathAt {
+            dirfd: dir,
+            len: 1,
+            path: 0x1400,
+        };
+        let dst = PathAt {
+            dirfd: 99,
+            len: 12,
+            path: 0x1401,
+        };
+        h.copy_out_user(&ctx, 0x1300, &src.to_le_bytes())
+            .expect("staged");
+        h.copy_out_user(&ctx, 0x1310, &dst.to_le_bytes())
+            .expect("staged");
+        assert_eq!(
+            h.fs_rename(&ctx, 0x1300, 0x1310, RenameFlags::empty(), 0),
+            Ok(0)
+        );
+        assert_eq!(
+            fx.fs.calls().last().map(String::as_str),
+            Some("rename uid=1000 src=a from=/Users/bob dst=/Users/bob/b flags=0 expect=None")
+        );
+        let event = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::FsNodeMutated.id())
+            .expect("the mutation is audited");
+        assert_eq!(field_of(&event, "path"), "a");
+        assert_eq!(field_of(&event, "from"), "/Users/bob");
+        assert_eq!(field_of(&event, "to"), "/Users/bob/b");
+        // A `PathAt` naming an empty path is refused before anything resolves.
+        let empty = PathAt { len: 0, ..src };
+        h.copy_out_user(&ctx, 0x1300, &empty.to_le_bytes())
+            .expect("staged");
+        assert_eq!(
+            h.fs_rename(&ctx, 0x1300, 0x1310, RenameFlags::empty(), 0),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    /// `EMPTY_PATH` changes to the directory a descriptor holds, the path `.`
+    /// from it, and refuses a descriptor that holds a file.
+    #[test]
+    fn fchdir_changes_to_the_directory_a_descriptor_holds() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let dir = open_at(&h, &ctx, FD_CWD, "/Users/bob", OpenFlags::DIRECTORY).expect("dir");
+        let file = open_at(&h, &ctx, FD_CWD, "/Users/bob/f", OpenFlags::READ).expect("file");
+        assert_eq!(
+            h.fs_chdir(&ctx, file, 0, 0, AtFlags::EMPTY_PATH),
+            Err(Errno::NotADirectory)
+        );
+        assert_eq!(h.fs_chdir(&ctx, dir, 0, 0, AtFlags::EMPTY_PATH), Ok(0));
+        assert_eq!(cwd_label(&fx.aspaces, ProcessId(2)), "/Users/bob");
+        assert_eq!(
+            fx.fs.calls().last().map(String::as_str),
+            Some("chdir uid=1000 path=. from=/Users/bob")
+        );
+    }
+
+    /// The working directory is held by node: a rename of it moves nothing,
+    /// so a relative open still reaches what it holds, and `getcwd` answers
+    /// where it stands now.
+    #[test]
+    fn the_working_directory_follows_its_node_through_a_rename() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xD7; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/d"),
+                crate::fs::test_volume::new_dir(),
+            )
+            .expect("mkdir");
+        fx.create("/Storage/vol/d/f");
+        h.copy_out_user(&ctx, 0x1000, b"/Storage/vol/d")
+            .expect("staged");
+        assert_eq!(
+            h.fs_chdir(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                "/Storage/vol/d".len(),
+                AtFlags::empty()
+            ),
+            Ok(0)
+        );
+        fx.svc
+            .rename(
+                uid,
+                &caps,
+                at("/Storage/vol/d"),
+                at("/Storage/vol/e"),
+                RenameFlags::empty(),
+                None,
+            )
+            .expect("rename");
+        let f = open_path(&h, &ctx, "f", OpenFlags::READ).expect("the held directory's f");
+        assert_eq!(h.fs_close(&ctx, f), Ok(0));
+        let n = h.fs_getcwd(&ctx, 0x1100, 64).expect("getcwd");
+        let mut answer = alloc::vec![0u8; usize::try_from(n).unwrap()];
+        h.copy_in_user(&ctx, 0x1100, &mut answer).expect("readable");
+        assert_eq!(answer.as_slice(), b"/Storage/vol/e");
+    }
+
+    /// A working directory whose last name is removed answers `NotFound`.
+    #[test]
+    fn a_removed_working_directory_answers_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xD8; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/gone"),
+                crate::fs::test_volume::new_dir(),
+            )
+            .expect("mkdir");
+        h.copy_out_user(&ctx, 0x1000, b"/Storage/vol/gone")
+            .expect("staged");
+        assert_eq!(
+            h.fs_chdir(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                "/Storage/vol/gone".len(),
+                AtFlags::empty()
+            ),
+            Ok(0)
+        );
+        fx.svc
+            .unlink(
+                uid,
+                &caps,
+                at("/Storage/vol/gone"),
+                UnlinkFlags::DIRECTORY,
+                None,
+            )
+            .expect("rmdir");
+        assert_eq!(h.fs_getcwd(&ctx, 0x1100, 64), Err(Errno::NotFound));
+    }
+
+    /// `fs_realpath` relative to a directory descriptor answers from where the
+    /// directory stands now.
+    #[test]
+    fn realpath_relative_to_a_renamed_directory_descriptor_is_exact() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xD9; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc
+            .mkdir(
+                uid,
+                &caps,
+                at("/Storage/vol/d"),
+                crate::fs::test_volume::new_dir(),
+            )
+            .expect("mkdir");
+        let dir = open_watch_dir(&h, &ctx, "/Storage/vol/d");
+        fx.svc
+            .rename(
+                uid,
+                &caps,
+                at("/Storage/vol/d"),
+                at("/Storage/vol/e"),
+                RenameFlags::empty(),
+                None,
+            )
+            .expect("rename");
+        h.copy_out_user(&ctx, 0x1000, b"x").expect("staged");
+        let n = h
+            .fs_realpath(
+                &ctx,
+                dir,
+                0x1000,
+                1,
+                0x1100,
+                64,
+                tairix_abi::RealpathMode::Final,
+            )
+            .expect("realpath");
+        let mut answer = alloc::vec![0u8; usize::try_from(n).unwrap()];
+        h.copy_in_user(&ctx, 0x1100, &mut answer).expect("readable");
+        assert_eq!(answer.as_slice(), b"/Storage/vol/e/x");
+    }
+
+    /// `CREATE | DIRECTORY | EXCLUSIVE` makes the directory, under the umask,
+    /// and answers it open with neither read nor write access.
+    #[test]
+    fn a_directory_made_by_its_open_answers_it_open() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xDA; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let make = OpenFlags::CREATE
+            .union(OpenFlags::DIRECTORY)
+            .union(OpenFlags::EXCLUSIVE);
+        h.copy_out_user(&ctx, 0x1000, b"/Storage/vol/n")
+            .expect("staged");
+        let fd = u32::try_from(
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/Storage/vol/n".len(), make, 0o777)
+                .expect("made and opened"),
+        )
+        .unwrap();
+        let stat = stat_fd(&h, &ctx, fd).expect("stat");
+        assert_eq!(stat.kind, tairix_abi::FileKind::Directory);
+        assert_eq!(stat.mode & 0o777, 0o755);
+        assert_eq!(read_fd(&h, &ctx, fd, 0, 1), Err(Errno::PermissionDenied));
+        assert_eq!(
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/Storage/vol/n".len(), make, 0o777),
+            Err(Errno::AlreadyExists)
+        );
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A removal whose expectation the name no longer meets answers `Stale`
+    /// and removes nothing; one it meets removes the name.
+    #[test]
+    fn an_expectation_no_longer_met_is_stale_and_removes_nothing() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xDB; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let fd = open_path(&h, &ctx, "/Storage/vol/f", rw.union(OpenFlags::CREATE)).expect("f");
+        let seen = NodeExpect::of(&stat_fd(&h, &ctx, fd).expect("stat"));
+        assert_eq!(write_fd(&h, &ctx, fd, 0, b"changed"), Ok(7));
+        h.copy_out_user(&ctx, 0x1100, &seen.to_le_bytes())
+            .expect("staged");
+        h.copy_out_user(&ctx, 0x1000, b"/Storage/vol/f")
+            .expect("staged");
+        let len = "/Storage/vol/f".len();
+        assert_eq!(
+            h.fs_unlink(
+                &ctx,
+                FD_CWD,
+                0x1000,
+                len,
+                UnlinkFlags::EXPECT_UNCHANGED,
+                0x1100
+            ),
+            Err(Errno::Stale)
+        );
+        assert!(
+            stat_fd(&h, &ctx, fd).is_ok_and(|stat| stat.nlink == 1),
+            "kept"
+        );
+        let node = NodeExpect {
+            id: seen.id,
+            ..NodeExpect::default()
+        };
+        h.copy_out_user(&ctx, 0x1100, &node.to_le_bytes())
+            .expect("staged");
+        assert_eq!(
+            h.fs_unlink(&ctx, FD_CWD, 0x1000, len, UnlinkFlags::EXPECT_NODE, 0x1100),
+            Ok(0)
+        );
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// `EMPTY_PATH` changes the mode of the node a descriptor holds, whatever
+    /// it has been renamed to, and attributes are reached through the
+    /// descriptor the same way.
+    #[test]
+    fn metadata_through_a_descriptor_follows_its_node_through_a_rename() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xDC; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let fd = open_path(&h, &ctx, "/Storage/vol/a", rw.union(OpenFlags::CREATE)).expect("a");
+        fx.svc
+            .rename(
+                uid,
+                &caps,
+                at("/Storage/vol/a"),
+                at("/Storage/vol/b"),
+                RenameFlags::empty(),
+                None,
+            )
+            .expect("rename");
+        assert_eq!(
+            h.fs_set_mode(&ctx, fd, 0, 0, 0o600, AtFlags::EMPTY_PATH),
+            Ok(0)
+        );
+        let mode = fx
+            .svc
+            .stat(
+                uid,
+                &caps,
+                at("/Storage/vol/b"),
+                crate::fs::FinalLink::Follow,
+            )
+            .expect("stat")
+            .mode;
+        assert_eq!(mode & 0o777, 0o600);
+        h.copy_out_user(&ctx, 0x1000, b"user.kv").expect("staged");
+        assert_eq!(h.fs_attr_set(&ctx, fd, 0x1000, 6, 0x1006, 1), Ok(0));
+        assert_eq!(h.fs_attr_get(&ctx, fd, 0x1000, 6, 0x1100, 8), Ok(1));
+        let mut value = [0u8; 1];
+        h.copy_in_user(&ctx, 0x1100, &mut value).expect("readable");
+        assert_eq!(&value, b"v");
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
 
     /// `plans/APPS.md` I3 — the instrumented host reproduction of the
@@ -54600,9 +57569,10 @@ mod fs_audit_tests {
     //! `mkdir`/`rmdir`/`unlink`/`rename`/`chmod`/`chown` produces exactly one
     //! stable audit record, so no on-disk mutation escapes the trail.
 
-    use super::{audit_path_field, emit_fs_mutation, format_mode_octal, FsAuditDetail};
+    use super::{audit_path_field, emit_fs_mutation, format_mode_octal, AuditPlace, FsAuditDetail};
     use crate::audit::AuditEvent;
     use crate::test_sink::{CapturedEvent, TestSink};
+    use alloc::borrow::Cow;
     use alloc::format;
     use tairix_abi::{Errno, LOG_FIELD_VALUE_MAX};
     use tairix_log::Level;
@@ -54644,7 +57614,14 @@ mod fs_audit_tests {
         assert!(path.starts_with(bounded));
 
         let sink = TestSink::new();
-        emit_fs_mutation(&sink, "mkdir", 1, &path, &FsAuditDetail::None, Ok(()));
+        emit_fs_mutation(
+            &sink,
+            "mkdir",
+            1,
+            &absolute(&path),
+            &FsAuditDetail::None,
+            Ok(()),
+        );
         let events = sink.snapshot();
         assert_eq!(events.len(), 1, "the record must always be emitted");
         assert_eq!(field(&events[0], "path"), Some(bounded));
@@ -54669,7 +57646,7 @@ mod fs_audit_tests {
             &sink,
             "mkdir",
             1000,
-            "/Users/me/x",
+            &absolute("/Users/me/x"),
             &FsAuditDetail::None,
             Ok(()),
         );
@@ -54691,7 +57668,7 @@ mod fs_audit_tests {
             &sink,
             "unlink",
             0,
-            "/System/x",
+            &absolute("/System/x"),
             &FsAuditDetail::None,
             Err(Errno::PermissionDenied),
         );
@@ -54707,6 +57684,14 @@ mod fs_audit_tests {
         assert_eq!(field(ev, "errno"), Some(expected));
     }
 
+    /// `path` as an audit record names an absolute one.
+    fn absolute(path: &str) -> AuditPlace<'_> {
+        AuditPlace {
+            from: None,
+            path: Cow::Borrowed(path),
+        }
+    }
+
     #[test]
     fn rename_records_destination_path() {
         let sink = TestSink::new();
@@ -54714,8 +57699,10 @@ mod fs_audit_tests {
             &sink,
             "rename",
             7,
-            "/a",
-            &FsAuditDetail::Rename { to: "/b" },
+            &absolute("/a"),
+            &FsAuditDetail::Rename {
+                to: &absolute("/b"),
+            },
             Ok(()),
         );
         let events = sink.snapshot();
@@ -54723,6 +57710,35 @@ mod fs_audit_tests {
         assert_eq!(field(ev, "op"), Some("rename"));
         assert_eq!(field(ev, "path"), Some("/a"));
         assert_eq!(field(ev, "to"), Some("/b"));
+        assert_eq!(field(ev, "from"), None);
+    }
+
+    /// A relative path is recorded as typed, beside the label of the start
+    /// it resolved from, never joined into a path the walk may not have
+    /// taken.
+    #[test]
+    fn a_relative_path_is_recorded_beside_where_it_started() {
+        let sink = TestSink::new();
+        let place = |from, path| AuditPlace {
+            from: Some(Cow::Borrowed(from)),
+            path: Cow::Borrowed(path),
+        };
+        emit_fs_mutation(
+            &sink,
+            "rename",
+            7,
+            &place("/Users/bob/d", "../x"),
+            &FsAuditDetail::Rename {
+                to: &place("/Storage", "usb/y"),
+            },
+            Ok(()),
+        );
+        let events = sink.snapshot();
+        let ev = &events[0];
+        assert_eq!(field(ev, "path"), Some("../x"));
+        assert_eq!(field(ev, "from"), Some("/Users/bob/d"));
+        assert_eq!(field(ev, "to"), Some("usb/y"));
+        assert_eq!(field(ev, "to_from"), Some("/Storage"));
     }
 
     #[test]
@@ -54732,7 +57748,7 @@ mod fs_audit_tests {
             &sink,
             "chmod",
             7,
-            "/a",
+            &absolute("/a"),
             &FsAuditDetail::Mode { mode: 0o640 },
             Ok(()),
         );
@@ -54747,7 +57763,7 @@ mod fs_audit_tests {
             &sink,
             "chown",
             7,
-            "/a",
+            &absolute("/a"),
             &FsAuditDetail::Owner {
                 owner: 1001,
                 group: 2002,
@@ -54766,7 +57782,7 @@ mod fs_audit_tests {
         // values, matching how the handler picks them from the flags.
         for op in ["rmdir", "unlink"] {
             let sink = TestSink::new();
-            emit_fs_mutation(&sink, op, 5, "/d", &FsAuditDetail::None, Ok(()));
+            emit_fs_mutation(&sink, op, 5, &absolute("/d"), &FsAuditDetail::None, Ok(()));
             assert_eq!(field(&sink.snapshot()[0], "op"), Some(op));
         }
     }

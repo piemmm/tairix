@@ -98,9 +98,10 @@ everything else may ignore.
 - `0` — the listing, change, rescan, or short help was completed.
 - `1` — a store, bundle, or output failure (for example the caller may
   not change the machine-wide catalog); the reason is stated on the
-  diagnostic stream.
-- `2` — the command line was not understood, the folder or entry is
-  unknown, or the bundle cannot be registered as asked.
+  diagnostic stream. A command line that was not understood (an unknown
+  `--category` folder included) exits `1` too.
+- `2` — the entry is unknown, or the bundle cannot be registered as
+  asked.
 
 ## ENVIRONMENT
 

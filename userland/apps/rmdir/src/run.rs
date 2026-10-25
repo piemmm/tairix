@@ -26,14 +26,11 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::format;
 
     use tairix_abi::{Errno, UnlinkFlags};
     use tairix_help::BundleHelp;
-    use tairix_rmdir::{parse, run, Filesystem, USAGE};
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rmdir::{parse, run, Filesystem};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
     /// The production [`Filesystem`] over the directory-only `fs_unlink`.
     struct RtFilesystem;
@@ -48,30 +45,21 @@ mod program {
         }
     }
 
-    /// Report a usage error: the banner on the standard error stream.
-    ///
-    /// Written verbatim: the banner already ends in a newline, and GNU
-    /// `rmdir` does not follow it with a blank line.
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` on a filesystem or output failure,
-    /// `2` on a usage error (a malformed argument vector or an unrecognised
-    /// option).
+    /// Exit codes: `0` on success, `1` on a filesystem or output failure or
+    /// a command line not understood, as GNU's `rmdir` ends.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return 2;
+        let Some(arguments) = tairix_help::arguments("rmdir") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("rmdir", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -82,10 +70,12 @@ mod program {
             &RtFilesystem,
             &BundleHelp::new("rmdir"),
             &Stdout,
+            &Stderr,
         ) {
-            Ok(()) => 0,
+            Ok(true) => 0,
+            Ok(false) => 1,
             Err(err) => {
-                write_stderr_line(&format!("rmdir: {err}"));
+                write_stderr_line(format_args!("rmdir: {err}"));
                 1
             }
         }

@@ -270,18 +270,20 @@ can never diverge in navigation semantics, listing policy, or look.
   semantics.
 - **Cut/copy clipboard** (`clipboard`, `Browser::clipboard`,
   `plans/NEW-FILEMANAGER.md` FM7): the cross-directory set the move/copy verbs
-  act on. `Browser::clipboard(op)` captures the selected entries' absolute
-  component paths onto a `Clipboard` (`None` when nothing is selected), so it
-  survives navigating to the paste target. `plan_paste(clipboard, target)`
+  act on. `Browser::clipboard(op)` captures the selected entries onto a
+  `Clipboard` (`None` when nothing is selected) as `Listed` — each absolute
+  component path and the node the listing showed there — so it survives
+  navigating to the paste target and a paste refuses a name that has come to
+  hold another node. `plan_paste(clipboard, target)`
   resolves each source to a destination in the target directory, **fail
   closed**: a target inside one of the moved items is `PasteError::WouldRecurse`
   (an exact component-prefix test — `/a/b` is within `/a`, `/ab` is not), and a
   paste back into an item's own directory is flagged
   (`PasteItem::overwrites_source`) for the app to confirm rather than silently
-  clobber. The model names *what* would move where; the app performs the
-  capability-checked `fs_rename` / streamed copy under the user's own identity,
-  so composing it grants nothing and the read-only picker never builds a
-  clipboard.
+  clobber. The model names *what* would move where; the app carries each item
+  out as an operation of the shared engine (`lib/fscopy`) under the user's own
+  identity, so composing it grants nothing and the read-only picker never
+  builds a clipboard.
 - **Paste execution** (`execute`, `plans/NEW-FILEMANAGER.md` FM7b): the pure
   model of *how* a planned paste is carried out, host-proven ahead of the app
   verbs. `paste_strategy(op, source, dest)` decides from the clipboard
@@ -293,75 +295,30 @@ can never diverge in navigation semantics, listing policy, or look.
   only after a cross-volume copy fully succeeds — the app performs every
   syscall under the user's own identity, so the read-only picker never runs
   it.
-- **Recursive copy** (`execute::CopyWalk`, `plans/NEW-FILEMANAGER.md` FM7b):
-  the model of *how* a whole tree is copied — the copy-side analogue of
-  `delete::DeleteWalk`. Where a delete removes contents before their container,
-  a copy *creates* a destination directory *before* streaming its contents into
-  it, so a child always has a parent to land in. `CopyWalk::from_items` starts
-  the walk from resolved `(source, dest, is_directory)` items (the app supplies
-  each item's kind, which the path-only clipboard does not carry) and is **fail
-  closed** — an empty set or a source/dest naming the root yields no walk.
-  `next_action` yields the next `CopyAction` — `MakeDir { source, dest }` (the
-  app `fs_mkdir`s it, gives it the source's attributes and reports `created`),
-  `List { source }` (the app reads it and reports its children with `expand`),
-  or `CopyFile { source, dest }` (the app copies it through the copy engine and
-  reports `copied_file`). It does no
-  I/O, keeps its own explicit stack (so a deep tree cannot overflow the call
-  stack), stays within the shared `MAX_COPY_DEPTH` (a deeper tree is
-  `CopyWalkError::TooDeep`, never descended without limit — the same
-  `MAX_WALK_DEPTH` bound `DeleteWalk` obeys), and holds its exact position
-  between steps so the app can cancel or be preempted without losing or
-  repeating work. Driving it against the wrong step is
-  `CopyWalkError::OutOfStep`, leaving the walk unchanged. `copied` is the walk's
-  own count of what it has copied, shown against the whole a `Survey` counted
-  before the copy began. The app performs every syscall under
-  the user's own identity, so composing it grants nothing and the read-only
-  picker never runs it.
 - **Delete** (`delete`, `Browser::plan_delete`, `plans/NEW-FILEMANAGER.md`
   FM7b): the model of *what* a Delete removes, host-proven ahead of the app
   verb. `Browser::plan_delete()` captures the selection into a `DeletePlan`
-  (`None` when nothing is selected) whose `DeleteTarget`s each carry the
-  entry's absolute component path and whether it is directory-backed on disk
-  — a directory *or* a bundle, so a sealed `<Name>.app` is removed with
-  `UnlinkFlags::DIRECTORY` and recursed into as the directory it really is,
-  while a regular file is a leaf. `DeletePlan::new` is **fail closed**: an
+  (`None` when nothing is selected) whose `DeleteTarget`s each carry the entry
+  as `Listed`, so a removal finding another node under the name leaves it
+  alone, and whether it was listed as directory-backed — a directory *or* a
+  bundle, removed with everything in it, which the confirmation warns of. `DeletePlan::new` is **fail closed**: an
   empty selection, or any target naming the root (an empty component list),
   yields no plan rather than one that could remove nothing or the root.
   `len`/`has_directories` are the honest figures a delete confirmation reports. The
-  model names the removals; the app performs each `fs_unlink` under the user's
-  own identity (no new capability), so composing it grants nothing and the
-  read-only picker never builds one.
-- **Delete execution** (`delete::DeleteWalk`, `plans/NEW-FILEMANAGER.md` FM7b):
-  the model of *how* a `DeletePlan` is carried out — the depth-first traversal
-  that removes a directory's contents before the directory itself, the
-  delete-side analogue of `execute::CopyWalk`. `DeleteWalk::from_plan` starts
-  the walk; `next_action` yields the next `DeleteAction` — `List(path)` (the app
-  reads that directory and reports its children with `expand`, so they are
-  removed first) or `Remove { path, is_directory }` (the app unlinks the leaf or
-  now-empty directory and reports it with `complete_removal`). It does no I/O,
-  keeps its own explicit stack (so a deep tree cannot overflow the call stack),
-  stays within `MAX_DELETE_DEPTH` (a fail-closed bound — a deeper tree is
-  `DeleteError::TooDeep`, never descended without limit), and holds its exact
-  position between steps so the app can cancel or be preempted without losing or
-  repeating work. Driving it against the wrong step is `DeleteError::OutOfStep`,
-  leaving the walk unchanged. `removed` is the walk's own count of what it has
-  removed, shown against the whole a `Survey` counted. This is the browser
-  engine's own component-path
-  traversal, distinct from `rm`'s coreutils removal engine — two consumers with
-  two data models, not one algorithm copied twice. The question asked first is
-  the renderer's `delete_alert`, a desktop alert naming the honest target count
-  and warning about folders; its answers are indexed by `DELETE_CONFIRM_INDEX`
-  and `DELETE_CANCEL_INDEX`. The files app asks it on `Delete` and, on the
-  removal's answer, drives the `DeleteWalk` to completion over the user's own
-  `fs_readdir`/`fs_unlink`. Only the write-capable
-  file manager builds and drives it — the read-only picker never deletes.
+  model names the removals; the app carries them out through the shared engine
+  (`lib/fscopy`) under the user's own identity (no new capability), so composing
+  it grants nothing and the read-only picker never builds one. The question
+  asked first is the renderer's `delete_alert`, a desktop alert naming the honest
+  target count and warning about folders; its answers are indexed by
+  `DELETE_CONFIRM_INDEX` and `DELETE_CANCEL_INDEX`. Only the write-capable file
+  manager builds and carries out a plan — the read-only picker never deletes.
 - **Move to Trash** (`trash`, `plans/NEW-FILEMANAGER.md` FM10): the pure model
   of a *recoverable* delete — a delete is reversible when that costs nothing.
   `trash_strategy` decides, from the item's and the Trash directory's
   `VolumeId`s, whether the removal is a cheap `TrashStrategy::Move` (a single
-  same-volume `fs_rename` into Trash, recoverable until emptied) or must fall
+  same-volume rename into Trash, recoverable until emptied) or must fall
   back to the irreversible `TrashStrategy::Unlink` (a cross-volume removal — a
-  rename cannot span volumes — the existing `DeleteWalk` path), reusing the same
+  rename cannot span volumes — an ordinary permanent delete), reusing the same
   volume identity `execute::paste_strategy` compares. `trash_dest_path` resolves
   a collision-free home inside the Trash directory: the original leaf when free,
   otherwise the smallest ` (n)` disambiguation inserted before the extension
@@ -370,8 +327,8 @@ can never diverge in navigation semantics, listing policy, or look.
   dir (`RootTrash`), an invalid original name (`InvalidName`), a disambiguation
   past the per-name limit (`TooLong`), or a search past `MAX_TRASH_NAME_ATTEMPTS`
   (`NoFreeName`). It touches no filesystem and holds no authority (the app
-  performs the `fs_stat`/`fs_rename` under the user's own identity), so the
-  read-only picker never runs it. `trash_dir` spells the fixed `Library/Trash`
+  performs the stat and the rename, one move of the shared engine per target,
+  under the user's own identity), so the read-only picker never runs it. `trash_dir` spells the fixed `Library/Trash`
   subtree of the user's home — the one definition the app and its QEMU witness
   share so where a trashed item lands cannot drift. The delete question is
   disposition-aware: `DeleteDisposition` (passed to `delete_alert`) asks a
@@ -382,7 +339,7 @@ can never diverge in navigation semantics, listing policy, or look.
   (`plans/NEW-FILEMANAGER.md` FM11) models the irreversible counterpart —
   emptying the Trash: it turns the Trash directory's listing into a
   `DeletePlan` over its *contents* (never the Trash directory itself), carried
-  out by the same recursive `DeleteWalk` a permanent delete uses (§2.2), so
+  out by the same recursive removal a permanent delete uses (§2.2), so
   emptying leaves the now-empty Trash folder in place. It returns `None` for an
   already-empty Trash (a no-op, not an error) and is fail closed: a root Trash
   dir (`RootTrash`) or an invalid child leaf (`InvalidName`) refuses the whole
@@ -392,8 +349,8 @@ can never diverge in navigation semantics, listing policy, or look.
   (FM11b): `ManagerTool::Trash` navigates (`navigate_to`) to the user's Trash —
   the navigable Trash location — and `ManagerTool::EmptyTrash`, enabled only in
   a non-empty Trash (`ManagerToolModel`), builds the `empty_trash_plan`,
-  confirms it with the `DeleteDisposition::Permanent` dialog, and hands its
-  `DeleteWalk` to the same operations worker a delete uses.
+  confirms it with the `DeleteDisposition::Permanent` dialog, and hands the plan
+  to the same operations worker a delete uses.
 - **Drops** (`plans/FILES-INTERACTION.md` FI9): `drop_operation` is the one
   policy a drag's drop is decided by — a copy, or a move with `Shift`, and
   nothing for a drop that would put a folder inside itself or leave every item

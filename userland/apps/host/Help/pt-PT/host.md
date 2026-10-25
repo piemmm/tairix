@@ -47,9 +47,9 @@ na saída de erro.
 
 - `0` — foi encontrado pelo menos um endereço (ou a ajuda breve foi escrita).
 - `1` — o nome não resolveu nenhum endereço (resposta negativa, tempo-limite
-  esgotado ou falha do resolvedor).
-- `2` — a linha de comandos não foi compreendida, ou a saída não pôde ser
-  escrita.
+  esgotado ou falha do resolvedor). Uma linha de comandos não compreendida
+  também termina com `1`.
+- `2` — nenhum socket DNS pôde ser aberto, ou a saída não pôde ser escrita.
 
 ## ENVIRONMENT
 

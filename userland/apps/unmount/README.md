@@ -10,11 +10,12 @@ availability — and asks the kernel's `volume_detach` path to take it
 out of service. A plain detach flushes first and fails closed; a
 surprise-removed (*unavailable-dirty*/*unavailable-lost*) volume
 refuses it, keeping its retained uncommitted writes for verified
-re-insert. `unmount --force NAME` is the audited force-unmount: the
-kernel discards the retained set, retracts the volume, and logs the
-deliberate data loss with its own event id (4179). On a healthy volume
-`--force` still commits cleanly — nothing is discarded when a clean
-flush is possible.
+re-insert, and so does a volume a descriptor still holds a file of
+(`Busy`). `unmount --force NAME` is the audited force-unmount: the kernel
+revokes the descriptors still open on it, discards the retained set,
+retracts the volume, and logs what it gave up with its own event id
+(4179). On a healthy volume `--force` still commits cleanly —
+nothing is discarded when a clean flush is possible.
 
 The crate is both the pure `no_std` engine library (parser, resolver,
 seams — host-tested against in-memory fixtures) and the freestanding

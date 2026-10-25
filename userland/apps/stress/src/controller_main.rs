@@ -25,7 +25,7 @@ use tairix_procinfo::{IpcTransport, Namespace, VolumeBytes};
 use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 use tairix_stress::{
     completion_line, default_scratch, dispatch_line, refusal_line, run_scratch_paths, size_targets,
-    summary_record, Action, Controller, Discovered, Event, RunSpec, WorkerKind, WorkerSpec, USAGE,
+    summary_record, Action, Controller, Discovered, Event, RunSpec, WorkerKind, WorkerSpec,
     WORKER_FLAG,
 };
 
@@ -69,7 +69,7 @@ pub fn run(spec: &RunSpec) -> i32 {
         match prepare_scratch(spec) {
             Ok(dir) => dir,
             Err(reason) => {
-                write_stderr_line(&format!("stress: {reason}"));
+                write_stderr_line(format_args!("stress: {reason}"));
                 return 1;
             }
         }
@@ -119,7 +119,7 @@ pub fn run(spec: &RunSpec) -> i32 {
                     // A refused dispatch fails the run loudly; whatever
                     // was already spawned is torn down through the normal
                     // signalled path.
-                    write_stderr_line(&format!("stress: {reason}"));
+                    write_stderr_line(format_args!("stress: {reason}"));
                     let actions = machine.on_event(Event::Signalled(Signal::Terminate));
                     let mut grace = None;
                     execute(&actions, started_ns, &mut grace);
@@ -347,7 +347,7 @@ fn prepare_scratch(spec: &RunSpec) -> Result<String, &'static str> {
 
 /// Create `dir` if it does not exist; an existing directory is fine.
 fn ensure_dir(dir: &str) -> Result<(), &'static str> {
-    let ret = tairix_rt::fs_mkdir(dir.as_bytes());
+    let ret = tairix_rt::fs_mkdir(dir.as_bytes(), tairix_abi::fs::FS_NEW_DIR_MODE);
     #[allow(clippy::cast_possible_truncation)] // The kernel encodes -errno in i32 range.
     let errno = -(ret as i32);
     if ret == 0 || errno == Errno::AlreadyExists.as_i32() {
@@ -388,9 +388,8 @@ fn scratch_free_bytes(scratch: &str) -> Option<u64> {
 /// orphaned — the kernel prunes the dead parent's bookkeeping and the run
 /// carries on unsupervised.
 fn background_respawn() -> i32 {
-    let Some(arguments) = tairix_rt::args() else {
-        write_stderr_line(USAGE);
-        return 2;
+    let Some(arguments) = tairix_help::arguments("stress") else {
+        return tairix_help::MISUSE;
     };
     let mut argv: Vec<&[u8]> = Vec::with_capacity(arguments.len() + 2);
     argv.push(b"stress");

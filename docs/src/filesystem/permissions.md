@@ -54,16 +54,45 @@ already does. A hard link needs no separate rule: a second name shares the
 one inode and therefore the one security record, so it confers no reach the
 first name did not.
 
+## Sticky directories
+
+In a directory carrying the sticky bit (`0o1000`), write permission lets a
+principal add names but not take away anyone else's: `unlink`, `rmdir` and
+`rename` — again at either end — succeed only for the entry's owner or the
+directory's owner. A shared drop folder (`0o1777`) is the case it exists
+for. No capability overrides it; a `CAP_FS_CHOWN` holder who must remove
+another's entry takes ownership of it first, which is audited. Both rules are
+one check, `Metadata::admits_name_removal`.
+
+## What a node is born with
+
+A node is born with its whole security record, in the creating call. Its
+owner is its creator. Its permission bits are the mode the create asked for
+(`fs_open` with `CREATE`, `fs_mkdir`) less the creating process's file mode
+creation mask; a symbolic link's are always `0o777`, since a link's own mode
+never gates access. The mask withholds only the `rwx` triads, never the
+setuid, setgid or sticky bit.
+
+Its group is its creator's own, except in a **setgid directory**
+(`0o2000`): that hands its group to everything made in it, and its setgid
+bit to a new directory, so a shared folder keeps its group however deep it
+grows. A file keeps a setgid bit it asked for only when its creator belongs
+to that group.
+
+The mask is per process: PID 1 starts with `0o022`, a child inherits its
+spawner's, and `fs_umask` sets it, answering the one it replaces. It needs no
+capability, since it decides only what the process's own creates are born
+with.
+
 ## Where the metadata comes from
 
 For the in-RAM tree the `Metadata` above is held directly on the inode.
-For a [driver-backed mount](./overview.md) it has two sources: the uniform
-mount-point template (a driver such as FAT that stores no per-file owner),
-or — for a driver that stores a full per-inode §5.3 record and implements
-`FilesystemSecurity`, such as [arxfs](./arxfs.md) — the node's own stored
-record, translated by `Metadata::from_node_security`. Each grant-only
-driver ACL entry (a `subject` plus an `rwx` triad) expands into one
-**allow** ACL entry per bit it grants; the driver surface carries no
+For a [driver-backed mount](./overview.md) it is the node's own record, read
+through the driver's `FilesystemSecurity` surface — the full per-inode record
+[arxfs](./arxfs.md) stores, or what a format that stores less reports for
+each node — and translated by `Metadata::from_node_security`. Each
+grant-only driver ACL entry (a `subject` plus an `rwx` triad) expands into
+one **allow** ACL entry per bit it grants; the driver surface carries no
 explicit deny. Either way the resulting `Metadata` feeds the *same*
 `authorize` decision above.
 
@@ -81,10 +110,13 @@ never judged as anyone else. The capability gate still comes first.
 ## Traversal
 
 Resolving a path requires **search (execute) permission on every directory
-descended through**, mirroring POSIX. `stat`-style `metadata` therefore
-needs search permission along the path but no permission on the target
-itself; `read` additionally needs read permission on the file; `mkdir`,
-`create_file`, `symlink`, and `remove` need write permission on the
+descended through**, mirroring POSIX — including the directory each `..`
+leaves, and the working directory or directory descriptor a relative path
+starts at, asked as the caller on every call. A directory is never granted,
+so a directory descriptor's authority is always its holder's. `stat`-style
+`metadata` therefore needs search permission along the path but no permission
+on the target itself; `read` additionally needs read permission on the file;
+`mkdir`, `create_file`, `symlink`, and `remove` need write permission on the
 *parent* directory.
 
 A **symbolic link** changes nothing here: search permission is required on
@@ -93,6 +125,42 @@ component or a link's target supplied it, so following a link can never
 reach a directory the caller could not have walked itself. Reading a link's
 own target (`readlink`) needs search permission on the way to it and none
 on the link, mirroring POSIX.
+
+## Descriptors
+
+A descriptor holds the node its open pinned, not a path
+([overview](./overview.md#open-file-descriptions)). The open is judged as any
+resolution is, and decides the access the descriptor carries. Every byte
+operation through it after that — read, write, truncate, punch, seek, listing,
+lock, a mapped page's fault — is judged again on the node alone, under the
+descriptor's authority: the caller's live identity for a descriptor it opened,
+so a capability narrowed while it is open stops working at once, and the
+identity captured when one was conferred at spawn or granted. `stat` and `sync`
+through a descriptor ask only the filesystem capability, as POSIX's `fstat` and
+`fsync` ask no permission.
+
+The capability gate binds every call. The mode and the ACL bind every call too,
+except that the node's owner, through a descriptor that was not granted, passes
+them (`Metadata::authorize_held`): the owner could restore any bit, and POSIX
+requires `open(O_CREAT, 0444)` then `write` to succeed. A grant has no such
+exemption, so the owner's `chmod` revokes one. Search permission above a held
+node is never asked again: a descriptor is not a name.
+
+A node's extended attributes are reached only through a descriptor, judged as
+its bytes are: read permission to read or list them, write permission to
+change them. A mode or owner change through a descriptor is judged as a change
+by path is, and is never made through a grant, whose holder could not restore
+what it changed.
+
+## Asking about access
+
+`fs_access` answers whether the caller may have a node as it asks — read,
+write, run, or with nothing asked whether the node exists — as the caller:
+the node's mode, ACL and capability gate under the caller's own identity,
+then the projection's flags, so a write where nothing may be written is
+`ReadOnly` and running a regular file on a `noexec` projection is
+`PermissionDenied`. It changes nothing, and a later operation is judged
+afresh.
 
 ## Errors
 

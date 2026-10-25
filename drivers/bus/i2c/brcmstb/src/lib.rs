@@ -15,7 +15,9 @@
 //! stalls the bus. An HDMI block's automatic I²C engine owns the controller
 //! until told to release it, which bring-up does first.
 //!
-//! Reference: Linux `drivers/i2c/busses/i2c-brcmstb.c`.
+//! Reference: VESA E-DDC. Broadcom publishes no description of the
+//! controller; its register interface is held to the on-metal run
+//! (`plans/PI.md`).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -28,7 +30,7 @@ use tairix_abi::driver::i2c::{
     BusFacts, Direction, I2cFault, I2cMessage, I2cTransaction, RepeatedStart,
 };
 use tairix_abi::{
-    CapabilityId, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey,
+    compatible_key, CapabilityId, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost,
     RegisterBlock,
 };
 use tairix_i2cbus::{step_budget_ns, wire_ns, I2cBus};
@@ -60,12 +62,7 @@ const BIND_PRIORITY: u16 = 10;
 /// and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    match HwMatchKey::compatible(DDC_COMPATIBLE) {
-        Ok(key) => key,
-        // A too-long literal is a compile-time const-eval error here, never a
-        // runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
+    compatible_key!(DDC_COMPATIBLE),
 )];
 
 /// The node's window holding the controller's registers.

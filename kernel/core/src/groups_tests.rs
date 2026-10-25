@@ -15,7 +15,7 @@ use tairix_users::{
     UsersDb,
 };
 
-use crate::fs::memfs::RwMockFs;
+use crate::fs::memfs::{RwMockFs, SYSTEM_RECORD};
 use crate::fs::VfsError;
 use crate::groups::{build_identity_table, load_groups_db, GroupsLoadError};
 use crate::test_identity::shared_password;
@@ -25,31 +25,31 @@ use crate::test_sink::TestSink;
 /// given file bytes, owned by `uid 0` so the bootstrap reader can traverse
 /// and read it (mirroring the mkimage-authored skeleton).
 fn planted(groups: &[u8]) -> RwMockFs {
-    let mut fs = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    let mut fs = RwMockFs::new();
     fs.set_root_security(NodeSecurity::new(0o755, 0, 0));
     let root = fs.root();
     let system = fs
-        .create(root, b"System", NodeKind::Directory)
+        .create(root, b"System", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("System");
     let security = fs
-        .create(system, b"Security", NodeKind::Directory)
+        .create(system, b"Security", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("Security");
-    fs.create(security, b"Groups", NodeKind::RegularFile)
+    let file = fs
+        .create(security, b"Groups", NodeKind::RegularFile, &SYSTEM_RECORD)
         .expect("Groups");
-    fs.write_at(security, b"Groups", 0, groups)
-        .expect("write Groups");
+    fs.write_at(file, 0, groups).expect("write Groups");
     fs
 }
 
 /// A root volume with the `/System/Security` tree but **no** `Groups` file.
 fn without_groups() -> RwMockFs {
-    let mut fs = RwMockFs::new().with_create_owner(0, 0, 0o755);
+    let mut fs = RwMockFs::new();
     fs.set_root_security(NodeSecurity::new(0o755, 0, 0));
     let root = fs.root();
     let system = fs
-        .create(root, b"System", NodeKind::Directory)
+        .create(root, b"System", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("System");
-    fs.create(system, b"Security", NodeKind::Directory)
+    fs.create(system, b"Security", NodeKind::Directory, &SYSTEM_RECORD)
         .expect("Security");
     fs
 }

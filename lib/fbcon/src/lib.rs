@@ -109,7 +109,7 @@ pub struct Geometry {
 
 impl Geometry {
     /// The grid a console keeps before any display hosts it: the 80 × 25
-    /// cells a terminal starts at, as Linux's dummy console holds.
+    /// cells of the PC's text mode.
     pub const UNHOSTED: Self = Self {
         width_px: 80 * CELL_WIDTH,
         height_px: 25 * CELL_HEIGHT,

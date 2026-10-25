@@ -78,8 +78,8 @@ error rather than a silently ignored argument.
 - `0` — the listing or summary was produced (or the short help was
   written).
 - `1` — the socket or defence query was refused or failed, or the output
-  could not be written.
-- `2` — the command line was not understood.
+  could not be written. A command line that was not understood exits `1`
+  too.
 
 ## ENVIRONMENT
 

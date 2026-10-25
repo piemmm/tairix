@@ -54,7 +54,7 @@ pub mod name;
 pub mod plan;
 
 use tairix_abi::raid_ipc::RAID_ARRAY_COMPATIBLE;
-use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
+use tairix_abi::{compatible_key, CapabilityId, DriverBindKey};
 
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match on the block-service node ranks like the other exact-compatible
@@ -90,22 +90,6 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// composer's business, and arrays stack over arrays for free because the
 /// node an array publishes is indistinguishable in kind from a disk's.
 pub const BIND_KEYS: &[DriverBindKey] = &[
-    DriverBindKey::new(
-        BIND_PRIORITY,
-        match HwMatchKey::compatible(b"tairix,usb-msd-lun") {
-            Ok(key) => key,
-            // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-            // too-long literal would be a compile-time const-eval error here,
-            // never a runtime panic.
-            Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-        },
-    ),
-    DriverBindKey::new(
-        BIND_PRIORITY,
-        match HwMatchKey::compatible(RAID_ARRAY_COMPATIBLE) {
-            Ok(key) => key,
-            // Unreachable, as above: the shared constant is a short literal.
-            Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-        },
-    ),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(b"tairix,usb-msd-lun")),
+    DriverBindKey::new(BIND_PRIORITY, compatible_key!(RAID_ARRAY_COMPATIBLE)),
 ];

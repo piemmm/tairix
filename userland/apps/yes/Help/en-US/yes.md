@@ -34,8 +34,7 @@ Option scanning stops at the first operand, so `yes a -x` prints
 
 - `0` — a requested short help was served.
 - `1` — the output stopped accepting bytes (the tool's one stop
-  condition).
-- `2` — the command line was not understood.
+  condition). A command line that was not understood exits `1` too.
 
 ## ENVIRONMENT
 

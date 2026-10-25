@@ -9,7 +9,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::listing::listed;
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeKind,
+    NameMatching, NodeId, NodeKind, NodeSecurity, Unpinned,
 };
 use tairix_abi::DriverError;
 
@@ -138,6 +138,27 @@ fn a_primary_tree_lists_names_without_versions_and_matches_them_blind_to_case() 
     // 2021-06-15 12:30:00 UTC.
     assert_eq!(info.times.modified.secs(), 1_623_760_200);
     assert_eq!(fs.lookup(root, b"MISSING"), Err(DriverError::NotFound));
+}
+
+/// Every directory's `..` names its parent, so a climb from any depth of a
+/// mastered disc reaches the root.
+#[test]
+fn a_climb_from_any_depth_reaches_the_root() {
+    let mut fs = mount(&disc(vec![Node::dir(
+        b"OUTER",
+        vec![
+            Node::file(b"SPACER.TXT;1", b"x"),
+            Node::dir(b"INNER", vec![Node::dir(b"DEEPEST", vec![])]),
+        ],
+    )]));
+    let root = fs.root();
+    let outer = fs.lookup(root, b"OUTER").expect("found");
+    let inner = fs.lookup(outer, b"INNER").expect("found");
+    let deepest = fs.lookup(inner, b"DEEPEST").expect("found");
+    assert_eq!(fs.parent(deepest), Ok(inner));
+    assert_eq!(fs.parent(inner), Ok(outer));
+    assert_eq!(fs.parent(outer), Ok(root));
+    assert_eq!(fs.parent(root), Ok(root));
 }
 
 #[test]
@@ -745,28 +766,55 @@ fn every_mutation_is_refused_as_read_only() {
     let mut fs = mount(&disc(vec![Node::file(b"A.TXT;1", b"a")]));
     let root = fs.root();
     assert_eq!(
-        fs.create(root, b"new", NodeKind::RegularFile),
+        fs.create(
+            root,
+            b"new",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0)
+        ),
         Err(DriverError::ReadOnly)
     );
-    assert_eq!(
-        fs.write_at(root, b"A.TXT", 0, b"b"),
-        Err(DriverError::ReadOnly)
-    );
-    assert_eq!(fs.truncate(root, b"A.TXT", 0), Err(DriverError::ReadOnly));
-    assert_eq!(fs.punch(root, b"A.TXT", 0, 1), Err(DriverError::ReadOnly));
+    let node = fs.lookup(root, b"A.TXT").expect("found");
+    assert_eq!(fs.write_at(node, 0, b"b"), Err(DriverError::ReadOnly));
+    assert_eq!(fs.truncate(node, 0), Err(DriverError::ReadOnly));
+    assert_eq!(fs.punch(node, 0, 1), Err(DriverError::ReadOnly));
     assert_eq!(fs.remove(root, b"A.TXT"), Err(DriverError::ReadOnly));
     assert_eq!(
         fs.rename(root, b"A.TXT", root, b"B.TXT"),
         Err(DriverError::ReadOnly)
     );
     assert_eq!(
-        fs.create_link(root, b"l", b"A.TXT"),
+        fs.create_link(root, b"l", b"A.TXT", &NodeSecurity::new(0o777, 0, 0)),
         Err(DriverError::ReadOnly)
     );
     assert_eq!(fs.flush(), Ok(()));
-    let node = fs.lookup(root, b"A.TXT").expect("found");
     assert!(!fs.records_ownership(node).expect("node"));
     assert_eq!(fs.security(node).expect("stand-in").mode, 0o644);
+}
+
+/// A finished disc keeps no record of a hold: a pin answers a live node's own
+/// id, and every unpin answers released.
+#[test]
+fn a_pin_answers_the_node_it_holds() {
+    let mut fs = mount(&disc(vec![
+        Node::file(b"A.TXT;1", b"abc"),
+        Node::dir(b"D", vec![]),
+    ]));
+    let root = fs.root();
+    let file = fs.lookup(root, b"A.TXT").expect("found");
+    let dir = fs.lookup(root, b"D").expect("found");
+    for node in [root, file, dir, file] {
+        assert_eq!(fs.pin(node), Ok(node));
+    }
+    let mut buf = [0u8; 8];
+    assert_eq!(fs.read_at(file, 0, &mut buf), Ok(3));
+    assert_eq!(fs.unpin(file), Ok(Unpinned::Released));
+    assert_eq!(fs.unpin(file), Ok(Unpinned::Released));
+    assert_eq!(fs.release_pins(), Ok(()));
+    let dot = super::node_id(fs.directory(dir).expect("a directory").pos);
+    assert_eq!(fs.pin(dot), Err(DriverError::NotFound), "a `.` record");
+    assert_eq!(fs.pin(NodeId::NONE), Err(DriverError::NotFound));
+    assert_eq!(fs.lookup(root, b"A.TXT"), Ok(file));
 }
 
 #[test]

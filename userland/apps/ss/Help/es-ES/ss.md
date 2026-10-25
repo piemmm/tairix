@@ -75,8 +75,8 @@ silencio.
 
 - `0` — se produjo el listado (o se escribió la ayuda breve).
 - `1` — la consulta de sockets fue rechazada o falló, o no se pudo
-  escribir la salida.
-- `2` — no se entendió la línea de órdenes.
+  escribir la salida. Una línea de órdenes no entendida también termina
+  con `1`.
 
 ## ENVIRONMENT
 

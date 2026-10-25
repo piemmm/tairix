@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{quote, quote_if_needed, Quoted, Style};
+use super::{output_style, quote, quote_if_needed, quote_subject, Quoted, Style};
 
 fn styled(text: &str, style: Style) -> String {
     format!("{}", Quoted::new(text, style))
@@ -116,10 +116,11 @@ fn a_name_that_reorders_or_hides_text_is_escaped_where_gnu_leaves_it_raw() {
     assert_eq!(styled("soft\u{ad}hy", Style::C), "\"soft\\302\\255hy\"");
 }
 
+/// GNU 9.4 writes `'''it'\''s'$'\n'`, a needless leading `''`, and
+/// `'\n''a'\'''$'\n'`, whose first escape lost its `$` and reads back as a
+/// backslash and an `n`.
 #[test]
-fn a_quote_and_a_closing_escape_take_the_minimal_form_gnu_does_not() {
-    // GNU 9.4 writes `'''it'\''s'$'\n'` and `'\n''a'\'''$'\n'`; the second
-    // reads back as a backslash and an `n`.
+fn a_quote_and_a_closing_escape_drop_the_faults_of_gnus_form() {
     assert_eq!(format!("{}", quote_if_needed("it's\n")), "'it'\\''s'$'\\n'");
     assert_eq!(
         format!("{}", quote_if_needed("\na'\n")),
@@ -400,9 +401,53 @@ fn every_short_name_reads_back_from_both_escaping_styles() {
                 "{name:?} as {quoted:?}"
             );
             assert!(
-                !quoted.chars().any(crate::utf8::is_hidden),
+                !quoted.chars().any(tairix_visible::is_hidden),
                 "{name:?} as {quoted:?} shows a hidden character"
             );
         }
     }
+}
+
+/// A name a `name: reason` line leads with, as GNU coreutils 9.4's `cat`,
+/// `wc`, `tee`, `df`, `readlink`, `tail` and `ls` write it in `C.UTF-8`.
+const GNU_SUBJECT: &[(&str, &str)] = &[
+    ("missing", "missing"),
+    ("loop/sub/up", "loop/sub/up"),
+    ("a:b", "'a:b'"),
+    ("c:d/e/up", "'c:d/e/up'"),
+    ("mi ss", "'mi ss'"),
+    ("it's", "\"it's\""),
+    ("it's:x", "\"it's:x\""),
+    ("a:b c", "'a:b c'"),
+    (":", "':'"),
+    ("a\nb:c", "'a'$'\\n''b:c'"),
+    ("~:x", "'~:x'"),
+    ("x:~", "'x:~'"),
+    ("#:", "'#:'"),
+    ("a:$b", "'a:$b'"),
+    ("e\u{1b}:x", "'e'$'\\033'':x'"),
+    ("a::b", "'a::b'"),
+    ("e\u{1b}x", "'e'$'\\033''x'"),
+];
+
+#[test]
+fn a_message_leads_with_a_name_quoted_where_a_shell_needs_it_or_it_holds_a_colon() {
+    for &(text, expected) in GNU_SUBJECT {
+        assert_eq!(format!("{}", quote_subject(text)), expected, "{text:?}");
+    }
+    assert_eq!(
+        format!("{}", quote_if_needed("a:b")),
+        "a:b",
+        "printf's %q keeps it bare"
+    );
+}
+
+#[test]
+fn a_name_on_standard_output_is_escaped_only_at_a_terminal() {
+    let name = "e\u{1b}[2Jx";
+    assert_eq!(
+        format!("{}", Quoted::new(name, output_style(true))),
+        "'e'$'\\033''[2Jx'"
+    );
+    assert_eq!(format!("{}", Quoted::new(name, output_style(false))), name);
 }

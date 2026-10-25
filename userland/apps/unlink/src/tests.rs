@@ -114,14 +114,30 @@ fn help_switches_are_the_reserved_pair() {
     assert_eq!(parse(&["--help"]), Ok(Command::Help));
 }
 
+/// GNU 9.4's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
 #[test]
-fn an_unknown_option_is_usage() {
+fn a_refused_option_is_worded_as_getopt_words_it() {
     // The tool has no options beyond short help — not even the GNU-family
     // `-f`/`-v` — so every other dash argument is refused rather than
     // silently treated as a name.
-    assert_eq!(parse(&["-f", "x"]), Err(UnlinkError::Usage));
-    assert_eq!(parse(&["--force", "x"]), Err(UnlinkError::Usage));
-    assert_eq!(parse(&["-r"]), Err(UnlinkError::Usage));
+    assert_eq!(refused(&["-f", "x"]), "invalid option -- 'f'");
+    assert_eq!(refused(&["--force", "x"]), "unrecognized option '--force'");
+    assert_eq!(refused(&["-r"]), "invalid option -- 'r'");
+    assert_eq!(
+        refused(&["--help=1"]),
+        "option '--help' doesn't allow an argument"
+    );
+}
+
+/// GNU 9.4 reads `unlink --he` as `unlink --help`.
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(parse(&["--he"]), Ok(Command::Help));
+    assert_eq!(parse(&["x", "--h"]), Ok(Command::Help));
 }
 
 #[test]
@@ -211,6 +227,20 @@ fn errors_render_the_gnu_wording() {
             }
         ),
         "cannot unlink 'd': is a directory"
+    );
+}
+
+/// A name's control bytes are escaped where GNU escapes them, never written
+/// raw to the terminal.
+#[test]
+fn a_name_holding_a_control_byte_is_escaped_in_the_refusal() {
+    let refused = UnlinkError::Remove {
+        path: "/a\u{1b}[2J".to_string(),
+        errno: Errno::IsADirectory,
+    };
+    assert_eq!(
+        refused.to_string(),
+        format!("cannot unlink '/a'$'\\033''[2J': {}", Errno::IsADirectory)
     );
 }
 

@@ -37,8 +37,7 @@ O `ps` não aceita operandos.
 
 - `0` — a listagem foi escrita.
 - `1` — o serviço recusou ou falhou, ou a listagem não pôde ser
-  entregue.
-- `2` — a linha de comandos não foi compreendida.
+  entregue. Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

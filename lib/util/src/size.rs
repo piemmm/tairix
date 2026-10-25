@@ -5,7 +5,7 @@
 //! `-B`/`--block-size` argument (`512`, `1K`, `1MiB`, `1GB`, `human-readable`,
 //! `si`), `-k`, and the `-h`/`--si` human-readable renderings — so the
 //! grammar and the rounding rules live here once, per the shared-code rule.
-//! The behaviour follows GNU `human.c`/`xstrtoumax`: sizes are scaled with
+//! The behaviour is GNU coreutils 9.4's, as observed: sizes are scaled with
 //! **ceiling** rounding (a partially used block is a used block; usage is
 //! never under-reported), and the human form shows one decimal below ten
 //! units, an integer otherwise.
@@ -127,7 +127,7 @@ const DECIMAL_UNITS: [char; 8] = ['k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y'];
 /// Render `bytes` in the GNU human-readable form into `buf`, returning the
 /// populated prefix.
 ///
-/// Matches GNU `human_ceiling` output: a size below one unit prints as a
+/// Matches GNU's human-readable sizes: a size below one unit prints as a
 /// bare integer; a scaled size prints with one decimal below ten units
 /// (`1.5K`, `9.9M`) and as an integer otherwise (`23M`, `999G`), always
 /// rounding **up** so usage is never under-reported. A tier that rounds up

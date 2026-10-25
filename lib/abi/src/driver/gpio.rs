@@ -103,6 +103,9 @@ pub enum Polarity {
 }
 
 impl Polarity {
+    /// Every polarity, in the order a chooser offers them.
+    pub const ALL: [Self; 2] = [Self::ActiveHigh, Self::ActiveLow];
+
     pub(crate) const fn from_u8(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::ActiveHigh),

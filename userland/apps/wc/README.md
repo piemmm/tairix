@@ -8,7 +8,7 @@ operand (or standard input), printing one aligned row per input in the
 fixed lines/words/chars/bytes/max-line order and a `total` row per
 `--total`. The GNU surface is implemented in full: `-c`/`--bytes`,
 `-m`/`--chars`, `-l`/`--lines`, `-w`/`--words`, `-L`/`--max-line-length`,
-`--total={auto,always,only,never}` (matched like GNU `argmatch`, so an
+`--total={auto,always,only,never}` (matched as GNU `wc` matches it, so an
 unambiguous prefix is accepted), `--files0-from=F` (NUL-separated operand
 list, `-` from standard input, refusing file operands alongside it),
 `--`, short-option bundles, and option/operand permutation — including
@@ -57,7 +57,7 @@ wc [-clmwL] [--total <when>] [--files0-from <file>] [--] [file...]
 
 - `0` — every input was counted (or the short help was written).
 - `1` — an input could not be read, or the output could not be delivered.
-- `2` — the command line was not understood.
+  A command line that was not understood exits `1` too.
 
 ## Stability
 

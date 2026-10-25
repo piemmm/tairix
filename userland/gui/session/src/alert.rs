@@ -94,7 +94,7 @@ pub fn app_speaker<'a>(name: &'a str, bundle: &'a str) -> Speaker<'a> {
     let name = name.trim();
     if name.is_empty()
         || name.eq_ignore_ascii_case(DESKTOP)
-        || name.chars().any(tairix_util::utf8::is_hidden)
+        || name.chars().any(tairix_visible::is_hidden)
     {
         Speaker::App(bundle)
     } else {

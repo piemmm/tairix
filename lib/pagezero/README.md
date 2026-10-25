@@ -35,8 +35,8 @@ kernel uses to zero a freshly-allocated frame before it becomes user-visible
 
 The hardware path is chosen by `Selection::ByPriority`: a block-zero primitive
 is unconditionally faster than a scalar byte loop and bit-identical in result,
-so there is nothing to benchmark (Linux likewise selects `DC ZVA`/ERMS by
-feature, not by timing). An absent or prohibited instruction is never reached —
+so there is nothing to benchmark. An absent or prohibited instruction is never
+reached —
 the candidate is filtered out unless its feature bit is present, and a bug is
 caught by the mandatory self-verify before the candidate can be selected.
 

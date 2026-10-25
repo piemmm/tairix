@@ -47,7 +47,9 @@ Drivers declare their canonical bind tables as a `pub const BIND_KEYS`
 in the driver crate (e.g. `tairix_drv_bus_pcie_brcm::BIND_KEYS`,
 `tairix_drv_bus_usb::BIND_KEYS`, `tairix_drv_input_usb_hid::BIND_KEYS`) —
 the single source of truth the signed-manifest bind table is authored
-from (`AGENTS.md` §18.3).
+from (`AGENTS.md` §18.3). A `compatible` key in one is written
+`tairix_abi::compatible_key!(b"…")`, made in const evaluation, so a string
+too long for a key fails the build rather than a run.
 
 The resolution across drivers is deterministic (`AGENTS.md` §18.3):
 
@@ -373,10 +375,10 @@ resources, so a driver still learns which of its channels share it, and a
 dropped specifier shifts no other entry's position.
 
 A specifier is mapped only when the node's **effective interrupt parent**
-is the port's root controller (the GIC, the PLIC). The parent is found as
-Linux's `of_irq_find_parent` finds it: the node's own `interrupt-parent`,
-else the one its tree parent hands down, where a node carrying
-`#interrupt-cells` hands down itself. A node wired to any other controller
+is the port's root controller (the GIC, the PLIC). The parent is the node's
+own `interrupt-parent`, else the one its tree parent hands down, where a node
+carrying `#interrupt-cells` hands down itself (Devicetree Specification v0.4
+§2.4). A node wired to any other controller
 carries none of its specifiers, because they are numbers in that
 controller's space, and a tree that names no parent at all maps nothing.
 
@@ -448,13 +450,22 @@ only place a SoC MAC like the BCM2711's GENET publishes its factory
 address. An I²C controller's `clock-frequency` becomes its **bus speed**, and
 a node carrying `wifi-2.4ghz-coexistence` states **radio coexistence**: an
 HDMI transmitter on that board keeps its TMDS clock clear of the 2.4 GHz
-band its harmonics would otherwise land in.
+band its harmonics would otherwise land in. An SD host whose `vqmmc-supply`
+and `vmmc-supply` are regulators on lines the platform firmware switches
+states its **I/O rail** and **power rail** (`HwNode::io_rail`,
+`HwNode::power_rail`): each rail's line, the level each signalling voltage
+selects or the level that powers the card, and the settling, start-up and
+off-on times its regulator declares. Only discovery states the two, since the
+firmware switches a line only for the driver of the node that names it.
 
-Two facts are the kernel's alone, and a node a driver publishes carrying
-either is refused: **kernel-driven**, on a device the kernel programs itself
-(an interrupt controller), and **console host**, on the display engine the
-kernel's framebuffer console is shown on, whose driver alone may host the
-console on memory the kernel allocates (`console_adopt`).
+Some facts are discovery's alone, and a node a driver publishes carrying any
+of them is refused (`HwProperty::discovery_only`): **kernel-driven**, on a
+device the kernel programs itself (an interrupt controller); **console host**,
+on the display engine the kernel's framebuffer console is shown on, whose
+driver alone may host the console on memory the kernel allocates
+(`console_adopt`); the header lines a board lends its system services; the
+zone a temperature sensor measures and its calibration; and an SD host's
+rails.
 
 ## The user-space driver chain
 
@@ -467,8 +478,10 @@ the mailbox and emits the `usb,xhci` node, the xHCI host-controller driver
 binds that and emits one node per USB interface, and the class drivers bind
 those. Nothing of the chain is compiled into the kernel: the in-kernel
 driver-candidate catalogue (`kernel/tairix-kernel::driver_catalog`) is the
-storage **bootstrap floor only** — virtio-blk + EMMC2, the block drivers that
-must be up before the signed store is reachable (§18.6). Hot-removal runs the
+storage **bootstrap floor only** — the block drivers that must be up before
+the signed store is reachable (§18.6), each declared by its own `Floor.toml`
+and gathered by the kernel's build
+([the bootstrap floor](block.md#discovery-and-the-bootstrap-floor)). Hot-removal runs the
 same path in reverse: a bus driver retires a vanished device's node and its
 subtree with `hw_remove_node` (the mirror of `hw_emit_node`, ownership-checked
 and fail-closed), and the `devmgr` reaction to the generation bump unloads the

@@ -249,7 +249,7 @@ pub trait KernelArch: SchedulerArch {
     /// The one-way `memtest` takeover (`plans/NEW-SUPERVISOR.md` §9) uses it
     /// to keep the live scan-out surface **out** of the destructive whole-RAM
     /// sweep, so the progress display survives the run: a firmware/mailbox
-    /// framebuffer sits in ordinary usable DRAM (the Raspberry Pi 4), and
+    /// framebuffer sits in ordinary usable DRAM, and
     /// sweeping it would scribble over the very pixels the test is drawing
     /// through. A port whose framebuffer lives in reserved memory or MMIO
     /// (a kernel-`.bss` ramfb surface, a VESA/GOP aperture) may return
@@ -417,8 +417,8 @@ pub trait KernelArch: SchedulerArch {
     /// interrupt vectors for PCI functions.
     ///
     /// Allocating an MSI vector and bringing the platform's MSI controller
-    /// up is irreducibly architecture-specific (the BCM2711 root-complex MSI
-    /// controller on the Pi 4, an IO-APIC/LAPIC MSI domain on x86_64), so —
+    /// up is irreducibly architecture-specific (a root complex's internal MSI
+    /// controller, an IO-APIC/LAPIC MSI domain on x86_64), so —
     /// like [`Self::irq_routing`] — the port supplies the concrete producer
     /// and the kernel core installs it into the syscall handler. The
     /// reference must be `'static` (the port backs it with a `static` or a
@@ -780,7 +780,7 @@ pub trait KernelArch: SchedulerArch {
     /// blocking** — the dispatch loop's per-iteration serial-drain hook.
     ///
     /// A port whose console transmit is buffered (the aarch64 PL011, whose
-    /// flow-blocked Pi 4 UART would otherwise freeze the calling task for a
+    /// flow-blocked UART would otherwise freeze the calling task for a
     /// whole line) copies producer bytes into an in-memory ring
     /// and drains it opportunistically. That ring must keep draining even
     /// when the dispatch loop never reaches its idle
@@ -1154,8 +1154,7 @@ where
     /// of the running kernel, exactly like the users database.
     pub hw_tree: &'static (dyn HwTreeSource + 'static),
 
-    /// The kernel filesystem service the `fs_*` syscalls route through
-    /// (`PREREQUISITES.md` P-A).
+    /// The kernel filesystem service the `fs_*` syscalls route through.
     ///
     /// Defaults to [`NULL_FILESYSTEM`], whose every operation fails closed
     /// with [`tairix_abi::Errno::NotImplemented`]: a boot path that has not
@@ -1326,8 +1325,8 @@ where
             // fail closed through `NULL_HW_TREE`.
             hw_tree: &NULL_HW_TREE,
             // Filesystem service unwired until a boot path mounts a volume
-            // and installs the disk-backed service through `with_filesystem`
-            // (`PREREQUISITES.md` P-A): every `fs_*` syscall fails closed
+            // and installs the disk-backed service through `with_filesystem`:
+            // every `fs_*` syscall fails closed
             // through `NULL_FILESYSTEM`.
             filesystem: &NULL_FILESYSTEM,
             // Volume forest unwired until a boot path mounts volumes and
@@ -1341,7 +1340,7 @@ where
             // attach/detach fails closed through `NULL_VOLUME_SERVICE`.
             volume_service: &NULL_VOLUME_SERVICE,
             // No identity cell until the port installs one through
-            // `with_spawn_identity` (`PREREQUISITES.md` P-C): the sec phase
+            // `with_spawn_identity`: the sec phase
             // then has nowhere to publish the compiled-in system identity
             // and every credential resolution fails closed through the
             // inert `NULL_IDENTITY`.
@@ -1538,7 +1537,7 @@ where
     }
 
     /// Install the disk-backed filesystem service the `fs_*` syscalls route
-    /// through, consuming and returning `self` (`PREREQUISITES.md` P-A).
+    /// through, consuming and returning `self`.
     ///
     /// Called by a boot path that owns a mounted volume, handing the
     /// `Box::leak`'d production service here. Until this is called the
@@ -1590,8 +1589,7 @@ where
     /// Install the boot path's identity cell — the one the `sec` phase
     /// publishes the compiled-in system identity into, the `spawn` handler
     /// resolves a spawn-as-user switch against, and the filesystem service
-    /// resolves caller groups against — consuming and returning `self`
-    /// (`PREREQUISITES.md` P-C).
+    /// resolves caller groups against — consuming and returning `self`.
     ///
     /// Every production port hands the **same** `&'static LateIdentity` the
     /// root unlock later replaces with the merged system∪human

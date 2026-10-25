@@ -115,10 +115,11 @@ reste peut ignorer.
   été terminés.
 - `1` — un échec de magasin, de paquet ou de sortie (par exemple,
   l'appelant ne peut pas modifier le catalogue à l'échelle de la
-  machine) ; la raison est indiquée sur le flux de diagnostic.
-- `2` — la ligne de commande n'a pas été comprise, le dossier ou
-  l'entrée est inconnu, ou le paquet ne peut pas être enregistré comme
-  demandé.
+  machine) ; la raison est indiquée sur le flux de diagnostic. Une ligne
+  de commande non comprise (y compris un dossier `--category` inconnu)
+  sort aussi avec `1`.
+- `2` — l'entrée est inconnue, ou le paquet ne peut pas être enregistré
+  comme demandé.
 
 ## ENVIRONMENT
 

@@ -49,7 +49,7 @@ descriptor is its class driver's.
   usage switch, usage modifier, vendor) and usage, with their parent, so a
   decoder selects by the application a field sits under.
 - **Bounds** — defences on untrusted input, not capacities: a descriptor of at
-  most 4096 bytes (Linux's `HID_MAX_DESCRIPTOR_SIZE`), at most 256 fields and
+  most 4096 bytes, at most 256 fields and
   128 collections, 1024 usage entries, a collection depth of 16, a global
   stack of 8, a report of at most 4096 bytes (a touchpad's certification
   feature alone is 256). An input outside a bound, an unbalanced collection, a
@@ -113,8 +113,8 @@ driver ending — has every key, button and contact it held released first.
   a boot-subclass interface, falls back to boot protocol and the fixed boot
   layout; on any other interface the device is refused with its reason logged.
   The descriptor is logged in hex at bind, as the evidence a metal capture needs.
-  Each interrupt-IN request names the interface's longest input report, the
-  transfer Linux's usbhid submits, and the host controller arms no less than one
+  Each interrupt-IN request names the interface's longest input report, and
+  the host controller arms no less than one
   service interval's payload, so a report spanning packets arrives whole
   (`plans/USB.md` U11). A transfer longer than one interval's payload once
   faulted behind the Pi 4's transaction translator, so a full-speed device whose

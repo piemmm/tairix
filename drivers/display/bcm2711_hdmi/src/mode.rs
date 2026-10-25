@@ -139,9 +139,10 @@ pub fn choose(transmitter: Transmitter, edid: Option<&Edid>, limits: PipeLimits)
         .find(|mode| mode.preferred)
         .or_else(|| edid.modes.iter().filter(carried).max_by_key(largest))?;
     let hdmi = edid.hdmi.is_some();
-    // An HDMI sink is sent one of the four 4K timings by its HDMI code, as
-    // Linux's `drm_mode_hdmi_vic` has it. Any other keeps the CTA code the
-    // sink listed it by, for the aspect that names, else the standard's.
+    // An HDMI sink is sent one of the four 4K timings by its HDMI 1.4 code,
+    // which every HDMI sink takes (`hdmi_video_code`). Any other keeps the
+    // CTA code the sink listed it by, for the aspect that names, else the
+    // standard's.
     let listed = |other: &tairix_edid::Mode| {
         other.timing == mode.timing && matches!(other.code, Some(VideoCode::Cta { .. }))
     };

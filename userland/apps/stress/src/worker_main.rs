@@ -70,7 +70,7 @@ pub fn run(spec: &WorkerSpec) -> i32 {
 
 /// Report a typed refusal once and choose the refusal exit status.
 fn refuse(spec: &WorkerSpec, reason: &str) -> i32 {
-    write_stderr_line(&alloc::format!(
+    write_stderr_line(format_args!(
         "stress: {} worker {}: refused: {reason}",
         spec.kind.as_str(),
         spec.index
@@ -80,7 +80,7 @@ fn refuse(spec: &WorkerSpec, reason: &str) -> i32 {
 
 /// Report a genuine failure once and fail the worker.
 fn fail(spec: &WorkerSpec, reason: &str) -> i32 {
-    write_stderr_line(&alloc::format!(
+    write_stderr_line(format_args!(
         "stress: {} worker {}: failed: {reason}",
         spec.kind.as_str(),
         spec.index
@@ -102,8 +102,8 @@ impl RtScratch {
     }
 
     /// The open descriptor for `path`, opening (and caching) it with
-    /// `flags` on a miss.
-    fn fd(&mut self, path: &str, flags: OpenFlags) -> Result<u32, ScratchError> {
+    /// `flags` on a miss, a file it creates born with `mode`.
+    fn fd(&mut self, path: &str, flags: OpenFlags, mode: u32) -> Result<u32, ScratchError> {
         if let Some((cached, fd)) = &self.open {
             if cached == path {
                 return Ok(*fd);
@@ -111,7 +111,7 @@ impl RtScratch {
             let (_, stale) = self.open.take().unwrap_or((String::new(), 0));
             let _ = tairix_rt::fs_close(stale);
         }
-        let ret = tairix_rt::fs_open(path.as_bytes(), flags);
+        let ret = tairix_rt::fs_open(path.as_bytes(), flags, mode);
         if ret < 0 {
             return Err(classify(Errno::from_syscall(ret)));
         }
@@ -141,16 +141,17 @@ impl Scratch for RtScratch {
             .union(OpenFlags::WRITE)
             .union(OpenFlags::CREATE)
             .union(OpenFlags::TRUNCATE);
-        self.fd(path, flags).map(|_| ())
+        self.fd(path, flags, tairix_abi::fs::FS_NEW_FILE_MODE)
+            .map(|_| ())
     }
 
     fn write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<(), ScratchError> {
-        let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
+        let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE), 0)?;
         tairix_rt::fs_write_all(fd, offset, data).map_err(classify)
     }
 
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<(), ScratchError> {
-        let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
+        let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE), 0)?;
         match tairix_rt::fs_read_full(fd, offset, buf) {
             Ok(got) if got == buf.len() => Ok(()),
             Ok(_) => Err(ScratchError::Failed("short read")),
@@ -159,7 +160,7 @@ impl Scratch for RtScratch {
     }
 
     fn sync(&mut self, path: &str) -> Result<(), ScratchError> {
-        let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
+        let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE), 0)?;
         let ret = tairix_rt::fs_sync(fd);
         if ret < 0 {
             return Err(classify(Errno::from_syscall(ret)));

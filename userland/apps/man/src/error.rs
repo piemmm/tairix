@@ -8,17 +8,20 @@ use tairix_abi::Errno;
 use tairix_help::{LoadError, NameError};
 use tairix_sandbox::helpdoc::{HelpRefusal, HelpRenderFailure};
 use tairix_sandbox::host::SandboxError;
-use tairix_util::quote::quote_if_needed;
+use tairix_util::getopt::Refusal;
+use tairix_util::quote::{quote_if_needed, quote_subject};
 
 /// Why a `man` invocation failed.
 ///
 /// Every failure is a value the `Run` binary reports on standard error and
-/// maps to an exit status (`2` for [`ManError::Usage`], `1` otherwise) —
-/// no path panics and none is silently swallowed.
+/// ends with exit status `1` ([`ManError::Option`] and [`ManError::Usage`]
+/// followed by where the help is) — no path panics and none is silently
+/// swallowed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManError {
-    /// The command line is outside the `man [-h | -?] <command> [topic]`
-    /// grammar.
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// The command line names no command to render, or a third operand.
     Usage,
     /// No candidate bundle exists for the command word: neither the system
     /// app store nor any `PATH` entry holds `<word>.app` (plans/APPS.md §8).
@@ -68,6 +71,7 @@ pub enum ManError {
 impl fmt::Display for ManError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ManError::Option(refusal) => write!(f, "{refusal}"),
             ManError::Usage => f.write_str("usage error"),
             ManError::CommandNotFound(word) => {
                 write!(f, "no such command: {word}", word = quote_if_needed(word))
@@ -76,7 +80,7 @@ impl fmt::Display for ManError {
                 write!(
                     f,
                     "{word}: not an application bundle (no help to read)",
-                    word = quote_if_needed(word)
+                    word = quote_subject(word)
                 )
             }
             ManError::InvalidName(err) => write!(f, "invalid help name: {err}"),

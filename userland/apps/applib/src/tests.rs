@@ -7,7 +7,7 @@ extern crate std;
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -260,7 +260,7 @@ fn parse_maps_the_grammar() {
         parse(&["rescan", "--user"]),
         Ok(Command::Rescan { user: true })
     );
-    // The reserved short-help switches win wherever they appear.
+    // The reserved short-help switches answer alone and in every subcommand.
     for line in [
         &["-h"][..],
         &["--help"][..],
@@ -284,7 +284,6 @@ fn parse_refuses_what_the_grammar_does_not_define() {
     for (line, expected) in [
         (&["frobnicate"][..], AppLibError::Usage),
         (&["list", "extra"][..], AppLibError::Usage),
-        (&["list", "--category"][..], AppLibError::Usage),
         (
             &["list", "--category", "Stuff"][..],
             AppLibError::UnknownFolder,
@@ -302,24 +301,61 @@ fn parse_refuses_what_the_grammar_does_not_define() {
             ][..],
             AppLibError::Usage,
         ),
-        (
-            &["add", "/System/Applications/a.app", "--frob"][..],
-            AppLibError::Usage,
-        ),
-        (
-            &["add", "/System/Applications/a.app", "-x"][..],
-            AppLibError::Usage,
-        ),
-        (
-            &["add", "/System/Applications/a.app", "--user=yes"][..],
-            AppLibError::Usage,
-        ),
         (&["remove"][..], AppLibError::Usage),
         (&["hide"][..], AppLibError::Usage),
         (&["rescan", "operand"][..], AppLibError::Usage),
     ] {
         assert_eq!(parse(line), Err(expected), "{line:?}");
     }
+}
+
+/// GNU's words for each refusal.
+fn refused(args: &[&str]) -> String {
+    parse(args).expect_err("refused").to_string()
+}
+
+#[test]
+fn a_refused_option_is_worded_as_getopt_words_it() {
+    assert_eq!(refused(&["-x"]), "invalid option -- 'x'");
+    assert_eq!(
+        refused(&["add", "/System/Applications/a.app", "-x"]),
+        "invalid option -- 'x'"
+    );
+    assert_eq!(
+        refused(&["add", "/System/Applications/a.app", "--frob"]),
+        "unrecognized option '--frob'"
+    );
+    assert_eq!(refused(&["list", "--user"]), "unrecognized option '--user'");
+    assert_eq!(
+        refused(&["list", "--category"]),
+        "option '--category' requires an argument"
+    );
+    assert_eq!(
+        refused(&["add", "/System/Applications/a.app", "--user=yes"]),
+        "option '--user' doesn't allow an argument"
+    );
+}
+
+#[test]
+fn a_long_option_may_be_abbreviated() {
+    assert_eq!(
+        parse(&[
+            "add",
+            "/System/Applications/chess.app",
+            "--cat=Games",
+            "--na",
+            "Chess",
+            "--u"
+        ]),
+        Ok(Command::Add(AddRequest {
+            bundle: "/System/Applications/chess.app",
+            category: Some(LibraryCategory::Games),
+            name: Some("Chess"),
+            icon: None,
+            user: true,
+        }))
+    );
+    assert_eq!(parse(&["rescan", "--he"]), Ok(Command::Help));
 }
 
 #[test]

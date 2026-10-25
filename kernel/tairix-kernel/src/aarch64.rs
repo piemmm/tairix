@@ -1,4 +1,4 @@
-//! The aarch64 (Raspberry Pi 4) boot pipeline and `KernelArch` port
+//! The aarch64 boot pipeline and `KernelArch` port
 //! wrapper.
 //!
 //! Every module here names the aarch64 architecture port, so the whole

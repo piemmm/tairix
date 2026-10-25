@@ -75,7 +75,7 @@ pour chaque fichier joué, un enregistrement `omission` pour chaque fichier
 
 - `0` — chaque fichier a été joué, ou la lecture a été arrêtée sans fichier écarté.
 - `1` — un fichier n'a pas pu être joué, ou la lecture n'a pas pu continuer.
-- `2` — la ligne de commande n'a pas été comprise.
+  Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

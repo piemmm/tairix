@@ -294,8 +294,8 @@ fn identity(
 /// names one: firmware knows a fabric no walk of the topology sees.
 /// Otherwise its own; the bus range below the topmost bridge to conventional
 /// PCI above it, which tags them with its secondary bus; or the topmost
-/// conventional bridge's own id — Linux's `set_msi_sid`, without
-/// device-specific aliases.
+/// conventional bridge's own id (Intel VT-d specification, §5.2 "Identifying
+/// Origination of Interrupt Requests"), without device-specific aliases.
 pub(crate) fn interrupt_source(
     topology: &Topology,
     index: usize,

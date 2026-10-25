@@ -11,6 +11,10 @@ publish.workspace = true
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-bytedev = { path = "../../../lib/bytedev", version = "=0.0.0" }
+# The indexes the kernel's holds on the volume's objects are kept in, which
+# grow fallibly, so a hold that cannot be recorded is refused rather than
+# aborting.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The ADFS recognition, disc record and map checks the volume probe shares.
 tairix-fsprobe = { path = "../../../lib/fsprobe", version = "=0.0.0" }

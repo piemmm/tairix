@@ -76,7 +76,9 @@ its address-space tags (`AddressTags`, below) and the `PageTableFrames`
 frame source, and the secondary-CPU bring-up
 slice (`SecondaryBringup`, below). With `SecondaryBringup` landed (Stage
 W14) every architecture primitive enumerated by §17.2 now lives behind
-the HAL; the burn-down is complete.
+the HAL; the burn-down is complete. Beside them sit two optional slices, the
+machine takeover and the message-interrupt multiplexer (`MsiMultiplexer`,
+below), which a port without the hardware does not implement.
 
 `kernel/arch/x86_64` implements `tairix_arch_api::SchedulerArch` for
 `X86_64Arch` and no longer names a scheduler crate; `kernel/sched/api`
@@ -179,6 +181,27 @@ per-port rather than folded into `conformance::run_all`: the controller
 check needs a port-specific valid/invalid line pair and `InterruptEntry`
 is implemented by only a subset of ports — the same reason
 `percpu::conformance::run_isolation` stands apart.
+
+### Message-interrupt multiplexer (optional)
+
+A root complex may capture an endpoint's message write itself and raise one
+wired *parent* line for a bank of vectors, leaving the kernel to read which are
+pending and fan the parent out to a line per vector — a chained handler no
+user-space driver can be. `MsiMultiplexer` (`kernel/arch/api::msimux`) is that
+silicon: an `IrqController` over the bank's vectors, plus `shape` (how many
+vectors and which parent line, `None` where discovery found none), `enable`
+(idempotent), `message` (what a
+function writes to raise a vector) and `drain` (one pending snapshot, lowest
+first, each vector fired and then acknowledged). The rest is the same for
+every part and is the kernel's: `kernel/core::msimux::MsiMuxLines` lays the
+vectors out on lines from a first line the port picks, brings the multiplexer
+up on the first `msi_alloc`, hands out the lowest free vector
+(`lib/sync::claims`), and fans a parent fire out through the port's composite
+controller. `msimux::conformance::run_discovered` and `run_undiscovered` are
+driven per port, like `irq::conformance`. aarch64 implements the slice over
+the root complex its tree describes; the other ports, whose messages reach
+their interrupt controller directly, implement nothing, and `msi_alloc` fails
+closed there (`plans/WIRING.md` W18).
 
 ### Timer programming
 

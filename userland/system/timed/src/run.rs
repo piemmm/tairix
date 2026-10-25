@@ -105,15 +105,6 @@ mod program {
     /// Wait-set token for the configuration watch.
     const WATCH_TOKEN: u64 = 2;
 
-    /// The shortest interval between two reports of a storm of configuration
-    /// changes; an isolated change reports at once.
-    const WATCH_LATENCY_NS: u64 = 1_000_000_000;
-
-    /// The most change batches one wake drains before reading the
-    /// configuration anyway, so a directory changing without pause cannot hold
-    /// the reactor.
-    const WATCH_DRAIN_BATCHES: usize = 16;
-
     /// The audit sink every record is written through.
     static LOG_SINK: LogSink = LogSink;
 
@@ -196,9 +187,10 @@ mod program {
             // unconditional attempt under the system-owned `/System/Settings`
             // would be refused, and audited, on every sync.
             tairix_rt::replace_file(
-                RECORD_PATH.as_bytes(),
+                RECORD_PATH,
                 bytes,
                 tairix_rt::ParentDir::CreatedIfMissing,
+                tairix_abi::fs::FS_NEW_FILE_MODE,
             )
         }
     }
@@ -402,7 +394,7 @@ mod program {
         if let Some(old) = watch.take() {
             old.leave(set);
         }
-        match Followed::follow(CONFIG_PATH, set, WATCH_TOKEN, WATCH_LATENCY_NS) {
+        match Followed::follow(CONFIG_PATH, set, WATCH_TOKEN) {
             Follow::NotYet => false,
             Follow::Watching(followed) => {
                 *watch = Some(followed);
@@ -644,10 +636,7 @@ mod program {
             let woken = Duration64::from_nanos(tairix_rt::clock_get());
             let mut changed = false;
             if waited == 0 && token == WATCH_TOKEN {
-                match watch
-                    .as_ref()
-                    .map_or(Verdict::Rewatch, |watch| watch.drain(WATCH_DRAIN_BATCHES))
-                {
+                match watch.as_ref().map_or(Verdict::Rewatch, Followed::drain) {
                     Verdict::Unconcerned => {}
                     Verdict::Reread => changed = true,
                     Verdict::Rewatch => {

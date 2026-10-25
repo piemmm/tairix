@@ -14,7 +14,8 @@
 //! [`Op`] events. Both are built over the same tables, so they provably agree:
 //! every operation the emitter writes parses back to the identical operation
 //! (the `emit_parse_round_trip*` tests assert exactly this), save an
-//! [`Op::Print`] of a control character, which is no glyph and prints U+FFFD.
+//! [`Op::Print`] of a hidden character (`tairix_visible::is_hidden`), which
+//! is no glyph and prints U+FFFD.
 //! There is no second
 //! escape-sequence definition anywhere in the tree.
 //!

@@ -974,7 +974,7 @@ pub fn uptime_ms() -> u64 {
 /// do-not-trap), followed by an `isb` so the change is in effect before
 /// the next instruction, and put this CPU under the IEEE default `FPCR`.
 ///
-/// `CPACR_EL1` is written whole, as Linux's `__cpu_setup` does, so SVE and
+/// `CPACR_EL1` is written whole, so SVE and
 /// SME stay trapped whatever the firmware left: this port switches neither
 /// register file, and a task running either untrapped would read another's.
 /// `FPCR` resets to an UNKNOWN value, so a CPU that kept the firmware's could

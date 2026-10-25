@@ -56,6 +56,13 @@ dispositivo, pelo que `%d` é esse id em decimal e `%D` em hexadecimal;
 comparar o `%d` de dois ficheiros continua a responder exactamente a
 «estão no mesmo volume?».
 
+Num terminal, cada nome que a saída mostra é posto entre aspas onde uma
+shell precisaria delas, e qualquer carácter de controlo ou outro
+carácter invisível nele contido é escrito como sequência de escape, de
+modo que um nome não consegue comandar nem reordenar o ecrã; o GNU
+mostra-o sem alterações. Um pipe ou um ficheiro recebe o nome byte a
+byte.
+
 ## OPTIONS
 
 - `-L, --dereference` — descrever aquilo que uma ligação simbólica
@@ -79,9 +86,9 @@ comparar o `%d` de dois ficheiros continua a responder exactamente a
 ## EXIT STATUS
 
 - `0` — cada operando foi descrito (ou a ajuda breve foi escrita).
-- `1` — pelo menos um operando não pôde ser lido, ou a saída falhou.
-- `2` — a linha de comandos não foi compreendida, ou o seu formato nomeou
-  uma directiva que este sistema não pode servir.
+- `1` — pelo menos um operando não pôde ser lido, ou a saída falhou. Uma
+  linha de comandos não compreendida, ou cujo formato nomeou uma
+  directiva que este sistema não pode servir, também termina com `1`.
 
 ## ENVIRONMENT
 

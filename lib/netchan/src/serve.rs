@@ -10,9 +10,9 @@
 //! stack, and then parks — never busy-polls — on a wait set over two
 //! sources:
 //!
-//! * a **call** wake decodes one request and drives the pure
-//!   [`NetChannelServer`]; `Attach` maps the granted frame region, `Service`
-//!   drives one device doorbell over it, `Detach` unmaps it;
+//! * a **call** wake decodes one request, admits its caller, and drives the
+//!   pure [`NetChannelServer`]; `Attach` maps the granted frame region,
+//!   `Service` drives one device doorbell over it, `Detach` unmaps it;
 //! * an **interrupt** wake masks the device's completion sources, harvests
 //!   the rings into the shared region itself, and wakes the stack with a
 //!   single notify.
@@ -49,18 +49,22 @@ use tairix_abi::driver::net_channel::{
 };
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId};
-use tairix_log::{log, Event, EventId, Level};
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId, PROC_ID_HEX_LEN};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::{LogSink, ServedCall};
 
 use crate::{Drain, DrainAction, Drained, NetChannelServer};
 use tairix_drvrt::exit::{end, step, DriverExit};
-use tairix_drvrt::serve::{publish_channel, DeviceChannel};
+use tairix_drvrt::serve::{instance_field, log_event, publish_channel, DeviceChannel};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon a NIC driver emits once its device is live and its endpoint is
 /// bound.
 const NETCHAN_READY: EventId = EventId(29_180);
+
+/// Audit event id: a call refused because its caller is not the network
+/// stack, or not the stack instance attached.
+const NETCHAN_REFUSED: EventId = EventId(29_181);
 
 /// Wait-set token for a device-channel call doorbell on the claimed
 /// endpoint.
@@ -75,8 +79,9 @@ const IRQ_TOKEN: u64 = 2;
 /// memory bound.
 const ENDPOINT_CAPACITY: usize = 4;
 
-/// The device channel, served restricted-sender to the one holder of
-/// `CAP_NET_RAW`, the network stack.
+/// The device channel, served restricted-sender to holders of `CAP_NET_RAW`.
+/// The tools that open echo sockets hold it too, so every call is also
+/// admitted by [`NetChannelServer::admit`]: the network stack's alone.
 const CHANNEL: DeviceChannel = DeviceChannel {
     block: NET_CHANNEL_ENDPOINTS,
     gate: CapabilityId::NET_RAW,
@@ -291,8 +296,8 @@ fn drain<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8]) -> Drained 
             // this re-arm raised no interrupt of its own: a source that
             // signals only on a *new* completion (virtio's used-ring event
             // suppression) would then never wake this driver again and the
-            // frame would sit there for good. Linux's
-            // `virtqueue_enable_cb` reports a non-empty queue for exactly
+            // frame would sit there for good. virtio 1.2 §2.7.14 re-checks
+            // the used ring after re-enabling notifications for exactly
             // this reason.
             DrainAction::UnmaskAndService => {
                 let _ = server.net_mut().set_completion_interrupts(true);
@@ -322,10 +327,11 @@ fn drain_and_release<N: Net>(server: &mut NetChannelServer<N>, bytes: &mut [u8])
 }
 
 /// Serve one device-channel doorbell on the claimed endpoint: receive the
-/// request, drive the pure [`NetChannelServer`], and reply. A transient
-/// recv error simply drops the doorbell (the stack retries); a decode
-/// failure is answered with the typed error so the stack sees the exact
-/// refusal.
+/// request, admit its caller, drive the pure [`NetChannelServer`], and reply.
+/// A transient recv error simply drops the doorbell (the stack retries); a
+/// call the kernel cannot attribute, a frame that does not decode, and a
+/// caller [`NetChannelServer::admit`] refuses are answered with the typed
+/// refusal, the last recorded.
 fn serve_call<N: Net>(
     server: &mut NetChannelServer<N>,
     endpoint: u64,
@@ -339,19 +345,40 @@ fn serve_call<N: Net>(
     else {
         return;
     };
-    match NetChannelRequest::decode(&request[..request_len]) {
-        Ok(NetChannelRequest::Facts) => {
+    let caller = match tairix_rt::peer_origin(endpoint, ticket) {
+        Ok(caller) => caller,
+        Err(err) => return refuse(endpoint, ticket, err),
+    };
+    let decoded = match NetChannelRequest::decode(&request[..request_len]) {
+        Ok(decoded) => decoded,
+        Err(err) => return refuse(endpoint, ticket, err),
+    };
+    if let Err(reason) = server.admit(&decoded, &caller) {
+        let mut hex = [0u8; PROC_ID_HEX_LEN];
+        log_event(
+            Level::Warn,
+            NETCHAN_REFUSED,
+            "netchan: a call from outside the attached network stack refused",
+            &[
+                instance_field("caller", caller.proc_id(), &mut hex),
+                Field {
+                    key: "uid",
+                    value: FieldValue::UnsignedInt(u64::from(caller.uid())),
+                },
+            ],
+        );
+        return refuse(endpoint, ticket, reason);
+    }
+    match decoded {
+        NetChannelRequest::Facts => {
             let reply = server.facts_reply();
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
-        Ok(NetChannelRequest::Attach(params)) => {
-            let status = match tairix_rt::peer_origin(endpoint, ticket) {
-                Ok(stack) => attach(server, params, stack.proc_id(), region),
-                Err(err) => encode_status_reply(Err(err)),
-            };
+        NetChannelRequest::Attach(params) => {
+            let status = attach(server, params, caller.proc_id(), region);
             let _ = tairix_rt::call_reply(endpoint, ticket, &status);
         }
-        Ok(NetChannelRequest::Service) => {
+        NetChannelRequest::Service => {
             let reply = match region.as_mut() {
                 Some(region) => {
                     let reply = server.service_reply(region.bytes);
@@ -370,15 +397,15 @@ fn serve_call<N: Net>(
             };
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
-        Ok(NetChannelRequest::SetMulticast(groups)) => {
+        NetChannelRequest::SetMulticast(groups) => {
             let reply = server.set_multicast_reply(&groups);
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
-        Ok(NetChannelRequest::SetRxFilter(policy)) => {
+        NetChannelRequest::SetRxFilter(policy) => {
             let reply = server.set_rx_filter_reply(policy);
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
-        Ok(NetChannelRequest::Detach) => {
+        NetChannelRequest::Detach => {
             // Mask before releasing the region: a device left running with
             // nowhere to harvest into would otherwise storm this driver.
             let _ = server.net_mut().set_completion_interrupts(false);
@@ -388,24 +415,30 @@ fn serve_call<N: Net>(
             }
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
-        Err(err) => {
-            let _ = tairix_rt::call_reply(endpoint, ticket, &encode_status_reply(Err(err)));
-        }
     }
 }
 
+/// Answer the call `ticket` on `endpoint` with `reason`.
+fn refuse(endpoint: u64, ticket: u64, reason: Errno) {
+    let _ = tairix_rt::call_reply(endpoint, ticket, &encode_status_reply(Err(reason)));
+}
+
 /// Map the frame region `stack` — the attested caller — granted, validate its
-/// length against the agreed geometry, and attach the pure server. On any
-/// refusal the region is unmapped and no attach state is kept (fail closed —
-/// a rejected attach never half-binds).
+/// length against the agreed geometry, and attach the pure server. An attach
+/// replaces any before it, accepted or not, so the old region and attachment
+/// go first; on any refusal the new region is unmapped and the channel is
+/// left detached (fail closed — a rejected attach never half-binds).
 fn attach<N: Net>(
     server: &mut NetChannelServer<N>,
     params: AttachParams,
     stack: ProcId,
     region: &mut Option<Region>,
 ) -> [u8; STATUS_REPLY_LEN] {
-    // A re-attach without a prior detach releases the old mapping first.
     if let Some(previous) = region.take() {
+        // Masked first: a device left running with nowhere to harvest into
+        // would storm this driver.
+        let _ = server.net_mut().set_completion_interrupts(false);
+        let _ = server.detach();
         let _ = tairix_rt::shm_unmap(previous.base, previous.len);
     }
     let mut len_out = 0u64;
@@ -443,7 +476,7 @@ fn attach<N: Net>(
     // the same frames through its own grant and never touches ring bytes
     // across a `Service` doorbell.
     let bytes = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, expected) };
-    let status = server.attach(params);
+    let status = server.attach(params, stack);
     if server.is_attached() {
         *region = Some(Region {
             base,

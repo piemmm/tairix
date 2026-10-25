@@ -26,15 +26,14 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
     use tairix_abi::{Errno, LockMode, LockRange, OpenFlags, WaitFlags, WaitStatus};
     use tairix_cmdres::{resolution_candidates, CommandEnv};
-    use tairix_flock::{parse, run, Mode, Ran, Session, Wait, USAGE};
+    use tairix_flock::{parse, run, FlockError, Mode, Ran, Session, Wait};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_rt::File;
 
     /// The production [`Session`]: a real lock file and a real child.
@@ -60,10 +59,9 @@ mod program {
             // and the kernel checks the descriptor was opened for it, and a
             // lock file is created on first use rather than being something
             // the user has to lay down first.
-            let flags = OpenFlags::READ
-                .union(OpenFlags::WRITE)
-                .union(OpenFlags::CREATE);
-            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            let flags = OpenFlags::READ.union(OpenFlags::WRITE);
+            let file = File::create(path.as_bytes(), flags, tairix_abi::fs::FS_NEW_FILE_MODE)
+                .map_err(Errno::from_syscall)?;
             let requested = match mode {
                 Mode::Shared => LockMode::Shared,
                 Mode::Exclusive => LockMode::Exclusive,
@@ -144,7 +142,7 @@ mod program {
             return Err(Errno::NotSupported);
         };
         if let Some(reason) = tairix_abi::load_failure_reason(code) {
-            write_stderr_line(&format!("flock: {reason}"));
+            write_stderr_line(format_args!("flock: {reason}"));
             return Ok(if code == tairix_abi::LOAD_NOT_FOUND {
                 Ran::NotFound
             } else {
@@ -154,29 +152,23 @@ mod program {
         Ok(Ran::Exited(code))
     }
 
-    /// Report a usage error: the banner on the standard error stream,
-    /// verbatim (it already ends in a newline).
-    fn report_usage() {
-        let _ = Stderr.write_all(USAGE.as_bytes());
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// The status is the command's own on success, the `-E` conflict code
-    /// when the lock could not be taken under `-n`/`-w`, `2` on a usage
-    /// error, `127`/`126` for a command word that resolved to nothing or
-    /// could not be executed, and `1` on any other failure.
+    /// when the lock could not be taken under `-n`/`-w`, `127`/`126` for a
+    /// command word that resolved to nothing or could not be executed, and
+    /// `1` on any other failure, a command line not understood included.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            report_usage();
-            return tairix_flock::EXIT_USAGE;
+        let Some(arguments) = tairix_help::arguments("flock") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            report_usage();
-            return tairix_flock::EXIT_USAGE;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("flock", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         let session = RtSession::new();
@@ -189,10 +181,14 @@ mod program {
             &Stderr,
         ) {
             Ok(status) => status,
+            Err(err @ FlockError::Usage) => {
+                tairix_help::report_misuse("flock", &err);
+                tairix_help::MISUSE
+            }
             Err(err) => {
                 // Every abnormal exit states its reason, so a script's `$?`
                 // is never the only evidence of what went wrong.
-                write_stderr_line(&format!("flock: {err}"));
+                write_stderr_line(format_args!("flock: {err}"));
                 err.exit_code()
             }
         }

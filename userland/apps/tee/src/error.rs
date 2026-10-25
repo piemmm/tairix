@@ -3,7 +3,8 @@
 use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
-use tairix_util::quote::quote;
+use tairix_util::argv::{BadWord, WordMiss};
+use tairix_util::getopt::Refusal;
 
 /// Why a `tee` invocation did not complete.
 ///
@@ -15,13 +16,11 @@ use tairix_util::quote::quote;
 /// GNU tool does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TeeError {
-    /// An unrecognised long option; carries the token.
-    UnknownLong(String),
-    /// An unrecognised short option; carries the flag character.
-    UnknownShort(char),
-    /// The `--output-error` value was not one of `warn`, `warn-nopipe`,
-    /// `exit`, `exit-nopipe`; carries the text.
-    InvalidMode(String),
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// The `--output-error` value named no one of `warn`, `warn-nopipe`,
+    /// `exit`, `exit-nopipe`; carries how, and the text.
+    BadMode(WordMiss, String),
     /// Writing the diagnostic stream failed. Carries the underlying
     /// [`Errno`]. The tool never continues silently past an unreportable
     /// failure.
@@ -31,23 +30,17 @@ pub enum TeeError {
 impl fmt::Display for TeeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownLong(token) => {
-                write!(f, "unrecognized option {token}", token = quote(token))
-            }
-            Self::UnknownShort(flag) => {
-                write!(
-                    f,
-                    "invalid option -- {}",
-                    quote(flag.encode_utf8(&mut [0; 4]))
-                )
-            }
-            Self::InvalidMode(text) => {
-                write!(
-                    f,
-                    "invalid argument {text} for '--output-error'",
-                    text = quote(text)
-                )
-            }
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::BadMode(miss, word) => write!(
+                f,
+                "{}",
+                BadWord {
+                    miss: *miss,
+                    word,
+                    option: "--output-error",
+                    choices: &crate::command::MODES,
+                }
+            ),
             Self::Output(errno) => write!(f, "write error: {errno}"),
         }
     }

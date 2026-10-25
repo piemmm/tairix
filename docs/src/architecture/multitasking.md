@@ -108,8 +108,8 @@ alone, and no kernel code uses x87 or MMX. That splits the state in two
   `XCR0` enables x87, SSE, AVX and, when all three are present, the AVX-512
   trio; AMX, MPX and PKRU stay off. A park saves the area with XSAVEOPT, XSAVE
   or FXSAVE64, unless a load is still pending; a resume marks a load pending
-  unless this CPU's owner is the area and the area last lived here (the rule
-  Linux's `fpregs_state_valid` states); and the load itself runs in each
+  unless this CPU's owner is the area and the area last lived here; and the
+  load itself runs in each
   stub's naked ring-3 exit, after all Rust, before the SSE frame is restored.
   A switch to a kernel thread and back costs no restore.
 - **First entry** pivots onto `RSP0`, zeroes the area header, restores every
@@ -404,8 +404,8 @@ kernel kthread** carrying only the manifest-independent admit state: a
 *placeholder empty-capability* record (derived through the shared
 `ChildRecordSeed`/`derive_task_record` so it and the later effective
 record can never diverge), the resolved standard streams and wired open
-entries, inherited resource limits and working directory, any device
-grants and matched node, and the parent/child wait link. Its loading body
+entries, inherited resource limits, working directory and umask, any
+device grants and matched node, and the parent/child wait link. Its loading body
 then runs on the child's *own* task: it parks for the app store if needed
 (`body_wait_app_store`, via `reschedule_current` — never a busy-spin),
 obtains the verified image (a prebuilt image directly, or a bundle read
@@ -435,7 +435,8 @@ stopping point, and inside the build that would be mid-body.
 the child's own slice does not surface as a `spawn` errno — the caller
 already has the PID. Instead the child audits the refusal
 (`emit_load_refusal`, a `ProcessSpawnDenied` event attributed to the child
-with the reserved status) and exits with a reserved load-failure status,
+with the reserved status and the errno it classifies) and exits with a
+reserved load-failure status,
 so the parent reaps a code it can turn into a `stderr` diagnosis. The
 status band is one `lib/abi` definition both sides share:
 `load_failure_status(Errno) -> i32` maps every load-path error onto

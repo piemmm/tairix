@@ -17,6 +17,7 @@
 //! | [`McsLock<T>`] | High-contention critical sections; need fair queueing. |
 //! | [`SeqLock<T>`] | Read-mostly data; readers must never block (e.g. `gettimeofday`). |
 //! | [`OnceCell<T>`] / [`Once<T>`] | Set-once / lazy initialisation, no panic on poison. |
+//! | [`claims`] | A bitmap allocator's lowest-free claim and release, lock-free. |
 //!
 //! Each module's documentation states:
 //! - exact use cases,
@@ -53,6 +54,7 @@
 
 mod loom_compat;
 
+pub mod claims;
 pub mod fnptr;
 pub mod irq;
 #[cfg(feature = "lock-diagnostics")]

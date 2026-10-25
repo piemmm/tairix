@@ -47,6 +47,13 @@ auf, statt selbst Verknüpfungen zu verfolgen. Eine zweite Kopie des
 Algorithmus, die in einer Regel abwiche, gäbe einen Pfad aus, den das
 Dateisystem anders auflöst.
 
+An einem Terminal wird jeder ausgegebene Pfad dort in Anführungszeichen
+gesetzt, wo eine Shell sie bräuchte, und jedes Steuer- oder sonst
+unsichtbare Zeichen darin maskiert geschrieben, sodass ein Pfad den
+Bildschirm weder steuern noch umordnen kann; GNU gibt ihn unverändert
+aus. Eine Pipe, eine Datei oder eine Ausgabe mit `-z` erhält den Pfad
+Byte für Byte.
+
 ## OPTIONS
 
 - `-f, --canonicalize` — den kanonischen Pfad ausgeben; jede Komponente
@@ -79,8 +86,8 @@ Dateisystem anders auflöst.
 
 - `0` — jedes Ziel wurde ausgegeben (oder die Kurzhilfe geschrieben).
 - `1` — mindestens eine Leseoperation wurde abgewiesen, oder die Ausgabe
-  ist fehlgeschlagen.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  ist fehlgeschlagen. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

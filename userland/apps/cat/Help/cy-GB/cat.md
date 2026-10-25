@@ -35,8 +35,8 @@ yn argraffu `$` cyn pob llinell newydd, mae `-T` yn argraffu TAB fel
 nad ydynt yn ASCII yn nodiant `M-`. `-e`, `-t` ac `-A` yw'r
 cyfuniadau arferol `-vE`, `-vT` a `-vET`.
 
-Mae ffynhonnell na ellir ei darllen yn atal y gorchymyn cyn cyffwrdd ag
-unrhyw ffynhonnell ddiweddarach; erys y beitiau a ysgrifennwyd eisoes.
+Adroddir am ffynhonnell na ellir ei darllen, a darllenir yr un nesaf o
+hyd.
 
 ## OPTIONS
 
@@ -73,7 +73,7 @@ unrhyw ffynhonnell ddiweddarach; erys y beitiau a ysgrifennwyd eisoes.
 
 - `0` — ysgrifennwyd pob ffynhonnell.
 - `1` — ni ellid darllen ffynhonnell, neu ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -3,10 +3,11 @@
 //!
 //! A lock is owned by an **open file description** ([`OwnerId`], minted per
 //! `fs_open` and shared by every descriptor duplicated or spawn-inherited
-//! from it), keyed on the file's stable [`FileId`] rather than on a path, so
-//! a rename moves neither the lock nor the identity two participants agree
-//! on. What the manager owns is the conflict decision, the wait-for graph,
-//! and the record bookkeeping; parking and waking are the handler's.
+//! from it), keyed on the pinned node ([`LockedNode`]) rather than on a path
+//! or a reported id, so a rename moves nothing and a write that changes the
+//! id a format reports (FAT's) keeps the key two participants agree on. What
+//! the manager owns is the conflict decision, the wait-for graph, and the
+//! record bookkeeping; parking and waking are the handler's.
 //!
 //! # Indexes, and why these
 //!
@@ -72,10 +73,32 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_abi::{Errno, FileId, LockConflict, LockMode, LockRange};
+use tairix_abi::{Errno, LockConflict, LockMode, LockRange};
 use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
+
+/// The node a lock is taken on: the volume registration that pinned it and
+/// the id that pin answered, which stay the node's for as long as any
+/// descriptor holds it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct LockedNode {
+    /// The registration's instance number.
+    pub instance: u64,
+    /// The pinned id's raw value.
+    pub pinned: u64,
+}
+
+impl LockedNode {
+    /// The key of the node `node` holds pinned.
+    #[must_use]
+    pub fn of(node: &crate::fs::NodeRef) -> Self {
+        Self {
+            instance: node.instance(),
+            pinned: node.pinned().raw(),
+        }
+    }
+}
 
 /// Identity of one open file description for locking purposes.
 ///
@@ -276,7 +299,7 @@ impl FileEntry {
 
 /// One task parked in `fs_lock`.
 struct Waiter {
-    file: FileId,
+    file: LockedNode,
     owner: OwnerId,
     range: LockRange,
     held: Held,
@@ -294,8 +317,8 @@ struct Waiter {
 /// the wrong process or bound the wrong range.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Request {
-    /// The file's stable identity.
-    pub file: FileId,
+    /// The node the lock is on.
+    pub file: LockedNode,
     /// The open file description asking.
     pub owner: OwnerId,
     /// The process to charge the records to, if this owner holds none yet.
@@ -390,16 +413,16 @@ impl Wakes {
 
 /// Registry state behind [`REGISTRY`].
 struct Registry {
-    files: BTreeMap<FileId, FileEntry>,
+    files: BTreeMap<LockedNode, FileEntry>,
     /// Which files each owner holds records on, so releasing a description
     /// does not scan every locked file.
-    owned: BTreeMap<OwnerId, BTreeSet<FileId>>,
+    owned: BTreeMap<OwnerId, BTreeSet<LockedNode>>,
     /// Live record count per charged process — the `file-locks` usage.
     charged: BTreeMap<ProcessId, u64>,
     waiters: BTreeMap<TaskId, Waiter>,
     /// The tasks queued per file, so a release considers that file's waiters
     /// rather than every waiter in the system.
-    queued: BTreeMap<FileId, BTreeSet<TaskId>>,
+    queued: BTreeMap<LockedNode, BTreeSet<TaskId>>,
     next_key: u64,
     next_seq: u64,
 }
@@ -468,7 +491,7 @@ pub fn usage(pid: ProcessId) -> u64 {
 /// Holders only: a queued waiter holds nothing, so reporting one would name
 /// a lock that does not exist.
 #[must_use]
-pub fn query(file: FileId, owner: OwnerId, range: LockRange, held: Held) -> Option<Conflict> {
+pub fn query(file: LockedNode, owner: OwnerId, range: LockRange, held: Held) -> Option<Conflict> {
     let reg = REGISTRY.lock();
     reg.files
         .get(&file)
@@ -563,7 +586,7 @@ pub fn acquire(request: &Request) -> Result<Wakes, Refusal> {
 ///
 /// [`Refusal::LimitExceeded`] when the split would pass the record bound.
 pub fn release(
-    file: FileId,
+    file: LockedNode,
     owner: OwnerId,
     range: LockRange,
     limit: u64,
@@ -638,7 +661,13 @@ pub fn release_owner(owner: OwnerId) -> Vec<Wakes> {
 /// between the failed attempt and the park still finds the waiter and wakes
 /// it rather than leaving it parked on a lock that is already free.
 #[must_use]
-pub fn enqueue(file: FileId, owner: OwnerId, task: TaskId, range: LockRange, held: Held) -> u64 {
+pub fn enqueue(
+    file: LockedNode,
+    owner: OwnerId,
+    task: TaskId,
+    range: LockRange,
+    held: Held,
+) -> u64 {
     let mut reg = REGISTRY.lock();
     let key = reg.ensure_file(file);
     // Re-queuing after a spurious wake keeps the original arrival order, so
@@ -793,7 +822,7 @@ fn overlapping(
 impl Registry {
     /// The wait key for `file`, creating its entry if nothing has locked or
     /// awaited it yet.
-    fn ensure_file(&mut self, file: FileId) -> u64 {
+    fn ensure_file(&mut self, file: LockedNode) -> u64 {
         let fresh = self.next_key;
         let entry = self
             .files
@@ -844,7 +873,7 @@ impl Registry {
 
     /// Forget a file nothing holds or awaits, so the registry carries only
     /// files something is actually using.
-    fn drop_if_vacant(&mut self, file: FileId) {
+    fn drop_if_vacant(&mut self, file: LockedNode) {
         if self.queued.contains_key(&file) {
             return;
         }
@@ -856,7 +885,7 @@ impl Registry {
     /// The queued waiters whose blocked ranges `range` overlaps — exactly
     /// those a change to it can advance, so a release of one range never
     /// disturbs a waiter queued on a disjoint one.
-    fn collect_wakes(&self, file: FileId, range: LockRange) -> Wakes {
+    fn collect_wakes(&self, file: LockedNode, range: LockRange) -> Wakes {
         let Some(entry) = self.files.get(&file) else {
             return Wakes::default();
         };
@@ -881,7 +910,7 @@ impl Registry {
     /// Whether an earlier-queued waiter blocks `held` over `range`.
     fn queue_blocked(
         &self,
-        file: FileId,
+        file: LockedNode,
         owner: OwnerId,
         range: LockRange,
         held: Held,
@@ -896,7 +925,7 @@ impl Registry {
     }
 
     /// The waiters queued on `file`.
-    fn file_waiters(&self, file: FileId) -> impl Iterator<Item = &Waiter> {
+    fn file_waiters(&self, file: LockedNode) -> impl Iterator<Item = &Waiter> {
         self.queued
             .get(&file)
             .into_iter()
@@ -908,7 +937,7 @@ impl Registry {
     /// in the way, plus the earlier-queued waiters that go first.
     fn blocking_owners(
         &self,
-        file: FileId,
+        file: LockedNode,
         owner: OwnerId,
         range: LockRange,
         held: Held,
@@ -939,7 +968,13 @@ impl Registry {
 
     /// Whether granting `owner` a wait for `held` over `range` on `file`
     /// would close a cycle.
-    fn would_deadlock(&self, file: FileId, owner: OwnerId, range: LockRange, held: Held) -> bool {
+    fn would_deadlock(
+        &self,
+        file: LockedNode,
+        owner: OwnerId,
+        range: LockRange,
+        held: Held,
+    ) -> bool {
         let mut visited = BTreeSet::new();
         let mut frontier = Vec::from_iter(self.blocking_owners(file, owner, range, held));
         while let Some(blocker) = frontier.pop() {
@@ -986,7 +1021,7 @@ pub(crate) fn reset_for_test() {
 /// The ranges `owner` holds on `file`, in order — the shape a test asserts
 /// the record algebra against.
 #[cfg(test)]
-pub(crate) fn held_ranges(file: FileId, owner: OwnerId) -> Vec<(u64, u64, Held)> {
+pub(crate) fn held_ranges(file: LockedNode, owner: OwnerId) -> Vec<(u64, u64, Held)> {
     let reg = REGISTRY.lock();
     reg.files
         .get(&file)
@@ -1011,7 +1046,7 @@ pub(crate) fn held_ranges(file: FileId, owner: OwnerId) -> Vec<(u64, u64, Held)>
 /// the per-owner sets are minimal and non-overlapping — the invariant every
 /// operation must preserve.
 #[cfg(test)]
-pub(crate) fn invariants_hold(file: FileId) -> bool {
+pub(crate) fn invariants_hold(file: LockedNode) -> bool {
     let reg = REGISTRY.lock();
     let Some(entry) = reg.files.get(&file) else {
         return true;

@@ -36,8 +36,8 @@ O comando não aceita operandos; um argumento é um erro
 - `0` — o nome (ou a ajuda curta pedida) foi escrito.
 - `1` — a leitura da identidade, a consulta do diretório ou a saída
   falhou, ou o diretório não contém nenhum nome para o identificador
-  de utilizador.
-- `2` — a linha de comandos não foi compreendida.
+  de utilizador. Uma linha de comandos não compreendida também termina
+  com `1`.
 
 ## ENVIRONMENT
 

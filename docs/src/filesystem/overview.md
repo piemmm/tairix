@@ -63,42 +63,38 @@ stable user/kernel `Errno` at the syscall boundary.
 ## Driver delegation
 
 A subtree can be backed by a `drivers/filesystem/*` driver instead of the
-in-RAM arena. The mount records the driver's `DriverHandle`, and the VFS
-exposes delegating operations over a `CoveredPath`: the path together with
-the mount that covered it, read under one guard of the mount table
-(`MountTable::cover`; `cover_pair` for a two-path operation). The kernel host
-looks up the live driver behind that mount under the same guard, so an
-operation is judged against exactly the mount whose volume serves it — a
-detach and re-attach at the path cannot pair one volume's driver with another
-mount's flags. The read operations take a `&mut dyn FilesystemRead`, the
-mutating ones a driver implementing both `FilesystemRead` and
-`FilesystemWrite`:
+in-RAM arena. Every path operation goes through one resolver
+(`kernel/core/src/fs/vfs.rs`): it walks the projections no volume backs
+itself, hands each backed one to its driver's walk
+(`DelegatedFs::walk_segment`) under one hold of that driver's lock, and
+crosses from one projection to the next only at a floor
+([path resolution](#path-resolution)). The operation then acts on what the
+walk reached under the same hold of the driver it ended on, judged by that
+projection's flags, so nothing between the walk's last step and the change
+can move the name it acts on. A rename or a link keeps the directory (for a
+link, also the node) each of its paths reached pinned between the two walks,
+refuses two projections with `VfsError::CrossVolume`, and changes the volume
+under one hold, with no retry.
 
-| Operation      | Effect                                               |
-| -------------- | ---------------------------------------------------- |
-| `read_via`     | Read a file under a driver-backed mount.             |
-| `list_via`     | List a directory under a driver-backed mount.        |
-| `stat_via`     | Stat a node under a driver-backed mount.             |
-| `create_via`   | Create a file under a driver-backed mount.           |
-| `mkdir_via`    | Create a directory under a driver-backed mount.      |
-| `write_via`    | Write a file under a driver-backed mount.            |
-| `truncate_via` | Set a file's length under a driver-backed mount.     |
-| `remove_via`   | Unlink a child under a driver-backed mount.          |
-| `readlink_via` | Read a symbolic link's stored target.                |
-| `symlink_via`  | Create a symbolic link with a stored target.         |
-| `link_via`     | Add a second name for an existing node (hard link).  |
-| `realpath_via` | Canonicalise a path: every link followed, every `..` applied. |
+`MountedFilesystemService` serves every mounted volume through the resolver.
+A boot reader holding the one driver of the volume it reads uses the same
+resolver through the two `Vfs` methods below, which take an absolute
+[`Path`] and a driver implementing `FilesystemRead` and `FilesystemSecurity`;
+a walk that goes on from that volume onto another is `VfsError::CrossVolume`:
 
-Each walks the in-RAM tree to the mount point — authorising **search
-permission on every ancestor** — then hands the remaining path components
-to the driver through `DelegatedFs`. The driver returns *structural* I/O
-only (node kind, size, children, bytes); it makes **no** permission
-decision (`AGENTS.md` §5.4). The §5.3 check runs against a node's
-[`Metadata`] before each read, before each mutation (which also requires
-**write** permission on the parent and refuses a `READ_ONLY` mount), and on
-every directory descended into. An unrecoverable driver fault, or a
-directory entry whose on-disk name is not valid UTF-8, surfaces as
-`VfsError::Io`.
+| Operation                  | Effect                                                    |
+| -------------------------- | --------------------------------------------------------- |
+| `list_via_secured`         | List a directory, resuming from a position.               |
+| `read_bounded_via_secured` | Read the leading bytes of a regular file of bounded size. |
+
+Every walk asks **search permission on every directory** it passes through,
+whichever projection shows it. The driver returns *structural* I/O only (node
+kind, size, children, bytes); it makes **no** permission decision. The check
+runs against a node's [`Metadata`] before each read, before each mutation
+(which also requires **write** permission on the parent and refuses a
+`READ_ONLY` mount), and on every directory descended into. An unrecoverable
+driver fault, or a directory entry whose on-disk name is not valid UTF-8,
+surfaces as `VfsError::Io`.
 
 A driver's *structural* refusals are carried across unchanged rather than
 re-derived per call site: `DriverError::AlreadyExists` is
@@ -121,34 +117,26 @@ non-directory, `IsADirectory` the other way round. So a driver's
 `VfsError::NotSupported` wherever it arrives: a link on a format that stores
 none, a mode or owner change on one that stores no record of its own.
 
-A create hands the new node to its creator in the same operation — the
-driver records the creator as owner where its format keeps one — and when
-that fails takes the node back out, so a refused create leaves no half-made
-name for a retry to collide with.
+A create hands the driver the whole record the new node is born with, in the
+creating call: the creator's identity, the mode the create asked for less its
+process's umask (`0o777` for a link) and, in a setgid directory, that
+directory's group. There is no second step, so a refused create leaves no
+half-made name for a retry to collide with. The driver keeps what of the
+record its format stores.
 
-Where that `Metadata` comes from is the one place the two policies differ:
+Every node is judged by **its own stored record**, read through the driver's
+`FilesystemSecurity` surface and translated (`Metadata::from_node_security`):
+[arxfs](./arxfs.md) stores full per-inode owner, mode, ACL, and capability
+gate, so a file marked owner-only or gated on a capability is enforced as
+stored; the [ext4 driver](./ext4.md) reports each inode's stored owner and
+mode with its POSIX access ACL folded in, judged under the POSIX.1e model
+(named entries under the mask, the owning group by its own entry); and FAT32,
+which stores no owner, reports the record its volume's storage-group identity
+map assigns, or its own restrictive system-owned posture where no map is
+provisioned.
 
-- The `*_via` methods apply the **mount point's** `Metadata` as a uniform
-  template to every node. No mounted volume is served through them.
-- The `*_via_secured` counterparts (`read_via_secured`,
-  `read_bounded_via_secured`, `list_via_secured`, `stat_via_secured`,
-  `create_via_secured`, `mkdir_via_secured`, `write_via_secured`,
-  `truncate_via_secured`, `remove_via_secured`, `readlink_via_secured`,
-  `symlink_via_secured`, `link_via_secured`, `realpath_via_secured`) instead
-  read **each node's own stored §5.3 record** through the driver's
-  `FilesystemSecurity` surface and translate it
-  (`Metadata::from_node_security`). The kernel host serves every mounted
-  volume through these: [arxfs](./arxfs.md) stores full per-inode owner,
-  mode, ACL, and capability gate — so a file marked owner-only or gated on a
-  capability is enforced as stored regardless of the mount template — the
-  [ext4 driver](./ext4.md) reports each inode's stored owner and mode with
-  its POSIX access ACL folded in, judged under the POSIX.1e model (named
-  entries under the mask, the owning group by its own entry), and FAT32, which stores no
-  owner, reports the record its volume's storage-group identity map assigns,
-  or its own restrictive system-owned posture where no map is provisioned.
-
-Both routes feed the *same* `Metadata::authorize` decision, so the policy
-is single-sourced; only the metadata's origin changes.
+The in-RAM tree and every volume feed the *same* `Metadata::authorize`
+decision, so the policy is single-sourced; only the metadata's origin changes.
 
 A driver-backed mount normally sits *below* the root (`/Storage/usb0`,
 …), but the **root mount itself** can also be given a backing driver
@@ -172,16 +160,42 @@ read and a write through the shared, transport-generic device tail.
 
 ## Path resolution
 
-A [`Path`] is absolute and normalised at parse time: relative paths, empty
-or over-long components, `.`/`..` traversal tokens, and embedded NUL bytes
-are rejected with `VfsError::InvalidPath`. A **caller-supplied** path
-therefore cannot spell a `..` at all, so nothing a caller types can escape
-the tree.
+A caller's path is a `/`-view path, or a relative one resolved from where the
+caller stands: the view root, its working directory, or a directory it holds a
+descriptor of (`At`, `Start`). An absolute path ignores the start. The path is
+parsed into steps through `lib/path` (`steps`): `.` is dropped and `..`
+is kept, never collapsed as text, so each `..` leaves the directory the walk
+actually reached — the node it came through, or the driver's `parent` of a
+directory it started at. A `..` needs search permission on the directory it
+leaves, and a file has none (`VfsError::NotADirectory`). An empty or over-long
+component, a NUL byte, or more than `MAX_PATH_COMPONENTS` steps is
+`VfsError::InvalidPath`; an alias or `id::` spelling is turned into the view
+location it names before it reaches the VFS.
 
-The one looser grammar is a *symbolic link's stored target* (below), which
-is on-disk data rather than a caller's spelling; it is parsed by
-`parse_link_target`, never by `Path::parse`, so widening it did not widen
-the caller boundary.
+At a projection's floor a caller's `..` climbs into the projection it is shown
+in (`/..` is `/`), and a caller's name that another projection is shown under,
+matched as the floor's volume matches its own entries, goes on at that
+projection's floor. Every projection but the root's sits
+directly beneath another's floor, so the floor is the only place a walk
+crosses. A step a symbolic link supplied never crosses ([below](#symbolic-links)).
+
+A floor whose volume no driver serves yet — `/` before the root is unlocked —
+is still crossed, by the exact name of a projection shown beneath it or by a
+`..`, its search permission asked of the record that stands for it (a runtime
+projection's template, or its node in the boot layout). Every other step there
+needs the volume itself and is `VfsError::Unserved`.
+
+A working directory (`Cwd`) and a directory descriptor are the directory
+itself, not the path they were entered by: a relative path from one is walked
+from the pinned node, whose search permission is asked as the caller on every
+call, and one whose projection has left the mount table, or whose
+registration is retired, is `VfsError::Stale`. A directory no name reaches any
+more holds no names: nothing in it is found or made, nothing moves or links
+into it, and its `..` is `VfsError::NotFound`.
+
+A [`Path`], what the one-driver API takes, is absolute and normalised at parse
+time, so it spells no `..`. A *symbolic link's stored target* is on-disk data
+rather than a caller's spelling and has its own grammar (`parse_link_target`).
 
 ## Symbolic links
 
@@ -196,21 +210,23 @@ only summarises, is `plans/SYMLINKS.md`.
 
 - **A link in an interior position is always followed**: such a component
   is being *used* as a directory, so what matters is what it names. Only
-  the **final** component's treatment varies, selected by `FinalLink`:
-  `Follow` is POSIX `stat`, `Keep` is POSIX `lstat`. `Keep` is what an
-  `OpenFlags::NO_FOLLOW` descriptor carries, and it is re-derived from the
-  handle (`FinalLink::for_open`) by every operation served for that
-  descriptor — so a stat or a listing can never contradict the open that
-  produced it. A dangling link is describable only under `Keep`;
-  `Follow` reports it as `VfsError::NotFound`.
+  the **final** component's treatment varies, selected by `FinalLink`
+  (`tairix_abi::fs`, the one definition the kernel and every tool share):
+  `Follow` is POSIX `stat`, `Keep` is POSIX `lstat`. `Keep` is how an
+  `OpenFlags::NO_FOLLOW` open resolves (`FinalLink::for_open`), and the
+  descriptor holds the node that open chose — so a stat or a listing through
+  it can never contradict the open that produced it. A dangling link is
+  describable only under `Keep`; `Follow` reports it as `VfsError::NotFound`.
 - **`..` is resolved physically, never lexically.** The walk keeps a stack
   of the real nodes it passed through and `..` pops that stack, so it names
   the directory the resolution actually came through rather than one a
   link's spelling suggests.
-- **A link cannot resolve outside what its mount projects.** The stack
-  starts at the root the covering mount projects and never pops past it, so
-  an absolute target on a foreign volume resolves against *that mount's*
-  root — a USB stick's link cannot name `/System/Security`. For a
+- **A link cannot resolve outside the projection that shows it.** Its `..`
+  stops at that projection's floor, its absolute target restarts there, and a
+  name it supplies that a projection beneath that floor is shown under is
+  `VfsError::NotFound`, neither crossing into that projection nor reaching
+  the directory it covers, so a USB stick's link cannot name
+  `/System/Security`. For a
   **sub-mount** (a subtree of a larger volume bound at a mount point, such
   as `/System/Logs`) the floor is the subtree's own root rather than the
   driver's, so a link stored inside one cannot reach the rest of the volume
@@ -222,7 +238,7 @@ only summarises, is `plans/SYMLINKS.md`.
   permission is required on every directory the resolution traverses,
   whoever supplied its name.
 - **A link is not byte-readable.** Its target is reached only through
-  `readlink_via`; asking an open for byte access to something that really
+  `readlink`; asking an open for byte access to something that really
   is a link is refused with `Errno::LinkLoop`, and `FilesystemWrite::create`
   refuses `NodeKind::Symlink` — a link is created only by `create_link`,
   which carries the target.
@@ -242,30 +258,43 @@ only summarises, is `plans/SYMLINKS.md`.
 
 The posture is a property of the operation, not a default, so each one names
 it. A walk reports the **place** its final name occupies — the directory
-holding the name and the name itself — because the driver mutation surface is
-keyed `(dir, name)` rather than by node; under `Follow` that is the *target's*
-place, which is what makes a write reach the target rather than the link.
+holding the name and the name itself — because a driver's name mutations are
+keyed `(dir, name)`; under `Follow` that is the *target's* place, which is
+what makes an `O_CREAT` reach the target rather than the link. A byte write is
+keyed by node and goes to the node the walk resolved, under the same hold of
+the driver's lock.
 
 | Operation | Final link | Why |
 |---|---|---|
-| `read`, `write`, `truncate`, truncate-on-open, append | followed | POSIX acts on the file the link names. The write permission this VFS asks for on a write's parent therefore applies to the directory the target lives in, not the one the link sits in. |
-| `stat`, `readdir`, `open` | per the descriptor | `FinalLink::for_open` fixes it once from `OpenFlags::NO_FOLLOW`; every operation served for that handle re-derives it. |
+| `read`, `write`, `truncate`, truncate-on-open, append | followed | POSIX acts on the file the link names, and the target's own record decides whether its bytes may be written. |
+| `open` | per the descriptor | `FinalLink::for_open` fixes it once from `OpenFlags::NO_FOLLOW`; a `stat` or a listing through the descriptor acts on the node the open pinned. |
 | `open` with `CREATE` | followed | Creating through a *dangling* link creates the file the link names, as POSIX specifies, rather than reporting the link's own name as taken. |
+| `open` with `CREATE` and `EXCLUSIVE` | kept | The name is taken, as POSIX requires, so a link planted where a program creates exclusively cannot turn the create onto the file it names. `CREATE`, `DIRECTORY` and `EXCLUSIVE` together make a directory and answer it open, with no byte access. |
 | `mkdir` | kept | POSIX `mkdir` over a link is `AlreadyExists`, live target or dangling. |
 | `symlink` | kept | A new link never replaces an existing name. |
 | `unlink`, `rmdir`, `rename` (both ends) | kept | The call is about the name as typed; removing or moving a link never touches what it names. |
 | `readlink` | kept | The call is about the link. |
 | `link` (existing name) | per the call | An empty `LinkFlags` keeps it, so the *link* gains the second name and one planted on the way cannot redirect it onto an object the caller never spelled (POSIX `link()`); `LinkFlags::FOLLOW` follows it, so its target does instead (`linkat(AT_SYMLINK_FOLLOW)`, what `ln -L` asks for). |
 | `link` (new name) | kept | A name being created; a create never replaces an existing name. |
-| `chmod`, `chown`, extended attributes | followed | POSIX applies these to the target. |
+| `chmod`, `chown`, `access` | per the call | Followed, as POSIX applies these to the target, unless the call asks about the link itself. |
+| `chdir` | followed | A working directory is a directory. |
+| extended attributes | per the descriptor | Reached only through a descriptor, so its open decided. |
 
 
 ## Canonicalisation
 
-`realpath_via{,_secured}` answers the **one** path that names what a path
-resolves to: every symbolic link followed, every `..` applied to the nodes
-the walk really traversed, and the answer spelled in the caller's own
-namespace — the covering mount point followed by the canonical remainder.
+Canonicalisation answers the **one** path that names what a path resolves
+to: every symbolic link followed, every `..` applied to the nodes the walk
+really traversed, and the answer spelled in the caller's own namespace — the
+mount point of the projection it ended in followed by the canonical
+remainder. A path relative to a working directory or a directory descriptor
+is spelled from that directory's canonical path now, however it has moved
+since it was entered: the label it was entered by while that still reaches
+it without following a link, otherwise the names found climbing from it to
+its projection's floor, each in its parent's listing, which the caller must
+be able to read. `getcwd` answers the same for the working directory itself
+(`FilesystemService::canonical_of`), and a directory no name reaches any more
+is `VfsError::NotFound`.
 It is the same walk every other operation uses, so a caller cannot obtain a
 path the kernel would resolve elsewhere. `fs_realpath` (116) exposes it, and
 `readlink -f`/`-e`/`-m` and `ln -r` are its userland consumers; a tool must
@@ -308,10 +337,11 @@ caller can tell apart from a structural refusal, never a substituted file.
 
 A node may carry more than one name. Each is an ordinary directory entry
 reaching one inode, so a write through either is visible through the other,
-and the node's storage is released only when the **last** name is unlinked —
-the count that decides it is the format's own (`NodeInfo::nlink`), carried up
-to `FileStat` and printed by `ls -l`, never derived by the VFS, which could
-not count names without walking every directory on the volume.
+and the node's storage is released only when the **last** name is unlinked
+and no hold remains ([held nodes](#held-nodes)) — the count that decides it is
+the format's own (`NodeInfo::nlink`), carried up to `FileStat` and printed by
+`ls -l`, never derived by the VFS, which could not count names without walking
+every directory on the volume.
 
 - **A directory is refused, in the VFS rather than per format.** The tree
   staying a tree is what makes physical `..` resolution well-defined, so
@@ -329,6 +359,63 @@ not count names without walking every directory on the volume.
 - **A format that keeps no count answers `1`.** Such a format also has no
   second-name object, so one name is the whole truth rather than a floor
   (`NodeInfo::SINGLE_NAME`, the one definition every such driver reads).
+
+## Held nodes
+
+A driver holds a node for the kernel through `FilesystemRead::pin` until the
+matching `unpin` ([driver traits](../abi/driver_traits.md#filesystem)). A held
+node that loses its last name keeps its data and takes byte I/O, `node_info`
+with `nlink` 0, and security and attribute changes until its last `unpin`
+frees it; a held directory that loses its name takes no entries and lists
+nothing. No hold survives a crash, so each format finishes or leaks the
+deletion it deferred:
+
+| Format | A held node that loses its last name | After a crash |
+|---|---|---|
+| ARXFS | stays in the pending-delete set, which its drain skips while held; reclaimed at the last unpin | the next writable mount drains the set (`arxfs-spec.md` §14) |
+| ext4 | joins the orphan chain in the journalled unlink; released at the last unpin | mount-time orphan recovery frees it |
+| FAT32 | its entry is deleted and its cluster chain kept under a token until the last unpin | the chain is lost to the format's checker |
+| ADFS | its fragments are kept under a token until the last unpin | the fragments are lost to the format's checker |
+| UDF | its file entry and extents are kept at link count 0 until the last unpin | the space is lost to the format's checker |
+| ISO 9660 | read-only, so a hold keeps no state | — |
+
+FAT32 and ADFS answer a pinned node under a token, so they declare
+`NodeIdentity::ContentDerived`; the others keep a node's id under a hold.
+
+## Open file descriptions
+
+A descriptor of a volume's node holds a pin on it (`kernel/core/src/fs/node.rs`,
+`plans/OPENFILE.md`): the `NodeRef`, the projection it was opened through, the
+identity its byte operations run under, and the path it was opened as, which
+is a label and is never resolved. An open walks once, creates what it was
+asked to, reserves the pin's release slot on its volume's registration
+(`VolumeNodes`) and pins, all under one hold of the driver's lock.
+
+Nothing after the open looks at a path. A read, write, truncate, punch, seek,
+stat, listing or sync runs on the pinned id (`HeldNode`) under the driver's
+lock, once the projection is still in the mount table and the registration
+current — else `Stale` — and judges the node as [permissions](./permissions.md#descriptors)
+describes. A rename of the node or of any directory above it moves nothing a
+descriptor holds, a new node made at its old name is another node, and a node
+that loses its last name reads, writes and stats on with `nlink` 0 until the
+last descriptor lets it go. A held directory's listing shows the projections
+attached beneath it only when it is its projection's floor: every projection
+sits directly beneath another's floor, and a runtime volume is attached only
+directly beneath the catalog, so no other directory has any.
+
+A projection is fixed once made: backing one replaces it, and one leaving the
+table is withdrawn, so its descriptors answer `Stale`. A registration is never
+reused: detach, retraction, recovery and a clean surprise removal retire it, so
+a descriptor of a volume that left never reaches one attached under the same
+name since; the stand-in for a volume that vanished with work unpublished
+takes over its registration, so its descriptors answer the device error while
+it is away.
+
+A pin's last reference may drop anywhere, so the drop only queues its release
+— one spin lock, no allocation — and wakes the write-back flusher unless a
+drop since its last pass already has. A close tells the driver at once when
+its lock is free; the flusher's pass tells it of whatever else was queued
+before it publishes.
 
 ## Content generations
 

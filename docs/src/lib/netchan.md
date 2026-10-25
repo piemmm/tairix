@@ -33,8 +33,10 @@ on the host against a mock device.
   `NotConnected`.
 - `Attach` validates the offered geometry against the device — both
   directions must carry at least one device frame, and a segmenting device's
-  transmit ring must carry a super-frame — and moves to **attached**. A
-  refused attach leaves the server unchanged; it never half-binds.
+  transmit ring must carry a super-frame — and moves to **attached** by the
+  calling stack instance. An attach replaces any before it, whose region the
+  driver has already given back, so a refused one leaves the server detached;
+  it never half-binds.
 - `Service` binds a `FrameRings` view over the caller-mapped region and
   drives exactly one `Net::service` doorbell.
 - `Detach` returns to detached; the device stays live for a later re-attach.
@@ -72,9 +74,16 @@ the bare-metal targets a driver binary is built for. It:
 
 1. binds the device-channel endpoint `NET_CHANNEL_ENDPOINTS` reserves for the
    node the driver was loaded for, which the kernel admits for that node's
-   driver alone, **restricted-sender requiring `CAP_NET_RAW`** — so the kernel
-   refuses every caller but the stack at dispatch, on top of the
-   `CAP_IPC_BIND_PRIVILEGED` gate the reserved-id bind already demands;
+   driver alone, **restricted-sender requiring `CAP_NET_RAW`**, on top of the
+   `CAP_IPC_BIND_PRIVILEGED` gate the reserved-id bind already demands. The
+   tools that open echo sockets (`ping`, `traceroute`, `netmap`) hold
+   `CAP_NET_RAW` too, so the kernel's gate is only the first: the loop reads
+   every call's attested origin and answers it only when
+   `NetChannelServer::admit` does — the network stack's service account, and
+   once a stack has attached only the instance that attached, save for
+   `Facts` and the `Attach` a restarted stack makes in its predecessor's
+   place — refusing any other caller `PermissionDenied` and logging it
+   (event 29181);
 2. publishes a hardware-tree node carrying that endpoint as a grant request
    (`NETCHAN_NODE_COMPATIBLE`), which the device manager observes and hands to
    the stack over its capability-gated admin surface. The kernel re-parents
@@ -108,8 +117,11 @@ re-poll.
 `cargo test -p tairix-netchan` drives `NetChannelServer` against an
 in-process loopback `Net`: the facts reply and its device-fault path, the
 detached/attached transitions, a frame round-tripping through one service
-doorbell, a geometry too small for the device, a wrong-length region, and
-detach. `Drain` is driven directly over synthetic reports: the re-arm
+doorbell, a geometry too small for the device, a wrong-length region,
+detach, a refused re-attach leaving the channel detached, and who may call:
+every request refused to a principal other than the network stack, and
+once a stack has attached, every request but `Facts` and `Attach` refused to
+another instance. `Drain` is driven directly over synthetic reports: the re-arm
 look-once-more, a frame landing in that window, a full ring, a fault, a
 link change with no frame moved, the pre-filter count reaching the notify,
 and an exhausted round budget stopping masked *and* asking for release. The process loop is exercised live by the two-process QEMU verticals

@@ -66,8 +66,8 @@ y mae'r system yn ei gofnodi mewn gwirionedd.
 
 - `0` — ysgrifennwyd y rhestr (neu'r cymorth byr).
 - `1` — gwrthodwyd ymholiad y goeden galedwedd neu methodd, neu ni
-  ellid ysgrifennu'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+  ellid ysgrifennu'r allbwn. Mae llinell orchymyn na ddeallwyd hefyd yn
+  gorffen â `1`.
 
 ## ENVIRONMENT
 

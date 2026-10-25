@@ -34,8 +34,7 @@ change rien.
 
 - `0` — la séquence d'effacement a été écrite.
 - `1` — le terminal ne peut pas effacer, ou la sortie n'a pas pu être
-  délivrée.
-- `2` — la ligne de commande n'a pas été comprise.
+  délivrée. Une ligne de commande non comprise sort aussi avec `1`.
 
 ## ENVIRONMENT
 

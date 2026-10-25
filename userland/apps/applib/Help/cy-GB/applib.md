@@ -107,9 +107,10 @@ popeth arall ei anwybyddu.
 - `0` — cwblhawyd y rhestru, y newid, y rescan, neu'r help byr.
 - `1` — methiant stôr, bwndel, neu allbwn (er enghraifft efallai na fydd
   y defnyddiwr yn cael newid y catalog ar draws y peiriant); nodir y
-  rheswm ar y ffrwd ddiagnostig.
-- `2` — ni ddeallwyd y llinell orchymyn, mae'r ffolder neu'r cofnod yn
-  anhysbys, neu ni ellir cofrestru'r bwndel fel y gofynnwyd.
+  rheswm ar y ffrwd ddiagnostig. Mae llinell orchymyn na ddeallwyd (gan
+  gynnwys ffolder `--category` anhysbys) hefyd yn gorffen â `1`.
+- `2` — mae'r cofnod yn anhysbys, neu ni ellir cofrestru'r bwndel fel y
+  gofynnwyd.
 
 ## ENVIRONMENT
 

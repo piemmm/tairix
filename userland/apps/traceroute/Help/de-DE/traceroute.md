@@ -69,9 +69,9 @@ eingeschlossen (Standard 60 für IPv4 und 80 für IPv6).
 
 - `0` — die Verfolgung lief, ob sie den Host erreichte oder nicht (oder
   die Kurzhilfe wurde ausgegeben).
-- `2` — die Befehlszeile wurde nicht verstanden, das Ziel ließ sich nicht
-  auflösen, der Socket ließ sich nicht öffnen, oder eine Sonde ließ sich
-  nicht senden.
+- `1` — die Befehlszeile wurde nicht verstanden.
+- `2` — das Ziel ließ sich nicht auflösen, der Socket ließ sich nicht
+  öffnen, oder eine Sonde ließ sich nicht senden.
 
 ## ENVIRONMENT
 

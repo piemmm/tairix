@@ -36,8 +36,8 @@ imprime os outros bytes de controlo como `^X` e os bytes não-ASCII em
 notação `M-`. `-e`, `-t` e `-A` são as combinações habituais `-vE`,
 `-vT` e `-vET`.
 
-Uma fonte que não pode ser lida para o comando antes de qualquer fonte
-posterior ser tocada; os bytes já escritos ficam escritos.
+Uma fonte que não pode ser lida é reportada e a seguinte é lida mesmo
+assim.
 
 ## OPTIONS
 
@@ -73,7 +73,7 @@ posterior ser tocada; os bytes já escritos ficam escritos.
 
 - `0` — todas as fontes foram escritas.
 - `1` — uma fonte não pôde ser lida, ou a saída não pôde ser entregue.
-- `2` — a linha de comandos não foi compreendida.
+  Uma linha de comandos não compreendida também termina com `1`.
 
 ## ENVIRONMENT
 

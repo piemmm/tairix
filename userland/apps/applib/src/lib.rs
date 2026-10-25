@@ -79,12 +79,13 @@ use tairix_proglib::{
     document as catalog_document, load as load_catalog, merge, BundlePath, Catalog, CatalogError,
     DisplayName, EntryError, EntryId, EntryPatch, IconAsset, LibraryEntry, Record,
 };
+use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
 
 /// The command word: the record producer on fd 3 and the diagnostic prefix.
 pub const OWN_WORD: &str = "applib";
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `applib`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `applib`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: applib [list [--category <folder>]]\n       applib add <bundle> [--category <folder>] [--name <name>] [--icon <asset>] [--user]\n       applib remove <id|bundle> [--user]\n       applib hide <id> [--user]\n       applib show <id> [--user]\n       applib rescan [--user]";
 
 /// One thing the `applib` tool can do.
@@ -171,9 +172,12 @@ impl fmt::Display for Side {
 ///
 /// Every variant is a fail-closed refusal: nothing was changed, and the
 /// rendered message states the reason.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppLibError {
-    /// The command line was not understood.
+    /// An option `getopt` refuses, worded as it words it.
+    Option(Refusal),
+    /// The command line named no known subcommand, or too many or too few
+    /// operands for the one it named.
     Usage,
     /// A `--category` value outside the closed folder taxonomy.
     UnknownFolder,
@@ -220,6 +224,7 @@ pub enum AppLibError {
 impl fmt::Display for AppLibError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
             Self::Usage => f.write_str("command line not understood"),
             Self::UnknownFolder => {
                 f.write_str("unknown folder; valid:")?;
@@ -295,171 +300,108 @@ pub struct Stores<'a> {
     pub home: Option<&'a str>,
 }
 
+/// What each of `applib`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Category,
+    Name,
+    Icon,
+    User,
+    Help,
+}
+
+/// The reserved help switches, read on a line naming no subcommand.
+const HELP_OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// `list`'s option, and the reserved help switches.
+const LIST_OPTIONS: &[Opt<Flag>] = &[
+    Opt::long(&["category"], Takes::Value, Flag::Category),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// `add`'s options, and the reserved help switches.
+const ADD_OPTIONS: &[Opt<Flag>] = &[
+    Opt::long(&["category"], Takes::Value, Flag::Category),
+    Opt::long(&["name"], Takes::Value, Flag::Name),
+    Opt::long(&["icon"], Takes::Value, Flag::Icon),
+    Opt::long(&["user"], Takes::Nothing, Flag::User),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
+/// The option `remove`, `hide`, `show` and `rescan` take, and the reserved
+/// help switches.
+const USER_OPTIONS: &[Opt<Flag>] = &[
+    Opt::long(&["user"], Takes::Nothing, Flag::User),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The reserved short-help switches (`-h`/`-?`/`--help`) win wherever they
-/// appear. Long options accept both `--option value` and `--option=value`,
-/// and `--` ends option parsing (plans/APPS.md; the GNU convention).
+/// The first argument names the subcommand, `list` when there is none. The
+/// rest is read as GNU's `getopt_long` reads it ([`Scan`]) against that
+/// subcommand's own options: anywhere among the operands, a long one by any
+/// unambiguous prefix, its value attached (`--name=Chess`) or following
+/// (`--name Chess`), `--` ending them. The help switches (`-h`, `-?`,
+/// `--help`) answer at once, in every subcommand and on a line naming none,
+/// which is otherwise refused.
 ///
 /// # Errors
 ///
-/// [`AppLibError::Usage`] for any input outside the grammar, and
-/// [`AppLibError::UnknownFolder`] for a `--category` value outside the
-/// closed taxonomy.
-pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, AppLibError> {
-    if args
-        .iter()
-        .any(|arg| matches!(*arg, "-h" | "-?" | "--help"))
-    {
-        return Ok(Command::Help);
-    }
+/// * [`AppLibError::Option`] — an option `getopt` refuses, in its words.
+/// * [`AppLibError::Usage`] — no known subcommand, or too many or too few
+///   operands for the one named.
+/// * [`AppLibError::UnknownFolder`] — a `--category` value outside the
+///   closed taxonomy.
+pub fn parse<'a>(args: &'a [&'a str]) -> Result<Command<'a>, AppLibError> {
     let Some((&word, rest)) = args.split_first() else {
         return Ok(Command::List { category: None });
     };
-    match word {
-        "list" => {
-            let mut options = Options::new(rest);
-            let mut category = None;
-            while let Some(token) = options.next()? {
-                match token {
-                    Token::Option("category", value) => category = Some(parse_folder(value)?),
-                    _ => return Err(AppLibError::Usage),
+    let options = match word {
+        "list" => LIST_OPTIONS,
+        "add" => ADD_OPTIONS,
+        "remove" | "hide" | "show" | "rescan" => USER_OPTIONS,
+        _ => {
+            for arg in Scan::new(HELP_OPTIONS, args, Order::Permute) {
+                if let Arg::Opt(Flag::Help, _) = arg.map_err(AppLibError::Option)? {
+                    return Ok(Command::Help);
                 }
             }
-            Ok(Command::List { category })
-        }
-        "add" => {
-            let mut options = Options::new(rest);
-            let (mut bundle, mut category, mut name, mut icon, mut user) =
-                (None, None, None, None, false);
-            while let Some(token) = options.next()? {
-                match token {
-                    Token::Option("category", value) => category = Some(parse_folder(value)?),
-                    Token::Option("name", value) => name = Some(value),
-                    Token::Option("icon", value) => icon = Some(value),
-                    Token::Flag("user") => user = true,
-                    Token::Operand(value) if bundle.is_none() => bundle = Some(value),
-                    _ => return Err(AppLibError::Usage),
-                }
-            }
-            Ok(Command::Add(AddRequest {
-                bundle: bundle.ok_or(AppLibError::Usage)?,
-                category,
-                name,
-                icon,
-                user,
-            }))
-        }
-        "remove" | "hide" | "show" => {
-            let mut options = Options::new(rest);
-            let (mut operand, mut user) = (None, false);
-            while let Some(token) = options.next()? {
-                match token {
-                    Token::Flag("user") => user = true,
-                    Token::Operand(value) if operand.is_none() => operand = Some(value),
-                    _ => return Err(AppLibError::Usage),
-                }
-            }
-            let operand = operand.ok_or(AppLibError::Usage)?;
-            Ok(match word {
-                "remove" => Command::Remove {
-                    target: operand,
-                    user,
-                },
-                "hide" => Command::Hide { id: operand, user },
-                _ => Command::Show { id: operand, user },
-            })
-        }
-        "rescan" => {
-            let mut options = Options::new(rest);
-            let mut user = false;
-            while let Some(token) = options.next()? {
-                match token {
-                    Token::Flag("user") => user = true,
-                    _ => return Err(AppLibError::Usage),
-                }
-            }
-            Ok(Command::Rescan { user })
-        }
-        _ => Err(AppLibError::Usage),
-    }
-}
-
-/// One parsed command-line token.
-enum Token<'a> {
-    /// A `--option` with a value (`--option value` or `--option=value`).
-    Option(&'a str, &'a str),
-    /// A bare `--option` that takes no value.
-    Flag(&'a str),
-    /// A positional operand.
-    Operand(&'a str),
-}
-
-/// The options `applib` defines that take a value; everything else long is
-/// a bare flag or unknown.
-const VALUE_OPTIONS: [&str; 3] = ["category", "name", "icon"];
-
-/// The bare flags `applib` defines.
-const FLAG_OPTIONS: [&str; 1] = ["user"];
-
-/// A tiny GNU-style option cursor over a borrowed argument slice.
-struct Options<'s, 'a> {
-    items: &'s [&'a str],
-    index: usize,
-    literal: bool,
-}
-
-impl<'s, 'a> Options<'s, 'a> {
-    fn new(items: &'s [&'a str]) -> Self {
-        Self {
-            items,
-            index: 0,
-            literal: false,
-        }
-    }
-
-    /// The next token, `None` at the end.
-    ///
-    /// # Errors
-    ///
-    /// [`AppLibError::Usage`] on an unknown option, a value option without
-    /// a value, or a flag given a `=value`.
-    fn next(&mut self) -> Result<Option<Token<'a>>, AppLibError> {
-        let Some(&item) = self.items.get(self.index) else {
-            return Ok(None);
-        };
-        self.index += 1;
-        if self.literal || !item.starts_with('-') || item == "-" {
-            return Ok(Some(Token::Operand(item)));
-        }
-        if item == "--" {
-            self.literal = true;
-            return self.next();
-        }
-        let Some(long) = item.strip_prefix("--") else {
             return Err(AppLibError::Usage);
-        };
-        let (name, inline) = match long.split_once('=') {
-            Some((name, value)) => (name, Some(value)),
-            None => (long, None),
-        };
-        if VALUE_OPTIONS.contains(&name) {
-            let value = if let Some(value) = inline {
-                value
-            } else {
-                let Some(&value) = self.items.get(self.index) else {
-                    return Err(AppLibError::Usage);
-                };
-                self.index += 1;
-                value
-            };
-            return Ok(Some(Token::Option(name, value)));
         }
-        if FLAG_OPTIONS.contains(&name) && inline.is_none() {
-            return Ok(Some(Token::Flag(name)));
+    };
+    let (mut category, mut name, mut icon, mut user) = (None, None, None, false);
+    let mut operands = Vec::new();
+    for arg in Scan::new(options, rest, Order::Permute) {
+        match arg.map_err(AppLibError::Option)? {
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::Category, value) => category = value.map(parse_folder).transpose()?,
+            Arg::Opt(Flag::Name, value) => name = value,
+            Arg::Opt(Flag::Icon, value) => icon = value,
+            Arg::Opt(Flag::User, _) => user = true,
+            Arg::Operand(operand) => operands.push(operand),
         }
-        Err(AppLibError::Usage)
+    }
+    match (word, operands.as_slice()) {
+        ("list", &[]) => Ok(Command::List { category }),
+        ("rescan", &[]) => Ok(Command::Rescan { user }),
+        ("add", &[bundle]) => Ok(Command::Add(AddRequest {
+            bundle,
+            category,
+            name,
+            icon,
+            user,
+        })),
+        ("remove", &[target]) => Ok(Command::Remove { target, user }),
+        ("hide", &[id]) => Ok(Command::Hide { id, user }),
+        ("show", &[id]) => Ok(Command::Show { id, user }),
+        _ => Err(AppLibError::Usage),
     }
 }
 

@@ -79,7 +79,7 @@ Die Abfragen:
   verlorenen Frames, ihr Ort und ihr Name — dann eine Zeile je eigenem
   Audiostrom — sein Gerät, seine Richtung, Rolle und sein Zustand, seine
   Position, seine Aussetzer und wer ihn hält.
-- `show <resource-ref>` — liest eine `info:`/`state:`/`stats:`-Ressourcen­referenz
+- `show <resource-ref>` — liest eine `info:`/`state:`/`stats:`-Ressourcenreferenz
   und gibt ihren Wert aus. Diese Namensräume liefern typisierte Werte über
   diese API, niemals Byteströme — `cat` kann sie nicht öffnen. Eine
   Ablehnung nennt die benötigte Capability.
@@ -108,8 +108,8 @@ Ohne Abfrage wird die Kurzhilfe angezeigt.
 
 - `0` — die Abfrage wurde beantwortet und ausgegeben.
 - `1` — der Dienst hat abgelehnt oder versagt, oder das Ergebnis konnte
-  nicht ausgegeben werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  nicht ausgegeben werden. Eine nicht verstandene Befehlszeile endet
+  ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

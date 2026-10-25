@@ -5,24 +5,28 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FileId, FileKind};
+use tairix_collections::HashSet;
+use tairix_hash::BuildSipHash13;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::join;
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
 
-use crate::command::{Command, Options};
+use crate::command::{Command, Dereference, Options};
 use crate::error::DuError;
-use crate::io::{Entry, Metadata, Output, Walk};
-use tairix_util::quote::quote;
+use crate::io::{Entry, FinalLink, Metadata, Output, Walk};
+use tairix_util::quote::{output_style, quote, Quoted, Style};
 
-/// The one-line usage banner, printed on a usage error and as the
-/// fallback when the bundled help document is unavailable.
+/// The one-line usage banner, the short help's fallback when the bundled
+/// help document is unavailable.
 pub const USAGE: &str =
-    "usage: du [-a | -s] [-clS0] [-h | -k | -m | -b | --si | -B <size>] [--apparent-size] [-d <n>] [--] [file...]";
+    "usage: du [-a | -s] [-clS0] [-H | -L | -P] [-h | -k | -m | -b | --si | -B <size>] [--apparent-size] [-d <n>] [--] [file...]";
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "du";
 
-/// Run a parsed `du` command against the injected seams.
+/// Run a parsed `du` command against the injected seams. `keys` is the
+/// process's hash key, which the identities of nodes already counted are
+/// kept under, since a hostile volume chooses them.
 ///
 /// Returns `Ok(true)` when every operand was walked cleanly, `Ok(false)`
 /// when at least one path was diagnosed on standard error (the GNU
@@ -38,6 +42,7 @@ pub fn run(
     help: &dyn HelpSource,
     out: &dyn Output,
     err: &dyn Output,
+    keys: BuildSipHash13,
 ) -> Result<bool, DuError> {
     let options = match command {
         Command::Help => {
@@ -53,9 +58,12 @@ pub fn run(
         walk,
         out,
         err,
+        names: output_style(out.at_terminal() && !options.null_terminated),
         clean: true,
         grand_total: 0,
-        counted: Counted::default(),
+        counted: Counted {
+            seen: HashSet::with_hasher(keys),
+        },
         warned: false,
     };
     if options.paths.is_empty() {
@@ -72,59 +80,45 @@ pub fn run(
     Ok(report.clean)
 }
 
-/// The multiply-named nodes this walk has already counted.
+/// The nodes this walk has already counted, so a second sighting — another
+/// name for a file, a repeated or nested operand, a node `-L` reaches twice —
+/// is left out, as GNU leaves it.
 ///
-/// A node named once can never be reached twice, so only an entry whose
-/// `nlink` exceeds one is remembered: the set holds the hard links the walk
-/// actually meets, not one entry per node on the volume — which on a volume
-/// far larger than memory is the difference between a bounded cost and an
-/// unbounded one. Directories are excluded too: a directory's count is
-/// always above one (its own `.` and each child's `..`) yet the tree walk
-/// reaches it once, and the VFS refuses to give one a second name.
-///
-/// The set grows on demand from no fixed ceiling. A heap that refuses to
-/// grow it degrades to counting every name — the pre-deduplication answer —
+/// Only what can be sighted twice is remembered (see [`Reporter::tracked`]):
+/// a node named once, met in a single operand's tree without following
+/// links, cannot be, which keeps the set to the hard links the walk meets on
+/// a volume far larger than memory. The set grows on demand from no fixed
+/// ceiling; a heap that refuses to grow it degrades to counting every name,
 /// and the run says so on standard error and exits non-zero, so an
 /// over-count is never silent.
-#[derive(Default)]
 struct Counted {
-    /// The identities already counted, sorted so membership is a binary
-    /// search rather than a scan.
-    seen: Vec<FileId>,
+    seen: HashSet<FileId, BuildSipHash13>,
 }
 
-/// What a node's identity says about whether to count its bytes.
+/// What a node's identity says about whether to count it.
 enum Sighting {
-    /// The first (or only) name for this node: count it.
+    /// The first sighting: count it.
     First,
-    /// Another name for a node already counted: it contributes nothing.
+    /// A node already counted: it is left out.
     Repeat,
-    /// Count it, but the node could not be remembered, so its other names
-    /// will be counted too — the caller reports the over-count.
+    /// Count it, but the node could not be remembered, so a later sighting
+    /// will count it again — the caller reports the over-count.
     Untracked,
 }
 
 impl Counted {
-    /// Record a sighting of `meta` and report whether its bytes count.
-    fn sight(&mut self, meta: &Metadata) -> Sighting {
-        if meta.kind == FileKind::Directory || meta.nlink <= 1 {
-            return Sighting::First;
-        }
+    /// Record a sighting of the node `id`.
+    fn sight(&mut self, id: FileId) -> Sighting {
         // A backing that offers no identity cannot be keyed on one. Counting
         // it risks a double count; merging it with the next such node would
         // silently *lose* real storage, so it is counted and reported.
-        if meta.id.is_none() {
+        if id.is_none() {
             return Sighting::Untracked;
         }
-        match self.seen.binary_search(&meta.id) {
-            Ok(_) => Sighting::Repeat,
-            Err(at) => {
-                if self.seen.try_reserve_exact(1).is_err() {
-                    return Sighting::Untracked;
-                }
-                self.seen.insert(at, meta.id);
-                Sighting::First
-            }
+        match self.seen.try_insert(id) {
+            Ok(true) => Sighting::First,
+            Ok(false) => Sighting::Repeat,
+            Err(_) => Sighting::Untracked,
         }
     }
 }
@@ -133,6 +127,8 @@ impl Counted {
 struct Frame {
     /// The directory's full path, as reported.
     path: String,
+    /// Its identity, so `-L` never re-enters a directory it is inside.
+    id: FileId,
     /// Its entries, consumed front to back.
     entries: Vec<Entry>,
     /// Index of the next entry to visit.
@@ -151,6 +147,9 @@ struct Reporter<'a> {
     walk: &'a dyn Walk,
     out: &'a dyn Output,
     err: &'a dyn Output,
+    /// How a row shows its path ([`output_style`]); a NUL-ended row is for a
+    /// program, which wants the path's own bytes.
+    names: Style,
     clean: bool,
     grand_total: u128,
     /// The names already counted, so a hard-linked file is summed once.
@@ -163,14 +162,21 @@ struct Reporter<'a> {
 impl Reporter<'_> {
     /// Walk one operand and report its rows.
     fn operand(&mut self, path: &str) -> Result<(), DuError> {
-        let meta = match self.walk.stat(path) {
+        let link = match self.options.dereference {
+            Dereference::Never => FinalLink::Keep,
+            Dereference::Operands | Dereference::Always => FinalLink::Follow,
+        };
+        let meta = match self.walk.stat(path, link) {
             Ok(meta) => meta,
             Err(errno) => return self.diagnose(path, errno),
         };
+        if !self.first_sighting(&meta)? {
+            return Ok(());
+        }
         if meta.kind != FileKind::Directory {
-            let bytes = self.contribution(&meta)?;
+            let bytes = self.measure(&meta);
             self.grand_total += bytes;
-            return self.row(bytes, path);
+            return self.row(bytes, Quoted::new(path, self.names));
         }
         self.directory(path, &meta)
     }
@@ -208,7 +214,7 @@ impl Reporter<'_> {
                     frame.tree_bytes
                 };
                 if self.within_depth(frame.depth) {
-                    self.row(reported, &frame.path)?;
+                    self.row(reported, Quoted::new(&frame.path, self.names))?;
                 }
                 match stack.last_mut() {
                     Some(parent) => parent.tree_bytes += frame.tree_bytes,
@@ -219,20 +225,43 @@ impl Reporter<'_> {
             // The child's metadata came with its directory entry: the one
             // listing already reported it, so the walk never re-resolves a
             // child by path (each such stat is a fresh full walk on an
-            // uncached, authenticated volume).
+            // uncached, authenticated volume) — except to follow a link
+            // under `-L`.
+            let child_meta = if child_meta.kind == FileKind::Symlink
+                && self.options.dereference == Dereference::Always
+            {
+                match self.walk.stat(&child_path, FinalLink::Follow) {
+                    Ok(meta) => meta,
+                    Err(errno) => {
+                        self.unreachable_link(&child_path, errno)?;
+                        continue;
+                    }
+                }
+            } else {
+                child_meta
+            };
+            if !self.first_sighting(&child_meta)? {
+                continue;
+            }
             if child_meta.kind == FileKind::Directory {
+                // `-l` keeps no seen-set, so a link back up is caught here.
+                let inside =
+                    !child_meta.id.is_none() && stack.iter().any(|frame| frame.id == child_meta.id);
+                if inside {
+                    continue;
+                }
                 if let Some(child) = self.open_frame(&child_path, &child_meta, child_depth)? {
                     stack.push(child);
                 }
                 continue;
             }
-            let bytes = self.contribution(&child_meta)?;
+            let bytes = self.measure(&child_meta);
             if let Some(frame) = stack.last_mut() {
                 frame.own_bytes += bytes;
                 frame.tree_bytes += bytes;
             }
             if self.options.all && self.within_depth(child_depth) {
-                self.row(bytes, &child_path)?;
+                self.row(bytes, Quoted::new(&child_path, self.names))?;
             }
         }
         Ok(())
@@ -257,6 +286,7 @@ impl Reporter<'_> {
         let own = self.measure(meta);
         Ok(Some(Frame {
             path: String::from(path),
+            id: meta.id,
             entries,
             next: 0,
             depth,
@@ -265,24 +295,41 @@ impl Reporter<'_> {
         }))
     }
 
-    /// The bytes a node contributes to the totals: its measured size, or
-    /// zero when another of its names has already been counted.
-    ///
-    /// `-l` counts every name, so the seen-set is neither consulted nor
-    /// grown under it.
-    fn contribution(&mut self, meta: &Metadata) -> Result<u128, DuError> {
-        let bytes = self.measure(meta);
+    /// Whether a node can be sighted twice, and so is remembered: every node
+    /// under `-L` or when operands may repeat or nest; otherwise only a file
+    /// with more than one name, since one operand's tree reaches every other
+    /// node once. `-l` counts every sighting, so it remembers nothing.
+    fn tracked(&self, meta: &Metadata) -> bool {
         if self.options.count_links {
-            return Ok(bytes);
+            return false;
         }
-        match self.counted.sight(meta) {
-            Sighting::First => Ok(bytes),
-            Sighting::Repeat => Ok(0),
-            Sighting::Untracked => {
-                self.warn_untracked()?;
-                Ok(bytes)
-            }
+        self.options.dereference == Dereference::Always
+            || self.options.paths.len() > 1
+            || (meta.nlink > 1 && meta.kind != FileKind::Directory)
+    }
+
+    /// Whether this is the first sighting of the node `meta`, which is then
+    /// counted; a later one is left out.
+    fn first_sighting(&mut self, meta: &Metadata) -> Result<bool, DuError> {
+        if !self.tracked(meta) {
+            return Ok(true);
         }
+        match self.counted.sight(meta.id) {
+            Sighting::First => Ok(true),
+            Sighting::Repeat => Ok(false),
+            Sighting::Untracked => self.warn_untracked().map(|()| true),
+        }
+    }
+
+    /// Report a link `-L` could not follow: GNU names a dangling one alone,
+    /// and any other refusal with its reason.
+    fn unreachable_link(&mut self, path: &str, errno: Errno) -> Result<(), DuError> {
+        if errno != Errno::NotFound {
+            return self.diagnose(path, errno);
+        }
+        self.clean = false;
+        let line = format!("du: cannot access {}\n", quote(path));
+        self.err.write_all(line.as_bytes()).map_err(DuError::Output)
     }
 
     /// Report, once, that the walk can no longer tell a repeated name from
@@ -318,7 +365,7 @@ impl Reporter<'_> {
     }
 
     /// Write one `size<TAB>path` row in the selected scale.
-    fn row(&self, bytes: u128, label: &str) -> Result<(), DuError> {
+    fn row(&self, bytes: u128, label: impl core::fmt::Display) -> Result<(), DuError> {
         let mut buf = [0u8; SIZE_TEXT_MAX];
         let size = match self.options.scale {
             SizeScale::Blocks(unit) => {
@@ -355,18 +402,25 @@ mod tests {
     use super::{run, USAGE};
     use crate::command::{parse, Command};
     use crate::error::DuError;
-    use crate::io::{Entry, Metadata, Output, Walk};
+    use crate::io::{Entry, FinalLink, Metadata, Output, Walk};
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::{Errno, FileId, FileKind};
+    use tairix_hash::{BuildSipHash13, HashSeed};
     use tairix_help::{HelpSource, SourceError};
+
+    fn keys() -> BuildSipHash13 {
+        BuildSipHash13::with_seed(HashSeed::UNKEYED)
+    }
 
     /// One node of the in-memory tree fixture.
     enum Node {
         /// A regular file: `(apparent size, allocated bytes)`.
         File(u64, u64),
+        /// A symbolic link naming this path.
+        Symlink(String),
         /// A second name for the file at this path — a hard link, so both
         /// names report the one identity and the count of names.
         Link(String),
@@ -397,6 +451,7 @@ mod tests {
                             match node {
                                 Node::File(size, allocated) => Node::File(*size, *allocated),
                                 Node::Link(target) => Node::Link(target.clone()),
+                                Node::Symlink(target) => Node::Symlink(target.clone()),
                                 Node::Unidentified(size, allocated, names) => {
                                     Node::Unidentified(*size, *allocated, *names)
                                 }
@@ -438,9 +493,48 @@ mod tests {
         }
     }
 
+    impl MemFs {
+        /// `path` with every link on the way resolved, and its final one too
+        /// under [`FinalLink::Follow`], as a walk through a followed link
+        /// reaches it. Bounded, so a cycle cannot spin.
+        fn resolve(&self, path: &str, link: FinalLink) -> Result<String, Errno> {
+            let mut hops = 0;
+            let mut at = String::new();
+            let parts: Vec<&str> = path.split('/').collect();
+            for (index, part) in parts.iter().enumerate() {
+                at = if at.is_empty() {
+                    (*part).to_string()
+                } else {
+                    alloc::format!("{at}/{part}")
+                };
+                let last = index + 1 == parts.len();
+                while let Some(Node::Symlink(target)) = self.nodes.get(&at) {
+                    if last && link == FinalLink::Keep {
+                        break;
+                    }
+                    hops += 1;
+                    if hops > 8 {
+                        return Err(Errno::LinkLoop);
+                    }
+                    at = target.clone();
+                }
+            }
+            Ok(at)
+        }
+    }
+
     impl Walk for MemFs {
-        fn stat(&self, path: &str) -> Result<Metadata, Errno> {
+        fn stat(&self, path: &str, link: FinalLink) -> Result<Metadata, Errno> {
+            let path = self.resolve(path, link)?;
+            let path = path.as_str();
             match self.nodes.get(path) {
+                Some(Node::Symlink(target)) => Ok(Metadata {
+                    kind: FileKind::Symlink,
+                    size: u64::try_from(target.len()).expect("short target"),
+                    allocated: 0,
+                    id: self.identity(path).0,
+                    nlink: 1,
+                }),
                 Some(Node::File(size, allocated)) => {
                     let (id, nlink) = self.identity(path);
                     Ok(Metadata {
@@ -486,6 +580,8 @@ mod tests {
         }
 
         fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {
+            let path = self.resolve(path, FinalLink::Follow)?;
+            let path = path.as_str();
             match self.nodes.get(path) {
                 Some(Node::Dir(_, names)) => names
                     .iter()
@@ -495,9 +591,9 @@ mod tests {
                         } else {
                             alloc::format!("{path}/{name}")
                         };
-                        // The listing reports each child's metadata, as the
-                        // production `fs_readdir` stream does.
-                        let meta = self.stat(&child)?;
+                        // The listing reports each child's own metadata, as
+                        // the production `fs_readdir` stream does.
+                        let meta = self.stat(&child, FinalLink::Keep)?;
                         Ok(Entry {
                             name: name.clone(),
                             meta,
@@ -586,11 +682,57 @@ mod tests {
         ])
     }
 
+    /// A capturing stream the kernel attests as a terminal.
+    #[derive(Default)]
+    struct Console(MemOut);
+
+    impl Output for Console {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
+            self.0.write_all(bytes)
+        }
+
+        fn at_terminal(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_label_is_escaped_at_a_terminal_and_kept_in_a_pipe() {
+        let fs = MemFs::new(&[("e\u{1b}[2Jx", Node::File(100, 1024))]);
+        let out = Console::default();
+        let command = parse(&["-c", "e\u{1b}[2Jx"]).expect("parse");
+        run(
+            command,
+            None,
+            &fs,
+            &NoHelp,
+            &out,
+            &MemOut::default(),
+            keys(),
+        )
+        .expect("run");
+        assert_eq!(out.0.text(), "1\t'e'$'\\033''[2Jx'\n1\ttotal\n");
+        let zero = Console::default();
+        let command = parse(&["-0", "e\u{1b}[2Jx"]).expect("parse");
+        run(
+            command,
+            None,
+            &fs,
+            &NoHelp,
+            &zero,
+            &MemOut::default(),
+            keys(),
+        )
+        .expect("run");
+        assert_eq!(zero.0.text(), "1\te\u{1b}[2Jx\0");
+        assert_eq!(run_case(&["e\u{1b}[2Jx"], &fs).1, "1\te\u{1b}[2Jx\n");
+    }
+
     fn run_case(args: &[&str], fs: &MemFs) -> (bool, String, String) {
         let command = parse(args).expect("parse");
         let out = MemOut::default();
         let err = MemOut::default();
-        let clean = run(command, None, fs, &NoHelp, &out, &err).expect("run");
+        let clean = run(command, None, fs, &NoHelp, &out, &err, keys()).expect("run");
         (clean, out.text(), err.text())
     }
 
@@ -617,10 +759,13 @@ mod tests {
 
     #[test]
     fn summarize_and_total_report_the_operand_totals() {
-        let (clean, out, _) = run_case(&["-sc", "docs", "docs/a"], &tree());
+        let (clean, out, _) = run_case(&["-sc", "docs", "docs/sub/b"], &tree());
         assert!(clean);
-        // The grand total covers both operands: 6144 + 1024 = 7168 B.
-        assert_eq!(out, "6\tdocs\n1\tdocs/a\n7\ttotal\n");
+        // `docs/sub/b` was counted inside `docs`, so the total is 6144 B.
+        assert_eq!(out, "6\tdocs\n6\ttotal\n");
+        let (_, out, _) = run_case(&["-sc", "docs/sub", "docs/a"], &tree());
+        // Two operands apart: 4608 + 1024 = 5632 B.
+        assert_eq!(out, "5\tdocs/sub\n1\tdocs/a\n6\ttotal\n");
     }
 
     #[test]
@@ -674,32 +819,106 @@ mod tests {
     }
 
     #[test]
-    fn a_deduplicated_name_still_gets_its_own_row_under_all() {
-        // Both names are listed — `du -a` reports names, not nodes — but the
-        // repeated one contributes nothing, to its own row or to the total.
+    fn a_second_name_for_a_counted_file_gets_no_row() {
         let (clean, out, _) = run_case(&["-a", "docs"], &linked_tree());
         assert!(clean);
-        assert_eq!(out, "4\tdocs/one\n1\tdocs/other\n0\tdocs/two\n6\tdocs\n");
+        assert_eq!(out, "4\tdocs/one\n1\tdocs/other\n6\tdocs\n");
     }
 
     #[test]
     fn two_operands_naming_one_node_are_counted_once() {
-        // The seen-set spans the whole run, so a node given twice on the
-        // command line is summed once, and the grand total says so.
         let (clean, out, err) = run_case(&["-c", "docs/one", "docs/two"], &linked_tree());
         assert!(clean);
-        assert_eq!(out, "4\tdocs/one\n0\tdocs/two\n4\ttotal\n");
+        assert_eq!(out, "4\tdocs/one\n4\ttotal\n");
         assert!(err.is_empty());
     }
 
     #[test]
-    fn a_singly_named_file_given_twice_is_counted_twice() {
-        // Deduplication is about a node's *names*, not about repeated
-        // operands: a file with one name cannot be the same node twice, so
-        // naming it twice counts it twice, exactly as the GNU tool does.
+    fn a_repeated_or_nested_operand_is_counted_once() {
         let (clean, out, _) = run_case(&["-c", "docs/other", "docs/other"], &linked_tree());
         assert!(clean);
-        assert_eq!(out, "1\tdocs/other\n1\tdocs/other\n2\ttotal\n");
+        assert_eq!(out, "1\tdocs/other\n1\ttotal\n");
+        let (_, out, _) = run_case(&["-c", "docs", "docs/sub"], &tree());
+        assert_eq!(out, "5\tdocs/sub\n6\tdocs\n6\ttotal\n");
+        let (_, out, _) = run_case(&["-c", "-a", "docs/a", "docs"], &tree());
+        assert_eq!(
+            out,
+            "1\tdocs/a\n4\tdocs/sub/b\n5\tdocs/sub\n5\tdocs\n6\ttotal\n"
+        );
+        let (_, out, _) = run_case(&["-l", "docs", "docs"], &tree());
+        assert_eq!(out, "5\tdocs/sub\n6\tdocs\n5\tdocs/sub\n6\tdocs\n");
+    }
+
+    /// The `tree` fixture with links: `ld` names `docs`, `docs/fl` names
+    /// `docs/a`, `docs/x` names `docs/sub`, `docs/sub/up` names `docs` and
+    /// `docs/dl` names nothing.
+    fn linked_up() -> MemFs {
+        MemFs::new(&[
+            (
+                "docs",
+                Node::Dir(
+                    512,
+                    alloc::vec![
+                        "a".to_string(),
+                        "fl".to_string(),
+                        "sub".to_string(),
+                        "x".to_string()
+                    ],
+                ),
+            ),
+            ("docs/a", Node::File(100, 1024)),
+            ("docs/fl", Node::Symlink("docs/a".to_string())),
+            (
+                "docs/sub",
+                Node::Dir(0, alloc::vec!["b".to_string(), "up".to_string()]),
+            ),
+            ("docs/sub/b", Node::File(3000, 4096)),
+            ("docs/sub/up", Node::Symlink("docs".to_string())),
+            ("docs/x", Node::Symlink("docs/sub".to_string())),
+            ("ld", Node::Symlink("docs".to_string())),
+        ])
+    }
+
+    #[test]
+    fn a_link_operand_counts_as_itself_unless_followed() {
+        let (_, out, _) = run_case(&["ld"], &linked_up());
+        assert_eq!(out, "0\tld\n");
+        for follow in ["-H", "-D", "--dereference-args", "-L", "--dereference"] {
+            let (clean, out, _) = run_case(&[follow, "-s", "ld"], &linked_up());
+            assert!(clean, "{follow}");
+            assert_eq!(out, "6\tld\n", "{follow}");
+        }
+        let (_, out, _) = run_case(&["-L", "-P", "ld"], &linked_up());
+        assert_eq!(out, "0\tld\n", "the last of -L and -P wins");
+    }
+
+    #[test]
+    fn dereference_follows_every_link_and_counts_each_node_once() {
+        let (clean, out, err) = run_case(&["-L", "-a", "docs"], &linked_up());
+        assert!(clean, "{err}");
+        assert_eq!(out, "1\tdocs/a\n4\tdocs/sub/b\n4\tdocs/sub\n6\tdocs\n");
+    }
+
+    #[test]
+    fn a_link_back_up_is_never_walked_again_even_counting_every_name() {
+        // `up` leads to `docs`, whose `sub` (and `x`) is the walk's own root:
+        // 512 + 1024 (`a`) + 1024 (`fl`, a second name `-l` counts) = 2560 B
+        // under `up`, and 4096 + 2560 = 6656 B for the operand.
+        let (clean, out, _) = run_case(&["-L", "-l", "docs/sub"], &linked_up());
+        assert!(clean);
+        assert_eq!(out, "3\tdocs/sub/up\n7\tdocs/sub\n");
+    }
+
+    #[test]
+    fn a_dangling_link_is_named_alone_under_dereference() {
+        let fs = MemFs::new(&[
+            ("d", Node::Dir(0, alloc::vec!["dl".to_string()])),
+            ("d/dl", Node::Symlink("nowhere".to_string())),
+        ]);
+        let (clean, out, err) = run_case(&["-L", "d"], &fs);
+        assert!(!clean);
+        assert_eq!(out, "0\td\n");
+        assert_eq!(err, "du: cannot access 'd/dl'\n");
     }
 
     #[test]
@@ -781,7 +1000,7 @@ mod tests {
     fn help_prints_the_usage_fallback() {
         let out = MemOut::default();
         let err = MemOut::default();
-        let clean = run(Command::Help, None, &tree(), &NoHelp, &out, &err).expect("run");
+        let clean = run(Command::Help, None, &tree(), &NoHelp, &out, &err, keys()).expect("run");
         assert!(clean);
         assert_eq!(out.text(), alloc::format!("{USAGE}\n"));
     }
@@ -790,7 +1009,7 @@ mod tests {
     fn a_failed_output_write_is_fatal() {
         let command = parse(&["docs"]).expect("parse");
         let err = MemOut::default();
-        let result = run(command, None, &tree(), &NoHelp, &BrokenSink, &err);
+        let result = run(command, None, &tree(), &NoHelp, &BrokenSink, &err, keys());
         assert_eq!(result, Err(DuError::Output(Errno::NotImplemented)));
     }
 
@@ -824,6 +1043,9 @@ mod tests {
                 "`-d, --max-depth <n>`",
                 "`-S, --separate-dirs`",
                 "`-l, --count-links`",
+                "`-L, --dereference`",
+                "`-H, -D, --dereference-args`",
+                "`-P, --no-dereference`",
                 "`-0, --null`",
                 "`-?, --help`",
             ] {

@@ -74,7 +74,7 @@ use tairix_abi::Errno;
 use tairix_hash::BuildSipHash13;
 use tairix_reclaim::{CacheBudget, CachedBytes, ReclaimCache};
 use tairix_rt::sync::{Mutex, MutexGuard};
-use tairix_util::utf8::is_hidden;
+use tairix_visible::is_hidden;
 use tairix_vt::char_width;
 
 use crate::atlas;

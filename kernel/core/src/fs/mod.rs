@@ -15,16 +15,15 @@
 //!
 //! # Driver delegation
 //!
-//! A subtree may instead be backed by a `drivers/filesystem/*` driver: the
-//! mount carries the driver's
-//! [`DriverHandle`], and the
-//! [`Vfs::read_via`] / [`Vfs::list_via`] / [`Vfs::stat_via`] methods route
-//! resolution below the mount point to a
-//! [`tairix_abi::driver::filesystem::FilesystemRead`] driver supplied by the
-//! caller (the kernel maps the handle to the live driver). The driver
-//! returns *structural* I/O only; the VFS remains the single policy
-//! point, authorising every traversal against the mount point's
-//! [`Metadata`] before and as it descends ([`DelegatedFs`]).
+//! A projection may instead show a `drivers/filesystem/*` driver's volume:
+//! it carries the driver's [`DriverHandle`], and a path is resolved across
+//! every projection it crosses, each volume walked by its own
+//! [`tairix_abi::driver::filesystem::FilesystemRead`] driver under one hold
+//! of that driver's lock ([`DelegatedFs`]). The driver returns *structural*
+//! I/O only; the VFS remains the single policy point, authorising every
+//! directory a name is looked up in before and as it descends. A boot reader
+//! that holds one driver resolves through the same walk
+//! ([`Vfs::list_via_secured`], [`Vfs::read_bounded_via_secured`]).
 //!
 //! # Layout enforcement
 //!
@@ -55,6 +54,7 @@ pub mod listing;
 pub mod memfs;
 pub mod mount;
 mod mounted;
+pub mod node;
 pub mod path;
 pub mod perm;
 pub mod retained;
@@ -69,22 +69,23 @@ pub mod wrapper_conformance;
 pub mod writeback;
 
 pub use blkclient::BlkClient;
-pub use delegate::{
-    DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, FinalLink, MetaPolicy,
-    MountProjection, PerInode, Uniform,
-};
+pub use delegate::{DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, FinalLink, HeldNode};
 pub use fscache::CachedFs;
-pub use listing::{DirPosition, ListEnd, Listing, ListingRegistry, ResumeName};
-pub use mount::{Attachment, ChildMounts, CoveredPair, CoveredPath, MountPoint, MountTable};
+pub use listing::{DirPosition, ListEnd, Listing, ResumeName};
+pub use mount::{Attachment, ChildMounts, MountTable, Projection};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
-    MountedFilesystemService,
+    MountedFilesystemService, RegisterError,
+};
+pub use node::{
+    Acting, At, Authority, Cwd, DriverGuard, DriverLock, FrozenAuthority, Grant, NodeHandle,
+    NodeRef, PinnedNode, ReleaseSlot, Start, VolumeNodes,
 };
 pub use path::{resolve_machine_alias, spell, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
-pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
+pub use perm::{Access, AclEntry, AclWho, CreateMode, Credentials, Judged, Metadata, Mode};
 pub use retained::{JournaledBlock, ReplaySnapshot, RetainedWrites};
 pub use service::{
-    FilesystemService, LookedUp, NullFilesystemService, ReaddirEntry, NULL_FILESYSTEM,
+    FilesystemService, LookedUp, NullFilesystemService, Opened, ReaddirEntry, NULL_FILESYSTEM,
 };
 pub use vfs::Vfs;
 pub use volsvc::{NullVolumeService, VolumeService, NULL_VOLUME_SERVICE};
@@ -109,7 +110,8 @@ use tairix_kernel_sec::{GroupId, UserId};
 pub(crate) const PRIVATE_ROOT_HANDLE: u64 = 0x726F_6F74;
 
 /// Build a minimal [`Vfs`] whose root mount is backed by the caller's root
-/// volume driver, ready for the `*_via_secured` delegation methods.
+/// volume driver, ready for [`Vfs::list_via_secured`] and
+/// [`Vfs::read_bounded_via_secured`].
 ///
 /// This is the shared shape of the real root volume — which carries the
 /// whole tree from its own root directory — used by every boot-time
@@ -135,8 +137,8 @@ pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
     Ok(vfs)
 }
 
-/// Why a bounded whole-file read ([`DelegatedFs::read_bounded`]) could not
-/// return a file's bytes.
+/// Why a bounded whole-file read ([`Vfs::read_bounded_via_secured`]) could
+/// not return a file's bytes.
 ///
 /// The structural refusals every boot-time reader shares; each maps these
 /// onto its own error type.
@@ -208,14 +210,7 @@ where
     };
     let path = Path::parse(file.path)?;
     let mut buf = alloc::vec::Vec::new();
-    vfs.read_bounded_via_secured(
-        &cred,
-        &vfs.cover(&path),
-        fs,
-        file.max_len as u64,
-        usize::MAX,
-        &mut buf,
-    )?;
+    vfs.read_bounded_via_secured(&cred, &path, fs, file.max_len as u64, usize::MAX, &mut buf)?;
     Ok(buf)
 }
 
@@ -260,7 +255,7 @@ pub enum VfsError {
     /// device fault, or returned a structurally invalid response (e.g. a
     /// directory entry whose name is not valid UTF-8). The in-RAM tree
     /// never produces this; it is reachable only through the
-    /// driver-delegation path ([`Vfs::read_via`] and friends).
+    /// driver-delegation path ([`DelegatedFs`]).
     Io,
     /// An extended-attribute key fails the shared `lib/fsmeta` grammar
     /// (malformed bytes, an unknown namespace, or an over-long key or
@@ -297,11 +292,15 @@ pub enum VfsError {
     TooManyLinks,
     /// The kernel heap could not hold what the operation needed to build.
     OutOfMemory,
-    /// A listing's later batch found a different directory at the path its
-    /// first batch read, so its position names a place in another directory.
+    /// The handle no longer reaches what it named: its projection left the
+    /// mount table, or its volume's registration was retired.
     Stale,
     /// A bounded kernel walk met more entries than its caller budgeted.
     LimitExceeded,
+    /// A walk needed a volume no driver is registered for: the volume is not
+    /// yet served, never stood in for by a guess. Only the projections shown
+    /// beneath its floor are reached through it meanwhile.
+    Unserved,
 }
 
 impl VfsError {
@@ -347,6 +346,7 @@ impl VfsError {
             Self::OutOfMemory => Errno::OutOfMemory,
             Self::Stale => Errno::Stale,
             Self::LimitExceeded => Errno::LimitExceeded,
+            Self::Unserved => Errno::NotImplemented,
         }
     }
 }
@@ -373,8 +373,9 @@ impl fmt::Display for VfsError {
             Self::NoSpace => "no space left on device",
             Self::NotSupported => "not supported by the mounted format",
             Self::OutOfMemory => "out of memory",
-            Self::Stale => "directory replaced during its listing",
+            Self::Stale => "the handle no longer reaches what it named",
             Self::LimitExceeded => "more entries than the walk allows",
+            Self::Unserved => "no driver serves the volume yet",
         };
         f.write_str(message)
     }
@@ -406,6 +407,7 @@ mod tests {
         assert_eq!(VfsError::NotSupported.to_errno(), Errno::NotSupported);
         assert_eq!(VfsError::TooManyLinks.to_errno(), Errno::TooManyLinks);
         assert_eq!(VfsError::Io.to_errno(), Errno::DeviceFault);
+        assert_eq!(VfsError::Unserved.to_errno(), Errno::NotImplemented);
     }
 
     #[test]
@@ -426,6 +428,7 @@ mod tests {
             VfsError::BufferTooSmall,
             VfsError::NoSpace,
             VfsError::NotSupported,
+            VfsError::Unserved,
         ] {
             assert!(!alloc::format!("{e}").is_empty());
         }

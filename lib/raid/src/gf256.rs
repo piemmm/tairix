@@ -7,16 +7,15 @@
 //! `Q = Σ gᵏ · Dₖ` where `g` is the field generator `0x02` and `Dₖ` is the
 //! `k`-th data chunk. Because P and Q are linear and independent, any two lost
 //! chunks in a stripe can be solved for from the survivors (two-fault
-//! redundancy). This is the standard Linux-md / Anvin RAID6 scheme.
+//! redundancy). This is the RAID6 scheme of H. P. Anvin, "The mathematics
+//! of RAID-6" (2004, revised 2011).
 //!
 //! The field uses the primitive polynomial `x^8 + x^4 + x^3 + x^2 + 1`
-//! (`0x11d`), identical to the Linux RAID6 implementation, so an array is
-//! wire-compatible with that well-understood layout. All arithmetic is a pure
+//! (`0x11d`), the field that paper uses. All arithmetic is a pure
 //! function of its byte inputs — no allocation, no `unsafe`, and constant with
 //! respect to control flow over the field — so it is fully host-testable.
 
-/// The field generator used for the Q syndrome (`g = {02}`), matching the
-/// Linux RAID6 convention.
+/// The field generator used for the Q syndrome (`g = {02}`).
 pub(crate) const GENERATOR: u8 = 0x02;
 
 /// Multiply two field elements in GF(2^8) with the reducing polynomial

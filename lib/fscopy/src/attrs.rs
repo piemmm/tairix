@@ -7,37 +7,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::stdinfo::{Human, JsonStr, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::Errno;
-use tairix_fsmeta::attr::display_value;
+use tairix_util::quote::{Quoted, Style};
 
-/// The extended attributes of the filesystem a copy runs against, by path.
-pub trait AttributeStore {
-    /// The keys of the attributes `path` carries.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::NotSupported`] where `path`'s volume keeps no attributes, or
-    /// the listing's refusal.
-    fn attr_keys(&self, path: &str) -> Result<Vec<String>, Errno>;
-
-    /// The value of `path`'s attribute `key`.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::NoData`] for a key `path` no longer carries, or the read's
-    /// refusal — [`Errno::NotFound`] among them, for a `path` that is gone.
-    fn attr_value(&self, path: &str, key: &str) -> Result<Vec<u8>, Errno>;
-
-    /// Set `path`'s attribute `key` to `value`.
-    ///
-    /// # Errors
-    ///
-    /// The volume's refusal: [`Errno::NotSupported`] for a key it keeps no
-    /// attribute of, [`Errno::OutOfRange`] for a value it cannot represent,
-    /// [`Errno::NoSpace`] or [`Errno::LengthOutOfRange`] when the node has no
-    /// room for it, [`Errno::PermissionDenied`] for a key the caller may not
-    /// set.
-    fn attr_set(&self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno>;
-}
+use crate::tree::Node;
 
 /// How a copy treats a node's extended attributes.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -117,37 +89,37 @@ pub enum AttrError {
     },
 }
 
-/// Copy `source`'s extended attributes to `destination` as `mode` says,
-/// answering each one the destination could not keep, and why.
+/// Copy the held node `source`'s extended attributes to the held node
+/// `destination` as `mode` says, answering each one the destination could not
+/// keep, and why.
 ///
 /// # Errors
 ///
 /// [`AttrError::Read`] when the source's attributes cannot be read, and
 /// [`AttrError::Write`] for a refusal that is no attribute's
 /// ([`Refusal::of`]) or any refusal under [`Attributes::Require`].
-pub fn copy_attributes<S: AttributeStore + ?Sized>(
-    store: &S,
-    source: &str,
-    destination: &str,
+pub fn copy_attributes<S: Node + ?Sized, D: Node + ?Sized>(
+    source: &S,
+    destination: &D,
     mode: Attributes,
 ) -> Result<Vec<(String, Refusal)>, AttrError> {
     let mut left = Vec::new();
     if mode == Attributes::Skip {
         return Ok(left);
     }
-    let keys = match store.attr_keys(source) {
+    let keys = match source.attr_keys() {
         Ok(keys) => keys,
         // A volume that keeps none has none to carry.
         Err(Errno::NotSupported) => return Ok(left),
         Err(err) => return Err(AttrError::Read(err)),
     };
     for key in keys {
-        let value = match store.attr_value(source, &key) {
+        let value = match source.attr_value(&key) {
             Ok(value) => value,
             Err(Errno::NoData) => continue,
             Err(err) => return Err(AttrError::Read(err)),
         };
-        let Err(error) = store.attr_set(destination, &key, &value) else {
+        let Err(error) = destination.attr_set(&key, &value) else {
             continue;
         };
         match Refusal::of(error) {
@@ -225,11 +197,11 @@ impl Omissions {
             format!("{} files", self.files)
         };
         // A key's grammar bans only `/` and NUL, so a volume's own can carry
-        // control bytes that would reach a terminal as an escape sequence.
+        // control bytes, and a comma that would pass for the list's own.
         let mut keys = self
             .keys
             .iter()
-            .map(|key| display_value(key.as_bytes()))
+            .map(|key| format!("{}", Quoted::new(key, Style::ShellEscape).marking(",")))
             .collect::<Vec<_>>()
             .join(", ");
         if self.more {

@@ -30,6 +30,8 @@ pub(crate) struct OpMark {
     freed: usize,
     freed_cost: usize,
     generation: u32,
+    /// The orphan index's undo log, as long as it was.
+    orphans: usize,
 }
 
 /// Blocks a commit stages beyond the transaction's own: the superblock's.
@@ -80,9 +82,8 @@ impl<B: Block> Ext4<B> {
     }
 
     /// Run `body` as one operation, undone alone if it fails. A transaction
-    /// that has reached its bound is published first, so a growing one is
-    /// never cut between an operation and the continuation that completes
-    /// it.
+    /// that has reached its bound, or whose window has closed, is published
+    /// first.
     pub(crate) fn operation<T>(
         &mut self,
         body: impl FnOnce(&mut Self) -> Result<T, DriverError>,
@@ -91,19 +92,6 @@ impl<B: Block> Ext4<B> {
         if self.pending() && (self.needs_publishing() || self.schedule.expired()) {
             self.commit(false)?;
         }
-        self.run(body)
-    }
-
-    /// Run `body` as an operation completing the one before it, in that
-    /// operation's transaction whatever its size, so a node's creation and
-    /// the owner stamped on it are not split across a crash wherever the
-    /// volume batches its commits. One that publishes every operation — no
-    /// host clock yet — has published the creation already.
-    pub(crate) fn continuation<T>(
-        &mut self,
-        body: impl FnOnce(&mut Self) -> Result<T, DriverError>,
-    ) -> Result<T, DriverError> {
-        self.ensure_writable()?;
         self.run(body)
     }
 
@@ -132,6 +120,7 @@ impl<B: Block> Ext4<B> {
             freed: self.freed.len(),
             freed_cost: self.freed_cost,
             generation: self.generation,
+            orphans: self.orphan_undo.len(),
         }
     }
 
@@ -161,6 +150,7 @@ impl<B: Block> Ext4<B> {
             self.freed.truncate(mark.freed);
             self.freed_cost = mark.freed_cost;
             self.generation = mark.generation;
+            self.rewind_orphans(mark.orphans);
         }
     }
 
@@ -277,6 +267,7 @@ impl<B: Block> Ext4<B> {
             match self.publish() {
                 Ok(()) => {
                     self.data_written = false;
+                    self.orphan_undo.clear();
                     self.schedule.closed();
                     if let Some(bound) = &self.bound {
                         bound.note_released();
@@ -292,6 +283,7 @@ impl<B: Block> Ext4<B> {
                     self.freed_cost = 0;
                     self.hints.forget_full();
                     self.sb.copy_from_slice(&self.disk_sb);
+                    self.rewind_orphans(0);
                     self.schedule.closed();
                     if acknowledged > 0 {
                         self.layout.no_write = Some(NoWrite::Halted);

@@ -46,8 +46,8 @@ de almacenarse.
 - `0` — la contraseña fue sustituida.
 - `1` — la base rechazó o no pudo completar la sustitución, las dos entradas
   no coincidieron, no había aleatoriedad disponible, o el registro estaba
-  mal formado; la razón se imprime en la salida de error.
-- `2` — no se entendió la línea de órdenes.
+  mal formado; la razón se imprime en la salida de error. Una línea de
+  órdenes no entendida también termina con `1`.
 
 ## ENVIRONMENT
 

@@ -252,7 +252,7 @@ the device is empty *and* the shared receive ring has room. A burst then
 costs one interrupt instead of one per frame, which is the coalescing a
 fixed frame threshold cannot give — so a device's own completion threshold
 is programmed at its most responsive (GENET writes `MBUF_DONE_THRESH = 1` on
-both rings with the ring timer disarmed, as Linux's `bcmgenet` does), and the
+both rings with the ring timer disarmed), and the
 coalescing comes from the masking, which adapts to the actual burst where a
 timer would only add latency to a lone frame. **Link and configuration-change
 sources are never masked**, or a cable pulled mid-flood would go unnoticed.
@@ -335,7 +335,7 @@ consumer index alone hands a slot back — so the hot path writes one register
 per frame.
 
 Before it programs either ring, bring-up stops both DMA engines and waits,
-bounded by Linux `bcmgenet`'s 5 ms, for each to report `DMA_DISABLED`; only
+bounded by 5 ms, for each to report `DMA_DISABLED`; only
 then is the device declared quiesced to its DMA host, so frame buffers a dead
 predecessor left with it leave the kernel's quarantine. Once it has started
 the engines over its frame carve, the device stops them again whenever it is
@@ -532,12 +532,10 @@ layout is unchanged, so the risk the question named does not arise.
   silently disabled. The controller consumes the block; it never reaches the
   wire. Offsets the frame does not bear out are refused and the frame is
   dropped — a partial checksum must never be transmitted.
-- **Segmentation without a segmentation engine.** The GENET has none (the
-  reference driver advertises scatter-gather, `HW_CSUM`, and `RXCSUM`, and
-  no `TSO`), so the driver splits the super-frame itself through the shared
+- **Segmentation without a segmentation engine.** The GENET is driven with
+  none, so the driver splits the super-frame itself through the shared
   `tairix_net::txoffload::TcpSegmenter` and hands each wire segment to the
-  transmit checksum engine — the shape Linux's `net/core/tso.c` gives
-  `mvneta`, `mvpp2`, and `fec`. That still buys the offload's real win: one
+  transmit checksum engine. That still buys the offload's real win: one
   ring slot and one stack transmit pass for tens of wire packets, with each
   segment's TCP checksum still done in hardware. The split itself is
   device-independent arithmetic (per-segment IP length and identification,

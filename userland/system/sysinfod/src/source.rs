@@ -191,8 +191,8 @@ pub trait SysinfoSource {
         caller: &Caller,
     ) -> Result<[ResourceLimitRecord; LimitKind::COUNT], Errno>;
 
-    /// Return the account directory: every account's uid + username pair,
-    /// and nothing else — no credential material (password records stay
+    /// Return the account directory: every account's uid, login group and
+    /// username, and nothing else — no credential material (password records stay
     /// behind the capability-gated `users_db_read` syscall).
     ///
     /// The `/etc/passwd`-class public pairing is secret-free, so the query

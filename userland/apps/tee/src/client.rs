@@ -8,10 +8,10 @@ use tairix_help::{own_short_help, HelpSource};
 use crate::command::{Command, Job, OutputError};
 use crate::error::TeeError;
 use crate::io::{FileSink, Input, Output};
-use tairix_util::quote::quote_if_needed;
+use tairix_util::quote::quote_subject;
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `tee`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `tee`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "usage: tee [-ap] [--output-error[=mode]] [--] [file...]";
 
 /// `tee`'s own command word: the short-help switches render its own Help
@@ -25,8 +25,9 @@ const READ_CHUNK: usize = 4096;
 
 /// One destination of the fan-out: the standard-output copy or one file
 /// operand, with its liveness. A failed output is marked dead and skipped
-/// thereafter (per the mode), exactly as the GNU tool nulls a failed
-/// descriptor.
+/// thereafter (per the mode), as GNU `tee` keeps writing the outputs that
+/// still work (`printf 'a\nb\n' | tee /dev/full /dev/null` copies both
+/// lines and diagnoses `/dev/full` once, exit 1).
 enum Target<'a> {
     /// The always-present copy to standard output — the TAIRiX analogue of
     /// the GNU pipe class (see [`OutputError`]).
@@ -52,9 +53,10 @@ impl Target<'_> {
 
 /// What a failed output means under the selected mode: whether it is
 /// diagnosed, whether it fails the run's exit status, and whether the run
-/// stops immediately. Mirrors GNU `tee.c`: only a pipe-class failure under
-/// a `-nopipe` mode (or the default) escapes the diagnosis, and only the
-/// `exit` modes (or the default pipe-class case) stop the run.
+/// stops immediately, per the `--output-error` modes the coreutils manual
+/// documents: only a pipe-class failure under a `-nopipe` mode (or the
+/// default) escapes the diagnosis, and only the `exit` modes (or the default
+/// pipe-class case) stop the run.
 struct Verdict {
     diagnose: bool,
     fail: bool,
@@ -82,7 +84,7 @@ fn judge(mode: OutputError, pipe_class: bool) -> Verdict {
             stop: true,
         },
         // Diagnosed and counted; the run continues with the surviving
-        // outputs, exactly as the GNU tool nulls the failed descriptor.
+        // outputs.
         (OutputError::Default | OutputError::WarnNopipe, false) | (OutputError::Warn, _) => {
             Verdict {
                 diagnose: true,
@@ -164,7 +166,7 @@ pub fn run(
                 Err(errno) => {
                     let verdict = judge(job.on_error, target.is_pipe_class());
                     if verdict.diagnose {
-                        diagnose(err, &format!("{}: {errno}", quote_if_needed(target.name())))?;
+                        diagnose(err, &format!("{}: {errno}", quote_subject(target.name())))?;
                     }
                     all_ok &= !verdict.fail;
                     if verdict.stop {
@@ -199,10 +201,7 @@ fn open_targets<'a>(
         match files.open(id, path, job.append) {
             Ok(()) => targets.push(Target::File { id, path }),
             Err(errno) => {
-                diagnose(
-                    err,
-                    &format!("{path}: {errno}", path = quote_if_needed(path)),
-                )?;
+                diagnose(err, &format!("{path}: {errno}", path = quote_subject(path)))?;
                 *all_ok = false;
                 if mode_is_exit(job.on_error) {
                     targets.clear();

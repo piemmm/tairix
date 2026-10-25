@@ -10,8 +10,8 @@
 //! any driver is loaded for.
 //!
 //! This module publishes that missing parent. It is one node, present on every
-//! machine, directly beneath the root, whose lifetime is the machine's — the
-//! equivalent of Linux's `virtual` bus. It describes no hardware, asserts
+//! machine, directly beneath the root, whose lifetime is the machine's. It
+//! describes no hardware, asserts
 //! nothing about what is attached, and grants nothing: a driver matched to it
 //! composes devices it is separately given authority over, and learns nothing
 //! from the node's existence. So it is a structural feature of the tree like
@@ -22,7 +22,9 @@
 //! new architecture port gets it without doing anything, and no port can
 //! forget it.
 
-use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID, HW_VIRTUAL_BUS_COMPATIBLE};
+use tairix_abi::{
+    compatible_key, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID, HW_VIRTUAL_BUS_COMPATIBLE,
+};
 
 use crate::hwtree_node_ids::VIRTUAL_BUS_NODE_ID;
 
@@ -30,10 +32,7 @@ use crate::hwtree_node_ids::VIRTUAL_BUS_NODE_ID;
 /// time so the runtime path has no failure to handle: the compatible string is
 /// a fixed 18 bytes and the inline limit is far wider, so a build in which
 /// this did not fit could not be produced at all.
-const VIRTUAL_BUS_KEY: HwMatchKey = match HwMatchKey::compatible(HW_VIRTUAL_BUS_COMPATIBLE) {
-    Ok(key) => key,
-    Err(_) => panic!("the virtual-bus compatible string fits HW_COMPATIBLE_MAX"),
-};
+const VIRTUAL_BUS_KEY: HwMatchKey = compatible_key!(HW_VIRTUAL_BUS_COMPATIBLE);
 
 /// The virtual-bus node: a bus directly beneath the root, carrying its
 /// compatible string and no resources.

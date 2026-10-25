@@ -14,7 +14,7 @@
 //! The vetting rules, in one place:
 //!
 //! - the source must be valid UTF-8 and at most [`MAX_SOURCE_BYTES`];
-//! - no character that hides or reorders text (`tairix_util::utf8::is_hidden`)
+//! - no character that hides or reorders text (`tairix_visible::is_hidden`)
 //!   other than the structural newline, and tab only as indentation (or inside
 //!   comments): no ESC/CSI/C0/C1 bytes, so a hostile entry cannot inject
 //!   terminal escape sequences through `lspci` output, and no bidirectional
@@ -568,7 +568,7 @@ pub fn parse(kind: DbKind, bytes: &[u8]) -> Result<ParsedDb, ParseError> {
                         kind: ParseErrorKind::TabInEntry,
                     });
                 }
-            } else if tairix_util::utf8::is_hidden(c) {
+            } else if tairix_visible::is_hidden(c) {
                 return Err(ParseError {
                     line,
                     kind: ParseErrorKind::HiddenChar,

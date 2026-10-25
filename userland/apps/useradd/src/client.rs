@@ -9,8 +9,8 @@ use crate::command::Command;
 use crate::error::UseraddError;
 use crate::io::{Output, UserDb, UserSpec};
 
-/// The usage banner a usage error is reported with, and the fallback the
-/// short-help switches print when `useradd`'s own Help tree is unavailable.
+/// The usage banner the short-help switches print when `useradd`'s own Help
+/// tree is unavailable.
 pub const USAGE: &str = "\
 usage: useradd [-u UID] -g GID [-G GID[,GID...]] [-c COMMENT] [-d HOME] [--] NAME
 

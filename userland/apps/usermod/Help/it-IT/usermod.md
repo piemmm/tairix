@@ -58,8 +58,8 @@ capacità che l'account chiamante non possiede.
 
 - `0` — ogni modifica richiesta è stata fatta.
 - `1` — il database ha rifiutato o non ha potuto completare una modifica; il
-  passo e la ragione sono stampati sull'errore standard.
-- `2` — la riga di comando non è stata compresa.
+  passo e la ragione sono stampati sull'errore standard. Anche una riga di
+  comando non compresa termina con `1`.
 
 ## ENVIRONMENT
 

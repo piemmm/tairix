@@ -32,8 +32,8 @@ cydnawsedd sgriptiau ac nid yw'n newid dim.
 ## EXIT STATUS
 
 - `0` — ysgrifennwyd y dilyniant clirio.
-- `1` — ni all y derfynell glirio, neu ni ellid cyflwyno'r allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn.
+- `1` — ni all y derfynell glirio, neu ni ellid cyflwyno'r allbwn. Mae
+  llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

@@ -15,14 +15,14 @@ permutation, and the obsolete first-argument `{+,-}COUNT[bcl]` form.
 `Help/` tree through the shared `lib/help` engine, in the locale the
 inherited `LANG` variable names.
 
-Follow mode (`-f`, `-F`, `--follow`, `--retry`, `--pid`,
+Follow mode (`-f`, `-F`, `--follow[=descriptor|name]`, `--retry`, `--pid`,
 `--sleep-interval`, `--max-unchanged-stats`, and the obsolete trailing `f`)
-is deliberately **staged, not stubbed**: following a growing file needs a
-kernel wake source that fires on a file change, which the userland runtime
-does not yet expose. A tight poll loop would be the busy-wait the charter
-forbids, and a silent no-op would misrepresent the switch, so the follow
-switches are reported as unrecognised options until that wake source exists
-(the same staging the `tee -i` and `mkdir -m` switches use).
+keeps each file open after the initial output and re-emits appended data,
+parking off-CPU on the kernel's file-change wait source (the `Watcher`
+seam, a wait-set of file members) between emissions — never a busy poll.
+`-f` follows the open node by descriptor; `-F` follows the *name*, watching
+its directory so a rotation reopens the new file, and retries a name not yet
+present; `--pid` ends the follow once that process dies.
 
 The streaming engine is constant-memory per source: the last-N modes retain
 only the window the format requires (a circular byte ring for `-c N`, a
@@ -54,6 +54,12 @@ tail [-qvz] [-c [+]num[suffix]] [-n [+]num[suffix]] [--] [file...]
   -q, --quiet, --silent  never print the ==> file <== headers
   -v, --verbose          always print the ==> file <== headers
   -z, --zero-terminated  NUL-delimited lines
+  -f, --follow[=descriptor|name]  print data as it is appended
+  -F                     follow by name, retrying (--follow=name --retry)
+      --retry            keep trying to open a file not yet accessible
+      --pid <PID>        with a follow, stop once process PID dies
+      --sleep-interval <N>       seconds between re-checks (default 1)
+      --max-unchanged-stats <N>  quiet cycles before -F re-checks the name
   -h, -?                 show this command's own short help
 ```
 
@@ -61,7 +67,7 @@ tail [-qvz] [-c [+]num[suffix]] [-n [+]num[suffix]] [--] [file...]
 
 - `0` — every file was printed (or the short help was written).
 - `1` — a file could not be read, or the output could not be delivered.
-- `2` — the command line was not understood.
+  A command line that was not understood exits `1` too.
 
 ## Stability
 

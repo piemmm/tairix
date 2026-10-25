@@ -33,15 +33,14 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags};
+    use tairix_abi::fs::DirEntries;
     use tairix_abi::time::Time64;
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_ls::{parse, run, Entry, FinalLink, Listing, Metadata, Output, Terminal, USAGE};
+    use tairix_ls::{parse, run, Entry, FinalLink, Listing, Metadata, Outcome, Output, Terminal};
     use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_rt::File;
 
@@ -54,17 +53,8 @@ mod program {
 
     impl Listing for RtListing {
         fn stat(&self, path: &str, links: FinalLink) -> Result<Metadata, Errno> {
-            // A resolve-only open: no read authority is requested, the
-            // handle is closed on drop, and only the metadata is learned.
-            // The follow posture is fixed once, here, by the open's flags,
-            // and every operation served for that handle re-derives it — so
-            // a `NO_FOLLOW` handle is the `lstat` reading and can describe
-            // even a dangling link.
-            let flags = match links {
-                FinalLink::Keep => OpenFlags::NO_FOLLOW,
-                FinalLink::Follow => OpenFlags::empty(),
-            };
-            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            let file =
+                File::open(path.as_bytes(), links.resolve_only()).map_err(Errno::from_syscall)?;
             let stat = file.stat().map_err(Errno::from_syscall)?;
             Ok(Metadata {
                 kind: stat.kind,
@@ -144,18 +134,21 @@ mod program {
     /// Exit codes are the GNU `ls` grades: `0` when everything listed, `1`
     /// for a minor problem (an entry or subdirectory inside a listing that
     /// could not be reached — each one already reported on standard error),
-    /// and `2` for serious trouble (a usage error, a command-line operand
-    /// that could not be reached, or a failure to write the listing at all).
+    /// and `2` for serious trouble (a command line not understood, a
+    /// command-line operand that could not be reached, a directory `-R`
+    /// reached again through a link, memory exhausted, or a failure to write
+    /// the listing at all).
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let misuse = Outcome::SeriousProblem.exit_status();
+        let Some(arguments) = tairix_help::arguments("ls") else {
+            return misuse;
         };
-        let Ok(command) = parse(&arguments) else {
-            write_stderr_line(USAGE);
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("ls", &err);
+                return misuse;
+            }
         };
         let locale = tairix_help::user_locale();
         // The `TERM` preference decides the colour depth of `--color` output.
@@ -180,7 +173,7 @@ mod program {
         ) {
             Ok(outcome) => outcome.exit_status(),
             Err(err) => {
-                write_stderr_line(&format!("ls: {err}"));
+                write_stderr_line(format_args!("ls: {err}"));
                 2
             }
         }

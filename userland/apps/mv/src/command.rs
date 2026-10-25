@@ -3,6 +3,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+
 use crate::error::MvError;
 
 /// What happens when a destination already exists.
@@ -72,31 +74,40 @@ pub enum Command {
     Help,
 }
 
+/// What each of `mv`'s options means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flag {
+    Force,
+    Interactive,
+    NoClobber,
+    NoTargetDirectory,
+    TargetDirectory,
+    Verbose,
+    Help,
+}
+
+/// `mv`'s options, as GNU's `mv` spells them and in its order, and the
+/// reserved help switches.
+const OPTIONS: &[Opt<Flag>] = &[
+    Opt::flag('f', &["force"], Flag::Force),
+    Opt::flag('i', &["interactive"], Flag::Interactive),
+    Opt::flag('n', &["no-clobber"], Flag::NoClobber),
+    Opt::flag('T', &["no-target-directory"], Flag::NoTargetDirectory),
+    Opt::valued('t', &["target-directory"], Flag::TargetDirectory),
+    Opt::flag('v', &["verbose"], Flag::Verbose),
+    Opt::flag('h', &["help"], Flag::Help),
+    Opt::letter('?', Takes::Nothing, Flag::Help),
+];
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
 /// The grammar is the GNU `mv` surface,
-/// `mv [-finvT] [-t dir] [--] source... dest`:
-///
-/// * `-f` / `--force` — never prompt before overwriting.
-/// * `-i` / `--interactive` — ask before overwriting an existing
-///   destination.
-/// * `-n` / `--no-clobber` — never overwrite an existing destination.
-/// * `-v` / `--verbose` — report each move.
-/// * `-t dir` / `--target-directory=dir` — move every source into `dir`.
-/// * `-T` / `--no-target-directory` — treat the destination as a normal
-///   file (exactly one source).
-/// * `-h` / `--help` — print the usage banner (wins immediately).
-/// * `--` — end option parsing; every later argument is a path.
-/// * any other `-…` — a [`MvError::Usage`] error (fail closed; never a
-///   silently ignored token).
-/// * anything else (including the bare `-`) — a path.
-///
-/// Short options may be combined into one argument (e.g. `-fn` is
-/// `-f -n`); an unrecognised letter anywhere in such a cluster is a usage
-/// error. As in the GNU tool, the last of `-f` / `-i` / `-n` wins, `-t`
-/// takes its directory either attached (`-tdir`) or as the next argument,
-/// and `-t` with `-T` is a usage error.
+/// `mv [-finvT] [-t dir] [--] source... dest`, read as GNU's `getopt_long`
+/// reads it ([`Scan`]): options anywhere among the operands, clustered, a
+/// long one by any unambiguous prefix, `--` ending them. The help switches
+/// (`-h`, `-?`, `--help`) answer at once. The last of `-f`, `-i` and `-n`
+/// wins.
 ///
 /// Without `-t`, the last path operand is the destination and the rest are
 /// the sources; at least two path operands are required. With `-t`, every
@@ -104,96 +115,30 @@ pub enum Command {
 ///
 /// # Errors
 ///
-/// [`MvError::Usage`] for any unrecognised option before `--`, a missing
-/// `-t` value, `-t` combined with `-T`, or too few path operands.
+/// * [`MvError::Option`] — an option `getopt` refuses, in its words.
+/// * [`MvError::Usage`] — an empty `-t` directory, `-t` combined with `-T`,
+///   or too few path operands.
 pub fn parse(args: &[&str]) -> Result<Command, MvError> {
     let mut options = Options::DEFAULT;
     let mut target_dir: Option<String> = None;
     let mut no_target_dir = false;
     let mut operands = Vec::new();
-    let mut options_done = false;
-    let mut iter = args.iter().copied();
-    while let Some(arg) = iter.next() {
-        if !options_done {
-            if arg == "--" {
-                options_done = true;
-                continue;
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(MvError::Option)? {
+            Arg::Operand(path) => operands.push(String::from(path)),
+            Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Flag::TargetDirectory, dir) => {
+                let dir = dir.filter(|dir| !dir.is_empty()).ok_or(MvError::Usage)?;
+                target_dir = Some(String::from(dir));
             }
-            if let Some(name) = arg.strip_prefix("--") {
-                if apply_long(name, &mut options, &mut target_dir, &mut no_target_dir)? {
-                    return Ok(Command::Help);
-                }
-                continue;
-            }
-            // A short-option cluster is a leading `-` followed by at least one
-            // letter (the bare `-` is a path, not an option).
-            if let Some(letters) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
-                for (pos, letter) in letters.char_indices() {
-                    match letter {
-                        'f' => options.clobber = Clobber::Overwrite,
-                        'i' => options.clobber = Clobber::Prompt,
-                        'n' => options.clobber = Clobber::Skip,
-                        'v' => options.verbose = true,
-                        'T' => no_target_dir = true,
-                        't' => {
-                            // The value is the rest of the cluster
-                            // (`-tdir`) or the next argument (`-t dir`).
-                            let rest = &letters[pos + letter.len_utf8()..];
-                            let dir = if rest.is_empty() {
-                                iter.next().ok_or(MvError::Usage)?
-                            } else {
-                                rest
-                            };
-                            if dir.is_empty() {
-                                return Err(MvError::Usage);
-                            }
-                            target_dir = Some(String::from(dir));
-                            break;
-                        }
-                        'h' | '?' => return Ok(Command::Help),
-                        _ => return Err(MvError::Usage),
-                    }
-                }
-                continue;
-            }
+            Arg::Opt(Flag::NoTargetDirectory, _) => no_target_dir = true,
+            Arg::Opt(Flag::Force, _) => options.clobber = Clobber::Overwrite,
+            Arg::Opt(Flag::Interactive, _) => options.clobber = Clobber::Prompt,
+            Arg::Opt(Flag::NoClobber, _) => options.clobber = Clobber::Skip,
+            Arg::Opt(Flag::Verbose, _) => options.verbose = true,
         }
-        operands.push(String::from(arg));
     }
     assemble(options, target_dir, no_target_dir, operands)
-}
-
-/// Apply one `--name` long option to the parse state.
-///
-/// Returns `Ok(true)` when the option was `--help`, which wins
-/// immediately.
-///
-/// # Errors
-///
-/// [`MvError::Usage`] for an unrecognised long option or an empty
-/// `--target-directory=` value.
-fn apply_long(
-    name: &str,
-    options: &mut Options,
-    target_dir: &mut Option<String>,
-    no_target_dir: &mut bool,
-) -> Result<bool, MvError> {
-    if let Some(dir) = name.strip_prefix("target-directory=") {
-        if dir.is_empty() {
-            return Err(MvError::Usage);
-        }
-        *target_dir = Some(String::from(dir));
-        return Ok(false);
-    }
-    match name {
-        "force" => options.clobber = Clobber::Overwrite,
-        "interactive" => options.clobber = Clobber::Prompt,
-        "no-clobber" => options.clobber = Clobber::Skip,
-        "verbose" => options.verbose = true,
-        "no-target-directory" => *no_target_dir = true,
-        "help" => return Ok(true),
-        _ => return Err(MvError::Usage),
-    }
-    Ok(false)
 }
 
 /// Assemble the parsed options and operands into a [`Command::Move`],
@@ -238,7 +183,7 @@ fn assemble(
 mod tests {
     use super::{parse, Clobber, Command, Options, TargetMode};
     use crate::error::MvError;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
     fn mv_with(options: Options, sources: &[&str], dest: &str) -> Command {
@@ -397,8 +342,12 @@ mod tests {
         );
         assert_eq!(parse(&["-t", "dst", "a", "b"]), Ok(expected.clone()));
         assert_eq!(parse(&["-tdst", "a", "b"]), Ok(expected.clone()));
+        assert_eq!(
+            parse(&["--target-directory", "dst", "a", "b"]),
+            Ok(expected.clone())
+        );
         assert_eq!(parse(&["--target-directory=dst", "a", "b"]), Ok(expected));
-        assert_eq!(parse(&["a", "-t"]), Err(MvError::Usage));
+        assert_eq!(refused(&["a", "-t"]), "option requires an argument -- 't'");
         assert_eq!(parse(&["--target-directory=", "a"]), Err(MvError::Usage));
         assert_eq!(parse(&["-t", "dst"]), Err(MvError::Usage));
     }
@@ -419,11 +368,49 @@ mod tests {
         assert_eq!(parse(&["-T", "-t", "d", "a"]), Err(MvError::Usage));
     }
 
+    /// GNU 9.4's words for each refusal.
+    fn refused(args: &[&str]) -> String {
+        parse(args).expect_err("refused").to_string()
+    }
+
     #[test]
-    fn unknown_option_is_usage() {
-        assert_eq!(parse(&["-x", "a", "b"]), Err(MvError::Usage));
-        assert_eq!(parse(&["--frobnicate", "a", "b"]), Err(MvError::Usage));
-        assert_eq!(parse(&["-fx", "a", "b"]), Err(MvError::Usage));
+    fn a_refused_option_is_worded_as_getopt_words_it() {
+        assert_eq!(refused(&["-x", "a", "b"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["--frobnicate", "a", "b"]),
+            "unrecognized option '--frobnicate'"
+        );
+        // A bundle with one bad flag is refused whole.
+        assert_eq!(refused(&["-fx", "a", "b"]), "invalid option -- 'x'");
+        assert_eq!(
+            refused(&["a", "--target-directory"]),
+            "option '--target-directory' requires an argument"
+        );
+        assert_eq!(
+            refused(&["--verbose=1", "a", "b"]),
+            "option '--verbose' doesn't allow an argument"
+        );
+    }
+
+    /// GNU 9.4 reads `mv --verb --no-cl a b` as `mv --verbose --no-clobber a b`.
+    #[test]
+    fn a_long_option_may_be_abbreviated() {
+        assert_eq!(
+            parse(&["--verb", "--no-cl", "a", "b"]),
+            Ok(mv_with(
+                Options {
+                    clobber: Clobber::Skip,
+                    verbose: true,
+                    ..Options::DEFAULT
+                },
+                &["a"],
+                "b",
+            ))
+        );
+        assert_eq!(
+            refused(&["--no", "a", "b"]),
+            "option '--no' is ambiguous; possibilities: '--no-clobber' '--no-target-directory'"
+        );
     }
 
     #[test]

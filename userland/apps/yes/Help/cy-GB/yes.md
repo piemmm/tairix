@@ -36,8 +36,7 @@ opsiwn.
 
 - `0` — cyflwynwyd cymorth byr y gofynnwyd amdano.
 - `1` — peidiodd yr allbwn â derbyn beitiau (unig amod stopio'r
-  offeryn).
-- `2` — ni ddeallwyd y llinell orchymyn.
+  offeryn). Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`.
 
 ## ENVIRONMENT
 

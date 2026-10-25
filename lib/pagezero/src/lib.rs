@@ -18,8 +18,7 @@
 //! scalar byte loop when present and bit-identical in result, so the choice is
 //! a pure feature decision — declared priority (hardware first, portable
 //! baseline last), never a microbenchmark. Racing a page-zero benchmark at
-//! boot would be pointless churn (and Linux likewise selects `DC ZVA`/ERMS by
-//! feature, not by timing). The framework's `ByBenchmark` axis is reserved for
+//! boot would be pointless churn. The framework's `ByBenchmark` axis is reserved for
 //! ops where the fastest implementation genuinely varies by microarchitecture.
 //!
 //! # One resolved routine, kernel-wide

@@ -69,8 +69,8 @@ gwybod i'r sgript yn lle ei rhedeg heb y clo y gofynnodd amdano.
   rhedodd y gorchymyn.
 - `1` — ni fu modd cymryd y clo am reswm na fyddai aros yn ei drwsio, neu
   ni fu modd rhedeg y gorchymyn; argreffir y rheswm ar y llif gwallau
-  safonol.
-- `2` — ni ddeallwyd y llinell orchymyn; ni chlowyd dim ac ni rhedodd dim.
+  safonol. Mae llinell orchymyn na ddeallwyd hefyd yn gorffen â `1`, heb i
+  ddim gael ei gloi na'i redeg.
 - `126` — canfuwyd y gorchymyn ond ni fu modd ei redeg.
 - `127` — ni chanfuwyd y gorchymyn.
 

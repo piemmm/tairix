@@ -73,8 +73,8 @@ ignorierten Arguments.
 
 - `0` — die Liste wurde erzeugt (oder die Kurzhilfe wurde geschrieben).
 - `1` — die Socket-Abfrage wurde verweigert oder schlug fehl, oder die
-  Ausgabe konnte nicht geschrieben werden.
-- `2` — die Befehlszeile wurde nicht verstanden.
+  Ausgabe konnte nicht geschrieben werden. Eine nicht verstandene
+  Befehlszeile endet ebenfalls mit `1`.
 
 ## ENVIRONMENT
 

@@ -43,7 +43,7 @@
 //! Architecture-neutral: the layer names no
 //! device type and no architecture — it is generic over any [`Block`], so
 //! every port shares this one definition and the per-device bring-up
-//! (virtio-blk, EMMC2, …) wraps its brought-up device in it.
+//! (virtio-blk, an SD host, …) wraps its brought-up device in it.
 
 use alloc::sync::Arc;
 use core::ops::Deref;

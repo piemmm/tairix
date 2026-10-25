@@ -21,8 +21,8 @@
 //! it can synthesise, so every rate reported is the firmware's own answer,
 //! never the request echoed.
 //!
-//! Reference: the Raspberry Pi firmware property interface, as the Linux
-//! `clk-raspberrypi` and `raspberrypi-cpufreq` drivers spell it.
+//! Reference: the Raspberry Pi firmware's mailbox property interface (the
+//! `raspberrypi/firmware` wiki, *Mailbox property interface*).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -68,8 +68,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
 /// The firmware accepts any rate and rounds, so this is not a hardware
 /// constraint but the interval worth *asking* at: finer would spend a
 /// firmware round trip on a change too small to matter, coarser would leave
-/// usable rates unreachable. It is the interval the Pi's own Linux `cpufreq`
-/// driver builds its operating points on (`RASPBERRYPI_FREQ_INTERVAL`).
+/// usable rates unreachable.
 const RATE_INTERVAL_HZ: u64 = 100_000_000;
 
 /// Driver entry point.

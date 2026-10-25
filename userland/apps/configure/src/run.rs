@@ -33,7 +33,6 @@
 mod program {
     extern crate alloc;
 
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -48,7 +47,7 @@ mod program {
         SETTINGS_ENDPOINT, SETTINGS_REPLY_MAX,
     };
     use tairix_abi::Errno;
-    use tairix_configure::{parse, run, ConfigureError, Documents, NetPolicy, USAGE};
+    use tairix_configure::{parse, run, ConfigureError, Documents, NetPolicy};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
@@ -143,22 +142,20 @@ mod program {
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Exit codes: `0` on success (a listing, a shown value, a completed
-    /// set, or the short help), `1` when the settings could not be read or
-    /// changed or the output could not be delivered — notably a permission
-    /// denial, whose reason is stated on the diagnostic stream — `2` on a
-    /// usage error (a malformed argument vector, an
-    /// unknown option, an unknown key, a value outside its key's set, or an
-    /// edit that would leave the network document inconsistent).
+    /// set, or the short help), `1` otherwise: the settings could not be
+    /// read or changed (a permission denial states its reason on the
+    /// diagnostic stream), the output could not be delivered, or the command
+    /// line was not understood or asked for what the registries refuse.
     fn main() -> i32 {
-        // A malformed (non-UTF-8) argument vector is a usage error, reported
-        // rather than guessed at.
-        let Some(arguments) = tairix_rt::args() else {
-            write_stderr_line(USAGE);
-            return 2;
+        let Some(arguments) = tairix_help::arguments("configure") else {
+            return tairix_help::MISUSE;
         };
-        let Ok(command) = parse(&arguments) else {
-            write_stderr_line(USAGE);
-            return 2;
+        let command = match parse(&arguments) {
+            Ok(command) => command,
+            Err(err) => {
+                tairix_help::report_misuse("configure", &err);
+                return tairix_help::MISUSE;
+            }
         };
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -174,23 +171,11 @@ mod program {
         ) {
             Ok(()) => 0,
             Err(err @ (ConfigureError::Usage | ConfigureError::UnknownKey)) => {
-                write_stderr_line(&format!("configure: {err}"));
-                write_stderr_line(USAGE);
-                2
-            }
-            // A value or a document the registries refuse is the command
-            // line asking for something impossible, not a store failure, so
-            // it exits as a usage error like every other refused request.
-            Err(
-                err @ (ConfigureError::InvalidValue(_)
-                | ConfigureError::InterfaceRefused(..)
-                | ConfigureError::NetworkInconsistent(_)),
-            ) => {
-                write_stderr_line(&format!("configure: {err}"));
-                2
+                tairix_help::report_misuse("configure", &err);
+                tairix_help::MISUSE
             }
             Err(err) => {
-                write_stderr_line(&format!("configure: {err}"));
+                write_stderr_line(format_args!("configure: {err}"));
                 1
             }
         }
