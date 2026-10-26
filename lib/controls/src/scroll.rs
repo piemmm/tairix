@@ -58,7 +58,8 @@ pub const REPEAT_INTERVAL_NS: u64 = 60_000_000;
 ///
 /// The control's press carries no clock, so a hold's first step is armed at
 /// the first deadline its owner asks for after the press — the same pass that
-/// handled it.
+/// handled it. Arming from when the press happened would step at once for a
+/// press handled late whose release is still on its way.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct HoldRepeat {
     due_ns: Option<u64>,

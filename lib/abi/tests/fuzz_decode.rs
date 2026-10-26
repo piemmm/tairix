@@ -59,7 +59,7 @@ use tairix_abi::fs::{
     DirChange, DirChangeBatch, DirEntries, DirEntry, FileKind, FileStat, NodeExpect, OpenFlags,
     PathAt, FS_PATH_MAX,
 };
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyInput, PointerButtonCode, PointerInput, TimedPointer};
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketDelivery,
     SocketRequest, SocketStreamEvent,
@@ -1626,13 +1626,19 @@ fn exercise_blkio(bytes: &[u8]) {
     );
 }
 
-/// The seat's input records: an accepted pointer record, key record or touch
-/// frame re-encodes to itself, and a frame carries at most ten contacts.
+/// The seat's input records: an accepted pointer record, timed pointer
+/// record, key record or touch frame re-encodes to itself, and a frame carries
+/// at most ten contacts.
 fn exercise_input(bytes: &[u8]) {
     if let Ok(event) = PointerInput::from_bytes(bytes) {
         let redecoded = PointerInput::from_bytes(&event.to_le_bytes())
             .expect("round-trip of an accepted pointer event must succeed");
         assert_eq!(event, redecoded);
+    }
+    if let Ok(timed) = TimedPointer::from_bytes(bytes) {
+        let redecoded = TimedPointer::from_bytes(&timed.to_le_bytes())
+            .expect("round-trip of an accepted timed pointer record must succeed");
+        assert_eq!(timed, redecoded);
     }
     if let Ok(event) = KeyInput::from_bytes(bytes) {
         let redecoded = KeyInput::from_bytes(&event.to_le_bytes())
@@ -1778,6 +1784,41 @@ fn exercise_process_builder(bytes: &[u8]) {
     for e in env {
         assert_eq!(view.env(idx), Some(*e));
         idx += 1;
+    }
+}
+
+/// Every bit of every canonical timed pointer record, flipped: each result is
+/// refused or round-trips. Random bytes almost never pass the record's magic,
+/// so its time is reached only from a canonical record.
+#[test]
+fn timed_pointer_records_with_flipped_bits_round_trip_or_are_refused() {
+    let records = [
+        PointerInput::MovedBy { dx: -7, dy: 300 },
+        PointerInput::Pressed(PointerButtonCode::Primary),
+        PointerInput::Released(PointerButtonCode::Secondary),
+        PointerInput::Scrolled { dx: 0, dy: -120 },
+    ];
+    for (input, at_ns) in records
+        .into_iter()
+        .zip([0, 1, u64::MAX, 0x0102_0304_0506_0708])
+    {
+        let canonical = TimedPointer { input, at_ns }.to_le_bytes();
+        assert_eq!(
+            TimedPointer::from_bytes(&canonical),
+            Ok(TimedPointer { input, at_ns })
+        );
+        for bit in 0..TimedPointer::WIRE_LEN * 8 {
+            let mut flipped = canonical;
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            exercise_input(&flipped);
+            if bit >= PointerInput::WIRE_LEN * 8 {
+                assert_eq!(
+                    TimedPointer::from_bytes(&flipped).map(|timed| timed.input),
+                    Ok(input),
+                    "a flipped time leaves the record as it was (bit {bit})"
+                );
+            }
+        }
     }
 }
 
