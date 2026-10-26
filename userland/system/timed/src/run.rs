@@ -27,9 +27,9 @@
 //! `time.servers`, else what DHCP offered, else the built-in fallback. The
 //! service starts before either of the first two is knowable, so it starts on
 //! the fallback and re-selects on a bounded ladder, replacing its
-//! servers only when a *strictly better* tier appears. The same ladder is what
-//! finds the root mounted: the configuration is watched, and the record read
-//! again, from the first rung that reaches it.
+//! servers only when a *strictly better* tier appears. The root holding the
+//! configuration is waited for on the mount table's notice instead: the
+//! configuration is watched, and the record read again, once it is served.
 //!
 //! # Two roles, one binary
 //!
@@ -356,10 +356,10 @@ mod program {
     /// and `None`, recorded, for one that cannot be read or fully understood —
     /// never a guess at a partial intent.
     ///
-    /// Before the root is mounted the layers have no backing at all, which is
+    /// Before the root is served the layers have no backing at all, which is
     /// indistinguishable from a volume-less boot and equally yields the
-    /// defaults; the caller's bounded ladder is what separates the two, by
-    /// outlasting the unlock.
+    /// defaults; the mount table's notice is what tells the caller to read
+    /// again.
     fn load_settings() -> Option<NetworkSettings> {
         let read = SystemConfigFile::System
             .read_effective(|path| tairix_rt::read_document(path.as_bytes(), MAX_CONFIG_LEN));
@@ -388,8 +388,10 @@ mod program {
     }
 
     /// Look for the configuration again, replacing `watch`; answers whether
-    /// the settings tree was there. A tree that is there but cannot be watched
-    /// is recorded, since its changes then wait for a restart.
+    /// the settings tree was there. Until it can be reached, the mount table's
+    /// notice wakes the loop under the watch's token instead. A tree that is
+    /// there but cannot be watched is recorded, since its changes then wait for
+    /// a restart.
     fn refollow(set: &WaitSet, watch: &mut Option<Followed>) -> bool {
         if let Some(old) = watch.take() {
             old.leave(set);
@@ -624,8 +626,8 @@ mod program {
             let timeout = match timeout_until(now, engine_at, retry.as_ref().map(|r| r.at)) {
                 Some(timeout) => timeout,
                 // Nothing is due, but the configuration may yet switch network
-                // time on or name a server.
-                None if watch.is_some() => u64::MAX,
+                // time on or name a server, or the root holding it be served.
+                None if watch.is_some() || !reachable => u64::MAX,
                 // Nothing is due and nothing can change. Exit rather than hold
                 // a task and a bound delivery port for the rest of the boot
                 // doing nothing; a restart picks a later configuration up, and
@@ -640,7 +642,11 @@ mod program {
                     Verdict::Unconcerned => {}
                     Verdict::Reread => changed = true,
                     Verdict::Rewatch => {
+                        let was_reachable = reachable;
                         reachable = refollow(&set, &mut watch);
+                        if reachable && !was_reachable {
+                            service.store_reachable(rng.next_u64());
+                        }
                         changed = true;
                     }
                 }
@@ -657,15 +663,9 @@ mod program {
                 return EXIT_UNAVAILABLE;
             }
 
-            // The ladder's rung, if one is due: the root may have been
-            // mounted, or a DHCP lease acquired, since the last.
+            // The ladder's rung, if one is due: a DHCP lease may have been
+            // acquired since the last.
             let rung_due = retry.as_ref().is_some_and(|rung| nanos(woken) >= rung.at);
-            if rung_due && !reachable {
-                reachable = refollow(&set, &mut watch);
-                if reachable {
-                    service.store_reachable(rng.next_u64());
-                }
-            }
             if rung_due || changed {
                 reread(&mut service, &mut held, deliver.id(), &mut rng);
             }

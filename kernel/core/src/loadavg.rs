@@ -219,7 +219,9 @@ mod tests {
     #[test]
     fn concurrent_observers_never_lose_a_claimed_span() {
         use core::sync::atomic::{AtomicUsize, Ordering};
-        const ROUNDS: usize = 400_000;
+        // The interpreter preempts at random points in every round, so it
+        // needs far fewer rounds than hardware to reach the racing orders.
+        const ROUNDS: usize = if cfg!(miri) { 1_000 } else { 400_000 };
         const STOP: usize = usize::MAX;
         let spans = |periods: &[u64]| {
             let tracker = LoadTracker::new();

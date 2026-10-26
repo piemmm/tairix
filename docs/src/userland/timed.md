@@ -134,16 +134,16 @@ its place.
 
 The store lives on the root volume and this service starts before that root
 is mounted, so its first read normally finds nothing and the defaults apply —
-network time on, whatever the document says — until the root is reached. There
-is no userland event for "the root is mounted", so the service looks for it
-again on a bounded, doubling schedule folded into the reactor's own deadline —
-about seventeen minutes of attempts, parking between them, never a spin and
-never a wait on the start-up path, which would hold the boot up behind a
-service nothing else is waiting for. The first rung that reaches the root arms
-the watch and reads the record (below). The same schedule is what picks up a
-DHCP lease acquired after the service started, so the two "it is not there
-yet" problems have one mechanism. It ends once the operator has named a server
-or switched network time off, there being nothing better to look for.
+network time on, whatever the document says — until the root is reached. Until
+then the service waits on the mount table's notice, which the kernel publishes
+when a volume comes to be served, however long the unlock takes; that wake arms
+the watch and reads the record (below). A DHCP lease acquired after the service
+started is picked up on a bounded, doubling schedule folded into the reactor's
+own deadline — about seventeen minutes of attempts, parking between them, never
+a spin and never a wait on the start-up path, which would hold the boot up
+behind a service nothing else is waiting for. It ends once the operator has
+named a server or switched network time off, there being nothing better to
+look for.
 
 Only a *strictly better* tier replaces the servers in use. An equal-tier change
 — a renewed lease naming a different server — would reset the engine's rotation
@@ -190,9 +190,10 @@ single folded deadline implies. The loop parks; it never polls. A wake is a
 datagram (evaluate it in the worker, apply the verdict), a configuration change
 (above), or the deadline lapsing (send the next request). With no deadline
 left — network time off, or every server retired by a Kiss-o'-Death, and the
-ladder spent — the service parks on the watch alone, since the configuration
-may yet switch network time on or name a server. Only with no watch either does
-it exit, rather than hold a task and a bound delivery port doing nothing.
+ladder spent — the service parks on the watch alone, or on the mount table's
+notice while the root is not yet served, since the configuration may yet switch
+network time on or name a server. Only with neither does it exit, rather than
+hold a task and a bound delivery port doing nothing.
 
 Every nonce and jitter value comes from one generator keyed from the kernel
 CSPRNG at start-up. A service the kernel cannot key exits with its reason

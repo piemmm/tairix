@@ -484,12 +484,13 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   and the x86_64/riscv64 embedded spawn floor.
 - **Config availability is a boot-order fact, not a bug.** The store lives on
   the root volume and the service starts before it is mounted, so the first
-  read normally precedes the mount. With no userland "root mounted" event, the
-  reactor looks again on a bounded doubling one-shot ladder (8 attempts, ~17
-  minutes, parking between them). TS-7 made that ladder also the mechanism
-  that picks up a DHCP lease acquired after start-up; TS-6 made its first rung
-  that reaches the root arm the configuration watch, which carries every later
-  change.
+  read normally precedes the mount. The reactor then waits on the mount
+  table's notice (`lib/rt::follow`), which the kernel publishes when the root
+  comes to be served, however long the unlock takes; that wake arms the
+  configuration watch, which carries every later change (TS-6), and reads the
+  record. A DHCP lease acquired after start-up is picked up on a bounded
+  doubling one-shot ladder (8 attempts, ~17 minutes, parking between them;
+  TS-7).
 - **Every socket client's delivery port is process-private.** The kernel's
   port registry is machine-wide, so a fixed well-known id would let a
   long-lived process deny another its deliveries for the boot;
@@ -509,15 +510,11 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   audited (per-packet audit of an injected flood is itself a denial of
   service).
 - The configuration re-read ladder arms on any selection below the
-  `Configured` tier (originally: on any read that finds no server).
-  An earlier attempt to disarm it when the store's path had no VFS backing —
-  meaning to spare a volume-less guest a pointless timer — stranded the
-  service on every ordinary boot instead: an unmounted root is
-  indistinguishable from an absent one at `open`, so `timed` gave up three
-  seconds before the unlock and never set the clock. The ladder's own finite
-  length is what bounds the volume-less case; the classification is not worth
-  attempting. Pinned by host tests over `ConfigRetry`, which lives in the
-  engine half so it is testable at all.
+  `Configured` tier. A root not yet served is never a reason to stop looking
+  for the store: its `open` answers `NotImplemented`, which the follow treats
+  as not there yet, waiting on the mount table's notice rather than on the
+  ladder. Pinned by host tests over `ConfigRetry`, which lives in the engine
+  half so it is testable at all, and over `lib/rt::follow`.
 - The `spawn_session` verticals' silence after `login` spawns was **not** the
   §17.1 cooperative-dispatch defect. Their audit sinks keyed PASS on raw
   `ProcessSpawned`/`SyscallInvoked` totals, so adding `timed` to the startup
@@ -823,7 +820,7 @@ copied, never merged into a third place:
   The vertical failed with `SERVICE_NOT_ENROLLED`: no document under `/System`
   is reliably readable at the instant PID 1 must decide what to bring up — the
   writable root is not mounted, and the read-only volume's availability at that
-  point is a boot-order fact PID 1 has no userland event for. The only
+  point is a boot-order fact, not a guarantee. The only
   sanctioned pre-unlock read is the store service's whitelist, gated on
   `CAP_DRV_LOAD`, which PID 1 must not hold to read a configuration file. So the
   image's decision travels the way the rest of the boot set already does — in
@@ -841,18 +838,17 @@ copied, never merged into a third place:
   (`tairix_enrolment::effective`), so no consumer re-derives the precedence.
 - **Applying the administrator layer is bounded by the unlock, and that is
   stated rather than hidden.** Pre-unlock, PID 1 obeys the vendor layer alone;
-  the moment the override document becomes readable — on a bounded doubling
-  one-shot ladder, since nothing announces the unlock — it re-derives the
-  effective set and *stops* a service the administrator disabled, through the
-  existing reverse-dependency `stop`, with an audit record. So a disabled
-  service does run for the few seconds before the unlock, every boot. Closing
+  the moment the override document becomes readable — announced by the mount
+  table's notice, which the kernel publishes when the root comes to be served —
+  it re-derives the effective set and *stops* a service the administrator
+  disabled, through the existing reverse-dependency `stop`, with an audit
+  record. So a disabled service does run until the unlock, every boot. Closing
   that window would need the override readable pre-unlock, which the volume
-  layout forbids; deferring the whole enrolled tier until the ladder resolves
-  would instead deny a never-unlocking machine (a recovery session, an RTC
-  vertical) its clock for the ladder's whole length. The bounded run is the
-  lesser cost and is not a fail-open: nothing is *granted* by the document being
-  unreadable, and the vendor default is a positive build-time decision — this is
-  a narrowing that arrives late.
+  layout forbids; deferring the whole enrolled tier until the unlock would
+  instead deny a never-unlocking machine (a recovery session, an RTC vertical)
+  its clock. The run is the lesser cost and is not a fail-open: nothing is
+  *granted* by the document being unreadable, and the vendor default is a
+  positive build-time decision — this is a narrowing that arrives late.
 
 **`Enable`/`Disable` arrive on PID 1's own reserved endpoint, not the control
 one.** `SERVICE_ENROL_ENDPOINT` is a second reserved id beside

@@ -855,7 +855,8 @@ fn the_reread_ladder_stays_disarmed_when_a_server_is_configured() {
 
 /// The rungs double and the ladder is finite, so a machine that genuinely has
 /// no server configured stops reading instead of re-reading for the whole
-/// boot. The window must still outlast an unlock by a wide margin.
+/// boot. The window must still outlast a lease arriving over a slow link by a
+/// wide margin.
 #[test]
 fn the_reread_ladder_doubles_and_is_spent_after_its_attempts() {
     let mut rung =
@@ -869,12 +870,12 @@ fn the_reread_ladder_doubles_and_is_spent_after_its_attempts() {
     }
     assert_eq!(climbed, CONFIG_RETRY_ATTEMPTS);
     // Rungs on time sum to (2^attempts - 1) base waits: ~17 minutes, against
-    // a root mount measured in seconds once any passphrase is in.
+    // a lease measured in seconds once a link is up.
     let window = u64::from(2u32.pow(CONFIG_RETRY_ATTEMPTS) - 1) * CONFIG_RETRY_BASE_NANOS;
     assert_eq!(at, window);
     assert!(
         at >= 600_000_000_000,
-        "the window must outlast any unlock, got {at} ns"
+        "the window must outlast a slow lease, got {at} ns"
     );
 }
 

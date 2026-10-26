@@ -49,17 +49,30 @@ pub const RENAME_OP: &str = "rename";
 /// published document, and reaching this many is the guest's PASS.
 pub const DESKTOP_CHANGES: u32 = 3;
 
-/// Whether `path` is the desktop session's own published settings document:
-/// `…/<the desktop's publisher>/<the published file>`.
+/// Whether the place an audit record names is the desktop session's own
+/// published settings document, `…/<the desktop's publisher>/<the published
+/// file>`: `path` as the caller spelled it, and `from`, for a relative one, the
+/// label of the directory it was resolved from.
 ///
 /// Matched by the whole trailing pair, so neither the store's ownership pin
 /// beside it nor the temporary name a commit is written under can pass for
 /// it.
 #[must_use]
-pub fn is_desktop_document(path: &str) -> bool {
+pub fn is_desktop_document(from: Option<&str>, path: &str) -> bool {
+    if path == PUBLISHED_FILE {
+        return from.is_some_and(is_publisher_directory);
+    }
     path.strip_suffix(PUBLISHED_FILE)
         .and_then(|dir| dir.strip_suffix('/'))
-        .and_then(|dir| dir.strip_suffix(DESKTOP_PUBLISHER))
+        .is_some_and(|dir| {
+            is_publisher_directory(dir) || (dir == DESKTOP_PUBLISHER && from.is_some())
+        })
+}
+
+/// Whether `dir` is the desktop's publisher directory beneath another,
+/// `…/<the desktop's publisher>`.
+fn is_publisher_directory(dir: &str) -> bool {
+    dir.strip_suffix(DESKTOP_PUBLISHER)
         .is_some_and(|parent| parent.ends_with('/'))
 }
 
@@ -77,17 +90,53 @@ mod tests {
     #[test]
     fn only_the_desktops_published_document_matches() {
         let dir = format!("/Users/ada/Settings/Apps/{DESKTOP_PUBLISHER}");
-        assert!(is_desktop_document(&format!("{dir}/{PUBLISHED_FILE}")));
-        assert!(!is_desktop_document(&format!("{dir}/{PUBLISHED_FILE}.new")));
-        assert!(!is_desktop_document(&format!("{dir}/.owner")));
+        assert!(is_desktop_document(
+            None,
+            &format!("{dir}/{PUBLISHED_FILE}")
+        ));
         assert!(!is_desktop_document(
+            None,
+            &format!("{dir}/{PUBLISHED_FILE}.new")
+        ));
+        assert!(!is_desktop_document(None, &format!("{dir}/.owner")));
+        assert!(!is_desktop_document(
+            None,
             "/Users/ada/Settings/Apps/os.tairix.terminal/public.conf"
         ));
-        assert!(!is_desktop_document(&format!(
-            "/Users/ada/Settings/Apps/x{DESKTOP_PUBLISHER}/{PUBLISHED_FILE}"
-        )));
-        assert!(!is_desktop_document(&format!(
-            "{DESKTOP_PUBLISHER}/{PUBLISHED_FILE}"
-        )));
+        assert!(!is_desktop_document(
+            None,
+            &format!("/Users/ada/Settings/Apps/x{DESKTOP_PUBLISHER}/{PUBLISHED_FILE}")
+        ));
+        assert!(!is_desktop_document(
+            None,
+            &format!("{DESKTOP_PUBLISHER}/{PUBLISHED_FILE}")
+        ));
+    }
+
+    /// Regression: the app-data service commits through its held directory,
+    /// so the record names the file relative to that directory's label, and a
+    /// matcher reading the name alone counted no commit at all.
+    #[test]
+    fn a_commit_named_from_its_directory_matches_the_same_way() {
+        let dir = format!("/Users/ada/Settings/Apps/{DESKTOP_PUBLISHER}");
+        assert!(is_desktop_document(Some(&dir), PUBLISHED_FILE));
+        assert!(is_desktop_document(
+            Some("/Users/ada/Settings/Apps"),
+            &format!("{DESKTOP_PUBLISHER}/{PUBLISHED_FILE}")
+        ));
+        assert!(!is_desktop_document(
+            Some(&dir),
+            &format!("{PUBLISHED_FILE}.new")
+        ));
+        assert!(!is_desktop_document(Some(&dir), ".owner"));
+        assert!(!is_desktop_document(
+            Some("/Users/ada/Settings/Apps/os.tairix.terminal"),
+            PUBLISHED_FILE
+        ));
+        assert!(!is_desktop_document(
+            Some(&format!("/Users/ada/Settings/Apps/x{DESKTOP_PUBLISHER}")),
+            PUBLISHED_FILE
+        ));
+        assert!(!is_desktop_document(None, PUBLISHED_FILE));
     }
 }

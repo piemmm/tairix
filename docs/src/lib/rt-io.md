@@ -203,10 +203,14 @@ end rule, until the caller stops it.
 A service that applies a document as it changes — the time service and the
 cooling service each follow `system.conf` — follows it through
 `follow::Followed`. The file's directory is watched once it exists, and its
-parent until then, so a service started before the volume holding the file is
-mounted follows it the moment the directory appears; a directory that is
-there but refused, or is not a directory, is answered as unwatched with why,
-never waited for. A storm of changes reports at most once a second, the
+parent until then. While neither can be reached — absent, or on a volume no
+driver serves yet, which answers `NotImplemented` — the mount table's notice
+stands in, joined before the look so a mount between the two still wakes the
+service, and left once the directory is watched; so a service started before
+the root is unlocked follows the file once it is, however long that takes. A
+directory that is there but refused, or is not a directory, is answered as
+unwatched with why, never waited for, and so is one nothing could wake the
+service for. A storm of changes reports at most once a second, the
 engine's own pacing. `Followed::drain`
 answers what a wake asks for: nothing, a re-read, or a re-follow because the
 watched directory came or went; a directory still changing after a bounded

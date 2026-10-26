@@ -68,7 +68,8 @@ the one asked again on a timer, a second later.
 ## Waking
 
 Its wait set: its status endpoint, the machine configuration's directory
-watch (the mount table's notice until that directory exists), and the
+watch (the mount table's notice until that directory can be reached — absent,
+or on a root not yet served), and the
 hardware tree's generation. Its deadline is an automatic fan's next sample,
 or a call the header left unanswered asked again, so a fan that is off,
 always on, or has no line to switch, and owes the header no answer, costs no

@@ -1,14 +1,15 @@
 //! Following one file through its directory's change watch.
 //!
-//! The file's directory is watched once it exists, and its parent until then,
-//! so a service started before the volume holding the file is mounted follows
-//! it the moment the directory appears. [`Followed::drain`] answers what a
-//! wake asks for: nothing, a re-read of the file, or a re-follow because the
-//! watched directory came or went.
+//! The file's directory is watched once it exists, and its parent until then;
+//! while neither can be reached — absent, or on a volume no driver serves yet —
+//! the mount table's notice stands in, so a service started before the volume
+//! holding the file is mounted follows it once it is. [`Followed::drain`]
+//! answers what a wake asks for: nothing, a re-read of the file, or a re-follow
+//! because the watched directory came or went.
 
 use tairix_abi::fs::{DirChangeBatch, DirWatchStatus};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::Errno;
+use tairix_abi::{Errno, NoticeTopic};
 
 use crate::{Dir, WaitSet};
 
@@ -86,13 +87,26 @@ impl Places {
 
 /// What looking for a followed file found.
 pub enum Follow {
-    /// Neither its directory nor that directory's parent is there yet.
+    /// Neither its directory nor that directory's parent can be reached yet;
+    /// the mount table's notice wakes the caller, under the follow's token, to
+    /// look again.
     NotYet,
     /// It is followed.
     Watching(Followed),
     /// Its directory, or the parent while the directory is absent, cannot be
-    /// opened or watched, for this reason.
+    /// opened or watched, or nothing could wake the caller to look again, for
+    /// this reason.
     Unwatched(Errno),
+}
+
+/// Where a look for a followed file's directory ended.
+enum Look {
+    /// It, or the parent while it is absent, opened; `true` for itself.
+    Found(Dir, bool),
+    /// Neither can be reached yet.
+    Unreachable,
+    /// One is there but refused.
+    Refused(Errno),
 }
 
 /// A file followed through a watch joined to a wait set.
@@ -106,23 +120,44 @@ pub struct Followed {
 impl Followed {
     /// Follow the file at `path`, its watch joined to `set` under `token`.
     ///
-    /// Only an absent directory is waited for: one there but refused, or not a
-    /// directory, is answered [`Follow::Unwatched`] with why.
+    /// Only a directory that cannot be reached yet is waited for, through the
+    /// mount table's notice joined under `token` — joined before the look, so a
+    /// mount between the two still wakes the caller. One there but refused, or
+    /// not a directory, is answered [`Follow::Unwatched`] with why.
     #[must_use]
     pub fn follow(path: &'static str, set: &WaitSet, token: u64) -> Follow {
         let Some(places) = Places::of(path) else {
             return Follow::Unwatched(Errno::OutOfRange);
         };
-        let open = |dir: &str| Dir::open(dir.as_bytes()).map_err(Errno::from_syscall);
-        let (opened, exact) = match open(places.dir) {
-            Ok(opened) => (opened, true),
-            Err(Errno::NotFound) => match open(places.parent) {
-                Ok(opened) => (opened, false),
-                Err(Errno::NotFound) => return Follow::NotYet,
-                Err(refused) => return Follow::Unwatched(refused),
-            },
-            Err(refused) => return Follow::Unwatched(refused),
+        let mounts = u64::from(NoticeTopic::Mounts.as_u32());
+        let waiting = match set.add(WaitSourceKind::SystemNotice, mounts, token) {
+            Ok(()) | Err(Errno::AlreadyExists) => Ok(()),
+            Err(refused) => Err(refused),
         };
+        let open = |dir: &str| Dir::open(dir.as_bytes()).map_err(Errno::from_syscall);
+        let look = match open(places.dir) {
+            Ok(opened) => Look::Found(opened, true),
+            // The parent's listing would not change when the volume arrives:
+            // only the mount table's notice says so.
+            Err(Errno::NotImplemented) => Look::Unreachable,
+            Err(Errno::NotFound) => match open(places.parent) {
+                Ok(opened) => Look::Found(opened, false),
+                Err(Errno::NotFound | Errno::NotImplemented) => Look::Unreachable,
+                Err(refused) => Look::Refused(refused),
+            },
+            Err(refused) => Look::Refused(refused),
+        };
+        let (opened, exact) = match look {
+            Look::Found(opened, exact) => (opened, exact),
+            Look::Unreachable => {
+                return waiting.map_or_else(Follow::Unwatched, |()| Follow::NotYet)
+            }
+            Look::Refused(refused) => {
+                leave_notice(set, mounts, token);
+                return Follow::Unwatched(refused);
+            }
+        };
+        leave_notice(set, mounts, token);
         let armed = opened
             .watch(STORM_LATENCY_NS)
             .map_err(Errno::from_syscall)
@@ -179,12 +214,25 @@ impl Followed {
     }
 }
 
+/// Leave the notice `topic` joined to `set` under `token`; one the set does not
+/// hold has nothing to leave.
+fn leave_notice(set: &WaitSet, topic: u64, token: u64) {
+    let _ = crate::waitset_ctl(
+        set.handle(),
+        WaitSetOp::Del,
+        WaitSourceKind::SystemNotice,
+        topic,
+        token,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{verdict, Verdict};
     use alloc::vec;
     use alloc::vec::Vec;
     use tairix_abi::fs::{DirChange, DirChangeBatch, DirWatchStatus};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 
     fn batch(status: DirWatchStatus, more: bool, names: &[&[u8]]) -> Vec<u8> {
         let mut out = vec![0u8; 4096];
@@ -239,26 +287,99 @@ mod tests {
         assert_eq!(verdict(&[0xFF; 8], true, file), (Verdict::Rewatch, false));
     }
 
-    /// Only an absent directory is waited for: one refused, or not a
-    /// directory, is answered with why, never awaited in silence.
+    const CONF: &str = "/Example/Settings/example.conf";
+
+    /// The `(op, kind)` of every wait-set edit the follow made, in order.
+    fn set_edits() -> Vec<(u64, u64)> {
+        tairix_abi_trap::seam::calls()
+            .into_iter()
+            .filter(|(number, _)| *number == crate::NUM_WAITSET_CTL)
+            .map(|(_, args)| (args[1], args[2]))
+            .collect()
+    }
+
+    fn edit(op: tairix_abi::waitset::WaitSetOp, kind: WaitSourceKind) -> (u64, u64) {
+        (u64::from(op.as_u32()), u64::from(kind.as_u32()))
+    }
+
+    /// Only a directory that cannot be reached yet is waited for: one refused,
+    /// or not a directory, is answered with why, never awaited in silence.
     #[test]
-    fn only_an_absent_directory_is_awaited() {
+    fn only_an_unreachable_directory_is_awaited() {
         use super::{Follow, Followed};
         use tairix_abi::Errno;
         use tairix_abi_trap::seam;
         let set = crate::WaitSet(0);
         for refused in [Errno::PermissionDenied, Errno::NotADirectory] {
-            seam::arm(seam::refusal(refused));
-            let followed = Followed::follow("/Example/Settings/example.conf", &set, 0);
+            seam::arm_script(&[0], seam::refusal(refused));
+            let followed = Followed::follow(CONF, &set, 0);
             assert!(
                 matches!(followed, Follow::Unwatched(errno) if errno == refused),
                 "{refused:?}"
             );
         }
-        seam::arm(seam::refusal(Errno::NotFound));
+        // Absent, its volume not served yet, or its parent's not served: a
+        // mount is what could bring each.
+        let unreachable: [&[Errno]; 3] = [
+            &[Errno::NotFound, Errno::NotFound],
+            &[Errno::NotImplemented],
+            &[Errno::NotFound, Errno::NotImplemented],
+        ];
+        for answers in unreachable {
+            let mut script = vec![0];
+            script.extend(answers.iter().map(|errno| seam::refusal(*errno)));
+            seam::arm_script(&script, seam::refusal(Errno::DeviceFault));
+            assert!(
+                matches!(Followed::follow(CONF, &set, 0), Follow::NotYet),
+                "{answers:?}"
+            );
+            assert_eq!(
+                set_edits(),
+                [edit(WaitSetOp::Add, WaitSourceKind::SystemNotice)]
+            );
+        }
+        // A notice already joined by an earlier look still wakes the caller.
+        seam::arm_script(
+            &[seam::refusal(Errno::AlreadyExists)],
+            seam::refusal(Errno::NotImplemented),
+        );
+        assert!(matches!(Followed::follow(CONF, &set, 0), Follow::NotYet));
+        // With nothing to wake it, an unreachable directory is never waited
+        // for in silence.
+        seam::arm_script(
+            &[seam::refusal(Errno::LimitExceeded)],
+            seam::refusal(Errno::NotImplemented),
+        );
         assert!(matches!(
-            Followed::follow("/Example/Settings/example.conf", &set, 0),
-            Follow::NotYet
+            Followed::follow(CONF, &set, 0),
+            Follow::Unwatched(Errno::LimitExceeded)
         ));
+    }
+
+    /// The notice is joined before the directory is looked for, so a mount
+    /// between the two is not missed, and left once the directory is watched.
+    #[test]
+    fn the_mount_notice_stands_in_only_until_the_directory_is_watched() {
+        use super::{Follow, Followed};
+        use tairix_abi_trap::seam;
+        let set = crate::WaitSet(0);
+        // Joined, the directory opened as descriptor 5, the notice left, the
+        // watch armed and joined.
+        seam::arm_script(&[0, 5, 0, 0, 0], 0);
+        let followed = Followed::follow(CONF, &set, 0);
+        assert!(matches!(followed, Follow::Watching(_)));
+        assert_eq!(
+            set_edits(),
+            [
+                edit(WaitSetOp::Add, WaitSourceKind::SystemNotice),
+                edit(WaitSetOp::Del, WaitSourceKind::SystemNotice),
+                edit(WaitSetOp::Add, WaitSourceKind::DirWatch),
+            ]
+        );
+        assert_eq!(
+            seam::calls().first().map(|(number, _)| *number),
+            Some(crate::NUM_WAITSET_CTL),
+            "the notice is joined before anything is looked for"
+        );
     }
 }

@@ -223,6 +223,7 @@ pub unsafe fn raw_syscall(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> u64 {
 #[cfg(all(not(abi_trap_native), feature = "host-seam"))]
 pub mod seam {
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::vec::Vec;
     use tairix_abi::{Errno, SYSCALL_MAX_ARGS};
 
@@ -232,6 +233,7 @@ pub mod seam {
     std::thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };
         static RETURN_VALUE: Cell<u64> = const { Cell::new(0) };
+        static SCRIPT: RefCell<VecDeque<u64>> = const { RefCell::new(VecDeque::new()) };
         static LAST_CALL: Cell<Option<Trap>> = const { Cell::new(None) };
         static CALLS: RefCell<Vec<Trap>> = const { RefCell::new(Vec::new()) };
     }
@@ -240,9 +242,17 @@ pub mod seam {
     /// is recorded for inspection.
     pub fn arm(value: u64) {
         RETURN_VALUE.with(|v| v.set(value));
+        SCRIPT.with(|script| script.borrow_mut().clear());
         LAST_CALL.with(|c| c.set(None));
         CALLS.with(|calls| calls.borrow_mut().clear());
         ARMED.with(|a| a.set(true));
+    }
+
+    /// Arm the seam as [`arm`] does, the traps returning `values` in order
+    /// and `then` once they are spent.
+    pub fn arm_script(values: &[u64], then: u64) {
+        arm(then);
+        SCRIPT.with(|script| script.borrow_mut().extend(values.iter().copied()));
     }
 
     /// Every trap on this thread since [`arm`], in order.
@@ -296,7 +306,8 @@ pub mod seam {
         }
         LAST_CALL.with(|c| c.set(Some((number, *args))));
         CALLS.with(|calls| calls.borrow_mut().push((number, *args)));
-        Some(RETURN_VALUE.with(Cell::get))
+        let scripted = SCRIPT.with(|script| script.borrow_mut().pop_front());
+        Some(scripted.unwrap_or_else(|| RETURN_VALUE.with(Cell::get)))
     }
 }
 
@@ -311,5 +322,20 @@ mod tests {
         // SAFETY: the host overload performs no trap.
         let ret = unsafe { raw_syscall(0, [0; SYSCALL_MAX_ARGS]) };
         assert_eq!(ret, HOST_NO_TRAP);
+    }
+
+    #[cfg(feature = "host-seam")]
+    #[test]
+    fn a_script_answers_its_traps_in_order_then_its_tail() {
+        seam::arm_script(&[7, 8], 9);
+        // SAFETY: the host overload performs no trap.
+        let answers: [u64; 4] = core::array::from_fn(|number| unsafe {
+            raw_syscall(number as u64, [0; SYSCALL_MAX_ARGS])
+        });
+        assert_eq!(answers, [7, 8, 9, 9]);
+        assert_eq!(seam::calls().len(), 4);
+        seam::arm(5);
+        // SAFETY: the host overload performs no trap.
+        assert_eq!(unsafe { raw_syscall(0, [0; SYSCALL_MAX_ARGS]) }, 5);
     }
 }

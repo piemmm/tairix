@@ -32,10 +32,10 @@ selected by a build-script-emitted cfg (`abi_trap_<arch>`) rather than
 (`plans/CCOMPAT.md` §1). On the host there is no kernel: `raw_syscall` fails
 closed with `HOST_NO_TRAP`, optionally routed through the `host-seam` test
 scaffolding (a thread-local seam, enabled only through a `dev-dependencies`
-edge so a shipping build stays `no_std`). The seam also carries the three
-helpers every wrapper test uses — `capture` (arm, call, read the one trap),
-`no_trap`, and `refusal` (the `-errno` register) — so no consumer keeps its own
-copy.
+edge so a shipping build stays `no_std`). The seam also carries the helpers
+wrapper tests use — `capture` (arm, call, read the one trap), `no_trap`,
+`refusal` (the `-errno` register), and `arm_script` (answer a call's several
+traps in order) — so no consumer keeps its own copy.
 
 ## Stability tier
 

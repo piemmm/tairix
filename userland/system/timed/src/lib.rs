@@ -989,22 +989,24 @@ const fn failure_name(failure: tairix_sandbox::timesync::TimeSyncFailure) -> &'s
     }
 }
 
-/// First delay before re-reading the configuration store, in nanoseconds.
+/// First delay before re-reading the configuration for a better time server,
+/// in nanoseconds.
 ///
-/// `timed` starts *before* the root holding the store is mounted, so its first
-/// read normally finds nothing. There is no userland event for "the root is
-/// mounted", so the store is looked for again on this bounded, doubling
-/// schedule folded into the reactor's own deadline — the tickless fallback,
-/// never a spin, and never a wait on the start-up path, which would hold the
-/// boot up behind a service nothing else is waiting for.
+/// `timed` starts before a DHCP lease can have named a server, so the
+/// configuration and the servers learned since are looked at again on this
+/// bounded, doubling schedule folded into the reactor's own deadline — the
+/// tickless fallback, never a spin, and never a wait on the start-up path,
+/// which would hold the boot up behind a service nothing else is waiting for.
+/// The root holding the store is not waited for this way: the mount table's
+/// notice announces it being served.
 pub const CONFIG_RETRY_BASE_NANOS: u64 = 4_000_000_000;
 
 /// How many rungs the configuration ladder climbs before giving up.
 ///
-/// Eight doublings from four seconds span about seventeen minutes: far longer
-/// than any unlock takes, and finite, so a machine whose network never offers
-/// a server stops asking rather than asking for the rest of the boot. A change
-/// to the configuration itself arrives through its watch, not the ladder.
+/// Eight doublings from four seconds span about seventeen minutes, and finite,
+/// so a machine whose network never offers a server stops asking rather than
+/// asking for the rest of the boot. A change to the configuration itself
+/// arrives through its watch, not the ladder.
 pub const CONFIG_RETRY_ATTEMPTS: u32 = 8;
 
 /// First delay before re-reading the board's real-time clock, in nanoseconds.

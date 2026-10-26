@@ -33,7 +33,7 @@ mod program {
         THERMAL_REQUEST_LEN,
     };
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-    use tairix_abi::{Errno, FieldValue, NoticeTopic};
+    use tairix_abi::{Errno, FieldValue};
     use tairix_caps::CapabilitySet;
     use tairix_log::{EventId, Field, Level};
     use tairix_rt::follow::{Follow, Followed, Verdict};
@@ -45,7 +45,6 @@ mod program {
     const ENDPOINT_TOKEN: u64 = 0;
     const WATCH_TOKEN: u64 = 1;
     const TREE_TOKEN: u64 = 2;
-    const MOUNTS_TOKEN: u64 = 3;
 
     /// Status calls queued at once; each is answered before the next.
     const ENDPOINT_CAPACITY: usize = 8;
@@ -121,11 +120,8 @@ mod program {
             if waited == 0 {
                 match token {
                     ENDPOINT_TOKEN => answer(&mut service, &mut machine),
-                    WATCH_TOKEN | MOUNTS_TOKEN => {
-                        let reread = match (token, &watch) {
-                            (WATCH_TOKEN, Some(followed)) => followed.drain(),
-                            _ => Verdict::Rewatch,
-                        };
+                    WATCH_TOKEN => {
+                        let reread = watch.as_ref().map_or(Verdict::Rewatch, Followed::drain);
                         if reread == Verdict::Rewatch {
                             refollow(&set, &mut watch);
                         }
@@ -173,29 +169,16 @@ mod program {
     }
 
     /// Follow the configuration again, replacing `watch`. Until its
-    /// directories exist the mount table is waited on instead: the volume
-    /// holding them being mounted is what makes them appear.
+    /// directories can be reached the follow wakes the loop on the mount
+    /// table's notice instead: the volume holding them being served is what
+    /// brings them.
     fn refollow(set: &WaitSet, watch: &mut Option<Followed>) {
         if let Some(old) = watch.take() {
             old.leave(set);
         }
-        let mounts = NoticeTopic::Mounts.as_u32().into();
         match Followed::follow(CONFIG_PATH, set, WATCH_TOKEN) {
-            Follow::Watching(followed) => {
-                // Gone already once a previous refollow left it.
-                let _ = tairix_rt::waitset_ctl(
-                    set.handle(),
-                    WaitSetOp::Del,
-                    WaitSourceKind::SystemNotice,
-                    mounts,
-                    MOUNTS_TOKEN,
-                );
-                *watch = Some(followed);
-            }
-            Follow::NotYet => {
-                // Already a member once a previous refollow joined it.
-                let _ = set.add(WaitSourceKind::SystemNotice, mounts, MOUNTS_TOKEN);
-            }
+            Follow::Watching(followed) => *watch = Some(followed),
+            Follow::NotYet => {}
             Follow::Unwatched(err) => record(
                 EVENT_CONFIG_UNFOLLOWED,
                 Level::Warn,

@@ -172,7 +172,8 @@ mod kernel {
                 return;
             }
             if field_str(event, "op") == Some(RENAME_OP)
-                && field_str(event, "to").is_some_and(is_desktop_document)
+                && field_str(event, "to")
+                    .is_some_and(|to| is_desktop_document(field_str(event, "to_from"), to))
             {
                 self.committed.fetch_add(1, Ordering::AcqRel);
             }

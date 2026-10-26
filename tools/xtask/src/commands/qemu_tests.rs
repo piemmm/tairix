@@ -7044,9 +7044,9 @@ static TESTS: &[QemuTest] = &[
             ("/Users/root", Duration::ZERO, "ps\n"),
             // The typed word `--bogus` must reach the child as `argv[1]`
             // through the spawn startup-strings block: `ps` refuses the
-            // unknown option and prints its usage line — output that a
-            // child running under its registered default argv could never
-            // produce — proving caller-supplied arguments arrive end to end.
+            // unknown option by name — output that a child running under its
+            // registered default argv could never produce — proving
+            // caller-supplied arguments arrive end to end.
             ("PID  PPID", Duration::ZERO, "ps --bogus\n"),
             // `man man` (plans/APPS.md §7): the spawned tool resolves its
             // own bundle through the shared store-then-PATH policy, reads
@@ -7055,7 +7055,7 @@ static TESTS: &[QemuTest] = &[
             // streams the rendered page (a serial console attests no
             // geometry, so no pager prompt). `SEE ALSO` is the page's final
             // section heading — seeing it proves the whole document arrived.
-            ("usage: ps", Duration::ZERO, "man man\n"),
+            ("unrecognized option '--bogus'", Duration::ZERO, "man man\n"),
             // `ls /System/Commands` (plans/APPS.md deliverable 6): the spawned
             // tool stats the operand and reads the directory through the
             // `fs_stat`/`fs_readdir` syscalls under its own manifest's
