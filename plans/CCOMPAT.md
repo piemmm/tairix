@@ -4,6 +4,7 @@
 |---|---|---|
 | CC1 | The full `lib/abi` C header surface, generated into `include/tairix/` | in progress |
 | CC1.1 | C mirrors for the remaining System Information records, and a completeness test that derives its list | planned |
+| CC1.2 | C view of the served-filesystem surface: the `volume_ctl`/`volume_serve` records and the `fsserve-v1` endpoint protocol | planned |
 | CC2 | `lib/abi-sys`: the C-callable syscall stub runtime | done |
 | CC3 | crt0: C program startup and teardown | done |
 | CC4 | Loader and bundle integration for native programs | done |
@@ -206,8 +207,8 @@ storage/bus/display/filesystem/input/net struct mirrors (`tairix_block_geometry_
 `tairix_time.h` —, `tairix_input_event_t`, and the `#[repr(transparent)]`
 `tairix_mac_address_t`), the `TAIRIX_VIRTIO_PCI_*` / `TAIRIX_MAC_ADDRESS_LEN` /
 `TAIRIX_MOUNT_FLAG_*` (with `KNOWN_MASK`) / `TAIRIX_NODE_ID_NONE` constants, and the
-`TAIRIX_DISPLAY_FORMAT_*` / `TAIRIX_NODE_KIND_*` / `TAIRIX_INPUT_EVENT_KIND_*`
-discriminants — every value read from `lib/abi`. `BusDevice::class` is spelled
+`TAIRIX_DISPLAY_FORMAT_*` / `TAIRIX_NODE_KIND_*` / `TAIRIX_WRITE_REFUSAL_*` /
+`TAIRIX_INPUT_EVENT_KIND_*` discriminants — every value read from `lib/abi`. `BusDevice::class` is spelled
 `device_class` in the mirror because `class` is reserved in C++; the driver
 input-event kinds are `TAIRIX_INPUT_EVENT_KIND_*` to stay disjoint from the
 windowing `TAIRIX_INPUT_KIND_*` in `tairix_input.h` (§2.2). The Rust-only error
@@ -226,6 +227,16 @@ RAID. And the completeness test pins a hand-written list, so a new
 `#[repr(C)]` type escapes the C surface until someone lists it: it is to find
 every such type in `lib/abi` itself and fail on one without a `typedef`, as
 `errno_table_matches_the_frozen_enum` does for the error table.
+
+**CC1.2.** `tairix_syscall.h` declares the four `volume_*` syscalls a
+served-filesystem driver makes and `tairix_driver.h` the
+`TAIRIX_WRITE_REFUSAL_*` codes its offer carries, but no header mirrors the
+records they exchange (`VolumeCtl`, `VolumeInfo`, `ServeFrame`, `ServeGrant`)
+or the `fsserve-v1` framing on the endpoint (`docs/src/abi/fsserve.md`). A
+filesystem driver written in C needs all of them, so they land together, one
+header per module (`tairix_volume.h`, `tairix_fsserve.h`); the `VolumeInfo`
+flag bits, private to `lib/abi` today, become public so the generator reads
+them rather than re-typing them.
 
 **Deliverables**
 - Grow the `tools/xtask` generator (`commands/c_header.rs`) from the current

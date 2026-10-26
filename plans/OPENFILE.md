@@ -59,7 +59,9 @@ Open walks once, creates what it was asked to, reserves the release slot and
 pins, under one hold of the driver lock. `fs_close` reaps with a `try_lock`,
 so a close never waits behind a long truncate; every other drop path (exit,
 spawn unwind, redemption, unmap) marks the volume due and wakes the
-write-back flusher, whose pass reaps before it publishes. Drops run outside
+write-back flusher, whose pass reaps before it publishes — save a served
+volume's registration, reaped inline by the next operation on the volume,
+since the flusher must never wait on a server. Drops run outside
 the registry lock. `unpin` answers `Held`, `Released` or `Freed`; the last pin
 of a nameless node frees it there, and the cache drops what it kept under the
 id.
@@ -145,10 +147,12 @@ and marks the projections dead: revoked descriptors answer `Stale`, and the
 audit records the count. A surprise removal with work unpublished keeps the
 registration through its stand-in, so descriptors answer the device error
 while the volume is away, and a clean one retires it; retraction, recovery and
-a verified re-insert each start a fresh registration,
-so only new opens see the returned volume. `Errno::Stale` means "the handle no
-longer reaches what it named". An open that waited out a detach finds nothing
-at its path.
+a verified re-insert each start a fresh registration, so only new opens see
+the returned volume. A served volume whose driver is lost keeps its
+registration through its stand-in in the same way, and the restarted driver
+serves under a fresh one (`plans/FSSERVE.md`). `Errno::Stale` means "the
+handle no longer reaches what it named". An open that waited out a detach
+finds nothing at its path.
 
 ## Delegation, spawn, mapping, locks, watches, sync
 

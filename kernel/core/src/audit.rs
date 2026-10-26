@@ -768,6 +768,16 @@ pub enum AuditEvent {
     VolumeReserveEntered,
     /// A volume that was down to its reserve has room outside it again.
     VolumeReserveLeft,
+    /// A user-space filesystem driver answered a call with a reply the kernel
+    /// refused: the call failed with a device fault, and the volume reads as
+    /// degraded until a call is answered cleanly. The `endpoint` and `op`
+    /// fields name the driver's endpoint and the operation.
+    ServedReplyMalformed,
+    /// A user-space filesystem driver went a whole idle budget without
+    /// answering a call or touching its volume, so the call was abandoned
+    /// and the volume reads as degraded. The `endpoint` and `op` fields name
+    /// the driver's endpoint and the operation.
+    ServedCallStalled,
     /// A wall-clock write lost to its provenance ladder: the stored reading
     /// came from a better source, so a weaker one cannot roll it back.
     WallClockSetRefused,
@@ -880,6 +890,8 @@ impl AuditEvent {
             Self::TaskLatencyOverrun => 4266,
             Self::VolumeReserveEntered => 4267,
             Self::VolumeReserveLeft => 4268,
+            Self::ServedReplyMalformed => 4190,
+            Self::ServedCallStalled => 4191,
             Self::WallClockSetRefused => 4269,
         })
     }
@@ -971,6 +983,8 @@ impl AuditEvent {
             Self::VolumeWritebackFailed => "volume write-back publish failed",
             Self::VolumeReserveEntered => "volume down to its reserve",
             Self::VolumeReserveLeft => "volume has room outside its reserve again",
+            Self::ServedReplyMalformed => "served filesystem answered with a malformed reply",
+            Self::ServedCallStalled => "served filesystem stalled on a call; abandoned",
             Self::WallClockSetRefused => "wall clock write refused by its provenance ladder",
             Self::TaskLatencyOverrun => "interactive surface overran its frame budget",
         }
@@ -1085,6 +1099,8 @@ mod tests {
         AuditEvent::VolumeReserveEntered,
         AuditEvent::VolumeReserveLeft,
         AuditEvent::WallClockSetRefused,
+        AuditEvent::ServedReplyMalformed,
+        AuditEvent::ServedCallStalled,
     ];
 
     #[test]
@@ -1092,7 +1108,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 83, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 85, "a new event belongs in `ALL`");
     }
 
     #[test]

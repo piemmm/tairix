@@ -58,6 +58,9 @@
 //!   snapshots in
 //!   `lib/devids/assets/` (`--write` to regenerate; `--fetch` — developer-run
 //!   only, never CI — to import and vet the upstream databases)
+//! - `unicode`      — verifies the Unicode property tables in
+//!   `lib/unicode/src/tables.rs` against the pinned UCD snapshot in
+//!   `lib/unicode/assets/` (`--write` to regenerate)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation

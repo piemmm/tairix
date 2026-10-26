@@ -79,8 +79,8 @@ fn verify_hash() -> Result<(), String> {
         return Err(format!(
             "abi-check: linked `tairix_kernel_syscall::SYSCALL_TABLE_HASH` \
              does not match sha256(tairix_abi::ENCODED_TABLE).\n  linked : {}\n  expected: {}",
-            hex(&tairix_kernel_syscall::SYSCALL_TABLE_HASH),
-            hex(&expected),
+            tairix_util::hex::encode(&tairix_kernel_syscall::SYSCALL_TABLE_HASH),
+            tairix_util::hex::encode(&expected),
         ));
     }
 
@@ -92,16 +92,6 @@ fn relative(base: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        // The `unwrap` is on `write!` into a `String`; infallible.
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 #[cfg(test)]

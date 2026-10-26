@@ -219,11 +219,14 @@ fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
         "the listing, the toolbar's enable states, and the rail's own mark all moved"
     );
     assert_eq!(outcome.refused, None);
-    assert_eq!(browser.components(), backup());
+    assert_eq!(browser.folder().expect("a folder"), backup());
     assert!(places.is_focused());
     assert_eq!(places.cursor(), volume);
     // The rail shows where the browser now is.
-    assert_eq!(places.index_of(browser.components()), Some(volume));
+    assert_eq!(
+        places.index_of(browser.folder().expect("a folder")),
+        Some(volume)
+    );
 }
 
 #[test]
@@ -239,7 +242,7 @@ fn a_press_beyond_the_rail_is_left_to_the_view_below() {
     assert!(route(&mut browser, &mut places, &press(just_outside)).is_none());
     // Nothing about the rail moved, and the browser stayed put.
     assert!(!places.is_focused());
-    assert!(browser.components().is_empty());
+    assert!(browser.folder().expect("a folder").is_empty());
 }
 
 #[test]
@@ -290,7 +293,7 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
         "a move replaces the listing, which no rail report describes"
     );
     assert_eq!(
-        browser.components(),
+        browser.folder().expect("a folder"),
         ["Users".to_string(), "ann".to_string(), "Home".to_string()]
     );
 
@@ -308,7 +311,7 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
     let outcome = route(&mut browser, &mut places, &named(NamedKeyCode::Enter));
     assert_eq!(outcome.map(|o| o.repaint), Some(Repaint::Whole));
     assert_eq!(
-        browser.components(),
+        browser.folder().expect("a folder"),
         ["Storage".to_string(), "Backup".to_string()]
     );
 }
@@ -367,7 +370,7 @@ fn a_place_that_cannot_be_listed_reports_and_leaves_the_browser_where_it_was() {
             "Desktop".to_string(),
         ])
         .expect("Desktop is a fixed row");
-    let before = browser.components().to_vec();
+    let before = browser.folder().expect("a folder").to_vec();
     let on_desktop = press(row_centre(&places, desktop));
 
     let outcome =
@@ -377,7 +380,7 @@ fn a_place_that_cannot_be_listed_reports_and_leaves_the_browser_where_it_was() {
     assert_eq!(outcome.refused.as_deref(), Some("could not open Desktop"));
     assert_eq!(outcome.repaint, Repaint::Whole);
     // The browser did not move, and the row now reads disabled.
-    assert_eq!(browser.components(), before.as_slice());
+    assert_eq!(browser.folder().expect("a folder"), before.as_slice());
     assert!(!places.rows()[desktop].is_available());
 
     // A disabled row does not act: activating it again refuses nothing,
@@ -386,7 +389,7 @@ fn a_place_that_cannot_be_listed_reports_and_leaves_the_browser_where_it_was() {
     places.set_focused(true);
     let again = route(&mut browser, &mut places, &named(NamedKeyCode::Enter));
     assert_eq!(again, Some(super::SidebarOutcome::QUIET));
-    assert_eq!(browser.components(), before.as_slice());
+    assert_eq!(browser.folder().expect("a folder"), before.as_slice());
 }
 
 #[test]
@@ -402,7 +405,7 @@ fn pressing_the_row_already_marked_changes_and_reports_nothing() {
     let (outcome, damage) = routed(&mut browser, &mut places, &on_volume);
     assert_eq!(outcome, Some(super::SidebarOutcome::QUIET));
     assert!(damage.is_empty());
-    assert_eq!(browser.components(), backup());
+    assert_eq!(browser.folder().expect("a folder"), backup());
 }
 
 #[test]
@@ -806,7 +809,7 @@ fn a_press_on_the_rails_bar_steps_it_and_navigates_nowhere() {
         bar.bottom() - 2,
     );
     hovered(&mut places, &motion(end));
-    let location = browser.components().to_vec();
+    let location = browser.folder().expect("a folder").to_vec();
     let cursor = places.cursor();
 
     assert!(route(&mut browser, &mut places, &press(end)).is_some());
@@ -815,7 +818,11 @@ fn a_press_on_the_rails_bar_steps_it_and_navigates_nowhere() {
         places.scroll().offset() > 0,
         "the end button stepped the rail"
     );
-    assert_eq!(browser.components(), location, "and navigated nowhere");
+    assert_eq!(
+        browser.folder().expect("a folder"),
+        location,
+        "and navigated nowhere"
+    );
     assert_eq!(places.cursor(), cursor, "nor moved the cursor");
 }
 
@@ -923,7 +930,10 @@ fn alt_enter_on_the_focused_rail_navigates_nowhere() {
     );
 
     assert_eq!(outcome, Some(super::SidebarOutcome::QUIET));
-    assert!(browser.components().is_empty(), "the browser stayed put");
+    assert!(
+        browser.folder().expect("a folder").is_empty(),
+        "the browser stayed put"
+    );
 }
 
 /// The rows a rebuild moves under a still pointer are lit again by the whole

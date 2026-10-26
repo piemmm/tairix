@@ -303,8 +303,11 @@ planned, `[~]` in progress, `[x]` done.
 - `tairix-net` exists (`no_std`, `#![forbid(unsafe_code)]`, §6 README,
   tier experimental): the dual-stack address vocabulary re-exports the
   `core::net` types and adds RFC 4007 `Ipv6Scope` (fail-closed on
-  reserved multicast scopes) + `ScopedIpv6Addr` (zone required exactly
-  when scope is non-global); `checksum` is the one RFC 1071 definition
+  reserved multicast scopes) + `zone_of` (an address narrower than global
+  scope is qualified by the interface it was met on — a TCP peer, a
+  connection's key and its reply's link carry it, and an unqualified one
+  resolves to its default zone, the one link that could carry it, or is
+  refused as ambiguous); `checksum` is the one RFC 1071 definition
   (one-shot fold + byte-stream incremental `Checksum` accumulator with
   `ipv4_pseudo`/`ipv6_pseudo` seeds); `eth` carries Ethernet II framing
   (`ETHERTYPE_ARP/IPV4/IPV6`); `neigh::NeighborTable` is the bounded,

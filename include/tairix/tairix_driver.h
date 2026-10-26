@@ -92,6 +92,7 @@
 #define TAIRIX_DRIVER_ERROR_READ_ONLY ((int32_t)25)
 #define TAIRIX_DRIVER_ERROR_TIMED_OUT ((int32_t)26)
 #define TAIRIX_DRIVER_ERROR_NOT_READY ((int32_t)27)
+#define TAIRIX_DRIVER_ERROR_INTERRUPTED ((int32_t)28)
 
 /* PCI vendor ID assigned to virtio devices (uint16_t; virtio 1.1 sec.4.1.2). */
 #define TAIRIX_VIRTIO_PCI_VENDOR_ID ((uint16_t)0x1af4u)
@@ -122,6 +123,26 @@
 #define TAIRIX_NODE_KIND_DIRECTORY ((uint8_t)0u)
 #define TAIRIX_NODE_KIND_REGULAR_FILE ((uint8_t)1u)
 #define TAIRIX_NODE_KIND_SYMLINK ((uint8_t)2u)
+
+/* Why a format will not write a volume it opened (uint8_t); no code is 0. */
+#define TAIRIX_WRITE_REFUSAL_FORMAT_READ_ONLY ((uint8_t)1u)
+#define TAIRIX_WRITE_REFUSAL_UNSUPPORTED_FEATURE ((uint8_t)2u)
+#define TAIRIX_WRITE_REFUSAL_ERRORS_RECORDED ((uint8_t)3u)
+#define TAIRIX_WRITE_REFUSAL_HURD_LAYOUT ((uint8_t)4u)
+#define TAIRIX_WRITE_REFUSAL_JOURNAL_UNUSABLE ((uint8_t)5u)
+#define TAIRIX_WRITE_REFUSAL_NEEDS_CHECK ((uint8_t)6u)
+#define TAIRIX_WRITE_REFUSAL_OPENED_READ_ONLY ((uint8_t)7u)
+#define TAIRIX_WRITE_REFUSAL_COMMIT_FAILED ((uint8_t)8u)
+#define TAIRIX_WRITE_REFUSAL_WRITE_PROTECTED ((uint8_t)9u)
+#define TAIRIX_WRITE_REFUSAL_REVISION_UNWRITTEN ((uint8_t)10u)
+#define TAIRIX_WRITE_REFUSAL_NOT_CLOSED ((uint8_t)11u)
+#define TAIRIX_WRITE_REFUSAL_MEDIA_NOT_REWRITABLE ((uint8_t)12u)
+#define TAIRIX_WRITE_REFUSAL_NO_SPACE_BITMAP ((uint8_t)13u)
+#define TAIRIX_WRITE_REFUSAL_SPARABLE_MEDIA ((uint8_t)14u)
+#define TAIRIX_WRITE_REFUSAL_WRITE_ONCE_MEDIA ((uint8_t)15u)
+#define TAIRIX_WRITE_REFUSAL_METADATA_PARTITION ((uint8_t)16u)
+#define TAIRIX_WRITE_REFUSAL_SEVERAL_PARTITIONS ((uint8_t)17u)
+#define TAIRIX_WRITE_REFUSAL_DAMAGED ((uint8_t)18u)
 
 /* Driver input-event kind (uint8_t); distinct from the windowing TAIRIX_INPUT_KIND_*. */
 #define TAIRIX_INPUT_EVENT_KIND_KEY ((uint8_t)1u)

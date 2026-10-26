@@ -15,8 +15,8 @@ use tairix_abi::window_ipc::{
 use tairix_browse::{Places, Volume};
 
 use super::{
-    component_declaration, is_settings, place_of, window_declaration, DESKTOP_SLOT_CLICK,
-    SETTINGS_ROWS, WINDOW_SLOT_CLICK,
+    component_declaration, is_network, is_settings, place_of, window_declaration, CLOSING_ROWS,
+    DESKTOP_SLOT_CLICK, WINDOW_SLOT_CLICK,
 };
 use crate::test_fs::mounted;
 
@@ -50,13 +50,20 @@ fn labels(places: &Places) -> Vec<String> {
     place_labels(&bar)
 }
 
-/// The label of the *Settings…* row.
+/// The labels of the *Network* and *Settings…* rows.
+const NETWORK: &str = "Network";
 const SETTINGS: &str = "Settings\u{2026}";
 
-/// The labels of `bar`'s place rows, in order: every item but *Settings…*.
+/// The labels of `bar`'s place rows, in order: every item but the closing
+/// *Network* and *Settings…*.
 fn place_labels(bar: &AppBar) -> Vec<String> {
     let mut shown = item_labels(bar);
     assert_eq!(shown.pop().as_deref(), Some(SETTINGS), "Settings… is last");
+    assert_eq!(
+        shown.pop().as_deref(),
+        Some(NETWORK),
+        "Network is just above it"
+    );
     shown
 }
 
@@ -216,7 +223,7 @@ fn a_chosen_row_names_the_place_the_user_saw() {
         let AppMenuRowView::Item(item) = row else {
             continue;
         };
-        if is_settings(item.id) {
+        if is_settings(item.id) || is_network(item.id) {
             continue;
         }
         let index = place_of(item.id).expect("a declared id names a place");
@@ -264,9 +271,9 @@ fn the_row_cap_drops_the_tail_and_reports_how_many() {
     assert_eq!(bar.menu.len(), APP_MENU_MAX_ROWS, "the cap is filled");
     assert_eq!(
         skipped,
-        places.rows().len() - (APP_MENU_MAX_ROWS - 1 - SETTINGS_ROWS),
-        "every place past the cap — the volumes' rule and Settings… taking \
-         rows of it — is counted"
+        places.rows().len() - (APP_MENU_MAX_ROWS - 1 - CLOSING_ROWS),
+        "every place past the cap — the volumes' rule and the closing rows \
+         taking rows of it — is counted"
     );
     // What is shown is still a prefix of the rail, so the rows the user sees
     // are the ones the rail would have shown first.
@@ -281,36 +288,51 @@ fn the_row_cap_drops_the_tail_and_reports_how_many() {
 }
 
 #[test]
-fn an_empty_rail_still_offers_settings() {
+fn an_empty_rail_still_offers_the_network_and_settings() {
     // A session with no home and nothing attached has no place to offer, but
-    // its file manager's settings are still the user's to reach.
+    // the network and its file manager's settings are still the user's to
+    // reach.
     let places = Places::default();
     let (bar, skipped) = component_declaration(7, &places).expect("the menu is admissible");
-    assert_eq!(item_labels(&bar), [SETTINGS.to_string()]);
+    assert_eq!(
+        item_labels(&bar),
+        [NETWORK.to_string(), SETTINGS.to_string()]
+    );
     assert_eq!(
         bar.menu.len(),
-        1,
-        "no rule above it with nothing to set it apart from"
+        2,
+        "no rule above them with nothing to set them apart from"
     );
     assert_eq!(skipped, 0);
 }
 
 #[test]
-fn an_ordinary_file_manager_offers_settings_between_the_convention_s_ends() {
+fn an_ordinary_file_manager_offers_the_network_and_settings_between_the_convention_s_ends() {
     let bar = window_declaration(7).expect("the rows fit");
     assert_eq!(bar.click, WINDOW_SLOT_CLICK);
     assert_eq!(
         item_labels(&bar),
-        [SETTINGS.to_string(), tairix_window::QUIT_LABEL.to_string()]
+        [
+            NETWORK.to_string(),
+            SETTINGS.to_string(),
+            tairix_window::QUIT_LABEL.to_string()
+        ]
     );
-    let settings = bar
-        .menu
-        .rows()
-        .find_map(|(row, _)| match row {
-            AppMenuRowView::Item(item) if item.label == SETTINGS => Some(item.id),
-            _ => None,
-        })
-        .expect("Settings… is declared");
-    assert!(is_settings(settings));
-    assert!(!tairix_window::is_quit(settings));
+    let id_of = |label: &str| {
+        bar.menu
+            .rows()
+            .find_map(|(row, _)| match row {
+                AppMenuRowView::Item(item) if item.label == label => Some(item.id),
+                _ => None,
+            })
+            .expect("declared")
+    };
+    let (network, settings) = (id_of(NETWORK), id_of(SETTINGS));
+    assert!(is_settings(settings) && !is_network(settings));
+    assert!(is_network(network) && !is_settings(network));
+    assert!(!tairix_window::is_quit(settings) && !tairix_window::is_quit(network));
+    assert_eq!(
+        place_of(network).filter(|&index| index < APP_MENU_MAX_ROWS),
+        None
+    );
 }

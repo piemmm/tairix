@@ -144,6 +144,13 @@ A rename to a case variant of an entry's own name re-spells it where it stands
 — its place in the order is unchanged — and a rename replacing a sibling takes
 the spelling asked for.
 
+## Served from user space
+
+On removable media the driver is served from user space ([Volumes served from user space](./served.md)): its `Run`
+binary binds `tairix,volume-adfs` and runs with `CAP_FS_SERVE` and
+`CAP_LOG_EMIT`, and the volume is mounted under the storage-group identity
+map.
+
 ## Test surface
 
 Per-variant unit tests cover round-trips (with remount), listings,

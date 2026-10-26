@@ -23,6 +23,7 @@ mod fields;
 mod integrity;
 mod layout;
 mod mkfs;
+mod served;
 mod space;
 mod write;
 
@@ -35,7 +36,7 @@ use tairix_abi::driver::block::{Block, BlockClass};
 use tairix_abi::driver::filesystem::{
     AclModel, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, NameMatching, NodeId, NodeIdentity,
-    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats, WriteRefusal,
 };
 use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
@@ -52,6 +53,7 @@ use integrity::Integrity;
 use layout::{LbAddr, Map, Partitions, Physical, Run};
 
 pub use mkfs::FormatOptions;
+pub use served::{Served, BIND_KEYS};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5544_4600_0000_0001; // "UDF" + index
@@ -107,7 +109,7 @@ pub struct Udf<B: Block> {
     file_set: LongAd,
     integrity: Integrity,
     /// Why the volume is not written, or `None` when it is.
-    refusal: Option<&'static str>,
+    refusal: Option<WriteRefusal>,
     /// The file most recently read, its extents mapped.
     file: Option<(NodeId, Mapped)>,
     write: write::State,
@@ -260,7 +262,7 @@ impl<B: Block> Udf<B> {
     /// media or the volume forbid it, or it uses a structure this driver
     /// reads but does not write.
     #[must_use]
-    pub fn write_refusal(&self) -> Option<&'static str> {
+    pub fn write_refusal(&self) -> Option<WriteRefusal> {
         self.refusal
     }
 
@@ -985,21 +987,21 @@ impl<B: Block> Udf<B> {
     }
 
     /// Why the volume cannot be written, `None` when it can.
-    fn refusal_cause(&self) -> Option<&'static str> {
+    fn refusal_cause(&self) -> Option<WriteRefusal> {
         let logical = self.volume.logical();
         if logical.domain_flags & (udf::DOMAIN_HARD_WRITE_PROTECT | udf::DOMAIN_SOFT_WRITE_PROTECT)
             != 0
         {
-            return Some("write_protected");
+            return Some(WriteRefusal::WriteProtected);
         }
         if !(0x0102..=WRITE_REVISION).contains(&logical.revision) {
-            return Some("revision_unwritten");
+            return Some(WriteRefusal::RevisionUnwritten);
         }
         if self.integrity.min_write_revision > WRITE_REVISION {
-            return Some("revision_unwritten");
+            return Some(WriteRefusal::RevisionUnwritten);
         }
         if !self.integrity.closed {
-            return Some("not_closed");
+            return Some(WriteRefusal::NotClosed);
         }
         for map in &self.partitions.maps {
             match map {
@@ -1008,19 +1010,19 @@ impl<B: Block> Udf<B> {
                         physical.access,
                         udf::ACCESS_OVERWRITABLE | udf::ACCESS_REWRITABLE
                     ) {
-                        return Some("media_not_rewritable");
+                        return Some(WriteRefusal::MediaNotRewritable);
                     }
                     if physical.bitmap.bytes() == 0 {
-                        return Some("no_space_bitmap");
+                        return Some(WriteRefusal::NoSpaceBitmap);
                     }
                 }
-                Map::Sparable { .. } => return Some("sparable_media"),
-                Map::Virtual { .. } => return Some("write_once_media"),
-                Map::Metadata { .. } => return Some("metadata_partition"),
+                Map::Sparable { .. } => return Some(WriteRefusal::SparableMedia),
+                Map::Virtual { .. } => return Some(WriteRefusal::WriteOnceMedia),
+                Map::Metadata { .. } => return Some(WriteRefusal::MetadataPartition),
             }
         }
         if self.partitions.maps.len() != 1 {
-            return Some("several_partitions");
+            return Some(WriteRefusal::SeveralPartitions);
         }
         None
     }

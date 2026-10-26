@@ -300,7 +300,7 @@ fn run_fetch(ctx: &Context, databases: &[&Database]) -> Result<(), String> {
              # Encoding: {encoding}\n\
              # Licence: {licence}\n",
             transport = db.transport,
-            sha = hex(&digest),
+            sha = tairix_util::hex::encode(&digest),
             licence = db.licence,
         );
         if let Some(conversion) = &conversion {
@@ -559,14 +559,6 @@ fn header_field(text: &str, key: &str) -> Option<String> {
             let value = value.trim();
             (!value.is_empty()).then(|| value.to_string())
         })
-}
-
-/// Lowercase-hex rendering of a digest.
-fn hex(digest: &[u8]) -> String {
-    digest.iter().fold(String::new(), |mut out, b| {
-        let _ = write!(out, "{b:02x}");
-        out
-    })
 }
 
 /// Today's UTC date as `YYYY-MM-DD`, from the system clock (the fetch is a

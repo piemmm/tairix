@@ -92,4 +92,9 @@ doc-valid-idents = [
     "GENET",
     "MDIO",
     "RGMII",
+    "NTLMv1",
+    "NTLMv2",
+    "NTOWFv2",
+    "LMv2",
+    "NetBIOS",
 ]

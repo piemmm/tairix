@@ -9,14 +9,13 @@
 //! What `core::net` deliberately does not carry, this module adds:
 //!
 //! - [`Ipv6Scope`] — RFC 4007 scope classification, needed to decide
-//!   whether an address is meaningful beyond one link and whether it
-//!   requires a zone to disambiguate.
-//! - [`ScopedIpv6Addr`] — an IPv6 address paired with the zone (interface)
-//!   index its scope requires. A link-local address without a zone is
-//!   ambiguous on a multi-interface host, so the constructor makes that
-//!   state unrepresentable instead of every consumer re-checking it.
+//!   whether an address is meaningful beyond one link.
+//! - [`zone_of`] — the zone, an interface, an address of narrower than
+//!   global scope is qualified by: such an address names a host only within
+//!   its zone, so on a host with several interfaces it is ambiguous without
+//!   one.
 
-use core::num::NonZeroU32;
+use tairix_abi::net_ipc::IF_NAME_LEN;
 
 pub use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -151,6 +150,24 @@ pub fn is_unicast_link_local(addr: &Ipv6Addr) -> bool {
     addr.segments()[0] & 0xFFC0 == 0xFE80
 }
 
+/// Whether `addr` names a host only within a zone (RFC 4007 §6): an IPv6
+/// address of narrower than global scope.
+#[must_use]
+pub fn needs_zone(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V6(v6) => Ipv6Scope::of(&v6).is_some_and(|scope| scope < Ipv6Scope::Global),
+        IpAddr::V4(_) => false,
+    }
+}
+
+/// The zone `addr` is qualified by when it was met on `interface`: that
+/// interface when the address [needs one](needs_zone), and none when it
+/// names a host alone.
+#[must_use]
+pub fn zone_of(addr: IpAddr, interface: [u8; IF_NAME_LEN]) -> Option<[u8; IF_NAME_LEN]> {
+    needs_zone(addr).then_some(interface)
+}
+
 /// The solicited-node multicast group of `addr`
 /// (`ff02::1:ffXX:XXXX`, RFC 4291 §2.7.1): the last 24 bits of the
 /// unicast address appended to the fixed prefix. Neighbour and
@@ -176,88 +193,9 @@ pub const ALL_NODES: Ipv6Addr = Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 1);
 /// The all-routers link-local multicast group (`ff02::2`, RFC 4291).
 pub const ALL_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 2);
 
-/// Why an address/zone pairing was refused by [`ScopedIpv6Addr::new`].
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ScopeError {
-    /// The address has no scope to pair a zone with (unspecified, or a
-    /// multicast address with a reserved `scop` value).
-    Unscoped,
-    /// The address's scope is not global, so a zone index is required
-    /// to make it unambiguous, and none was supplied (RFC 4007 §6).
-    ZoneRequired,
-    /// The address is global scope; a zone index is meaningless and a
-    /// supplied one is refused rather than silently ignored.
-    ZoneForbidden,
-}
-
-/// An IPv6 address paired with the zone (interface) index its scope
-/// requires, per RFC 4007 §6.
-///
-/// A non-global-scope address (link-local unicast, non-global multicast,
-/// loopback) is meaningful only relative to a zone, so the constructor
-/// requires one; a global-scope address needs none and refuses one. This
-/// removes the "link-local address, but on which interface?" ambiguity
-/// from every consumer.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ScopedIpv6Addr {
-    addr: Ipv6Addr,
-    zone: Option<NonZeroU32>,
-}
-
-impl ScopedIpv6Addr {
-    /// Pair `addr` with `zone`, enforcing the scope/zone rules.
-    ///
-    /// # Errors
-    ///
-    /// * [`ScopeError::Unscoped`] — `addr` has no scope (unspecified, or
-    ///   reserved multicast `scop`).
-    /// * [`ScopeError::ZoneRequired`] — `addr` is non-global scope and
-    ///   `zone` is `None`.
-    /// * [`ScopeError::ZoneForbidden`] — `addr` is global scope and
-    ///   `zone` is `Some`.
-    pub fn new(addr: Ipv6Addr, zone: Option<NonZeroU32>) -> Result<Self, ScopeError> {
-        let scope = Ipv6Scope::of(&addr).ok_or(ScopeError::Unscoped)?;
-        match (scope == Ipv6Scope::Global, zone) {
-            (true, Some(_)) => Err(ScopeError::ZoneForbidden),
-            (false, None) => Err(ScopeError::ZoneRequired),
-            _ => Ok(Self { addr, zone }),
-        }
-    }
-
-    /// The address.
-    #[must_use]
-    pub const fn addr(&self) -> Ipv6Addr {
-        self.addr
-    }
-
-    /// The zone index, present exactly when the scope is not global.
-    #[must_use]
-    pub const fn zone(&self) -> Option<NonZeroU32> {
-        self.zone
-    }
-
-    /// The address's scope.
-    ///
-    /// Infallible: the constructor already refused unscoped addresses.
-    #[must_use]
-    pub fn scope(&self) -> Ipv6Scope {
-        match Ipv6Scope::of(&self.addr) {
-            Some(scope) => scope,
-            // The constructor refused every unscoped address, so this
-            // arm is unreachable; fail closed to the narrowest scope
-            // rather than panic.
-            None => Ipv6Scope::InterfaceLocal,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn zone(index: u32) -> Option<NonZeroU32> {
-        NonZeroU32::new(index)
-    }
 
     #[test]
     fn ecn_codepoint_round_trips_and_classifies() {
@@ -327,37 +265,25 @@ mod tests {
     }
 
     #[test]
-    fn scoped_address_zone_rules() {
-        let link_local = Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 1);
-        let global = Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 1);
-
-        let scoped = ScopedIpv6Addr::new(link_local, zone(3)).expect("zoned link-local");
-        assert_eq!(scoped.addr(), link_local);
-        assert_eq!(scoped.zone(), zone(3));
-        assert_eq!(scoped.scope(), Ipv6Scope::LinkLocal);
-
-        assert_eq!(
-            ScopedIpv6Addr::new(link_local, None),
-            Err(ScopeError::ZoneRequired)
-        );
-        assert_eq!(
-            ScopedIpv6Addr::new(global, zone(3)),
-            Err(ScopeError::ZoneForbidden)
-        );
-
-        let scoped = ScopedIpv6Addr::new(global, None).expect("global needs no zone");
-        assert_eq!(scoped.zone(), None);
-        assert_eq!(scoped.scope(), Ipv6Scope::Global);
-
-        assert_eq!(
-            ScopedIpv6Addr::new(Ipv6Addr::UNSPECIFIED, None),
-            Err(ScopeError::Unscoped)
-        );
-        // Reserved multicast scop is unscoped, zone or not.
-        let reserved = Ipv6Addr::new(0xFF03, 0, 0, 0, 0, 0, 0, 1);
-        assert_eq!(
-            ScopedIpv6Addr::new(reserved, zone(1)),
-            Err(ScopeError::Unscoped)
-        );
+    fn an_address_narrower_than_global_is_qualified_by_its_zone() {
+        let eth0 = *b"eth0\0\0\0\0\0\0\0\0\0\0\0\0";
+        for zoned in [
+            Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 1),
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 1),
+            Ipv6Addr::new(0xFEC0, 0, 0, 0, 0, 0, 0, 1),
+        ] {
+            assert_eq!(zone_of(IpAddr::V6(zoned), eth0), Some(eth0), "{zoned}");
+        }
+        for alone in [
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xDB8, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0xFD00, 0, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0xFF0E, 0, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        ] {
+            assert_eq!(zone_of(alone, eth0), None, "{alone}");
+        }
     }
 }

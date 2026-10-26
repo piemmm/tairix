@@ -46,6 +46,7 @@ use tairix_abi::account::{
     MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
 };
 
+use tairix_abi::driver::filesystem::WriteRefusal;
 use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
     TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
@@ -81,10 +82,10 @@ use tairix_abi::{
     MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN,
     MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
     MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX,
-    PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
-    PROCESS_FLAG_SANDBOXED, PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
-    PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RANDOM_RESERVE_DEFAULT_BYTES, READDIR_BATCH_MAX, RELEASE_EPOCH_SECS,
+    PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_EDGE_UNTIMED, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
+    PROCESS_CPU_NONE, PROCESS_FLAG_SANDBOXED, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
+    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, READDIR_BATCH_MAX, RELEASE_EPOCH_SECS,
     RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
     SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
     SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
@@ -200,6 +201,7 @@ const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
     ("READ_ONLY", DriverError::ReadOnly),
     ("TIMED_OUT", DriverError::TimedOut),
     ("NOT_READY", DriverError::NotReady),
+    ("INTERRUPTED", DriverError::Interrupted),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -800,6 +802,7 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::IommuAlias => "IOMMU_ALIAS",
         HwResourceKind::IommuGroup => "IOMMU_GROUP",
         HwResourceKind::MsiDoorbell => "MSI_DOORBELL",
+        HwResourceKind::Volume => "VOLUME",
     }
 }
 
@@ -1082,9 +1085,9 @@ fn generate_manifest() -> String {
 /// `tairix_input.h` — the desktop input event ABI.
 ///
 /// Declares the pointer ([`PointerInput`]) and keyboard ([`KeyInput`]) record
-/// magics and packed wire sizes, the `kind`, `button`, `key_class`, and
-/// modifier field codes, and the [`PointerButtonCode`] / [`NamedKeyCode`]
-/// `#[repr(u16)]` discriminant sets. Both records are hand-serialised
+/// magics and packed wire sizes, the untimed `pointer_inject` device time, the
+/// `kind`, `button`, `key_class`, and modifier field codes, and the
+/// [`PointerButtonCode`] / [`NamedKeyCode`] `#[repr(u16)]` discriminant sets. Both records are hand-serialised
 /// little-endian byte images (not a `#[repr(C)]` struct), so the header
 /// exports their field codes and wire sizes rather than a C struct mirror; a
 /// [`Errno`] decoder on the Rust side validates the bytes. Every value is read
@@ -1110,6 +1113,11 @@ fn generate_input() -> String {
     let _ = writeln!(
         out,
         "#define TAIRIX_SCROLL_UNITS_PER_DETENT ((int32_t){SCROLL_UNITS_PER_DETENT})"
+    );
+    // The `pointer_inject` device time of a driver that cannot state one.
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_POINTER_EDGE_UNTIMED ((uint64_t){POINTER_EDGE_UNTIMED}u)"
     );
     out.push('\n');
     push_touch_frame(&mut out);
@@ -2558,9 +2566,15 @@ fn driver_emit_submodule_constants(out: &mut String) {
     out.push('\n');
 }
 
+/// Every [`WriteRefusal`], in code order: the dense run `lib/abi` decodes
+/// from 1, so the set and its spellings come from the enum itself.
+fn write_refusals() -> impl Iterator<Item = WriteRefusal> {
+    (1..=u8::MAX).map_while(|raw| WriteRefusal::from_u8(raw).ok())
+}
+
 /// Emit the driver-submodule enum discriminants: [`DisplayFormat`],
-/// [`DisplayPower`], [`NodeKind`], and the driver-class [`InputEventKind`]
-/// (every value read from `lib/abi`).
+/// [`DisplayPower`], [`NodeKind`], [`WriteRefusal`], and the driver-class
+/// [`InputEventKind`] (every value read from `lib/abi`).
 ///
 /// The driver input-event kinds are spelled `TAIRIX_INPUT_EVENT_KIND_*` to
 /// stay disjoint from the windowing `TAIRIX_INPUT_KIND_*` codes in
@@ -2618,6 +2632,17 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
         "#define TAIRIX_NODE_KIND_SYMLINK ((uint8_t){}u)",
         NodeKind::Symlink as u8
     );
+    out.push('\n');
+
+    out.push_str("/* Why a format will not write a volume it opened (uint8_t); no code is 0. */\n");
+    for refusal in write_refusals() {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_WRITE_REFUSAL_{} ((uint8_t){}u)",
+            refusal.as_str().to_ascii_uppercase(),
+            refusal.as_u8()
+        );
+    }
     out.push('\n');
 
     out.push_str(
@@ -5120,6 +5145,15 @@ mod tests {
     }
 
     #[test]
+    fn input_header_pins_the_untimed_device_time() {
+        let want = format!(
+            "#define TAIRIX_POINTER_EDGE_UNTIMED ((uint64_t){}u)",
+            tairix_abi::POINTER_EDGE_UNTIMED
+        );
+        assert!(body("tairix_input.h").contains(&want), "missing {want}");
+    }
+
+    #[test]
     fn input_header_pins_constants_and_discriminants() {
         use tairix_abi::{
             KeyInput, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE, KEY_CLASS_CHAR,
@@ -6370,6 +6404,39 @@ mod tests {
             "DriverError defines discriminant {} but the C table stops at {last}",
             last + 1
         );
+    }
+
+    /// The header names every write refusal: the emitted set is the run
+    /// `lib/abi` decodes from 1, so a code past a gap would escape it.
+    #[test]
+    fn write_refusal_codes_are_dense_and_each_reaches_the_driver_header() {
+        let h = body("tairix_driver.h");
+        let count = write_refusals().count();
+        assert!(count > 0, "the refusal set is never empty");
+        assert!(
+            WriteRefusal::from_u8(0).is_err(),
+            "0 is never a refusal: the serve offer spells none with it"
+        );
+        let first_unnamed = u8::try_from(count + 1).expect("small set");
+        for raw in first_unnamed..=u8::MAX {
+            assert!(
+                WriteRefusal::from_u8(raw).is_err(),
+                "WriteRefusal decodes {raw} but the C header stops at {count}"
+            );
+        }
+        for refusal in write_refusals() {
+            let name = refusal.as_str();
+            assert!(
+                name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+                "`{name}` must spell a C identifier"
+            );
+            let line = format!(
+                "#define TAIRIX_WRITE_REFUSAL_{} ((uint8_t){}u)",
+                name.to_ascii_uppercase(),
+                refusal.as_u8()
+            );
+            assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        }
     }
 
     /// The `spawn()` attach-block contract is read from `lib/abi`, never

@@ -66,11 +66,13 @@ It is upheld structurally, never by convention:
 
 - **In the kernel**, the runtime volume service connects a device **once per
   block-service endpoint** and shares that one client, read through one block
-  cache, behind `SharedBlock`'s sleeping lock, so every volume on a disk — each partition's
-  mount, and the detach-time device-cache flush — serialises whole operations
-  onto it. An attach, recovery or detach holds only its own device's lock, so
-  a disk that stops answering holds up no other disk's volumes. A mount holds an *owned* window (`OwnedBlockWindow`) because the
-  filesystem driver long outlives the attach call that opened it; the last
+  cache, behind `SharedBlock`'s sleeping lock, so every volume on a disk — each
+  partition's served volume, which its user-space filesystem driver reaches it
+  through, and the detach-time device-cache flush — serialises whole operations
+  onto it. An attach, recovery, serve or detach holds only its own device's
+  lock, so a disk that stops answering holds up no other disk's volumes. A
+  served volume holds an *owned* window (`OwnedBlockWindow`) because it long
+  outlives the attach call that built it; the last
   window dropped closes the client and releases its window hold. When the
   device vanishes, every volume on it goes through the removal transition,
   and its cache drops what it held as soon as nothing holds the device.

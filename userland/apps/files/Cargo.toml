@@ -82,6 +82,9 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # surface), never a browser-private text box — and the one damage sink every
 # reporting round writes into, which the host-tested rail routing needs.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The network catalogue's client: the error a browse of it ends with, which
+# the host-tested browse bookkeeping (`src/netbrowse.rs`) is written against.
+tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0" }
 # The shared icon vocabulary's draw-site artwork seam: the `ArtworkCache` the
 # grid resolves each tile through, and the empty lookup the host tests paint a
 # listing with.
@@ -107,6 +110,9 @@ tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0", features = [
 # bare-metal targets it is actually built for; on the host those parts of the
 # binary are not compiled at all.
 [target.'cfg(target_os = "none")'.dependencies]
+# The production discovery transport (`RtTransport`) the reader thread holds
+# the network session over.
+tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0", features = ["program"] }
 # The browser engine's production symbolic-link reader (`RtLinkReader`): the
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.

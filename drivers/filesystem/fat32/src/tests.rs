@@ -473,6 +473,27 @@ fn a_long_name_past_the_name_limit_is_listed_by_its_alias() {
     assert!(fs.lookup(root, alias).is_ok(), "the alias resolves");
 }
 
+/// A long name that would hide, reorder or stack over what it says is listed
+/// exactly as the volume holds it — the driver's job is fidelity — and the
+/// display policy every surface draws names through escapes each such
+/// character.
+#[test]
+fn a_hostile_long_name_is_listed_exactly_and_shown_escaped() {
+    let mut fs = mount();
+    let root = fs.root();
+    let name = "invoice\u{202e}fdp.exe\u{200b}e\u{301}\u{301}";
+    fs.create(root, name.as_bytes(), NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    let entries = listed(&mut fs, root, 0, &[]).expect("lists");
+    let (_, listed_name) = entries.last().expect("the new entry");
+    assert_eq!(listed_name.as_slice(), name.as_bytes());
+    let listed_name = core::str::from_utf8(listed_name).expect("UTF-8");
+    assert_eq!(
+        tairix_util::utf8::shown(listed_name),
+        "invoice\u{fffd}fdp.exe\u{fffd}e\u{301}\u{fffd}"
+    );
+}
+
 /// A [`MockBlock`] that records the first block of every read.
 struct CountingBlock {
     inner: MockBlock,

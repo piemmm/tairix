@@ -425,7 +425,8 @@ fn a_volume_is_ext4_once_any_feature_past_ext3s_is_on() {
         }
     }
     assert_eq!(
-        [Generation::Ext2, Generation::Ext3, Generation::Ext4].map(Generation::name),
+        [Generation::Ext2, Generation::Ext3, Generation::Ext4]
+            .map(|generation| generation.format().as_str()),
         ["ext2", "ext3", "ext4"]
     );
 }

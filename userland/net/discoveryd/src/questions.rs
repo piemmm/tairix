@@ -38,6 +38,7 @@ use tairix_hash::{BuildFastHash, HashSeed, SipHash13};
 use tairix_inline::{ArrayVec, IntrusiveList, Link, LinkStore};
 use tairix_net::dns::Name;
 use tairix_net::mdns::{MAX_QUESTIONS, MAX_RECORDS, PER_RECORD_INTERVAL_NS};
+use tairix_net::IpAddr;
 
 use crate::wire::Form;
 
@@ -794,6 +795,9 @@ impl Questions {
             Some(State::Stopping { .. }) => return Verdict::Stale,
             Some(State::Live(question)) => question,
         };
+        if !answers_form(question.form, answer) {
+            return Verdict::Lie;
+        }
         if !linked || !question.asked {
             return Verdict::Stale;
         }
@@ -883,6 +887,9 @@ impl Questions {
             Some(State::Stopping { .. }) => return Verdict::Stale,
             Some(State::Live(question)) => question,
         };
+        if !answers_form(question.form, answer) {
+            return Verdict::Lie;
+        }
         let print = fingerprint(self.key, answer);
         let holds = question
             .held
@@ -1116,8 +1123,36 @@ fn held_total(
     held_on.get_mut(at).map(|(_, total)| total)
 }
 
+/// Whether `answer` is the kind a question of `form` is answered with: an
+/// honest decoder types each answer by its question's form, so any other is a
+/// lie.
+fn answers_form(form: Form, answer: &Answer<'_>) -> bool {
+    matches!(
+        (form, answer),
+        (Form::Instance, Answer::Instance { .. })
+            | (Form::Service, Answer::Service { .. })
+            | (Form::Text, Answer::Text { .. })
+            | (
+                Form::AddressV4,
+                Answer::Address {
+                    address: IpAddr::V4(_)
+                }
+            )
+            | (
+                Form::AddressV6,
+                Answer::Address {
+                    address: IpAddr::V6(_)
+                }
+            )
+            | (Form::Pointer, Answer::Pointer { .. })
+            | (Form::Type, Answer::Type { .. })
+            | (Form::Computer, Answer::Computer { .. })
+    )
+}
+
 /// The identity of one answer, keyed so a peer cannot choose two answers that
-/// collide. Names compare without ASCII case, as the cache holds them.
+/// collide. Names compare without ASCII case, as the cache holds them; a
+/// computer is one answer for as long as its key, whatever it is called.
 fn fingerprint(key: HashSeed, answer: &Answer<'_>) -> u64 {
     let mut hash = SipHash13::new(key);
     let folded = |hash: &mut SipHash13, bytes: &[u8]| {
@@ -1160,6 +1195,10 @@ fn fingerprint(key: HashSeed, answer: &Answer<'_>) -> u64 {
             hash.write_u8(6);
             hash.write_u8(service.transport.as_u8());
             folded(&mut hash, service.name);
+        }
+        Answer::Computer { key, .. } => {
+            hash.write_u8(7);
+            hash.write_u64(key);
         }
     }
     hash.finish()

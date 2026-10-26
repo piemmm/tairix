@@ -15,12 +15,15 @@
 extern crate alloc;
 
 mod name;
+mod served;
 mod susp;
 mod time;
 mod zisofs;
 
 #[cfg(test)]
 mod tests;
+
+pub use served::{Served, BIND_KEYS};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

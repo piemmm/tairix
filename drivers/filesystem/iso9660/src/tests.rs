@@ -1120,3 +1120,24 @@ fn relocated_directories_leave_the_listing_sector_held() {
         "{reads} reads for six relocated directories"
     );
 }
+
+#[test]
+fn the_served_driver_offers_every_disc_read_only() {
+    use tairix_fsserve::{ServedFormat, WritebackBudget};
+    let budget = WritebackBudget {
+        backing: 1 << 30,
+        gauge: &tairix_reclaim::Unpressured,
+    };
+    let image = || Image(master::master(&disc(Vec::new())).image);
+    let mut asked_to_write = crate::Served::open(image(), false, budget).expect("mounts");
+    assert_eq!(
+        asked_to_write.format,
+        tairix_abi::volume::FormatName::Iso9660
+    );
+    assert_eq!(
+        asked_to_write.offer().write_refusal,
+        Some(tairix_abi::driver::filesystem::WriteRefusal::FormatReadOnly)
+    );
+    let read_only = crate::Served::open(image(), true, budget).expect("mounts");
+    assert_eq!(read_only.write_refusal, None);
+}

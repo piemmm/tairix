@@ -6,6 +6,7 @@
 | NS-2 | Find the `/System` volume by superblock identity, never by partition type | planned |
 | NS-3 | The signed namespace policy on `/System` | planned |
 | NS-4 | `nsmgr`, the user-space namespace manager applying the policy | planned |
+| NS-4a | `view_bind` / `view_unbind`: projecting an attachment at a chosen directory under `/Users` or `/Storage` — an empty directory the caller owns, or any directory for a `CAP_FS_MOUNT` holder — never under `/System`; first consumer the SMB mount (`plans/SMB.md`) | planned |
 | NS-5 | Root-volume unlock and its driver in user space | planned |
 | NS-6 | Delete the compiled-in boot layout | planned |
 
@@ -292,7 +293,23 @@ the whole point.
 - A new system service bundle under `/System/Services/`, started by PID 1.
   Distinct from `volmgr`: `volmgr` is a per-node *driver* that probes one
   storage unit, `nsmgr` is the policy engine that turns the signed document
-  into `volume_attach` + the new `view_bind` calls.
+  into `volume_attach` + `view_bind` calls (NS-4a).
+
+### NS-4a — `view_bind` and `view_unbind`
+
+- `view_bind(volume, subtree, target, narrowing)` projects an attachment's
+  subtree at `target`, through `MountTable::attach_at`; `view_unbind(target)`
+  withdraws it. A projection's flags are its attachment's plus the narrowing,
+  so widening stays unrepresentable (NS-1).
+- **Where.** `target`'s first component is `Users` or `Storage`; `/System`,
+  the root, and a new top-level entry are refused to everyone (§16.1). A
+  caller without `CAP_FS_MOUNT` may bind only an attachment it owns
+  (`plans/FSSERVE.md` §6) onto an **empty directory it owns**, checked by the
+  kernel under the same resolution the bind takes — never a path string
+  judged earlier. A `CAP_FS_MOUNT` holder may bind any attachment onto any
+  directory under those two roots.
+- A projection is withdrawn with its attachment, and `VIEW_LIST` reports it
+  with its binder. Audit: `fs.view.bind.{allow,deny}`, `fs.view.unbind`.
 - Holds `CAP_FS_MOUNT` and nothing else it does not need. Every request is
   re-validated kernel-side; `nsmgr` is policy, never authority (§4).
 - Adds `userland/system/nsmgr/` to §3 and to `PLAN.md` in the stage that

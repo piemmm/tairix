@@ -239,7 +239,7 @@ mod program {
             let patience = tairix_rt::clock_get().saturating_add(CONNECT_PATIENCE_NANOS);
             let network = &self.network;
             if let Err(errno) = connect_when_reachable(
-                || tairix_rt::net::connect(socket, peer),
+                || tairix_rt::net::connect(socket, peer, None),
                 || matches!(network.wait_until(patience), Ok(Some(_))),
             ) {
                 let _ = tairix_rt::net::close(socket);

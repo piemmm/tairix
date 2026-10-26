@@ -297,6 +297,8 @@ const fn key_token(key: SortKey) -> &'static str {
         SortKey::Free => "free",
         SortKey::Filesystem => "filesystem",
         SortKey::Health => "health",
+        SortKey::Address => "address",
+        SortKey::Workgroup => "workgroup",
     }
 }
 

@@ -432,6 +432,18 @@ impl WallClockReading {
         self.state
     }
 
+    /// The instant a record may be stamped with: the reading while the clock
+    /// is set and plausible, so an unset or wildly wrong clock stamps nothing
+    /// rather than a time no reader could trust.
+    #[must_use]
+    pub const fn stamp(&self) -> Option<Time64> {
+        if self.state.is_set() && is_plausible_wall_time(self.time) {
+            Some(self.time)
+        } else {
+            None
+        }
+    }
+
     /// Encode `self` little-endian into a fixed-size buffer.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -771,7 +783,26 @@ mod tests {
         weekday_from_days, CivilTime, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS,
         NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
     };
+    use super::{WallClockReading, WallTimeState};
     use crate::Errno;
+
+    #[test]
+    fn only_a_set_and_plausible_reading_is_a_stamp() {
+        let now = Time64::from_secs(RELEASE_EPOCH_SECS + 1);
+        assert_eq!(
+            WallClockReading::new(now, WallTimeState::Trusted).stamp(),
+            Some(now)
+        );
+        assert_eq!(
+            WallClockReading::new(now, WallTimeState::Unset).stamp(),
+            None
+        );
+        let wild = Time64::from_secs(RELEASE_EPOCH_SECS + PLAUSIBLE_FUTURE_SECS + 1);
+        assert_eq!(
+            WallClockReading::new(wild, WallTimeState::Trusted).stamp(),
+            None
+        );
+    }
 
     #[test]
     fn a_monotonic_reading_is_the_instant_that_far_past_the_epoch() {

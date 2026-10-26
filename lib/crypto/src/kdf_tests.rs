@@ -6,11 +6,17 @@
 //! covers a non-ASCII passphrase and an output spanning three blocks, so
 //! the stride transposition at the end of the construction is exercised
 //! rather than assumed.
+//!
+//! The PBKDF2-HMAC-SHA1 answers are RFC 6070's and RFC 3962 Appendix B's;
+//! the counter-mode answers are RFC 8009 Appendix A's, and the multi-block
+//! and SMB 3 answers come from `cryptography`'s independent `KBKDFHMAC`.
 
 use super::{
-    bcrypt_pbkdf, bcrypt_pbkdf_scratch_len, derive_key, pbkdf2_sha256, pbkdf2_sha256_verify,
-    BcryptPbkdfError, PasswordHash, BCRYPT_PBKDF_MAX_OUTPUT_LEN, DERIVED_KEY_LEN,
+    bcrypt_pbkdf, bcrypt_pbkdf_scratch_len, derive_key, kdf_counter_sha256, kdf_counter_sha384,
+    pbkdf2_sha1, pbkdf2_sha256, pbkdf2_sha256_verify, BcryptPbkdfError, KdfLengthError,
+    BCRYPT_PBKDF_MAX_OUTPUT_LEN, DERIVED_KEY_LEN,
 };
+use crate::test_hex::hex;
 
 use core::num::NonZeroU32;
 
@@ -149,14 +155,6 @@ fn rounds(n: u32) -> NonZeroU32 {
     NonZeroU32::new(n).expect("non-zero")
 }
 
-fn unhex(text: &str) -> PasswordHash {
-    let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).expect("hex");
-    }
-    out
-}
-
 #[test]
 fn pbkdf2_matches_the_published_sha256_vectors() {
     // The de-facto standard PBKDF2-HMAC-SHA256 vectors (the SHA-256
@@ -164,15 +162,15 @@ fn pbkdf2_matches_the_published_sha256_vectors() {
     // RustCrypto and OpenSSL test suites).
     assert_eq!(
         pbkdf2_sha256(b"password", b"salt", rounds(1)),
-        unhex("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"),
+        hex("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"),
     );
     assert_eq!(
         pbkdf2_sha256(b"password", b"salt", rounds(2)),
-        unhex("ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"),
+        hex("ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"),
     );
     assert_eq!(
         pbkdf2_sha256(b"password", b"salt", rounds(4096)),
-        unhex("c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"),
+        hex("c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"),
     );
 }
 
@@ -233,5 +231,119 @@ fn distinct_secrets_yield_independent_keys() {
     assert_ne!(
         derive_key(&SECRET, b"arxfs/content"),
         derive_key(&other, b"arxfs/content")
+    );
+}
+
+#[test]
+fn pbkdf2_sha1_matches_rfc_6070() {
+    let mut out = [0u8; 20];
+    pbkdf2_sha1(b"password", b"salt", rounds(1), &mut out).expect("defined length");
+    assert_eq!(out, hex("0c60c80f961f0e71f3a9b524af6012062fe037a6"));
+    pbkdf2_sha1(b"password", b"salt", rounds(2), &mut out).expect("defined length");
+    assert_eq!(out, hex("ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957"));
+    pbkdf2_sha1(b"password", b"salt", rounds(4096), &mut out).expect("defined length");
+    assert_eq!(out, hex("4b007901b765489abead49d926f721d065a429c1"));
+}
+
+#[test]
+fn pbkdf2_sha1_spans_blocks_and_truncates_the_last() {
+    let mut out = [0u8; 25];
+    pbkdf2_sha1(
+        b"passwordPASSWORDpassword",
+        b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
+        rounds(4096),
+        &mut out,
+    )
+    .expect("defined length");
+    assert_eq!(
+        out,
+        hex("3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038")
+    );
+}
+
+#[test]
+fn pbkdf2_sha1_gives_the_rfc_3962_string_to_key_intermediates() {
+    let mut aes128 = [0u8; 16];
+    pbkdf2_sha1(
+        b"password",
+        b"ATHENA.MIT.EDUraeburn",
+        rounds(1),
+        &mut aes128,
+    )
+    .expect("defined length");
+    assert_eq!(aes128, hex("cdedb5281bb2f801565a1122b2563515"));
+    let mut aes256 = [0u8; 32];
+    pbkdf2_sha1(
+        b"password",
+        b"ATHENA.MIT.EDUraeburn",
+        rounds(1),
+        &mut aes256,
+    )
+    .expect("defined length");
+    assert_eq!(
+        aes256,
+        hex("cdedb5281bb2f801565a1122b25635150ad1f7a04bb9f3a333ecc0e2e1f70837")
+    );
+}
+
+#[test]
+fn pbkdf2_sha1_refuses_an_empty_output() {
+    assert_eq!(
+        pbkdf2_sha1(b"password", b"salt", rounds(1), &mut []),
+        Err(KdfLengthError(()))
+    );
+}
+
+#[test]
+fn the_counter_kdf_matches_rfc_8009() {
+    let base = hex::<16>("3705d96080c17728a0e800eab6e0d23c");
+    let mut kc = [0u8; 16];
+    kdf_counter_sha256(&base, &hex::<5>("0000000299"), b"", &mut kc).expect("defined length");
+    assert_eq!(kc, hex("b31a018a48f54776f403e9a396325dc3"));
+    let mut ke = [0u8; 16];
+    kdf_counter_sha256(&base, &hex::<5>("00000002aa"), b"", &mut ke).expect("defined length");
+    assert_eq!(ke, hex("9b197dd1e8c5609d6e67c3e37c62c72e"));
+
+    let base = hex::<32>("6d404d37faf79f9df0d33568d320669800eb4836472ea8a026d16b7182460c52");
+    let mut kc = [0u8; 24];
+    kdf_counter_sha384(&base, &hex::<5>("0000000299"), b"", &mut kc).expect("defined length");
+    assert_eq!(kc, hex("ef5718be86cc84963d8bbb5031e9f5c4ba41f28faf69e73d"));
+    let mut ke = [0u8; 32];
+    kdf_counter_sha384(&base, &hex::<5>("00000002aa"), b"", &mut ke).expect("defined length");
+    assert_eq!(
+        ke,
+        hex("56ab22bee63d82d7bc5227f6773f8ea7a5eb1c825160c38312980c442e5c7e49")
+    );
+}
+
+#[test]
+fn the_counter_kdf_derives_smb_3_keys_and_spans_blocks() {
+    let mut signing = [0u8; 16];
+    kdf_counter_sha256(
+        &hex::<16>("7cd451825d0450d235424e44ba6e78cc"),
+        b"SMB2AESCMAC\0",
+        b"SmbSign\0",
+        &mut signing,
+    )
+    .expect("defined length");
+    assert_eq!(signing, hex("0b7e9c5cac36c0f6ea9ab275298cedce"));
+
+    let mut long = [0u8; 48];
+    kdf_counter_sha256(&[1u8; 16], b"SMB2AESCCM\0", b"ServerIn \0", &mut long)
+        .expect("defined length");
+    assert_eq!(
+        long,
+        hex(
+            "72e56fa27958c89426b3257f11fc78f0abf4512e91f82e55488c22516ee3b266\
+             d0c94f55b05303eef465c7e17594d492"
+        )
+    );
+}
+
+#[test]
+fn the_counter_kdf_refuses_an_empty_output() {
+    assert_eq!(
+        kdf_counter_sha256(&[1u8; 16], b"label", b"", &mut []),
+        Err(KdfLengthError(()))
     );
 }

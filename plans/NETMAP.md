@@ -136,8 +136,8 @@ invariants, never status.
   campaign's pacing is a one-shot timer re-armed to the next token, never a
   spin. Nothing busy-waits.
 - **Not in this plan:** the `files.app` Network *catalogue* view and the
-  discovered-share mount into `Storage:` (that is ZEROCONF Z8/Z9, gated on the
-  §6.6 display-safety policy); service *publication* (ZEROCONF Z5); any
+  discovered-share mount into `Storage:` (that is ZEROCONF Z8/Z9); service
+  *publication* (ZEROCONF Z5); any
   firewall/NAT/forwarding control (NETWORK §9); SNMP and SSDP inventory, and
   transmitting LLDP — the map listens to the LLDP its neighbours send (NM-S5)
   but never speaks it (each would need its own stack surface and is a later
@@ -305,13 +305,15 @@ minimalism test is met by *not* minting anything.
 
 ### NM2b — advertised services and names
 
-- `discover::Discovery` is the pure engine over an injected `Directory`
-  (`Session` implements it): the type list, a browse per type, a resolve per
-  instance, a host lookup per `.local` resolve target, and a reverse lookup
-  per link-local address the map shows, each kind bounded (`MAX_TYPES`,
-  `MAX_SERVICES`, `MAX_HOSTS`, `MAX_REVERSES`), their sum asserted below
+- `tairix_discovery::walk::Discovery` is the pure engine over an injected
+  `Directory` (`Session` implements it), shared with the storage catalogue
+  (`plans/ZEROCONF.md` Z8): the map roots it at the type list and a reverse
+  lookup per link-local address it shows (`walk::segment_roots`), and it
+  follows a browse per type, a resolve per instance and a host lookup per
+  `.local` resolve target, each kind held to the map's `discover::BOUNDS`
+  (64 browses, 256 resolves, 128 hosts, 128 names), their sum asserted below
   `discovery_ipc::REQUESTS_PER_ACCOUNT`. `reconcile` diffs the open set
-  against a walk down from the type list once per collect, so retirement
+  against a walk down from the roots once per collect, so retirement
   unwinds every level at once; a `Lost` request is replaced by starting the
   new one before stopping the old, so the shared question stays asked and is
   replayed from the decoder's cache — except at the account's bound, where the
@@ -322,10 +324,11 @@ minimalism test is met by *not* minting anything.
   wait marks the pass `truncated()`. So one the service cannot replay whole is
   retried on a clock, never as fast as its losses or doorbells arrive. A refusal bears on what it refused: `PermissionDenied` and
   `OutOfRange` drop that ask while it stays wanted (`refused()` reports the
-  first, and `locked_out()` says the type list itself was refused), anything
-  else — the service's bounds, its absence — ends the pass (`stalled()`), and
-  the next pass asks again; `truncated()` is the last pass's. `services()` and
-  `names()` are the view.
+  first, and the map's `discover::locked_out` says the type list itself was
+  refused), anything else — the service's bounds, its absence — ends the pass
+  (`stalled()`), and the next pass asks again; `truncated()` is the last
+  pass's. `services()` and `names()` return what peers sent, raw, and
+  `discover::advertised` and `discover::names` draw it.
 - Nothing a peer authored reaches the model raw: labels and `TXT` strings
   through `tairix_net::dns::DisplayLabel` (printable Unicode kept, controls and
   default-ignorable characters escaped as `\DDD`), names through `WireName`,

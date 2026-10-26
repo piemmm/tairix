@@ -9,7 +9,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::listing::listed;
 use tairix_abi::driver::filesystem::{
     AclModel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeKind, NodeSecurity, SecurityAcl, SecuritySubject, Unpinned,
+    NodeKind, NodeSecurity, SecurityAcl, SecuritySubject, Unpinned, WriteRefusal,
 };
 use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
@@ -980,7 +980,7 @@ fn the_integrity_descriptor_is_open_while_a_change_waits_for_its_window() {
     );
     // Taken from the device unpublished: a volume left mid-change.
     let crashed = Udf::open(fs.into_device()).expect("mounts");
-    assert_eq!(crashed.write_refusal(), Some("not_closed"));
+    assert_eq!(crashed.write_refusal(), Some(WriteRefusal::NotClosed));
     let (mut fs, host) = hosted(formatted(512, 0x0201));
     let root = fs.root();
     let done = fs
@@ -1122,7 +1122,7 @@ fn a_disc_mastered_as_a_bridge_is_read_and_refused_writes() {
     let image = sparse::sparse(include_bytes!("../../iso9660/tests/fixtures/bridge.sparse"));
     let mut fs = Udf::open(Disk::new(2048, image)).expect("mounts");
     // genisoimage marks its UDF write-protected as well as read-only.
-    assert_eq!(fs.write_refusal(), Some("write_protected"));
+    assert_eq!(fs.write_refusal(), Some(WriteRefusal::WriteProtected));
     let root = fs.root();
     let listing = names(&mut fs, root);
     assert!(
@@ -2225,4 +2225,20 @@ fn region_queries_reuse_the_extents_a_read_mapped() {
         2,
         "the entry, once a query, and no continuation"
     );
+}
+
+#[test]
+fn the_served_driver_states_a_refusal_only_for_a_volume_it_was_asked_to_write() {
+    use tairix_fsserve::{ServedFormat, WritebackBudget};
+    let budget = WritebackBudget {
+        backing: 1 << 30,
+        gauge: &tairix_reclaim::Unpressured,
+    };
+    let writable = crate::Served::open(formatted(512, 0x0201).into_device(), false, budget)
+        .expect("opens writable");
+    assert_eq!(writable.format, tairix_abi::volume::FormatName::Udf);
+    assert_eq!(writable.write_refusal, None);
+    let read_only = crate::Served::open(formatted(512, 0x0201).into_device(), true, budget)
+        .expect("opens read-only");
+    assert_eq!(read_only.write_refusal, None);
 }

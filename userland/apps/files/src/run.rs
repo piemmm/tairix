@@ -92,6 +92,7 @@ pub mod gesture;
 pub mod icons;
 pub mod listing;
 pub mod location;
+pub mod netbrowse;
 pub mod notice;
 pub mod operation;
 pub mod operations;
@@ -119,7 +120,11 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::time::Duration64;
 
+    use crate::netbrowse::{
+        self, Browse, Need, NetworkAnswer, NetworkAsk, NetworkLanded, NetworkReading,
+    };
     use crate::route;
+    use tairix_abi::discovery_ipc::DOORBELL_LEN;
     use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode, RefreshRate};
     use tairix_abi::fs::{
         FileId, FileKind, OpenFlags, FS_MODE_MASK, FS_NAME_MAX, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE,
@@ -135,8 +140,8 @@ mod program {
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, RenameFlags,
-        SpawnAttach, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, APPINFO_WIRE_MAX, STDIN,
-        STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+        SpawnAttach, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, APPINFO_WIRE_MAX,
+        ORIGIN_WIRE_LEN, STDIN, STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::document;
@@ -156,23 +161,26 @@ mod program {
     use tairix_browse::{
         applications_for, association_from_manifest, blank_documents, browser_floor,
         context_choice_from_item, context_menu, drop_operation, empty_trash_plan, fitted_sizing,
-        manager_opening, paste_strategy, plan_paste, quick_applications, trash_dest_path,
-        trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation, AppAssociation,
-        Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard, ClipboardOp,
-        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, DeleteDisposition,
-        DeletePlan, DeleteTarget, DirectorySource, Drive, DriveChange, DriveSample, Entry,
-        EntryKind, HiddenEndings, Listed, Listing, ListingDesk, ListingJob, ManagerChrome,
-        ManagerTool, ManagerToolModel, Marquee, NewEntry, OpenWithCandidate, OpenWithChooser,
-        OwnerChange, PasteItem, PasteStrategy, PendingEntry, PendingRename, Places, Probe, Probes,
-        ProgressModel, ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn,
-        SortMode, Subject, Survey, SurveyStep, Tally, Took, ToolbarBand, ToolbarCommand,
-        TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate, WatchedDirectory, Watches,
-        MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT,
-        WIN_WIDTH,
+        manager_opening, network_context_menu, paste_strategy, plan_paste, quick_applications,
+        trash_dest_path, trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation,
+        AppAssociation, Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard,
+        ClipboardOp, ContextChoice, ContextCommand, ContextMenuModel, ContextQuick,
+        DeleteDisposition, DeletePlan, DeleteTarget, DirectorySource, Drive, DriveChange,
+        DriveSample, Entry, EntryKind, HiddenEndings, Listed, Listing, ListingDesk, ListingJob,
+        Location, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NetworkItem, NewEntry,
+        OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
+        PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties, RenameError,
+        RowList, RtLinkReader, ScrollColumn, SortMode, Subject, Survey, SurveyStep, Tally, Took,
+        ToolbarBand, ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate,
+        WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_WINDOW_GROUND,
+        WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::text::{Keystroke, TextAction, TextField};
     use tairix_controls::value::Progress;
+    use tairix_discovery::catalogue::Catalogue;
+    use tairix_discovery::walk::OpenSession;
+    use tairix_discovery::{DiscoveryError, RtTransport, Session};
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
@@ -183,6 +191,7 @@ mod program {
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
+    use tairix_rt::PrivatePort;
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
@@ -259,9 +268,17 @@ mod program {
     /// carried out has an answer for the loop to adopt.
     const SETTINGS_TOKEN: u64 = MOUNTS_TOKEN + 1;
 
+    /// The wait-set token the discovery service rings the network session's
+    /// doorbell under: what the catalogue holds moved.
+    const DOORBELL_TOKEN: u64 = SETTINGS_TOKEN + 1;
+
+    /// Rings the doorbell holds before the loop drains it; the service rings
+    /// once per change it queues, so a few say all a drain needs to know.
+    const DOORBELL_CAPACITY: usize = 4;
+
     /// Each browser window's directory watch reports under this plus the
     /// number its listing consumer was minted as, so a wake names its window.
-    const WATCH_TOKEN_BASE: u64 = SETTINGS_TOKEN + 1;
+    const WATCH_TOKEN_BASE: u64 = DOORBELL_TOKEN + 1;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -475,14 +492,16 @@ mod program {
         /// Settings that changed while a gesture held the listing, taken once
         /// it lets go.
         settings_owed: Option<Preferences>,
+        /// The network answer this window last showed.
+        network_seen: u64,
     }
 
     /// What a browser window's height was last fitted to: the window never
     /// stands taller than its listing, so no blank band opens beneath it.
     struct Fit {
-        /// The folder it was fitted to; moving to another fits it afresh, as a
-        /// new window there would open.
-        location: Vec<String>,
+        /// The location it was fitted to; moving to another fits it afresh, as
+        /// a new window there would open.
+        location: Location,
         /// The range the window manager was last told.
         sizing: WindowSizing,
         /// The window's narrowest client at the desktop's scale and theme,
@@ -800,7 +819,7 @@ mod program {
 
         /// Whether this is a listing of `location`, or one already on its way
         /// there.
-        fn shows(&self, location: &[String]) -> bool {
+        fn shows(&self, location: &Location) -> bool {
             match &self.kind {
                 WindowKind::Browser(win) => lists(&win.browser, location),
                 WindowKind::Properties(_) | WindowKind::Progress(_) | WindowKind::Settings(_) => {
@@ -814,7 +833,7 @@ mod program {
             let WindowKind::Browser(win) = &self.kind else {
                 return false;
             };
-            win.browser.components() == folder
+            win.browser.folder() == Some(folder)
                 && win.browser.entries().iter().any(|entry| {
                     entry.name() == name && entry.kind().resolved() == Some(EntryKind::File)
                 })
@@ -822,8 +841,8 @@ mod program {
     }
 
     /// Whether `browser` lists `location`, or is on its way there.
-    fn lists(browser: &Browser<DeferredSource>, location: &[String]) -> bool {
-        browser.components() == location || browser.listing_target() == Some(location)
+    fn lists(browser: &Browser<DeferredSource>, location: &Location) -> bool {
+        browser.is_at(location) || browser.listing_target() == Some(location)
     }
 
     impl BrowserWindow {
@@ -852,7 +871,9 @@ mod program {
         /// Whether a confirmation to empty `trash` may open: the window still
         /// shows it, with nothing else open over it.
         fn awaits_empty_confirmation_of(&self, trash: &[String]) -> bool {
-            empty_confirmation_may_open(trash, self.browser.components(), self.is_occupied())
+            self.browser
+                .folder()
+                .is_some_and(|shown| empty_confirmation_may_open(trash, shown, self.is_occupied()))
         }
 
         /// Whether anything is open over the listing that a confirmation
@@ -921,6 +942,83 @@ mod program {
 
         /// A listing this window asked for was refused: say so in the window,
         /// which stays where it was. Answers whether the window changed.
+        /// Show `items`, the catalogue's latest, if this window shows the
+        /// network or is on its way there: a navigation it waited on lands and
+        /// owes the whole window, and an update repaints only the slots it
+        /// altered.
+        fn adopt_network(
+            &mut self,
+            items: &[NetworkItem],
+            reads: &Reads,
+            canvas: Canvas<'_>,
+            damage: &mut Region,
+        ) -> Repaint {
+            let arriving = self.browser.awaits_network();
+            let viewport = canvas.viewport(&self.places);
+            let (scale, theme, toolbar) = (canvas.scale, canvas.theme(), canvas.chrome.toolbar);
+            let before = tairix_browse::render::shown_listing(
+                &self.browser,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            );
+            if !self.browser.show_network(items.to_vec()) {
+                return Repaint::Nothing;
+            }
+            if arriving {
+                // The folder left is followed no longer, and no click armed on
+                // its entries names anything shown now.
+                drop(reads.unwatch(self.listing));
+                self.overlays.double_click.reset();
+                self.overlays.rename_arm = None;
+                return Repaint::Whole;
+            }
+            Repaint::reported_if(tairix_browse::render::listing_damage(
+                &before,
+                &self.browser,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+                damage,
+            ))
+        }
+
+        /// Whether this window is to show answer `generation`: it wants the
+        /// network, has not shown that answer or waits on one, and nothing
+        /// holds its listing.
+        fn owes_network(&self, generation: u64) -> bool {
+            self.browser.wants_network()
+                && (self.network_seen != generation || self.browser.awaits_network())
+                && !self.listing_is_held()
+        }
+
+        /// The catalogue can no longer be read: a navigation to the network
+        /// is refused where it started, and a network shown says it stopped,
+        /// each stating `err`.
+        fn network_failed(&mut self, err: DiscoveryError) -> Repaint {
+            if !self.browser.wants_network() {
+                return Repaint::Nothing;
+            }
+            let shown = self.browser.is_network();
+            let changed = self.browser.stop_network();
+            let title = if shown {
+                netbrowse::STOPPED
+            } else {
+                netbrowse::NOT_SHOWN
+            };
+            report_error(&alloc::format!("{title}: {err}"));
+            self.overlays
+                .notices
+                .refuse(NoticeSource::Network, title, netbrowse::refusal(err));
+            if changed {
+                Repaint::Whole
+            } else {
+                Repaint::Nothing
+            }
+        }
+
         fn listing_refused(&mut self, err: tairix_browse::BrowseError) -> bool {
             report_error(&alloc::format!("listing refused ({err})"));
             self.overlays.notices.refuse(
@@ -1014,10 +1112,7 @@ mod program {
                 return Repaint::Nothing;
             };
             self.overlays.rename_arm = None;
-            let settled = self
-                .browser
-                .listing_target()
-                .is_none_or(|target| target == self.browser.components());
+            let settled = !self.browser.listing_elsewhere();
             let free = !self.listing_is_held()
                 && self.overlays.delete.is_none()
                 && !self.overlays.notices.is_showing();
@@ -1078,7 +1173,7 @@ mod program {
                 return false;
             }
             let arrived = self.browser.focus_pending().is_none()
-                && self.browser.components() == dir.as_slice()
+                && self.browser.folder() == Some(dir.as_slice())
                 && self.browser.chosen_name() == Some(name.as_str())
                 && !self.listing_is_held();
             self.overlays.rename_on_arrival = None;
@@ -1106,11 +1201,7 @@ mod program {
             canvas: Canvas<'_>,
             damage: &mut Region,
         ) -> Repaint {
-            let elsewhere = self
-                .browser
-                .listing_target()
-                .is_some_and(|target| target != self.browser.components());
-            if self.listing_is_held() || elsewhere {
+            if self.listing_is_held() || self.browser.listing_elsewhere() {
                 return Repaint::Nothing;
             }
             match reads.take_watch_update(self.listing) {
@@ -1153,7 +1244,10 @@ mod program {
         ) -> Repaint {
             let viewport = canvas.viewport(&self.places);
             let (scale, theme, toolbar) = (canvas.scale, canvas.theme(), canvas.chrome.toolbar);
-            let cued = reads.invalidate_probes(self.browser.components(), &changes);
+            let cued = self
+                .browser
+                .folder()
+                .is_some_and(|folder| reads.invalidate_probes(folder, &changes));
             let tools = manager_tool_model(&self.browser);
             let before = tairix_browse::render::shown_listing(
                 &self.browser,
@@ -1256,6 +1350,157 @@ mod program {
     fn owe(win: &mut OpenWindow, repaint: Repaint, damage: &Region) {
         let mode = *win.pane.mode();
         win.owed.owe(&mode, repaint, damage);
+    }
+
+    /// Bring the network browse up to date: take what the reader answered
+    /// into every window that wants the network, ask the reader for what the
+    /// windows need now, and show a window that arrived meanwhile the answer
+    /// already held. Answers whether anything moved.
+    fn step_network(
+        (windows, opening): (&mut [OpenWindow], &Opening),
+        browse: &mut Browse,
+        reads: &Reads,
+        rung: &Cell<bool>,
+        notices: &mut Notices,
+        look: (&Theme, Scale),
+    ) -> bool {
+        let now = tairix_rt::clock_get();
+        let mut moved = false;
+        if let Some(answer) = reads.take_network() {
+            let landed = browse.landed(answer, now);
+            moved |= land_network(windows, opening, &landed, (reads, notices));
+        }
+        let mut need = Need {
+            rung: rung.replace(false),
+            ..Need::default()
+        };
+        let opening_browsers = opening.borrow();
+        let browsers = windows
+            .iter()
+            .filter_map(|win| match &win.kind {
+                WindowKind::Browser(state) => Some(&state.browser),
+                _ => None,
+            })
+            .chain(opening_browsers.iter().map(|asked| &asked.browser));
+        for browser in browsers {
+            need.wanted |= browser.wants_network();
+            need.waiting |= browser.awaits_network();
+        }
+        drop(opening_browsers);
+        if let Some(ask) = browse.next(need, now) {
+            if let Some(answer) = reads.want_network(ask) {
+                let landed = browse.landed(answer, now);
+                moved |= land_network(windows, opening, &landed, (reads, notices));
+            }
+        }
+        if let Some(latest) = browse.latest() {
+            moved |= land_items(windows, opening, latest, reads, look);
+        }
+        moved
+    }
+
+    /// Take a failed answer into every window that wants the network; a
+    /// network window still opening is given up, stated once. Items are
+    /// shown from what the browse holds ([`land_items`]).
+    fn land_network(
+        windows: &mut [OpenWindow],
+        opening: &Opening,
+        landed: &NetworkLanded,
+        (reads, notices): (&Reads, &mut Notices),
+    ) -> bool {
+        match landed {
+            NetworkLanded::Failed(err) => {
+                let mut moved = false;
+                for win in windows.iter_mut() {
+                    let repaint = win
+                        .browser()
+                        .map_or(Repaint::Nothing, |state| state.network_failed(*err));
+                    if repaint != Repaint::Nothing {
+                        moved = true;
+                        owe(win, repaint, &Region::new());
+                    }
+                }
+                let mut opening = opening.borrow_mut();
+                let mut given_up = false;
+                let mut at = 0;
+                while at < opening.len() {
+                    if opening[at].browser.wants_network() {
+                        reads.forget_listing(opening.remove(at).listing);
+                        given_up = true;
+                    } else {
+                        at += 1;
+                    }
+                }
+                if given_up {
+                    report_error(&alloc::format!("{}: {err}", netbrowse::NOT_SHOWN));
+                    notices.refuse(
+                        NoticeSource::Network,
+                        netbrowse::NOT_SHOWN,
+                        netbrowse::refusal(*err),
+                    );
+                }
+                moved || given_up
+            }
+            NetworkLanded::Items | NetworkLanded::Nothing => false,
+        }
+    }
+
+    /// Show answer `generation`, `items`, in every window that wants the
+    /// network and has not shown it, or waits on it, and in every network
+    /// window still opening, which then opens. A window whose listing is held
+    /// shows it once let go.
+    fn land_items(
+        windows: &mut [OpenWindow],
+        opening: &Opening,
+        (generation, items): (u64, &[NetworkItem]),
+        reads: &Reads,
+        (theme, scale): (&Theme, Scale),
+    ) -> bool {
+        let mut moved = false;
+        for win in windows.iter_mut() {
+            let mode = *win.pane.mode();
+            let mut damage = Region::new();
+            let repaint = match win.browser() {
+                Some(state) if state.owes_network(generation) => {
+                    let canvas = Canvas {
+                        theme,
+                        mode: &mode,
+                        scale,
+                        chrome: state.chrome,
+                    };
+                    let repaint = state.adopt_network(items, reads, canvas, &mut damage);
+                    state.network_seen = generation;
+                    repaint
+                }
+                _ => continue,
+            };
+            if repaint != Repaint::Nothing {
+                moved = true;
+                owe(win, repaint, &damage);
+            }
+        }
+        for asked in opening.borrow_mut().iter_mut() {
+            if asked.browser.awaits_network() {
+                moved |= asked.browser.show_network(items.to_vec());
+            }
+        }
+        moved
+    }
+
+    /// The doorbell the discovery service rings the network session on, a
+    /// member of the event wait-set, or why none could be had.
+    fn network_doorbell(set: u64) -> Result<PrivatePort, Errno> {
+        let port = PrivatePort::bind(DOORBELL_LEN, DOORBELL_CAPACITY)?;
+        match tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Port,
+            port.id(),
+            DOORBELL_TOKEN,
+        ) {
+            0 => Ok(port),
+            refused => Err(Errno::from_syscall(refused)),
+        }
     }
 
     /// Paint what `win` owes and present it.
@@ -1539,7 +1784,11 @@ mod program {
             ladder,
             ..
         } = landed;
-        let shows = ladder.shows_in(browser.components()).map(String::from);
+        let shows = ladder
+            .as_ref()
+            .zip(browser.folder())
+            .and_then(|(ladder, folder)| ladder.shows_in(folder))
+            .map(String::from);
         if let Some(name) = &shows {
             browser.follow(name);
         }
@@ -1564,9 +1813,9 @@ mod program {
         };
         // Asked before the first present, so no frame is shown unfrosted.
         apply_backdrop(client, pane.id(), grounds);
-        let location = browser.components().to_vec();
+        let location = browser.location();
         let mut overlays = initial_overlays();
-        if let Some(reason) = ladder.moved() {
+        if let Some(reason) = ladder.as_ref().and_then(Ladder::moved) {
             overlays
                 .notices
                 .refuse(NoticeSource::Listing, OPENED_ELSEWHERE, &reason);
@@ -1596,6 +1845,7 @@ mod program {
                 reveal_chosen: shows.is_some(),
                 confirm_trash: settings.confirm_trash,
                 settings_owed: None,
+                network_seen: 0,
             })),
         };
         if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
@@ -1662,9 +1912,9 @@ mod program {
             grounds.window,
         );
         let sizing = fitted_sizing(floor, fitted);
-        let moved = state.fit.location.as_slice() != state.browser.components();
+        let moved = !state.browser.is_at(&state.fit.location);
         if moved {
-            state.fit.location = state.browser.components().to_vec();
+            state.fit.location = state.browser.location();
         }
         let mut resized = false;
         if moved && state.fit.restored {
@@ -1934,10 +2184,10 @@ mod program {
     ) -> bool {
         match state.browser.finish_entry(pending, made) {
             Ok(true) if state.browser.focus_pending().is_some() => {
-                state.overlays.rename_on_arrival = Some((
-                    state.browser.components().to_vec(),
-                    String::from(pending.name()),
-                ));
+                state.overlays.rename_on_arrival = state
+                    .browser
+                    .folder()
+                    .map(|folder| (folder.to_vec(), String::from(pending.name())));
                 false
             }
             Ok(true) => {
@@ -2546,6 +2796,10 @@ mod program {
             }
             WindowEvent::AppBarMenu { item } if appbar::is_settings(item) => {
                 open_settings(windows, client, surround, event_endpoint, kept);
+                BarRouted::Handled
+            }
+            WindowEvent::AppBarMenu { item } if appbar::is_network(item) => {
+                open_network(windows, opening, client, reads, &settings);
                 BarRouted::Handled
             }
             // A component's rows are its places: open a window at the one
@@ -3522,7 +3776,8 @@ mod program {
     ) {
         let ladder = ladder_for(location, settings);
         if let Some(wanted) = ladder.place() {
-            if let Some(open) = windows.iter().find(|win| win.shows(wanted)) {
+            let at = Location::Folder(wanted.to_vec());
+            if let Some(open) = windows.iter().find(|win| win.shows(&at)) {
                 if raise_showing(client, open.pane.id()) {
                     return;
                 }
@@ -3531,7 +3786,7 @@ mod program {
             } else if opening
                 .borrow()
                 .iter()
-                .any(|asked| lists(&asked.browser, wanted))
+                .any(|asked| lists(&asked.browser, &at))
             {
                 // Asked for already: it opens once its listing lands.
                 return;
@@ -3546,6 +3801,43 @@ mod program {
         if let Some(asked) = open_browser(reads, ladder, settings) {
             opening.borrow_mut().push(asked);
         }
+    }
+
+    /// Show the network: bring forward the window already showing it, else
+    /// open one, which lands with the catalogue's first answer. A refused
+    /// raise still shows it, in a new window.
+    fn open_network(
+        windows: &mut [OpenWindow],
+        opening: &Opening,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &alloc::sync::Arc<Reads>,
+        settings: &Preferences,
+    ) {
+        if let Some(open) = windows.iter().find(|win| win.shows(&Location::Network)) {
+            if raise_showing(client, open.pane.id()) {
+                return;
+            }
+        } else if opening
+            .borrow()
+            .iter()
+            .any(|asked| lists(&asked.browser, &Location::Network))
+        {
+            return;
+        }
+        let listing = reads.listing_client();
+        let mut browser =
+            Browser::open_network(DeferredSource(alloc::sync::Arc::clone(reads), listing));
+        browser.set_view_mode(settings.view);
+        browser.set_sort_mode(settings.sort);
+        if let Err(err) = browser.set_presentation(settings.presentation) {
+            report_error(&alloc::format!("listing refused ({err})"));
+        }
+        opening.borrow_mut().push(PendingWindow {
+            browser,
+            listing,
+            ladder: None,
+            vital: false,
+        });
     }
 
     /// The places a window asked for `location` — or for none — may open at,
@@ -4195,6 +4487,23 @@ mod program {
         wake: tairix_rt::sync::WorkerWake,
         /// The wait-set the loop parks in, which each window's watch joins.
         set: u64,
+        /// The network session and its catalogue, held by whichever thread
+        /// carries out a network job. A lock of its own, so the calls to the
+        /// discovery service hold no other desk up.
+        network: tairix_rt::sync::Mutex<Option<NetworkSession>>,
+        /// The port the discovery service rings the session on, or why none
+        /// could be bound.
+        doorbell: Result<u64, Errno>,
+        /// The session open now, for the loop's drain of the doorbell to tell
+        /// the service's rings from anything else posted there.
+        open_session: OpenSession,
+    }
+
+    /// The session the network catalogue is browsed through, and the
+    /// catalogue it keeps.
+    struct NetworkSession {
+        session: Session<RtTransport>,
+        catalogue: Catalogue,
     }
 
     /// The desks the worker serves, in one lock: they are read by the same
@@ -4225,6 +4534,8 @@ mod program {
         /// The user's home components and the mounted volumes the places rail
         /// is built from, re-read when the kernel says the mount table moved.
         places: tairix_util::defer::JobDesk<(), (Vec<String>, Vec<Volume>)>,
+        /// The network catalogue a window shows or is on its way to.
+        network: tairix_util::defer::JobDesk<NetworkAsk, NetworkAnswer>,
         /// Set once the app is tearing down, so a parked worker leaves instead
         /// of looking for work. Its own flag rather than one desk's, so the
         /// worker's exit test does not depend on which desk happens to carry
@@ -4424,12 +4735,14 @@ mod program {
         Bundles,
         /// Re-read the home components and the mounted volumes.
         Places,
+        /// Collect from, or close, the network session.
+        Network(NetworkAsk),
     }
 
     impl Reads {
         /// A desk over `wake`, with no worker yet, whose windows' watches
-        /// report in `set`.
-        fn new(wake: tairix_rt::sync::WorkerWake, set: u64) -> Self {
+        /// report in `set` and whose network session rings `doorbell`.
+        fn new(wake: tairix_rt::sync::WorkerWake, set: u64, doorbell: Result<u64, Errno>) -> Self {
             Self {
                 work: tairix_rt::sync::Mutex::new(Work {
                     // A queue refused its room refuses every open, stating why.
@@ -4447,6 +4760,7 @@ mod program {
                     drives: DriveReads::new(),
                     bundles: tairix_util::defer::JobDesk::new(),
                     places: tairix_util::defer::JobDesk::new(),
+                    network: tairix_util::defer::JobDesk::new(),
                     stopping: false,
                     alone: false,
                     scratch: Vec::new(),
@@ -4456,6 +4770,9 @@ mod program {
                 operation_signal: tairix_rt::sync::Condvar::new(),
                 wake,
                 set,
+                network: tairix_rt::sync::Mutex::new(None),
+                doorbell,
+                open_session: OpenSession::default(),
             }
         }
 
@@ -4548,6 +4865,10 @@ mod program {
                         let found = places_source();
                         self.work.lock().places.deliver(found)
                     }
+                    Read::Network(ask) => {
+                        let answer = self.browse_network(ask);
+                        self.work.lock().network.deliver(answer)
+                    }
                 };
                 if owed {
                     self.wake.nudge();
@@ -4567,6 +4888,11 @@ mod program {
             }
             if let Some(job) = work.listings.next_job() {
                 return Some(Read::List(job));
+            }
+            // A window showing the network, or on its way there, waits on
+            // the catalogue as a folder's on its listing.
+            if let Some(ask) = work.network.next_job() {
+                return Some(Read::Network(ask));
             }
             // A folder on screen that changed is next: what the user sees is
             // wrong until it lands.
@@ -5024,6 +5350,99 @@ mod program {
             self.work.lock().places.collect()
         }
 
+        /// Ask for `ask` of the network session, answering it directly when
+        /// there is no worker to carry it out elsewhere: each is a call to the
+        /// discovery service, which the loop that owes a frame must not wait
+        /// on.
+        fn want_network(&self, ask: NetworkAsk) -> Option<NetworkAnswer> {
+            let submitted = {
+                let mut work = self.work.lock();
+                if work.stopping {
+                    drop(work);
+                    return Some(self.browse_network(ask));
+                }
+                work.network.submit(ask)
+            };
+            if submitted.wake {
+                self.signal.notify_one();
+            }
+            None
+        }
+
+        /// Take a landed answer from the network session, if one has.
+        fn take_network(&self) -> Option<NetworkAnswer> {
+            self.work.lock().network.collect()
+        }
+
+        /// Carry `ask` out on the network session.
+        fn browse_network(&self, ask: NetworkAsk) -> NetworkAnswer {
+            let mut held = self.network.lock();
+            match ask {
+                NetworkAsk::Close => {
+                    if let Some(open) = held.take() {
+                        self.open_session.close();
+                        // The service ends a session whose owner has gone, so
+                        // a refused close leaves nothing here to act on.
+                        let _ = open.session.close();
+                    }
+                    NetworkAnswer::Closed
+                }
+                NetworkAsk::Collect => NetworkAnswer::Read(self.collect_network(&mut held)),
+            }
+        }
+
+        /// Take what the service holds for the session — opening one if none
+        /// is held, and once more if the one held was lost — and bring the
+        /// catalogue's questions in line with it.
+        fn collect_network(
+            &self,
+            held: &mut Option<NetworkSession>,
+        ) -> Result<NetworkReading, DiscoveryError> {
+            let doorbell = self.doorbell.map_err(DiscoveryError::Transport)?;
+            let lost = match held.as_mut() {
+                Some(open) => drain_session(open).is_err(),
+                None => true,
+            };
+            if lost {
+                *held = None;
+                self.open_session.close();
+                let session = Session::open(RtTransport, doorbell)?;
+                self.open_session.open(session.id());
+                let mut opened = NetworkSession {
+                    session,
+                    catalogue: Catalogue::new(netbrowse::PACE_NS),
+                };
+                drain_session(&mut opened)?;
+                *held = Some(opened);
+            }
+            let open = held.as_mut().ok_or(DiscoveryError::Unavailable)?;
+            open.catalogue
+                .reconcile(&mut open.session, tairix_rt::clock_get());
+            let walk = open.catalogue.walk();
+            if let Some(refused) = walk.refused() {
+                return Err(*refused);
+            }
+            Ok(NetworkReading {
+                unsettled: walk.stalled().is_some() || walk.deferred(),
+                items: tairix_browse::network::items(open.catalogue.listing()),
+            })
+        }
+
+        /// Drain the doorbell, answering whether the service rang the session
+        /// open now: anything else posted there is dropped unread.
+        fn drain_doorbell(&self) -> bool {
+            let Ok(doorbell) = self.doorbell else {
+                return false;
+            };
+            let mut frame = [0u8; DOORBELL_LEN];
+            let mut sender = [0u8; ORIGIN_WIRE_LEN];
+            let mut rung = false;
+            while let Ok(len) = tairix_rt::ipc_recv(doorbell, &mut frame, &mut sender) {
+                rung |= self.open_session.rung_by(&sender, &frame[..len]);
+            }
+            rung
+        }
+
         /// Ask both workers to leave and wake them.
         fn stop(&self) {
             let mut work = self.work.lock();
@@ -5133,7 +5552,16 @@ mod program {
             self.drives.stop();
             self.bundles.stop();
             self.places.stop();
+            self.network.stop();
         }
+    }
+
+    /// Take everything the service holds for `open`'s session into its
+    /// catalogue.
+    fn drain_session(open: &mut NetworkSession) -> Result<(), DiscoveryError> {
+        let NetworkSession { session, catalogue } = open;
+        while session.collect(&mut |entry| catalogue.apply(entry))? {}
+        Ok(())
     }
 
     /// Stops the workers on every way out, so neither is left on a disk for
@@ -5511,6 +5939,9 @@ mod program {
         /// band's step, a clicked name opening — and the one deadline the park
         /// keeps for the loop.
         due: &'a Cell<Option<u64>>,
+        /// Set when the discovery service rang the network session, cleared
+        /// when the loop asks for what moved.
+        network_rung: &'a Cell<bool>,
     }
 
     /// Places read on the loop's own thread because no worker was there to
@@ -5592,6 +6023,14 @@ mod program {
                 Wake::DesktopChanged => {
                     self.desktop_moved.set(true);
                     return Ok(Parked::Interrupted);
+                }
+                // What the network catalogue holds moved; what to read is
+                // the loop's to ask the reader.
+                Wake::App(DOORBELL_TOKEN) => {
+                    if self.reads.drain_doorbell() {
+                        self.network_rung.set(true);
+                        return Ok(Parked::Interrupted);
+                    }
                 }
                 // A folder a window shows changed. The drain is the reader's,
                 // and its answer arrives as a reader wake for the loop to
@@ -7439,10 +7878,28 @@ mod program {
                     .open_file(acts.menu.client, &path);
                 false
             }
+            // Mounting is what opening an endpoint means, and this system
+            // has no client for its shares: the refusal is the answer.
+            Ok(Activation::MountEndpoint(endpoint)) => {
+                report_error(&alloc::format!(
+                    "{} could not be opened: {}",
+                    endpoint.name(),
+                    netbrowse::MOUNT_UNAVAILABLE
+                ));
+                overlays.notices.refuse(
+                    NoticeSource::Open,
+                    &notice::not_opened(endpoint.name()),
+                    netbrowse::MOUNT_UNAVAILABLE,
+                );
+                false
+            }
             // Nothing was chosen, so nothing was refused.
             Err(tairix_browse::BrowseError::NoSuchEntry) => false,
             Err(err) => {
-                let name = browser.chosen_name().unwrap_or_default();
+                let name = browser
+                    .chosen_name()
+                    .or_else(|| browser.chosen_network_item().map(NetworkItem::label))
+                    .unwrap_or_default();
                 let reason = command::listing_refusal(err);
                 report_error(&alloc::format!(
                     "{} could not be opened: {reason}",
@@ -8162,7 +8619,12 @@ mod program {
             return (false, false);
         };
         let op = clip.op();
-        match start_paste(&clip, browser.components(), overlays) {
+        let Some(folder) = browser.folder() else {
+            overlays.clipboard = Some(clip);
+            refuse_paste(overlays, op, NOTHING_PASTES_ON_THE_NETWORK);
+            return (true, false);
+        };
+        match start_paste(&clip, folder, overlays) {
             Ok(()) if op == ClipboardOp::Cut => {}
             Ok(()) => overlays.clipboard = Some(clip),
             Err(reason) => {
@@ -8172,6 +8634,10 @@ mod program {
         }
         (true, false)
     }
+
+    /// Why nothing is pasted while the network is shown.
+    const NOTHING_PASTES_ON_THE_NETWORK: &str =
+        "the network holds no files to paste among; open a folder or a mounted share";
 
     /// State why a paste or a drop moved nothing, in the window and on
     /// `stderr` for the record.
@@ -8682,15 +9148,20 @@ mod program {
             .unwrap_or_default();
         let quick = quick_applications(&ranked);
         let documents = blank_documents(held.as_deref().unwrap_or_default());
-        let rows = match context_menu(
-            model,
-            MANAGER_MENU_TITLE,
-            ContextQuick {
-                chosen: browser.chosen_entry(),
-                candidates: &quick,
-                documents: &documents,
-            },
-        ) {
+        let built = if browser.is_network() {
+            network_context_menu(browser, MANAGER_MENU_TITLE)
+        } else {
+            context_menu(
+                model,
+                MANAGER_MENU_TITLE,
+                ContextQuick {
+                    chosen: browser.chosen_entry(),
+                    candidates: &quick,
+                    documents: &documents,
+                },
+            )
+        };
+        let rows = match built {
             Ok(rows) => rows,
             Err(err) => {
                 report_error(&alloc::format!("menu model refused ({err}); not shown"));
@@ -9399,7 +9870,7 @@ mod program {
     /// `HOME`, which the engine does not know (`plans/NEW-FILEMANAGER.md`
     /// `FM11`).
     fn manager_tool_model<S: DirectorySource>(browser: &Browser<S>) -> ManagerToolModel {
-        ManagerToolModel::new(current_is_populated_trash(browser))
+        ManagerToolModel::for_browser(browser, current_is_populated_trash(browser))
     }
 
     /// Whether the current directory is the user's Trash *and* it holds at
@@ -9416,7 +9887,7 @@ mod program {
         if home.is_empty() {
             return false;
         }
-        browser.components() == trash_dir(&home).as_slice()
+        browser.folder() == Some(trash_dir(&home).as_slice())
     }
 
     /// Show the user's Trash (`plans/NEW-FILEMANAGER.md` `FM11`): the reader
@@ -9460,7 +9931,7 @@ mod program {
             return (false, false);
         };
         let trash = trash_dir(&home);
-        if browser.components() != trash.as_slice() {
+        if browser.folder() != Some(trash.as_slice()) {
             return (false, false);
         }
         let repeats = |then: &BrowserWrite| matches!(then, BrowserWrite::EmptyTrash(_));
@@ -9569,12 +10040,12 @@ mod program {
         browser: &Browser<S>,
         request: &mut Option<PropertiesRequest>,
     ) -> (bool, bool) {
-        let Some(entry) = browser.chosen_entry() else {
+        let (Some(entry), Some(folder)) = (browser.chosen_entry(), browser.folder()) else {
             return (false, false);
         };
         let kind = entry.kind();
         let target = entry.target().map(String::from);
-        let art = tairix_browse::icon_for_entry(entry, browser.components());
+        let art = tairix_browse::icon_for_entry(entry, folder);
         let drive = entry.drive().is_some();
         let Some(Ok(path)) = browser.chosen_target_path() else {
             report_error("that item's location could not be resolved; no window opened");
@@ -10842,8 +11313,9 @@ mod program {
     struct PendingWindow {
         browser: Browser<DeferredSource>,
         listing: FilesClient,
-        /// Where it may open, the place being tried first.
-        ladder: Ladder,
+        /// Where it may open, the place being tried first; none for the
+        /// network, which has no place to fall back to.
+        ladder: Option<Ladder>,
         /// Whether the process ends when it is given up: the window an
         /// ordinary file manager was started to show.
         vital: bool,
@@ -10868,7 +11340,7 @@ mod program {
         Some(PendingWindow {
             browser,
             listing,
-            ladder,
+            ladder: Some(ladder),
             vital: false,
         })
     }
@@ -10945,9 +11417,11 @@ mod program {
         while at < opening.len() {
             let asked = &mut opening[at];
             if let Err(err) = asked.browser.resume() {
-                let next = step_down(&mut asked.ladder, err)
-                    .then(|| browse_ladder(reads, asked.listing, &mut asked.ladder, settings))
-                    .flatten();
+                let next = asked.ladder.as_mut().and_then(|ladder| {
+                    step_down(ladder, err)
+                        .then(|| browse_ladder(reads, asked.listing, ladder, settings))
+                        .flatten()
+                });
                 if let Some(browser) = next {
                     // Looked at again at once: a place read on this thread has
                     // already answered.
@@ -10969,13 +11443,19 @@ mod program {
             let (listing, vital) = (landed.listing, landed.vital);
             // A window already showing where this one landed — reached by a
             // fallback, or since — is raised in its place, saying why.
-            let shown_at = landed.browser.components();
-            if let Some(win) = windows.iter_mut().find(|win| win.shows(shown_at)) {
-                if let Some(name) = landed.ladder.shows_in(shown_at) {
+            let shown_at = landed.browser.location();
+            if let Some(win) = windows.iter_mut().find(|win| win.shows(&shown_at)) {
+                let shows = landed
+                    .ladder
+                    .as_ref()
+                    .zip(landed.browser.folder())
+                    .and_then(|(ladder, folder)| ladder.shows_in(folder));
+                if let Some(name) = shows {
                     reveal_entry(win, name);
                 }
                 if raise_showing(client, win.pane.id()) {
-                    if let (Some(reason), Some(state)) = (landed.ladder.moved(), win.browser()) {
+                    let moved = landed.ladder.as_ref().and_then(Ladder::moved);
+                    if let (Some(reason), Some(state)) = (moved, win.browser()) {
                         state.overlays.notices.refuse(
                             NoticeSource::Listing,
                             OPENED_ELSEWHERE,
@@ -11124,7 +11604,14 @@ mod program {
         // cannot stall the window. A pipe the kernel refuses, or a thread it
         // will not grant, leaves those reads on this task — where they used to
         // be, and stated once.
-        let reads = alloc::sync::Arc::new(Reads::new(tairix_rt::sync::WorkerWake::create(), set));
+        // The network view's doorbell, bound once: a refusal is stated when
+        // the network is asked for, and every folder still lists.
+        let doorbell = network_doorbell(set);
+        let reads = alloc::sync::Arc::new(Reads::new(
+            tairix_rt::sync::WorkerWake::create(),
+            set,
+            doorbell.as_ref().map(PrivatePort::id).map_err(|err| *err),
+        ));
         let reader = if reads.wake.is_armed() {
             spawn_reader(&reads)
         } else {
@@ -11222,6 +11709,8 @@ mod program {
         let desktop_moved = Cell::new(false);
         let places_read: PlacesRead = RefCell::new(reads.want_places());
         let due = Cell::new(None);
+        let network_rung = Cell::new(false);
+        let mut browse = Browse::default();
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
@@ -11232,6 +11721,7 @@ mod program {
             settings: &writer,
             places_read: &places_read,
             due: &due,
+            network_rung: &network_rung,
         });
         // The event a park woke for, served first by the turn after it.
         let mut woken = None;
@@ -11321,6 +11811,14 @@ mod program {
             );
             moved |= collect_writes(&mut windows, &reads, themes.active(), desktop.scale());
             moved |= adopt_settings(&mut windows, &kept);
+            moved |= step_network(
+                (&mut windows, &opening),
+                &mut browse,
+                &reads,
+                &network_rung,
+                &mut launcher.borrow_mut().notices,
+                (themes.active(), desktop.scale()),
+            );
             submit_writes(&mut windows, &reads, themes.active(), desktop.scale());
             state_rename_refusals(&mut windows);
             open_started_operations(
@@ -11582,6 +12080,7 @@ mod program {
                         WindowKind::Progress(progress) => progress.operation.due(),
                         WindowKind::Settings(page) => page.due(now),
                     })
+                    .chain(browse.retry_at())
                     .min(),
             );
             // A park the reader interrupted has no event; the next turn

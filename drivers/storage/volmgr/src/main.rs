@@ -7,12 +7,12 @@
 //! node's transport grants (the blkio call endpoint and the shared data
 //! window). It probes the unit's partition table and filesystem
 //! signatures read-only, derives each recognised volume's deterministic
-//! catalog name, and asks the kernel to attach and publish it through the
+//! catalog name, and asks the kernel to attach it through the
 //! `CAP_FS_MOUNT`-gated, audited `volume_attach` syscall — the kernel
-//! re-validates the caller's grants, the extent, and the name, opens the
-//! filesystem itself, and owns the mount from then on. The instance then
-//! exits `0`: publication is a run-to-completion job, and the kernel-held
-//! mount outlives it. It knows neither the bus nor the vendor behind the
+//! re-validates the caller's grants, the extent, and the name, and owns the
+//! volume from then on, served by its format's user-space driver. The
+//! instance then exits `0`: attaching is a run-to-completion job, and the
+//! kernel-held volume outlives it. It knows neither the bus nor the vendor behind the
 //! block service.
 //!
 //! # Least privilege

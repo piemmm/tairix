@@ -751,6 +751,14 @@ and DNS through `10.0.2.3`, additionally depend on the host's own
 connectivity. Inbound connections need a `hostfwd` rule, which the
 session does not add.
 
+That link is QEMU's own, so link-local discovery finds nothing on it: no LAN
+host is on it, the user-mode network joins no multicast group on the host, so
+none of the LAN's multicast reaches the guest, and whatever reaches it from the
+LAN comes through the NAT from an off-link address, which the discovery service
+refuses from every sender. A session's file-manager Network view is therefore
+empty; browsing a LAN's file servers needs a machine on that LAN, such as the
+Pi on its wired network.
+
 The windowed display backend is chosen **explicitly**, not left to
 QEMU's implicit default. A QEMU built without a windowing backend (a
 common modern Linux build carries no GTK/SDL) has no graphical default

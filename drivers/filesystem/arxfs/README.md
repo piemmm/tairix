@@ -658,10 +658,12 @@ but makes **no** permission decision itself: the VFS is the policy point
   each fails closed with `PermissionDenied`.
 - The read/write methods are reached only through the `DriverHandle` the
   host minted at load time, and the VFS only delegates a write to a
-  non-`READ_ONLY` mount. The kernel links the driver and serves it
-  in-kernel, the root volume and runtime volumes alike; serving drivers
-  that parse removable media from user space is open work
-  (`plans/OPEN-DEFECTS.md`).
+  non-`READ_ONLY` mount. The kernel links the driver for the root and
+  `/System`. A removable volume is served from user space instead: the
+  crate's `Run` binary, built with the `program` feature, serves it through
+  `lib/fsserve` (`Served`, binding `tairix,volume-arxfs`), plaintext and with
+  its write-back bounded, holding `CAP_FS_SERVE` and `CAP_LOG_EMIT`
+  (`docs/src/filesystem/served.md`).
 
 ## Test surface
 

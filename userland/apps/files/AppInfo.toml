@@ -30,8 +30,14 @@ purpose = "Browse, open, and organise your files"
 author = "The TAIRiX Project"
 # CAP_LOG_EMIT is the sandbox seam's voice: a decode worker that crashes is
 # contained and replaced, and that record must reach the log rather than be
-# refused into an audited denial that hides the crash.
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_LOG_EMIT"]
+# refused into an audited denial that hides the crash. CAP_NET is what the
+# discovery service admits its Network view's browse against; the view opens
+# no socket of its own.
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_LOG_EMIT", "CAP_NET"]
+# The storage types its Network view browses (plans/ZEROCONF.md §6.5), and
+# with them the computers WS-Discovery names: what a computer offers is
+# learned from its file service.
+browses = ["_smb._tcp"]
 # Deliberately absent from the program library. The file manager is a
 # component of the desktop rather than an application the user starts: the
 # session autostarts it in its core role at bring-up and it holds a permanent

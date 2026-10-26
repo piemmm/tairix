@@ -217,7 +217,7 @@ struct SeatSlot {
     /// every pointer injector passes through, so the window is applied here
     /// rather than in each driver — and a driver holds no configuration
     /// authority to read the operator's window with.
-    debounce: SpinLock<ClickDebounce>,
+    debounce: SpinLock<DeviceDebounce>,
     /// The seat is unowned and held cleared for a handover, written under
     /// `state`'s lock with every transition and read under it.
     handover: AtomicBool,
@@ -231,7 +231,7 @@ impl SeatSlot {
             channel: KeyboardChannel::new(),
             pointer: PointerChannel::new(),
             touch: TouchChannel::new(),
-            debounce: SpinLock::new(ClickDebounce::new()),
+            debounce: SpinLock::new(DeviceDebounce::new()),
             handover: AtomicBool::new(false),
         }
     }
@@ -346,6 +346,42 @@ impl ClickDebounceControl {
 impl Default for ClickDebounceControl {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The chatter history of the pointing device whose button edge reached a
+/// seat last, kept under the process that injected it.
+///
+/// Chatter is one switch's: a button edge from another injector starts the
+/// history afresh, so one device's release never judges another's press.
+struct DeviceDebounce {
+    injector: Option<u64>,
+    history: ClickDebounce,
+}
+
+impl DeviceDebounce {
+    const fn new() -> Self {
+        Self {
+            injector: None,
+            history: ClickDebounce::new(),
+        }
+    }
+
+    /// Whether `injector`'s button edge `record`, which its device reported at
+    /// `at_ns` if its driver knows when, is delivered under a window of
+    /// `window_ns`.
+    fn admits(
+        &mut self,
+        injector: u64,
+        record: PointerInput,
+        at_ns: Option<u64>,
+        window_ns: u64,
+    ) -> bool {
+        if self.injector != Some(injector) {
+            self.injector = Some(injector);
+            self.history = ClickDebounce::new();
+        }
+        self.history.admits(record, at_ns, window_ns)
     }
 }
 
@@ -659,9 +695,11 @@ impl SeatRegistry {
         Ok(KeyInput::WIRE_LEN)
     }
 
-    /// Route one decoded pointer event to seat `seat_id`'s current
-    /// foreground sink, returning the number of bytes consumed from the
-    /// record ([`PointerInput::WIRE_LEN`]).
+    /// Route one decoded pointer event, which the process `injector`'s device
+    /// reported at monotonic `at_ns` if its driver knows when, to seat
+    /// `seat_id`'s current foreground sink under a chatter window of
+    /// `window_ns`, returning the number of bytes consumed from the record
+    /// ([`PointerInput::WIRE_LEN`]).
     ///
     /// A **held** seat routes the whole record to its pointer channel. An
     /// **unowned** seat consumes and discards the record: the text console
@@ -677,17 +715,22 @@ impl SeatRegistry {
         &self,
         seat_id: u64,
         record: PointerInput,
-        now_ns: u64,
+        injector: u64,
+        at_ns: Option<u64>,
+        window_ns: u64,
     ) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
         // Chatter is filtered before the lease is consulted, so the filter's
         // per-button history stays continuous across a lease change: a press
         // dropped as chatter must still suppress the release that closes it,
-        // whoever holds the seat by then.
-        if !slot
-            .debounce
-            .lock()
-            .admits(record, now_ns, CLICK_DEBOUNCE.window_ns())
+        // whoever holds the seat by then. Motion never chatters, so it takes
+        // no part in the filter.
+        let edge = matches!(record, PointerInput::Pressed(_) | PointerInput::Released(_));
+        if edge
+            && !slot
+                .debounce
+                .lock()
+                .admits(injector, record, at_ns, window_ns)
         {
             return Ok(PointerInput::WIRE_LEN);
         }
@@ -1239,6 +1282,12 @@ mod tests {
     /// chatter window, so no test edge is judged against a stale release.
     const TEST_NOW_NS: u64 = 1_000_000_000;
 
+    /// The process every seat test injects pointer records as.
+    const TEST_INJECTOR: u64 = 0x5EA7;
+
+    /// The shipped chatter window, which the pointer tests run under.
+    const TEST_WINDOW_NS: u64 = DEFAULT_CLICK_DEBOUNCE_MS as u64 * MS;
+
     use tairix_abi::input::PointerButtonCode;
     use tairix_abi::time::NANOS_PER_MILLI as MS;
 
@@ -1277,6 +1326,23 @@ mod tests {
         assert!(!drained.get(), "a reader without the lease drains nothing");
     }
 
+    /// Every pointer record seat `SEAT_PRIMARY` holds for `owner`, drained.
+    fn drained(seat: &SeatRegistry, owner: SeatOwner) -> alloc::vec::Vec<PointerInput> {
+        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut drained = alloc::vec::Vec::new();
+        while seat
+            .read_pointer(SEAT_PRIMARY, owner, &mut buf)
+            .expect("drained")
+            != 0
+        {
+            drained.push(PointerInput::from_bytes(&buf).expect("decodes"));
+        }
+        drained
+    }
+
+    const PRESS: PointerInput = PointerInput::Pressed(PointerButtonCode::Primary);
+    const RELEASE: PointerInput = PointerInput::Released(PointerButtonCode::Primary);
+
     #[test]
     fn a_chattering_repress_never_reaches_the_pointer_channel() {
         // The on-metal fault: a worn switch emits a second press 16 ms after
@@ -1284,32 +1350,24 @@ mod tests {
         // pulse, so the desktop sees one click and no unpaired edge.
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, SeatOwner(7)).expect("acquired");
-        CLICK_DEBOUNCE.set_ms(25);
-
-        let press = PointerInput::Pressed(PointerButtonCode::Primary);
-        let release = PointerInput::Released(PointerButtonCode::Primary);
         for (record, at) in [
-            (press, 0),
-            (release, 80 * MS),
-            (press, 96 * MS),
-            (release, 128 * MS),
+            (PRESS, 0),
+            (RELEASE, 80 * MS),
+            (PRESS, 96 * MS),
+            (RELEASE, 128 * MS),
         ] {
-            seat.inject_pointer(SEAT_PRIMARY, record, at)
-                .expect("injected");
-        }
-
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
-        let mut drained = alloc::vec::Vec::new();
-        while seat
-            .read_pointer(SEAT_PRIMARY, SeatOwner(7), &mut buf)
-            .expect("drained")
-            != 0
-        {
-            drained.push(PointerInput::from_bytes(&buf).expect("decodes"));
+            seat.inject_pointer(
+                SEAT_PRIMARY,
+                record,
+                TEST_INJECTOR,
+                Some(at),
+                TEST_WINDOW_NS,
+            )
+            .expect("injected");
         }
         assert_eq!(
-            drained,
-            alloc::vec![press, release],
+            drained(&seat, SeatOwner(7)),
+            alloc::vec![PRESS, RELEASE],
             "the chatter pulse is dropped whole, not half"
         );
     }
@@ -1320,28 +1378,55 @@ mod tests {
         // reporting real intent; zero must deliver every edge.
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, SeatOwner(9)).expect("acquired");
-        CLICK_DEBOUNCE.set_ms(0);
-
-        let press = PointerInput::Pressed(PointerButtonCode::Primary);
-        let release = PointerInput::Released(PointerButtonCode::Primary);
         for step in 0..3u64 {
-            seat.inject_pointer(SEAT_PRIMARY, press, step * 10 * MS)
-                .expect("injected");
-            seat.inject_pointer(SEAT_PRIMARY, release, step * 10 * MS + 5 * MS)
-                .expect("injected");
+            for (record, at) in [(PRESS, step * 10 * MS), (RELEASE, step * 10 * MS + 5 * MS)] {
+                seat.inject_pointer(SEAT_PRIMARY, record, TEST_INJECTOR, Some(at), 0)
+                    .expect("injected");
+            }
         }
-        CLICK_DEBOUNCE.set_ms(DEFAULT_CLICK_DEBOUNCE_MS);
+        assert_eq!(
+            drained(&seat, SeatOwner(9)).len(),
+            6,
+            "every edge of a deliberate rapid-fire run"
+        );
+    }
 
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
-        let mut count = 0;
-        while seat
-            .read_pointer(SEAT_PRIMARY, SeatOwner(9), &mut buf)
-            .expect("drained")
-            != 0
-        {
-            count += 1;
+    #[test]
+    fn distinct_clicks_a_late_driver_injects_back_to_back_are_delivered() {
+        // Two clicks a driver read off its device together after a stall
+        // arrive at the seat microseconds apart. A driver with no device time
+        // states none, and one with a single reading states it for both; in
+        // neither case is the second click judged chatter. Measuring by the
+        // injections dropped it, and the launch that click asked for.
+        for at in [None, Some(TEST_NOW_NS)] {
+            let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+            seat.acquire(SEAT_PRIMARY, SeatOwner(5)).expect("acquired");
+            for record in [PRESS, RELEASE, PRESS, RELEASE] {
+                seat.inject_pointer(SEAT_PRIMARY, record, TEST_INJECTOR, at, TEST_WINDOW_NS)
+                    .expect("injected");
+            }
+            assert_eq!(
+                drained(&seat, SeatOwner(5)),
+                alloc::vec![PRESS, RELEASE, PRESS, RELEASE],
+                "{at:?}"
+            );
         }
-        assert_eq!(count, 6, "every edge of a deliberate rapid-fire run");
+    }
+
+    #[test]
+    fn one_devices_release_never_judges_anothers_press() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, SeatOwner(6)).expect("acquired");
+        for (record, injector, at) in [
+            (PRESS, 1, 0),
+            (RELEASE, 1, 80 * MS),
+            (PRESS, 2, 86 * MS),
+            (RELEASE, 2, 150 * MS),
+        ] {
+            seat.inject_pointer(SEAT_PRIMARY, record, injector, Some(at), TEST_WINDOW_NS)
+                .expect("injected");
+        }
+        assert_eq!(drained(&seat, SeatOwner(6)).len(), 4);
     }
 
     use super::*;
@@ -1682,7 +1767,9 @@ mod tests {
             seat.inject_pointer(
                 SEAT_PRIMARY,
                 PointerInput::MovedBy { dx: 3, dy: 4 },
-                TEST_NOW_NS,
+                TEST_INJECTOR,
+                Some(TEST_NOW_NS),
+                TEST_WINDOW_NS,
             )
             .expect("moved");
             seat.inject_touch(SEAT_PRIMARY, &touch_at(5))
@@ -1786,7 +1873,9 @@ mod tests {
             seat.inject_pointer(
                 SEAT_PRIMARY,
                 PointerInput::MovedBy { dx: 1, dy: 2 },
-                TEST_NOW_NS
+                TEST_INJECTOR,
+                Some(TEST_NOW_NS),
+                TEST_WINDOW_NS
             ),
             Ok(PointerInput::WIRE_LEN)
         );
@@ -2054,7 +2143,13 @@ mod tests {
             .expect("fresh seat is acquirable");
         let record = PointerInput::MovedBy { dx: 40, dy: -8 };
         assert_eq!(
-            seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
+            seat.inject_pointer(
+                SEAT_PRIMARY,
+                record,
+                TEST_INJECTOR,
+                Some(TEST_NOW_NS),
+                TEST_WINDOW_NS
+            ),
             Ok(PointerInput::WIRE_LEN)
         );
         let mut buf = [0u8; PointerInput::WIRE_LEN];
@@ -2075,7 +2170,13 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         let record = PointerInput::MovedBy { dx: 1, dy: 2 };
         assert_eq!(
-            seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
+            seat.inject_pointer(
+                SEAT_PRIMARY,
+                record,
+                TEST_INJECTOR,
+                Some(TEST_NOW_NS),
+                TEST_WINDOW_NS
+            ),
             Ok(PointerInput::WIRE_LEN)
         );
         // Acquiring afterwards finds an empty channel: the pre-ownership
@@ -2093,7 +2194,13 @@ mod tests {
             .expect("fresh seat is acquirable");
         let record = PointerInput::MovedBy { dx: 3, dy: 4 };
         assert_eq!(
-            seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
+            seat.inject_pointer(
+                SEAT_PRIMARY,
+                record,
+                TEST_INJECTOR,
+                Some(TEST_NOW_NS),
+                TEST_WINDOW_NS
+            ),
             Ok(PointerInput::WIRE_LEN)
         );
         let mut buf = [0u8; PointerInput::WIRE_LEN];
@@ -2144,7 +2251,13 @@ mod tests {
                 dy: 0,
             };
             assert_eq!(
-                seat.inject_pointer(SEAT_PRIMARY, record, TEST_NOW_NS),
+                seat.inject_pointer(
+                    SEAT_PRIMARY,
+                    record,
+                    TEST_INJECTOR,
+                    Some(TEST_NOW_NS),
+                    TEST_WINDOW_NS
+                ),
                 Ok(PointerInput::WIRE_LEN)
             );
         }

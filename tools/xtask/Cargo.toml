@@ -311,6 +311,16 @@ tairix-drv-display-bcm2711-hvs = { path = "../../drivers/display/bcm2711_hvs", v
 tairix-drv-display-bcm2711-hdmi = { path = "../../drivers/display/bcm2711_hdmi", version = "=0.0.0" }
 tairix-drv-storage-usb-msd = { path = "../../drivers/storage/usb_msd", version = "=0.0.0" }
 tairix-drv-storage-volmgr = { path = "../../drivers/storage/volmgr", version = "=0.0.0" }
+# The served filesystem drivers' bind tables and their shared capability set,
+# for every image that attaches removable volumes: each is a bundle `devmgr`
+# loads for the volume nodes the kernel publishes for its format.
+tairix-fsserve = { path = "../../lib/fsserve", version = "=0.0.0" }
+tairix-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
+tairix-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0" }
+tairix-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
+tairix-drv-fs-iso9660 = { path = "../../drivers/filesystem/iso9660", version = "=0.0.0" }
+tairix-drv-fs-udf = { path = "../../drivers/filesystem/udf", version = "=0.0.0" }
+tairix-drv-fs-adfs = { path = "../../drivers/filesystem/adfs", version = "=0.0.0" }
 tairix-drv-storage-raid-member = { path = "../../drivers/storage/raid_member", version = "=0.0.0" }
 tairix-drv-storage-raid = { path = "../../drivers/storage/raid", version = "=0.0.0" }
 # The shared desktop theme definition: the display vertical's screendump

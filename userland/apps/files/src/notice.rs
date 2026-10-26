@@ -21,6 +21,8 @@ pub enum NoticeSource {
     Open,
     /// What a finished operation's copies could not keep.
     Omission,
+    /// Browsing the network.
+    Network,
 }
 
 /// A window's refusal notices, by where each came from.

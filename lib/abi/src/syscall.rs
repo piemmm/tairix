@@ -3074,6 +3074,50 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::FS_ACCESS`]; a pure query, not audited.
     pub const FS_ACCESS: Self = Self(154);
 
+    /// Read blocks of a volume this user-space filesystem driver serves
+    /// (`plans/FSSERVE.md` §4).
+    ///
+    /// Arguments: `volume: u64` (the id its [`crate::HwResourceKind::Volume`]
+    /// grant names), `lba: u64` (the first block, counted from the volume's
+    /// start), `buf: *mut u8`, and `len: usize` — whole blocks, at most
+    /// [`crate::volume::VOLUME_IO_MAX`] bytes. Returns `0`, or `-errno`:
+    /// [`Errno::PermissionDenied`] without a grant covering the volume,
+    /// [`Errno::LengthOutOfRange`] for a length that is not whole blocks or
+    /// a range past the volume's end, [`Errno::DeviceOffline`] once the
+    /// volume is gone, the device's own error otherwise. Gated by
+    /// [`crate::CapabilityId::FS_SERVE`]; not audited, being the data path
+    /// of a driver whose authority was decided when it was given the volume.
+    pub const VOLUME_READ: Self = Self(155);
+
+    /// Write blocks of a volume this driver serves: the arguments and errors
+    /// of [`Self::VOLUME_READ`], with `buf` the source, plus
+    /// [`Errno::ReadOnly`] for a volume that may not be written. Gated by
+    /// [`crate::CapabilityId::FS_SERVE`]; not audited, for the same reason.
+    pub const VOLUME_WRITE: Self = Self(156);
+
+    /// Describe, flush or discard a volume this driver serves.
+    ///
+    /// Arguments: `volume: u64`, `request: *const u8` and `request_len:
+    /// usize` (a [`crate::volume::VolumeCtl`] frame), `reply: *mut u8` and
+    /// `reply_cap: usize`. Returns the reply's length — a
+    /// [`crate::volume::VolumeInfo`] for a description, nothing for a flush
+    /// or a discard — or `-errno`, as [`Self::VOLUME_READ`]. Gated by
+    /// [`crate::CapabilityId::FS_SERVE`]; not audited.
+    pub const VOLUME_CTL: Self = Self(157);
+
+    /// Serve the filesystem on a volume this driver was given, or refuse it.
+    ///
+    /// Arguments: `volume: u64`, `frame: *const u8` and `frame_len: usize`
+    /// (a [`crate::fsserve::ServeFrame`]), `grant: *mut u8` and `grant_cap:
+    /// usize`. For a serve the kernel creates the driver's call endpoint and
+    /// data window, mounts the volume, and writes the
+    /// [`crate::fsserve::ServeGrant`] to `grant`, returning its length; for a
+    /// refusal it retracts the volume, recording why, and returns `0`. Fails
+    /// with [`Errno::PermissionDenied`] without a grant covering the volume
+    /// and [`Errno::AlreadyExists`] for a volume already served. Gated by
+    /// [`crate::CapabilityId::FS_SERVE`]; audited.
+    pub const VOLUME_SERVE: Self = Self(158);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3354,6 +3398,10 @@ mod tests {
         assert_eq!(SyscallNumber::PTY_CREATE.as_u16(), 97);
         assert_eq!(SyscallNumber::PTY_SET_SIZE.as_u16(), 98);
         assert_eq!(SyscallNumber::CALL_POST.as_u16(), 99);
+    }
+
+    #[test]
+    fn the_later_numbers_are_frozen_too() {
         assert_eq!(SyscallNumber::CALL_REAP.as_u16(), 100);
         assert_eq!(SyscallNumber::CALL_CANCEL.as_u16(), 101);
         assert_eq!(SyscallNumber::FS_WATCH.as_u16(), 136);
@@ -3375,6 +3423,10 @@ mod tests {
         assert_eq!(SyscallNumber::FS_PUNCH.as_u16(), 152);
         assert_eq!(SyscallNumber::FS_UMASK.as_u16(), 153);
         assert_eq!(SyscallNumber::FS_ACCESS.as_u16(), 154);
+        assert_eq!(SyscallNumber::VOLUME_READ.as_u16(), 155);
+        assert_eq!(SyscallNumber::VOLUME_WRITE.as_u16(), 156);
+        assert_eq!(SyscallNumber::VOLUME_CTL.as_u16(), 157);
+        assert_eq!(SyscallNumber::VOLUME_SERVE.as_u16(), 158);
     }
 
     #[test]

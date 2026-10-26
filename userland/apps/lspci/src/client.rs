@@ -418,6 +418,12 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
         },
         Some(HwResourceKind::IommuReserved) => describe_iommu_reserved(resource, line),
         Some(HwResourceKind::MsiDoorbell) => describe_doorbell(resource, line),
+        Some(HwResourceKind::Volume) => match resource.volume_id() {
+            Some(id) => {
+                let _ = write!(line, "served volume 0x{id:x}");
+            }
+            None => line.push_str("served volume (malformed)"),
+        },
         Some(HwResourceKind::Property) => describe_property(resource, line),
         None => line.push_str("resource (unknown kind)"),
     }

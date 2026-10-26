@@ -52,7 +52,7 @@ use crate::account::MAX_PASSWORD_LEN;
 use crate::bounded_text::BoundedText;
 use core::num::NonZeroU64;
 
-use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64, Reader};
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -271,19 +271,19 @@ impl<'a> SessionRequest<'a> {
         if read_u16(bytes, 4) != SESSION_VERSION {
             return Err(Errno::OutOfRange);
         }
-        let mut cur = Cursor::new(bytes, 8);
+        let mut r = Reader::starting_at(bytes, 8);
         let request = match bytes[6] {
-            OPCODE_ACCOUNTS => Self::Accounts { offset: cur.u32()? },
+            OPCODE_ACCOUNTS => Self::Accounts { offset: r.u32()? },
             OPCODE_AUTHENTICATE => {
-                let username = cur.str(SESSION_LOGIN_NAME_MAX)?;
-                let password = cur.str(MAX_PASSWORD_LEN)?;
+                let username = read_name(&mut r, SESSION_LOGIN_NAME_MAX)?;
+                let password = read_name(&mut r, MAX_PASSWORD_LEN)?;
                 Self::Authenticate { username, password }
             }
             OPCODE_BACKGROUND => Self::Background,
             OPCODE_ZONE_STORE => Self::ZoneStore,
             _ => return Err(Errno::OutOfRange),
         };
-        if !cur.exhausted() {
+        if !r.exhausted() {
             return Err(Errno::LengthOutOfRange);
         }
         Ok(request)
@@ -745,47 +745,14 @@ fn put_str(out: &mut [u8], at: usize, s: &str) -> Result<usize, Errno> {
     Ok(end)
 }
 
-/// A fail-closed little-endian reader over a request buffer.
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Cursor<'a> {
-    const fn new(bytes: &'a [u8], at: usize) -> Self {
-        Self { bytes, at }
+/// A `u16`-length-prefixed UTF-8 string, refused when empty or longer than
+/// `max` before its bytes are judged as text.
+fn read_name<'a>(r: &mut Reader<'a>, max: usize) -> Result<&'a str, Errno> {
+    let bytes = r.bytes16()?;
+    if bytes.is_empty() || bytes.len() > max {
+        return Err(Errno::LengthOutOfRange);
     }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Errno> {
-        let end = self.at.checked_add(n).ok_or(Errno::LengthOutOfRange)?;
-        if end > self.bytes.len() {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let out = &self.bytes[self.at..end];
-        self.at = end;
-        Ok(out)
-    }
-
-    fn u32(&mut self) -> Result<u32, Errno> {
-        let b = self.take(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    /// A `u16`-length-prefixed UTF-8 string, refused when empty or longer
-    /// than `max`.
-    fn str(&mut self, max: usize) -> Result<&'a str, Errno> {
-        let b = self.take(2)?;
-        let len = usize::from(u16::from_le_bytes([b[0], b[1]]));
-        if len == 0 || len > max {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let bytes = self.take(len)?;
-        core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
-    }
-
-    const fn exhausted(&self) -> bool {
-        self.at == self.bytes.len()
-    }
+    core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
 }
 
 #[cfg(test)]

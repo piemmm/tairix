@@ -26,6 +26,9 @@ pub enum BrowseError {
     /// The memory the listing needed could not be had; the listing is as it
     /// was.
     OutOfMemory,
+    /// The network endpoint cannot be reached now: no address is known for
+    /// it.
+    Unreachable,
 }
 
 impl BrowseError {
@@ -46,6 +49,7 @@ impl fmt::Display for BrowseError {
             Self::NoSuchEntry => f.write_str("no such entry"),
             Self::NotADirectory => f.write_str("not a directory"),
             Self::OutOfMemory => f.write_str("out of memory"),
+            Self::Unreachable => f.write_str("cannot be reached now"),
         }
     }
 }

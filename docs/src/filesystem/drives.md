@@ -466,14 +466,16 @@ root backs, so `id::<volume-id>/path` opens the same object under the same
 permissions, never a policy bypass, and an unpublished identity fails closed
 `NotFound`. **Runtime attach and unpublish are landed** (`plans/DEVICES.md`
 D3b): the `CAP_FS_MOUNT`-gated, audited `volume_attach` / `volume_detach`
-syscalls attach a filesystem driver to a hot-pluggable block source (the
-kernel blkio client over a served block-service endpoint + shared window),
-mount its root at `/Storage/<name>` with the removable-media flags, and
-publish/withdraw its `id::` root through the same forest — a detach flushes
-first and fails closed rather than discarding uncommitted data. A catalog name
-another volume holds is answered `AlreadyExists` before the filesystem is
-opened, so the volume manager's next candidate name costs no open; a volume
-already attached under another name is `Busy`, which no other name answers.
+syscalls attach a hot-pluggable block source (the kernel blkio client over a
+served block-service endpoint + shared window), and the volume's format is
+served by its user-space driver ([Volumes served from user space](./served.md)),
+whose root is mounted at `/Storage/<name>` with the removable-media flags and
+published/withdrawn as an `id::` root through the same forest — a detach
+flushes first and fails closed rather than discarding uncommitted data. A
+catalog name another volume holds is answered `AlreadyExists` before the
+volume is judged, so the volume manager's next candidate name costs nothing; a
+volume already attached under another name is `Busy`, which no other name
+answers.
 **Automount
 policy, catalog enumeration, and the mount-policy identity map are landed**
 (`plans/DEVICES.md` D3c/D3d): the `volmgr` policy driver probes and attaches
@@ -546,7 +548,11 @@ discarded byte count and the reason a clean commit was impossible),
 retained writes replayed and committed — carries the replayed byte count),
 `fs.hotplug.reinsert_conflict` (a re-inserted volume whose non-mutation could
 not be proven, mounted fresh and read-only with the retained set kept —
-carries the refusing cause and the retained byte count), and
+carries the refusing cause and the retained byte count),
+`fs.serve.{awaiting,resumed,refused,lost}` (a removable volume's user-space
+driver awaited, serving again, refused, or gone — see
+[Volumes served from user space](./served.md); `fs.hotplug.root_added` is then
+recorded when its driver first serves it), and
 `fs.conflict.alias_ambiguous`. No secret, key,
 capability-token value, or private path content beyond the audit subsystem's
 policy set is logged.

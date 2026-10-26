@@ -23,12 +23,27 @@ Benutzers: ein nicht lesbares Verzeichnis wird abgelehnt, niemals erraten.
 
 Der Desktop startet den Browser für Sie und hält ihn auf der Symbolleiste:
 das Menü seines Platzes listet Ihre eigenen Orte und alles Eingebundene, und
-die Wahl eines Eintrags öffnet dort ein Fenster; *Einstellungen…* steht
-zuletzt. Ein Klick auf den Platz öffnet eines dort, wo die Einstellungen es
-bestimmen. Wer einen Ordner verlangt, für den schon ein Fenster offen ist,
-holt dieses Fenster nach vorn, statt ein weiteres zu öffnen. Diese Instanz
-hat keine Zeile *Beenden* — sie ist Teil des Desktops, und das Schließen
-ihrer Fenster räumt sie einfach weg.
+die Wahl eines Eintrags öffnet dort ein Fenster; *Netzwerk* und
+*Einstellungen…* stehen zuletzt. Ein Klick auf den Platz öffnet eines dort,
+wo die Einstellungen es bestimmen. Wer einen Ordner verlangt, für den schon
+ein Fenster offen ist, holt dieses Fenster nach vorn, statt ein weiteres zu
+öffnen. Diese Instanz hat keine Zeile *Beenden* — sie ist Teil des Desktops,
+und das Schließen ihrer Fenster räumt sie einfach weg.
+
+*Netzwerk* im Menü des Platzes, direkt über *Einstellungen…*, öffnet ein
+Fenster mit den Computern im lokalen Netzwerk, die Dateien freigeben. Jeder
+wird mit seinem Namen, der Adresse, unter der er erreichbar ist, seiner
+Arbeitsgruppe oder Domäne und seiner Art aufgeführt, und die Liste füllt
+sich, während Computer antworten. Das Netzwerk wird nur durchsucht, solange
+ein Fenster es zeigt. Ein Computer, der nicht mehr antwortet, wird
+ausgegraut, bis er vergessen ist; ein Name, der Alphabete so mischt, wie es
+die Nachahmung eines anderen Namens braucht, trägt statt seines Bildes ein
+Warnzeichen; und bietet ein Computer mehr als einige wenige Einträge an,
+werden die übrigen in einer eigenen Zeile gezählt, statt die anderen zu
+verdrängen. Namen im Netzwerk wählt, wer den jeweiligen Computer betreibt,
+daher beweist ein Name nie, welchen Computer Sie vor sich haben. Die
+Verbindung zu den Freigaben eines Computers ist auf diesem System nicht
+verfügbar, und das Öffnen eines Computers sagt dies.
 
 Namentlich aus einer Shell gestartet (oder vom Desktop aus auf einem Ordner
 geöffnet) ist er stattdessen eine gewöhnliche Anwendung: ein Fenster, und

@@ -612,6 +612,115 @@ pub trait VolumeHost: Send + Sync {
     fn reserve_crossed(&self, volume: DriverHandle, in_reserve: bool);
 }
 
+/// Why a format will not write a volume it opened, which is then served
+/// read-only.
+///
+/// A closed set, so the reason a user-space driver gives the kernel is a
+/// code and never text the driver chose; [`as_str`](Self::as_str) is the
+/// one spelling the audit log carries.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WriteRefusal {
+    /// The format has no write support at all.
+    FormatReadOnly = 1,
+    /// The volume uses a feature this driver does not write.
+    UnsupportedFeature = 2,
+    /// The volume records errors a check must clear first.
+    ErrorsRecorded = 3,
+    /// The volume is laid out for the GNU Hurd.
+    HurdLayout = 4,
+    /// The volume's journal cannot be replayed or written.
+    JournalUnusable = 5,
+    /// The volume was not cleanly closed and needs a check.
+    NeedsCheck = 6,
+    /// The volume was opened read-only.
+    OpenedReadOnly = 7,
+    /// A commit failed, so the driver stopped writing.
+    CommitFailed = 8,
+    /// The volume is marked write-protected.
+    WriteProtected = 9,
+    /// The volume's revision is one this driver does not write.
+    RevisionUnwritten = 10,
+    /// The volume's integrity sequence is not closed.
+    NotClosed = 11,
+    /// The medium cannot be rewritten in place.
+    MediaNotRewritable = 12,
+    /// The volume keeps no space bitmap to allocate from.
+    NoSpaceBitmap = 13,
+    /// The medium remaps defective blocks in a way this driver does not write.
+    SparableMedia = 14,
+    /// The medium is write-once.
+    WriteOnceMedia = 15,
+    /// The volume keeps a metadata partition this driver does not write.
+    MetadataPartition = 16,
+    /// The volume spans several partitions.
+    SeveralPartitions = 17,
+    /// The driver found the volume damaged while writing it.
+    Damaged = 18,
+}
+
+impl WriteRefusal {
+    /// The stable spelling the audit log records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FormatReadOnly => "format_read_only",
+            Self::UnsupportedFeature => "unsupported_feature",
+            Self::ErrorsRecorded => "errors_recorded",
+            Self::HurdLayout => "hurd_layout",
+            Self::JournalUnusable => "journal_unusable",
+            Self::NeedsCheck => "needs_check",
+            Self::OpenedReadOnly => "opened_read_only",
+            Self::CommitFailed => "commit_failed",
+            Self::WriteProtected => "write_protected",
+            Self::RevisionUnwritten => "revision_unwritten",
+            Self::NotClosed => "not_closed",
+            Self::MediaNotRewritable => "media_not_rewritable",
+            Self::NoSpaceBitmap => "no_space_bitmap",
+            Self::SparableMedia => "sparable_media",
+            Self::WriteOnceMedia => "write_once_media",
+            Self::MetadataPartition => "metadata_partition",
+            Self::SeveralPartitions => "several_partitions",
+            Self::Damaged => "damaged",
+        }
+    }
+
+    /// The wire code.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The refusal `raw` names.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for a code naming none.
+    pub const fn from_u8(raw: u8) -> Result<Self, DriverError> {
+        Ok(match raw {
+            1 => Self::FormatReadOnly,
+            2 => Self::UnsupportedFeature,
+            3 => Self::ErrorsRecorded,
+            4 => Self::HurdLayout,
+            5 => Self::JournalUnusable,
+            6 => Self::NeedsCheck,
+            7 => Self::OpenedReadOnly,
+            8 => Self::CommitFailed,
+            9 => Self::WriteProtected,
+            10 => Self::RevisionUnwritten,
+            11 => Self::NotClosed,
+            12 => Self::MediaNotRewritable,
+            13 => Self::NoSpaceBitmap,
+            14 => Self::SparableMedia,
+            15 => Self::WriteOnceMedia,
+            16 => Self::MetadataPartition,
+            17 => Self::SeveralPartitions,
+            18 => Self::Damaged,
+            _ => return Err(DriverError::OutOfRange),
+        })
+    }
+}
+
 /// Who an allocating operation's space is for, which decides whether it may
 /// draw on the volume's reserve once everything else is gone.
 ///
@@ -1553,6 +1662,19 @@ mod tests {
 
     use super::*;
     use crate::driver::DriverHandle;
+
+    #[test]
+    fn every_write_refusal_round_trips_its_code_and_spells_distinctly() {
+        let mut spelt: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        for raw in 1..=18 {
+            let refusal = WriteRefusal::from_u8(raw).expect("named");
+            assert_eq!(refusal.as_u8(), raw);
+            assert!(!spelt.contains(&refusal.as_str()), "{refusal:?}");
+            spelt.push(refusal.as_str());
+        }
+        assert_eq!(WriteRefusal::from_u8(0), Err(DriverError::OutOfRange));
+        assert_eq!(WriteRefusal::from_u8(19), Err(DriverError::OutOfRange));
+    }
 
     #[test]
     fn known_mask_covers_every_named_flag() {

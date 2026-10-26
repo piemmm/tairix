@@ -9,18 +9,20 @@
 //! `ls`'s `--quoting-style`. Each formats straight into its destination,
 //! allocating nothing.
 //!
-//! Three deliberate departures from GNU 9.4. Every [`is_hidden`] character is
-//! escaped, the tree's one rule for text from elsewhere, where GNU escapes only
-//! what its locale calls unprintable and so leaves a bidirectional override
-//! raw. The shell styles write GNU's own form save its two faults with a name
-//! holding a `'` that ends in an escape: GNU prefixes a needless `''` to it,
-//! and when such a name also begins with an escape drops that escape's `$`, so
-//! its word no longer reads back as the name. And a marked character takes no
-//! backslash inside `"…"`, where a shell would read the backslash back too.
+//! Three deliberate departures from GNU 9.4. Every character a faithful
+//! rendering escapes is escaped ([`Faithful`]: the hidden characters, and a
+//! mark stacked or doubled past telling apart), the tree's one rule for text
+//! from elsewhere, where GNU escapes only what its locale calls unprintable and
+//! so leaves a bidirectional override raw. The shell styles write GNU's own
+//! form save its two faults with a name holding a `'` that ends in an escape:
+//! GNU prefixes a needless `''` to it, and when such a name also begins with an
+//! escape drops that escape's `$`, so its word no longer reads back as the
+//! name. And a marked character takes no backslash inside `"…"`, where a shell
+//! would read the backslash back too.
 
 use core::fmt::{self, Write};
 
-use tairix_visible::is_hidden;
+use tairix_visible::Faithful;
 
 /// A GNU `--quoting-style`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,8 +101,9 @@ impl<'a> Quoted<'a> {
         }
     }
 
-    /// The same, with each hidden character a style does not escape shown as
-    /// `?` (`ls -q`). The escaping styles are unchanged.
+    /// The same, with each character a style does not escape that a faithful
+    /// rendering would shown as `?` (`ls -q`). The escaping styles are
+    /// unchanged.
     #[must_use]
     pub const fn hiding(self) -> Self {
         Self { hide: true, ..self }
@@ -119,11 +122,13 @@ impl<'a> Quoted<'a> {
             f.write_char('"')?;
         }
         let mut run = 0;
+        let mut faithful = Faithful::default();
         for (at, ch) in self.text.char_indices() {
+            let escaped = faithful.escapes(ch);
             let backslashed = match ch {
                 '\\' => true,
                 '"' if quoted => true,
-                _ if is_hidden(ch) => {
+                _ if escaped => {
                     f.write_str(&self.text[run..at])?;
                     write_escape(f, ch)?;
                     run = at + ch.len_utf8();
@@ -159,8 +164,9 @@ impl<'a> Quoted<'a> {
         let mut escaping = false;
         f.write_char('\'')?;
         let mut run = 0;
+        let mut faithful = Faithful::default();
         for (at, ch) in self.text.char_indices() {
-            if escape && is_hidden(ch) {
+            if escape && faithful.escapes(ch) {
                 self.shown(f, &self.text[run..at])?;
                 if !escaping {
                     f.write_str("'$'")?;
@@ -183,14 +189,16 @@ impl<'a> Quoted<'a> {
         f.write_char('\'')
     }
 
-    /// `text` as it stands, each hidden character `?` when hiding.
+    /// `text` as it stands, each character a faithful rendering escapes `?`
+    /// when hiding.
     fn shown(&self, f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
         if !self.hide {
             return f.write_str(text);
         }
         let mut run = 0;
+        let mut faithful = Faithful::default();
         for (at, ch) in text.char_indices() {
-            if is_hidden(ch) {
+            if faithful.escapes(ch) {
                 f.write_str(&text[run..at])?;
                 f.write_char('?')?;
                 run = at + ch.len_utf8();
@@ -230,8 +238,13 @@ impl Shape {
             has_single_quote: false,
             hard: false,
         };
+        let mut faithful = Faithful::default();
         for (at, ch) in text.char_indices() {
-            let (forces, hard) = bearing(ch, at, text.len(), escape);
+            let (forces, hard) = if escape && faithful.escapes(ch) {
+                (true, true)
+            } else {
+                bearing(ch, at, text.len(), escape)
+            };
             shape.needs_quotes |= forces || marks.contains(ch);
             shape.hard |= hard;
             shape.has_single_quote |= ch == '\'';
@@ -251,7 +264,6 @@ const fn bearing(ch: char, at: usize, len: usize, escape: bool) -> (bool, bool) 
         '{' | '}' => (len == 1, true),
         '!' | '"' | '$' | '&' | '(' | ')' | '*' | ';' | '<' | '=' | '>' | '?' | '[' | '\\'
         | '^' | '`' | '|' => (true, true),
-        _ if escape && is_hidden(ch) => (true, true),
         // A shell splits or joins a word at these, so even the styles that
         // leave them raw must quote them.
         '\t' | '\n' | '\r' if !escape => (true, true),

@@ -1,0 +1,41 @@
+[package]
+name = "tairix-fsserve"
+description = "TAIRiX served-filesystem runtime: the server side of fsserve-v1 a user-space filesystem driver links to serve its volume to the kernel's VFS — the one dispatch of the protocol onto the filesystem driver traits, the in-process host the driver reports its commit deadline to, and the driver program (plans/FSSERVE.md FSS2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `program` feature is the driver process itself, which every served
+# format's `Run` binary is: it links the userland runtime, the driver runtime
+# its grants are read through, and the memory-pressure wake, so it is enabled
+# only where a bare-metal driver is built and the library stays host-testable.
+[features]
+program = ["dep:tairix-rt", "dep:tairix-drvrt", "dep:tairix-procinfo", "dep:tairix-util"]
+
+[dependencies]
+# The fsserve-v1 codec, the filesystem driver traits it is dispatched onto,
+# the volume grant's calls, and the `DriverError`/`Errno` vocabulary.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The lock the host's reported state lives behind: the driver traits ask for
+# a `Sync` host.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
+# The pressure gauge a format's write-back bound reads, the one model every
+# cache on the machine obeys.
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0", optional = true }
+tairix-procinfo = { path = "../procinfo", version = "=0.0.0", optional = true, features = [
+    "program",
+] }
+tairix-util = { path = "../util", version = "=0.0.0", optional = true }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

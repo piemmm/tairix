@@ -90,9 +90,12 @@ normalisation policy likewise belong to the VFS, not the driver.
 - `CAP_DRV_LOAD` at `register` time.
 - The `FilesystemRead`/`FilesystemWrite` methods are reached only through
   the `DriverHandle` the host minted at load time, and the VFS only
-  delegates a write to a non-`READ_ONLY` mount. The kernel's runtime
-  volume service links the driver and serves it in-kernel; serving it from
-  user space is open work (`plans/OPEN-DEFECTS.md`).
+  delegates a write to a non-`READ_ONLY` mount.
+- On removable media the crate's `Run` binary, built with the `program`
+  feature, serves the volume from user space through `lib/fsserve`
+  (`Served`, binding `tairix,volume-fat32`), with `CAP_FS_SERVE` and
+  `CAP_LOG_EMIT` (`docs/src/filesystem/served.md`). The kernel links the
+  library only to read the boot partition.
 
 ## Test surface
 

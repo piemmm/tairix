@@ -10,18 +10,20 @@ audit footprint never exceeds a handful of crates.
 | Primitive | Module | Upstream |
 |---|---|---|
 | SHA-256 / SHA-384 / SHA-512, one-shot and streaming | `hash` | `sha2` |
-| HMAC-SHA256 / HMAC-SHA512 / HMAC-SHA1 | `mac` | `hmac` + `sha2` / `sha1` |
+| HMAC-SHA256 / HMAC-SHA384 / HMAC-SHA512 / HMAC-SHA1 | `mac` | `hmac` + `sha2` / `sha1` |
+| AES-128-CMAC, AES-128-GMAC | `mac` | `cmac` / `aes-gcm` |
 | Poly1305 one-time authenticator | `mac` | `poly1305` |
 | ChaCha20-Poly1305 AEAD | `aead` | `chacha20poly1305` |
-| AES-128/256-GCM AEAD | `aead` | `aes-gcm` |
-| AES-128/192/256-CTR | `cipher` | `aes` + `ctr` |
+| AES-128/256-GCM and AES-128/256-CCM AEAD | `aead` | `aes-gcm` / `ccm` |
+| AES-128/192/256-CTR, AES-128/256-CTS (CBC-CS3) | `cipher` | `aes` + `ctr` / `cts` |
+| NTLMv2's NTOWFv2, HMAC-MD5, signing key and checksum | `ntlm` | `md4` / `md-5` + `hmac` |
 | ChaCha12 keystream, 64-bit-nonce ChaCha20 | `stream` | `chacha20` |
 | Ed25519 sign, verify, key derivation from a seed | `sign` | `ed25519-dalek` |
 | ECDSA and ECDH over P-256 / P-384 / P-521 | `nistp` | `p256` / `p384` / `p521` |
 | X25519 key agreement | `agree` | `x25519-dalek` |
 | Finite-field DH over the RFC 3526 groups | `ffdh` | `crypto-bigint` |
 | ML-KEM-768 (FIPS 203) | `kem` | `ml-kem` |
-| HKDF-Expand single block, PBKDF2-HMAC-SHA256, bcrypt-pbkdf | `kdf` | `hmac` / `bcrypt-pbkdf` |
+| HKDF-Expand single block, PBKDF2-HMAC-SHA256/SHA1, SP 800-108 counter KDF, bcrypt-pbkdf | `kdf` | `hmac` / `bcrypt-pbkdf` |
 | Constant-time comparison | `constant_time` | first-party |
 
 **No other crate in the workspace names a cryptographic dependency** —
@@ -65,6 +67,42 @@ transport direction between rekeys; that expansion is most of what a short
 message costs (a 48-byte SSH packet under AES-128-GCM falls from about 450 ns
 to 80 ns). The upstream type wipes both on drop. `aes128gcm_seal` and its
 siblings are the same operations for one message, keying per call.
+
+AES-CCM is the same pair of forms (`Aes128Ccm`, `Aes256Ccm`,
+`aes128ccm_seal`, …) at SMB 3's widths: an 11-byte nonce and a 16-byte tag.
+CCM authenticates the plaintext, so it decrypts before it can check the tag;
+a rejected message's buffer is zeroed rather than left holding
+unauthenticated plaintext. GCM checks the tag first and leaves the
+ciphertext. AES-GCM and AES-CCM are offered for foreign protocols only — SSH
+and SMB 3 fix them — and TAIRiX's own consumers use ChaCha20-Poly1305.
+
+## Foreign-protocol constructions
+
+SMB 3, NTLMv2 and Kerberos fix their algorithms, so the crate carries what
+they need, each named for what it is and none offered as a general digest:
+
+- **SMB 3 signing**: `aes128_cmac` (3.0, 3.0.2) and `aes128_gmac` (3.1.1),
+  the latter GCM over an empty plaintext with the message as associated data.
+- **SMB 3 and RFC 8009 key derivation**: `kdf_counter_sha256` and
+  `kdf_counter_sha384`, NIST SP 800-108 in counter mode,
+  `HMAC(key, [i]₃₂ ‖ label ‖ 0x00 ‖ context ‖ [L]₃₂)` per block.
+- **Kerberos's AES mode**: `aes{128,256}_cts_{encrypt,decrypt}`, CBC with
+  ciphertext stealing in the CS3 arrangement from the zero initial state.
+  A message of exactly one block is plain CBC, which is the block cipher
+  alone; `cts` computes something else for that case, so the wrapper does it
+  directly, pinned by the FIPS-197 answer.
+- **Kerberos string-to-key**: `pbkdf2_sha1`, PBKDF2 over HMAC-SHA1 with any
+  output length, sharing one PBKDF2 composition with `pbkdf2_sha256`.
+- **NTLMv2** (`ntlm`): `ntowfv2`, `ntlm_hmac` (HMAC-MD5, the proof, session
+  base key and MIC), `ntlm_signing_key` and `ntlm_checksum`. This module is
+  the only place MD4 or MD5 is computed, and it exposes neither digest. The
+  forms are extended session security without key exchange, which is all
+  TAIRiX negotiates, so RC4 appears nowhere.
+
+Intermediates that are themselves key material — the NT hash, PBKDF2's
+`U_i` blocks, a KDF block before truncation — are wiped with `zeroize`
+before the function returns; the upstream types wipe their own states on
+drop.
 
 ## Stream keystream (§22)
 
@@ -284,6 +322,20 @@ implementation outside this tree, never from the dependency under test.
   encapsulation, plus implicit-rejection behaviour on a forged ciphertext.
 * bcrypt-pbkdf: the golden vectors from the Go project's independent
   implementation of the same OpenBSD construction.
+* HMAC-SHA384: RFC 4231 test case 1. AES-CMAC: RFC 4493 §4's four
+  examples. AES-GMAC: the NIST GCM vector with an empty plaintext.
+* AES-CCM: answers at SMB 3's widths from `cryptography`'s `AESCCM` over
+  OpenSSL (no published vector uses them), plus rejection of every
+  alteration with the buffer zeroed.
+* AES-CTS: RFC 3962 Appendix B's six vectors, and FIPS-197 Appendix C for
+  the one-block case.
+* PBKDF2-HMAC-SHA1: RFC 6070's vectors, including the one spanning blocks,
+  and RFC 3962 Appendix B's string-to-key intermediates.
+* SP 800-108 counter KDF: RFC 8009 Appendix A's derived keys, and SMB 3 and
+  multi-block answers from `cryptography`'s `KBKDFHMAC`.
+* NTLMv2: MS-NLMP §4.2.4's worked example (NTOWFv2, the proof, the session
+  base key, the LMv2 response and the signing key) and RFC 2202's HMAC-MD5
+  vectors.
 * ChaCha20-Poly1305: the RFC 8439 §2.8.2 worked example, plus round-trip
   and tampered-ciphertext / tag / nonce / associated-data rejections.
 * ChaCha12 keystream: the first 96 bytes under RFC 8439's test-vector key

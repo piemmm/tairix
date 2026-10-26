@@ -227,6 +227,9 @@ zeroize = { version = "1.8.1", default-features = false }
 [dev-dependencies]
 # The shared driver listing fixtures (`listing::listed`, `first_listed`).
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0", features = ["test-util"] }
+# The served-filesystem runtime, playing the user-space driver the served
+# proxy's tests talk to over the real protocol.
+tairix-fsserve = { path = "../../lib/fsserve", version = "=0.0.0" }
 # Mirrors `kernel/sched`'s self-link pattern: integration tests get the
 # host-only `test-arch` feature for free without ever leaking it into a
 # production build. `default-features = false` keeps this self-link from

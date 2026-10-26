@@ -180,6 +180,10 @@ const SOURCES: &[&str] = &[
     "ISO",
     "ITU",
     "IANA",
+    // Unicode Technical Standards: UTS #39's security mechanisms.
+    "UTS",
+    // Microsoft's protocol documents: MS-SMB2, MS-ERREF and their siblings.
+    "MS-",
     // NIST Special Publications: the randomness, entropy-source, and
     // statistical-test-suite standards the crypto and RNG crates cite by
     // section. `SP 800-22 §2.5` collides with a charter label, so without

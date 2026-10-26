@@ -406,6 +406,7 @@ impl SyscallHandlers for CountingHandlers {
         _seat: u64,
         _buf: u64,
         _len: usize,
+        _at_ns: u64,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -1167,6 +1168,52 @@ impl SyscallHandlers for CountingHandlers {
         _c: &CallerContext<'_>,
         _request: u64,
         _request_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn volume_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _volume: u64,
+        _lba: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn volume_write(
+        &self,
+        _c: &CallerContext<'_>,
+        _volume: u64,
+        _lba: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn volume_ctl(
+        &self,
+        _c: &CallerContext<'_>,
+        _volume: u64,
+        _request: u64,
+        _request_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn volume_serve(
+        &self,
+        _c: &CallerContext<'_>,
+        _volume: u64,
+        _frame: u64,
+        _frame_len: usize,
+        _grant: u64,
+        _grant_cap: usize,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

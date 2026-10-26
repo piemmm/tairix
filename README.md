@@ -118,6 +118,7 @@ for filesystems, the feature section below.
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
 | USB host controller (xHCI: enumeration, hubs, hotplug, isochronous streams) | ✓ qemu-xhci | ✓ qemu-xhci + ◐ VL805 | ✓ qemu-xhci | — |
 | USB optical drives (multimedia units, sessions, removal) | ▢ | ✓ qemu-xhci | ▢ | — |
+| Removable-media filesystems served from user space (`fsserve-v1`: ARXFS, ext2/3/4, FAT32, ADFS, ISO 9660, UDF) | ▢ | ✓ | ▢ | — |
 | Input devices | ✓ virtio + ◐ ps2 | ✓ virtio + ◐ USB HID | ✓ virtio | ✓ host |
 | Touch input (multitouch frames; tap, scroll and pinch gestures) | ◐ virtio | ◐ virtio + ◐ USB HID | ◐ virtio | ▢ |
 | Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio + Pi jack, I²S, HDMI | ◐ virtio + USB + HD Audio | ▢ |
@@ -172,7 +173,8 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 
 TAIRiX ships drivers for ARXFS (native) and for ext2/ext3/ext4, FAT32,
 ADFS, ISO 9660 (read-only: Joliet, Rock Ridge, High Sierra) and UDF 1.02–2.60
-as interoperability drivers for foreign volumes. A copy onto ARXFS keeps a
+as interoperability drivers for foreign volumes; on removable media each runs
+in user space, reaching only its own volume's blocks. A copy onto ARXFS keeps a
 file's RISC OS filetype, Mac type and creator, Amiga comment and holes.
 
 ## Security & attack-vector prevention
@@ -230,7 +232,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Supply-chain pinning: SBOM, source-hash, advisory SLA (§19.3) | Dependency compromise (xz-utils class) | ◐ | ◐ | ◐ | ◐ |
 | Stack canaries / shadow stack (§19.2) | Return-address / saved-state overwrite | ◐ | ◐ | ◐ | ◐ |
 | KPTI / kernel-user address-space isolation (§19.1) | Meltdown-class kernel-memory disclosure | ◐ | ◐ | ◐ | — |
-| Minimum-capability parser sandboxes (§19.5) | Untrusted-input parser compromise (font/image/net) | ◐ | ◐ | ◐ | ▢ |
+| Minimum-capability parser sandboxes (§19.5) | Untrusted-input parser compromise (font/image/net/removable filesystems) | ◐ | ◐ | ◐ | ▢ |
 | Hardware memory tagging — MTE / ADI (§19.10) | Use-after-free (hardware-enforced) | — | ▢ | ▢ | — |
 
 

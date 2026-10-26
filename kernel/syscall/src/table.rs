@@ -1057,8 +1057,11 @@ pub trait SyscallHandlers {
     /// hands it to the seat registry, which routes by who holds that seat:
     /// a held seat's record goes to its pointer channel (drained by
     /// [`Self::pointer_read`]); an unowned seat's record is consumed and
-    /// discarded — the text console has no pointer consumer. Returns the
-    /// number of bytes consumed from the record.
+    /// discarded — the text console has no pointer consumer. `at_ns` is when
+    /// the device reported the record, as its driver states it, or
+    /// [`tairix_abi::input::POINTER_EDGE_UNTIMED`]: what the seat's chatter
+    /// filter measures a button edge by. Returns the number of bytes consumed
+    /// from the record.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]: a kernel build with no seat registry
@@ -1070,6 +1073,7 @@ pub trait SyscallHandlers {
         _seat: u64,
         _buf: u64,
         _len: usize,
+        _at_ns: u64,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -3291,6 +3295,79 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Read `len` bytes of whole blocks from `lba` of served volume `volume`
+    /// into `buf` (`plans/FSSERVE.md` §4).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_SERVE`] and that `buf` is non-null; the
+    /// implementation holds the caller to the volume its grant names.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _volume: u64,
+        _lba: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write `len` bytes of whole blocks from `buf` to `lba` of served volume
+    /// `volume`; as [`Self::volume_read`].
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_write(
+        &self,
+        _caller: &CallerContext<'_>,
+        _volume: u64,
+        _lba: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Describe, flush or discard served volume `volume`, the `VolumeCtl`
+    /// frame at `request` saying which, answering into `reply`.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_SERVE`] and that both pointers are non-null.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_ctl(
+        &self,
+        _caller: &CallerContext<'_>,
+        _volume: u64,
+        _request: u64,
+        _request_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Serve, or refuse, the filesystem on served volume `volume`, the
+    /// `ServeFrame` at `frame` saying which, writing the `ServeGrant` to
+    /// `grant`.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_SERVE`] and that both pointers are non-null.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn volume_serve(
+        &self,
+        _caller: &CallerContext<'_>,
+        _volume: u64,
+        _frame: u64,
+        _frame_len: usize,
+        _grant: u64,
+        _grant_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// End the machine's power state: flush every mounted volume, then
     /// power the platform off or reset it (`plans/NEW-TASKBAR.md` T13).
     ///
@@ -3838,10 +3915,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::POINTER_INJECT => {
                 // args[0] is the seat id; `validate_arg` guarantees args[1]
-                // is a non-null `UserPtr`; args[2] is the record length.
+                // is a non-null `UserPtr`; args[2] is the record length;
+                // args[3] is the device time.
                 let len = decode_len(args.0[2])?;
                 self.handlers
-                    .pointer_inject(caller, args.0[0], args.0[1], len)
+                    .pointer_inject(caller, args.0[0], args.0[1], len, args.0[3])
             }
             SyscallNumber::POINTER_READ => {
                 // args[0] is the seat id; `validate_arg` guarantees args[1]
@@ -4544,6 +4622,35 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // (dispatcher-checked); args[1] is its exact length.
                 let request_len = decode_len(args.0[1])?;
                 self.handlers.volume_detach(caller, args.0[0], request_len)
+            }
+            SyscallNumber::VOLUME_READ => {
+                let len = decode_len(args.0[3])?;
+                self.handlers
+                    .volume_read(caller, args.0[0], args.0[1], args.0[2], len)
+            }
+            SyscallNumber::VOLUME_WRITE => {
+                let len = decode_len(args.0[3])?;
+                self.handlers
+                    .volume_write(caller, args.0[0], args.0[1], args.0[2], len)
+            }
+            SyscallNumber::VOLUME_CTL => {
+                let request_len = decode_len(args.0[2])?;
+                let reply_cap = decode_len(args.0[4])?;
+                self.handlers.volume_ctl(
+                    caller,
+                    args.0[0],
+                    args.0[1],
+                    request_len,
+                    args.0[3],
+                    reply_cap,
+                )
+            }
+            SyscallNumber::VOLUME_SERVE => {
+                let frame_len = decode_len(args.0[2])?;
+                let grant_cap = decode_len(args.0[4])?;
+                self.handlers.volume_serve(
+                    caller, args.0[0], args.0[1], frame_len, args.0[3], grant_cap,
+                )
             }
             SyscallNumber::FS_CHDIR => {
                 // args[0] is the start directory; args[1]/args[2] the path,
@@ -5459,12 +5566,13 @@ mod tests {
             seat: u64,
             _buf: u64,
             len: usize,
+            at_ns: u64,
         ) -> SyscallResult {
             self.record("pointer_inject");
-            // Echo `seat + len` back so the reachability test can assert the
-            // dispatcher decoded `(seat, buf, len)` without wiring a real
-            // seat registry here.
-            Ok(seat + len as u64)
+            // Echo `seat + len + at_ns` back so the reachability test can
+            // assert the dispatcher decoded `(seat, buf, len, at_ns)` without
+            // wiring a real seat registry here.
+            Ok(seat + len as u64 + at_ns)
         }
 
         fn pointer_read(
@@ -6464,6 +6572,56 @@ mod tests {
             Ok(0)
         }
 
+        fn volume_read(
+            &self,
+            _c: &CallerContext<'_>,
+            _volume: u64,
+            _lba: u64,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("volume_read");
+            Ok(0)
+        }
+
+        fn volume_write(
+            &self,
+            _c: &CallerContext<'_>,
+            _volume: u64,
+            _lba: u64,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("volume_write");
+            Ok(0)
+        }
+
+        fn volume_ctl(
+            &self,
+            _c: &CallerContext<'_>,
+            _volume: u64,
+            _request: u64,
+            _request_len: usize,
+            _reply: u64,
+            _reply_cap: usize,
+        ) -> SyscallResult {
+            self.record("volume_ctl");
+            Ok(0)
+        }
+
+        fn volume_serve(
+            &self,
+            _c: &CallerContext<'_>,
+            _volume: u64,
+            _frame: u64,
+            _frame_len: usize,
+            _grant: u64,
+            _grant_cap: usize,
+        ) -> SyscallResult {
+            self.record("volume_serve");
+            Ok(0)
+        }
+
         fn system_power(&self, _c: &CallerContext<'_>, _action: PowerAction) -> SyscallResult {
             self.record("system_power");
             Ok(0)
@@ -6757,6 +6915,7 @@ mod tests {
                 CapabilityId::SYSTEM_POWER,
                 CapabilityId::IPC_ENDPOINT,
                 CapabilityId::CPUFREQ,
+                CapabilityId::FS_SERVE,
             ],
             &sink,
         );

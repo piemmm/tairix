@@ -1,17 +1,22 @@
 //! Unit tests for the front ↔ decoder channel.
 
 use super::{
-    Edge, Form, FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN,
-    DATAGRAM_HEADER_LEN, DEADLINE_LEN, GROUP_BURST, LINK_LEN, MAX_FROM_DECODER, MAX_TO_DECODER,
-    REPLAYED_LEN, REPLAY_LEN, RNG_KEY_LEN, STOPPED_LEN, STOP_LEN, TICK_LEN, TRANSMIT_HEADER_LEN,
+    Budgets, Edge, FetchRequest, Form, FromDecoder, FromWsd, ToDecoder, ToWsd, ASK_HEADER_LEN,
+    CACHE_KEY_LEN, CONFIGURE_LEN, DATAGRAM_HEADER_LEN, DEADLINE_LEN, FETCHED_HEADER_LEN,
+    FETCH_HEADER_LEN, GROUP_BURST, LINK_LEN, MAX_FROM_DECODER, MAX_TO_DECODER, REPLAYED_LEN,
+    REPLAY_LEN, RNG_KEY_LEN, STOPPED_LEN, STOP_LEN, TICK_LEN, TRANSMIT_HEADER_LEN, WSD_BURST,
+    WSD_DATAGRAM_HEADER_LEN, WSD_TRANSMIT_HEADER_LEN,
 };
+use crate::wsd_fixtures;
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::discovery_ipc::{Answer, Change, Entry};
 use tairix_abi::net::SOCKET_MAX_DATAGRAM;
 use tairix_abi::net_ipc::IF_NAME_LEN;
+use tairix_net::http::MAX_HOST_NAME;
 use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN, MAX_QUESTIONS};
 use tairix_net::rate::BucketLevel;
+use tairix_net::wsd::{MAX_ENDPOINT, MAX_METADATA, MAX_PATH};
 use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// One second in nanoseconds, the scale a bucket's tokens are held at.
@@ -72,15 +77,21 @@ fn every_front_frame_round_trips() {
         ToDecoder::Link {
             now: 8,
             interface: iface(b"eth1"),
-            edge: Edge::Up(BucketLevel {
-                scaled: u64::from(GROUP_BURST) * NANOS,
-                at: 7,
+            edge: Edge::Up(Budgets {
+                group: BucketLevel {
+                    scaled: u64::from(GROUP_BURST) * NANOS,
+                    at: 7,
+                },
+                wsd: BucketLevel {
+                    scaled: u64::from(WSD_BURST) * NANOS,
+                    at: 6,
+                },
             }),
         },
         ToDecoder::Link {
             now: 8,
             interface: iface(b"eth1"),
-            edge: Edge::Up(BucketLevel { scaled: 0, at: 0 }),
+            edge: Edge::Up(EMPTY),
         },
         ToDecoder::Link {
             now: 9,
@@ -136,7 +147,15 @@ fn every_front_frame_round_trips() {
 #[test]
 fn the_largest_datagram_fits_and_a_larger_one_is_never_encoded() {
     let largest = vec![0xAB; SOCKET_MAX_DATAGRAM];
-    assert_eq!(datagram(&largest).len(), MAX_TO_DECODER);
+    assert_eq!(
+        datagram(&largest).len(),
+        DATAGRAM_HEADER_LEN + SOCKET_MAX_DATAGRAM
+    );
+    assert_eq!(
+        MAX_TO_DECODER,
+        (DATAGRAM_HEADER_LEN + SOCKET_MAX_DATAGRAM).max(FETCHED_HEADER_LEN + MAX_METADATA),
+        "the longest frame is the larger of a datagram and a metadata response"
+    );
     let larger = vec![0xAB; SOCKET_MAX_DATAGRAM + 1];
     let mut out = vec![0u8; MAX_TO_DECODER + 1];
     let frame = ToDecoder::Datagram {
@@ -188,7 +207,7 @@ fn a_malformed_front_frame_is_refused_whole() {
 #[test]
 fn a_datagram_frame_longer_than_any_delivery_is_refused() {
     let mut frame = datagram(&[]);
-    frame.resize(MAX_TO_DECODER + 1, 0);
+    frame.resize(DATAGRAM_HEADER_LEN + SOCKET_MAX_DATAGRAM + 1, 0);
     assert_eq!(ToDecoder::decode(&frame), Err(WireError::Malformed));
 }
 
@@ -378,7 +397,7 @@ fn an_ask_names_a_form_and_a_name() {
         name: b"\x04host\x05local\x00",
     });
     let mut form = good.clone();
-    form[13] = 8;
+    form[13] = 9;
     assert_eq!(ToDecoder::decode(&form), Err(WireError::Malformed));
     let mut empty = good[..ASK_HEADER_LEN].to_vec();
     empty[14] = 0;
@@ -395,8 +414,13 @@ fn an_ask_names_a_form_and_a_name() {
     assert_eq!(ToDecoder::decode(&link), Err(WireError::Malformed));
 }
 
-/// A link going down carries no budget, and one coming up no more than a
-/// group budget holds: anything else is no frame the front sends.
+const EMPTY: Budgets = Budgets {
+    group: BucketLevel { scaled: 0, at: 0 },
+    wsd: BucketLevel { scaled: 0, at: 0 },
+};
+
+/// A link going down carries no budget, and one coming up no more than each
+/// budget holds: anything else is no frame the front sends.
 #[test]
 fn a_link_edge_carries_a_budget_only_coming_up_and_only_one_a_group_holds() {
     let down = encoded(&ToDecoder::Link {
@@ -409,18 +433,257 @@ fn a_link_edge_carries_a_budget_only_coming_up_and_only_one_a_group_holds() {
         dirty[at] = 1;
         assert_eq!(ToDecoder::decode(&dirty), Err(WireError::Malformed));
     }
-    let over = BucketLevel {
+    let over_group = BucketLevel {
         scaled: u64::from(GROUP_BURST) * NANOS + 1,
         at: 0,
     };
-    let edge = ToDecoder::Link {
-        now: 0,
-        interface: iface(b"eth0"),
-        edge: Edge::Up(over),
+    let over_wsd = BucketLevel {
+        scaled: u64::from(WSD_BURST) * NANOS + 1,
+        at: 0,
     };
-    assert_eq!(edge.encode(&mut [0u8; LINK_LEN]), None, "never encoded");
-    let mut forged = down;
-    forged[25] = 1;
-    forged[26..34].copy_from_slice(&over.scaled.to_le_bytes());
-    assert_eq!(ToDecoder::decode(&forged), Err(WireError::Malformed));
+    for (budgets, field) in [
+        (
+            Budgets {
+                group: over_group,
+                ..EMPTY
+            },
+            26..34,
+        ),
+        (
+            Budgets {
+                wsd: over_wsd,
+                ..EMPTY
+            },
+            42..50,
+        ),
+    ] {
+        let edge = ToDecoder::Link {
+            now: 0,
+            interface: iface(b"eth0"),
+            edge: Edge::Up(budgets),
+        };
+        assert_eq!(edge.encode(&mut [0u8; LINK_LEN]), None, "never encoded");
+        let mut forged = down.clone();
+        forged[25] = 1;
+        let scaled = budgets.group.scaled.max(budgets.wsd.scaled);
+        forged[field].copy_from_slice(&scaled.to_le_bytes());
+        assert_eq!(ToDecoder::decode(&forged), Err(WireError::Malformed));
+    }
+}
+
+const NINE: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9));
+
+fn fetch_request<'a>(path: &'a str, endpoint: &'a str) -> FetchRequest<'a> {
+    FetchRequest {
+        interface: iface(b"eth0"),
+        fetch: 5,
+        addr: NINE,
+        port: 5357,
+        path,
+        endpoint,
+        name: None,
+    }
+}
+
+#[test]
+fn every_ws_discovery_frame_round_trips_at_its_bounds() {
+    let largest = vec![0x3C; SOCKET_MAX_DATAGRAM];
+    let metadata = vec![b'm'; MAX_METADATA];
+    let v6 = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 7));
+    for (frame, len) in [
+        (
+            ToWsd::Datagram {
+                now: 1,
+                interface: iface(b"eth0"),
+                source: NINE,
+                payload: b"<soap:Envelope/>",
+            },
+            WSD_DATAGRAM_HEADER_LEN + 16,
+        ),
+        (
+            ToWsd::Datagram {
+                now: u64::MAX,
+                interface: iface(b"wlan0"),
+                source: v6,
+                payload: &largest,
+            },
+            WSD_DATAGRAM_HEADER_LEN + SOCKET_MAX_DATAGRAM,
+        ),
+        (
+            ToWsd::Fetched {
+                now: 2,
+                interface: iface(b"eth0"),
+                fetch: u32::MAX,
+                response: &metadata,
+            },
+            FETCHED_HEADER_LEN + MAX_METADATA,
+        ),
+        (
+            ToWsd::FetchFailed {
+                now: 3,
+                interface: iface(b"eth0"),
+                fetch: 0,
+            },
+            FETCHED_HEADER_LEN,
+        ),
+    ] {
+        let bytes = encoded(&ToDecoder::Wsd(frame));
+        assert_eq!(bytes.len(), len);
+        assert!(bytes.len() <= MAX_TO_DECODER);
+        assert_eq!(ToDecoder::decode(&bytes), Ok(ToDecoder::Wsd(frame)));
+    }
+    let long_path = alloc::format!("/{}", "p".repeat(MAX_PATH - 1));
+    let long_endpoint = "e".repeat(MAX_ENDPOINT);
+    let long_name = wsd_fixtures::longest_host_name();
+    for (frame, len) in [
+        (
+            FromWsd::Transmit {
+                interface: iface(b"eth0"),
+                at: 9,
+                payload: b"probe",
+            },
+            WSD_TRANSMIT_HEADER_LEN + 5,
+        ),
+        (
+            FromWsd::Fetch(fetch_request("/meta", "urn:uuid:0001")),
+            FETCH_HEADER_LEN + 5 + 13,
+        ),
+        (
+            FromWsd::Fetch(FetchRequest {
+                name: Some("OFFICE"),
+                ..fetch_request("/meta", "urn:uuid:0001")
+            }),
+            FETCH_HEADER_LEN + 5 + 13 + 6,
+        ),
+        (
+            FromWsd::Fetch(FetchRequest {
+                addr: v6,
+                name: Some(&long_name),
+                ..fetch_request(&long_path, &long_endpoint)
+            }),
+            FETCH_HEADER_LEN + MAX_PATH + MAX_ENDPOINT + MAX_HOST_NAME,
+        ),
+    ] {
+        let bytes = from_decoder(&FromDecoder::Wsd(frame));
+        assert_eq!(bytes.len(), len);
+        assert_eq!(FromDecoder::decode(&bytes), Ok(FromDecoder::Wsd(frame)));
+    }
+}
+
+#[test]
+fn a_ws_discovery_frame_past_its_bounds_is_never_built_nor_believed() {
+    let mut out = vec![0u8; MAX_TO_DECODER + 1];
+    let too_much = vec![0u8; MAX_METADATA + 1];
+    let overfull = ToWsd::Fetched {
+        now: 1,
+        interface: iface(b"eth0"),
+        fetch: 1,
+        response: &too_much,
+    };
+    assert_eq!(ToDecoder::Wsd(overfull).encode(&mut out), None);
+    let mut failed = encoded(&ToDecoder::Wsd(ToWsd::FetchFailed {
+        now: 1,
+        interface: iface(b"eth0"),
+        fetch: 1,
+    }));
+    failed.push(0);
+    assert_eq!(
+        ToDecoder::decode(&failed),
+        Err(WireError::Malformed),
+        "a failure carries nothing"
+    );
+    let mut fetched = encoded(&ToDecoder::Wsd(ToWsd::Fetched {
+        now: 1,
+        interface: iface(b"eth0"),
+        fetch: 1,
+        response: &[],
+    }));
+    fetched.resize(FETCHED_HEADER_LEN + MAX_METADATA + 1, b'm');
+    assert_eq!(ToDecoder::decode(&fetched), Err(WireError::Malformed));
+    let empty = from_decoder(&FromDecoder::Wsd(FromWsd::Transmit {
+        interface: iface(b"eth0"),
+        at: 1,
+        payload: b"x",
+    }));
+    assert_eq!(
+        FromDecoder::decode(&empty[..WSD_TRANSMIT_HEADER_LEN]),
+        Err(WireError::Malformed),
+        "an empty datagram"
+    );
+}
+
+#[test]
+fn a_fetch_outside_its_grammar_is_never_built_nor_believed() {
+    let mut out = vec![0u8; MAX_FROM_DECODER];
+    for bad in [
+        fetch_request("relative", "urn:uuid:0001"),
+        fetch_request("/a b", "urn:uuid:0001"),
+        fetch_request("/meta", "urn:a&b"),
+        fetch_request("/meta", ""),
+        FetchRequest {
+            port: 0,
+            ..fetch_request("/meta", "urn:uuid:0001")
+        },
+        FetchRequest {
+            name: Some(""),
+            ..fetch_request("/meta", "urn:uuid:0001")
+        },
+        FetchRequest {
+            name: Some("OFFICE\r\nX: y"),
+            ..fetch_request("/meta", "urn:uuid:0001")
+        },
+        FetchRequest {
+            name: Some("192.168.001.9"),
+            ..fetch_request("/meta", "urn:uuid:0001")
+        },
+    ] {
+        assert_eq!(
+            FromDecoder::Wsd(FromWsd::Fetch(bad)).encode(&mut out),
+            None,
+            "{bad:?}"
+        );
+    }
+    let named = from_decoder(&FromDecoder::Wsd(FromWsd::Fetch(FetchRequest {
+        name: Some("OFFICE"),
+        ..fetch_request("/meta", "urn:uuid:0001")
+    })));
+    let mut split = named.clone();
+    let colon_at = named.len() - 3;
+    split[colon_at] = b':';
+    assert_eq!(
+        FromDecoder::decode(&split),
+        Err(WireError::Malformed),
+        "a name that could carry a port into the Host field"
+    );
+    let good = from_decoder(&FromDecoder::Wsd(FromWsd::Fetch(fetch_request(
+        "/meta",
+        "urn:uuid:0001",
+    ))));
+    let mut space = good.clone();
+    space[FETCH_HEADER_LEN + 2] = b' ';
+    assert_eq!(
+        FromDecoder::decode(&space),
+        Err(WireError::Malformed),
+        "a path that ends the line"
+    );
+    let mut port = good.clone();
+    port[38..40].fill(0);
+    assert_eq!(FromDecoder::decode(&port), Err(WireError::Malformed));
+    let mut long = good.clone();
+    long[40] += 1;
+    assert_eq!(
+        FromDecoder::decode(&long),
+        Err(WireError::Truncated),
+        "lengths past the frame"
+    );
+    let mut short = good.clone();
+    short[40] -= 1;
+    assert_eq!(
+        FromDecoder::decode(&short),
+        Err(WireError::Malformed),
+        "lengths short of it"
+    );
+    let mut trailing = good;
+    trailing.push(b'x');
+    assert_eq!(FromDecoder::decode(&trailing), Err(WireError::Malformed));
 }

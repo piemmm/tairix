@@ -89,6 +89,11 @@ pub const KIND_SCROLLED: u16 = 3;
 /// motion or scroll event.
 pub const BUTTON_NONE: u16 = 0;
 
+/// The `pointer_inject` device time a driver states when it cannot say when
+/// its device reported the record — a paravirtual device's transport carries no
+/// such time — so the seat's chatter filter never judges it.
+pub const POINTER_EDGE_UNTIMED: u64 = u64::MAX;
+
 /// The pointer button a press or release record names.
 ///
 /// A `#[repr(u16)]` enum so the wire code is exactly the integer carried in
@@ -698,10 +703,16 @@ impl KeyInput {
 /// closes that same pulse is dropped with it, so no consumer is left holding
 /// half an edge pair as a latched grab.
 ///
-/// Holds history only. The window and the clock are both the caller's to know
-/// — the window is operator policy that can change under a running seat, and
-/// the clock belongs to whoever is servicing the injection — so this type is
-/// pure, host-testable, and cannot read either behind the caller's back.
+/// The window is measured between the times the *device* reported the two
+/// edges, as its driver states them, never between their injections: a driver
+/// catching up on a backlog injects distinct clicks back to back. A press with
+/// no stated time, after a release with none, or stated at the release's own
+/// instant — the two read together — cannot be told from a distinct click, and
+/// is admitted.
+///
+/// Holds one device's history only. The window and the times are both the
+/// caller's to know, so this type is pure, host-testable, and reads neither
+/// behind the caller's back.
 ///
 /// A window of zero disables the filter: a device whose rapid-fire mode
 /// deliberately emits click pairs at ~10 ms is reporting real intent, and
@@ -709,8 +720,8 @@ impl KeyInput {
 /// debounced.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ClickDebounce {
-    /// Monotonic time each button was last released at, indexed by
-    /// `PointerButtonCode` discriminant minus one.
+    /// When the device reported each button's last release, if its driver
+    /// said, indexed by `PointerButtonCode` discriminant minus one.
     released_ns: [Option<u64>; POINTER_BUTTON_COUNT as usize],
     /// Buttons whose press was dropped, so the release closing the same
     /// chatter pulse is dropped too.
@@ -727,11 +738,12 @@ impl ClickDebounce {
         }
     }
 
-    /// Whether `record` is delivered, at monotonic `now_ns`, under a chatter
-    /// window of `window_ns` (zero disabling the filter).
+    /// Whether `record`, which the device reported at monotonic `at_ns` if its
+    /// driver knows when, is delivered under a chatter window of `window_ns`
+    /// (zero disabling the filter).
     ///
     /// Motion and scroll are always delivered: only a button edge can chatter.
-    pub fn admits(&mut self, record: PointerInput, now_ns: u64, window_ns: u64) -> bool {
+    pub fn admits(&mut self, record: PointerInput, at_ns: Option<u64>, window_ns: u64) -> bool {
         let (button, pressed) = match record {
             PointerInput::Pressed(button) => (button, true),
             PointerInput::Released(button) => (button, false),
@@ -742,7 +754,7 @@ impl ClickDebounce {
             return true;
         };
         if !pressed {
-            *released_ns = Some(now_ns);
+            *released_ns = at_ns;
             // A window turned off between the press and its release must not
             // swallow the release: the suppression is cleared either way.
             return match self.suppressed.get_mut(slot) {
@@ -756,8 +768,10 @@ impl ClickDebounce {
         if window_ns == 0 {
             return true;
         }
-        let chatter = released_ns
-            .is_some_and(|last| now_ns >= last && now_ns.saturating_sub(last) < window_ns);
+        let chatter = match (*released_ns, at_ns) {
+            (Some(released), Some(pressed)) => pressed > released && pressed - released < window_ns,
+            _ => false,
+        };
         if chatter {
             if let Some(flag) = self.suppressed.get_mut(slot) {
                 *flag = true;
@@ -781,10 +795,14 @@ mod tests {
     #[test]
     fn an_ordinary_click_is_admitted_whole() {
         let mut filter = debounce();
-        assert!(filter.admits(PointerInput::Pressed(PointerButtonCode::Primary), 0, WINDOW));
+        assert!(filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            Some(0),
+            WINDOW
+        ));
         assert!(filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            80 * MS,
+            Some(80 * MS),
             WINDOW
         ));
     }
@@ -795,26 +813,30 @@ mod tests {
         // 32 ms pulse that closes it. Both go, so no consumer sees an unpaired
         // edge it would hold as a latched grab.
         let mut filter = debounce();
-        assert!(filter.admits(PointerInput::Pressed(PointerButtonCode::Primary), 0, WINDOW));
+        assert!(filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            Some(0),
+            WINDOW
+        ));
         assert!(filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            80 * MS,
+            Some(80 * MS),
             WINDOW
         ));
         assert!(!filter.admits(
             PointerInput::Pressed(PointerButtonCode::Primary),
-            96 * MS,
+            Some(96 * MS),
             WINDOW
         ));
         assert!(!filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            128 * MS,
+            Some(128 * MS),
             WINDOW
         ));
         // The next genuine click is unaffected.
         assert!(filter.admits(
             PointerInput::Pressed(PointerButtonCode::Primary),
-            400 * MS,
+            Some(400 * MS),
             WINDOW
         ));
     }
@@ -824,12 +846,12 @@ mod tests {
         let mut filter = debounce();
         assert!(filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            0,
+            Some(0),
             WINDOW
         ));
         assert!(filter.admits(
             PointerInput::Pressed(PointerButtonCode::Primary),
-            25 * MS,
+            Some(25 * MS),
             WINDOW
         ));
     }
@@ -840,12 +862,12 @@ mod tests {
         let mut filter = debounce();
         assert!(filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            0,
+            Some(0),
             WINDOW
         ));
         assert!(filter.admits(
             PointerInput::Pressed(PointerButtonCode::Secondary),
-            5 * MS,
+            Some(5 * MS),
             WINDOW
         ));
     }
@@ -857,10 +879,14 @@ mod tests {
         let mut filter = ClickDebounce::new();
         for step in 0..4 {
             let t = step * 10 * MS;
-            assert!(filter.admits(PointerInput::Pressed(PointerButtonCode::Primary), t, 0));
+            assert!(filter.admits(
+                PointerInput::Pressed(PointerButtonCode::Primary),
+                Some(t),
+                0
+            ));
             assert!(filter.admits(
                 PointerInput::Released(PointerButtonCode::Primary),
-                t + 5 * MS,
+                Some(t + 5 * MS),
                 0
             ));
         }
@@ -874,17 +900,17 @@ mod tests {
         let mut filter = debounce();
         assert!(filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            0,
+            Some(0),
             WINDOW
         ));
         assert!(!filter.admits(
             PointerInput::Pressed(PointerButtonCode::Primary),
-            5 * MS,
+            Some(5 * MS),
             WINDOW
         ));
         assert!(filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            9 * MS,
+            Some(9 * MS),
             0
         ));
     }
@@ -894,11 +920,50 @@ mod tests {
         let mut filter = debounce();
         assert!(filter.admits(
             PointerInput::Released(PointerButtonCode::Primary),
-            0,
+            Some(0),
             WINDOW
         ));
-        assert!(filter.admits(PointerInput::MovedBy { dx: 3, dy: -2 }, MS, WINDOW));
-        assert!(filter.admits(PointerInput::Scrolled { dx: 0, dy: 1 }, 2 * MS, WINDOW));
+        assert!(filter.admits(PointerInput::MovedBy { dx: 3, dy: -2 }, Some(MS), WINDOW));
+        assert!(filter.admits(
+            PointerInput::Scrolled { dx: 0, dy: 1 },
+            Some(2 * MS),
+            WINDOW
+        ));
+    }
+
+    #[test]
+    fn an_edge_without_a_device_time_is_never_judged() {
+        // A paravirtual device's driver knows no device time, so however
+        // closely it injects distinct clicks after a stall, each is delivered.
+        let press = PointerInput::Pressed(PointerButtonCode::Primary);
+        let release = PointerInput::Released(PointerButtonCode::Primary);
+        let mut untimed = debounce();
+        for record in [press, release, press, release] {
+            assert!(untimed.admits(record, None, WINDOW));
+        }
+        let mut press_untimed = debounce();
+        assert!(press_untimed.admits(release, Some(0), WINDOW));
+        assert!(press_untimed.admits(press, None, WINDOW));
+        let mut release_untimed = debounce();
+        assert!(release_untimed.admits(release, None, WINDOW));
+        assert!(release_untimed.admits(press, Some(MS), WINDOW));
+    }
+
+    #[test]
+    fn edges_stated_at_one_instant_are_not_judged() {
+        // One report carries one state per button, so a release and the next
+        // press stated at the same instant are two reports read together.
+        let mut filter = debounce();
+        assert!(filter.admits(
+            PointerInput::Released(PointerButtonCode::Primary),
+            Some(40 * MS),
+            WINDOW
+        ));
+        assert!(filter.admits(
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            Some(40 * MS),
+            WINDOW
+        ));
     }
 
     use super::{

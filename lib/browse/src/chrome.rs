@@ -184,14 +184,14 @@ impl ToolbarModel {
     /// Back/Forward reflect the navigation history
     /// ([`can_go_back`](Browser::can_go_back) /
     /// [`can_go_forward`](Browser::can_go_forward)); Up reflects whether there
-    /// is a parent to climb to (`!`[`is_root`](Browser::is_root)); Refresh, the
-    /// view toggle, and sort are always actionable.
+    /// is a parent to climb to ([`can_go_up`](Browser::can_go_up)); Refresh,
+    /// the view toggle, and sort are always actionable.
     #[must_use]
     pub fn for_browser<S: DirectorySource>(browser: &Browser<S>) -> Self {
         Self {
             back: browser.can_go_back(),
             forward: browser.can_go_forward(),
-            up: !browser.is_root(),
+            up: browser.can_go_up(),
             view_mode: browser.view_mode(),
             sort_mode: browser.sort_mode(),
         }
@@ -337,6 +337,7 @@ impl ManagerTool {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ManagerToolModel {
     can_empty_trash: bool,
+    can_create: bool,
 }
 
 impl ManagerToolModel {
@@ -348,7 +349,20 @@ impl ManagerToolModel {
     /// one gate on offering [`ManagerTool::EmptyTrash`].
     #[must_use]
     pub const fn new(can_empty_trash: bool) -> Self {
-        Self { can_empty_trash }
+        Self {
+            can_empty_trash,
+            can_create: true,
+        }
+    }
+
+    /// The model for a file manager showing `browser`, whose Trash it may
+    /// empty when `can_empty_trash`: nothing is made where no folder is shown.
+    #[must_use]
+    pub fn for_browser<S: DirectorySource>(browser: &Browser<S>, can_empty_trash: bool) -> Self {
+        Self {
+            can_empty_trash,
+            can_create: browser.folder().is_some(),
+        }
     }
 
     /// The model for a consumer that draws no write tools (the trusted
@@ -357,19 +371,22 @@ impl ManagerToolModel {
     pub const fn none() -> Self {
         Self {
             can_empty_trash: false,
+            can_create: false,
         }
     }
 
     /// Whether `tool` is currently actionable and should render enabled.
     ///
-    /// [`NewFolder`](ManagerTool::NewFolder) and [`Trash`](ManagerTool::Trash)
-    /// are always available; [`EmptyTrash`](ManagerTool::EmptyTrash) is enabled
-    /// only when the model was built for a non-empty Trash (the `can_empty_trash`
-    /// argument to [`new`](Self::new)).
+    /// [`Trash`](ManagerTool::Trash) is always available;
+    /// [`NewFolder`](ManagerTool::NewFolder) wherever a folder is shown; and
+    /// [`EmptyTrash`](ManagerTool::EmptyTrash) only when the model was built
+    /// for a non-empty Trash (the `can_empty_trash` argument to
+    /// [`new`](Self::new)).
     #[must_use]
     pub const fn is_enabled(&self, tool: ManagerTool) -> bool {
         match tool {
-            ManagerTool::NewFolder | ManagerTool::Trash => true,
+            ManagerTool::NewFolder => self.can_create,
+            ManagerTool::Trash => true,
             ManagerTool::EmptyTrash => self.can_empty_trash,
         }
     }
@@ -648,6 +665,8 @@ impl SortKey {
             Self::Free => "Sort by Free Space",
             Self::Filesystem => "Sort by Filesystem",
             Self::Health => "Sort by Health",
+            Self::Address => "Sort by Address",
+            Self::Workgroup => "Sort by Workgroup",
         }
     }
 
@@ -662,6 +681,8 @@ impl SortKey {
             Self::Free => AppMenuSymbol::SortByFree,
             Self::Filesystem => AppMenuSymbol::SortByFilesystem,
             Self::Health => AppMenuSymbol::SortByHealth,
+            Self::Address => AppMenuSymbol::SortByAddress,
+            Self::Workgroup => AppMenuSymbol::SortByWorkgroup,
         }
     }
 }
@@ -848,6 +869,64 @@ pub fn context_menu(
         push_candidates(&mut menu, parent, quick.candidates)?;
     }
     Ok(menu)
+}
+
+/// Build the row model a secondary press over the network asks the desktop to
+/// open, under the root `title`: Display ▸ (the views, then the network's
+/// orders), then Open for the one item chosen.
+///
+/// The network has no path, so nothing that writes, copies or creates is
+/// offered; the ids are [`context_menu`]'s, so [`context_choice_from_item`]
+/// reads either.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shared menu bounds refuse, as [`context_menu`]'s.
+pub fn network_context_menu<S: DirectorySource>(
+    browser: &Browser<S>,
+    title: &str,
+) -> Result<AppMenu, Errno> {
+    let mut menu = AppMenu::titled(AppMenuLabel::new(title)?);
+    let display_row = push_submenu(
+        &mut menu,
+        AppMenuLabel::new(DISPLAY_LABEL)?,
+        AppMenuSymbol::Display,
+        "",
+    )?;
+    menu.push(AppMenuRow::Separator)?;
+    let open = CONTEXT_COMMANDS
+        .iter()
+        .position(|&command| command == ContextCommand::Open)
+        .ok_or(Errno::OutOfRange)?;
+    let item = command_item(
+        open,
+        ContextCommand::Open,
+        network_open_reason(browser),
+        (None, browser.presentation().endings),
+    )?;
+    menu.push(AppMenuRow::Item(item))?;
+    push_display_rows(&mut menu, display_row, browser.view_mode())?;
+    push_sort_rows(
+        &mut menu,
+        display_row,
+        browser.sort_mode(),
+        ListColumns::Network.keys(),
+    )?;
+    Ok(menu)
+}
+
+/// Why Open cannot act on what is chosen over the network, or `""` when it
+/// can.
+fn network_open_reason<S: DirectorySource>(browser: &Browser<S>) -> &'static str {
+    match (browser.chosen_network_item(), browser.selection().len()) {
+        (Some(item), _) => match item.endpoint() {
+            Some(endpoint) if endpoint.is_available() => "",
+            Some(_) => "it cannot be reached now",
+            None => "there is nothing to open",
+        },
+        (None, 0) => REASON_NO_SELECTION,
+        (None, _) => "several items selected",
+    }
 }
 
 /// The row for `command`, numbered by its `index` in [`CONTEXT_COMMANDS`]:
@@ -1169,7 +1248,7 @@ impl ContextMenuModel {
             has_clipboard,
             display: browser.view_mode(),
             sort: browser.sort_mode(),
-            sort_keys: ListColumns::of(browser.entries()).keys(),
+            sort_keys: ListColumns::of_browser(browser).keys(),
             endings: browser.presentation().endings,
         }
     }

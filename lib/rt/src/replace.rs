@@ -311,15 +311,6 @@ fn staged_path(path: &[u8], tag: [u8; TAG_LEN]) -> Result<Vec<u8>, Errno> {
 /// The calls as the kernel serves them.
 struct Syscalls;
 
-/// A negative syscall result as its error.
-fn refusal(ret: i64) -> Result<(), Errno> {
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(Errno::from_syscall(ret))
-    }
-}
-
 impl ReplaceFs for Syscalls {
     type Dir = Dir;
     type File = File;
@@ -329,7 +320,7 @@ impl ReplaceFs for Syscalls {
     }
 
     fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno> {
-        refusal(crate::fs_mkdir(path.as_bytes(), mode))
+        crate::status(crate::fs_mkdir(path.as_bytes(), mode))
     }
 
     fn original(&mut self, dir: &Dir, name: &str) -> Result<Option<File>, Errno> {
@@ -419,7 +410,7 @@ impl ReplaceFs for Syscalls {
                 } else {
                     LinkFlags::empty()
                 };
-                refusal(crate::fs_link_at(
+                crate::status(crate::fs_link_at(
                     FD_CWD,
                     existing.as_bytes(),
                     dir.fd(),

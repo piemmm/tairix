@@ -1209,6 +1209,8 @@ fn a_display_label_keeps_text_and_escapes_what_hides() {
         "Print\\226\\128\\139er"
     );
     assert_eq!(shown("x\u{202e}y".as_bytes()), "x\\226\\128\\174y");
+    // A doubled mark draws as one, so the second shows as its octets.
+    assert_eq!(shown("Re\u{301}\u{301}".as_bytes()), "Re\u{301}\\204\\129");
     assert_eq!(shown(b"bell\x07"), "bell\\007");
     assert_eq!(
         shown(b"bad\xff"),

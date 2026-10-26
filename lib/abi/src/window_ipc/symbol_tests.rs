@@ -11,7 +11,7 @@ fn every_symbol_round_trips_and_the_table_covers_the_vocabulary() {
     // variant's value is the vocabulary's size: a variant missing from
     // the table would leave a value it cannot decode.
     assert_eq!(
-        usize::from(AppMenuSymbol::SortByHealth.wire()),
+        usize::from(AppMenuSymbol::SortByWorkgroup.wire()),
         AppMenuSymbol::ALL.len()
     );
 }

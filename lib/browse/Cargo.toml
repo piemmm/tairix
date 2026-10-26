@@ -33,8 +33,10 @@ tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
 # second copy of the "is this a legal name" rule.
 tairix-path = { path = "../path", version = "=0.0.0" }
 # The one rule for showing a name so nothing in it can hide: the listing and the
-# questions that name an item draw it through `tairix_util::utf8::shown`.
+# questions that name an item draw it through `tairix_util::utf8::shown`, and a
+# budgeted name through `tairix_visible::shown_chars`.
 tairix-util = { path = "../util", version = "=0.0.0" }
+tairix-visible = { path = "../visible", version = "=0.0.0" }
 # Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
 # window manager and taskbar use.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
@@ -64,6 +66,12 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # The one fast hash: a watch batch's merge filters the listing's names through
 # it before searching the batch for them.
 tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The network catalogue the Network location lists: its endpoints, the
+# per-source quota's omissions, and the record a choice of one carries.
+tairix-discovery = { path = "../discovery", version = "=0.0.0" }
+# The one spelling of a peer's host name and of when an address needs its
+# link named, for the Network location's address column.
+tairix-net = { path = "../net", version = "=0.0.0" }
 # What a mounted volume's record says, said one way: its capacity in bytes,
 # its medium and health in words, its options and its throughput, the same
 # derivations `df`, the Switchboard and Settings state a volume through.

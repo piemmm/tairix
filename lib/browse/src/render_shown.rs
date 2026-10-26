@@ -15,11 +15,11 @@ use tairix_theme::Theme;
 
 use super::{
     awaiting_listing, build_toolbar, candidate_art, chooser_identity, content_area,
-    content_viewport, grid_view, identity_slot, list_view, open_with_identity_rect, open_with_rows,
-    place_art, row_art, sidebar_view, tile_art, toolbar_bounds, Identity, ManagerChrome,
-    PropertiesLayout, Tiles,
+    content_viewport, grid_view, identity_slot, list_view, network_row_art, network_tile_art,
+    open_with_identity_rect, open_with_rows, place_art, row_art, sidebar_view, tile_art,
+    toolbar_bounds, Identity, ManagerChrome, PropertiesLayout, Tiles,
 };
-use crate::browser::Browser;
+use crate::browser::{Browser, Item};
 use crate::chrome::{ToolbarBand, ToolbarModel};
 use crate::open_with::OpenWithChooser;
 use crate::source::DirectorySource;
@@ -79,49 +79,58 @@ pub fn manager_art<S: DirectorySource>(
     let area = content_area(viewport, scale, theme, chrome.sidebar, chrome.toolbar);
     let content = content_viewport(area, scale, theme);
     let offset = browser.scroll_offset();
-    let (parent, entries) = (browser.components(), browser.entries());
     let pictures = browser.presentation().pictures;
     // Spelled once for the walk, as the paint spells it once for the frame.
-    let dir = crate::vfs::spell_absolute_path(parent);
+    let folder = browser
+        .folder()
+        .map(|parent| (crate::vfs::spell_absolute_path(parent), parent));
     let mut scratch = String::new();
     match Tiles::of(browser.view_mode()) {
         None => {
             let view = list_view(browser, scale, theme, content, chrome.toolbar);
             for index in view.visible_range(offset) {
-                let (Some(entry), Some(bounds)) = (entries.get(index), view.row_rect(index)) else {
+                let (Some(item), Some(bounds)) = (browser.item(index), view.row_rect(index)) else {
                     break;
                 };
                 let Some(at) = view.shown_rect(offset, index) else {
                     continue;
                 };
-                let (_, request, side) = row_art(
-                    (&dir, parent),
-                    entry,
-                    bounds,
-                    (scale, theme, pictures),
-                    &mut scratch,
-                );
+                let (_, request, side) = match (item, &folder) {
+                    (Item::Entry(entry), Some((dir, parent))) => row_art(
+                        (dir, parent),
+                        entry,
+                        bounds,
+                        (scale, theme, pictures),
+                        &mut scratch,
+                    ),
+                    (Item::Network(item), _) => network_row_art(item, bounds, scale, theme),
+                    (Item::Entry(_), None) => break,
+                };
                 visit(ShownArt { request, side, at });
             }
         }
         Some(tiles) => {
             let view = grid_view(browser, tiles, scale, theme, content, chrome.toolbar);
             for index in view.visible_range(offset) {
-                let (Some(entry), Some(bounds)) = (entries.get(index), view.cell_rect(index))
+                let (Some(item), Some(bounds)) = (browser.item(index), view.cell_rect(index))
                 else {
                     break;
                 };
                 let Some(at) = view.shown_rect(offset, index) else {
                     continue;
                 };
-                let (_, request, side) = tile_art(
-                    tiles,
-                    (&dir, parent),
-                    entry,
-                    bounds,
-                    (scale, theme, pictures),
-                    &mut scratch,
-                );
+                let (_, request, side) = match (item, &folder) {
+                    (Item::Entry(entry), Some((dir, parent))) => tile_art(
+                        tiles,
+                        (dir, parent),
+                        entry,
+                        bounds,
+                        (scale, theme, pictures),
+                        &mut scratch,
+                    ),
+                    (Item::Network(item), _) => network_tile_art(tiles, item, bounds, scale, theme),
+                    (Item::Entry(_), None) => break,
+                };
                 visit(ShownArt { request, side, at });
             }
         }

@@ -15,8 +15,9 @@
 //!
 //! In the ordinary [`Role::Window`](crate::command::Role::Window) role the app
 //! is an application like any other and makes the shared declaration — the
-//! information row, *Settings…* and *Quit*, with the session raising a window
-//! it has and asking for one when it has none ([`WINDOW_SLOT_CLICK`]).
+//! information row, *Network*, *Settings…* and *Quit*, with the session
+//! raising a window it has and asking for one when it has none
+//! ([`WINDOW_SLOT_CLICK`]).
 //!
 //! In the [`Role::Desktop`](crate::command::Role::Desktop) role it is a
 //! component of the desktop, and the slot is the user's way *into* the
@@ -27,7 +28,8 @@
 //! attached right now, each beside the picture the rail draws it with — the
 //! house, a folder, or the drive a volume is on. Choosing one opens a window
 //! there, and a primary click on the slot opens one among the user's own files
-//! ([`DESKTOP_SLOT_CLICK`]). *Settings…* comes last, beneath a rule.
+//! ([`DESKTOP_SLOT_CLICK`]). *Network*, which opens a window browsing the
+//! storage the network offers, and *Settings…* come last, beneath a rule.
 //!
 //! # The row cap is a display cap, and it is stated
 //!
@@ -64,15 +66,38 @@ pub const WINDOW_SLOT_CLICK: AppBarClick = AppBarClick::RaiseOrOpen;
 /// component's menu can number, and clear of the convention's *Quit*.
 pub const SETTINGS_ROW: u16 = u16::MAX;
 
+/// The id the *Network* row answers with in either role, clear of every place,
+/// *Settings…* and *Quit*.
+pub const NETWORK_ROW: u16 = u16::MAX - 1;
+
 const _: () = assert!(SETTINGS_ROW as usize > APP_MENU_MAX_ROWS && SETTINGS_ROW != QUIT_ROW);
+const _: () = assert!(NETWORK_ROW as usize > APP_MENU_MAX_ROWS && NETWORK_ROW != QUIT_ROW);
 
 /// The *Settings…* row's label.
 const SETTINGS_LABEL: &str = "Settings\u{2026}";
+
+/// The *Network* row's label.
+const NETWORK_LABEL: &str = "Network";
 
 /// Whether the chosen row `item` is *Settings…*.
 #[must_use]
 pub fn is_settings(item: AppMenuItemId) -> bool {
     item.get() == SETTINGS_ROW
+}
+
+/// Whether the chosen row `item` is *Network*.
+#[must_use]
+pub fn is_network(item: AppMenuItemId) -> bool {
+    item.get() == NETWORK_ROW
+}
+
+/// The *Network* row.
+fn network_row() -> Result<AppMenuRow, Errno> {
+    Ok(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(NETWORK_ROW)?,
+        AppMenuLabel::new(NETWORK_LABEL)?,
+        AppMenuSymbol::Network,
+    )))
 }
 
 /// The *Settings…* row.
@@ -85,14 +110,18 @@ fn settings_row() -> Result<AppMenuRow, Errno> {
 }
 
 /// The ordinary file manager's declaration, addressed to its own `endpoint`:
-/// the shared convention with *Settings…* between its ends.
+/// the shared convention with *Network* and *Settings…* between its ends.
 ///
 /// # Errors
 ///
 /// Any [`Errno`] the bounded menu builder refuses; the rows are fixed, so a
 /// refusal can only mean the shared bounds changed under this declaration.
 pub fn window_declaration(endpoint: u64) -> Result<AppBar, Errno> {
-    tairix_window::declaration(endpoint, WINDOW_SLOT_CLICK, &[settings_row()?])
+    tairix_window::declaration(
+        endpoint,
+        WINDOW_SLOT_CLICK,
+        &[network_row()?, settings_row()?],
+    )
 }
 
 /// The component's declaration for `places`, addressed to its own `endpoint`,
@@ -101,7 +130,7 @@ pub fn window_declaration(endpoint: u64) -> Result<AppBar, Errno> {
 /// One row per place in rail order, each with the class picture the rail draws
 /// it with, and a rule where the user's own places give way to the mounted
 /// volumes, so the menu reads as two groups rather than one long list; then a
-/// rule and *Settings…*, whose two rows the cap always leaves room for. A row
+/// rule, *Network* and *Settings…*, whose rows the cap always leaves room for. A row
 /// carries the place's own index as its id, so a place that had to be skipped
 /// shifts nothing: the caller resolves a chosen row through [`place_of`] and
 /// lands on exactly the place the user saw.
@@ -137,7 +166,7 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
         // never ends on a dangling divider. It costs a row of the cap, so the
         // pair is admitted together or not at all.
         let rule = !ruled && shown > 0 && place.kind() == PlaceKind::Volume;
-        if menu.len() + 1 + usize::from(rule) > APP_MENU_MAX_ROWS - SETTINGS_ROWS {
+        if menu.len() + 1 + usize::from(rule) > APP_MENU_MAX_ROWS - CLOSING_ROWS {
             skipped += 1;
             continue;
         }
@@ -159,6 +188,7 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
     if shown > 0 {
         menu.push(AppMenuRow::Separator)?;
     }
+    menu.push(network_row()?)?;
     menu.push(settings_row()?)?;
     Ok((
         AppBar {
@@ -170,8 +200,9 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
     ))
 }
 
-/// The rows the component's *Settings…* takes: its rule, and itself.
-const SETTINGS_ROWS: usize = 2;
+/// The rows the component's menu closes with: a rule, *Network* and
+/// *Settings…*.
+const CLOSING_ROWS: usize = 3;
 
 /// What a row opening a place of `kind` does.
 const fn place_symbol(kind: PlaceKind) -> AppMenuSymbol {

@@ -1268,6 +1268,7 @@ mod program {
                     } => {
                         let io = sockets.on_tcp_segment(
                             stack,
+                            outcome.interface,
                             *source,
                             *destination,
                             *ecn,

@@ -41,10 +41,13 @@ fn secret() -> TestSecret {
 }
 
 fn peer(a: u8, b: u8, c: u8, d: u8, port: u16) -> Peer {
-    Peer {
-        addr: IpAddr::V4(Ipv4Addr::new(a, b, c, d)),
-        port,
-    }
+    Peer::arrived(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port, link(b"eth0"))
+}
+
+fn link(name: &[u8]) -> [u8; tairix_abi::net_ipc::IF_NAME_LEN] {
+    let mut out = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
+    out[..name.len()].copy_from_slice(name);
+    out
 }
 
 fn pseudo(peer: Peer) -> Pseudo {
@@ -415,10 +418,11 @@ fn ipv6_handshake_completes() {
     let now = ms(0);
     let secret = secret();
     let local6 = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
-    let peer6 = Peer {
-        addr: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2)),
-        port: 41000,
-    };
+    let peer6 = Peer::arrived(
+        IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2)),
+        41000,
+        link(b"eth0"),
+    );
     let ps = Pseudo::V6 {
         source: match peer6.addr {
             IpAddr::V6(a) => a,
@@ -589,4 +593,90 @@ fn a_listener_configuration_is_fitted_to_its_allowance() {
     );
     let mut starved = base;
     assert!(!starved.fit_within(backlog / 2));
+}
+
+/// A link-local address names a host only on its own link, so one sending
+/// from it on two links is two peers: two half-open connections, and a
+/// cookie minted on one link that validates on that link alone.
+#[test]
+fn a_link_local_peer_is_a_peer_of_its_own_link_only() {
+    let now = ms(0);
+    let secret = secret();
+    let local6 = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+    let addr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2));
+    let (on_a, on_b) = (
+        Peer::arrived(addr, 41000, link(b"eth0")),
+        Peer::arrived(addr, 41000, link(b"wlan0")),
+    );
+    assert_ne!(on_a, on_b);
+    assert_eq!(
+        Peer::arrived(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 41000, link(b"eth0")).link,
+        None,
+        "an address that names a host alone needs no link"
+    );
+    let (IpAddr::V6(source), IpAddr::V6(destination)) = (addr, local6) else {
+        unreachable!("both IPv6")
+    };
+    let ps = Pseudo::V6 {
+        source,
+        destination,
+    };
+    let ser = |out: &OutSegment<'_>| {
+        let mut buf = vec![0u8; crate::tcp::MAX_HEADER_LEN + out.payload.len()];
+        let n = crate::tcp::write(ps, &out.meta, out.payload, &mut buf).expect("write");
+        buf.truncate(n);
+        buf
+    };
+    let syn_of = |client: &mut Tcb| {
+        let mut syn = Vec::new();
+        client.poll_transmit(now, |o| {
+            syn = ser(&o);
+            true
+        });
+        syn
+    };
+
+    let mut listener = Listener::new(LOCAL_PORT, listen_config(4, 64));
+    for peer in [on_a, on_b] {
+        let mut client = Tcb::connect(TcpConfig::default(), peer.port, LOCAL_PORT, 0x9000, now);
+        let syn = syn_of(&mut client);
+        let seg = TcpSegment::parse(ps, &syn).unwrap();
+        listener.on_segment(local6, peer, &seg, now, &secret, |_, _| true);
+    }
+    assert_eq!(listener.half_open_len(), 2, "one half-open on each link");
+
+    let mut cookies = Listener::new(LOCAL_PORT, listen_config(0, 64));
+    let mut client = Tcb::connect(TcpConfig::default(), on_a.port, LOCAL_PORT, 0x9000, now);
+    let syn = syn_of(&mut client);
+    let mut synack = Vec::new();
+    cookies.on_segment(
+        local6,
+        on_a,
+        &TcpSegment::parse(ps, &syn).unwrap(),
+        now,
+        &secret,
+        |_, o| {
+            synack = ser(&o);
+            true
+        },
+    );
+    client.on_segment(
+        &TcpSegment::parse(ps, &synack).unwrap(),
+        crate::addr::Ecn::NotEct,
+        now,
+    );
+    let mut ack = Vec::new();
+    client.poll_transmit(now, |o| {
+        ack = ser(&o);
+        true
+    });
+    let ack = TcpSegment::parse(ps, &ack).unwrap();
+    cookies.on_segment(local6, on_b, &ack, now, &secret, |_, _| true);
+    assert!(
+        cookies.accept().is_none(),
+        "the cookie is not the other link's"
+    );
+    assert_eq!(cookies.stats().cookies_rejected, 1);
+    cookies.on_segment(local6, on_a, &ack, now, &secret, |_, _| true);
+    assert!(cookies.accept().is_some_and(|conn| conn.peer == on_a));
 }

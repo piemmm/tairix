@@ -98,12 +98,17 @@ pub struct RwMockFs {
     /// Run on entry to every lookup, so a test can check what its caller
     /// holds while inside the driver.
     lookup_probe: Option<Box<dyn Fn() + Send>>,
+    /// Run as the driver is dropped, so a test can check what its caller
+    /// holds then.
+    drop_probe: Option<Box<dyn FnOnce() + Send>>,
     /// What every security store answers instead of storing, so a test can
     /// stand in for a format that holds no record.
     security_refusal: Option<DriverError>,
     /// What every pin answers instead of holding the node, so a test can
     /// stand in for a driver that refuses one.
     pin_refusal: Option<DriverError>,
+    /// What every unpin answers instead of letting the hold go.
+    unpin_refusal: Option<DriverError>,
     /// How long ids are declared to last.
     node_identity: NodeIdentity,
     /// What, if anything, gives a file a new number.
@@ -210,6 +215,14 @@ fn hole_seek(holes: &Holes, offset: u64, size: u64, region: SeekRegion) -> Optio
 /// ([`super::wrapper_conformance::assert_allocation_class_forwards`]).
 pub const SYSTEM_ONLY_NAME: &[u8] = b"system-only";
 
+impl Drop for RwMockFs {
+    fn drop(&mut self) {
+        if let Some(probe) = self.drop_probe.take() {
+            probe();
+        }
+    }
+}
+
 impl Default for RwMockFs {
     fn default() -> Self {
         Self::new()
@@ -233,8 +246,10 @@ impl RwMockFs {
             name_matching: NameMatching::AsciiCaseInsensitive,
             free: None,
             lookup_probe: None,
+            drop_probe: None,
             security_refusal: None,
             pin_refusal: None,
+            unpin_refusal: None,
             node_identity: NodeIdentity::Stable,
             renumbering: Renumbering::Never,
             ino_bias: 0,
@@ -309,6 +324,12 @@ impl RwMockFs {
         self
     }
 
+    /// Run `probe` as the driver is dropped.
+    #[cfg(test)]
+    pub(crate) fn on_drop(&mut self, probe: Box<dyn FnOnce() + Send>) {
+        self.drop_probe = Some(probe);
+    }
+
     /// Run `probe` on entry to every lookup.
     #[cfg(test)]
     #[must_use]
@@ -329,6 +350,13 @@ impl RwMockFs {
     #[cfg(test)]
     pub(crate) fn refuse_pins(&mut self, refusal: Option<DriverError>) {
         self.pin_refusal = refusal;
+    }
+
+    /// Answer every unpin from now on with `refusal`, or let holds go again
+    /// for `None`.
+    #[cfg(test)]
+    pub(crate) fn refuse_unpins(&mut self, refusal: Option<DriverError>) {
+        self.unpin_refusal = refusal;
     }
 
     /// Run `probe` on entry to every space-accounting read.
@@ -554,12 +582,7 @@ impl RwMockFs {
             return Err(DriverError::Unsupported);
         };
         let needle = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
-        for (k, &v) in children {
-            if self.name_matching.matches(k.as_bytes(), needle.as_bytes()) {
-                return Ok(Some(v));
-            }
-        }
-        Ok(None)
+        Ok(self.entry(children, needle).map(|(_, node)| node))
     }
 
     /// The spelling directory `dir_idx` stores for the entry `name` matches.
@@ -567,10 +590,30 @@ impl RwMockFs {
         let RwNode::Dir(children) = self.nodes.get(dir_idx)? else {
             return None;
         };
+        let name = core::str::from_utf8(name).ok()?;
+        self.entry(children, name)
+            .map(|(stored, _)| stored.as_bytes())
+    }
+
+    /// The stored spelling and node of the entry in `children` that `name`
+    /// matches: one map lookup when names are exact, a scan when they fold.
+    fn entry<'a>(
+        &self,
+        children: &'a BTreeMap<String, usize>,
+        name: &str,
+    ) -> Option<(&'a str, usize)> {
+        if self.name_matching == NameMatching::Exact {
+            return children
+                .get_key_value(name)
+                .map(|(stored, &node)| (stored.as_str(), node));
+        }
         children
-            .keys()
-            .find(|k| self.name_matching.matches(k.as_bytes(), name))
-            .map(String::as_bytes)
+            .iter()
+            .find(|(stored, _)| {
+                self.name_matching
+                    .matches(stored.as_bytes(), name.as_bytes())
+            })
+            .map(|(stored, &node)| (stored.as_str(), node))
     }
 
     /// Take the entry named `name` out of directory `dir_idx`, returning the
@@ -803,6 +846,9 @@ impl FilesystemRead for RwMockFs {
     }
 
     fn unpin(&mut self, pinned: NodeId) -> Result<Unpinned, DriverError> {
+        if let Some(refusal) = self.unpin_refusal {
+            return Err(refusal);
+        }
         let idx = Self::index(pinned)?;
         let holds = self.held.get_mut(idx as u64).ok_or(DriverError::NotFound)?;
         *holds = holds.saturating_sub(1);
@@ -930,10 +976,14 @@ impl FilesystemWrite for RwMockFs {
             .checked_add(data.len())
             .ok_or(DriverError::LengthOutOfRange)?;
         let old = body.len() as u64;
-        if body.len() < end {
-            body.resize(end, 0);
+        if body.len() < start {
+            body.resize(start, 0);
         }
-        body[start..end].copy_from_slice(data);
+        // Only a gap past the end is zero-filled; written bytes are copied
+        // once, in bulk.
+        let overlap = body.len().min(end) - start;
+        body[start..start + overlap].copy_from_slice(&data[..overlap]);
+        body.extend_from_slice(&data[overlap..]);
         // A gap a write leaves past the old end stores nothing, as a
         // hole-keeping format's does.
         hole_insert(&mut self.holes[child], old, offset);

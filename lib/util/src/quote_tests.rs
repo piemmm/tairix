@@ -116,6 +116,20 @@ fn a_name_that_reorders_or_hides_text_is_escaped_where_gnu_leaves_it_raw() {
     assert_eq!(styled("soft\u{ad}hy", Style::C), "\"soft\\302\\255hy\"");
 }
 
+#[test]
+fn a_mark_that_would_draw_over_another_is_escaped() {
+    // The second acute draws over the first, so it is written as its bytes.
+    assert_eq!(
+        format!("{}", quote_if_needed("re\u{301}\u{301}f")),
+        "'re\u{301}'$'\\314\\201''f'"
+    );
+    assert_eq!(
+        styled("caf\u{e9}\u{301}", Style::C),
+        "\"caf\u{e9}\\314\\201\""
+    );
+    assert_eq!(hidden("re\u{301}\u{301}f", Style::Literal), "re\u{301}?f");
+}
+
 /// GNU 9.4 writes `'''it'\''s'$'\n'`, a needless leading `''`, and
 /// `'\n''a'\'''$'\n'`, whose first escape lost its `$` and reads back as a
 /// backslash and an `n`.
@@ -375,8 +389,9 @@ fn read_back(word: &str) -> Option<String> {
 
 #[test]
 fn every_short_name_reads_back_from_both_escaping_styles() {
-    const ALPHABET: [char; 14] = [
+    const ALPHABET: [char; 15] = [
         'a', ' ', '\'', '"', '$', '\\', '!', '~', '#', '{', '\n', '\u{1b}', '\u{9b}', '\u{202e}',
+        '\u{301}',
     ];
     let mut names = Vec::from([String::new()]);
     let mut frontier = names.clone();
@@ -400,9 +415,10 @@ fn every_short_name_reads_back_from_both_escaping_styles() {
                 Some(name.as_str()),
                 "{name:?} as {quoted:?}"
             );
+            let mut faithful = tairix_visible::Faithful::default();
             assert!(
-                !quoted.chars().any(tairix_visible::is_hidden),
-                "{name:?} as {quoted:?} shows a hidden character"
+                !quoted.chars().any(|ch| faithful.escapes(ch)),
+                "{name:?} as {quoted:?} shows what a faithful rendering escapes"
             );
         }
     }

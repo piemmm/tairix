@@ -183,6 +183,14 @@ const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
 
 /// `volume_detach` syscall number (as above).
 const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
+/// `volume_read` syscall number (as above).
+const NUM_VOLUME_READ: u64 = SyscallNumber::VOLUME_READ.as_u16() as u64;
+/// `volume_write` syscall number (as above).
+const NUM_VOLUME_WRITE: u64 = SyscallNumber::VOLUME_WRITE.as_u16() as u64;
+/// `volume_ctl` syscall number (as above).
+const NUM_VOLUME_CTL: u64 = SyscallNumber::VOLUME_CTL.as_u16() as u64;
+/// `volume_serve` syscall number (as above).
+const NUM_VOLUME_SERVE: u64 = SyscallNumber::VOLUME_SERVE.as_u16() as u64;
 
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
@@ -897,21 +905,29 @@ pub fn keyboard_read(seat: u64, buf: &mut [u8]) -> i64 {
 /// space, decodes the record fail-closed, and routes it by who holds that
 /// seat — the whole record delivered to a held seat's pointer channel, or
 /// consumed and discarded while the seat is unowned (the text console has
-/// no pointer consumer). The driver never chooses the destination. A
-/// malformed record or an unwired registry fails closed with `-errno`; the
-/// wrapper surfaces the raw signed value so the caller decides how to
-/// react.
+/// no pointer consumer). The driver never chooses the destination. `at_ns`
+/// is when the device reported the record, on the monotonic clock, where the
+/// driver knows it: the seat's chatter filter measures a button edge by it,
+/// and never judges one stated with none. A malformed record or an unwired
+/// registry fails closed with `-errno`; the wrapper surfaces the raw signed
+/// value so the caller decides how to react.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
-pub fn pointer_inject(seat: u64, record: &PointerInput) -> i64 {
+pub fn pointer_inject(seat: u64, record: &PointerInput, at_ns: Option<u64>) -> i64 {
     let bytes = record.to_le_bytes();
     let ptr = bytes.as_ptr() as usize as u64;
+    let at_ns = at_ns.unwrap_or(tairix_abi::input::POINTER_EDGE_UNTIMED);
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_INPUT_INJECT`, the seat id, and the `(buf, len)` pair against
     // the caller's address space before reading it. `bytes` is a live
     // stack array for the duration of the call, so the `(ptr, len)` pair
     // denotes readable memory.
-    let ret = unsafe { raw_syscall(NUM_POINTER_INJECT, [seat, ptr, bytes.len() as u64, 0, 0, 0]) };
+    let ret = unsafe {
+        raw_syscall(
+            NUM_POINTER_INJECT,
+            [seat, ptr, bytes.len() as u64, at_ns, 0, 0],
+        )
+    };
     ret as i64
 }
 
@@ -2263,6 +2279,141 @@ pub fn volume_detach(request: &[u8]) -> i64 {
     // the call.
     let ret = unsafe { raw_syscall(NUM_VOLUME_DETACH, [ptr, request.len() as u64, 0, 0, 0, 0]) };
     ret as i64
+}
+
+/// A syscall's `0`-or-`-errno` answer as a result.
+pub(crate) fn status(ret: i64) -> Result<(), Errno> {
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(Errno::from_syscall(ret))
+    }
+}
+
+/// Read whole blocks from `lba` of the volume this filesystem driver serves
+/// into `buf` (`SyscallNumber::VOLUME_READ`, `plans/FSSERVE.md` §4).
+///
+/// # Errors
+///
+/// The kernel's refusal: no grant covering `volume`, a length that is not
+/// whole blocks or runs past the volume, the volume gone, or the device's
+/// own error.
+pub fn volume_read(volume: u64, lba: u64, buf: &mut [u8]) -> Result<(), Errno> {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before writing
+    // it. `buf` is a live exclusive `&mut [u8]` for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_VOLUME_READ, [volume, lba, ptr, buf.len() as u64, 0, 0]) };
+    #[allow(clippy::cast_possible_wrap)] // The kernel's errno-result encoding.
+    status(ret as i64)
+}
+
+/// Write whole blocks from `buf` to `lba` of the volume this filesystem
+/// driver serves (`SyscallNumber::VOLUME_WRITE`).
+///
+/// # Errors
+///
+/// As [`volume_read`], and [`Errno::ReadOnly`] for a volume that may not be
+/// written.
+pub fn volume_write(volume: u64, lba: u64, buf: &[u8]) -> Result<(), Errno> {
+    let ptr = buf.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before reading
+    // it. `buf` is a live shared `&[u8]` for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_VOLUME_WRITE, [volume, lba, ptr, buf.len() as u64, 0, 0]) };
+    #[allow(clippy::cast_possible_wrap)] // The kernel's errno-result encoding.
+    status(ret as i64)
+}
+
+/// Describe, flush or discard the volume this filesystem driver serves, as
+/// `ctl` asks, answering into `reply` (`SyscallNumber::VOLUME_CTL`).
+/// Returns the reply's length.
+///
+/// # Errors
+///
+/// As [`volume_read`].
+pub fn volume_ctl(
+    volume: u64,
+    ctl: &tairix_abi::volume::VolumeCtl,
+    reply: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = ctl.encode();
+    let request_ptr = request.as_ptr() as usize as u64;
+    let reply_ptr = reply.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space. `request`
+    // is a live local array and `reply` a live exclusive `&mut [u8]` for the
+    // duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_VOLUME_CTL,
+            [
+                volume,
+                request_ptr,
+                request.len() as u64,
+                reply_ptr,
+                reply.len() as u64,
+                0,
+            ],
+        )
+    };
+    count_result(ret, reply.len()).map_err(Errno::from_syscall)
+}
+
+/// Serve the filesystem on the volume this driver was given, or refuse it, as
+/// `frame` says (`SyscallNumber::VOLUME_SERVE`, `plans/FSSERVE.md` §5).
+///
+/// A serve answers the call endpoint the kernel created for the driver and
+/// the data window it mapped; a refusal answers `None`.
+///
+/// # Errors
+///
+/// The kernel's refusal: no grant covering `volume`, a volume already served,
+/// or a frame it refuses; [`Errno::OutOfRange`] for a grant this target
+/// cannot build a window over.
+pub fn volume_serve(
+    volume: u64,
+    frame: &tairix_abi::fsserve::ServeFrame,
+) -> Result<Option<(u64, crate::shm::ServeWindow)>, Errno> {
+    let encoded = frame.encode();
+    let mut grant = [0u8; tairix_abi::fsserve::SERVE_GRANT_LEN];
+    let frame_ptr = encoded.as_ptr() as usize as u64;
+    let grant_ptr = grant.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space. Both are
+    // live local arrays for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_VOLUME_SERVE,
+            [
+                volume,
+                frame_ptr,
+                encoded.len() as u64,
+                grant_ptr,
+                grant.len() as u64,
+                0,
+            ],
+        )
+    };
+    let answered = count_result(ret, grant.len()).map_err(Errno::from_syscall)?;
+    served_grant(&grant, answered)
+}
+
+/// What a `volume_serve` answer of `answered` bytes of `grant` grants, read
+/// only as far as the kernel wrote it: nothing for a refusal's empty answer,
+/// else the endpoint and window.
+fn served_grant(
+    grant: &[u8; tairix_abi::fsserve::SERVE_GRANT_LEN],
+    answered: usize,
+) -> Result<Option<(u64, crate::shm::ServeWindow)>, Errno> {
+    let answer = grant.get(..answered).ok_or(Errno::OutOfRange)?;
+    if answer.is_empty() {
+        return Ok(None);
+    }
+    let grant = tairix_abi::fsserve::ServeGrant::decode(answer)?;
+    let window =
+        crate::shm::ServeWindow::mapped(grant.window, grant.window_len).ok_or(Errno::OutOfRange)?;
+    Ok(Some((grant.endpoint, window)))
 }
 
 /// Map the `[offset, offset + len)` sub-region of a **granted** device MMIO
@@ -8088,6 +8239,104 @@ mod tests {
     }
 
     #[test]
+    fn volume_transfers_marshal_the_volume_block_and_buffer() {
+        let mut inbound = [0u8; 512];
+        let (number, args) = capture(0, || {
+            assert_eq!(volume_read(9, 40, &mut inbound), Ok(()));
+        });
+        assert_eq!(number, NUM_VOLUME_READ);
+        assert_eq!(args, [9, 40, inbound.as_ptr() as usize as u64, 512, 0, 0]);
+        let outbound = [7u8; 1024];
+        let (number, args) = capture(refusal(Errno::ReadOnly), || {
+            assert_eq!(volume_write(9, 41, &outbound), Err(Errno::ReadOnly));
+        });
+        assert_eq!(number, NUM_VOLUME_WRITE);
+        assert_eq!(args, [9, 41, outbound.as_ptr() as usize as u64, 1024, 0, 0]);
+    }
+
+    #[test]
+    fn volume_ctl_marshals_both_buffers_and_never_counts_past_its_reply() {
+        use tairix_abi::volume::{VolumeCtl, VolumeCtlOp, VOLUME_CTL_LEN, VOLUME_INFO_LEN};
+        let ctl = VolumeCtl {
+            op: VolumeCtlOp::Info,
+            lba: 0,
+            blocks: 0,
+        };
+        let mut reply = [0u8; VOLUME_INFO_LEN];
+        let (number, args) = capture(VOLUME_INFO_LEN as u64, || {
+            assert_eq!(volume_ctl(3, &ctl, &mut reply), Ok(VOLUME_INFO_LEN));
+        });
+        assert_eq!(number, NUM_VOLUME_CTL);
+        assert_eq!(args[0], 3);
+        assert_ne!(args[1], 0, "the encoded request");
+        assert_eq!(args[2], VOLUME_CTL_LEN as u64);
+        assert_eq!(
+            args[3..],
+            [reply.as_ptr() as usize as u64, VOLUME_INFO_LEN as u64, 0]
+        );
+        let (_, _) = capture(VOLUME_INFO_LEN as u64 + 9, || {
+            assert_eq!(volume_ctl(3, &ctl, &mut reply), Ok(VOLUME_INFO_LEN));
+        });
+    }
+
+    #[test]
+    fn volume_serve_answers_a_refusal_with_none_and_maps_no_grant_it_cannot_trust() {
+        use tairix_abi::driver::filesystem::{NameMatching, NodeId, NodeIdentity};
+        use tairix_abi::fsserve::{ServeFrame, ServeOffer, SERVE_FRAME_LEN, SERVE_GRANT_LEN};
+        let refuse = ServeFrame::Refuse(tairix_abi::DriverError::BadMagic);
+        let (number, args) = capture(0, || {
+            assert!(matches!(volume_serve(5, &refuse), Ok(None)));
+        });
+        assert_eq!(number, NUM_VOLUME_SERVE);
+        assert_eq!(args[0], 5);
+        assert_eq!(args[2], SERVE_FRAME_LEN as u64);
+        assert_eq!(args[4], SERVE_GRANT_LEN as u64);
+        let serve = ServeFrame::Serve(ServeOffer {
+            root: NodeId::from_raw(1),
+            name_matching: NameMatching::Exact,
+            node_identity: NodeIdentity::Stable,
+            attrs: false,
+            write_refusal: None,
+            format: tairix_abi::volume::FormatName::Ext4,
+        });
+        // A grant answered short of whole, or whole but never written, is
+        // refused before any window is built over it.
+        for answered in [16, SERVE_GRANT_LEN as u64] {
+            let (_, _) = capture(answered, || {
+                assert_eq!(volume_serve(5, &serve).err(), Some(Errno::LengthOutOfRange));
+            });
+        }
+    }
+
+    #[test]
+    fn a_serve_answer_is_read_only_as_far_as_the_kernel_wrote_it() {
+        use tairix_abi::fsserve::{ServeGrant, FSSERVE_WINDOW_LEN};
+        let grant = ServeGrant {
+            endpoint: 7,
+            window: 0,
+            window_len: u32::try_from(FSSERVE_WINDOW_LEN).expect("a window length"),
+        }
+        .encode();
+        assert!(matches!(served_grant(&grant, 0), Ok(None)));
+        // Twenty bytes already carry the window length; read with the
+        // unwritten pad as though whole, they would pass for a grant.
+        assert_eq!(
+            served_grant(&grant, 20).err(),
+            Some(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            served_grant(&grant, grant.len()).err(),
+            Some(Errno::OutOfRange),
+            "a grant naming no window maps none"
+        );
+        assert_eq!(
+            served_grant(&grant, grant.len() + 1).err(),
+            Some(Errno::OutOfRange),
+            "an answer past the grant"
+        );
+    }
+
+    #[test]
     fn ipc_send_marshals_endpoint_pointer_and_len() {
         let payload = *b"reply-record";
         let (number, args) = capture(0, || {
@@ -8564,19 +8813,24 @@ mod tests {
     }
 
     #[test]
-    fn pointer_inject_marshals_the_seat_record_pointer_and_len() {
+    fn pointer_inject_marshals_the_seat_record_pointer_len_and_device_time() {
         let record = PointerInput::MovedBy { dx: 5, dy: -9 };
         let want = i64::try_from(PointerInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
-        let (number, args) = capture(PointerInput::WIRE_LEN as u64, || {
-            assert_eq!(pointer_inject(3, &record), want);
-        });
-        assert_eq!(number, NUM_POINTER_INJECT);
-        // arg 0 is the seat id; arg 1 the record buffer pointer; arg 2 its
-        // WIRE_LEN.
-        assert_eq!(args[0], 3);
-        assert_ne!(args[1], 0);
-        assert_eq!(args[2], PointerInput::WIRE_LEN as u64);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        for (at_ns, sent) in [
+            (Some(77), 77),
+            (None, tairix_abi::input::POINTER_EDGE_UNTIMED),
+        ] {
+            let (number, args) = capture(PointerInput::WIRE_LEN as u64, || {
+                assert_eq!(pointer_inject(3, &record, at_ns), want);
+            });
+            assert_eq!(number, NUM_POINTER_INJECT);
+            // arg 0 is the seat id; arg 1 the record buffer pointer; arg 2 its
+            // WIRE_LEN; arg 3 the device time.
+            assert_eq!(args[0], 3);
+            assert_ne!(args[1], 0);
+            assert_eq!(args[2], PointerInput::WIRE_LEN as u64);
+            assert_eq!(&args[3..], &[sent, 0, 0]);
+        }
     }
 
     #[test]

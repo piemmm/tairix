@@ -4477,6 +4477,68 @@ mod held {
         );
     }
 
+    /// A served volume's release a drop left is never the flusher's, whose
+    /// pass must not wait on a server; the next operation on the volume hands
+    /// it over before it runs.
+    #[test]
+    fn a_served_volume_is_reaped_by_its_next_operation_never_the_flusher() {
+        let (serving, pinned) = served_release_left_by_a_drop();
+        let svc = &serving.service;
+        let driver = &serving.drivers[0];
+        let sink = crate::test_sink::TestSink::new();
+        crate::fs::writeback::publish_due(serving.mounted, &sink, 0);
+        assert!(
+            driver.lock().node_info(pinned).is_ok(),
+            "the flusher left it"
+        );
+        let mut back = [0u8; 1];
+        read_path(svc, TEST_UID, &caps(), &path("other"), 0, &mut back).expect("reads");
+        assert_eq!(
+            driver.lock().node_info(pinned).map(|_| ()),
+            Err(tairix_abi::driver::DriverError::NotFound),
+            "the read let it go first, freeing the nameless node"
+        );
+    }
+
+    /// A sync hands a served volume's waiting releases over before it
+    /// flushes, so what they free is committed with the rest.
+    #[test]
+    fn a_sync_hands_a_served_volumes_releases_over_first() {
+        let (serving, pinned) = served_release_left_by_a_drop();
+        serving.service.sync_all(TEST_UID, &caps()).expect("syncs");
+        assert_eq!(
+            serving.drivers[0].lock().node_info(pinned).map(|_| ()),
+            Err(tairix_abi::driver::DriverError::NotFound),
+        );
+    }
+
+    /// A served volume holding the files `doomed` and `other`, and the pin of
+    /// `doomed`, unlinked while open, whose release a dropped descriptor left
+    /// queued.
+    fn served_release_left_by_a_drop() -> (
+        crate::fs::test_volume::Serving<RwMockFs>,
+        tairix_abi::driver::filesystem::NodeId,
+    ) {
+        let serving = crate::fs::test_volume::mounted_served(driver(), &[TEST_ACCOUNT]);
+        let svc = &serving.service;
+        let caps = caps();
+        file_with(svc, "doomed", b"x");
+        file_with(svc, "other", b"y");
+        let held =
+            own_handle(svc, TEST_UID, &caps, &path("doomed"), OpenFlags::READ).expect("opens");
+        let pinned = held.node.pinned();
+        svc.unlink(
+            TEST_UID,
+            &caps,
+            at(&path("doomed")),
+            UnlinkFlags::empty(),
+            None,
+        )
+        .expect("unlink");
+        drop(held);
+        (serving, pinned)
+    }
+
     /// A working directory is a directory its caller may search, pinned as
     /// it is entered: a catalog is held as the catalog, and the view root
     /// pins nothing.
@@ -4792,6 +4854,41 @@ fn a_flusher_pass_leaves_a_busy_volume_due_and_reaps_the_others() {
         Err(tairix_abi::driver::DriverError::NotFound),
         "the volume was reaped once it was free"
     );
+}
+
+/// A driver is held from before its entry is visible until it has its host,
+/// so no operation reaches it first: one that did, on a server's proxy, would
+/// wait on a server that is inside the very call serving it. The driver it
+/// replaces in place is dropped once the successor is visible, and finds the
+/// successor already held.
+#[test]
+fn a_driver_is_held_before_its_entry_is_visible() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    let held: &'static AtomicBool = crate::forever(Box::new(AtomicBool::new(false)));
+    let handle = DriverHandle::from_raw(32).expect("non-zero handle");
+    let first = cell
+        .register(handle, RwMockFs::new(), "vol", "memfs", [0u8; 16], None)
+        .expect("register");
+    let nodes = Arc::clone(first.nodes());
+    first.lock().on_drop(Box::new(move || {
+        let successor = cell.driver(handle).expect("visible");
+        held.store(successor.try_lock().is_none(), Ordering::Relaxed);
+    }));
+    drop(first);
+    let second = cell
+        .register_with_nodes(
+            handle,
+            RwMockFs::new(),
+            "vol",
+            "memfs",
+            [0u8; 16],
+            None,
+            nodes,
+        )
+        .expect("replaced in place");
+    assert!(held.load(Ordering::Relaxed), "the successor was held");
+    assert!(second.try_lock().is_some(), "and is free once registered");
 }
 
 /// A pass walks registrations by instance number, so one withdrawn behind its

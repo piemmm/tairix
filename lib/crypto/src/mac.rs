@@ -7,13 +7,18 @@
 //! bit-rotted metadata block fails the check and is repaired from its
 //! redundant copy rather than trusted.
 //!
-//! HMAC-SHA512 is the SSH transport's `hmac-sha2-512` (RFC 6668).
-//! HMAC-SHA1 exists for exactly one caller: OpenSSH's hashed `known_hosts`
-//! index (`|1|salt|HMAC-SHA1(salt, host)`), a fixed foreign format. That
-//! index is an obfuscation over a hostname — it selects which line to
-//! compare a host key against and is never itself an authentication
-//! decision — so SHA-1's collision weakness does not bear on it. No other
-//! use of SHA-1 is offered, and the bare digest is not exposed at all.
+//! HMAC-SHA512 is the SSH transport's `hmac-sha2-512` (RFC 6668), and
+//! HMAC-SHA384 is Kerberos's `aes256-cts-hmac-sha384-192` (RFC 8009).
+//! HMAC-SHA1 exists for two fixed foreign formats: OpenSSH's hashed
+//! `known_hosts` index (`|1|salt|HMAC-SHA1(salt, host)`), an obfuscation
+//! over a hostname, and the RFC 3962 Kerberos enctypes' integrity check and
+//! string-to-key. HMAC's security rests on the digest's pseudo-randomness,
+//! not its collision resistance, so SHA-1's collision weakness bears on
+//! neither. The bare SHA-1 digest is not exposed at all.
+//!
+//! AES-CMAC (RFC 4493) and AES-GMAC (GCM over an empty plaintext, NIST SP
+//! 800-38D) are how SMB 3 signs a message: 3.0 and 3.0.2 with CMAC, 3.1.1
+//! with GMAC where it was negotiated.
 //!
 //! Poly1305 (RFC 8439 §2.5) is the one-time authenticator
 //! `chacha20-poly1305@openssh.com` keys from a `ChaCha20` block. The packaged
@@ -28,10 +33,14 @@
 //! a caller cannot accidentally reintroduce a timing-leaking `==` over a
 //! secret tag.
 
+use aes::Aes128;
+use aes_gcm::aead::AeadInOut;
+use aes_gcm::{Aes128Gcm, Nonce as GcmNonce};
+use cmac::Cmac;
 use hmac::{Hmac, KeyInit as HmacKeyInit, Mac};
 use poly1305::Poly1305;
 use sha1::Sha1;
-use sha2::{Sha256, Sha512};
+use sha2::{Sha256, Sha384, Sha512};
 
 use crate::constant_time::ct_eq;
 
@@ -140,6 +149,19 @@ hmac_variant!(
 );
 
 hmac_variant!(
+    Sha384,
+    "HMAC-SHA384",
+    HMAC_SHA384_KEY_LEN,
+    HMAC_SHA384_TAG_LEN,
+    48,
+    HmacSha384Key,
+    HmacSha384Tag,
+    hmac_sha384,
+    hmac_sha384_parts,
+    hmac_sha384_verify
+);
+
+hmac_variant!(
     Sha1,
     "HMAC-SHA1",
     HMAC_SHA1_KEY_LEN,
@@ -188,6 +210,71 @@ pub fn poly1305(key: &Poly1305Key, data: &[u8]) -> Poly1305Tag {
 #[must_use]
 pub fn poly1305_verify(key: &Poly1305Key, data: &[u8], tag: &Poly1305Tag) -> bool {
     ct_eq(&poly1305(key, data), tag)
+}
+
+/// Length, in bytes, of an AES-128-CMAC or AES-128-GMAC key.
+pub const AES128_MAC_KEY_LEN: usize = 16;
+
+/// Length, in bytes, of an AES-CMAC or AES-GMAC tag: one AES block.
+pub const AES_MAC_TAG_LEN: usize = 16;
+
+/// Length, in bytes, of an AES-GMAC nonce, GCM's 96-bit nonce.
+pub const AES_GMAC_NONCE_LEN: usize = 12;
+
+/// An AES-128-CMAC or AES-128-GMAC key as raw bytes.
+pub type Aes128MacKey = [u8; AES128_MAC_KEY_LEN];
+
+/// An AES-CMAC or AES-GMAC tag as raw bytes.
+pub type AesMacTag = [u8; AES_MAC_TAG_LEN];
+
+/// An AES-GMAC nonce as raw bytes.
+pub type AesGmacNonce = [u8; AES_GMAC_NONCE_LEN];
+
+/// Compute the AES-128-CMAC (RFC 4493) of `data` under `key`.
+#[must_use]
+pub fn aes128_cmac(key: &Aes128MacKey, data: &[u8]) -> AesMacTag {
+    let mut mac = <Cmac<Aes128> as cmac::KeyInit>::new(key.into());
+    mac.update(data);
+    mac.finalize().into_bytes().into()
+}
+
+/// Verify that `tag` is the AES-128-CMAC of `data` under `key`, in constant
+/// time with respect to the tag contents.
+#[must_use]
+pub fn aes128_cmac_verify(key: &Aes128MacKey, data: &[u8], tag: &AesMacTag) -> bool {
+    ct_eq(&aes128_cmac(key, data), tag)
+}
+
+/// Compute the AES-128-GMAC of `data` under `key` and `nonce`: GCM's tag over
+/// an empty plaintext with `data` as the associated data.
+///
+/// GMAC inherits GCM's nonce rule: one `(key, nonce)` pair authenticates one
+/// message, ever. SMB 3.1.1 builds the nonce from the message id, which a
+/// connection never reuses; this function generates none.
+///
+/// `None` when `data` is longer than GCM authenticates under one nonce
+/// (about 64 GiB).
+#[must_use]
+pub fn aes128_gmac(key: &Aes128MacKey, nonce: &AesGmacNonce, data: &[u8]) -> Option<AesMacTag> {
+    let cipher = <Aes128Gcm as aes_gcm::KeyInit>::new(key.into());
+    let mut empty = [0u8; 0];
+    cipher
+        .encrypt_inout_detached(&GcmNonce::from(*nonce), data, empty.as_mut_slice().into())
+        .ok()
+        .map(Into::into)
+}
+
+/// Verify that `tag` is the AES-128-GMAC of `data` under `key` and `nonce`,
+/// in constant time with respect to the tag contents. Input GMAC cannot
+/// authenticate never verifies.
+#[must_use]
+pub fn aes128_gmac_verify(
+    key: &Aes128MacKey,
+    nonce: &AesGmacNonce,
+    data: &[u8],
+    tag: &AesMacTag,
+) -> bool {
+    aes128_gmac(key, nonce, data).is_some_and(|computed| ct_eq(&computed, tag))
 }
 
 #[cfg(test)]

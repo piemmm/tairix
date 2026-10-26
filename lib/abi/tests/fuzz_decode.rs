@@ -1318,7 +1318,100 @@ fn exercise(bytes: &[u8]) {
     exercise_usb_urb(bytes);
     exercise_blkio(bytes);
     exercise_fs(bytes);
+    exercise_fsserve(bytes);
     exercise_introspect(bytes);
+}
+
+/// The served-filesystem protocol, both directions: a request the driver
+/// accepts re-encodes to itself, a reply the kernel accepts honours the
+/// request it answers and re-encodes to itself, and the serve frames
+/// round-trip.
+fn exercise_fsserve(bytes: &[u8]) {
+    use tairix_abi::driver::filesystem::NodeId;
+    use tairix_abi::fsserve::{
+        decode_reply, decode_request, encode_reply, encode_request, Answer, DirReply, Request,
+        ServeFrame, ServeGrant, Span, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX,
+    };
+    if let Ok((class, request)) = decode_request(bytes) {
+        let mut out = std::vec![0u8; FSSERVE_REQUEST_MAX];
+        let len =
+            encode_request(&request, class, &mut out).expect("an accepted request must re-encode");
+        assert_eq!(&out[..len], bytes);
+    }
+    let node = NodeId::from_raw(7);
+    let span = Span::new(0, 512).expect("a span");
+    let asked = [
+        Request::NodeInfo { node },
+        Request::Lookup {
+            dir: node,
+            name: b"x",
+        },
+        Request::ReadAt {
+            file: node,
+            offset: 0,
+            span,
+        },
+        Request::ReadLink {
+            link: node,
+            cap: 64,
+        },
+        Request::SeekRegion {
+            file: node,
+            offset: 9,
+            region: tairix_abi::fs::SeekRegion::Data,
+        },
+        Request::ReadDir {
+            dir: node,
+            cursor: 0,
+            after: b"",
+        },
+        Request::Security { node },
+        Request::Stats,
+        Request::GetAttr {
+            node,
+            key: b"user.k",
+            cap: 16,
+        },
+        Request::ListAttr {
+            node,
+            index: 0,
+            cap: 16,
+        },
+        Request::Pin { node },
+        Request::Unpin { pinned: node },
+        Request::Flush,
+    ];
+    for request in asked {
+        let Ok(reply) = decode_reply(bytes, &request) else {
+            continue;
+        };
+        let mut out = std::vec![0u8; FSSERVE_REPLY_MAX];
+        let len = match reply.result {
+            Ok(Answer::Entries(batch)) => {
+                let mut rebuilt = DirReply::new(&mut out).expect("a reply buffer");
+                for (entry, name) in &batch {
+                    rebuilt
+                        .push(&entry, name)
+                        .expect("an accepted entry re-encodes");
+                }
+                rebuilt
+                    .finish(batch.end(), reply.state)
+                    .expect("an accepted batch re-encodes")
+            }
+            result => encode_reply(request.op(), reply.state, result, &mut out)
+                .expect("an accepted reply must re-encode"),
+        };
+        assert_eq!(&out[..len], bytes, "{request:?}");
+        if let Ok(Answer::Count(count)) = reply.result {
+            assert!(count as usize <= span.size());
+        }
+    }
+    if let Ok(frame) = ServeFrame::decode(bytes) {
+        assert_eq!(&frame.encode()[..], bytes);
+    }
+    if let Ok(grant) = ServeGrant::decode(bytes) {
+        assert_eq!(&grant.encode()[..], bytes);
+    }
 }
 
 /// Drive the System Information introspection decoders on `bytes`.
@@ -1741,6 +1834,197 @@ fn spawn_attach_blocks_with_flipped_bits_round_trip_or_are_refused() {
     }
 }
 
+/// One served-filesystem request of each argument shape, encoded.
+fn fsserve_request_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
+    use tairix_abi::driver::filesystem::{
+        AclModel, AllocationClass, NodeId, NodeKind, NodeSecurity, SecurityAcl, SecuritySubject,
+    };
+    use tairix_abi::fsserve::{encode_request, Request, Span, FSSERVE_REQUEST_MAX};
+    let node = NodeId::from_raw(7);
+    let span = Span::new(16, 512).expect("a span");
+    let mut record = NodeSecurity::new(0o640, 1, 2);
+    record.acl_model = AclModel::Posix {
+        group_obj: 0o5,
+        mask: 0o7,
+    };
+    record
+        .push_acl(SecurityAcl {
+            subject: SecuritySubject::Group(3),
+            perms: 0o6,
+        })
+        .expect("room for an entry");
+    let requests = [
+        Request::Lookup {
+            dir: node,
+            name: b"name",
+        },
+        Request::ReadAt {
+            file: node,
+            offset: 3,
+            span,
+        },
+        Request::ReadDir {
+            dir: node,
+            cursor: 5,
+            after: b"prev",
+        },
+        Request::Pin { node },
+        Request::Unpin { pinned: node },
+        Request::ReleasePins,
+        Request::Create {
+            dir: node,
+            name: b"n",
+            kind: NodeKind::Directory,
+            record,
+        },
+        Request::CreateLink {
+            dir: node,
+            name: b"l",
+            target: b"../t",
+            record,
+        },
+        Request::WriteAt {
+            file: node,
+            offset: 9,
+            span,
+        },
+        Request::Truncate {
+            file: node,
+            size: 4,
+        },
+        Request::Punch {
+            file: node,
+            offset: 8,
+            len: 16,
+        },
+        Request::Rename {
+            src_dir: node,
+            src_name: b"a",
+            dst_dir: node,
+            dst_name: b"b",
+        },
+        Request::SetSecurity {
+            node,
+            security: NodeSecurity::new(0o640, 1, 2),
+        },
+        Request::SetAttr {
+            node,
+            key: b"user.k",
+            value: b"v",
+        },
+        Request::Release,
+    ];
+    requests
+        .iter()
+        .map(|request| {
+            let mut out = std::vec![0u8; FSSERVE_REQUEST_MAX];
+            let len = encode_request(request, AllocationClass::System, &mut out).expect("encodes");
+            out.truncate(len);
+            out
+        })
+        .collect()
+}
+
+/// One served-filesystem reply of each answer shape, a listing, and the two
+/// serve frames, encoded.
+fn fsserve_reply_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
+    use tairix_abi::driver::filesystem::{
+        DirEntry, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, Unpinned,
+        VolumeStats,
+    };
+    use tairix_abi::fsserve::{
+        encode_reply, Answer, DirEnd, DirReply, Op, ServeFrame, ServeGrant, ServeOffer,
+        ServerState, FSSERVE_REPLY_MAX, FSSERVE_WINDOW_LEN,
+    };
+    use tairix_abi::time::Time64;
+    let node = NodeId::from_raw(7);
+    let info = NodeInfo {
+        kind: NodeKind::RegularFile,
+        nlink: 1,
+        ino: 7,
+        size: 9,
+        allocated: 4096,
+        times: NodeTimes {
+            created: Time64::new(5, 6).expect("a time"),
+            modified: Time64::UNIX_EPOCH,
+            accessed: Time64::UNIX_EPOCH,
+            changed: Time64::UNIX_EPOCH,
+        },
+        content_gen: 0,
+    };
+    let state = ServerState {
+        unpublished: true,
+        in_reserve: false,
+    };
+    let space = VolumeStats {
+        block_size: 512,
+        in_reserve: false,
+        total_blocks: 9,
+        free_blocks: 4,
+        avail_blocks: 4,
+        files: 0,
+        files_free: 0,
+    };
+    let mut frames = std::vec::Vec::new();
+    for (op, answer) in [
+        (Op::NodeInfo, Answer::Info(info)),
+        (Op::ReadAt, Answer::Count(100)),
+        (Op::SeekRegion, Answer::Region(Some(20))),
+        (Op::Stats, Answer::Stats(space)),
+        (Op::GetAttr, Answer::Attr(Some(b"value"))),
+        (Op::Pin, Answer::Node(node)),
+        (Op::Unpin, Answer::Unpinned(Unpinned::Freed)),
+    ] {
+        let mut out = std::vec![0u8; 256];
+        let len = encode_reply(op, state, Ok(answer), &mut out).expect("encodes");
+        out.truncate(len);
+        frames.push(out);
+    }
+    let mut out = std::vec![0u8; FSSERVE_REPLY_MAX];
+    let entry = DirEntry {
+        node,
+        info,
+        next_cursor: 1,
+    };
+    let mut reply = DirReply::new(&mut out).expect("a reply");
+    reply.push(&entry, b"one").expect("fits");
+    let len = reply.finish(DirEnd::Ended, state).expect("finishes");
+    out.truncate(len);
+    frames.push(out);
+    let offer = ServeOffer {
+        root: node,
+        name_matching: NameMatching::Exact,
+        node_identity: NodeIdentity::Stable,
+        attrs: true,
+        write_refusal: None,
+        format: tairix_abi::volume::FormatName::Ext3,
+    };
+    frames.push(ServeFrame::Serve(offer).encode().to_vec());
+    let grant = ServeGrant {
+        endpoint: 1,
+        window: 2,
+        window_len: u32::try_from(FSSERVE_WINDOW_LEN).expect("a window length"),
+    };
+    frames.push(grant.encode().to_vec());
+    frames
+}
+
+/// Every served-filesystem frame shape, each bit flipped in turn: a request
+/// or reply either decodes to its own encoding or is refused, never panics.
+#[test]
+fn fsserve_frames_with_flipped_bits_round_trip_or_are_refused() {
+    for frame in fsserve_request_frames()
+        .into_iter()
+        .chain(fsserve_reply_frames())
+    {
+        for bit in 0..frame.len() * 8 {
+            let mut flipped = frame.clone();
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            exercise_fsserve(&flipped);
+        }
+    }
+}
+
 #[test]
 fn random_short_inputs_never_panic() {
     let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
@@ -1892,8 +2176,8 @@ fn structured_settings_frames_with_corrupted_fields_never_panic() {
 #[test]
 fn structured_discovery_inputs_with_corrupted_fields_never_panic() {
     use tairix_abi::discovery_ipc::{
-        Answer, Change, CollectWriter, DiscoveryRequest, Entry, Families, Query, ServiceTypeField,
-        Transport,
+        Answer, Change, CollectWriter, DiscoveryRequest, Entry, Families, Membership, Query,
+        ServiceTypeField, Transport,
     };
     let mut seeds: Vec<Vec<u8>> = Vec::new();
     for request in [
@@ -1913,6 +2197,10 @@ fn structured_discovery_inputs_with_corrupted_fields_never_panic() {
                 name: b"\x07printer\x05local\x00",
                 families: Families::BOTH,
             },
+        },
+        DiscoveryRequest::Start {
+            session: 1,
+            query: Query::Computers,
         },
         DiscoveryRequest::Collect {
             session: 1,
@@ -1941,6 +2229,20 @@ fn structured_discovery_inputs_with_corrupted_fields_never_panic() {
         .push(&Entry::Flush {
             request: 2,
             interface,
+        })
+        .expect("fits");
+    writer
+        .push(&Entry::Answer {
+            request: 4,
+            interface,
+            change: Change::Added,
+            ttl: 0,
+            answer: Answer::Computer {
+                key: 7,
+                address: core::net::IpAddr::V4(core::net::Ipv4Addr::new(10, 0, 0, 9)),
+                name: "PC",
+                membership: Membership::Workgroup("WG"),
+            },
         })
         .expect("fits");
     let len = writer.finish(true);

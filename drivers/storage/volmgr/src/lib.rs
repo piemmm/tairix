@@ -31,13 +31,14 @@
 //!    kebab case, else `<transport>_<fingerprint>`; a label in use or
 //!    reserved takes `_<fingerprint>` of the volume's identity — [`name`]),
 //!    and
-//! 5. asks the kernel to attach and publish each recognised volume
-//!    (the `CAP_FS_MOUNT`-gated, audited `volume_attach` syscall — the
-//!    kernel re-validates everything and performs the mount itself).
+//! 5. asks the kernel to attach each recognised volume (the
+//!    `CAP_FS_MOUNT`-gated, audited `volume_attach` syscall — the kernel
+//!    re-validates everything and publishes the volume node its format's
+//!    user-space driver serves it through).
 //!
 //! It then exits `0`: publication is a run-to-completion job, and the
-//! kernel-held mount outlives the instance. Removal handling (detach,
-//! retained dirty state) is the staged D4 work.
+//! kernel-held volume outlives the instance. Removal (detach, retained dirty
+//! state) is the kernel's.
 //!
 //! Nothing here names a bus, a controller, or a vendor: the bind table
 //! selects on the block-service node's own compatible key, and every byte

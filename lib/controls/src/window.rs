@@ -34,7 +34,7 @@ use tairix_raster::{
     div255, pointwise, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL,
 };
 use tairix_theme::{Palette, TextRole, Theme};
-use tairix_visible::is_hidden;
+use tairix_visible::shown_chars;
 
 use crate::damage;
 use crate::paint::{
@@ -937,18 +937,20 @@ impl TitleBarLayout {
     }
 }
 
-/// Bound an untrusted window title/identity string: cap its length and replace
-/// every character that draws nothing yet can hide, reorder or break the text
-/// around it — a control, a bidirectional override, a zero-width character
-/// ([`is_hidden`]) — with a space, so it renders as the plain text it is and
-/// cannot smuggle an escape sequence, break the layout, or read as another
-/// name (spec §11.18).
+/// The most characters of an untrusted label a title bar keeps: far wider than
+/// any bar, so the bound only caps what laying the label out costs.
+pub(crate) const MAX_LABEL_CHARS: usize = 512;
+
+/// An untrusted window title or identity as the bar keeps it: its first
+/// [`MAX_LABEL_CHARS`] characters, shown as text from elsewhere is
+/// ([`tairix_visible::Shown`]), so it cannot smuggle an escape sequence,
+/// break the layout, or read as another name (spec §11.18).
 fn sanitize_label(text: &str) -> String {
-    const MAX: usize = 512;
-    text.chars()
-        .take(MAX)
-        .map(|ch| if is_hidden(ch) { ' ' } else { ch })
-        .collect()
+    let end = text
+        .char_indices()
+        .nth(MAX_LABEL_CHARS)
+        .map_or(text.len(), |(at, _)| at);
+    shown_chars(&text[..end]).collect()
 }
 
 /// The window-manager-owned title bar: application identity, a title, a stable
@@ -961,7 +963,7 @@ fn sanitize_label(text: &str) -> String {
 /// anywhere but a control activates the window and, past the drag threshold,
 /// begins a cooperative move; a press over a control routes to that control
 /// instead and never starts a drag. The title text is untrusted application
-/// data, so it is length-bounded, control characters are replaced, and it
+/// data, so it is length-bounded, shown as text from elsewhere is, and it
 /// elides on the right once the span cannot show it whole.
 ///
 /// The owning application's identity icon leads that group, before the text. It

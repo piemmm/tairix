@@ -19,8 +19,15 @@
 //! fingerprints) is the volume manager's job; this layer enforces only
 //! the structural spelling bounds so a malformed name can never reach the
 //! mount table.
+//!
+//! The volume a user-space filesystem driver serves (`plans/FSSERVE.md` §4)
+//! is reached through `volume_read`, `volume_write` and `volume_ctl`, whose
+//! control frame ([`VolumeCtl`]) and description ([`VolumeInfo`]) live here
+//! too.
 
-use crate::le::{put_u64, read_u64};
+use crate::blkio::{BlkMedium, BLK_MEDIUM_LEN};
+use crate::driver::block::{DiscLayout, DiscardCapability, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
+use crate::le::{exact_len, put_u32, put_u64, read_u32, read_u64};
 use crate::Errno;
 
 /// The filesystem drivers a volume can be attached with. Closed set: an
@@ -69,6 +76,101 @@ impl VolumeFsType {
             _ => Err(Errno::OutOfRange),
         }
     }
+
+    /// The `compatible` key of the volume node the kernel publishes for a
+    /// volume of this format, which that format's driver binds by.
+    #[must_use]
+    pub const fn served_compatible(self) -> &'static [u8] {
+        match self {
+            Self::ARXFS => b"tairix,volume-arxfs",
+            Self::Ext4 => b"tairix,volume-ext4",
+            Self::Fat32 => b"tairix,volume-fat32",
+            Self::Iso9660 => b"tairix,volume-iso9660",
+            Self::Udf => b"tairix,volume-udf",
+            Self::Adfs => b"tairix,volume-adfs",
+        }
+    }
+}
+
+/// What the mount table calls a volume: its format, and for a format with
+/// generations, the one this volume is.
+///
+/// A closed set, so the name a user-space driver gives the kernel is a code
+/// the kernel holds to the format the volume was attached as.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FormatName {
+    /// The native filesystem.
+    Arxfs = 1,
+    /// ext2: no journal, and no feature past ext3's.
+    Ext2 = 2,
+    /// ext3: a journal, and no feature past ext3's.
+    Ext3 = 3,
+    /// ext4: a feature past ext3's.
+    Ext4 = 4,
+    /// FAT32.
+    Fat32 = 5,
+    /// ISO 9660.
+    Iso9660 = 6,
+    /// UDF.
+    Udf = 7,
+    /// Acorn ADFS.
+    Adfs = 8,
+}
+
+impl FormatName {
+    /// The name as a user and `mount` know it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Arxfs => "arxfs",
+            Self::Ext2 => "ext2",
+            Self::Ext3 => "ext3",
+            Self::Ext4 => "ext4",
+            Self::Fat32 => "fat32",
+            Self::Iso9660 => "iso9660",
+            Self::Udf => "udf",
+            Self::Adfs => "adfs",
+        }
+    }
+
+    /// The format family the name belongs to.
+    #[must_use]
+    pub const fn family(self) -> VolumeFsType {
+        match self {
+            Self::Arxfs => VolumeFsType::ARXFS,
+            Self::Ext2 | Self::Ext3 | Self::Ext4 => VolumeFsType::Ext4,
+            Self::Fat32 => VolumeFsType::Fat32,
+            Self::Iso9660 => VolumeFsType::Iso9660,
+            Self::Udf => VolumeFsType::Udf,
+            Self::Adfs => VolumeFsType::Adfs,
+        }
+    }
+
+    /// The wire code.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The name `raw` codes.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a code naming none.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        Ok(match raw {
+            1 => Self::Arxfs,
+            2 => Self::Ext2,
+            3 => Self::Ext3,
+            4 => Self::Ext4,
+            5 => Self::Fat32,
+            6 => Self::Iso9660,
+            7 => Self::Udf,
+            8 => Self::Adfs,
+            _ => return Err(Errno::OutOfRange),
+        })
+    }
 }
 
 /// Maximum byte length of a volume's catalog name. A fixed security bound
@@ -92,6 +194,191 @@ pub const VOLUME_ATTACH_MAX_LEN: usize = ATTACH_FIXED_LEN + VOLUME_NAME_MAX;
 /// Encoded length of a [`VolumeDetachRequest`]: the volume identity plus
 /// the force byte.
 pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN + 1;
+
+/// The most one `volume_read` or `volume_write` moves: one served window,
+/// so a driver reads the data a call asks for in one transfer.
+pub const VOLUME_IO_MAX: usize = crate::fsserve::FSSERVE_WINDOW_LEN;
+
+/// What a `volume_ctl` call asks of a served volume.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VolumeCtlOp {
+    /// Describe the volume: a [`VolumeInfo`].
+    Info = 1,
+    /// Make every write the volume accepted durable on its medium.
+    Flush = 2,
+    /// Tell the device `blocks` blocks from `lba` no longer hold data.
+    Discard = 3,
+}
+
+/// A `volume_ctl` request: the operation and, for a discard, its range.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeCtl {
+    /// The operation.
+    pub op: VolumeCtlOp,
+    /// The first block of a discard; zero otherwise.
+    pub lba: u64,
+    /// How many blocks a discard covers; zero otherwise.
+    pub blocks: u64,
+}
+
+/// Encoded length of a [`VolumeCtl`]: `op(4) || pad(4) || lba(8) ||
+/// blocks(8)`.
+pub const VOLUME_CTL_LEN: usize = 24;
+
+impl VolumeCtl {
+    /// Encode the request.
+    #[must_use]
+    pub fn encode(&self) -> [u8; VOLUME_CTL_LEN] {
+        let mut out = [0u8; VOLUME_CTL_LEN];
+        put_u32(&mut out, 0, self.op as u32);
+        put_u64(&mut out, 8, self.lba);
+        put_u64(&mut out, 16, self.blocks);
+        out
+    }
+
+    /// Decode a request.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for any length but [`VOLUME_CTL_LEN`];
+    /// [`Errno::OutOfRange`] for an unknown operation, a nonzero pad, a
+    /// range on an operation that takes none, or an empty discard.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        exact_len(bytes, VOLUME_CTL_LEN).map_err(|_| Errno::LengthOutOfRange)?;
+        let op = match read_u32(bytes, 0) {
+            1 => VolumeCtlOp::Info,
+            2 => VolumeCtlOp::Flush,
+            3 => VolumeCtlOp::Discard,
+            _ => return Err(Errno::OutOfRange),
+        };
+        if read_u32(bytes, 4) != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let ctl = Self {
+            op,
+            lba: read_u64(bytes, 8),
+            blocks: read_u64(bytes, 16),
+        };
+        let ranged = op == VolumeCtlOp::Discard;
+        if ranged == (ctl.blocks == 0) || (!ranged && ctl.lba != 0) {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(ctl)
+    }
+}
+
+/// What a served volume is: the `volume_ctl` description a driver builds its
+/// block device from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeInfo {
+    /// The block size: a power of two the block layer accepts.
+    pub block_size: u32,
+    /// How many blocks the volume spans.
+    pub block_count: u64,
+    /// The volume may not be written.
+    pub read_only: bool,
+    /// What the device can discard.
+    pub discard: DiscardCapability,
+    /// Where the disc keeps its newest structures, for an optical medium.
+    pub disc_layout: Option<DiscLayout>,
+    /// What the device said its medium is.
+    pub medium: Option<BlkMedium>,
+}
+
+/// Encoded length of a [`VolumeInfo`]: `block_size(4) || flags(4) ||
+/// block_count(8) || discard granularity(8) || discard maximum(8) ||
+/// last_session_start(8) || last_recorded(8) || medium(8)`.
+pub const VOLUME_INFO_LEN: usize = 56;
+
+const INFO_READ_ONLY: u32 = 1 << 0;
+const INFO_DISCARD: u32 = 1 << 1;
+const INFO_LAYOUT: u32 = 1 << 2;
+const INFO_RECORDED: u32 = 1 << 3;
+
+impl VolumeInfo {
+    /// Encode the description.
+    #[must_use]
+    pub fn encode(&self) -> [u8; VOLUME_INFO_LEN] {
+        let mut out = [0u8; VOLUME_INFO_LEN];
+        let mut flags = 0;
+        if self.read_only {
+            flags |= INFO_READ_ONLY;
+        }
+        put_u32(&mut out, 0, self.block_size);
+        put_u64(&mut out, 8, self.block_count);
+        if self.discard.supported {
+            flags |= INFO_DISCARD;
+            put_u64(&mut out, 16, self.discard.granularity_blocks);
+            put_u64(&mut out, 24, self.discard.max_blocks_per_request);
+        }
+        if let Some(layout) = self.disc_layout {
+            flags |= INFO_LAYOUT;
+            put_u64(&mut out, 32, layout.last_session_start);
+            if let Some(recorded) = layout.last_recorded {
+                flags |= INFO_RECORDED;
+                put_u64(&mut out, 40, recorded);
+            }
+        }
+        out[48..].copy_from_slice(&BlkMedium::encode(self.medium));
+        put_u32(&mut out, 4, flags);
+        out
+    }
+
+    /// Decode a description.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for any length but [`VOLUME_INFO_LEN`];
+    /// [`Errno::OutOfRange`] for a block size outside the block layer's
+    /// range, an empty volume, an unknown flag, or a field its flag says is
+    /// absent but which is not zero.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        exact_len(bytes, VOLUME_INFO_LEN).map_err(|_| Errno::LengthOutOfRange)?;
+        let block_size = read_u32(bytes, 0);
+        let flags = read_u32(bytes, 4);
+        let block_count = read_u64(bytes, 8);
+        if !block_size.is_power_of_two()
+            || !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size)
+            || block_count == 0
+            || flags & !(INFO_READ_ONLY | INFO_DISCARD | INFO_LAYOUT | INFO_RECORDED) != 0
+            || (flags & INFO_RECORDED != 0 && flags & INFO_LAYOUT == 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let absent = |set: u32, at: usize| flags & set != 0 || read_u64(bytes, at) == 0;
+        if !absent(INFO_DISCARD, 16)
+            || !absent(INFO_DISCARD, 24)
+            || !absent(INFO_LAYOUT, 32)
+            || !absent(INFO_RECORDED, 40)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let discard = if flags & INFO_DISCARD == 0 {
+            DiscardCapability::unsupported()
+        } else {
+            DiscardCapability {
+                supported: true,
+                granularity_blocks: read_u64(bytes, 16),
+                max_blocks_per_request: read_u64(bytes, 24),
+            }
+        };
+        let disc_layout = (flags & INFO_LAYOUT != 0).then(|| DiscLayout {
+            last_session_start: read_u64(bytes, 32),
+            last_recorded: (flags & INFO_RECORDED != 0).then(|| read_u64(bytes, 40)),
+        });
+        let mut medium = [0u8; BLK_MEDIUM_LEN];
+        medium.copy_from_slice(&bytes[48..]);
+        Ok(Self {
+            block_size,
+            block_count,
+            read_only: flags & INFO_READ_ONLY != 0,
+            discard,
+            disc_layout,
+            medium: BlkMedium::decode(&medium),
+        })
+    }
+}
 
 /// `true` if `byte` may begin or end a volume catalog name: a lowercase
 /// ASCII letter or a digit, as the alias grammar asks of an alias.
@@ -304,6 +591,132 @@ impl VolumeDetachRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blkio::BlkTransport;
+
+    #[test]
+    fn a_control_request_round_trips_and_carries_a_range_only_to_a_discard() {
+        for ctl in [
+            VolumeCtl {
+                op: VolumeCtlOp::Info,
+                lba: 0,
+                blocks: 0,
+            },
+            VolumeCtl {
+                op: VolumeCtlOp::Flush,
+                lba: 0,
+                blocks: 0,
+            },
+            VolumeCtl {
+                op: VolumeCtlOp::Discard,
+                lba: 9,
+                blocks: 7,
+            },
+        ] {
+            assert_eq!(VolumeCtl::decode(&ctl.encode()), Ok(ctl));
+        }
+        let mut stray = VolumeCtl {
+            op: VolumeCtlOp::Flush,
+            lba: 0,
+            blocks: 0,
+        }
+        .encode();
+        stray[8] = 1;
+        assert_eq!(VolumeCtl::decode(&stray), Err(Errno::OutOfRange));
+        let empty = VolumeCtl {
+            op: VolumeCtlOp::Discard,
+            lba: 1,
+            blocks: 0,
+        }
+        .encode();
+        assert_eq!(VolumeCtl::decode(&empty), Err(Errno::OutOfRange));
+        let mut unknown = empty;
+        unknown[0] = 4;
+        assert_eq!(VolumeCtl::decode(&unknown), Err(Errno::OutOfRange));
+        assert_eq!(VolumeCtl::decode(&[0; 23]), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
+    fn a_volume_description_round_trips_every_optional_part() {
+        let plain = VolumeInfo {
+            block_size: 512,
+            block_count: 1 << 30,
+            read_only: false,
+            discard: DiscardCapability::unsupported(),
+            disc_layout: None,
+            medium: None,
+        };
+        let full = VolumeInfo {
+            block_size: 2048,
+            block_count: 300_000,
+            read_only: true,
+            discard: DiscardCapability {
+                supported: true,
+                granularity_blocks: 8,
+                max_blocks_per_request: 1 << 16,
+            },
+            disc_layout: Some(DiscLayout {
+                last_session_start: 40_000,
+                last_recorded: Some(299_999),
+            }),
+            medium: Some(BlkMedium::of_transport(BlkTransport::Usb)),
+        };
+        for info in [plain, full] {
+            assert_eq!(VolumeInfo::decode(&info.encode()), Ok(info));
+        }
+    }
+
+    #[test]
+    fn a_volume_description_out_of_shape_is_refused() {
+        type Corruption = (&'static str, fn(&mut [u8; VOLUME_INFO_LEN]));
+        let good = VolumeInfo {
+            block_size: 512,
+            block_count: 8,
+            read_only: false,
+            discard: DiscardCapability::unsupported(),
+            disc_layout: None,
+            medium: None,
+        }
+        .encode();
+        let cases: [Corruption; 5] = [
+            ("block size", |b| {
+                b[0..4].copy_from_slice(&3u32.to_le_bytes());
+            }),
+            ("empty volume", |b| b[8..16].fill(0)),
+            ("unknown flag", |b| b[4] = 0x10),
+            ("discard without its flag", |b| b[16] = 1),
+            ("recorded without a layout", |b| b[4] = 0x08),
+        ];
+        for (what, corrupt) in cases {
+            let mut bad = good;
+            corrupt(&mut bad);
+            assert_eq!(VolumeInfo::decode(&bad), Err(Errno::OutOfRange), "{what}");
+        }
+    }
+
+    #[test]
+    fn every_format_name_round_trips_into_its_family() {
+        for raw in 1..=8 {
+            let name = FormatName::from_u8(raw).expect("a name");
+            assert_eq!(name.as_u8(), raw);
+            assert!(!name.as_str().is_empty());
+        }
+        assert_eq!(FormatName::Ext2.family(), VolumeFsType::Ext4);
+        assert_eq!(FormatName::from_u8(0), Err(Errno::OutOfRange));
+        assert_eq!(FormatName::from_u8(9), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn every_format_names_its_own_volume_node() {
+        let keys = [0, 1, 2, 3, 4, 5].map(|raw| {
+            VolumeFsType::from_u8(raw)
+                .expect("a format")
+                .served_compatible()
+        });
+        for (at, key) in keys.iter().enumerate() {
+            assert!(key.starts_with(b"tairix,volume-"));
+            assert!(!keys[..at].contains(key), "{key:?} named twice");
+        }
+    }
 
     fn attach() -> VolumeAttachRequest<'static> {
         VolumeAttachRequest {

@@ -468,6 +468,7 @@ fn random_peer(rng: &mut Prng) -> tairix_net::tcp::listen::Peer {
     tairix_net::tcp::listen::Peer {
         addr: tairix_net::IpAddr::V4(Ipv4Addr::from(bytes.to_be_bytes())),
         port: (rng.next_u16()) | 1,
+        link: None,
     }
 }
 
@@ -537,6 +538,7 @@ fn listener_drive_once(rng: &mut Prng) {
     let mut honest = tairix_net::tcp::listen::Peer {
         addr: tairix_net::IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42)),
         port: 55555,
+        link: None,
     };
     for _ in 0..300 {
         t += 1 + (rng.next_u64() % 9);

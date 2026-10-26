@@ -690,6 +690,7 @@ pub(super) const fn map_driver_error(error: DriverError) -> VfsError {
         // The volume's own record forbids the change — a node `chattr` holds
         // fixed — whatever the caller may do elsewhere.
         DriverError::PermissionDenied => VfsError::PermissionDenied,
+        DriverError::Interrupted => VfsError::Interrupted,
         _ => VfsError::Io,
     }
 }

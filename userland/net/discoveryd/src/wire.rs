@@ -2,8 +2,9 @@
 //!
 //! Every frame is one fixed layout behind a one-byte tag, so either side's
 //! reader is a bounds-checked field read and nothing more. The front parses no
-//! DNS: an answer crosses as a [`discovery_ipc`](tairix_abi::discovery_ipc)
-//! entry, already typed, and a datagram to send crosses unread. Both
+//! DNS, SOAP or HTTP: an answer crosses as a
+//! [`discovery_ipc`](tairix_abi::discovery_ipc) entry, already typed, and a
+//! datagram to send or a metadata response to read crosses unread. Both
 //! directions fail closed — a frame whose tag, length, or any field is not
 //! exactly what an honest peer sends is refused whole.
 //!
@@ -17,8 +18,10 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::time::NANOS_PER_SEC;
 use tairix_net::dns::RecordType;
+use tairix_net::http::{HostName, MAX_HOST_NAME};
 use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN, MAX_QUESTIONS};
 use tairix_net::rate::BucketLevel;
+use tairix_net::wsd::{Endpoint, MetadataPath, MAX_ENDPOINT, MAX_METADATA, MAX_PATH};
 use tairix_net::IpAddr;
 use tairix_sandbox::wire::{Reader, WireError};
 
@@ -41,6 +44,13 @@ pub const GROUP_RATE: u32 = 8;
 /// are queued.
 pub const GROUP_RESERVE: u32 = 4;
 
+/// WS-Discovery datagrams one interface may send to its group in a burst: a
+/// probe round's four sendings and room for resolves.
+pub const WSD_BURST: u32 = 8;
+
+/// WS-Discovery datagrams one interface may send per second after its burst.
+pub const WSD_RATE: u32 = 2;
+
 const TAG_CONFIGURE: u8 = 1;
 const TAG_DATAGRAM: u8 = 2;
 const TAG_TICK: u8 = 3;
@@ -48,6 +58,9 @@ const TAG_LINK: u8 = 4;
 const TAG_ASK: u8 = 5;
 const TAG_STOP: u8 = 6;
 const TAG_REPLAY: u8 = 7;
+const TAG_WSD_DATAGRAM: u8 = 8;
+const TAG_FETCHED: u8 = 9;
+const TAG_FETCH_FAILED: u8 = 10;
 
 const TAG_DEADLINE: u8 = 1;
 const TAG_ANSWER: u8 = 2;
@@ -56,6 +69,8 @@ const TAG_REPLAYED: u8 = 4;
 const TAG_TRANSMIT: u8 = 5;
 const TAG_LINKED: u8 = 6;
 const TAG_STOPPED: u8 = 7;
+const TAG_WSD_TRANSMIT: u8 = 8;
+const TAG_FETCH: u8 = 9;
 
 const TO_GROUP: u8 = 0;
 const TO_PEER: u8 = 1;
@@ -72,8 +87,24 @@ pub const DATAGRAM_HEADER_LEN: usize = 1 + 8 + IF_NAME_LEN + 1 + 16 + 2 + 1;
 pub const TICK_LEN: usize = 1 + 8;
 
 /// Length of a [`ToDecoder::Link`] frame: tag, time, interface, edge, and the
-/// group budget's tokens and instant.
-pub const LINK_LEN: usize = 1 + 8 + IF_NAME_LEN + 1 + 8 + 8;
+/// multicast DNS and WS-Discovery budgets' tokens and instants.
+pub const LINK_LEN: usize = 1 + 8 + IF_NAME_LEN + 1 + 2 * (8 + 8);
+
+/// Length of a [`ToWsd::Datagram`] frame before its payload: tag, time,
+/// interface, address family and address.
+pub const WSD_DATAGRAM_HEADER_LEN: usize = 1 + 8 + IF_NAME_LEN + 1 + 16;
+
+/// Length of a [`ToWsd::Fetched`] frame before its response, and of a whole
+/// [`ToWsd::FetchFailed`]: tag, time, interface, fetch.
+pub const FETCHED_HEADER_LEN: usize = 1 + 8 + IF_NAME_LEN + 4;
+
+/// Length of a [`FromWsd::Transmit`] frame before its payload: tag,
+/// interface, instant.
+pub const WSD_TRANSMIT_HEADER_LEN: usize = 1 + IF_NAME_LEN + 8;
+
+/// Length of a [`FromWsd::Fetch`] frame before its path, endpoint and host
+/// name: tag, interface, fetch, family, address, port, and the three lengths.
+pub const FETCH_HEADER_LEN: usize = 1 + IF_NAME_LEN + 4 + 1 + 16 + 2 + 3;
 
 /// Length of a [`ToDecoder::Ask`] frame before its name: tag, time, question,
 /// form, name length.
@@ -101,15 +132,28 @@ pub const STOPPED_LEN: usize = 1 + 4;
 /// interface, instant, destination kind, family, address, port.
 pub const TRANSMIT_HEADER_LEN: usize = 1 + IF_NAME_LEN + 8 + 1 + 1 + 16 + 2;
 
-/// The longest frame the front sends: a datagram carrying the largest
-/// payload the stack delivers.
-pub const MAX_TO_DECODER: usize = DATAGRAM_HEADER_LEN + SOCKET_MAX_DATAGRAM;
+/// The longest frame the front sends: a metadata response at its bound, or a
+/// datagram carrying the largest payload the stack delivers.
+pub const MAX_TO_DECODER: usize =
+    if FETCHED_HEADER_LEN + MAX_METADATA > DATAGRAM_HEADER_LEN + SOCKET_MAX_DATAGRAM {
+        FETCHED_HEADER_LEN + MAX_METADATA
+    } else {
+        DATAGRAM_HEADER_LEN + SOCKET_MAX_DATAGRAM
+    };
 
 /// The longest frame the decoder sends: a datagram to transmit.
 pub const MAX_FROM_DECODER: usize = TRANSMIT_HEADER_LEN + MAX_MESSAGE_LEN;
 
 const _: () = assert!(ASK_HEADER_LEN + NAME_MAX <= MAX_TO_DECODER);
 const _: () = assert!(1 + 4 + ENTRY_MAX <= MAX_FROM_DECODER);
+const _: () =
+    assert!(FETCH_HEADER_LEN + MAX_PATH + MAX_ENDPOINT + MAX_HOST_NAME <= MAX_FROM_DECODER);
+// Each of a fetch's texts fits the byte its length is framed in.
+const _: () = assert!(
+    MAX_PATH <= u8::MAX as usize
+        && MAX_ENDPOINT <= u8::MAX as usize
+        && MAX_HOST_NAME <= u8::MAX as usize
+);
 
 /// What a question's answers are read as, which fixes the record type it asks
 /// for and the [`Answer`](tairix_abi::discovery_ipc::Answer) each record
@@ -131,19 +175,24 @@ pub enum Form {
     Pointer = 6,
     /// The RFC 6763 §9 type enumeration: `PTR` records naming types.
     Type = 7,
+    /// The computers announcing themselves over WS-Discovery, asked about
+    /// the root name: the one question of its form.
+    Computer = 8,
 }
 
 impl Form {
-    /// The record type a question of this form asks for.
+    /// The record type a multicast DNS question of this form asks for, or
+    /// `None` for a form WS-Discovery answers.
     #[must_use]
-    pub const fn record_type(self) -> RecordType {
-        match self {
+    pub const fn record_type(self) -> Option<RecordType> {
+        Some(match self {
             Self::Instance | Self::Pointer | Self::Type => RecordType::Ptr,
             Self::Service => RecordType::Srv,
             Self::Text => RecordType::Txt,
             Self::AddressV4 => RecordType::A,
             Self::AddressV6 => RecordType::Aaaa,
-        }
+            Self::Computer => return None,
+        })
     }
 
     const fn from_u8(value: u8) -> Option<Self> {
@@ -155,6 +204,7 @@ impl Form {
             5 => Self::AddressV6,
             6 => Self::Pointer,
             7 => Self::Type,
+            8 => Self::Computer,
             _ => return None,
         })
     }
@@ -226,6 +276,8 @@ pub enum ToDecoder<'a> {
         /// The front's name for this replay.
         token: u32,
     },
+    /// A frame for the decoder's WS-Discovery engines.
+    Wsd(ToWsd<'a>),
 }
 
 impl<'a> ToDecoder<'a> {
@@ -254,12 +306,8 @@ impl<'a> ToDecoder<'a> {
                 }
                 let len = DATAGRAM_HEADER_LEN + payload.len();
                 let frame = out.get_mut(..len)?;
-                let (family, addr) = address_parts(source);
-                frame[0] = TAG_DATAGRAM;
-                frame[1..9].copy_from_slice(&now.to_le_bytes());
-                frame[9..9 + IF_NAME_LEN].copy_from_slice(&interface);
-                frame[25] = family.as_u8();
-                frame[26..42].copy_from_slice(&addr);
+                stamp(frame, TAG_DATAGRAM, now, interface);
+                put_address(&mut frame[25..42], source);
                 frame[42..44].copy_from_slice(&port.to_le_bytes());
                 frame[44] = u8::from(to_group);
                 frame[DATAGRAM_HEADER_LEN..].copy_from_slice(payload);
@@ -278,16 +326,16 @@ impl<'a> ToDecoder<'a> {
             } => {
                 let frame = out.get_mut(..LINK_LEN)?;
                 frame.fill(0);
-                frame[0] = TAG_LINK;
-                frame[1..9].copy_from_slice(&now.to_le_bytes());
-                frame[9..9 + IF_NAME_LEN].copy_from_slice(&interface);
-                if let Edge::Up(budget) = edge {
-                    if !is_group_level(budget) {
+                stamp(frame, TAG_LINK, now, interface);
+                if let Edge::Up(budgets) = edge {
+                    if !budgets.are_levels() {
                         return None;
                     }
                     frame[25] = 1;
-                    frame[26..34].copy_from_slice(&budget.scaled.to_le_bytes());
-                    frame[34..LINK_LEN].copy_from_slice(&budget.at.to_le_bytes());
+                    frame[26..34].copy_from_slice(&budgets.group.scaled.to_le_bytes());
+                    frame[34..42].copy_from_slice(&budgets.group.at.to_le_bytes());
+                    frame[42..50].copy_from_slice(&budgets.wsd.scaled.to_le_bytes());
+                    frame[50..LINK_LEN].copy_from_slice(&budgets.wsd.at.to_le_bytes());
                 }
                 Some(LINK_LEN)
             }
@@ -329,6 +377,7 @@ impl<'a> ToDecoder<'a> {
                 frame[5..].copy_from_slice(&token.to_le_bytes());
                 Some(REPLAY_LEN)
             }
+            Self::Wsd(frame) => frame.encode(out),
         }
     }
 
@@ -371,13 +420,19 @@ impl<'a> ToDecoder<'a> {
                 let now = reader.u64()?;
                 let interface = interface(&mut reader)?;
                 let up = flag(reader.u8()?)?;
-                let budget = BucketLevel {
-                    scaled: reader.u64()?,
-                    at: reader.u64()?,
+                let mut level = || -> Result<BucketLevel, WireError> {
+                    Ok(BucketLevel {
+                        scaled: reader.u64()?,
+                        at: reader.u64()?,
+                    })
+                };
+                let budgets = Budgets {
+                    group: level()?,
+                    wsd: level()?,
                 };
                 let edge = match up {
-                    true if is_group_level(budget) => Edge::Up(budget),
-                    false if budget.scaled == 0 && budget.at == 0 => Edge::Down,
+                    true if budgets.are_levels() => Edge::Up(budgets),
+                    false if budgets == Budgets::NONE => Edge::Down,
                     _ => return Err(WireError::Malformed),
                 };
                 Self::Link {
@@ -408,6 +463,9 @@ impl<'a> ToDecoder<'a> {
                 question: question(&mut reader)?,
                 token: reader.u32()?,
             },
+            tag @ (TAG_WSD_DATAGRAM | TAG_FETCHED | TAG_FETCH_FAILED) => {
+                Self::Wsd(ToWsd::decode(tag, &mut reader, frame.len())?)
+            }
             _ => return Err(WireError::Malformed),
         };
         if !reader.is_exhausted() {
@@ -464,6 +522,8 @@ pub enum FromDecoder<'a> {
         /// The question.
         question: u32,
     },
+    /// A frame from the decoder's WS-Discovery engines.
+    Wsd(FromWsd<'a>),
 }
 
 impl<'a> FromDecoder<'a> {
@@ -517,10 +577,8 @@ impl<'a> FromDecoder<'a> {
                 frame[1..=IF_NAME_LEN].copy_from_slice(&interface);
                 frame[17..25].copy_from_slice(&at.to_le_bytes());
                 if let Destination::Peer { addr, port } = to {
-                    let (family, octets) = address_parts(addr);
                     frame[25] = TO_PEER;
-                    frame[26] = family.as_u8();
-                    frame[27..43].copy_from_slice(&octets);
+                    put_address(&mut frame[26..43], addr);
                     frame[43..TRANSMIT_HEADER_LEN].copy_from_slice(&port.to_le_bytes());
                 } else {
                     frame[25] = TO_GROUP;
@@ -544,6 +602,7 @@ impl<'a> FromDecoder<'a> {
                 frame[1..].copy_from_slice(&question.to_le_bytes());
                 Some(STOPPED_LEN)
             }
+            Self::Wsd(frame) => frame.encode(out),
         }
     }
 
@@ -611,6 +670,9 @@ impl<'a> FromDecoder<'a> {
             TAG_STOPPED => Self::Stopped {
                 question: question(&mut reader)?,
             },
+            tag @ (TAG_WSD_TRANSMIT | TAG_FETCH) => {
+                Self::Wsd(FromWsd::decode(tag, &mut reader, frame.len())?)
+            }
             _ => return Err(WireError::Malformed),
         };
         if !reader.is_exhausted() {
@@ -620,19 +682,324 @@ impl<'a> FromDecoder<'a> {
     }
 }
 
+/// A frame the front sends the decoder's WS-Discovery engines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToWsd<'a> {
+    /// One WS-Discovery datagram the stack delivered from a sender it found
+    /// on-link.
+    Datagram {
+        /// The monotonic instant the front relayed it, in nanoseconds.
+        now: u64,
+        /// The logical interface it arrived on.
+        interface: [u8; IF_NAME_LEN],
+        /// The sender's address.
+        source: IpAddr,
+        /// The datagram, unread.
+        payload: &'a [u8],
+    },
+    /// The whole of what a [`FromWsd::Fetch`]'s target sent before it closed
+    /// the connection, at most [`MAX_METADATA`] bytes, unread.
+    Fetched {
+        /// The monotonic instant, in nanoseconds.
+        now: u64,
+        /// The interface the fetch was made on.
+        interface: [u8; IF_NAME_LEN],
+        /// The decoder's id for the fetch.
+        fetch: u32,
+        /// The response.
+        response: &'a [u8],
+    },
+    /// A [`FromWsd::Fetch`] could not complete: refused, unreachable, too
+    /// slow, too large, or cut off.
+    FetchFailed {
+        /// The monotonic instant, in nanoseconds.
+        now: u64,
+        /// The interface the fetch was made on.
+        interface: [u8; IF_NAME_LEN],
+        /// The decoder's id for the fetch.
+        fetch: u32,
+    },
+}
+
+impl<'a> ToWsd<'a> {
+    fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        match *self {
+            Self::Datagram {
+                now,
+                interface,
+                source,
+                payload,
+            } => {
+                if payload.len() > SOCKET_MAX_DATAGRAM {
+                    return None;
+                }
+                let frame = out.get_mut(..WSD_DATAGRAM_HEADER_LEN + payload.len())?;
+                stamp(frame, TAG_WSD_DATAGRAM, now, interface);
+                put_address(&mut frame[25..WSD_DATAGRAM_HEADER_LEN], source);
+                frame[WSD_DATAGRAM_HEADER_LEN..].copy_from_slice(payload);
+                Some(frame.len())
+            }
+            Self::Fetched {
+                now,
+                interface,
+                fetch,
+                response,
+            } => {
+                if response.len() > MAX_METADATA {
+                    return None;
+                }
+                let frame = out.get_mut(..FETCHED_HEADER_LEN + response.len())?;
+                stamp(frame, TAG_FETCHED, now, interface);
+                frame[25..FETCHED_HEADER_LEN].copy_from_slice(&fetch.to_le_bytes());
+                frame[FETCHED_HEADER_LEN..].copy_from_slice(response);
+                Some(frame.len())
+            }
+            Self::FetchFailed {
+                now,
+                interface,
+                fetch,
+            } => {
+                let frame = out.get_mut(..FETCHED_HEADER_LEN)?;
+                stamp(frame, TAG_FETCH_FAILED, now, interface);
+                frame[25..].copy_from_slice(&fetch.to_le_bytes());
+                Some(FETCHED_HEADER_LEN)
+            }
+        }
+    }
+
+    /// Decode what follows `tag` in a frame of `len` bytes.
+    fn decode(tag: u8, reader: &mut Reader<'a>, len: usize) -> Result<Self, WireError> {
+        let now = reader.u64()?;
+        let interface = interface(reader)?;
+        match tag {
+            TAG_WSD_DATAGRAM => {
+                let source = address(reader)?;
+                let payload = reader.take(len.saturating_sub(WSD_DATAGRAM_HEADER_LEN))?;
+                if payload.len() > SOCKET_MAX_DATAGRAM {
+                    return Err(WireError::Malformed);
+                }
+                Ok(Self::Datagram {
+                    now,
+                    interface,
+                    source,
+                    payload,
+                })
+            }
+            TAG_FETCHED | TAG_FETCH_FAILED => {
+                let fetch = reader.u32()?;
+                let response = reader.take(len.saturating_sub(FETCHED_HEADER_LEN))?;
+                match tag {
+                    TAG_FETCHED if response.len() <= MAX_METADATA => Ok(Self::Fetched {
+                        now,
+                        interface,
+                        fetch,
+                        response,
+                    }),
+                    TAG_FETCH_FAILED if response.is_empty() => Ok(Self::FetchFailed {
+                        now,
+                        interface,
+                        fetch,
+                    }),
+                    _ => Err(WireError::Malformed),
+                }
+            }
+            _ => Err(WireError::Malformed),
+        }
+    }
+}
+
+/// A frame the decoder's WS-Discovery engines send the front.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FromWsd<'a> {
+    /// A datagram to send to `interface`'s groups, built against its
+    /// WS-Discovery budget as it stood at `at`.
+    Transmit {
+        /// The interface.
+        interface: [u8; IF_NAME_LEN],
+        /// The instant the budget was charged at, in nanoseconds.
+        at: u64,
+        /// The datagram.
+        payload: &'a [u8],
+    },
+    /// Ask a target for its metadata, answered with [`ToWsd::Fetched`] or
+    /// [`ToWsd::FetchFailed`].
+    Fetch(FetchRequest<'a>),
+}
+
+/// A metadata fetch the decoder asks the front to make. The front builds the
+/// request itself, so the decoder names only where and to whom.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FetchRequest<'a> {
+    /// The interface the target was heard on.
+    pub interface: [u8; IF_NAME_LEN],
+    /// The decoder's id for the fetch.
+    pub fetch: u32,
+    /// The target's address: one it sent from.
+    pub addr: IpAddr,
+    /// The port its URL names, never `0`.
+    pub port: u16,
+    /// The path its URL names, as a [`MetadataPath`] spells it.
+    pub path: &'a str,
+    /// The endpoint the request is addressed to, as an [`Endpoint`] spells
+    /// it.
+    pub endpoint: &'a str,
+    /// The name its URL gives its host, as a [`HostName`] spells it, which
+    /// the request's `Host` field names; `None` when the URL names `addr`.
+    pub name: Option<&'a str>,
+}
+
+impl FetchRequest<'_> {
+    /// Whether an engine could have asked for it.
+    fn is_well_formed(&self) -> bool {
+        self.port != 0
+            && MetadataPath::new(self.path).is_some()
+            && Endpoint::new(self.endpoint).is_some()
+            && self.name.is_none_or(|name| HostName::new(name).is_some())
+    }
+}
+
+impl<'a> FromWsd<'a> {
+    fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        match *self {
+            Self::Transmit {
+                interface,
+                at,
+                payload,
+            } => {
+                if payload.is_empty() || payload.len() > MAX_MESSAGE_LEN {
+                    return None;
+                }
+                let frame = out.get_mut(..WSD_TRANSMIT_HEADER_LEN + payload.len())?;
+                frame[0] = TAG_WSD_TRANSMIT;
+                frame[1..=IF_NAME_LEN].copy_from_slice(&interface);
+                frame[17..WSD_TRANSMIT_HEADER_LEN].copy_from_slice(&at.to_le_bytes());
+                frame[WSD_TRANSMIT_HEADER_LEN..].copy_from_slice(payload);
+                Some(frame.len())
+            }
+            Self::Fetch(request) => {
+                if !request.is_well_formed() {
+                    return None;
+                }
+                let (path, endpoint) = (request.path.as_bytes(), request.endpoint.as_bytes());
+                let name = request.name.map_or(&[][..], str::as_bytes);
+                let texts = path.len() + endpoint.len() + name.len();
+                let frame = out.get_mut(..FETCH_HEADER_LEN + texts)?;
+                frame[0] = TAG_FETCH;
+                frame[1..=IF_NAME_LEN].copy_from_slice(&request.interface);
+                frame[17..21].copy_from_slice(&request.fetch.to_le_bytes());
+                put_address(&mut frame[21..38], request.addr);
+                frame[38..40].copy_from_slice(&request.port.to_le_bytes());
+                frame[40] = u8::try_from(path.len()).ok()?;
+                frame[41] = u8::try_from(endpoint.len()).ok()?;
+                frame[42] = u8::try_from(name.len()).ok()?;
+                let (path_field, rest) = frame[FETCH_HEADER_LEN..].split_at_mut(path.len());
+                let (endpoint_field, name_field) = rest.split_at_mut(endpoint.len());
+                path_field.copy_from_slice(path);
+                endpoint_field.copy_from_slice(endpoint);
+                name_field.copy_from_slice(name);
+                Some(frame.len())
+            }
+        }
+    }
+
+    /// Decode what follows `tag` in a frame of `len` bytes.
+    fn decode(tag: u8, reader: &mut Reader<'a>, len: usize) -> Result<Self, WireError> {
+        let interface = interface(reader)?;
+        match tag {
+            TAG_WSD_TRANSMIT => {
+                let at = reader.u64()?;
+                let payload = reader.take(len.saturating_sub(WSD_TRANSMIT_HEADER_LEN))?;
+                if payload.is_empty() || payload.len() > MAX_MESSAGE_LEN {
+                    return Err(WireError::Malformed);
+                }
+                Ok(Self::Transmit {
+                    interface,
+                    at,
+                    payload,
+                })
+            }
+            TAG_FETCH => {
+                let fetch = reader.u32()?;
+                let addr = address(reader)?;
+                let port = u16::from_le_bytes(*fixed(reader)?);
+                let path_len = usize::from(reader.u8()?);
+                let endpoint_len = usize::from(reader.u8()?);
+                let name_len = usize::from(reader.u8()?);
+                let path = text(reader.take(path_len)?)?;
+                let endpoint = text(reader.take(endpoint_len)?)?;
+                let name = text(reader.take(name_len)?)?;
+                let request = FetchRequest {
+                    interface,
+                    fetch,
+                    addr,
+                    port,
+                    path,
+                    endpoint,
+                    name: (!name.is_empty()).then_some(name),
+                };
+                if !request.is_well_formed() {
+                    return Err(WireError::Malformed);
+                }
+                Ok(Self::Fetch(request))
+            }
+            _ => Err(WireError::Malformed),
+        }
+    }
+}
+
+/// Write the tag, instant and interface a frame to the decoder opens with.
+fn stamp(frame: &mut [u8], tag: u8, now: u64, interface: [u8; IF_NAME_LEN]) {
+    frame[0] = tag;
+    frame[1..9].copy_from_slice(&now.to_le_bytes());
+    frame[9..9 + IF_NAME_LEN].copy_from_slice(&interface);
+}
+
+/// Write `addr` into a seventeen-byte field as the family byte and sixteen
+/// octets [`address`] reads.
+fn put_address(field: &mut [u8], addr: IpAddr) {
+    let (family, octets) = address_parts(addr);
+    field[0] = family.as_u8();
+    field[1..].copy_from_slice(&octets);
+}
+
+/// Bytes the frame carries as text, refused when they are not UTF-8.
+fn text(bytes: &[u8]) -> Result<&str, WireError> {
+    core::str::from_utf8(bytes).map_err(|_| WireError::Malformed)
+}
+
 /// What became of an interface a [`ToDecoder::Link`] names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Edge {
-    /// It came up, with its group budget as the front holds it, which the
-    /// decoder spends from exactly as the front charges it.
-    Up(BucketLevel),
+    /// It came up, with its send budgets as the front holds them, which the
+    /// decoder spends from exactly as the front charges them.
+    Up(Budgets),
     /// It went down.
     Down,
 }
 
-/// Whether `budget` is one a group budget can hold.
-fn is_group_level(budget: BucketLevel) -> bool {
-    budget.scaled <= u64::from(GROUP_BURST) * u64::from(NANOS_PER_SEC)
+/// An interface's two send budgets: multicast DNS's and WS-Discovery's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Budgets {
+    /// The multicast DNS group budget.
+    pub group: BucketLevel,
+    /// The WS-Discovery group budget.
+    pub wsd: BucketLevel,
+}
+
+impl Budgets {
+    /// The zero levels a down edge carries.
+    const NONE: Self = Self {
+        group: BucketLevel { scaled: 0, at: 0 },
+        wsd: BucketLevel { scaled: 0, at: 0 },
+    };
+
+    /// Whether each budget holds no more than its burst.
+    fn are_levels(self) -> bool {
+        let at_most = |level: BucketLevel, burst: u32| {
+            level.scaled <= u64::from(burst) * u64::from(NANOS_PER_SEC)
+        };
+        at_most(self.group, GROUP_BURST) && at_most(self.wsd, WSD_BURST)
+    }
 }
 
 /// Whether `id` can name a question: every id is a slot below

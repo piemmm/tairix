@@ -135,7 +135,7 @@ mod program {
         let peer = peer_addr();
         let deadline = tairix_rt::clock_get().saturating_add(PHASE_TIMEOUT_NANOS);
         loop {
-            match connect(socket, peer) {
+            match connect(socket, peer, None) {
                 Ok(()) => return Ok(socket),
                 Err(Errno::NetworkUnreachable) => {
                     if park_for_event(network, deadline).is_err() {

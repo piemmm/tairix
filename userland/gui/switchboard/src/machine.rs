@@ -26,6 +26,7 @@ use tairix_abi::switchboard_ipc::{
 use tairix_abi::sysinfo::MemoryBand;
 use tairix_controls::RecoveryState;
 use tairix_font::ELLIPSIS;
+use tairix_visible::shown_chars;
 
 use crate::model::{process_count, process_recovery, RollingMeters};
 use crate::resource_report::{busiest_by_cpu, served_rates, storage_subjects};
@@ -220,15 +221,13 @@ fn history(points: &[u16]) -> MachineHistory {
 
 /// `raw` as a bounded display name, or `None` for an empty one.
 ///
-/// A name is display text whoever chose it, so bytes that are not text and
-/// control characters stand as U+FFFD rather than refusing the name, and one
-/// too long for the field is cut on a character boundary with a mark saying
-/// it was cut.
+/// A name is display text whoever chose it, so bytes that are not text stand
+/// as U+FFFD and the rest is shown as text from elsewhere is
+/// ([`tairix_visible::Shown`]) rather than refusing the name, and one too
+/// long for the field is cut on a character boundary with a mark saying it was
+/// cut.
 fn fitted<const MAX: usize>(raw: &[u8]) -> Option<BoundedText<1, MAX>> {
-    let text: String = String::from_utf8_lossy(raw)
-        .chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
-        .collect();
+    let text: String = shown_chars(&String::from_utf8_lossy(raw)).collect();
     if text.is_empty() {
         return None;
     }

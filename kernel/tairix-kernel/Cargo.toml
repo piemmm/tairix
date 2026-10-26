@@ -179,10 +179,6 @@ tairix-sysconfig = { path = "../../lib/sysconfig", version = "=0.0.0" }
 # architecture-neutral, so it is a common dependency and its host tests run
 # on the CI host.
 tairix-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
-tairix-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0" }
-tairix-drv-fs-adfs = { path = "../../drivers/filesystem/adfs", version = "=0.0.0" }
-tairix-drv-fs-iso9660 = { path = "../../drivers/filesystem/iso9660", version = "=0.0.0" }
-tairix-drv-fs-udf = { path = "../../drivers/filesystem/udf", version = "=0.0.0" }
 # The shared, scheme-neutral partition layer: the boot
 # path splits the single whole-disk block device into its FAT boot and
 # `ARXFS` root partitions through `parse_partition_table` + the
@@ -458,3 +454,11 @@ tairix-test-encrypted-root-image = { path = "../../tests/integration/encrypted_r
 # The same test parses the served `users-v1` text and authenticates the
 # planted account, proving the served database is usable (`plans/PI.md` P11).
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
+# The volume-service tests serve each attached volume as its user-space driver
+# would: the real format drivers, opened through their served form and
+# answered through the shared server runtime.
+tairix-fsserve = { path = "../../lib/fsserve", version = "=0.0.0" }
+tairix-drv-fs-ext4 = { path = "../../drivers/filesystem/ext4", version = "=0.0.0" }
+tairix-drv-fs-adfs = { path = "../../drivers/filesystem/adfs", version = "=0.0.0" }
+tairix-drv-fs-iso9660 = { path = "../../drivers/filesystem/iso9660", version = "=0.0.0" }
+tairix-drv-fs-udf = { path = "../../drivers/filesystem/udf", version = "=0.0.0" }

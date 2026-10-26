@@ -69,6 +69,10 @@ use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
 use tairix_collections::RadixTree;
 
+mod served;
+
+pub use served::{Served, BIND_KEYS};
+
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4641_5433_3200_0001; // "FAT32" + index
 

@@ -405,12 +405,58 @@ unsafe impl Send for SpawnPart {}
 // SAFETY: as for `SharedRegion`: only `&mut self` writes.
 unsafe impl Sync for SpawnPart {}
 
+/// The data window the kernel mapped for a filesystem driver it accepted to
+/// serve a volume (`volume_serve`), mapped for the rest of the process's life.
+///
+/// It is never unmapped: the attachment ends with the serving process, whose
+/// exit reclaims it.
+pub struct ServeWindow {
+    mapping: Mapping,
+}
+
+impl ServeWindow {
+    /// The window the kernel reported mapping at `base` for `len` bytes, or
+    /// `None` when that is not one a slice may be built over.
+    pub(crate) fn mapped(base: u64, len: u32) -> Option<Self> {
+        let base = mapped_at(base).and_then(mapping)?;
+        let len = usize::try_from(len).ok()?;
+        Some(Self {
+            mapping: Mapping { base, len },
+        })
+    }
+
+    /// The window's byte length.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.mapping.len
+    }
+
+    /// Whether the window holds no bytes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.mapping.len == 0
+    }
+
+    /// The window, for the driver answering a call: the kernel leaves it
+    /// alone while one is in service.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        self.mapping.bytes_mut()
+    }
+}
+
+// SAFETY: as for `SpawnShare`: the mapping is the process's, and nothing of
+// it belongs to the thread that received it.
+unsafe impl Send for ServeWindow {}
+
+// SAFETY: as for `SharedRegion`: only `&mut self` writes.
+unsafe impl Sync for ServeWindow {}
+
 #[cfg(test)]
 mod tests {
     use core::ptr::NonNull;
     use std::vec;
 
-    use super::{mapped_at, MappedGrant, Mapping, SharedRegion, SpawnShare};
+    use super::{mapped_at, MappedGrant, Mapping, ServeWindow, SharedRegion, SpawnShare};
 
     /// A slice over a null pointer is undefined behaviour even when it is
     /// empty, so a zero base is not a mapping however the kernel reported
@@ -473,6 +519,35 @@ mod tests {
         assert!(grant.bytes()[..15].iter().all(|&byte| byte == 0));
         drop(grant);
         assert_eq!(memory[15], 1);
+    }
+
+    /// A serve window is its mapping's bytes, read through a shared reference
+    /// on one thread and written in place on the thread that answers calls.
+    #[test]
+    fn a_serve_window_s_bytes_are_its_mapped_bytes_from_any_thread() {
+        let mut memory = vec![0u8; 32];
+        let mut window = ServeWindow {
+            mapping: over(&mut memory),
+        };
+        let shared = &window;
+        std::thread::scope(|scope| {
+            scope.spawn(|| assert_eq!((shared.len(), shared.is_empty()), (32, false)));
+        });
+        let window = std::thread::spawn(move || {
+            window.bytes_mut()[31] = 5;
+            window
+        })
+        .join()
+        .expect("the answering thread returns its window");
+        assert_eq!(window.len(), 32, "the same window comes back");
+        assert_eq!(memory[31], 5, "written where it lies");
+    }
+
+    /// A window the kernel reported at address zero is refused before any
+    /// pointer is made of it.
+    #[test]
+    fn a_serve_window_at_a_zero_base_is_refused() {
+        assert!(ServeWindow::mapped(0, 4096).is_none());
     }
 
     /// A spawn share is cut into parts, each writing its own range where it

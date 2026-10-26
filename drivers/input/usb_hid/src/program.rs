@@ -68,9 +68,15 @@ impl HidLink for Link {
     }
 }
 
-/// The boot seat. A record the seat refuses is its decision, and the device
-/// carries on with the next.
-struct Seat;
+/// The boot seat, told when the report its records come from reached the
+/// driver. A record the seat refuses is its decision, and the device carries
+/// on with the next.
+struct Seat {
+    /// When the report being decoded arrived, on the monotonic clock; `None`
+    /// for the releases a departing device is let go with, which no report
+    /// carried.
+    at_ns: Option<u64>,
+}
 
 impl SeatSink for Seat {
     fn key(&mut self, record: &KeyInput) -> Result<(), DriverError> {
@@ -79,7 +85,7 @@ impl SeatSink for Seat {
     }
 
     fn pointer(&mut self, record: &PointerInput) -> Result<(), DriverError> {
-        let _ = tairix_rt::pointer_inject(SEAT_PRIMARY, record);
+        let _ = tairix_rt::pointer_inject(SEAT_PRIMARY, record, self.at_ns);
         Ok(())
     }
 
@@ -250,12 +256,15 @@ fn serve(link: &mut Link, bound: &mut Bound) -> i32 {
         match read {
             Ok(len) => {
                 faults = 0;
+                let mut seat = Seat {
+                    at_ns: Some(tairix_rt::clock_get()),
+                };
                 // A report an application finds cut short changes nothing it
                 // holds; the device's next report carries its state again.
-                let _: Result<Decoded, DriverError> = bound.device.input(&report[..len], &mut Seat);
+                let _: Result<Decoded, DriverError> = bound.device.input(&report[..len], &mut seat);
             }
             Err(errno) if transport_error(errno) == DriverError::NotFound => {
-                let _ = bound.device.release(&mut Seat);
+                let _ = bound.device.release(&mut Seat { at_ns: None });
                 log_hex(
                     HID_DETACHED,
                     Level::Info,
@@ -274,7 +283,7 @@ fn serve(link: &mut Link, bound: &mut Bound) -> i32 {
                     errno as u64,
                 );
                 if pump_error_limit_reached(&mut faults, MAX_CONSECUTIVE_FAULTS) {
-                    let _ = bound.device.release(&mut Seat);
+                    let _ = bound.device.release(&mut Seat { at_ns: None });
                     return end(DriverExit::DeviceFault, &[]);
                 }
             }

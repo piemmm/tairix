@@ -51,9 +51,8 @@
 //! * [`space`] — three-dimensional vectors, orthonormal frames and rigid
 //!   poses.
 //! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines" windows.
-//! * [`utf8`] — which bytes begin a UTF-8 sequence, which characters hide or
-//!   reorder the text around them, and the letters and order a reader looks
-//!   names up by.
+//! * [`utf8`] — which bytes begin a UTF-8 sequence, a name as it is shown,
+//!   and the letters and order a reader looks names up by.
 
 #![no_std]
 // `mathf` takes the correctly rounded square root and rounding `core` exposes

@@ -94,8 +94,9 @@
 //!   name only needs a zone name's shape here, and a reader passes over one
 //!   its store does not hold.
 //! * `input.mouse.debounce` — whole milliseconds, `25` by default, `0` to
-//!   disable: how long after a pointer button is released the *same* button's
-//!   next press is treated as switch chatter rather than a distinct click. A
+//!   disable: how long after a pointing device reports a button released the
+//!   *same* button's next press it reports is treated as switch chatter rather
+//!   than a distinct click. A
 //!   worn switch can emit a second press a few milliseconds after release that
 //!   the device meant as one click, and the seat cannot ask the device which it
 //!   meant. Bounded by [`MAX_CLICK_DEBOUNCE_MS`]. Set it to `0` for a device

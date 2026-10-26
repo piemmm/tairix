@@ -95,7 +95,7 @@ use tairix_abi::{CapabilityId, Duration64, Errno};
 use tairix_collections::HashMap;
 use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
-use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr};
+use tairix_net::addr::{zone_of, Ecn, IpAddr, Ipv4Addr};
 use tairix_net::checksum::Pseudo;
 use tairix_net::icmp::IcmpErrorKind;
 use tairix_net::stack::{EchoProbe, StackEvent};
@@ -117,10 +117,10 @@ use crate::service::Caller;
 /// engine asks be stamped on the datagram (RFC 3168 §5).
 type OutSeg = (TcpSegmentMeta, Vec<u8>, Option<u16>, Ecn);
 
-/// An [`OutSeg`] tagged with the peer address it must be routed to — the
-/// shape a listener's `advance` yields (each retransmitted SYN-ACK may be
-/// destined for a different peer).
-type PeerOutSeg = (IpAddr, TcpSegmentMeta, Vec<u8>, Option<u16>, Ecn);
+/// An [`OutSeg`] tagged with the peer it must be routed to — the shape a
+/// listener's `advance` yields (each retransmitted SYN-ACK may be destined
+/// for a different peer).
+type PeerOutSeg = (Peer, TcpSegmentMeta, Vec<u8>, Option<u16>, Ecn);
 
 /// Largest number of multicast groups one socket may join at once.
 pub const MAX_GROUPS_PER_SOCKET: usize = 16;
@@ -450,13 +450,15 @@ pub struct StreamIo {
 }
 
 /// The four-tuple that identifies an established stream, and the key its
-/// demux index is looked up by.
+/// demux index is looked up by: with the peer's link when its address is
+/// link-local, which names a host on that link alone.
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 struct ConnKey {
     family: NetAddrFamily,
     local_port: u16,
     peer_addr: [u8; 16],
     peer_port: u16,
+    zone: Option<[u8; IF_NAME_LEN]>,
 }
 
 /// What holds one local port.
@@ -695,12 +697,12 @@ impl SocketService {
         response: &mut [u8],
         now: Duration64,
     ) -> Result<SocketReply, Errno> {
-        if claims_multicast_dns(&decoded) && !is_discovery(caller) {
+        if claims_discovery(&decoded) && !is_discovery(caller) {
             emit(
                 audit,
                 Level::Warn,
                 events::SOCKET_DENIED,
-                "socket request denied: the multicast DNS port and groups are reserved to the discovery service",
+                "socket request denied: the multicast DNS and WS-Discovery ports and groups are reserved to the discovery service",
                 &[op_field(&decoded)],
             );
             return Err(Errno::PermissionDenied);
@@ -741,9 +743,13 @@ impl SocketService {
                 }
                 self.bind(interfaces, entropy, owner, socket, local, response)
             }
-            SocketRequest::Connect { socket, peer } => {
-                self.connect(interfaces, entropy, owner, socket, peer, now, response)
-            }
+            SocketRequest::Connect {
+                socket,
+                peer,
+                interface,
+            } => self.connect(
+                interfaces, entropy, owner, socket, peer, interface, now, response,
+            ),
             SocketRequest::Send {
                 socket,
                 dest,
@@ -926,8 +932,11 @@ impl SocketService {
     }
 
     /// Set a datagram socket's default peer, or actively open a stream
-    /// connection to `peer`.
-    #[allow(clippy::too_many_arguments)]
+    /// connection to `peer` over `interface` when one is named.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the dispatcher's shared context plus the request's own fields, each used once"
+    )]
     fn connect(
         &mut self,
         interfaces: &mut Netstack,
@@ -935,11 +944,16 @@ impl SocketService {
         owner: ProcId,
         socket: SocketId,
         peer: SocketAddr,
+        interface: Option<[u8; IF_NAME_LEN]>,
         now: Duration64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
         let index = self.owned_index(owner, socket)?;
         if peer.family != self.sockets[index].family {
+            return Err(Errno::OutOfRange);
+        }
+        // A datagram names its link per send, not once for its peer.
+        if interface.is_some() && !matches!(self.sockets[index].proto, Proto::Stream(None)) {
             return Err(Errno::OutOfRange);
         }
         match self.sockets[index].proto {
@@ -955,7 +969,7 @@ impl SocketService {
             // in the wrong state for a connect, not a duplicate of one.
             Proto::Listen(_) => Err(Errno::OutOfRange),
             Proto::Stream(None) => {
-                self.connect_stream(interfaces, entropy, index, peer, now, response)
+                self.connect_stream(interfaces, entropy, index, peer, interface, now, response)
             }
             Proto::Echo(_) => {
                 // An echo socket's default peer is an address only; ICMP has
@@ -1384,12 +1398,17 @@ impl SocketService {
     /// [`Tcb`], choose the egress interface by originating the SYN, and
     /// record the connection. The socket stays unconnected (and the client
     /// may retry) if no interface can reach the peer.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the dispatcher's shared context plus the request's own fields, each used once"
+    )]
     fn connect_stream(
         &mut self,
         interfaces: &mut Netstack,
         entropy: &mut dyn FnMut() -> u32,
         index: usize,
         peer: SocketAddr,
+        interface: Option<[u8; IF_NAME_LEN]>,
         now: Duration64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
@@ -1401,7 +1420,7 @@ impl SocketService {
         // connection segments to — a size that fits the link (RFC 6691).
         // The stack stays unconnected (the client may retry) when no
         // interface can reach the peer.
-        let (iface, local_mss) = interfaces.egress_mss_for(dest, now)?;
+        let (iface, local_mss) = interfaces.egress_mss_for(dest, interface, now)?;
         // Size the connection's buffers out of what is left of the owner's
         // share, so the ceilings handed out cannot sum past it. Too little
         // left to carry data is the point at which the stack refuses,
@@ -1531,6 +1550,7 @@ impl SocketService {
     pub fn on_tcp_segment(
         &mut self,
         interfaces: &mut Netstack,
+        arrival: [u8; IF_NAME_LEN],
         source: IpAddr,
         destination: IpAddr,
         ecn: Ecn,
@@ -1551,6 +1571,7 @@ impl SocketService {
             local_port: dst_port,
             peer_addr: src_bytes,
             peer_port: src_port,
+            zone: zone_of(source, arrival),
         };
         if let Some(index) = self
             .by_conn
@@ -1575,8 +1596,9 @@ impl SocketService {
         if let Some(lindex) = self.demux_index(fam, dst_port) {
             let entry = &self.sockets[lindex];
             if entry.family == fam && matches!(&entry.proto, Proto::Listen(_)) {
+                let peer = Peer::arrived(source, src_port, arrival);
                 let io =
-                    self.drive_listener(interfaces, lindex, source, destination, &seg, now, secret);
+                    self.drive_listener(interfaces, lindex, peer, destination, &seg, now, secret);
                 #[cfg(test)]
                 self.assert_indices_agree();
                 return io;
@@ -1585,25 +1607,21 @@ impl SocketService {
         StreamIo::default()
     }
 
-    /// Feed one inbound segment to the listener at `lindex`, route the
-    /// segments it emits (SYN-ACK, cookie SYN-ACK, RST) back to the peer,
-    /// and drain any newly completed connection into a pending child
-    /// socket. `local` is the local address the segment arrived on.
+    /// Feed one inbound segment from `peer` to the listener at `lindex`,
+    /// route the segments it emits (SYN-ACK, cookie SYN-ACK, RST) back to the
+    /// peer, and drain any newly completed connection into a pending child
+    /// socket. `destination` is the local address the segment arrived on.
     #[allow(clippy::too_many_arguments)]
     fn drive_listener(
         &mut self,
         interfaces: &mut Netstack,
         lindex: usize,
-        source: IpAddr,
+        peer: Peer,
         destination: IpAddr,
         seg: &TcpSegment<'_>,
         now: Duration64,
         secret: &dyn CookieSecret,
     ) -> StreamIo {
-        let peer = Peer {
-            addr: source,
-            port: seg.source_port,
-        };
         let mut emitted: Vec<OutSeg> = Vec::new();
         let mut cookies_engaged = false;
         if let Proto::Listen(listening) = &mut self.sockets[lindex].proto {
@@ -1620,7 +1638,7 @@ impl SocketService {
             ..StreamIo::default()
         };
         io.tx
-            .extend(route_segments_to(interfaces, source, &emitted, now));
+            .extend(route_segments_to(interfaces, peer, &emitted, now));
         self.drain_listener_accepts(interfaces, lindex, now);
         io
     }
@@ -1637,21 +1655,15 @@ impl SocketService {
         let mut emitted: Vec<PeerOutSeg> = Vec::new();
         if let Proto::Listen(listening) = &mut self.sockets[lindex].proto {
             listening.listener.advance(now, |peer, out| {
-                emitted.push((
-                    peer.addr,
-                    out.meta,
-                    out.payload.to_vec(),
-                    out.gso_size,
-                    out.ecn,
-                ));
+                emitted.push((peer, out.meta, out.payload.to_vec(), out.gso_size, out.ecn));
                 true
             });
         }
         let mut tx = FrameBatch::new();
-        for (peer_ip, meta, payload, gso_size, ecn) in &emitted {
-            if let Ok((iface, _mss)) = interfaces.egress_mss_for(*peer_ip, now) {
+        for (peer, meta, payload, gso_size, ecn) in &emitted {
+            if let Ok((iface, _mss)) = interfaces.egress_mss_for(peer.addr, peer.link, now) {
                 if let Ok(frames) =
-                    interfaces.send_tcp_on(iface, *peer_ip, meta, payload, *gso_size, *ecn, now)
+                    interfaces.send_tcp_on(iface, peer.addr, meta, payload, *gso_size, *ecn, now)
                 {
                     if !frames.is_empty() {
                         tx.push((iface, frames));
@@ -1700,10 +1712,11 @@ impl SocketService {
             let Some(conn) = conn else {
                 break;
             };
-            // Bind the child to the interface that reaches its peer; a
-            // connection with no route home is dropped (it times out
-            // remotely) rather than parked forever.
-            let Ok((iface, _mss)) = interfaces.egress_mss_for(conn.peer.addr, now) else {
+            // Bind the child to its peer's link, or to the interface that
+            // reaches its peer; a connection with no way home is dropped (it
+            // times out remotely) rather than parked forever.
+            let Ok((iface, _mss)) = interfaces.egress_mss_for(conn.peer.addr, conn.peer.link, now)
+            else {
                 continue;
             };
             let (pfam, paddr) = address_parts(conn.peer.addr);
@@ -2535,6 +2548,7 @@ impl SocketService {
             local_port: entry.local_port,
             peer_addr: conn.peer.addr,
             peer_port: conn.peer.port,
+            zone: zone_of(ip_from_parts(conn.peer.family, conn.peer.addr), conn.iface),
         })
     }
 
@@ -2992,26 +3006,26 @@ fn drain_segments(tcb: &mut Tcb, now: Duration64) -> Vec<OutSeg> {
 }
 
 /// Route a batch of listener-emitted `(header, payload)` segments to a
-/// single peer, choosing the egress interface by the route to that peer,
-/// and return the produced frames tagged by that interface's alias. An
-/// empty batch, or a peer with no route home, yields nothing (the listener
-/// is passive; a lost SYN-ACK is retransmitted by `advance`).
+/// single peer — out its link when it has one, else the interface that
+/// reaches it — and return the produced frames tagged by that interface's
+/// alias. An empty batch, or a peer with no way home, yields nothing (the
+/// listener is passive; a lost SYN-ACK is retransmitted by `advance`).
 fn route_segments_to(
     interfaces: &mut Netstack,
-    peer_ip: IpAddr,
+    peer: Peer,
     segs: &[OutSeg],
     now: Duration64,
 ) -> FrameBatch {
     if segs.is_empty() {
         return FrameBatch::new();
     }
-    let Ok((iface, _mss)) = interfaces.egress_mss_for(peer_ip, now) else {
+    let Ok((iface, _mss)) = interfaces.egress_mss_for(peer.addr, peer.link, now) else {
         return FrameBatch::new();
     };
     let mut frames = Vec::new();
     for (meta, payload, gso_size, ecn) in segs {
         if let Ok(more) =
-            interfaces.send_tcp_on(iface, peer_ip, meta, payload, *gso_size, *ecn, now)
+            interfaces.send_tcp_on(iface, peer.addr, meta, payload, *gso_size, *ecn, now)
         {
             frames.extend(more);
         }
@@ -3224,34 +3238,36 @@ fn told_index(told: &[PublishedLink], name: [u8; IF_NAME_LEN]) -> Option<usize> 
     told.iter().position(|link| link.name == name)
 }
 
-/// The multicast DNS port every mDNS message is sent from and to.
-const MDNS_PORT: u16 = tairix_net::mdns::PORT;
-
-/// Whether `request` binds the multicast DNS port — in any transport, since
-/// they share one port space — or addresses a multicast DNS group. Both are
-/// the discovery service's alone: a query sent to the group from any other
-/// port is answered unicast by every responder on the segment, and a second
-/// listener on the port would hear the segment's answers without its checks.
-fn claims_multicast_dns(request: &SocketRequest<'_>) -> bool {
+/// Whether `request` binds a link-local discovery port — multicast DNS's or
+/// WS-Discovery's, in any transport, since they share one port space — or
+/// addresses one of their groups. Both are the discovery service's alone: a
+/// query sent to a group from any other port is answered by every responder
+/// on the segment, a second listener on the port would hear the segment's
+/// answers without the service's checks, and an announcement from anyone
+/// else would publish around them.
+fn claims_discovery(request: &SocketRequest<'_>) -> bool {
     match *request {
-        SocketRequest::Bind { local, .. } => local.port == MDNS_PORT,
-        SocketRequest::Connect { peer, .. } => is_multicast_dns(peer),
-        SocketRequest::Send { dest, .. } => dest.is_some_and(is_multicast_dns),
+        SocketRequest::Bind { local, .. } => {
+            local.port == tairix_net::mdns::PORT || local.port == tairix_net::wsd::PORT
+        }
+        SocketRequest::Connect { peer, .. } => is_discovery_group(peer),
+        SocketRequest::Send { dest, .. } => dest.is_some_and(is_discovery_group),
         _ => false,
     }
 }
 
-/// Whether `peer` is a multicast DNS group on the mDNS port.
-fn is_multicast_dns(peer: SocketAddr) -> bool {
-    peer.port == MDNS_PORT
-        && match ip_of(peer) {
-            IpAddr::V4(group) => group == tairix_net::mdns::GROUP_V4,
-            IpAddr::V6(group) => group == tairix_net::mdns::GROUP_V6,
-        }
+/// Whether `peer` is a discovery group on its protocol's port.
+fn is_discovery_group(peer: SocketAddr) -> bool {
+    let group = ip_of(peer);
+    let mdns = group == IpAddr::V4(tairix_net::mdns::GROUP_V4)
+        || group == IpAddr::V6(tairix_net::mdns::GROUP_V6);
+    let wsd = group == IpAddr::V4(tairix_net::wsd::GROUP_V4)
+        || group == IpAddr::V6(tairix_net::wsd::GROUP_V6);
+    (mdns && peer.port == tairix_net::mdns::PORT) || (wsd && peer.port == tairix_net::wsd::PORT)
 }
 
 /// Whether the caller is the discovery service's account, the one principal
-/// the multicast DNS port and groups are reserved to.
+/// the discovery ports and groups are reserved to.
 fn is_discovery(caller: &Caller) -> bool {
     tairix_abi::discovery_ipc::from_discovery_service(caller.origin())
 }

@@ -1,0 +1,12 @@
+[package]
+name = "tairix-unicode"
+description = "TAIRiX Unicode character properties: the hidden characters, the nonspacing marks, the UTS #39 mark-sequence checks over canonical decompositions, and the UTS #39 restriction level of a string's scripts, from tables generated out of the pinned Unicode Character Database snapshot in assets/ (cargo xtask unicode). no_std, allocation-free, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

@@ -1311,6 +1311,20 @@ impl FileStat {
 /// reporting a longer name is a structural fault, not a capacity.
 pub const FS_NAME_MAX: usize = 255;
 
+/// Whether `name` is spelled as a name may be: 1 to [`FS_NAME_MAX`] bytes
+/// holding neither a NUL nor a `/`.
+#[must_use]
+pub fn is_name(name: &[u8]) -> bool {
+    !name.is_empty() && name.len() <= FS_NAME_MAX && !name.iter().any(|&b| b == 0 || b == b'/')
+}
+
+/// Whether `name` can name a directory entry: a [name](is_name) that is
+/// neither `.` nor `..`, which a path resolves itself.
+#[must_use]
+pub fn is_component(name: &[u8]) -> bool {
+    is_name(name) && name != b"." && name != b".."
+}
+
 /// One entry in the packed `fs_readdir` stream.
 ///
 /// `fs_readdir` fills the caller's buffer with consecutive records, each a
@@ -1821,14 +1835,35 @@ impl core::iter::FusedIterator for DirChanges<'_> {}
 mod tests {
     extern crate alloc;
     use super::{
-        mode_after_owner_change, mode_string, Access, AtFlags, DirChange, DirChangeBatch,
-        DirEntries, DirEntry, DirWatchStatus, FileId, FileKind, FileStat, FinalLink, NodeExpect,
-        NodeTimes, OpenFlags, PathAt, RealpathMode, RenameFlags, UnlinkFlags, FD_CWD, FS_MODE_MASK,
-        FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, FS_UMASK_BITS, FS_UMASK_QUERY,
+        is_component, is_name, mode_after_owner_change, mode_string, Access, AtFlags, DirChange,
+        DirChangeBatch, DirEntries, DirEntry, DirWatchStatus, FileId, FileKind, FileStat,
+        FinalLink, NodeExpect, NodeTimes, OpenFlags, PathAt, RealpathMode, RenameFlags,
+        UnlinkFlags, FD_CWD, FS_MODE_MASK, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, FS_UMASK_BITS,
+        FS_UMASK_QUERY,
     };
     use crate::time::Time64;
     use crate::Errno;
     use alloc::vec;
+
+    #[test]
+    fn a_name_is_bounded_and_holds_no_separator_or_nul() {
+        assert!(is_name(b"a"));
+        assert!(is_name(&[b'n'; FS_NAME_MAX]));
+        assert!(is_name(b".."));
+        assert!(!is_name(b""));
+        assert!(!is_name(&[b'n'; FS_NAME_MAX + 1]));
+        assert!(!is_name(b"a/b"));
+        assert!(!is_name(b"a\0b"));
+    }
+
+    #[test]
+    fn a_component_is_a_name_other_than_the_dots() {
+        assert!(is_component(b"..."));
+        assert!(is_component(b".hidden"));
+        assert!(!is_component(b"."));
+        assert!(!is_component(b".."));
+        assert!(!is_component(b"/"));
+    }
 
     #[test]
     fn mode_string_renders_kind_and_permission_triads() {

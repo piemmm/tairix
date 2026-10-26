@@ -1073,7 +1073,10 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             Err(Errno::AlreadyExists) if waiting.access == PickAccess::Create => {
                 // Asked only about the folder still showing: a yes must
                 // replace the file the user can see the question is about.
-                let shown = shown_path(active.browser.components(), &waiting.name);
+                let shown = active
+                    .browser
+                    .folder()
+                    .and_then(|folder| shown_path(folder, &waiting.name));
                 if shown.as_deref() == Some(waiting.path.as_str()) {
                     band.ask_to_replace((waiting.name, waiting.path), active.wm, shell, compositor);
                 } else {
@@ -1263,7 +1266,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let kind = active.browser.entries()[index].kind();
         match kind {
             EntryKind::File => {
-                let path = shown_path(active.browser.components(), &name)?;
+                let path = shown_path(active.browser.folder()?, &name)?;
                 band.ask_to_replace((name, path), active.wm, shell, compositor);
                 redraw_band(active, shell, compositor);
                 None
@@ -1304,7 +1307,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<PickStep> {
-        let components = self.active.as_ref()?.browser.components();
+        let components = self.active.as_ref()?.browser.folder()?;
         let path = vfs::absolute_path(components).ok()?;
         let name = components
             .last()
@@ -1323,7 +1326,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     ) -> Option<PickStep> {
         // A name the shared spelling refuses is not chosen rather than
         // guessed at.
-        let path = shown_path(self.active.as_ref()?.browser.components(), &name)?;
+        let path = shown_path(self.active.as_ref()?.browser.folder()?, &name)?;
         self.request_at(name, path, access, shell, compositor)
     }
 
@@ -1378,7 +1381,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let active = self.active.as_mut()?;
         let scale = compositor.scale();
         let prefix = active.title_prefix();
-        let titled = picker_title(prefix, active.browser.components());
+        let titled = picker_title(prefix, active.browser.folder());
         match step(&mut active.browser) {
             NavOutcome::None => None,
             NavOutcome::Redraw => {
@@ -1396,7 +1399,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 // its own, so it retitles through the compositor. A step that
                 // only moved the selection leaves the title alone rather than
                 // re-presenting the taskbar for an unchanged label.
-                let located = picker_title(prefix, active.browser.components());
+                let located = picker_title(prefix, active.browser.folder());
                 if located != titled {
                     shell.retitle_window(compositor, active.wm, &located);
                     // A question about a file in the folder left behind is
@@ -1498,7 +1501,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             surface
         };
         let prefix = title_prefix(save.is_some(), folder.is_some());
-        let titled = picker_title(prefix, browser.components());
+        let titled = picker_title(prefix, browser.folder());
         let wm = shell
             .open_window(compositor, PICKER_ORIGIN, surface, titled.clone())
             .ok_or(Errno::NoSpace)?;
@@ -1582,11 +1585,11 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
 /// behind the shared ellipsis and always keeps the folder the user is in, so
 /// the result never exceeds [`WINDOW_TITLE_MAX`] bytes.
 #[must_use]
-fn picker_title(prefix: &str, components: &[String]) -> String {
+fn picker_title(prefix: &str, folder: Option<&[String]>) -> String {
     let budget = WINDOW_TITLE_MAX - prefix.len() - PICKER_TITLE_SEPARATOR.len();
     let mut title = String::from(prefix);
     title.push_str(PICKER_TITLE_SEPARATOR);
-    title.push_str(&vfs::spell_title_location(components, budget));
+    title.push_str(&vfs::spell_title_of(folder, budget));
     title
 }
 

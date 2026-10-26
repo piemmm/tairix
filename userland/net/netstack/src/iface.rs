@@ -25,7 +25,7 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::{Duration64, Errno, MAX_TIME_SERVERS};
 use tairix_hash::HashSeed;
-use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
+use tairix_net::addr::{needs_zone, Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::bond::{flow_hash, Bond, BondConfig, BondEvent, BondMode, MemberId};
 use tairix_net::iface::{eui64_interface_id, AddrError, TempAddrSource};
 use tairix_net::internet_checksum;
@@ -928,12 +928,16 @@ impl Netstack {
     /// exactly the unicast echo behaviour.
     ///
     /// A named `egress` is the whole of the choice: that logical interface
-    /// carries the datagram or it is refused, never another in its place.
+    /// carries the datagram or it is refused, never another in its place. A
+    /// link-local destination with none named goes out the one logical
+    /// interface that can reach it.
     ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — `egress` names no logical interface (a bond
     ///   member carries no datagrams of its own).
+    /// * [`Errno::OutOfRange`] — a link-local destination names no link,
+    ///   and more than one could carry it.
     /// * [`Errno::MessageTooLarge`] — the datagram is too large to fit or
     ///   fragment onto the path (an oversize IPv6 datagram is
     ///   source-fragmented) or overflows the length field, on an interface
@@ -959,6 +963,10 @@ impl Netstack {
                 return Err(Errno::NotFound);
             }
         }
+        let egress = match egress {
+            Some(name) => Some(name),
+            None => self.default_zone(dest, now)?,
+        };
         let multicast = match dest {
             IpAddr::V4(v4) => v4.is_multicast(),
             IpAddr::V6(v6) => v6.is_multicast(),
@@ -1024,7 +1032,8 @@ impl Netstack {
     ///   fragment onto the path (an oversize IPv6 request is
     ///   source-fragmented) on an interface that otherwise matched.
     /// * [`Errno::OutOfRange`] — the destination is not a legal echo target
-    ///   (multicast / unspecified).
+    ///   (multicast / unspecified), or is link-local and more than one link
+    ///   could carry it.
     /// * [`Errno::NetworkUnreachable`] — no interface has a route to the
     ///   destination, a usable source address, or an up link.
     pub fn originate_echo(
@@ -1032,6 +1041,7 @@ impl Netstack {
         probe: &EchoProbe<'_>,
         now: Duration64,
     ) -> Result<FrameBatch, Errno> {
+        let zone = self.default_zone(probe.dest, now)?;
         let mut deferred: Option<Errno> = None;
         let Self {
             interfaces,
@@ -1040,7 +1050,10 @@ impl Netstack {
             ..
         } = self;
         let peer_hash_key = *peer_hash_key;
-        for iface in interfaces.iter_mut() {
+        for iface in interfaces
+            .iter_mut()
+            .filter(|iface| zone.is_none_or(|name| iface.name == name))
+        {
             match iface.stack.send_echo_request(probe, now, out) {
                 Ok(()) => {
                     let frames = core::mem::take(&mut out.frames);
@@ -1113,7 +1126,8 @@ impl Netstack {
     /// Choose the egress interface for a new TCP connection to `dest` and
     /// return its alias together with the effective local maximum segment
     /// size ([`Stack::tcp_local_mss`]) for that interface and `dest`'s
-    /// family: the first interface that can reach `dest`.
+    /// family: the `named` interface, or else the first that can reach
+    /// `dest`.
     ///
     /// The connection is bound to this interface for its life, and the MSS
     /// seeds its [`TcpConfig`](tairix_net::tcp::conn::TcpConfig) so every
@@ -1121,21 +1135,69 @@ impl Netstack {
     /// 40-byte header is accounted here, not discovered as a dropped
     /// full-size segment.
     ///
+    /// A link-local `dest` with no interface named is reached over the one
+    /// logical interface that can reach it.
+    ///
     /// # Errors
     ///
-    /// [`Errno::NetworkUnreachable`] — no interface has a route, a usable
-    /// source address, and an up link to `dest`.
+    /// * [`Errno::NetworkUnreachable`] — no interface (or not the named one)
+    ///   has a route, a usable source address, and an up link to `dest`.
+    /// * [`Errno::OutOfRange`] — `dest` is link-local, no interface is
+    ///   named, and more than one could reach it.
     pub fn egress_mss_for(
         &mut self,
         dest: IpAddr,
+        named: Option<[u8; IF_NAME_LEN]>,
         now: Duration64,
     ) -> Result<([u8; IF_NAME_LEN], u16), Errno> {
+        let named = match named {
+            Some(name) => Some(name),
+            None => self.default_zone(dest, now)?,
+        };
+        if let Some(name) = named {
+            let iface = self.interface_mut(name).ok_or(Errno::NetworkUnreachable)?;
+            return iface
+                .stack
+                .tcp_local_mss(dest, now)
+                .map(|mss| (iface.name, mss))
+                .ok_or(Errno::NetworkUnreachable);
+        }
         for iface in &mut self.interfaces {
             if let Some(mss) = iface.stack.tcp_local_mss(dest, now) {
                 return Ok((iface.name, mss));
             }
         }
         Err(Errno::NetworkUnreachable)
+    }
+
+    /// The default zone of a unicast `dest` that [needs one](needs_zone)
+    /// (RFC 4007 §6): the one logical interface that could carry a unicast to
+    /// it. Such an address names a host only within its zone, so where more
+    /// than one link could carry it `dest` names no host in particular and is
+    /// refused, never sent out whichever comes first. Any other destination
+    /// needs no zone, and one no interface reaches is left to the caller's
+    /// search to refuse.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] — `dest` needs a zone and more than one
+    /// interface could reach it.
+    fn default_zone(
+        &mut self,
+        dest: IpAddr,
+        now: Duration64,
+    ) -> Result<Option<[u8; IF_NAME_LEN]>, Errno> {
+        if !needs_zone(dest) || matches!(dest, IpAddr::V6(v6) if v6.is_multicast()) {
+            return Ok(None);
+        }
+        let mut reaching = self.interfaces.iter_mut().filter_map(|iface| {
+            let logical = !matches!(iface.role, BondRole::Member { .. });
+            (logical && iface.stack.tcp_local_mss(dest, now).is_some()).then_some(iface.name)
+        });
+        match (reaching.next(), reaching.next()) {
+            (only, None) => Ok(only),
+            (_, Some(_)) => Err(Errno::OutOfRange),
+        }
     }
 
     /// Whether any managed interface owns the local address `addr` of

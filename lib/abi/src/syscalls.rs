@@ -2024,15 +2024,18 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::POINTER_INJECT,
         name: "pointer_inject",
-        arg_count: 3,
+        arg_count: 4,
         args: [
             // The seat the decoded pointer event belongs to (the seat whose
-            // pointing device produced it), then the encoded record. An
-            // unknown seat id fails closed with `NotFound`.
+            // pointing device produced it), then the encoded record, then
+            // when the device reported it — `POINTER_EDGE_UNTIMED` when the
+            // driver cannot say — which the seat's chatter filter measures
+            // a button edge by. An unknown seat id fails closed with
+            // `NotFound`.
             AbiType::U64,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            AbiType::U64,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -3742,6 +3745,88 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // pure query, high-volume like fs_stat; not audited per call.
         required_capability: Some(CapabilityId::FS_ACCESS),
         audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_READ,
+        name: "volume_read",
+        arg_count: 4,
+        args: [
+            // Served-volume id, first block, non-null `UserPtr`
+            // destination, length in bytes.
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The class capability of a user-space filesystem driver; the
+        // handler holds it to the one volume its grant names. The data path
+        // of an authority decided at serve time: not audited.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_WRITE,
+        name: "volume_write",
+        arg_count: 4,
+        args: [
+            // Served-volume id, first block, non-null `UserPtr` source,
+            // length in bytes.
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // As `volume_read`, its source rather than its destination.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_CTL,
+        name: "volume_ctl",
+        arg_count: 5,
+        args: [
+            // Served-volume id, non-null `UserPtr` to the `VolumeCtl`
+            // frame and its length, non-null `UserPtr` reply buffer and
+            // its capacity.
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // As `volume_read`: a description, a flush or a discard of the
+        // volume the grant names. Not audited.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VOLUME_SERVE,
+        name: "volume_serve",
+        arg_count: 5,
+        args: [
+            // Served-volume id, non-null `UserPtr` to the `ServeFrame` and
+            // its length, non-null `UserPtr` for the `ServeGrant` and its
+            // capacity.
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // Serving a filesystem puts a volume into the namespace under the
+        // driver's account of it, so every decision is audited.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: true,
     },
 ];
 

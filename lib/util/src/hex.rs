@@ -3,13 +3,26 @@
 
 const DIGITS: &[u8; 16] = b"0123456789abcdef";
 
+/// The lowercase hex digit spelling the low four bits of `nibble`.
+#[must_use]
+pub const fn digit(nibble: u8) -> u8 {
+    DIGITS[(nibble & 0x0f) as usize]
+}
+
 /// The two lowercase hex digits spelling `byte`.
 #[must_use]
-pub fn digits(byte: u8) -> [u8; 2] {
-    [
-        DIGITS[usize::from(byte >> 4)],
-        DIGITS[usize::from(byte & 0x0f)],
-    ]
+pub const fn digits(byte: u8) -> [u8; 2] {
+    [digit(byte >> 4), digit(byte)]
+}
+
+/// `bytes` as lowercase hex text.
+#[must_use]
+pub fn encode(bytes: &[u8]) -> alloc::string::String {
+    bytes
+        .iter()
+        .flat_map(|&byte| digits(byte))
+        .map(char::from)
+        .collect()
 }
 
 /// Fill `out` with the bytes `text` spells, answering whether it spelled

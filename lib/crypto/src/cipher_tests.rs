@@ -8,9 +8,11 @@
 //! library's behaviour.
 
 use super::{
-    Aes128Ctr, Aes128Key, Aes192Ctr, Aes192Key, Aes256Ctr, Aes256Key, AesCtrIv, AES128_KEY_LEN,
-    AES192_KEY_LEN, AES256_KEY_LEN, AES_BLOCK_LEN,
+    aes128_cts_decrypt, aes128_cts_encrypt, aes256_cts_decrypt, aes256_cts_encrypt, Aes128Ctr,
+    Aes128Key, Aes192Ctr, Aes192Key, Aes256Ctr, Aes256Key, AesCtrIv, CtsLengthError,
+    AES128_KEY_LEN, AES192_KEY_LEN, AES256_KEY_LEN, AES_BLOCK_LEN,
 };
+use crate::test_hex::hex;
 
 /// SP 800-38A §F.5: the initial counter block shared by all three sizes.
 const IV: AesCtrIv = [
@@ -191,4 +193,70 @@ fn debug_does_not_leak_cipher_state() {
     let rendered = core::str::from_utf8(&sink.data[..sink.len]).expect("ascii");
     assert!(rendered.contains("Aes256Ctr"));
     assert!(!rendered.contains("60"), "key bytes must not be rendered");
+}
+
+/// RFC 3962 Appendix B: the AES-128 key "chicken teriyaki" and the message
+/// every CTS vector takes a prefix of.
+const CTS_KEY: Aes128Key = *b"chicken teriyaki";
+const CTS_MESSAGE: &[u8; 64] = b"I would like the General Gau's Chicken, please, and wonton soup.";
+
+/// Encrypt then decrypt `N` bytes of the RFC 3962 message, checking both.
+fn cts_round_trip<const N: usize>(expected: &str) {
+    let mut buf: [u8; N] = CTS_MESSAGE[..N].try_into().expect("prefix");
+    aes128_cts_encrypt(&CTS_KEY, &mut buf).expect("long enough");
+    assert_eq!(buf, hex::<N>(expected), "{N} bytes");
+    aes128_cts_decrypt(&CTS_KEY, &mut buf).expect("long enough");
+    assert_eq!(buf[..], CTS_MESSAGE[..N], "{N} bytes back");
+}
+
+#[test]
+fn aes_cts_matches_rfc_3962() {
+    cts_round_trip::<17>("c6353568f2bf8cb4d8a580362da7ff7f97");
+    cts_round_trip::<31>("fc00783e0efdb2c1d445d4c8eff7ed2297687268d6ecccc0c07b25e25ecfe5");
+    cts_round_trip::<32>("39312523a78662d5be7fcbcc98ebf5a897687268d6ecccc0c07b25e25ecfe584");
+    cts_round_trip::<47>(
+        "97687268d6ecccc0c07b25e25ecfe584b3fffd940c16a18c1b5549d2f838029e\
+         39312523a78662d5be7fcbcc98ebf5",
+    );
+    cts_round_trip::<48>(
+        "97687268d6ecccc0c07b25e25ecfe5849dad8bbb96c4cdc03bc103e1a194bbd8\
+         39312523a78662d5be7fcbcc98ebf5a8",
+    );
+    cts_round_trip::<64>(
+        "97687268d6ecccc0c07b25e25ecfe58439312523a78662d5be7fcbcc98ebf5a8\
+         4807efe836ee89a526730dbc2f7bc8409dad8bbb96c4cdc03bc103e1a194bbd8",
+    );
+}
+
+#[test]
+fn a_one_block_cts_message_is_the_block_cipher_alone() {
+    // FIPS-197 Appendix C: CBC of one block from the zero state is the raw
+    // cipher, which is what Kerberos's key derivation encrypts.
+    let mut block = hex::<16>("00112233445566778899aabbccddeeff");
+    aes128_cts_encrypt(&hex("000102030405060708090a0b0c0d0e0f"), &mut block).expect("one block");
+    assert_eq!(block, hex("69c4e0d86a7b0430d8cdb78070b4c55a"));
+
+    let key256 = hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    let mut block = hex::<16>("00112233445566778899aabbccddeeff");
+    aes256_cts_encrypt(&key256, &mut block).expect("one block");
+    assert_eq!(block, hex("8ea2b7ca516745bfeafc49904b496089"));
+    aes256_cts_decrypt(&key256, &mut block).expect("one block");
+    assert_eq!(block, hex("00112233445566778899aabbccddeeff"));
+}
+
+#[test]
+fn aes_cts_refuses_less_than_a_block() {
+    let mut short = [0u8; 15];
+    assert_eq!(
+        aes128_cts_encrypt(&CTS_KEY, &mut short),
+        Err(CtsLengthError(()))
+    );
+    assert_eq!(
+        aes128_cts_decrypt(&CTS_KEY, &mut short),
+        Err(CtsLengthError(()))
+    );
+    assert_eq!(
+        aes128_cts_encrypt(&CTS_KEY, &mut []),
+        Err(CtsLengthError(()))
+    );
 }

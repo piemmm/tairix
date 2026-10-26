@@ -23,11 +23,26 @@ ddarllen, ac ni ddyfelir byth.
 
 Mae'r bwrdd gwaith yn cychwyn y porwr i chi ac yn ei gadw ar y bar eiconau:
 mae dewislen ei slot yn rhestru eich lleoedd eich hun a phopeth sydd wedi'i
-osod, ac mae dewis un yn agor ffenestr yno; daw *Gosodiadau…* yn olaf. Mae
-clic ar y slot yn agor un yn y man y mae'r gosodiadau'n ei ddewis. Mae gofyn
-am ffolder sydd eisoes â ffenestr yn dod â'r ffenestr honno i'r blaen yn
-hytrach nag agor un arall. Nid oes rhes *Gadael* gan y copi hwnnw — mae'n
-rhan o'r bwrdd gwaith, ac mae cau ei ffenestri yn ei gadw o'r neilltu.
+osod, ac mae dewis un yn agor ffenestr yno; daw *Rhwydwaith* a *Gosodiadau…*
+yn olaf. Mae clic ar y slot yn agor un yn y man y mae'r gosodiadau'n ei
+ddewis. Mae gofyn am ffolder sydd eisoes â ffenestr yn dod â'r ffenestr
+honno i'r blaen yn hytrach nag agor un arall. Nid oes rhes *Gadael* gan y
+copi hwnnw — mae'n rhan o'r bwrdd gwaith, ac mae cau ei ffenestri yn ei gadw
+o'r neilltu.
+
+Mae *Rhwydwaith*, ar ddewislen y slot yn union uwchben *Gosodiadau…*, yn
+agor ffenestr ar y cyfrifiaduron ar y rhwydwaith lleol sy'n rhannu ffeiliau.
+Rhestrir pob un gyda'i enw, y cyfeiriad lle mae ar gael, ei weithgor neu ei
+barth, a'r hyn ydyw, ac mae'r rhestr yn llenwi wrth i gyfrifiaduron ateb.
+Dim ond tra bo ffenestr yn ei dangos y caiff y rhwydwaith ei chwilio. Mae
+cyfrifiadur sydd wedi peidio ag ateb yn llwyd nes iddo gael ei anghofio; mae
+enw sy'n cymysgu gwyddorau yn y ffordd y mae dynwared enw arall yn gofyn
+amdani yn dangos arwydd rhybudd yn lle ei lun; a phan fo un cyfrifiadur yn
+cynnig mwy nag ychydig o gofnodion, caiff y gweddill eu cyfrif mewn rhes eu
+hunain yn hytrach na gwthio'r lleill o'r neilltu. Pwy bynnag sy'n rhedeg pob
+cyfrifiadur sy'n dewis ei enw ar y rhwydwaith, felly nid yw enw byth yn
+profi pa gyfrifiadur rydych chi'n edrych arno. Nid yw cysylltu â chyfrannau
+cyfrifiadur ar gael ar y system hon, ac mae agor un yn dweud hynny.
 
 O'i redeg wrth ei enw o gragen (neu o'i agor ar ffolder o'r bwrdd gwaith)
 mae'n rhaglen gyffredin yn lle hynny: un ffenestr, ac mae'n dod i ben pan

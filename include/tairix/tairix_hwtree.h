@@ -92,6 +92,7 @@
 #define TAIRIX_HW_RES_IOMMU_ALIAS ((uint16_t)14u)
 #define TAIRIX_HW_RES_IOMMU_GROUP ((uint16_t)15u)
 #define TAIRIX_HW_RES_MSI_DOORBELL ((uint16_t)16u)
+#define TAIRIX_HW_RES_VOLUME ((uint16_t)17u)
 
 /* Property keys (uint32_t). */
 #define TAIRIX_HW_PROPERTY_USB_INTERFACE ((uint32_t)1u)

@@ -6,9 +6,10 @@
 ///
 /// Several boot-order problems are the same problem — no userland event says
 /// "it is there now" — so they climb this one definition rather than each
-/// carrying a schedule of its own: the clock service's configuration store and
-/// RTC, and the service manager's administrator enrolment overrides, which all
-/// live behind a volume or a driver that appears after the reader starts.
+/// carrying a schedule of its own: the clock service's real-time clock, behind
+/// a driver that binds after it starts, and the time servers a DHCP lease may
+/// name. A volume coming online is not one of them: the mount table's notice
+/// announces it.
 ///
 /// It is a one-shot ladder, never a poll loop: the caller parks until [`at`]
 /// and takes a single attempt, so a core is never pegged and a boot on which

@@ -48,6 +48,10 @@ use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 /// `debug`/`release` profiles under distinct subdirectories, so the two
 /// profiles coexist).
 ///
+/// `features` are the package features the binary needs: a driver whose
+/// library the kernel also links keeps its `Run` binary behind one, so the
+/// kernel never pulls in the userland runtime the program links.
+///
 /// `profile` selects the Cargo build profile the program compiles in — the
 /// same image → Cargo-profile mapping the kernel build uses
 /// ([`ImageProfile::cargo_build_args`] / [`ImageProfile::cargo_profile_dir`]),
@@ -64,6 +68,7 @@ pub fn cross_compile_pie_elf(
     group: &str,
     package: &str,
     bin: &str,
+    features: &[&str],
     profile: ImageProfile,
 ) -> Result<Vec<u8>, String> {
     let triple = arch.target_triple();
@@ -108,8 +113,11 @@ pub fn cross_compile_pie_elf(
         .env_remove("RUSTFLAGS")
         .env(arch.rustflags_env_var(), rustflags)
         .args(["build", "--locked", "-p", package, "--bin", bin, "--target"])
-        .arg(arch.cargo_target_spec())
-        .args(["-Z", pie::SYSROOT_BUILD_STD])
+        .arg(arch.cargo_target_spec());
+    if !features.is_empty() {
+        cmd.args(["--features", &features.join(",")]);
+    }
+    cmd.args(["-Z", pie::SYSROOT_BUILD_STD])
         .args(profile.cargo_build_args())
         .args(["--target-dir"])
         .arg(&target_dir);

@@ -33,7 +33,7 @@ pub mod source;
 pub mod view;
 pub mod viewport;
 
-pub use discover::{AdvertisedService, Collect, Directory, Discovery, OpenSession};
+pub use discover::{AdvertisedService, Collect, Directory, OpenSession};
 pub use infer::{infer, Evidence, Role, Seen, Signals};
 pub use ingest::{assigned_oui, InterfaceObservation, Inventory};
 pub use layout::{layout, RING_STEP};
@@ -48,6 +48,7 @@ pub use probe::{
 };
 pub use settings::{Posture, ProbeKey, ProbeSettings};
 pub use source::Snapshot;
+pub use tairix_discovery::walk::Discovery;
 pub use view::{node_look, os_emblem, Look, MapView, Reaction, NODE_RADIUS};
 pub use viewport::{Viewport, DEFAULT_ZOOM_PER_MILLE, MAX_ZOOM_PER_MILLE, MIN_ZOOM_PER_MILLE};
 

@@ -100,6 +100,10 @@ depth-bounded so a cyclic (corrupt) tree cannot spin the driver, and
   `DriverHandle` the host minted at load time, and the VFS only
   delegates writes on a non-`READ_ONLY` mount. The driver runs in user
   space; it does not request `CAP_DRV_KERNEL`.
+- The crate's `Run` binary, built with the `program` feature, serves a
+  removable volume through `lib/fsserve` (`Served`, binding
+  `tairix,volume-adfs`), with `CAP_FS_SERVE` and `CAP_LOG_EMIT`
+  (`docs/src/filesystem/served.md`).
 
 ## Test surface
 

@@ -220,6 +220,34 @@ pub fn assert_read_forwards<W: FilesystemRead + ?Sized>(wrapper: &mut W) {
 /// would otherwise disturb a later assertion, so the facets may be driven
 /// in any order against one wrapper.
 pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapper: &mut W) {
+    assert_mutations_forward(wrapper);
+    assert_volume_host_forwards(wrapper);
+}
+
+/// Every [`FilesystemWrite`] method reaches the inner driver, save
+/// [`FilesystemWrite::set_volume_host`], which a wrapper whose inner runs its
+/// own commit timer keeps: the kernel's host is told of no deadline, so its
+/// flusher never waits on that inner.
+pub fn assert_write_forwards_keeping_its_timer<W: FilesystemRead + FilesystemWrite + ?Sized>(
+    wrapper: &mut W,
+) {
+    assert_mutations_forward(wrapper);
+    let host: &'static RecordingHost = crate::forever(Box::new(RecordingHost(AtomicU64::new(0))));
+    let volume = DriverHandle::from_raw(CONFORMANCE_VOLUME).expect("non-zero handle");
+    wrapper.set_volume_host(volume, host);
+    let file = child(wrapper, FILE_NAME);
+    wrapper
+        .write_at(file, 0, FILE_BODY)
+        .expect("`write_at` is not being forwarded");
+    assert_eq!(
+        host.0.load(Ordering::Acquire),
+        0,
+        "the kernel's host was told of a deadline the inner keeps itself"
+    );
+}
+
+/// The mutating calls, each forwarded.
+fn assert_mutations_forward<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapper: &mut W) {
     let root = wrapper.root();
     let file = child(wrapper, FILE_NAME);
 
@@ -288,7 +316,6 @@ pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapp
         .expect("`remove` is not being forwarded");
     assert_deferred_deletion_reaches_the_driver(wrapper);
     wrapper.flush().expect("`flush` is not being forwarded");
-    assert_volume_host_forwards(wrapper);
     assert_allocation_class_forwards(wrapper);
 }
 

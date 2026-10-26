@@ -15,6 +15,10 @@
 //!   for an hour costs what changes, not what is held.
 //! * [`Held`] — one request's current answers, kept from those entries: what
 //!   a program that wants "the printers on this network now" reads.
+//! * [`walk::Discovery`] — the requests a program keeps open to follow what
+//!   the segment offers, from the roots it names down to each host.
+//! * [`catalogue::Catalogue`] — the storage the segment offers, as one list
+//!   of endpoints a file manager or a share command browses.
 //! * `RtDiscovery` (the `program` feature; documented on a freestanding
 //!   target) — the production glue: the endpoint call, and a park on the
 //!   session's doorbell that is woken by the service, never polled.
@@ -28,16 +32,23 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::discovery_ipc::{
-    decode_id_reply, Answer, Change, CollectReply, DiscoveryRequest, Entry, Query,
+    decode_id_reply, Answer, Change, CollectReply, DiscoveryRequest, Entry, Membership, Query,
     DISCOVERY_MAX_REPLY, DISCOVERY_MAX_REQUEST,
 };
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::Errno;
 use tairix_util::fallible;
+
+pub mod catalogue;
+pub mod walk;
+
+#[cfg(test)]
+mod test_book;
 
 #[cfg(all(feature = "program", target_os = "none"))]
 mod rt;
@@ -287,6 +298,28 @@ pub enum OwnedAnswer {
     Pointer(Vec<u8>),
     /// A type enumeration found a service type: the name and transport.
     Type(Vec<u8>, tairix_abi::discovery_ipc::Transport),
+    /// A computer announced itself over WS-Discovery.
+    Computer {
+        /// Its identity on the interface it was learned on.
+        key: u64,
+        /// The address it answers at.
+        address: core::net::IpAddr,
+        /// Its name.
+        name: String,
+        /// The workgroup or domain it belongs to.
+        membership: OwnedMembership,
+    },
+}
+
+/// A [`Membership`] with its name owned.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OwnedMembership {
+    /// A workgroup, by name.
+    Workgroup(String),
+    /// A domain, by name.
+    Domain(String),
+    /// Neither, or nothing stated.
+    Unstated,
 }
 
 impl OwnedAnswer {
@@ -315,6 +348,29 @@ impl OwnedAnswer {
             Answer::Address { address } => Self::Address(address),
             Answer::Pointer { target } => Self::Pointer(owned(target)?),
             Answer::Type { service } => Self::Type(owned(service.name)?, service.transport),
+            Answer::Computer {
+                key,
+                address,
+                name,
+                membership,
+            } => {
+                let text = |text: &str| -> Option<String> {
+                    let mut out = String::new();
+                    out.try_reserve_exact(text.len()).ok()?;
+                    out.push_str(text);
+                    Some(out)
+                };
+                Self::Computer {
+                    key,
+                    address,
+                    name: text(name)?,
+                    membership: match membership {
+                        Membership::Workgroup(group) => OwnedMembership::Workgroup(text(group)?),
+                        Membership::Domain(domain) => OwnedMembership::Domain(text(domain)?),
+                        Membership::Unstated => OwnedMembership::Unstated,
+                    },
+                }
+            }
         })
     }
 
@@ -341,6 +397,7 @@ impl OwnedAnswer {
                 },
             ) => priority == p && weight == w && port == o && folded(target, t),
             (Self::Type(a, x), Self::Type(b, y)) => x == y && folded(a, b),
+            (Self::Computer { key: a, .. }, Self::Computer { key: b, .. }) => a == b,
             (a, b) => a == b,
         }
     }

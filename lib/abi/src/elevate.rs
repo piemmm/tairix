@@ -76,7 +76,7 @@
 //! same trust boundary as typing it at the login prompt); both ends zeroise
 //! their copies as soon as the exchange resolves.
 
-use crate::le::{put_i32, put_i64, put_u32, read_i32, read_i64, read_u32};
+use crate::le::{put_i32, put_i64, put_u32, read_i32, read_i64, read_u32, Reader, Writer};
 use crate::process::CONSOLE_INDEX_MAX;
 use crate::time::Duration64;
 use crate::Errno;
@@ -318,9 +318,9 @@ impl<'a> Iterator for ElevateArgvIter<'a> {
                 // The region was validated at decode, so every step here
                 // succeeds; ending the walk on a short read keeps that an
                 // invariant rather than a panic.
-                let mut cur = Cursor::new(bytes);
-                let arg = cur.str().ok()?;
-                *bytes = bytes.get(cur.at..)?;
+                let mut r = Reader::new(bytes);
+                let arg = r.str().ok()?;
+                *bytes = bytes.get(r.position()..)?;
                 *left -= 1;
                 Some(arg)
             }
@@ -368,7 +368,7 @@ impl ElevateWords {
             for arg in args {
                 w.str(arg)?;
             }
-            w.at
+            w.written()
         };
         words.len = u16::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
         words.count = u16::try_from(args.len()).map_err(|_| Errno::LengthOutOfRange)?;
@@ -420,9 +420,9 @@ impl ElevateWords {
         if bytes.len() > ELEVATE_WORDS_BYTES {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut cur = Cursor::new(bytes);
-        cur.words(count)?;
-        if !cur.exhausted() {
+        let mut r = Reader::new(bytes);
+        read_words(&mut r, count)?;
+        if !r.exhausted() {
             return Err(Errno::LengthOutOfRange);
         }
         let mut words = Self::NONE;
@@ -684,7 +684,7 @@ impl<'a> ElevateRequest<'a> {
                 w.u32(offset)?;
             }
         }
-        Ok(w.at)
+        Ok(w.written())
     }
 
     /// The wire opcode naming this request.
@@ -710,15 +710,15 @@ impl<'a> ElevateRequest<'a> {
         if bytes.len() > ELEVATE_MAX_REQUEST {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut cur = Cursor::new(bytes);
-        if cur.u16()? != ELEVATE_VERSION {
+        let mut r = Reader::new(bytes);
+        if r.u16()? != ELEVATE_VERSION {
             return Err(Errno::OutOfRange);
         }
-        let request = match cur.u8()? {
+        let request = match r.u8()? {
             opcode @ (OPCODE_RUN | OPCODE_LAUNCH | OPCODE_CAPTURE) => {
-                let username = cur.str()?;
-                let password = cur.str()?;
-                let program = cur.str()?;
+                let username = r.str()?;
+                let password = r.str()?;
+                let program = r.str()?;
                 if username.is_empty() || password.is_empty() || program.is_empty() {
                     return Err(Errno::LengthOutOfRange);
                 }
@@ -727,13 +727,13 @@ impl<'a> ElevateRequest<'a> {
                         username,
                         password,
                         program,
-                        argv: cur.argv()?,
+                        argv: read_argv(&mut r)?,
                     },
                     OPCODE_CAPTURE => Self::Capture {
                         username,
                         password,
                         program,
-                        argv: cur.argv()?,
+                        argv: read_argv(&mut r)?,
                     },
                     _ => Self::Launch {
                         username,
@@ -743,25 +743,25 @@ impl<'a> ElevateRequest<'a> {
                 }
             }
             OPCODE_VERIFY => {
-                let password = cur.str()?;
+                let password = r.str()?;
                 if password.is_empty() {
                     return Err(Errno::LengthOutOfRange);
                 }
                 Self::Verify { password }
             }
             OPCODE_AUTHORISERS => {
-                let program = cur.str()?;
+                let program = r.str()?;
                 if program.is_empty() {
                     return Err(Errno::LengthOutOfRange);
                 }
                 Self::Authorisers {
                     program,
-                    offset: cur.u32()?,
+                    offset: r.u32()?,
                 }
             }
             _ => return Err(Errno::OutOfRange),
         };
-        if !cur.exhausted() {
+        if !r.exhausted() {
             return Err(Errno::LengthOutOfRange);
         }
         Ok(request)
@@ -1018,138 +1018,43 @@ fn decode_region(bytes: &[u8]) -> Result<&[u8], Errno> {
     Ok(&bytes[REPLY_HEAD_LEN + 4..])
 }
 
-/// A fail-closed little-endian reader over a request buffer (the
-/// [`crate::users_admin`] cursor shape; small enough that sharing it would
-/// couple two independent wire formats).
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    at: usize,
+/// A `u16` argument count and that many length-prefixed UTF-8 arguments,
+/// validated whole against the same rule an encoder applies.
+///
+/// Every argument is decoded here — its length read, its bytes taken, its
+/// UTF-8 checked — so the region the borrowed [`ElevateArgv`] keeps is one
+/// that walks cleanly, and the iterator over it needs no error path of its
+/// own.
+fn read_argv<'a>(r: &mut Reader<'a>) -> Result<ElevateArgv<'a>, Errno> {
+    let count = r.u16()?;
+    let from = r.position();
+    read_words(r, count)?;
+    Ok(ElevateArgv {
+        repr: ArgvRepr::Packed {
+            count,
+            bytes: r.since(from)?,
+        },
+    })
 }
 
-impl<'a> Cursor<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0 }
+/// Walk `count` length-prefixed UTF-8 arguments, refusing any the
+/// admissibility rule refuses.
+fn read_words(r: &mut Reader<'_>, count: u16) -> Result<(), Errno> {
+    if count as usize > ELEVATE_MAX_ARGS {
+        return Err(Errno::LengthOutOfRange);
     }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Errno> {
-        let end = self.at.checked_add(n).ok_or(Errno::LengthOutOfRange)?;
-        if end > self.bytes.len() {
+    let mut total = 0usize;
+    for _ in 0..count {
+        let arg = r.str()?;
+        if arg.len() > ELEVATE_MAX_ARG_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        let out = &self.bytes[self.at..end];
-        self.at = end;
-        Ok(out)
-    }
-
-    fn u8(&mut self) -> Result<u8, Errno> {
-        let b = self.take(1)?;
-        Ok(b[0])
-    }
-
-    fn u16(&mut self) -> Result<u16, Errno> {
-        let b = self.take(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
-    }
-
-    fn u32(&mut self) -> Result<u32, Errno> {
-        let b = self.take(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    /// A `u16`-length-prefixed UTF-8 string.
-    fn str(&mut self) -> Result<&'a str, Errno> {
-        let len = self.u16()? as usize;
-        let bytes = self.take(len)?;
-        core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
-    }
-
-    /// A `u16` argument count and that many length-prefixed UTF-8
-    /// arguments, validated whole against the same rule an encoder applies.
-    ///
-    /// Every argument is decoded here — its length read, its bytes taken,
-    /// its UTF-8 checked — so the region the borrowed [`ElevateArgv`] keeps
-    /// is one that walks cleanly, and the iterator over it needs no error
-    /// path of its own.
-    fn argv(&mut self) -> Result<ElevateArgv<'a>, Errno> {
-        let count = self.u16()?;
-        let from = self.at;
-        self.words(count)?;
-        Ok(ElevateArgv {
-            repr: ArgvRepr::Packed {
-                count,
-                bytes: self.bytes.get(from..self.at).ok_or(Errno::OutOfRange)?,
-            },
-        })
-    }
-
-    /// Walk `count` length-prefixed UTF-8 arguments, refusing any the
-    /// admissibility rule refuses.
-    fn words(&mut self, count: u16) -> Result<(), Errno> {
-        if count as usize > ELEVATE_MAX_ARGS {
+        total = total.saturating_add(arg.len());
+        if total > ELEVATE_MAX_ARGV_BYTES {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut total = 0usize;
-        for _ in 0..count {
-            let arg = self.str()?;
-            if arg.len() > ELEVATE_MAX_ARG_LEN {
-                return Err(Errno::LengthOutOfRange);
-            }
-            total = total.saturating_add(arg.len());
-            if total > ELEVATE_MAX_ARGV_BYTES {
-                return Err(Errno::LengthOutOfRange);
-            }
-        }
-        Ok(())
     }
-
-    const fn exhausted(&self) -> bool {
-        self.at == self.bytes.len()
-    }
-}
-
-/// A fail-closed little-endian writer over a caller-supplied buffer.
-struct Writer<'a> {
-    out: &'a mut [u8],
-    at: usize,
-}
-
-impl<'a> Writer<'a> {
-    fn new(out: &'a mut [u8]) -> Self {
-        Self { out, at: 0 }
-    }
-
-    fn bytes(&mut self, bytes: &[u8]) -> Result<(), Errno> {
-        let end = self
-            .at
-            .checked_add(bytes.len())
-            .ok_or(Errno::BufferTooSmall)?;
-        if end > self.out.len() {
-            return Err(Errno::BufferTooSmall);
-        }
-        self.out[self.at..end].copy_from_slice(bytes);
-        self.at = end;
-        Ok(())
-    }
-
-    fn u8(&mut self, v: u8) -> Result<(), Errno> {
-        self.bytes(&[v])
-    }
-
-    fn u16(&mut self, v: u16) -> Result<(), Errno> {
-        self.bytes(&v.to_le_bytes())
-    }
-
-    fn u32(&mut self, v: u32) -> Result<(), Errno> {
-        self.bytes(&v.to_le_bytes())
-    }
-
-    /// A `u16`-length-prefixed UTF-8 string; a string longer than a `u16`
-    /// can carry is refused.
-    fn str(&mut self, s: &str) -> Result<(), Errno> {
-        let len = u16::try_from(s.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        self.u16(len)?;
-        self.bytes(s.as_bytes())
-    }
+    Ok(())
 }
 
 #[cfg(test)]

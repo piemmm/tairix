@@ -214,8 +214,9 @@ through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device u
 with `VirtioInput::open_armed`, and pumps `poll_reports`: a touch surface's
 frames go to `touch_inject`, and each other event is offered to the shared
 pointer mapping first (`PointerInput::from_device_event` — axis deltas, `BTN_*`
-edges, and scroll ticks → `pointer_inject`) and then to
-`VirtioKeyboardConsole::feed` → `key_inject`. One driver instance is spawned
+edges, and scroll ticks → `pointer_inject`, stating no device time: the
+virtqueue carries none, and a virtio device's buttons do not bounce) and then
+to `VirtioKeyboardConsole::feed` → `key_inject`. One driver instance is spawned
 per discovered virtio-input node (keyboard, mouse and touchscreen alike — the
 bind table cannot tell them apart), and each instance's device decides which
 producer ever yields a record. A touch device that faults is told to the seat
@@ -274,7 +275,8 @@ first report is read. Every keyboard,
 mouse, touch pad and touch screen application on the interface is then served:
 each report is a blocking interrupt-IN URB the host controller answers when
 the device reports, so the driver parks between reports, and each record goes
-to the boot seat through `key_inject`, `pointer_inject` or `touch_inject`. An
+to the boot seat through `key_inject`, `pointer_inject` or `touch_inject`, a
+pointer record stating when its report arrived. An
 interface that goes, or faults four times running, is let go of first — every
 key, button and contact it held released — and the driver exits; a re-plug
 autoloads a fresh instance on a fresh node. The live report path is a metal

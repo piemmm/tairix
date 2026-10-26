@@ -335,6 +335,9 @@ fn a_name_too_long_for_its_field_is_cut_with_a_mark_on_a_character_boundary() {
         .trim_end_matches('\u{2026}')
         .chars()
         .all(|c| c == 'é'));
+    // One that would hide or reorder what it says is shown escaped.
+    let hostile: MachineDeviceName = fitted("disk\u{202e}0\u{200b}".as_bytes()).expect("a name");
+    assert_eq!(hostile.as_str(), "disk\u{FFFD}0\u{FFFD}");
     // One that fits is left whole, and an empty one names nothing.
     let whole: MachineDeviceName = fitted(b"nvme0").expect("a name");
     assert_eq!(whole.as_str(), "nvme0");

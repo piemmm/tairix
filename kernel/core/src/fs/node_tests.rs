@@ -92,6 +92,70 @@ fn a_release_marks_the_registration_due_once() {
     assert!(!volume.take_reap_due());
 }
 
+/// A registration reaped inline is due for the next operation on its volume,
+/// and never wakes the flusher, which must not wait on its driver.
+#[test]
+fn a_release_reaped_inline_never_wakes_the_flusher() {
+    let volume = Arc::new(VolumeNodes::reaped_inline(14));
+    consumed(volume.admit().expect("admits"));
+    assert!(!volume.queue_release(NodeId::from_raw(1)));
+    assert!(volume.is_reap_due());
+}
+
+/// Files named `names`, created on `fs`, each pinned on `volume`.
+fn pinned_files(volume: &Arc<VolumeNodes>, fs: &mut RwMockFs, names: &[&[u8]]) -> Vec<NodeRef> {
+    let root = fs.root();
+    names
+        .iter()
+        .map(|name| {
+            let file = fs
+                .create(root, name, NodeKind::RegularFile, &ADMIN_RECORD)
+                .expect("create");
+            let pinned = fs.pin(file).expect("pin");
+            let slot = volume.admit().expect("admits");
+            NodeRef::new(slot, pinned, NodeKind::RegularFile).expect("allocates")
+        })
+        .collect()
+}
+
+/// A release its driver answers busy — never sent — stays first in line and
+/// the registration due, so the next operation hands every release over in
+/// order, allocating nothing to keep it.
+#[test]
+fn a_release_answered_busy_waits_first_in_line_when_reaped_inline() {
+    let volume = Arc::new(VolumeNodes::reaped_inline(15));
+    let mut fs = RwMockFs::new();
+    let held = pinned_files(&volume, &mut fs, &[b"a", b"b"]);
+    let first = held[0].pinned();
+    drop(held);
+    fs.refuse_unpins(Some(DriverError::Busy));
+    volume.reap_inline(&mut fs);
+    assert_eq!(queued(&volume), 2, "neither was sent");
+    assert!(volume.is_reap_due());
+    assert!(reserved(&volume));
+    fs.refuse_unpins(None);
+    volume.reap_inline(&mut fs);
+    assert_eq!(queued(&volume), 0);
+    assert_eq!(fs.unpin(first), Err(DriverError::NotFound), "both went");
+}
+
+/// A registration the flusher reaps is left to it: an operation reaps
+/// nothing, and the flusher's reap drops a release answered busy as it drops
+/// every other answer.
+#[test]
+fn a_registration_the_flusher_reaps_is_left_to_it() {
+    let volume = Arc::new(VolumeNodes::new(16));
+    let mut fs = RwMockFs::new();
+    drop(pinned_files(&volume, &mut fs, &[b"a"]));
+    volume.reap_inline(&mut fs);
+    assert_eq!(queued(&volume), 1);
+    fs.refuse_unpins(Some(DriverError::Busy));
+    assert!(volume.take_reap_due());
+    volume.reap(&mut fs);
+    assert_eq!(queued(&volume), 0);
+    assert!(!volume.is_reap_due());
+}
+
 /// Only the release that makes a registration due wakes the flusher; the
 /// releases after it, before the flusher's pass takes the registration, add
 /// to the work that wake already asked for.

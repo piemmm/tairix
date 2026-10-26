@@ -98,14 +98,17 @@ the owner included.
 
 ## Hosting
 
-The kernel's runtime volume service links this driver and serves it
-in-kernel, though it parses removable media; moving filesystem drivers
-into user space is open work (`plans/OPEN-DEFECTS.md`).
+A removable ext volume is served from user space
+(`docs/src/filesystem/served.md`): the crate's `Run` binary, built with the
+`program` feature, binds `tairix,volume-ext4` (`BIND_KEYS`) and serves the
+volume through `lib/fsserve` (`Served`), its write-back bounded to the
+machine's memory and pressure. The kernel links no ext driver.
 
 ## Required capabilities
 
 `CAP_DRV_LOAD` at `register`; every other call is reached through the
-handle the host minted at load.
+handle the host minted at load. The served driver runs with `CAP_FS_SERVE`
+and `CAP_LOG_EMIT` and reaches only the volume its node's grant names.
 
 ## Tests
 

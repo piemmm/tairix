@@ -115,6 +115,13 @@ A file's resource fork is a UDF named stream; streams are freed with their
 file but not yet read or written as `mac.resourcefork`
 (`plans/FOREIGN-MEDIA.md`).
 
+## Served from user space
+
+The driver is served from user space ([Volumes served from user space](./served.md)): its `Run` binary binds
+`tairix,volume-udf` and runs with `CAP_FS_SERVE` and `CAP_LOG_EMIT`. A volume
+it will not write — a write-once medium, a revision past its own — is offered
+read-only with its reason, which the kernel records as it mounts it so.
+
 ## Bounds
 
 ICB indirections are followed at most 64 deep, the file set descriptor

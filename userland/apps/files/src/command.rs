@@ -323,6 +323,7 @@ pub const fn listing_refusal(err: BrowseError) -> &'static str {
             "it is not a folder"
         }
         BrowseError::OutOfMemory => "there was not enough memory to list it",
+        BrowseError::Unreachable => "it cannot be reached now",
         BrowseError::Source(errno) => device_refusal(errno, "it could not be read"),
     }
 }

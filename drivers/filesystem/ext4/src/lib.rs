@@ -35,9 +35,9 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     AclModel, AllocationClass, DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity,
-    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats, WriteRefusal,
 };
-use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
+use tairix_abi::fs::{is_component, SeekRegion, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_collections::RadixTree;
@@ -57,6 +57,7 @@ mod io;
 mod journal;
 mod map;
 mod orphan;
+mod served;
 mod superblock;
 mod txn;
 mod xattr;
@@ -69,6 +70,7 @@ use group::{Hints, Releases};
 use indexed::IndexUse;
 use io::Device;
 use journal::Journal;
+pub use served::{Served, BIND_KEYS};
 pub use superblock::Generation;
 use superblock::{
     Layout, NoWrite, INCOMPAT_RECOVER, RO_COMPAT_METADATA_CSUM, SB_FEATURE_INCOMPAT,
@@ -618,18 +620,17 @@ impl<B: Block> Ext4<B> {
         self.layout.generation
     }
 
-    /// Why this handle refuses writes, as a stable cause for the host's
-    /// audit record, or `None` when it accepts them.
+    /// Why this handle refuses writes, or `None` when it accepts them.
     #[must_use]
-    pub fn write_refusal(&self) -> Option<&'static str> {
+    pub fn write_refusal(&self) -> Option<WriteRefusal> {
         self.layout.no_write.map(|reason| match reason {
-            NoWrite::Feature => "unsupported_feature",
-            NoWrite::Errors => "errors_recorded",
-            NoWrite::Hurd => "hurd_layout",
-            NoWrite::Journal => "journal_unusable",
-            NoWrite::Unclean => "needs_check",
-            NoWrite::ReadOnly => "opened_read_only",
-            NoWrite::Halted => "commit_failed",
+            NoWrite::Feature => WriteRefusal::UnsupportedFeature,
+            NoWrite::Errors => WriteRefusal::ErrorsRecorded,
+            NoWrite::Hurd => WriteRefusal::HurdLayout,
+            NoWrite::Journal => WriteRefusal::JournalUnusable,
+            NoWrite::Unclean => WriteRefusal::NeedsCheck,
+            NoWrite::ReadOnly => WriteRefusal::OpenedReadOnly,
+            NoWrite::Halted => WriteRefusal::CommitFailed,
         })
     }
 
@@ -1991,10 +1992,7 @@ impl<B: Block> FilesystemStats for Ext4<B> {
 
 /// Validate a path component the write surface will store.
 fn validate_name(name: &[u8]) -> Result<(), DriverError> {
-    if name.is_empty() || name.len() > MAX_NAME_LEN {
-        return Err(DriverError::LengthOutOfRange);
-    }
-    if name == b"." || name == b".." || name.iter().any(|&b| b == b'/' || b == 0) {
+    if name.len() > MAX_NAME_LEN || !is_component(name) {
         return Err(DriverError::LengthOutOfRange);
     }
     Ok(())

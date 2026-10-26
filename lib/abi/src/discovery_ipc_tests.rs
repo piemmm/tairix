@@ -84,6 +84,10 @@ fn every_request() -> Vec<DiscoveryRequest<'static>> {
             session: 2,
             query: Query::Types,
         },
+        DiscoveryRequest::Start {
+            session: 2,
+            query: Query::Computers,
+        },
     ]
 }
 
@@ -291,6 +295,73 @@ fn a_doorbell_round_trips_and_nothing_else_is_believed() {
     assert_eq!(decode_doorbell(&bell[..11]), Err(Errno::LengthOutOfRange));
 }
 
+/// A computer answer on `eth0` belonging to `membership`.
+fn computer(change: Change, membership: Membership<'static>) -> Entry<'static> {
+    Entry::Answer {
+        request: 3,
+        interface: iface(b"eth0"),
+        change,
+        ttl: 0,
+        answer: Answer::Computer {
+            key: 0x0123_4567_89ab_cdef,
+            address: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+            name: "FILESERVER",
+            membership,
+        },
+    }
+}
+
+/// A computer answer's entry is refused for a stated lifetime, a name that
+/// is not UTF-8, or a membership whose name and kind disagree.
+#[test]
+fn a_computer_answer_is_held_to_its_shape() {
+    let Entry::Answer { answer, .. } = computer(Change::Added, Membership::Workgroup("WG")) else {
+        panic!("an answer");
+    };
+    let with_ttl = Entry::Answer {
+        request: 3,
+        interface: iface(b"eth0"),
+        change: Change::Added,
+        ttl: 60,
+        answer,
+    };
+    let mut out = [0u8; ENTRY_MAX];
+    assert_eq!(with_ttl.encode(&mut out), Err(Errno::OutOfRange));
+    let len = computer(Change::Added, Membership::Workgroup("WG"))
+        .encode(&mut out)
+        .expect("encodes");
+    let entry = &out[..len];
+    let mut ttl = entry.to_vec();
+    ttl[24] = 1;
+    assert_eq!(Entry::decode(&ttl), Err(Errno::BadMagic));
+    let mut not_utf8 = entry.to_vec();
+    not_utf8[ENTRY_HEADER_LEN + 28] = 0xff;
+    assert_eq!(Entry::decode(&not_utf8), Err(Errno::OutOfRange));
+    let mut unstated_with_name = entry.to_vec();
+    unstated_with_name[ENTRY_HEADER_LEN + 25] = 0;
+    assert_eq!(
+        Entry::decode(&unstated_with_name),
+        Err(Errno::LengthOutOfRange)
+    );
+    let mut unknown_kind = entry.to_vec();
+    unknown_kind[ENTRY_HEADER_LEN + 25] = 9;
+    assert_eq!(Entry::decode(&unknown_kind), Err(Errno::OutOfRange));
+    let long = "n".repeat(COMPUTER_NAME_MAX + 1);
+    let too_long = Entry::Answer {
+        request: 3,
+        interface: iface(b"eth0"),
+        change: Change::Added,
+        ttl: 0,
+        answer: Answer::Computer {
+            key: 1,
+            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            name: &long,
+            membership: Membership::Unstated,
+        },
+    };
+    assert_eq!(too_long.encode(&mut out), Err(Errno::LengthOutOfRange));
+}
+
 fn every_entry() -> Vec<Entry<'static>> {
     let eth = iface(b"eth0");
     let answer = |change, answer| Entry::Answer {
@@ -336,6 +407,9 @@ fn every_entry() -> Vec<Entry<'static>> {
         ),
         answer(Change::Added, Answer::Pointer { target: PRINTER }),
         answer(Change::Added, Answer::Type { service: ipp() }),
+        computer(Change::Added, Membership::Workgroup("WORKGROUP")),
+        computer(Change::Retired, Membership::Domain("corp.example")),
+        computer(Change::Added, Membership::Unstated),
         Entry::Flush {
             request: 3,
             interface: eth,

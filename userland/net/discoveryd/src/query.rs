@@ -4,7 +4,7 @@
 //! the type a browse is scoped to is the field the grant is checked against,
 //! never something inferred from a name the caller spelled.
 
-use tairix_abi::discovery_ipc::Query;
+use tairix_abi::discovery_ipc::{Query, Transport};
 use tairix_abi::Errno;
 use tairix_inline::ArrayVec;
 use tairix_net::dns::Name;
@@ -15,6 +15,10 @@ use crate::wire::Form;
 
 /// The name the RFC 6763 §9 type enumeration asks about.
 const SERVICES_NAME: &str = "_services._dns-sd._udp.local";
+
+/// The service type whose grant lets a caller browse computers: what they
+/// offer is learned by connecting to their file service.
+const COMPUTERS_GRANTED_BY: &[u8] = b"smb";
 
 /// The most questions one request asks: a resolve's `SRV` and `TXT`, a
 /// host's `A` and `AAAA`.
@@ -112,6 +116,16 @@ pub fn plan(query: &Query<'_>) -> Result<Plan, Errno> {
                 Name::encode(SERVICES_NAME).map_err(|_| Errno::OutOfRange)?,
             )?;
             Needs::Everything
+        }
+        Query::Computers => {
+            ask(
+                Form::Computer,
+                Name::from_labels(&[]).map_err(|_| Errno::OutOfRange)?,
+            )?;
+            Needs::Type(
+                ServiceType::new(COMPUTERS_GRANTED_BY, Transport::Tcp)
+                    .map_err(|_| Errno::OutOfRange)?,
+            )
         }
     };
     Ok(Plan { needs, asks })

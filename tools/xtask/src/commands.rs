@@ -54,6 +54,7 @@ mod source_tree;
 mod spec_review;
 mod supply_chain;
 mod target_clippy;
+mod unicode;
 mod wasm_tests;
 
 /// One sanctioned developer workflow.
@@ -73,6 +74,7 @@ pub enum Command {
     SoundEncode,
     Artsheet,
     Devids,
+    Unicode,
     DepsCheck,
     CfgCheck,
     BoardCheck,
@@ -116,6 +118,7 @@ impl Command {
         Command::SoundEncode,
         Command::Artsheet,
         Command::Devids,
+        Command::Unicode,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::BoardCheck,
@@ -158,6 +161,7 @@ impl Command {
             "sound-encode" => Command::SoundEncode,
             "artsheet" => Command::Artsheet,
             "devids" => Command::Devids,
+            "unicode" => Command::Unicode,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "board-check" => Command::BoardCheck,
@@ -202,6 +206,7 @@ impl Command {
             Command::SoundEncode => "sound-encode",
             Command::Artsheet => "artsheet",
             Command::Devids => "devids",
+            Command::Unicode => "unicode",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::BoardCheck => "board-check",
@@ -258,6 +263,10 @@ impl Command {
             Command::Devids => {
                 "Verify the vetted PCI/USB ID-database tables (`--write` to regenerate, \
                  `--fetch` to import upstream; developer-run only)."
+            }
+            Command::Unicode => {
+                "Verify the Unicode property tables against the pinned UCD snapshot \
+                 (`--write` to regenerate)."
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
@@ -326,6 +335,7 @@ impl Command {
             Command::SoundEncode => sound_encode::run(ctx, args),
             Command::Artsheet => run_artsheet(ctx, args),
             Command::Devids => devids::run(ctx, args),
+            Command::Unicode => unicode::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::BoardCheck => run_board_check(ctx),
@@ -1574,6 +1584,9 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // committed snapshots in-process and compares byte-for-byte with
         // the committed tables, no workspace build and no network.
         static_gate("devids", ctx, |c| devids::run(c, &[])),
+        // The Unicode property tables' drift guard: regenerates from the
+        // pinned UCD snapshot in-process, no workspace build and no network.
+        static_gate("unicode", ctx, |c| unicode::run(c, &[])),
         // Silver: exhaustively model-check the capability + IPC state machine.
         // Exhaustive (not budgeted) and fast; a reachable invariant violation
         // fails closed.
@@ -2110,8 +2123,10 @@ const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     ),
 ];
 
-/// Build every bundle in [`PLATFORM_IMAGE_DRIVER_STORE`], each paired with
-/// its store path, or fail on the first that does not.
+/// Build every bundle in [`PLATFORM_IMAGE_DRIVER_STORE`] and every served
+/// filesystem driver, a volume on removable media being served by its
+/// format's, each paired with its store path, or fail on the first that does
+/// not.
 fn build_image_driver_bundles(
     ctx: &Context,
     profile: tairix_mkimage::ImageProfile,
@@ -2122,6 +2137,10 @@ fn build_image_driver_bundles(
     PLATFORM_IMAGE_DRIVER_STORE
         .iter()
         .map(|(path, build)| build(ctx, arch, profile).map(|bytes| (*path, bytes)))
+        .chain(image_drivers::SERVED_FS_DRIVERS.iter().map(|driver| {
+            image_drivers::build_served_fs_bundle(ctx, arch, driver, profile)
+                .map(|bytes| (driver.store_path, bytes))
+        }))
         .collect()
 }
 

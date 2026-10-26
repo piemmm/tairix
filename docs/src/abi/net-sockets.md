@@ -148,8 +148,12 @@ link-scoped protocol names it, because a link-local destination names no link
 by itself and a message built from one link's state must not reach another's;
 a named interface that cannot carry the datagram refuses it rather than
 choosing another. With none named the stack chooses: the first interface that
-reaches a unicast destination, every interface for a multicast group. Only a
-send may carry the field; on any other operation it is reserved.
+reaches a unicast destination, every interface for a multicast group. A
+link-local destination with none named goes out its default zone (RFC 4007),
+the one link that could carry it, and is refused (`OutOfRange`) as ambiguous
+where several could; an echo request is held to the same rule. Only a send and
+a stream's `Connect` may carry the field; on any other operation it is
+reserved.
 
 ## Stream sockets (TCP, N5c)
 
@@ -157,8 +161,13 @@ A stream socket is opened with `SocketType::Stream`, then actively opened to
 a peer with `Connect` (which returns immediately — the three-way handshake
 runs asynchronously in the stack, driving the pure RFC 9293
 `tairix_net::tcp::conn::Tcb` the stack owns per connection). The connection's
-CSPRNG initial sequence number and its egress interface are chosen by the
-stack at `Connect`. `Send` enqueues bytes onto the connection's bounded send
+CSPRNG initial sequence number is drawn by the stack at `Connect`, and its
+egress interface is the one `Connect` names — a client that learned its peer on
+a link names that link — or else the first that reaches the peer, by the same
+default-zone rule as a datagram for a link-local one. The connection is bound
+to that interface for its life, and identified with it when its peer is
+link-local, so a segment from that address on another link is not its own.
+A datagram or echo socket's `Connect` naming an interface is refused. `Send` enqueues bytes onto the connection's bounded send
 buffer; `Close` begins an orderly teardown (FIN) and the connection is reaped
 in the background once fully closed.
 

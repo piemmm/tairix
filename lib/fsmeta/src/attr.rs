@@ -10,7 +10,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_visible::is_hidden;
+use tairix_visible::Faithful;
 
 use crate::key::AttrKey;
 use crate::{MetadataError, ATTRS_PER_INODE, TOTAL_ATTR_BYTES, VALUE_MAX};
@@ -298,22 +298,22 @@ impl AttrSet {
 ///
 /// A value is opaque bytes: it may be UTF-8 text, a packed foreign-metadata
 /// field, or anything a writer chose. Text here means valid UTF-8 with no
-/// character that would hide, reorder or break the text around it
-/// ([`is_hidden`]), which is the only form that can be drawn as itself and
-/// retyped unchanged — so an editor offering a value back for editing offers
-/// only what it could faithfully reproduce, and never silently rewrites bytes
-/// it could not.
+/// character a faithful rendering escapes ([`Faithful`]: one that would hide,
+/// reorder or break the text around it, or a mark past its combining
+/// sequence's limits), which is the only form that can be drawn as itself,
+/// told apart from every other value and retyped unchanged — so an editor
+/// offering a value back for editing offers only what it could faithfully
+/// reproduce, and never silently rewrites bytes it could not.
 #[must_use]
 pub fn text_value(value: &[u8]) -> Option<&str> {
-    match core::str::from_utf8(value) {
-        Ok(text) if !text.chars().any(is_hidden) => Some(text),
-        _ => None,
-    }
+    let text = core::str::from_utf8(value).ok()?;
+    let mut faithful = Faithful::default();
+    (!text.chars().any(|ch| faithful.escapes(ch))).then_some(text)
 }
 
-/// An attribute value's display form: its text with each [`is_hidden`]
-/// character escaped byte by byte as `\xNN`, or, for bytes that are not UTF-8,
-/// each byte outside printable ASCII so.
+/// An attribute value's display form: its text with each character a
+/// faithful rendering escapes ([`Faithful`]) escaped byte by byte as `\xNN`,
+/// or, for bytes that are not UTF-8, each byte outside printable ASCII so.
 ///
 /// Values come from whoever wrote them, which on a mounted volume is not
 /// necessarily anybody trusted: control bytes reaching a terminal are escape
@@ -326,8 +326,9 @@ pub fn display_value(value: &[u8]) -> alloc::string::String {
     let mut out = alloc::string::String::new();
     match core::str::from_utf8(value) {
         Ok(text) => {
+            let mut faithful = Faithful::default();
             for ch in text.chars() {
-                if is_hidden(ch) {
+                if faithful.escapes(ch) {
                     let mut utf8 = [0; 4];
                     for byte in ch.encode_utf8(&mut utf8).bytes() {
                         let _ = write!(&mut out, "\\x{byte:02x}");

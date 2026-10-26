@@ -21,8 +21,8 @@ exercise.
   expressed as the `core::net` types (re-exported, never a drifting
   first-party copy), plus what `core::net` does not carry: RFC 4007 scope
   classification (`Ipv6Scope`, fail-closed on reserved multicast scopes)
-  and the scope/zone pairing rules (`ScopedIpv6Addr` — a link-local
-  address without a zone is unrepresentable). It also carries `Ecn`, the
+  and the zone an address narrower than global is qualified by
+  (`zone_of`: the interface it was met on). It also carries `Ecn`, the
   shared RFC 3168 §5 ECN codepoint the IPv4 and IPv6 headers both express.
 - `checksum` — the one RFC 1071 Internet-checksum definition: a one-shot
   fold plus an incremental accumulator with byte-stream semantics and the

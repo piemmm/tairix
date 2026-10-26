@@ -42,7 +42,10 @@ use tairix_abi::discovery_ipc::{
     encode_doorbell, encode_id_reply, Change, DiscoveryRequest, Entry, Query, NAME_MAX,
     REQUESTS_PER_ACCOUNT,
 };
-use tairix_abi::net::{SocketAddr, SocketDelivery, SocketId, SocketLinkEvent};
+use tairix_abi::net::{
+    SocketAddr, SocketDatagram, SocketDelivery, SocketId, SocketLinkEvent, SocketStreamEvent,
+    StreamCloseReason,
+};
 use tairix_abi::net_ipc::{address_parts, ip_from_parts, IF_NAME_LEN};
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::time::Duration64;
@@ -51,8 +54,10 @@ use tairix_hash::HashSeed;
 use tairix_inline::{ArrayString, ArrayVec};
 use tairix_log::{Event, Field, Level, Sink};
 use tairix_net::dnssd::ServiceType;
+use tairix_net::http::{Authority, Host as UrlHost, HostName};
 use tairix_net::mdns::{Destination, GROUP_V4, GROUP_V6, MAX_QUESTIONS, PORT};
 use tairix_net::rate::{PeerBudgets, TokenBucket};
+use tairix_net::wsd::{self, Endpoint, MetadataPath, Uuid, MAX_FETCHES, MAX_METADATA};
 use tairix_net::IpAddr;
 use tairix_sandbox::proto::FRAME_HEADER_LEN;
 use tairix_sandbox::session::{SessionBounds, SessionDescriptors, SessionError};
@@ -66,8 +71,9 @@ use crate::query::{plan, Needs, QUESTIONS_PER_REQUEST};
 use crate::questions::{Questions, Spend, Verdict};
 use crate::sessions::{Session, Sessions, Subscribed};
 use crate::wire::{
-    Edge, FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN, GROUP_BURST,
-    GROUP_RATE, MAX_FROM_DECODER, MAX_TO_DECODER, RNG_KEY_LEN, TICK_LEN,
+    Budgets, Edge, FetchRequest, FromDecoder, FromWsd, ToDecoder, ToWsd, ASK_HEADER_LEN,
+    CACHE_KEY_LEN, CONFIGURE_LEN, GROUP_BURST, GROUP_RATE, MAX_FROM_DECODER, MAX_TO_DECODER,
+    RNG_KEY_LEN, TICK_LEN, WSD_BURST, WSD_RATE,
 };
 
 /// Bytes of frames the front may hold queued for its decoder.
@@ -90,6 +96,33 @@ const RELAY_SOURCE_RATE: u32 = 32;
 /// The same for every sender together.
 const RELAY_SHARED_BURST: u32 = 2048;
 const RELAY_SHARED_RATE: u32 = 1024;
+
+/// WS-Discovery senders whose relay budget is tracked at once, each held to
+/// a burst and a rate far above a computer's few announcements a minute,
+/// beneath one budget all of them share.
+const WSD_TRACKED_SOURCES: usize = 32;
+const WSD_SOURCE_BURST: u32 = 16;
+const WSD_SOURCE_RATE: u32 = 4;
+const WSD_SHARED_BURST: u32 = 256;
+const WSD_SHARED_RATE: u32 = 128;
+
+/// WS-Discovery senders remembered as places a fetch may go, and for how
+/// long after one was last relayed: as long as the decoder keeps a computer
+/// that has stopped answering.
+const WSD_SENDERS: usize = 32;
+const WSD_SENDER_WINDOW_NS: u64 = 150_000_000_000;
+
+/// Metadata fetches in flight on every link together.
+const FETCHES: usize = 8;
+
+/// How long a fetch may take, from opening its connection to the target
+/// closing it.
+const FETCH_DEADLINE_NS: u64 = 5_000_000_000;
+
+/// The longest metadata request the front builds: the HTTP head naming a
+/// longest path and host name, and a WS-Transfer `Get` around a longest
+/// endpoint.
+const FETCH_REQUEST_MAX: usize = 2048;
 
 /// Accounts whose budgets are tracked; a quieter one forgotten can only be
 /// handed a fresh budget.
@@ -155,18 +188,42 @@ pub trait Host {
     /// The source's typed refusal.
     fn fill_random(&mut self, out: &mut [u8]) -> Result<(), Errno>;
 
-    /// Send `payload` to `to` out of `interface`, from the multicast DNS
-    /// socket of `to`'s family.
+    /// Send `payload` to `to` out of `interface`, from `protocol`'s socket of
+    /// `to`'s family.
     ///
     /// # Errors
     ///
     /// The stack's refusal.
     fn transmit(
         &mut self,
+        protocol: Protocol,
         interface: [u8; IF_NAME_LEN],
         to: SocketAddr,
         payload: &[u8],
     ) -> Result<(), Errno>;
+
+    /// Open a stream connection to `to` over `interface`, its events arriving
+    /// through [`Front::on_stream`].
+    ///
+    /// # Errors
+    ///
+    /// The stack's refusal.
+    fn fetch_open(
+        &mut self,
+        interface: [u8; IF_NAME_LEN],
+        to: SocketAddr,
+    ) -> Result<SocketId, Errno>;
+
+    /// Send `bytes` on an open fetch connection, returning how many the stack
+    /// took; a [`SocketStreamEvent::Room`] follows a short send.
+    ///
+    /// # Errors
+    ///
+    /// The stack's refusal.
+    fn fetch_send(&mut self, socket: SocketId, bytes: &[u8]) -> Result<usize, Errno>;
+
+    /// Close a fetch connection.
+    fn fetch_close(&mut self, socket: SocketId);
 
     /// Post `doorbell` to a client's delivery port.
     ///
@@ -203,13 +260,47 @@ pub enum Fatal {
     Entropy(Errno),
 }
 
-/// The two sockets the front listens on, by family.
+/// Which link-local discovery protocol a socket speaks.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Protocol {
+    /// Multicast DNS, on port 5353.
+    MulticastDns,
+    /// WS-Discovery, on port 3702.
+    WsDiscovery,
+}
+
+impl Protocol {
+    /// The group, and port, the protocol multicasts to over IPv6 or IPv4.
+    fn group(self, v6: bool) -> SocketAddr {
+        let (group, port) = match (self, v6) {
+            (Self::MulticastDns, false) => (IpAddr::V4(GROUP_V4), PORT),
+            (Self::MulticastDns, true) => (IpAddr::V6(GROUP_V6), PORT),
+            (Self::WsDiscovery, false) => (IpAddr::V4(wsd::GROUP_V4), wsd::PORT),
+            (Self::WsDiscovery, true) => (IpAddr::V6(wsd::GROUP_V6), wsd::PORT),
+        };
+        let (family, addr) = address_parts(group);
+        SocketAddr { family, addr, port }
+    }
+}
+
+/// The sockets the front listens on, by protocol and family.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Sockets {
-    /// The IPv4 socket, joined to `224.0.0.251`.
+    /// The multicast DNS IPv4 socket, joined to `224.0.0.251`.
     pub v4: Option<SocketId>,
-    /// The IPv6 socket, joined to `ff02::fb`.
+    /// The multicast DNS IPv6 socket, joined to `ff02::fb`.
     pub v6: Option<SocketId>,
+    /// The WS-Discovery IPv4 socket, joined to `239.255.255.250`.
+    pub wsd_v4: Option<SocketId>,
+    /// The WS-Discovery IPv6 socket, joined to `ff02::c`.
+    pub wsd_v6: Option<SocketId>,
+}
+
+impl Sockets {
+    /// Whether `socket` is one of the WS-Discovery sockets.
+    fn is_wsd(&self, socket: SocketId) -> bool {
+        Some(socket) == self.wsd_v4 || Some(socket) == self.wsd_v6
+    }
 }
 
 /// Where the decoder's time stands.
@@ -246,6 +337,11 @@ struct Link {
     /// Edges told the decoder it has not yet acknowledged.
     pending: u8,
     group: TokenBucket,
+    wsd_group: TokenBucket,
+    /// The fetches its engine has asked for, no more than an honest engine
+    /// may: each keeps its slot until its outcome is in the decoder's queue,
+    /// so an outcome never needs memory it might not get.
+    fetches: ArrayVec<Fetch, MAX_FETCHES>,
 }
 
 impl Link {
@@ -262,6 +358,15 @@ impl Link {
     fn settled(&self) -> bool {
         self.told_up() && self.pending == 0
     }
+
+    /// Close every fetch its engine made, which the decoder has been told is
+    /// gone with its link.
+    fn drop_fetches<H: Host>(&mut self, host: &mut H) {
+        for fetch in &mut self.fetches {
+            fetch.land(host, None);
+        }
+        self.fetches.clear();
+    }
 }
 
 /// A peer the front relayed from recently, which may be answered directly.
@@ -272,6 +377,112 @@ struct Asker {
     port: u16,
     credits: u8,
     until: u64,
+}
+
+/// A WS-Discovery sender relayed from recently, to which a fetch may go.
+#[derive(Copy, Clone, Debug)]
+struct WsdSender {
+    interface: [u8; IF_NAME_LEN],
+    addr: IpAddr,
+    until: u64,
+}
+
+/// One metadata fetch the decoder asked for.
+struct Fetch {
+    fetch: u32,
+    flight: Flight,
+}
+
+enum Flight {
+    /// Its connection is opening, or carrying the request and the response.
+    Flying {
+        socket: SocketId,
+        request: Vec<u8>,
+        /// How much of `request` the stack has taken, once connected.
+        sent: Option<usize>,
+        response: Vec<u8>,
+        deadline: u64,
+    },
+    /// Done, waiting for room in the decoder's queue: the whole response, or
+    /// `None` for a fetch that failed.
+    Landed(Option<Vec<u8>>),
+}
+
+impl Fetch {
+    fn socket(&self) -> Option<SocketId> {
+        match self.flight {
+            Flight::Flying { socket, .. } => Some(socket),
+            Flight::Landed(_) => None,
+        }
+    }
+
+    /// When it fails, unless it lands first.
+    fn deadline(&self) -> Option<u64> {
+        match self.flight {
+            Flight::Flying { deadline, .. } => Some(deadline),
+            Flight::Landed(_) => None,
+        }
+    }
+
+    /// End it with `response`, closing its connection.
+    fn land<H: Host>(&mut self, host: &mut H, response: Option<Vec<u8>>) {
+        if let Flight::Flying { socket, .. } = self.flight {
+            host.fetch_close(socket);
+        }
+        self.flight = Flight::Landed(response);
+    }
+
+    /// Send what the stack will take of the request, once connected.
+    fn send<H: Host>(&mut self, host: &mut H) {
+        let Flight::Flying {
+            socket,
+            request,
+            sent: Some(sent),
+            ..
+        } = &mut self.flight
+        else {
+            return;
+        };
+        let Some(rest) = request.get(*sent..).filter(|rest| !rest.is_empty()) else {
+            return;
+        };
+        match host.fetch_send(*socket, rest) {
+            Ok(taken) => *sent += taken.min(rest.len()),
+            Err(_) => self.land(host, None),
+        }
+    }
+
+    /// Take bytes of the response, failing the fetch once they pass the
+    /// bound.
+    fn receive<H: Host>(&mut self, host: &mut H, payload: &[u8]) {
+        let Flight::Flying { response, .. } = &mut self.flight else {
+            return;
+        };
+        if response.len() + payload.len() <= MAX_METADATA
+            && response.try_reserve(payload.len()).is_ok()
+        {
+            response.extend_from_slice(payload);
+        } else {
+            self.land(host, None);
+        }
+    }
+
+    /// Take the connection's end: the response is whole only when the target
+    /// closed it in order after taking the whole request.
+    fn closed<H: Host>(&mut self, host: &mut H, reason: StreamCloseReason) {
+        let Flight::Flying {
+            request,
+            sent,
+            response,
+            ..
+        } = &mut self.flight
+        else {
+            return;
+        };
+        let whole = reason == StreamCloseReason::PeerClosed && *sent == Some(request.len());
+        let response = whole.then(|| core::mem::take(response));
+        self.land(host, response);
+    }
 }
 
 /// An acknowledgement the decoder owes. It carries out frames in the order
@@ -297,6 +508,8 @@ pub struct Front<L: SessionLauncher, S: Sink + Clone, H: Host> {
     sockets: Sockets,
     grants: Grants,
     admission: PeerBudgets<IpAddr, RELAY_TRACKED_SOURCES>,
+    wsd_admission: PeerBudgets<IpAddr, WSD_TRACKED_SOURCES>,
+    wsd_senders: ArrayVec<WsdSender, WSD_SENDERS>,
     /// What each account's requests may cost the decoder in fresh questions.
     fresh: PeerBudgets<u32, BUDGETED_ACCOUNTS>,
     /// What each account's requests may cost the decoder in replays.
@@ -355,6 +568,13 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 RELAY_SHARED_BURST,
                 RELAY_SHARED_RATE,
             ),
+            wsd_admission: PeerBudgets::new(
+                WSD_SOURCE_BURST,
+                WSD_SOURCE_RATE,
+                WSD_SHARED_BURST,
+                WSD_SHARED_RATE,
+            ),
+            wsd_senders: ArrayVec::new(),
             fresh: PeerBudgets::new(
                 FRESH_ACCOUNT_BURST,
                 FRESH_ACCOUNT_RATE,
@@ -396,7 +616,13 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             .front()
             .filter(|_| self.decoder.is_live())
             .map(|&(_, sent)| sent.saturating_add(ACK_DEADLINE_NS));
-        [self.decoder.restart_deadline(), tick, overdue]
+        let fetch = self
+            .links
+            .iter()
+            .flat_map(|link| link.fetches.iter())
+            .filter_map(Fetch::deadline)
+            .min();
+        [self.decoder.restart_deadline(), tick, overdue, fetch]
             .into_iter()
             .flatten()
             .min()
@@ -418,6 +644,15 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 .condemn(now, "the decoder withheld an acknowledgement");
             self.forget_decoder();
         }
+        let mut expired = false;
+        for link in &mut self.links {
+            for fetch in &mut link.fetches {
+                if fetch.deadline().is_some_and(|deadline| now >= deadline) {
+                    fetch.land(&mut self.host, None);
+                    expired = true;
+                }
+            }
+        }
         if self.decoder.restart_deadline().is_some_and(|at| now >= at) {
             self.start(now)?;
         }
@@ -426,6 +661,9 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         });
         if due && self.may_tick() {
             self.tick(now);
+        }
+        if expired {
+            self.sync(now);
         }
         Ok(())
     }
@@ -441,41 +679,58 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
     /// Take one delivery from the stack at `now`.
     pub fn on_delivery(&mut self, now: u64, delivery: &SocketDelivery<'_>) {
         match delivery {
-            SocketDelivery::Datagram(datagram) => {
-                if !datagram.source_on_link || !self.wants_deliveries() {
-                    return;
-                }
-                let Some(link) = self
-                    .links
-                    .iter()
-                    .find(|link| link.name == datagram.interface)
-                else {
-                    return;
-                };
-                if !link.told_up() {
-                    return;
-                }
-                let source = ip_from_parts(datagram.source.family, datagram.source.addr);
-                if !self.admission.allow(Duration64::from_nanos(now), source) {
-                    return;
-                }
-                self.note_asker(now, datagram.interface, source, datagram.source.port);
-                let relayed = ToDecoder::Datagram {
-                    now,
-                    interface: datagram.interface,
-                    source,
-                    port: datagram.source.port,
-                    to_group: datagram.to_group,
-                    payload: datagram.payload,
-                };
-                if let Some(len) = relayed.encode(&mut self.frame) {
-                    self.queue(len);
-                }
-            }
+            SocketDelivery::Datagram(datagram) => self.relay(now, datagram),
             SocketDelivery::Link(event) => {
                 self.on_link(event);
                 self.sync(now);
             }
+        }
+    }
+
+    /// Relay `datagram` to the decoder when the stack found its sender
+    /// on-link, the decoder runs an engine for its interface, and its sender
+    /// is within its protocol's relay budget.
+    fn relay(&mut self, now: u64, datagram: &SocketDatagram<'_>) {
+        if !datagram.source_on_link || !self.wants_deliveries() {
+            return;
+        }
+        let interface = datagram.interface;
+        if !self
+            .links
+            .iter()
+            .any(|link| link.name == interface && link.told_up())
+        {
+            return;
+        }
+        let at = Duration64::from_nanos(now);
+        let source = ip_from_parts(datagram.source.family, datagram.source.addr);
+        let relayed = if self.sockets.is_wsd(datagram.socket) {
+            if !self.wsd_admission.allow(at, source) {
+                return;
+            }
+            self.note_wsd_sender(now, interface, source);
+            ToDecoder::Wsd(ToWsd::Datagram {
+                now,
+                interface,
+                source,
+                payload: datagram.payload,
+            })
+        } else {
+            if !self.admission.allow(at, source) {
+                return;
+            }
+            self.note_asker(now, interface, source, datagram.source.port);
+            ToDecoder::Datagram {
+                now,
+                interface,
+                source,
+                port: datagram.source.port,
+                to_group: datagram.to_group,
+                payload: datagram.payload,
+            }
+        };
+        if let Some(len) = relayed.encode(&mut self.frame) {
+            self.queue(len);
         }
     }
 
@@ -735,7 +990,157 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         }
     }
 
-    /// Apply one link event from a family socket.
+    /// Record a WS-Discovery sender relayed from on `interface` as a place a
+    /// fetch may go for a while. When the table is full the entry nearest its
+    /// end makes way.
+    fn note_wsd_sender(&mut self, now: u64, interface: [u8; IF_NAME_LEN], addr: IpAddr) {
+        let until = now.saturating_add(WSD_SENDER_WINDOW_NS);
+        if let Some(sender) = self
+            .wsd_senders
+            .iter_mut()
+            .find(|sender| sender.interface == interface && sender.addr == addr)
+        {
+            sender.until = until;
+            return;
+        }
+        let sender = WsdSender {
+            interface,
+            addr,
+            until,
+        };
+        if let Err(full) = self.wsd_senders.try_push(sender) {
+            if let Some(oldest) = self
+                .wsd_senders
+                .iter_mut()
+                .min_by_key(|sender| sender.until)
+            {
+                *oldest = full.into_value();
+            }
+        }
+    }
+
+    /// Take one event on a fetch connection at `now`.
+    pub fn on_stream(&mut self, now: u64, event: &SocketStreamEvent<'_>) {
+        let (SocketStreamEvent::Connected { socket }
+        | SocketStreamEvent::Data { socket, .. }
+        | SocketStreamEvent::Closed { socket, .. }
+        | SocketStreamEvent::Room { socket }
+        | SocketStreamEvent::Accepted { socket }) = *event;
+        let Some(fetch) = self
+            .links
+            .iter_mut()
+            .flat_map(|link| link.fetches.iter_mut())
+            .find(|fetch| fetch.socket() == Some(socket))
+        else {
+            return;
+        };
+        let host = &mut self.host;
+        match *event {
+            SocketStreamEvent::Connected { .. } => {
+                if let Flight::Flying { sent, .. } = &mut fetch.flight {
+                    *sent = Some(0);
+                }
+                fetch.send(host);
+            }
+            SocketStreamEvent::Room { .. } => fetch.send(host),
+            SocketStreamEvent::Data { payload, .. } => fetch.receive(host, payload),
+            SocketStreamEvent::Closed { reason, .. } => fetch.closed(host, reason),
+            SocketStreamEvent::Accepted { .. } => fetch.land(host, None),
+        }
+        self.sync(now);
+    }
+
+    /// Hand the decoder every fetch outcome its queue has room for. A
+    /// response that cannot be framed is reported as a failure, so no fetch
+    /// goes unanswered.
+    fn deliver_landed(&mut self, now: u64) {
+        for at in 0..self.links.len() {
+            let mut slot = 0;
+            while let Some(fetch) = self.links[at].fetches.get(slot) {
+                let Flight::Landed(response) = &fetch.flight else {
+                    slot += 1;
+                    continue;
+                };
+                let (interface, id) = (self.links[at].name, fetch.fetch);
+                let fetched = response.as_deref().and_then(|response| {
+                    ToDecoder::Wsd(ToWsd::Fetched {
+                        now,
+                        interface,
+                        fetch: id,
+                        response,
+                    })
+                    .encode(&mut self.frame)
+                });
+                let Some(len) = fetched.or_else(|| {
+                    ToDecoder::Wsd(ToWsd::FetchFailed {
+                        now,
+                        interface,
+                        fetch: id,
+                    })
+                    .encode(&mut self.frame)
+                }) else {
+                    return;
+                };
+                match self.decoder.send(&self.frame[..len]) {
+                    Ok(()) => {
+                        self.links[at].fetches.remove(slot);
+                    }
+                    Err(SessionError::WorkerFailed) => {
+                        self.forget_decoder();
+                        return;
+                    }
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+
+    /// Make the fetch the decoder asked for, reporting whether an honest
+    /// decoder could have asked it. One the front will not make — to an
+    /// address that has not sent from the link lately, past the fetches the
+    /// front makes at once, or one whose connection cannot be opened — is
+    /// told back as failed; one past what the engine may have in flight, or
+    /// reusing an id it has in flight, is a lie.
+    fn fetch(&mut self, now: u64, request: &FetchRequest<'_>) -> bool {
+        let interface = request.interface;
+        let flying = self
+            .links
+            .iter()
+            .flat_map(|link| link.fetches.iter())
+            .filter(|fetch| fetch.socket().is_some())
+            .count();
+        let heard = self.wsd_senders.iter().any(|sender| {
+            sender.interface == interface && sender.addr == request.addr && sender.until >= now
+        });
+        let Self { links, host, .. } = self;
+        let Some(link) = links.iter_mut().find(|link| link.name == interface) else {
+            return true;
+        };
+        // Asked by an engine the decoder has since been told is gone.
+        if !link.settled() {
+            return true;
+        }
+        if link.fetches.is_full() || link.fetches.iter().any(|f| f.fetch == request.fetch) {
+            return false;
+        }
+        let flight = (heard && flying < FETCHES)
+            .then(|| open_fetch(host, now, request))
+            .flatten()
+            .unwrap_or(Flight::Landed(None));
+        let fetch = Fetch {
+            fetch: request.fetch,
+            flight,
+        };
+        if let Err(refused) = link.fetches.try_push(fetch) {
+            refused.into_value().land(host, None);
+            return false;
+        }
+        true
+    }
+
+    /// Apply one link event from a multicast DNS socket. The WS-Discovery
+    /// sockets' events are not needed: they join the same interfaces, and
+    /// their sends need no membership.
     fn on_link(&mut self, event: &SocketLinkEvent) {
         let v4 = Some(event.socket) == self.sockets.v4;
         if !v4 && Some(event.socket) != self.sockets.v6 {
@@ -758,6 +1163,8 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 told: Told::Down,
                 pending: 0,
                 group: TokenBucket::new(GROUP_BURST, GROUP_RATE),
+                wsd_group: TokenBucket::new(WSD_BURST, WSD_RATE),
+                fetches: ArrayVec::new(),
             });
             self.links.len() - 1
         };
@@ -793,7 +1200,10 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             }
             let interface = link.name;
             let edge = if up {
-                Edge::Up(link.group.level())
+                Edge::Up(Budgets {
+                    group: link.group.level(),
+                    wsd: link.wsd_group.level(),
+                })
             } else {
                 Edge::Down
             };
@@ -812,6 +1222,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             link.pending = link.pending.saturating_add(1);
             if down {
                 link.told = Told::Down;
+                link.drop_fetches(&mut self.host);
                 self.flush_pass += 1;
                 let Self {
                     questions,
@@ -858,6 +1269,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             }
             self.questions.replay_sent(question, token);
         }
+        self.deliver_landed(now);
     }
 
     /// Send a control frame the decoder answers with `owed`, recording the
@@ -958,6 +1370,12 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 to,
                 payload,
             } => self.transmit(now, interface, at, to, payload),
+            FromDecoder::Wsd(FromWsd::Transmit {
+                interface,
+                at,
+                payload,
+            }) => self.transmit_wsd(now, interface, at, payload),
+            FromDecoder::Wsd(FromWsd::Fetch(request)) => self.fetch(now, &request),
             FromDecoder::Linked { interface, up } => {
                 if !self.acknowledged(Owed::Linked { interface, up }) {
                     return false;
@@ -975,6 +1393,57 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 self.acknowledged(Owed::Stopped(question)) && self.questions.on_stopped(question)
             }
         }
+    }
+
+    /// The link a datagram the decoder built at `at` may leave `interface`
+    /// by.
+    fn outgoing(&self, now: u64, interface: [u8; IF_NAME_LEN], at: u64) -> Outgoing {
+        if at > now {
+            return Outgoing::Lie;
+        }
+        match self.links.iter().position(|link| link.name == interface) {
+            Some(index) if self.links[index].settled() => Outgoing::By(index),
+            _ => Outgoing::Stale,
+        }
+    }
+
+    /// Send `payload` to `protocol`'s groups on the families link `index` is
+    /// up on.
+    fn send_to_groups(&mut self, protocol: Protocol, index: usize, payload: &[u8]) {
+        let link = &self.links[index];
+        let (interface, families) = (link.name, [(link.v4, false), (link.v6, true)]);
+        for (up, v6) in families {
+            if up {
+                let _ = self
+                    .host
+                    .transmit(protocol, interface, protocol.group(v6), payload);
+            }
+        }
+    }
+
+    /// Send a WS-Discovery datagram the decoder built at `at` to
+    /// `interface`'s groups, charged to its WS-Discovery budget at that
+    /// instant; `false` when no honest decoder sends it.
+    fn transmit_wsd(
+        &mut self,
+        now: u64,
+        interface: [u8; IF_NAME_LEN],
+        at: u64,
+        payload: &[u8],
+    ) -> bool {
+        let index = match self.outgoing(now, interface, at) {
+            Outgoing::Lie => return false,
+            Outgoing::Stale => return true,
+            Outgoing::By(index) => index,
+        };
+        if !self.links[index]
+            .wsd_group
+            .allow(Duration64::from_nanos(at))
+        {
+            return false;
+        }
+        self.send_to_groups(Protocol::WsDiscovery, index, payload);
+        true
     }
 
     /// Queue `entry` for the requests `verdict` names, ringing each quiet
@@ -1020,35 +1489,21 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         to: Destination,
         payload: &[u8],
     ) -> bool {
-        if at > now {
-            return false;
-        }
-        let Some(link) = self.links.iter_mut().find(|link| link.name == interface) else {
-            return true;
+        let index = match self.outgoing(now, interface, at) {
+            Outgoing::Lie => return false,
+            Outgoing::Stale => return true,
+            Outgoing::By(index) => index,
         };
-        // What an engine built before its link's last edge is not sent.
-        if !link.settled() {
-            return true;
-        }
-        let (v4, v6) = (link.v4, link.v6);
+        let link = &mut self.links[index];
         match to {
             Destination::Group => {
                 if !link.group.allow(Duration64::from_nanos(at)) {
                     return false;
                 }
-                if v4 {
-                    let _ =
-                        self.host
-                            .transmit(interface, group_addr(IpAddr::V4(GROUP_V4)), payload);
-                }
-                if v6 {
-                    let _ =
-                        self.host
-                            .transmit(interface, group_addr(IpAddr::V6(GROUP_V6)), payload);
-                }
+                self.send_to_groups(Protocol::MulticastDns, index, payload);
             }
             Destination::Peer { addr, port } => {
-                let family_up = if addr.is_ipv4() { v4 } else { v6 };
+                let family_up = if addr.is_ipv4() { link.v4 } else { link.v6 };
                 let Some(asker) = self.askers.iter_mut().find(|asker| {
                     asker.interface == interface
                         && asker.addr == addr
@@ -1066,6 +1521,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 asker.credits -= 1;
                 let (family, octets) = address_parts(addr);
                 let _ = self.host.transmit(
+                    Protocol::MulticastDns,
                     interface,
                     SocketAddr {
                         family,
@@ -1264,6 +1720,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         self.owed.clear();
         self.clock = Clock::Idle;
         for link in &mut self.links {
+            link.drop_fetches(&mut self.host);
             link.told = Told::Down;
             link.pending = 0;
         }
@@ -1317,14 +1774,51 @@ fn entry_interface(entry: &Entry<'_>) -> Option<[u8; IF_NAME_LEN]> {
     }
 }
 
-/// The multicast DNS group of `group`'s family, on the mDNS port.
-fn group_addr(group: IpAddr) -> SocketAddr {
-    let (family, addr) = address_parts(group);
-    SocketAddr {
+/// Where a datagram the decoder built may leave by.
+enum Outgoing {
+    /// No honest decoder built it: it is from the future.
+    Lie,
+    /// It is not sent: its engine built it before its link's last edge, or
+    /// for a link the front no longer holds.
+    Stale,
+    /// The link at this index.
+    By(usize),
+}
+
+/// Build `request`'s metadata request and open its connection, or `None`
+/// when either cannot be done. The connection goes to the address the target
+/// sent from, whatever name its URL gives in the `Host` field.
+fn open_fetch<H: Host>(host: &mut H, now: u64, request: &FetchRequest<'_>) -> Option<Flight> {
+    let path = MetadataPath::new(request.path)?;
+    let endpoint = Endpoint::new(request.endpoint)?;
+    let url_host = match request.name {
+        Some(name) => UrlHost::Name(HostName::new(name)?),
+        None => UrlHost::Addr(request.addr),
+    };
+    let mut random = [0u8; 16];
+    host.fill_random(&mut random).ok()?;
+    let mut bytes = fallible::filled(FETCH_REQUEST_MAX, 0u8)?;
+    let at = Authority {
+        host: &url_host,
+        port: request.port,
+    };
+    let id = Uuid::from_random(random);
+    let len = wsd::write_metadata_request(&mut bytes, at, &path, &endpoint, id).ok()?;
+    bytes.truncate(len);
+    let (family, addr) = address_parts(request.addr);
+    let to = SocketAddr {
         family,
         addr,
-        port: PORT,
-    }
+        port: request.port,
+    };
+    let socket = host.fetch_open(request.interface, to).ok()?;
+    Some(Flight::Flying {
+        socket,
+        request: bytes,
+        sent: None,
+        response: Vec::new(),
+        deadline: now.saturating_add(FETCH_DEADLINE_NS),
+    })
 }
 
 fn status_ok(reply: &mut [u8]) -> Result<usize, Errno> {

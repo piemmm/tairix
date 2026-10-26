@@ -16,8 +16,9 @@ path = "src/lib.rs"
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# The one rule for which characters would hide, reorder or break the text an
-# attribute is shown in.
+# The one rule for showing text from elsewhere (`Faithful`): what an
+# attribute's display escapes, and what keeps a value from being offered back
+# as text.
 tairix-visible = { path = "../visible", version = "=0.0.0" }
 
 [dev-dependencies]

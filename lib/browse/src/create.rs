@@ -112,6 +112,8 @@ pub enum CreateError {
     Refused(Errno),
     /// The entry was created but the directory could no longer be re-listed.
     Source(Errno),
+    /// No folder is shown to make it in: the network holds none.
+    NoFolder,
 }
 
 impl CreateError {
@@ -139,6 +141,7 @@ impl CreateError {
             Self::Clash => "An item with that name already exists here.",
             Self::Refused(_) => "The new item could not be created.",
             Self::Source(_) => "Created, but this folder could not be reloaded.",
+            Self::NoFolder => "Only a folder can hold a new item.",
         }
     }
 }

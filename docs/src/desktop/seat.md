@@ -105,12 +105,21 @@ that does not (or no longer) exist.
   above the few milliseconds a switch chatters for, below the 60–100 ms of a
   deliberate double-click — and **`0` disables the filter**, which is what a
   device whose rapid-fire mode emits deliberate click pairs at ~10 ms needs.
-  Motion and scroll are never filtered. It is applied here, at the one funnel
-  every injector passes through, rather than per driver: the filter would
-  otherwise be duplicated in each, and a driver holds no configuration
-  authority to read the operator's window with. The per-button history
-  (`ClickDebounce`) is the seat's; the window and the clock are supplied to it,
-  so it reads neither behind the caller's back. The first
+  Motion and scroll are never filtered. The window is measured between the
+  times the *device* reported the two edges, as the driver states them with
+  each record, never between their injections: a driver catching up after a
+  stall injects distinct clicks back to back, and judging those would drop the
+  second. An edge stated with no time (`POINTER_EDGE_UNTIMED` — the virtio
+  driver's, whose virtqueue carries none and whose buttons do not bounce), and a
+  release and press stated at one instant (two reports read together), are
+  never judged. The history is one device's: a button edge from another
+  injecting process starts it afresh, so one device's release never judges
+  another's press. It is applied here, at the one funnel every injector passes
+  through, rather than per driver: the filter would otherwise be duplicated in
+  each, and a driver holds no configuration authority to read the operator's
+  window with. The per-button history (`ClickDebounce`) is the seat's; the
+  window and the times are supplied to it, so it reads neither behind the
+  caller's back. The first
   delivered record of each input kind emits that kind's one-shot
   `INPUT_DELIVERED` witness (`kind=key` / `kind=pointer` / `kind=touch`), so
   keyboard, pointer and touch liveness are separately attributable from the

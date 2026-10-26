@@ -12,8 +12,8 @@
 //! plan.
 //!
 //! Paths are root-first component lists — the same
-//! [`components`](crate::Browser::components) vocabulary the whole engine uses
-//! — and each target carries the node the listing showed, so a removal finding
+//! [`folder`](crate::Browser::folder) vocabulary the whole engine uses — and
+//! each target carries the node the listing showed, so a removal finding
 //! another under the name leaves it alone.
 //!
 //! [`DeletePlan::new`] is **fail closed**: a plan is built only from a

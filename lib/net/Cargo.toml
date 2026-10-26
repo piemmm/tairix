@@ -9,7 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# Exposes the cache's consistency oracle to the fuzz harness.
+# Exposes the cache's consistency oracle to the fuzz harness, and the
+# captured WS-Discovery traffic to the tests of the service that speaks it.
 test-support = []
 
 [dependencies]
@@ -29,6 +30,9 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The one rule for which characters hide or reorder text, so a label a peer
 # chose is escaped exactly as every other display escapes text from elsewhere.
 tairix-visible = { path = "../visible", version = "=0.0.0" }
+# The fail-closed XML scanner WS-Discovery's SOAP envelopes are read with,
+# every name resolved by namespace rather than by the prefix a peer chose.
+tairix-xml = { path = "../xml", version = "=0.0.0" }
 
 [lints]
 workspace = true

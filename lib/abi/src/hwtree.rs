@@ -664,6 +664,11 @@ pub enum HwResourceKind {
     /// A fact only discovery states: the kernel maps it, at its own address,
     /// into every domain translating the node's DMA, so its messages arrive.
     MsiDoorbell = 16,
+    /// A **volume the holder serves**: `base` is the kernel's served-volume
+    /// id, `len` `1`. The holder reads and writes that one volume's blocks
+    /// and offers the filesystem on it, and nothing past the volume's extent.
+    /// Recovered through [`HwResource::volume_id`].
+    Volume = 17,
 }
 
 /// What a [`HwResourceKind::Property`] states.
@@ -941,6 +946,7 @@ impl HwResourceKind {
         Self::IommuAlias,
         Self::IommuGroup,
         Self::MsiDoorbell,
+        Self::Volume,
     ];
 
     /// Raw on-wire discriminant.
@@ -970,6 +976,7 @@ impl HwResourceKind {
             14 => Some(Self::IommuAlias),
             15 => Some(Self::IommuGroup),
             16 => Some(Self::MsiDoorbell),
+            17 => Some(Self::Volume),
             _ => None,
         }
     }
@@ -1008,6 +1015,9 @@ impl HwResourceKind {
             // A bus-child or DMA-controller duty authorises binding a
             // reserved id, which is a privileged bind.
             Self::LinkDuty => CapabilityId::IPC_BIND_PRIVILEGED,
+            // Serving a volume is gated by the class capability of every
+            // user-space filesystem driver; the grant scopes it to one volume.
+            Self::Volume => CapabilityId::FS_SERVE,
         })
     }
 }
@@ -1764,6 +1774,23 @@ impl HwResource {
         }
     }
 
+    /// The volume `id` the holder serves ([`HwResourceKind::Volume`]).
+    #[must_use]
+    pub fn volume(id: u64) -> Self {
+        Self::new(HwResourceKind::Volume, id, 1, 0)
+    }
+
+    /// The served-volume id a [`HwResourceKind::Volume`] resource names, or
+    /// [`None`] for another kind or one [`Self::volume`] would not make.
+    #[must_use]
+    pub fn volume_id(&self) -> Option<u64> {
+        (self.kind() == Some(HwResourceKind::Volume)
+            && self.len == 1
+            && self.flags == 0
+            && self.xlate == 0)
+            .then_some(self.base)
+    }
+
     /// The fact that a node's interrupt messages are written to the doorbell
     /// `[base, base + len)` ([`HwResourceKind::MsiDoorbell`]).
     ///
@@ -2300,6 +2327,10 @@ impl HwResource {
                     (Ok(parent), Ok(child)) => parent.covers(child),
                     _ => false,
                 }
+            }
+            (HwResourceKind::Volume, HwResourceKind::Volume) => {
+                // Granted whole: another id is another volume.
+                self.base == child.base && self.len == child.len && self.xlate == child.xlate
             }
             (HwResourceKind::IommuGroup, HwResourceKind::IommuGroup) => {
                 self.iommu_group().is_ok() && self.iommu_group() == child.iommu_group()
@@ -3814,6 +3845,29 @@ mod tests {
             assert_eq!(HwProperty::from_u32(key.as_u32()), Some(*key));
         }
         assert_eq!(HwProperty::from_u32(0), None);
+    }
+
+    #[test]
+    fn a_volume_grant_covers_exactly_its_volume_and_needs_the_serving_capability() {
+        let grant = HwResource::volume(0x5E_0001);
+        assert_eq!(grant.kind(), Some(HwResourceKind::Volume));
+        assert_eq!(grant.volume_id(), Some(0x5E_0001));
+        assert_eq!(
+            HwResourceKind::Volume.required_capability(),
+            Some(CapabilityId::FS_SERVE)
+        );
+        let wire = HwResource::from_bytes(&grant.to_le_bytes()).expect("decodes");
+        assert_eq!(wire.volume_id(), Some(0x5E_0001));
+        assert!(grant.covers(&HwResource::volume(0x5E_0001)));
+        assert!(
+            !grant.covers(&HwResource::volume(0x5E_0002)),
+            "another volume"
+        );
+        assert!(
+            !grant.covers(&HwResource::endpoint(0x5E_0001)),
+            "another kind"
+        );
+        assert_eq!(HwResource::endpoint(9).volume_id(), None);
     }
 
     #[test]

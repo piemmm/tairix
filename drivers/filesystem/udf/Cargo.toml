@@ -8,7 +8,22 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The `Run` binary is the driver process `devmgr` loads for a volume node of
+# this format. It links the userland runtime, so it is built only with
+# `program`, which the bundle builder enables: the kernel links this library
+# for its own volumes and must never pull the runtime in with it.
+[features]
+program = ["dep:tairix-rt", "tairix-fsserve/program"]
+
+[[bin]]
+name = "tairix-drv-fs-udf"
+path = "src/main.rs"
+required-features = ["program"]
+
 [dependencies]
+# The served-filesystem runtime: the format trait this driver is served
+# through, and its bind key.
+tairix-fsserve = { path = "../../../lib/fsserve", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-bytedev = { path = "../../../lib/bytedev", version = "=0.0.0" }
 # The holds the kernel takes on nodes: an index whose growth is refused, not
@@ -23,6 +38,8 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0" }
 
 [dev-dependencies]
+# The pressure gauge a served open's write-back budget names.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # The shared driver listing fixtures and the test wall clock.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = ["test-util"] }
@@ -31,3 +48,10 @@ tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0", featur
 
 [lints]
 workspace = true
+
+# The `Run` binary's runtime, pulled only by `program`.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

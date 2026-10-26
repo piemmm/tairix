@@ -30,10 +30,10 @@ test-support = ["write"]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The store's integrity checksum.
 tairix-crc32c = { path = "../crc32c", version = "=0.0.0" }
-# What may not stand in a name a person reads (`utf8::is_hidden`): a region
-# or place that could hide or reorder its text is refused with the store.
+# The order a reader looks a region or place up by (`utf8::reader_order`).
 tairix-util = { path = "../util", version = "=0.0.0" }
-# The one rule for a hidden character.
+# What may not stand in a name a person reads (`is_hidden`): a region or place
+# that could hide or reorder its text is refused with the store.
 tairix-visible = { path = "../visible", version = "=0.0.0" }
 # For the `rt` loader only: the bounded whole-file read under the caller's
 # own identity.

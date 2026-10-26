@@ -2,9 +2,10 @@
 //! one, a doomed one, one that lies, and — end to end — the real decoder.
 
 use super::{
-    Caller, Fatal, Front, Host, Sockets, ACK_DEADLINE_NS, ASKER_WINDOW_NS, FRESH_ACCOUNT_BURST,
-    FRESH_ACCOUNT_RATE, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE, RELAY_SOURCE_BURST,
-    REPLAY_ACCOUNT_BURST, REPLAY_ACCOUNT_RATE,
+    open_fetch, Caller, Fatal, Flight, Front, Host, Protocol, Sockets, ACK_DEADLINE_NS,
+    ASKER_WINDOW_NS, FETCH_DEADLINE_NS, FRESH_ACCOUNT_BURST, FRESH_ACCOUNT_RATE,
+    MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE, RELAY_SOURCE_BURST, REPLAY_ACCOUNT_BURST,
+    REPLAY_ACCOUNT_RATE, WSD_SOURCE_BURST,
 };
 use crate::decoder::Decoder;
 use crate::events::{DECODER_STARTED, REQUEST_DENIED};
@@ -12,8 +13,10 @@ use crate::grants::Grants;
 use crate::query::QUESTIONS_PER_REQUEST;
 use crate::questions::FLOOR_RESERVE;
 use crate::wire::{
-    Edge, FromDecoder, ToDecoder, DATAGRAM_HEADER_LEN, GROUP_BURST, GROUP_RATE, MAX_FROM_DECODER,
+    Edge, FetchRequest, FromDecoder, FromWsd, ToDecoder, ToWsd, DATAGRAM_HEADER_LEN, GROUP_BURST,
+    GROUP_RATE, MAX_FROM_DECODER, WSD_BURST,
 };
+use crate::wsd_fixtures;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec;
@@ -23,7 +26,10 @@ use tairix_abi::discovery_ipc::{
     decode_doorbell, decode_id_reply, Answer, Change, CollectReply, DiscoveryRequest, Entry,
     Families, Query, ServiceTypeField, Transport, DISCOVERY_MAX_REPLY, REQUESTS_PER_ACCOUNT,
 };
-use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketLinkEvent};
+use tairix_abi::net::{
+    SocketAddr, SocketDatagram, SocketDelivery, SocketId, SocketLinkEvent, SocketStreamEvent,
+    StreamCloseReason,
+};
 use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
@@ -34,7 +40,11 @@ use tairix_log::{Event, EventId, Sink};
 use tairix_net::dns::Name;
 use tairix_net::mdns::{Destination, MessageWriter, RData, Record, Section, MAX_QUESTIONS};
 use tairix_net::rate::BucketLevel;
-use tairix_net::{IpAddr, Ipv4Addr};
+use tairix_net::wsd::vectors::{
+    probe_id, qnap_probe_matches, QNAP_METADATA, QNAP_NAME, QNAP_PATH, QNAP_PORT, QNAP_SOURCE_PORT,
+};
+use tairix_net::wsd::{Uuid, MAX_ENDPOINT, MAX_METADATA, MAX_PATH};
+use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_sandbox::host::EVENT_WORKER_CRASHED;
 use tairix_sandbox::loopback::{LoopbackSession, LoopbackSessionLauncher};
 use tairix_sandbox::proto::FRAME_HEADER_LEN;
@@ -46,6 +56,8 @@ use tairix_sandbox::supervise::SessionLauncher;
 const SEC: u64 = 1_000 * MS;
 const V4: u32 = 1;
 const V6: u32 = 2;
+const WSD_V4: u32 = 3;
+const WSD_V6: u32 = 4;
 const PORT: u64 = 0x77;
 
 /// Captures the id of every logged event.
@@ -72,9 +84,18 @@ struct World {
     draws: u8,
     entropy_dead: bool,
     sent: Vec<([u8; IF_NAME_LEN], SocketAddr, Vec<u8>)>,
+    wsd_sent: Vec<([u8; IF_NAME_LEN], SocketAddr, Vec<u8>)>,
     rings: Vec<(u64, u32)>,
     ring_full: bool,
     watched: Vec<ProcId>,
+    /// Fetch connections opened, by socket.
+    opened: Vec<(SocketId, [u8; IF_NAME_LEN], SocketAddr)>,
+    open_refused: bool,
+    /// What each fetch connection was sent, by socket.
+    fetch_sent: Vec<(SocketId, Vec<u8>)>,
+    /// The most one send takes, when the stack's buffer is short.
+    send_limit: Option<usize>,
+    closed: Vec<SocketId>,
 }
 
 /// The front's view of the world, shared with the test.
@@ -94,15 +115,45 @@ impl Host for FakeHost {
 
     fn transmit(
         &mut self,
+        protocol: Protocol,
         interface: [u8; IF_NAME_LEN],
         to: SocketAddr,
         payload: &[u8],
     ) -> Result<(), Errno> {
-        self.0
-            .borrow_mut()
-            .sent
-            .push((interface, to, payload.to_vec()));
+        let mut world = self.0.borrow_mut();
+        let sent = match protocol {
+            Protocol::MulticastDns => &mut world.sent,
+            Protocol::WsDiscovery => &mut world.wsd_sent,
+        };
+        sent.push((interface, to, payload.to_vec()));
         Ok(())
+    }
+
+    fn fetch_open(
+        &mut self,
+        interface: [u8; IF_NAME_LEN],
+        to: SocketAddr,
+    ) -> Result<SocketId, Errno> {
+        let mut world = self.0.borrow_mut();
+        if world.open_refused {
+            return Err(Errno::NetworkUnreachable);
+        }
+        let socket = 100 + u32::try_from(world.opened.len()).unwrap();
+        world.opened.push((socket, interface, to));
+        Ok(socket)
+    }
+
+    fn fetch_send(&mut self, socket: SocketId, bytes: &[u8]) -> Result<usize, Errno> {
+        let mut world = self.0.borrow_mut();
+        let taken = world
+            .send_limit
+            .map_or(bytes.len(), |limit| limit.min(bytes.len()));
+        world.fetch_sent.push((socket, bytes[..taken].to_vec()));
+        Ok(taken)
+    }
+
+    fn fetch_close(&mut self, socket: SocketId) {
+        self.0.borrow_mut().closed.push(socket);
     }
 
     fn ring(&mut self, port: u64, doorbell: &[u8]) -> Result<(), Errno> {
@@ -137,6 +188,11 @@ enum Script {
     Forge,
     /// Send this many group datagrams, at the instant each datagram came.
     Multicast(u32),
+    /// Send this many WS-Discovery group datagrams for each WS-Discovery
+    /// datagram, at the instant it came.
+    WsdMulticast(u32),
+    /// Ask these fetches, by id and address, for each WS-Discovery datagram.
+    Fetches(&'static [(u32, [u8; 4])]),
 }
 
 /// A worker that records every frame, acknowledges every link, stop and
@@ -173,7 +229,10 @@ impl SessionService for Scripted {
                 let _ = out.frame(&encoded(&FromDecoder::Replayed { token }));
             }
             Ok(ToDecoder::Datagram { now, interface, .. }) => match self.script {
-                Script::Nothing | Script::Withhold => {}
+                Script::Nothing
+                | Script::Withhold
+                | Script::WsdMulticast(_)
+                | Script::Fetches(_) => {}
                 Script::Forge => {
                     let _ = out.frame(&encoded(&FromDecoder::Replayed { token: 0 }));
                 }
@@ -210,6 +269,32 @@ impl SessionService for Scripted {
                         }));
                     }
                 }
+            },
+            Ok(ToDecoder::Wsd(ToWsd::Datagram { now, interface, .. })) => match self.script {
+                Script::WsdMulticast(count) => {
+                    for _ in 0..count {
+                        let _ = out.frame(&encoded(&FromDecoder::Wsd(FromWsd::Transmit {
+                            interface,
+                            at: now,
+                            payload: b"probe",
+                        })));
+                    }
+                }
+                Script::Fetches(fetches) => {
+                    for &(fetch, octets) in fetches {
+                        let _ =
+                            out.frame(&encoded(&FromDecoder::Wsd(FromWsd::Fetch(FetchRequest {
+                                interface,
+                                fetch,
+                                addr: IpAddr::V4(Ipv4Addr::from(octets)),
+                                port: 5357,
+                                path: "/meta",
+                                endpoint: "urn:uuid:0001",
+                                name: None,
+                            }))));
+                    }
+                }
+                _ => {}
             },
             _ => {}
         }
@@ -283,6 +368,8 @@ fn sockets() -> Sockets {
     Sockets {
         v4: Some(V4),
         v6: Some(V6),
+        wsd_v4: Some(WSD_V4),
+        wsd_v6: Some(WSD_V6),
     }
 }
 
@@ -382,6 +469,14 @@ fn from_on<'a>(name: &[u8], last: u8, on_link: bool, payload: &'a [u8]) -> Socke
     }
 }
 
+/// A WS-Discovery datagram from `192.168.1.<last>` on `eth0`.
+fn wsd_from(last: u8, on_link: bool, payload: &[u8]) -> SocketDatagram<'_> {
+    let mut datagram = from(last, on_link, payload);
+    datagram.socket = WSD_V4;
+    datagram.source.port = 3702;
+    datagram
+}
+
 fn deliver<L: SessionLauncher>(
     front: &mut Front<L, RecordingSink, FakeHost>,
     now: u64,
@@ -421,6 +516,7 @@ fn told(log: &Rc<RefCell<Vec<Vec<u8>>>>) -> Vec<&'static str> {
             Ok(ToDecoder::Ask { .. }) => "ask",
             Ok(ToDecoder::Stop { .. }) => "stop",
             Ok(ToDecoder::Replay { .. }) => "replay",
+            Ok(ToDecoder::Wsd(_)) => "wsd",
             Err(_) => "?",
         })
         .collect()
@@ -563,6 +659,11 @@ fn collected<L: SessionLauncher>(
                 },
                 label.to_vec(),
             ),
+            Entry::Answer {
+                request,
+                answer: Answer::Computer { name, .. },
+                ..
+            } => (request, "computer", name.as_bytes().to_vec()),
             Entry::Answer { request, .. } => (request, "answer", Vec::new()),
             Entry::Flush { request, .. } => (request, "flush", Vec::new()),
             Entry::Lost { request } => (request, "lost", Vec::new()),
@@ -967,9 +1068,9 @@ fn a_replacement_decoder_spends_what_its_predecessor_left() {
         .iter()
         .filter_map(|frame| match ToDecoder::decode(frame) {
             Ok(ToDecoder::Link {
-                edge: Edge::Up(level),
+                edge: Edge::Up(budgets),
                 ..
-            }) => Some(level),
+            }) => Some(budgets.group),
             _ => None,
         })
         .collect();
@@ -1597,4 +1698,477 @@ fn end_to_end_an_exited_client_stops_being_asked_for() {
     front.on_wake(10 * SEC).expect("no start due");
     turn(&mut front, 10 * SEC);
     assert_eq!(front.wake_at(), None);
+}
+
+/// Fetch outcomes as `(fetch, response)`, a failure's response `None`.
+type Outcomes = Vec<(u32, Option<Vec<u8>>)>;
+
+/// The WS-Discovery frames the workers saw: datagrams by payload, and fetch
+/// outcomes.
+fn wsd_seen(log: &Rc<RefCell<Vec<Vec<u8>>>>) -> (Vec<Vec<u8>>, Outcomes) {
+    let (mut datagrams, mut outcomes) = (Vec::new(), Vec::new());
+    for frame in seen(log) {
+        match ToDecoder::decode(&frame) {
+            Ok(ToDecoder::Wsd(ToWsd::Datagram { payload, .. })) => datagrams.push(payload.to_vec()),
+            Ok(ToDecoder::Wsd(ToWsd::Fetched {
+                fetch, response, ..
+            })) => outcomes.push((fetch, Some(response.to_vec()))),
+            Ok(ToDecoder::Wsd(ToWsd::FetchFailed { fetch, .. })) => outcomes.push((fetch, None)),
+            _ => {}
+        }
+    }
+    (datagrams, outcomes)
+}
+
+fn stream(
+    front: &mut Front<Workers, RecordingSink, FakeHost>,
+    now: u64,
+    event: &SocketStreamEvent<'_>,
+) {
+    front.on_stream(now, event);
+    turn(front, now);
+}
+
+/// A harness asking `fetches` of the first WS-Discovery datagram from
+/// `192.168.1.9`, which it has been sent.
+fn fetching(fetches: &'static [(u32, [u8; 4])]) -> Harness {
+    let mut h = harness(Script::Fetches(fetches));
+    started(&mut h, 0);
+    deliver(&mut h.front, MS, &wsd_from(9, true, b"hello"));
+    turn(&mut h.front, MS);
+    h
+}
+
+const NINE: [u8; 4] = [192, 168, 1, 9];
+
+#[test]
+fn ws_discovery_is_relayed_within_its_own_budget_beside_multicast_dns() {
+    let mut h = harness(Script::Nothing);
+    started(&mut h, 0);
+    for _ in 0..100 {
+        deliver(&mut h.front, MS, &wsd_from(9, true, b"flood"));
+        turn(&mut h.front, MS);
+    }
+    deliver(&mut h.front, MS, &wsd_from(9, false, b"off link"));
+    deliver(&mut h.front, MS, &from(9, true, b"mdns"));
+    turn(&mut h.front, MS);
+    let (datagrams, _) = wsd_seen(&h.log);
+    assert_eq!(
+        datagrams.len(),
+        WSD_SOURCE_BURST as usize,
+        "held to its budget, never off-link"
+    );
+    assert_eq!(
+        relayed_payloads(&h.log),
+        [b"mdns".to_vec()],
+        "its own budget untouched"
+    );
+}
+
+#[test]
+fn ws_discovery_sends_go_to_its_groups_within_its_budget() {
+    let mut h = harness(Script::WsdMulticast(WSD_BURST));
+    started(&mut h, 0);
+    link(&mut h.front, 0, V6, b"eth0", true);
+    deliver(&mut h.front, MS, &wsd_from(9, true, b"q"));
+    turn(&mut h.front, MS);
+    let sent = h.world.0.borrow().wsd_sent.clone();
+    assert_eq!(
+        sent.len(),
+        2 * WSD_BURST as usize,
+        "each datagram to both families' groups"
+    );
+    let v4 = sent
+        .iter()
+        .filter(|(_, to, _)| to.family == NetAddrFamily::V4);
+    assert!(v4
+        .clone()
+        .all(|(_, to, _)| to.port == 3702 && to.addr[..4] == [239, 255, 255, 250]));
+    assert_eq!(v4.count(), WSD_BURST as usize);
+    assert!(
+        h.world.0.borrow().sent.is_empty(),
+        "nothing through multicast DNS"
+    );
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 0);
+}
+
+#[test]
+fn a_decoder_sending_past_its_ws_discovery_budget_is_condemned() {
+    let mut h = harness(Script::WsdMulticast(WSD_BURST + 1));
+    started(&mut h, 0);
+    deliver(&mut h.front, MS, &wsd_from(9, true, b"q"));
+    turn(&mut h.front, MS);
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 1);
+    assert_eq!(h.world.0.borrow().wsd_sent.len(), WSD_BURST as usize);
+}
+
+#[test]
+fn a_fetch_goes_only_to_a_sender_heard_on_its_link() {
+    let h = fetching(&[(1, NINE), (2, [192, 168, 1, 77])]);
+    let world = h.world.0.borrow();
+    assert_eq!(world.opened.len(), 1);
+    let (_, interface, to) = world.opened[0];
+    assert_eq!(
+        (interface, to.port, &to.addr[..4]),
+        (iface(b"eth0"), 5357, &NINE[..])
+    );
+    assert_eq!(
+        wsd_seen(&h.log).1,
+        [(2, None)],
+        "the stranger's fetch fails at once"
+    );
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 0);
+}
+
+#[test]
+fn a_fetch_sends_the_request_the_front_builds_and_returns_the_whole_response() {
+    let mut h = fetching(&[(1, NINE)]);
+    let socket = h.world.0.borrow().opened[0].0;
+    stream(
+        &mut h.front,
+        2 * MS,
+        &SocketStreamEvent::Connected { socket },
+    );
+    let request = sent_on(&h.world, socket);
+    let text = core::str::from_utf8(&request).expect("text");
+    assert!(
+        text.starts_with("POST /meta HTTP/1.1\r\nHost: 192.168.1.9:5357\r\n"),
+        "{text}"
+    );
+    assert!(text.contains("<wsa:To>urn:uuid:0001</wsa:To>"));
+    stream(
+        &mut h.front,
+        3 * MS,
+        &SocketStreamEvent::Data {
+            socket,
+            payload: b"HTTP/1.1 200 OK\r\n",
+        },
+    );
+    stream(
+        &mut h.front,
+        3 * MS,
+        &SocketStreamEvent::Data {
+            socket,
+            payload: b"\r\nbody",
+        },
+    );
+    assert!(wsd_seen(&h.log).1.is_empty(), "nothing until it closes");
+    stream(
+        &mut h.front,
+        4 * MS,
+        &SocketStreamEvent::Closed {
+            socket,
+            reason: StreamCloseReason::PeerClosed,
+        },
+    );
+    assert_eq!(
+        wsd_seen(&h.log).1,
+        [(1, Some(b"HTTP/1.1 200 OK\r\n\r\nbody".to_vec()))]
+    );
+    assert_eq!(
+        h.world.0.borrow().closed,
+        [socket],
+        "the connection is released"
+    );
+    assert_eq!(h.front.wake_at(), None, "no deadline left");
+}
+
+/// What the stack took of `socket`'s sends, in order.
+fn sent_on(world: &FakeHost, socket: SocketId) -> Vec<u8> {
+    let world = world.0.borrow();
+    let sends = world.fetch_sent.iter().filter(|(on, _)| *on == socket);
+    sends.flat_map(|(_, bytes)| bytes.iter().copied()).collect()
+}
+
+#[test]
+fn a_short_send_is_finished_on_room_and_a_close_before_it_is_a_failure() {
+    let mut h = fetching(&[(1, NINE), (2, NINE)]);
+    h.world.0.borrow_mut().send_limit = Some(40);
+    let (first, second) = {
+        let world = h.world.0.borrow();
+        (world.opened[0].0, world.opened[1].0)
+    };
+    stream(
+        &mut h.front,
+        2 * MS,
+        &SocketStreamEvent::Connected { socket: first },
+    );
+    for _ in 0..200 {
+        stream(
+            &mut h.front,
+            2 * MS,
+            &SocketStreamEvent::Room { socket: first },
+        );
+    }
+    let whole = sent_on(&h.world, first);
+    assert!(core::str::from_utf8(&whole).is_ok_and(|text| text.ends_with("</soap:Envelope>")));
+    stream(
+        &mut h.front,
+        2 * MS,
+        &SocketStreamEvent::Connected { socket: second },
+    );
+    stream(
+        &mut h.front,
+        3 * MS,
+        &SocketStreamEvent::Closed {
+            socket: second,
+            reason: StreamCloseReason::PeerClosed,
+        },
+    );
+    assert_eq!(
+        wsd_seen(&h.log).1,
+        [(2, None)],
+        "closed before the request was whole"
+    );
+}
+
+#[test]
+fn a_slow_oversized_or_reset_fetch_fails_and_its_connection_is_closed() {
+    let mut h = fetching(&[(1, NINE), (2, NINE)]);
+    let (slow, big) = {
+        let world = h.world.0.borrow();
+        (world.opened[0].0, world.opened[1].0)
+    };
+    assert_eq!(h.front.wake_at(), Some(MS + FETCH_DEADLINE_NS));
+    let chunk = vec![b'x'; 1024];
+    for _ in 0..=MAX_METADATA / chunk.len() {
+        stream(
+            &mut h.front,
+            2 * MS,
+            &SocketStreamEvent::Data {
+                socket: big,
+                payload: &chunk,
+            },
+        );
+    }
+    assert_eq!(wsd_seen(&h.log).1, [(2, None)], "past the bound");
+    h.front.on_wake(MS + FETCH_DEADLINE_NS - 1).expect("wakes");
+    turn(&mut h.front, MS + FETCH_DEADLINE_NS - 1);
+    assert_eq!(wsd_seen(&h.log).1.len(), 1, "not before its deadline");
+    h.front.on_wake(MS + FETCH_DEADLINE_NS).expect("wakes");
+    turn(&mut h.front, MS + FETCH_DEADLINE_NS);
+    assert_eq!(wsd_seen(&h.log).1, [(2, None), (1, None)]);
+    assert_eq!(h.world.0.borrow().closed, [big, slow]);
+
+    let mut h = fetching(&[(1, NINE)]);
+    let socket = h.world.0.borrow().opened[0].0;
+    stream(
+        &mut h.front,
+        2 * MS,
+        &SocketStreamEvent::Connected { socket },
+    );
+    stream(
+        &mut h.front,
+        3 * MS,
+        &SocketStreamEvent::Closed {
+            socket,
+            reason: StreamCloseReason::Reset,
+        },
+    );
+    assert_eq!(wsd_seen(&h.log).1, [(1, None)]);
+    assert_eq!(h.world.0.borrow().closed, [socket]);
+}
+
+#[test]
+fn a_fetch_whose_connection_cannot_open_fails_at_once() {
+    let world = FakeHost::default();
+    world.0.borrow_mut().open_refused = true;
+    let mut h = harness_with(world, &[], Script::Fetches(&[(1, NINE)]));
+    started(&mut h, 0);
+    deliver(&mut h.front, MS, &wsd_from(9, true, b"hello"));
+    turn(&mut h.front, MS);
+    assert_eq!(wsd_seen(&h.log).1, [(1, None)]);
+}
+
+#[test]
+fn a_decoder_asking_past_its_fetches_or_reusing_an_id_is_condemned() {
+    let h = fetching(&[(1, NINE), (2, NINE), (3, NINE)]);
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 1);
+    let world = h.world.0.borrow();
+    let opened: Vec<SocketId> = world.opened.iter().map(|&(socket, ..)| socket).collect();
+    assert_eq!(world.closed, opened, "its fetches die with it");
+    drop(world);
+    let h = fetching(&[(1, NINE), (1, NINE)]);
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 1);
+}
+
+#[test]
+fn a_link_going_down_closes_its_fetches_and_owes_nothing_of_them() {
+    let mut h = fetching(&[(1, NINE)]);
+    let socket = h.world.0.borrow().opened[0].0;
+    link(&mut h.front, 2 * MS, V4, b"eth0", false);
+    assert_eq!(h.world.0.borrow().closed, [socket]);
+    stream(
+        &mut h.front,
+        3 * MS,
+        &SocketStreamEvent::Closed {
+            socket,
+            reason: StreamCloseReason::PeerClosed,
+        },
+    );
+    assert!(
+        wsd_seen(&h.log).1.is_empty(),
+        "the decoder dropped the engine that asked"
+    );
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 0);
+}
+
+#[test]
+fn end_to_end_a_computer_announcing_itself_is_fetched_named_and_answered() {
+    let (mut front, sink, world) = real();
+    let who = origin(
+        30,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let session = open(&mut front, &who);
+    let request = decode_id_reply(&call(
+        &mut front,
+        0,
+        &who,
+        &DiscoveryRequest::Start {
+            session,
+            query: Query::Computers,
+        },
+    ))
+    .expect("browsing computers");
+    let due = front.wake_at().expect("a probe is due");
+    front.on_wake(due).expect("no start due");
+    turn(&mut front, due);
+    assert!(
+        !world.0.borrow().wsd_sent.is_empty(),
+        "a probe went to the group"
+    );
+    let hello = wsd_fixtures::hello(1, 1);
+    deliver(&mut front, due + MS, &wsd_from(9, true, &hello));
+    turn(&mut front, due + MS);
+    let socket = {
+        let world = world.0.borrow();
+        assert_eq!(world.opened.len(), 1, "its metadata is fetched");
+        world.opened[0].0
+    };
+    front.on_stream(due + 2 * MS, &SocketStreamEvent::Connected { socket });
+    let metadata = wsd_fixtures::metadata("STUDY/Workgroup:HOME");
+    front.on_stream(
+        due + 2 * MS,
+        &SocketStreamEvent::Data {
+            socket,
+            payload: &metadata,
+        },
+    );
+    front.on_stream(
+        due + 3 * MS,
+        &SocketStreamEvent::Closed {
+            socket,
+            reason: StreamCloseReason::PeerClosed,
+        },
+    );
+    turn(&mut front, due + 3 * MS);
+    assert_eq!(
+        collected(&mut front, &who, session),
+        [(request, "computer", b"STUDY".to_vec())]
+    );
+    assert_eq!(sink.count(EVENT_WORKER_CRASHED), 0);
+}
+
+#[test]
+fn end_to_end_a_qnap_naming_its_host_is_fetched_where_it_answered_and_answered() {
+    let (mut front, sink, world) = real();
+    let who = origin(
+        30,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let session = open(&mut front, &who);
+    let request = decode_id_reply(&call(
+        &mut front,
+        0,
+        &who,
+        &DiscoveryRequest::Start {
+            session,
+            query: Query::Computers,
+        },
+    ))
+    .expect("browsing computers");
+    let due = front.wake_at().expect("a probe is due");
+    front.on_wake(due).expect("no start due");
+    turn(&mut front, due);
+    let asked = world
+        .0
+        .borrow()
+        .wsd_sent
+        .iter()
+        .find_map(|(_, _, payload)| probe_id(payload))
+        .expect("a probe went to the group");
+    let answer = qnap_probe_matches(Uuid::from_random([4; 16]), asked, 2_801_352_027);
+    let mut datagram = wsd_from(9, true, answer.as_bytes());
+    datagram.source.port = QNAP_SOURCE_PORT;
+    deliver(&mut front, due + MS, &datagram);
+    turn(&mut front, due + MS);
+    let (socket, to) = {
+        let world = world.0.borrow();
+        assert_eq!(world.opened.len(), 1, "its metadata is fetched");
+        let (socket, _, to) = world.opened[0];
+        (socket, to)
+    };
+    assert_eq!(
+        (to.port, &to.addr[..4]),
+        (QNAP_PORT, &NINE[..]),
+        "at the address it answered from, never at a name"
+    );
+    front.on_stream(due + 2 * MS, &SocketStreamEvent::Connected { socket });
+    let sent = sent_on(&world, socket);
+    let head = alloc::format!("POST {QNAP_PATH} HTTP/1.1\r\nHost: {QNAP_NAME}:{QNAP_PORT}\r\n");
+    assert!(
+        sent.starts_with(head.as_bytes()),
+        "{:?}",
+        core::str::from_utf8(&sent)
+    );
+    front.on_stream(
+        due + 2 * MS,
+        &SocketStreamEvent::Data {
+            socket,
+            payload: QNAP_METADATA,
+        },
+    );
+    front.on_stream(
+        due + 3 * MS,
+        &SocketStreamEvent::Closed {
+            socket,
+            reason: StreamCloseReason::PeerClosed,
+        },
+    );
+    turn(&mut front, due + 3 * MS);
+    assert_eq!(
+        collected(&mut front, &who, session),
+        [(request, "computer", QNAP_NAME.as_bytes().to_vec())]
+    );
+    assert_eq!(sink.count(EVENT_WORKER_CRASHED), 0);
+}
+
+#[test]
+fn the_longest_fetch_a_decoder_may_ask_for_is_built_whole() {
+    let mut world = FakeHost::default();
+    let path = alloc::format!("/{}", "p".repeat(MAX_PATH - 1));
+    let endpoint = "e".repeat(MAX_ENDPOINT);
+    let name = wsd_fixtures::longest_host_name();
+    let request = FetchRequest {
+        interface: iface(b"eth0"),
+        fetch: 1,
+        addr: IpAddr::V6(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff,
+        )),
+        port: u16::MAX,
+        path: &path,
+        endpoint: &endpoint,
+        name: Some(&name),
+    };
+    let Some(Flight::Flying { request: built, .. }) = open_fetch(&mut world, 0, &request) else {
+        panic!("built within its bound");
+    };
+    let text = core::str::from_utf8(&built).expect("text");
+    assert!(text.starts_with(&alloc::format!(
+        "POST {path} HTTP/1.1\r\nHost: {name}:65535\r\n"
+    )));
+    assert!(text.ends_with("</soap:Envelope>"), "{text}");
 }

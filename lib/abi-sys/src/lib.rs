@@ -88,6 +88,10 @@ const NUM_FILE_MAP: u64 = SyscallNumber::FILE_MAP.as_u16() as u64;
 const NUM_FILE_UNMAP: u64 = SyscallNumber::FILE_UNMAP.as_u16() as u64;
 const NUM_VOLUME_ATTACH: u64 = SyscallNumber::VOLUME_ATTACH.as_u16() as u64;
 const NUM_VOLUME_DETACH: u64 = SyscallNumber::VOLUME_DETACH.as_u16() as u64;
+const NUM_VOLUME_READ: u64 = SyscallNumber::VOLUME_READ.as_u16() as u64;
+const NUM_VOLUME_WRITE: u64 = SyscallNumber::VOLUME_WRITE.as_u16() as u64;
+const NUM_VOLUME_CTL: u64 = SyscallNumber::VOLUME_CTL.as_u16() as u64;
+const NUM_VOLUME_SERVE: u64 = SyscallNumber::VOLUME_SERVE.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
@@ -1061,17 +1065,19 @@ pub extern "C" fn sys_keyboard_read(seat: u64, buf: *mut c_void, len: usize) -> 
 /// fail-closed, and routes it by who currently holds that seat — a held
 /// seat's pointer channel, or consumed and discarded while unowned (the
 /// text console has no pointer consumer). The driver never chooses the
-/// destination.
+/// destination. `at_ns` is when the device reported the record, or
+/// `TAIRIX_POINTER_EDGE_UNTIMED` where the driver cannot say; the seat's
+/// chatter filter measures a button edge by it.
 #[must_use]
 #[export_name = "tairix_sys_pointer_inject"]
-pub extern "C" fn sys_pointer_inject(seat: u64, buf: *mut c_void, len: usize) -> u64 {
+pub extern "C" fn sys_pointer_inject(seat: u64, buf: *mut c_void, len: usize, at_ns: u64) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`,
     // the seat id, and the `(buf, len)` pair against the caller's address
     // space before reading it.
     unsafe {
         raw_syscall(
             NUM_POINTER_INJECT,
-            [seat, ptr_arg(buf), len as u64, 0, 0, 0],
+            [seat, ptr_arg(buf), len as u64, at_ns, 0, 0],
         )
     }
 }
@@ -1693,6 +1699,94 @@ pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i
             NUM_VOLUME_DETACH,
             [request as u64, request_len as u64, 0, 0, 0, 0],
         ))
+    }
+}
+
+/// `volume_read`: read `len` bytes of whole blocks from block `lba` of served
+/// volume `volume` into `buf` (`SyscallNumber::VOLUME_READ`). Returns a
+/// `TAIRIX_E_*` code; needs `TAIRIX_CAP_FS_SERVE` and a grant on the volume.
+#[must_use]
+#[export_name = "tairix_sys_volume_read"]
+pub extern "C" fn sys_volume_read(volume: u64, lba: u64, buf: *mut c_void, len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VOLUME_READ,
+            [volume, lba, ptr_arg(buf), len as u64, 0, 0],
+        ))
+    }
+}
+
+/// `volume_write`: write `len` bytes of whole blocks from `buf` to block
+/// `lba` of served volume `volume` (`SyscallNumber::VOLUME_WRITE`). Returns a
+/// `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_volume_write"]
+pub extern "C" fn sys_volume_write(volume: u64, lba: u64, buf: *mut c_void, len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VOLUME_WRITE,
+            [volume, lba, ptr_arg(buf), len as u64, 0, 0],
+        ))
+    }
+}
+
+/// `volume_ctl`: describe, flush or discard served volume `volume` as the
+/// `tairix_volume_ctl` frame at `request` asks, answering into `reply`
+/// (`SyscallNumber::VOLUME_CTL`). Returns the reply's length, or a
+/// `TAIRIX_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "tairix_sys_volume_ctl"]
+pub extern "C" fn sys_volume_ctl(
+    volume: u64,
+    request: *mut c_void,
+    request_len: usize,
+    reply: *mut c_void,
+    reply_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both pointer pairs.
+    unsafe {
+        raw_syscall(
+            NUM_VOLUME_CTL,
+            [
+                volume,
+                ptr_arg(request),
+                request_len as u64,
+                ptr_arg(reply),
+                reply_cap as u64,
+                0,
+            ],
+        )
+    }
+}
+
+/// `volume_serve`: serve, or refuse, the filesystem on served volume `volume`
+/// as the serve frame at `frame` says, writing the grant to `grant`
+/// (`SyscallNumber::VOLUME_SERVE`). Returns the grant's length, `0` for a
+/// refusal, or a `TAIRIX_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "tairix_sys_volume_serve"]
+pub extern "C" fn sys_volume_serve(
+    volume: u64,
+    frame: *mut c_void,
+    frame_len: usize,
+    grant: *mut c_void,
+    grant_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both pointer pairs.
+    unsafe {
+        raw_syscall(
+            NUM_VOLUME_SERVE,
+            [
+                volume,
+                ptr_arg(frame),
+                frame_len as u64,
+                ptr_arg(grant),
+                grant_cap as u64,
+                0,
+            ],
+        )
     }
 }
 
@@ -3945,6 +4039,10 @@ mod tests {
         (NUM_FILE_UNMAP, "file_unmap", 2),
         (NUM_VOLUME_ATTACH, "volume_attach", 2),
         (NUM_VOLUME_DETACH, "volume_detach", 2),
+        (NUM_VOLUME_READ, "volume_read", 4),
+        (NUM_VOLUME_WRITE, "volume_write", 4),
+        (NUM_VOLUME_CTL, "volume_ctl", 5),
+        (NUM_VOLUME_SERVE, "volume_serve", 5),
         (NUM_WAIT, "wait", 3),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
@@ -4044,7 +4142,7 @@ mod tests {
         (NUM_CALL_PEER_PORT, "call_peer_port", 3),
         (NUM_WAITSET_CLOSE, "waitset_close", 1),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
-        (NUM_POINTER_INJECT, "pointer_inject", 3),
+        (NUM_POINTER_INJECT, "pointer_inject", 4),
         (NUM_POINTER_READ, "pointer_read", 3),
         (NUM_FD_GRANT, "fd_grant", 4),
         (NUM_FD_REDEEM, "fd_redeem", 1),
@@ -4693,6 +4791,48 @@ mod tests {
         assert_eq!(number, NUM_SHARE_MAP);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(&args[1..], &[0; 5]);
+    }
+
+    #[test]
+    fn served_volume_calls_marshal_volume_range_and_buffers() {
+        let mut data = [0u8; 512];
+        let at = data.as_mut_ptr() as u64;
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_volume_read(9, 3, data.as_mut_ptr().cast(), 512), 0);
+        });
+        assert_eq!(number, NUM_VOLUME_READ);
+        assert_eq!(args, [9, 3, at, 512, 0, 0]);
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_volume_write(9, 4, data.as_mut_ptr().cast(), 512), 0);
+        });
+        assert_eq!(number, NUM_VOLUME_WRITE);
+        assert_eq!(args, [9, 4, at, 512, 0, 0]);
+        let mut reply = [0u8; 64];
+        let reply_at = reply.as_mut_ptr() as u64;
+        let (number, args) = capture(56, || {
+            let ret = sys_volume_ctl(
+                9,
+                data.as_mut_ptr().cast(),
+                24,
+                reply.as_mut_ptr().cast(),
+                64,
+            );
+            assert_eq!(ret, 56);
+        });
+        assert_eq!(number, NUM_VOLUME_CTL);
+        assert_eq!(args, [9, at, 24, reply_at, 64, 0]);
+        let (number, args) = capture(24, || {
+            let ret = sys_volume_serve(
+                9,
+                data.as_mut_ptr().cast(),
+                16,
+                reply.as_mut_ptr().cast(),
+                24,
+            );
+            assert_eq!(ret, 24);
+        });
+        assert_eq!(number, NUM_VOLUME_SERVE);
+        assert_eq!(args, [9, at, 16, reply_at, 24, 0]);
     }
 
     #[test]

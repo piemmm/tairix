@@ -1543,18 +1543,29 @@ fn a_command_states_itself_on_its_plate_and_never_on_an_edge() {
 fn title_is_sanitised() {
     let mut bar = TitleBar::new(furniture());
     bar.set_title("a\tb\nc");
-    assert_eq!(bar.title(), "a b c");
+    assert_eq!(bar.title(), "a\u{fffd}b\u{fffd}c");
 }
 
 /// A character that draws nothing yet reorders or hides the text beside it
-/// cannot make a title read as another: it shows as the gap it is.
+/// cannot make a title read as another: it shows as an escape, never as a gap
+/// a real space would look the same as.
 #[test]
 fn a_title_cannot_hide_or_reorder_what_it_says() {
     let mut bar = TitleBar::new(furniture());
     bar.set_title("Desk\u{200b}top \u{202e}etomer");
-    assert_eq!(bar.title(), "Desk top  etomer");
+    assert_eq!(bar.title(), "Desk\u{fffd}top \u{fffd}etomer");
     bar.set_app_name("Desk\u{2066}top");
-    assert_eq!(bar.app_name(), "Desk top");
+    assert_eq!(bar.app_name(), "Desk\u{fffd}top");
+    bar.set_title("Re\u{301}\u{301}sume\u{301}");
+    assert_eq!(bar.title(), "Re\u{301}\u{fffd}sume\u{301}");
+}
+
+/// Laying a label out costs no more however long the text the bar is handed.
+#[test]
+fn a_title_is_kept_to_its_bound() {
+    let mut bar = TitleBar::new(furniture());
+    bar.set_title(&"\u{5b57}".repeat(4096));
+    assert_eq!(bar.title().chars().count(), crate::window::MAX_LABEL_CHARS);
 }
 
 #[test]

@@ -15,6 +15,24 @@ use crate::{
 
 // --- key grammar ---------------------------------------------------------
 
+/// A combining mark past its sequence's limits — a doubled accent — is
+/// escaped as a hidden character is, so two values never look alike, and a
+/// value holding one is never offered back as text.
+#[test]
+fn a_mark_past_its_sequences_limits_is_escaped_and_never_offered_back() {
+    let doubled = "e\u{301}\u{301}x";
+    assert_eq!(
+        attr::display_value(doubled.as_bytes()),
+        "e\u{301}\\xcc\\x81x"
+    );
+    assert_eq!(attr::text_value(doubled.as_bytes()), None);
+    assert_eq!(
+        attr::text_value("e\u{301}x".as_bytes()),
+        Some("e\u{301}x"),
+        "one accent is text"
+    );
+}
+
 #[test]
 fn a_character_that_hides_or_reorders_text_is_escaped_too() {
     assert_eq!(attr::text_value("rlo\u{202e}gpj".as_bytes()), None);

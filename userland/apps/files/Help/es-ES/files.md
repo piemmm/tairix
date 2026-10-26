@@ -23,11 +23,25 @@ nunca se adivina.
 
 El escritorio inicia el explorador por usted y lo mantiene en la barra de
 iconos: el menú de su ranura lista sus propios lugares y todo lo montado, y
-elegir uno abre allí una ventana; *Configuración…* va al final. Un clic en
-la ranura abre una donde indique la configuración. Pedir una carpeta que ya
-tiene ventana trae esa ventana al frente en lugar de abrir otra. Esa copia
-no tiene fila *Salir*: forma parte del escritorio, y cerrar sus ventanas
-simplemente la retira.
+elegir uno abre allí una ventana; *Red* y *Configuración…* van al final. Un
+clic en la ranura abre una donde indique la configuración. Pedir una carpeta
+que ya tiene ventana trae esa ventana al frente en lugar de abrir otra. Esa
+copia no tiene fila *Salir*: forma parte del escritorio, y cerrar sus
+ventanas simplemente la retira.
+
+*Red*, en el menú de la ranura justo encima de *Configuración…*, abre una
+ventana con los ordenadores de la red local que comparten archivos. Cada uno
+aparece con su nombre, la dirección en la que se le alcanza, su grupo de
+trabajo o dominio y lo que es, y la lista se completa a medida que responden
+los ordenadores. La red solo se explora mientras una ventana la muestra. Un
+ordenador que ha dejado de responder aparece atenuado hasta que se olvida;
+un nombre que mezcla alfabetos como lo necesita la imitación de otro nombre
+lleva una señal de advertencia en lugar de su imagen; y cuando un ordenador
+ofrece más que unas pocas entradas, el resto se cuenta en una fila propia en
+vez de desplazar a los demás. Los nombres de la red los elige quien gestiona
+cada ordenador, así que un nombre nunca prueba qué ordenador está mirando.
+Conectarse a los recursos compartidos de un ordenador no está disponible en
+este sistema, y abrir uno lo indica.
 
 Iniciado por su nombre desde un shell (o abierto sobre una carpeta desde el
 escritorio), es en cambio una aplicación ordinaria: una ventana, y termina

@@ -19,7 +19,10 @@
 //! tail, under the launching user's identity, so composing this engine grants
 //! nothing (the read-only picker never launches at all).
 
+use alloc::boxed::Box;
 use alloc::string::String;
+
+use crate::network::NetworkEndpoint;
 
 /// What an activation should do when the entry turns out to be an application
 /// bundle (`<Name>.app`).
@@ -70,4 +73,8 @@ pub enum Activation {
         /// The file's validated absolute path.
         path: String,
     },
+    /// The item is a network endpoint that can be reached: the caller mounts
+    /// it as it was displayed (`plans/ZEROCONF.md` §6.3). The engine names the
+    /// endpoint and mounts nothing itself.
+    MountEndpoint(Box<NetworkEndpoint>),
 }

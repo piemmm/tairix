@@ -58,6 +58,7 @@ pub mod node;
 pub mod path;
 pub mod perm;
 pub mod retained;
+pub mod served;
 pub mod service;
 #[cfg(test)]
 pub(crate) mod test_volume;
@@ -88,7 +89,9 @@ pub use service::{
     FilesystemService, LookedUp, NullFilesystemService, Opened, ReaddirEntry, NULL_FILESYSTEM,
 };
 pub use vfs::Vfs;
-pub use volsvc::{NullVolumeService, VolumeService, NULL_VOLUME_SERVICE};
+pub use volsvc::{
+    ChunkSink, ChunkSource, NullVolumeService, ServeChannel, VolumeService, NULL_VOLUME_SERVICE,
+};
 pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 
 use core::fmt;
@@ -301,6 +304,9 @@ pub enum VfsError {
     /// yet served, never stood in for by a guess. Only the projections shown
     /// beneath its floor are reached through it meanwhile.
     Unserved,
+    /// The caller was being terminated, so a served volume's answer was not
+    /// waited for.
+    Interrupted,
 }
 
 impl VfsError {
@@ -347,6 +353,7 @@ impl VfsError {
             Self::Stale => Errno::Stale,
             Self::LimitExceeded => Errno::LimitExceeded,
             Self::Unserved => Errno::NotImplemented,
+            Self::Interrupted => Errno::Interrupted,
         }
     }
 }
@@ -376,6 +383,7 @@ impl fmt::Display for VfsError {
             Self::Stale => "the handle no longer reaches what it named",
             Self::LimitExceeded => "more entries than the walk allows",
             Self::Unserved => "no driver serves the volume yet",
+            Self::Interrupted => "caller terminated before the volume answered",
         };
         f.write_str(message)
     }
@@ -408,6 +416,7 @@ mod tests {
         assert_eq!(VfsError::TooManyLinks.to_errno(), Errno::TooManyLinks);
         assert_eq!(VfsError::Io.to_errno(), Errno::DeviceFault);
         assert_eq!(VfsError::Unserved.to_errno(), Errno::NotImplemented);
+        assert_eq!(VfsError::Interrupted.to_errno(), Errno::Interrupted);
     }
 
     #[test]
@@ -429,6 +438,7 @@ mod tests {
             VfsError::NoSpace,
             VfsError::NotSupported,
             VfsError::Unserved,
+            VfsError::Interrupted,
         ] {
             assert!(!alloc::format!("{e}").is_empty());
         }

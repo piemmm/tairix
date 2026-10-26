@@ -18,6 +18,7 @@
 //! record refuses the whole listing rather than showing a partial or guessed
 //! one.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -25,6 +26,8 @@ use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FS_PATH_MAX};
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
+use tairix_util::utf8::shown;
+use tairix_visible::shown_chars;
 
 use crate::entry::{Entry, EntryKind, LinkResolution};
 use crate::source::{DirectorySource, Listing, Probe};
@@ -94,16 +97,24 @@ impl<F: FnMut(&str) -> Option<LinkInfo>> LinkReader for F {
 /// tests' tree keys, and the VFS fetch all go through it, so the three can
 /// never disagree about what a component list names.
 #[must_use]
-pub fn spell_absolute_path(components: &[String]) -> String {
+pub fn spell_absolute_path<S: AsRef<str>>(components: &[S]) -> String {
     if components.is_empty() {
         return String::from("/");
     }
-    let mut path = String::new();
+    let mut path = String::with_capacity(spelled_len(components));
     for component in components {
         path.push('/');
-        path.push_str(component);
+        path.push_str(component.as_ref());
     }
     path
+}
+
+/// The length [`spell_absolute_path`] spells non-empty `components` in.
+fn spelled_len<S: AsRef<str>>(components: &[S]) -> usize {
+    components
+        .iter()
+        .map(|component| 1 + component.as_ref().len())
+        .sum()
 }
 
 /// Spell root-first `components` as the location text a window title carries,
@@ -120,32 +131,29 @@ pub fn spell_absolute_path(components: &[String]) -> String {
 /// boundary. A `budget` too small even for the mark and the leaf yields the
 /// longest prefix of the leaf that fits — a shortened name rather than nothing.
 ///
-/// A control character in a name — which the kernel refuses to *create* but a
-/// foreign volume can still carry — is shown as [`char::REPLACEMENT_CHARACTER`],
-/// so the text is always one the bounded title field accepts and a hostile name
-/// cannot leave a window permanently unable to state where it is. Only the title
-/// is spelled this way: [`spell_absolute_path`] stays byte-exact, because it
-/// names a real path to open.
+/// Each name is [`shown`] as a name from elsewhere is — a foreign volume can
+/// carry characters the kernel refuses to create — so the text is one the
+/// bounded title field accepts and says what is there. Only the title is
+/// spelled this way: [`spell_absolute_path`] stays byte-exact, because it names
+/// a real path to open.
 #[must_use]
 pub fn spell_title_location(components: &[String], budget: usize) -> String {
-    let shown: Option<Vec<String>> = components
-        .iter()
-        .any(|name| name.chars().any(char::is_control))
-        .then(|| components.iter().map(|name| shown_name(name)).collect());
-    let components = shown.as_deref().unwrap_or(components);
-    let full = spell_absolute_path(components);
+    let names: Vec<Cow<'_, str>> = components.iter().map(|name| shown(name)).collect();
+    let full = spell_absolute_path(&names);
     if full.len() <= budget {
         return full;
     }
-    for skip in 1..components.len() {
-        let tail = spell_absolute_path(&components[skip..]);
-        if ELLIPSIS.len().saturating_add(tail.len()) <= budget {
-            let mut fitted = String::from(ELLIPSIS);
-            fitted.push_str(&tail);
+    let mut tail = full.len();
+    for dropped in names.iter().take(names.len().saturating_sub(1)) {
+        tail -= spelled_len(core::slice::from_ref(dropped));
+        if ELLIPSIS.len().saturating_add(tail) <= budget {
+            let mut fitted = String::with_capacity(ELLIPSIS.len() + tail);
+            fitted.push_str(ELLIPSIS);
+            fitted.push_str(&full[full.len() - tail..]);
             return fitted;
         }
     }
-    let leaf = components.last().map_or("", String::as_str);
+    let leaf = names.last().map_or("", |name| name.as_ref());
     let Some(room) = budget.checked_sub(ELLIPSIS.len().saturating_add(1)) else {
         return String::from(cut_to_bytes(leaf, budget));
     };
@@ -153,6 +161,17 @@ pub fn spell_title_location(components: &[String], budget: usize) -> String {
     fitted.push('/');
     fitted.push_str(cut_to_bytes(leaf, room));
     fitted
+}
+
+/// What a title calls a browser's `folder` within `budget` bytes: the folder as
+/// [`spell_title_location`] spells it, or the network's name where it shows no
+/// folder ([`Browser::folder`](crate::Browser::folder)).
+#[must_use]
+pub fn spell_title_of(folder: Option<&[String]>, budget: usize) -> String {
+    match folder {
+        Some(components) => spell_title_location(components, budget),
+        None => String::from(cut_to_bytes(crate::network::NETWORK_TITLE, budget)),
+    }
 }
 
 /// What leads a document window's title while the document holds changes.
@@ -188,18 +207,13 @@ pub fn write_document_title(
     title.push_str(app);
 }
 
-/// Append `name` to `out` as a reader is shown it, in at most `budget` bytes:
-/// every control character shown as [`char::REPLACEMENT_CHARACTER`], and a
+/// Append `name` to `out` as [`shown`] shows it, in at most `budget` bytes: a
 /// name too long given up in the middle behind an [`ELLIPSIS`], its extension
 /// kept whole when that leaves its start at least as much room —
 /// `averylongn….png` — since the extension says what kind of file it is.
-///
-/// A bounded field and a name are different sizes, so a long name is
-/// shortened rather than left to make the whole text unacceptable; and a
-/// control character in it would make any field refuse it.
 pub(crate) fn push_shown_name(out: &mut String, name: &str, budget: usize) {
     if shown_len(name) <= budget {
-        out.extend(name.chars().map(shown));
+        out.extend(shown_chars(name));
         return;
     }
     let Some(room) = budget.checked_sub(ELLIPSIS.len()) else {
@@ -212,7 +226,7 @@ pub(crate) fn push_shown_name(out: &mut String, name: &str, budget: usize) {
     let start = &name[..name.len() - ending.len()];
     push_shown_prefix(out, start, room - shown_len(ending));
     out.push_str(ELLIPSIS);
-    out.extend(ending.chars().map(shown));
+    out.extend(shown_chars(ending));
 }
 
 /// `name`'s extension with its dot — `.png` — or `None` when it has none: its
@@ -222,38 +236,22 @@ fn extension(name: &str) -> Option<&str> {
     (dot > 0 && dot + 1 < name.len()).then(|| &name[dot..])
 }
 
-/// How many bytes `text` takes as a reader is shown it.
+/// How many bytes `text` takes as [`shown`] shows it.
 fn shown_len(text: &str) -> usize {
-    text.chars().map(|ch| shown(ch).len_utf8()).sum()
+    shown_chars(text).map(char::len_utf8).sum()
 }
 
-/// Append the longest prefix of `text`, as a reader is shown it, that fits in
+/// Append the longest prefix of `text`, as [`shown`] shows it, that fits in
 /// `budget` bytes.
 fn push_shown_prefix(out: &mut String, text: &str, budget: usize) {
     let mut used = 0;
-    for ch in text.chars().map(shown) {
+    for ch in shown_chars(text) {
         used += ch.len_utf8();
         if used > budget {
             break;
         }
         out.push(ch);
     }
-}
-
-/// `ch` as a reader is shown it: a control character as
-/// [`char::REPLACEMENT_CHARACTER`], which a display can render, rather than
-/// the byte itself.
-fn shown(ch: char) -> char {
-    if ch.is_control() {
-        char::REPLACEMENT_CHARACTER
-    } else {
-        ch
-    }
-}
-
-/// `name` with every character shown as a reader is shown it.
-fn shown_name(name: &str) -> String {
-    name.chars().map(shown).collect()
 }
 
 /// The longest prefix of `text` that fits in `budget` bytes, cut on a `char`

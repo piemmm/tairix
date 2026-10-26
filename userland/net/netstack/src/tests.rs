@@ -1582,6 +1582,7 @@ fn the_same_budget_carries_many_idle_sockets_or_few_busy_ones() {
         let connect = encode_request(&SocketRequest::Connect {
             socket: id,
             peer: v4_addr(10, 0, 2, 9, 9000 + u16::try_from(i % 5000).expect("fits")),
+            interface: None,
         });
         if busy
             .serve(
@@ -1638,6 +1639,7 @@ fn a_connections_windows_are_sized_from_what_the_share_has_left() {
         let connect = encode_request(&SocketRequest::Connect {
             socket: id,
             peer: v4_addr(10, 0, 2, 9, 9000 + i),
+            interface: None,
         });
         if svc
             .serve(
@@ -1783,6 +1785,7 @@ fn enough_principals_cannot_jointly_outgrow_the_stack_budget() {
         let connect = encode_request(&SocketRequest::Connect {
             socket: id,
             peer: v4_addr(10, 0, 2, 9, 9000 + u16::from(who)),
+            interface: None,
         });
         let _ = svc.serve(
             &mut stack,
@@ -2134,6 +2137,7 @@ fn connected_echo_socket(svc: &mut SocketService, stack: &mut Netstack) -> (Sock
     let request = encode_request(&SocketRequest::Connect {
         socket: id,
         peer: v4_addr(10, 0, 2, 2, 0),
+        interface: None,
     });
     svc.serve(
         stack,
@@ -2374,6 +2378,7 @@ fn a_connected_socket_only_receives_from_its_peer() {
     let request = encode_request(&SocketRequest::Connect {
         socket: id,
         peer: v4_addr(10, 0, 2, 2, 40000),
+        interface: None,
     });
     svc.serve(
         &mut stack,
@@ -2640,6 +2645,7 @@ fn defence_counters_survive_a_listener_close() {
         for frame in &segments {
             let io = svc.on_tcp_segment(
                 &mut stack,
+                name("wan"),
                 IpAddr::V4(V4_B),
                 IpAddr::V4(V4_A),
                 tairix_net::addr::Ecn::NotEct,
@@ -2756,6 +2762,7 @@ fn feed_bare_syn(
     buf.truncate(n);
     svc.on_tcp_segment(
         stack,
+        name("wan"),
         IpAddr::V4(V4_B),
         IpAddr::V4(V4_A),
         tairix_net::addr::Ecn::NotEct,
@@ -3494,8 +3501,16 @@ fn pump_client_into(
                     ecn,
                     segment,
                 } => {
-                    let io =
-                        svc.on_tcp_segment(ns, *source, *destination, *ecn, segment, now, &secret);
+                    let io = svc.on_tcp_segment(
+                        ns,
+                        outcome.interface,
+                        *source,
+                        *destination,
+                        *ecn,
+                        segment,
+                        now,
+                        &secret,
+                    );
                     stage_batch(fs, &io.tx);
                 }
                 _ => {}
@@ -3675,6 +3690,7 @@ impl<'r> StreamFixture<'r> {
                 SocketRequest::Connect {
                     socket: sid,
                     peer: sockaddr_v4(V4_B, PEER_PORT),
+                    interface: None,
                 },
                 &mut response,
             )
@@ -3690,6 +3706,41 @@ impl<'r> StreamFixture<'r> {
             "client observed the connection establish"
         );
         sid
+    }
+
+    /// Open a socket of `sock_type` and return its handle.
+    fn open(&mut self, sock_type: SocketType) -> u32 {
+        let mut response = [0u8; 64];
+        let reply = self
+            .serve(
+                SocketRequest::Socket {
+                    family: NetAddrFamily::V4,
+                    sock_type,
+                    deliver_port: DELIVER_PORT,
+                },
+                &mut response,
+            )
+            .expect("open");
+        decode_socket_reply(&response[..reply.len]).expect("socket id")
+    }
+
+    /// Connect `socket` to the peer echo server over `interface`.
+    fn connect_over(
+        &mut self,
+        socket: u32,
+        interface: Option<[u8; IF_NAME_LEN]>,
+    ) -> Result<crate::SocketReply, Errno> {
+        let mut response = [0u8; 64];
+        let reply = self.serve(
+            SocketRequest::Connect {
+                socket,
+                peer: sockaddr_v4(V4_B, PEER_PORT),
+                interface,
+            },
+            &mut response,
+        )?;
+        decode_status_reply(&response[..reply.len])?;
+        Ok(reply)
     }
 
     /// Send `payload` on `socket`, asserting the whole of it was accepted,
@@ -5995,6 +6046,7 @@ fn spend_share_to_a_partial_window(fx: &mut StreamFixture<'_>, owner: ProcId, sh
             SocketRequest::Connect {
                 socket: id,
                 peer: sockaddr_v4(V4_B, 9000 + spent),
+                interface: None,
             },
             &mut response,
         )
@@ -6237,6 +6289,7 @@ fn the_multicast_dns_port_and_groups_are_reserved_to_the_discovery_service() {
             &SocketRequest::Connect {
                 socket: id,
                 peer: mdns_group_v4(),
+                interface: None,
             }
         ),
         Err(Errno::PermissionDenied)
@@ -6273,6 +6326,93 @@ fn the_multicast_dns_port_and_groups_are_reserved_to_the_discovery_service() {
         ),
         Ok(())
     );
+}
+
+/// WS-Discovery's port and groups are the discovery service's, as multicast
+/// DNS's are, while the same groups on another port are not.
+#[test]
+fn the_ws_discovery_port_and_groups_are_reserved_to_the_discovery_service() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let who = net_caller_as(1000, 1);
+    let id = open_socket(&mut svc, &mut stack, &who, SocketType::Datagram).expect("open");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Bind {
+                socket: id,
+                local: v4_addr(0, 0, 0, 0, 3702),
+            }
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    let send = |socket, dest| SocketRequest::Send {
+        socket,
+        dest: Some(dest),
+        interface: None,
+        payload: b"<probe/>",
+    };
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &send(id, v4_addr(239, 255, 255, 250, 3702))
+        ),
+        Err(Errno::PermissionDenied)
+    );
+    let v6 = open_socket_v6(&mut svc, &mut stack, &who);
+    let group_v6 = SocketAddr {
+        family: NetAddrFamily::V6,
+        addr: tairix_net::wsd::GROUP_V6.octets(),
+        port: 3702,
+    };
+    assert_eq!(
+        serve_req(&mut svc, &mut stack, &who, &send(v6, group_v6)),
+        Err(Errno::PermissionDenied)
+    );
+    assert_ne!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &send(id, v4_addr(239, 255, 255, 250, 1900))
+        ),
+        Err(Errno::PermissionDenied),
+        "the group on another protocol's port is not reserved"
+    );
+    let discovery = net_caller_as(tairix_abi::discovery_ipc::DISCOVERYD_UID, 2);
+    let id = open_socket(&mut svc, &mut stack, &discovery, SocketType::Datagram).expect("open");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &discovery,
+            &SocketRequest::Bind {
+                socket: id,
+                local: v4_addr(0, 0, 0, 0, 3702),
+            }
+        ),
+        Ok(())
+    );
+}
+
+/// A datagram socket of the IPv6 family.
+fn open_socket_v6(svc: &mut SocketService, stack: &mut Netstack, who: &Caller) -> u32 {
+    let mut ent = seeded_entropy();
+    let sink = RecordingSink::new();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V6,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let out = svc
+        .serve(stack, who, &sink, &mut ent, &request, &mut reply, t(2))
+        .expect("open");
+    decode_socket_reply(&reply[..out.len]).expect("socket id")
 }
 
 /// `routed_stack` plus a second interface, `lan`, on another subnet.
@@ -7021,4 +7161,303 @@ fn a_family_is_told_up_only_where_it_has_a_source_to_speak_from() {
     }
     assert_eq!(tell(&mut stack, &mut svc, usize::MAX).0, []);
     assert!(v6_up(&stack), "the link-local is past DAD");
+}
+
+/// A stream connects over the link its client names, so a peer learned on one
+/// link is never reached across another.
+#[test]
+fn a_stream_connects_over_the_link_it_names() {
+    let mut region = vec![0u8; 1 << 16];
+    let mut fixture = StreamFixture::new(&mut region);
+    let socket = fixture.open(SocketType::Stream);
+    let reply = fixture
+        .connect_over(socket, Some(name("wan")))
+        .expect("the named link reaches the peer");
+    assert!(!reply.tx.is_empty(), "the connection starts at once");
+    assert!(
+        reply.tx.iter().all(|(link, _)| *link == name("wan")),
+        "the SYN leaves by the named link"
+    );
+}
+
+/// A link that cannot reach the peer, or that does not exist, refuses the
+/// connection rather than choosing another, and leaves the socket to connect
+/// again.
+#[test]
+fn a_named_link_that_cannot_reach_the_peer_refuses_the_connection() {
+    let mut region = vec![0u8; 1 << 16];
+    let mut fixture = StreamFixture::new(&mut region);
+    fixture
+        .ns
+        .add_interface(
+            name("lan0"),
+            NetIfKind::Ethernet,
+            facts(MAC_B),
+            IID_B,
+            9,
+            0,
+            t(0),
+        )
+        .expect("an unaddressed second interface");
+    let socket = fixture.open(SocketType::Stream);
+    for link in [name("lan0"), name("wlan9")] {
+        assert_eq!(
+            fixture.connect_over(socket, Some(link)).err(),
+            Some(Errno::NetworkUnreachable)
+        );
+    }
+    assert!(fixture.connect_over(socket, None).is_ok());
+}
+
+/// A datagram names its link per send, so naming one for its peer is refused.
+#[test]
+fn a_datagram_socket_names_no_link_when_it_connects() {
+    let mut region = vec![0u8; 1 << 16];
+    let mut fixture = StreamFixture::new(&mut region);
+    let socket = fixture.open(SocketType::Datagram);
+    assert_eq!(
+        fixture.connect_over(socket, Some(name("wan"))).err(),
+        Some(Errno::OutOfRange)
+    );
+    assert!(fixture.connect_over(socket, None).is_ok());
+}
+
+/// `stack` with each of `links`' IPv6 link-locals past duplicate address
+/// detection, so any of them may send from one.
+fn past_dad(mut stack: Netstack, links: &[&str]) -> Netstack {
+    for link in links {
+        for at in [2, 4] {
+            let mut out = StackOutput::default();
+            stack
+                .interface_mut(name(link))
+                .expect("iface")
+                .stack_mut()
+                .advance(t(at), &mut out);
+        }
+    }
+    stack
+}
+
+fn two_link_local_stack() -> Netstack {
+    past_dad(two_link_stack(), &["wan", "lan"])
+}
+
+/// A neighbour's link-local address, the same on both links.
+const NEIGHBOUR_IID: [u8; 8] = [0x02, 0, 0, 0xff, 0xfe, 0, 0, 0x99];
+
+/// A bare SYN from the neighbour's link-local address to `local`, port
+/// `to`, as it arrives on `arrival`.
+fn link_local_syn(
+    svc: &mut SocketService,
+    stack: &mut Netstack,
+    arrival: &str,
+    local: tairix_net::addr::Ipv6Addr,
+    to: u16,
+) -> crate::StreamIo {
+    let neighbour = link_local(NEIGHBOUR_IID);
+    let meta = tairix_net::tcp::TcpSegmentMeta {
+        source_port: 41_000,
+        destination_port: to,
+        seq: tairix_net::tcp::SeqNumber::new(0x7000),
+        ack: tairix_net::tcp::SeqNumber::new(0),
+        flags: tairix_net::tcp::TcpFlags::SYN,
+        window: 1024,
+        urgent: 0,
+        options: tairix_net::tcp::TcpOptions::default(),
+    };
+    let pseudo = Pseudo::V6 {
+        source: neighbour,
+        destination: local,
+    };
+    let mut buf = vec![0u8; 128];
+    let n = tairix_net::tcp::write(pseudo, &meta, &[], &mut buf).expect("serialise SYN");
+    buf.truncate(n);
+    svc.on_tcp_segment(
+        stack,
+        name(arrival),
+        IpAddr::V6(neighbour),
+        IpAddr::V6(local),
+        tairix_net::addr::Ecn::NotEct,
+        &buf,
+        t(5),
+        &test_cookie_secret(),
+    )
+}
+
+/// A link-local address names a host only on its link, so a listener answers
+/// a SYN from one on the link it came in on — never the first that could
+/// reach the address — and the same address on two links is two peers.
+#[test]
+fn a_link_local_syn_is_answered_on_its_own_link_and_counted_apart_from_anothers() {
+    let mut svc = socket_service();
+    let mut stack = two_link_local_stack();
+    let who = net_caller(1);
+    let listener = open_in(
+        &mut svc,
+        &mut stack,
+        &who,
+        NetAddrFamily::V6,
+        SocketType::Stream,
+    )
+    .expect("open");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Bind {
+            socket: listener,
+            local: SocketAddr {
+                family: NetAddrFamily::V6,
+                addr: [0u8; 16],
+                port: 8300,
+            },
+        },
+    )
+    .expect("bind");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Listen { socket: listener },
+    )
+    .expect("listen");
+    for (link, local) in [("lan", IID_B), ("wan", IID_A)] {
+        let answered = link_local_syn(&mut svc, &mut stack, link, link_local(local), 8300);
+        assert_eq!(
+            egress_of(&answered.tx),
+            [name(link)],
+            "answered where it was asked"
+        );
+    }
+    assert_eq!(
+        svc.defence_counters().half_open_started,
+        2,
+        "one neighbour address on two links is two handshakes"
+    );
+}
+
+/// With one link a link-local address can be on, that link is its default
+/// zone: a stream, a datagram and an echo to it need name none.
+#[test]
+fn a_link_local_peer_on_the_only_link_is_reached_without_naming_it() {
+    let mut svc = socket_service();
+    let mut stack = past_dad(routed_stack(), &["wan"]);
+    let who = net_caller(1);
+    let peer = SocketAddr {
+        family: NetAddrFamily::V6,
+        addr: link_local(NEIGHBOUR_IID).octets(),
+        port: 80,
+    };
+    let stream = open_in(
+        &mut svc,
+        &mut stack,
+        &who,
+        NetAddrFamily::V6,
+        SocketType::Stream,
+    )
+    .expect("open");
+    let mut ent = seeded_entropy();
+    let mut reply = [0u8; 64];
+    let connect = SocketRequest::Connect {
+        socket: stream,
+        peer,
+        interface: None,
+    };
+    let out = svc
+        .serve(
+            &mut stack,
+            &who,
+            &RecordingSink::new(),
+            &mut ent,
+            &encode_request(&connect),
+            &mut reply,
+            t(5),
+        )
+        .expect("the default zone");
+    assert_eq!(egress_of(&out.tx), [name("wan")]);
+    let mut stack = two_link_local_stack();
+    let datagram = open_in(
+        &mut svc,
+        &mut stack,
+        &who,
+        NetAddrFamily::V6,
+        SocketType::Datagram,
+    )
+    .expect("open");
+    let send = SocketRequest::Send {
+        socket: datagram,
+        dest: Some(peer),
+        interface: None,
+        payload: b"x",
+    };
+    assert_eq!(
+        serve_req(&mut svc, &mut stack, &who, &send),
+        Err(Errno::OutOfRange),
+        "two links could carry it"
+    );
+    let pinned = SocketRequest::Send {
+        socket: datagram,
+        dest: Some(peer),
+        interface: Some(name("lan")),
+        payload: b"x",
+    };
+    assert_eq!(serve_req(&mut svc, &mut stack, &who, &pinned), Ok(()));
+}
+
+/// A stream to a link-local address must name the link it is on where more
+/// than one could carry it: the connection is refused rather than sent out
+/// whichever link is first.
+#[test]
+fn a_stream_to_a_link_local_peer_names_its_link() {
+    let mut svc = socket_service();
+    let mut stack = two_link_local_stack();
+    let who = net_caller(1);
+    let peer = SocketAddr {
+        family: NetAddrFamily::V6,
+        addr: link_local(NEIGHBOUR_IID).octets(),
+        port: 80,
+    };
+    let connect = |socket, interface| SocketRequest::Connect {
+        socket,
+        peer,
+        interface,
+    };
+    let unnamed = open_in(
+        &mut svc,
+        &mut stack,
+        &who,
+        NetAddrFamily::V6,
+        SocketType::Stream,
+    )
+    .expect("open");
+    assert_eq!(
+        serve_req(&mut svc, &mut stack, &who, &connect(unnamed, None)),
+        Err(Errno::OutOfRange)
+    );
+    let named = open_in(
+        &mut svc,
+        &mut stack,
+        &who,
+        NetAddrFamily::V6,
+        SocketType::Stream,
+    )
+    .expect("open");
+    let mut ent = seeded_entropy();
+    let mut reply = [0u8; 64];
+    let out = svc
+        .serve(
+            &mut stack,
+            &who,
+            &RecordingSink::new(),
+            &mut ent,
+            &encode_request(&connect(named, Some(name("lan")))),
+            &mut reply,
+            t(5),
+        )
+        .expect("connect over lan");
+    assert_eq!(
+        egress_of(&out.tx),
+        [name("lan")],
+        "the SYN leaves by the named link"
+    );
 }

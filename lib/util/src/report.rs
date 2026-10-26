@@ -10,6 +10,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
+use tairix_visible::Faithful;
+
 /// Most lines a report holds. A fixed containment bound: past it the report
 /// says it stops.
 pub const MAX_REPORT_LINES: usize = 4096;
@@ -163,16 +165,21 @@ fn cut(text: &mut String, most: usize) {
 }
 
 /// Append `bytes` — text the file carries, in no encoding it promises — to
-/// `line`: valid UTF-8 as it is, every control character and stray byte as
-/// `\xNN`, and at most `most` bytes of it before `…`.
+/// `line`: valid UTF-8 as it is, each stray byte as `\xNN`, each character a
+/// faithful rendering escapes ([`Faithful`]) as `\xNN` below U+0100 and
+/// `\u{N}` above, and at most `most` bytes of it before `…`.
 pub fn push_clean(line: &mut String, bytes: &[u8], most: usize) {
     let start = line.len();
     for chunk in bytes.utf8_chunks() {
+        let mut faithful = Faithful::default();
         for ch in chunk.valid().chars() {
-            if ch.is_control() {
-                let _ = write!(line, "\\x{:02x}", u32::from(ch) & 0xff);
-            } else {
+            let code = u32::from(ch);
+            if !faithful.escapes(ch) {
                 line.push(ch);
+            } else if code <= 0xff {
+                let _ = write!(line, "\\x{code:02x}");
+            } else {
+                let _ = write!(line, "\\u{{{code:x}}}");
             }
             if line.len() - start > most {
                 cut_from(line, start, most);
@@ -273,6 +280,13 @@ mod tests {
         let mut shown = String::new();
         push_clean(&mut shown, b"a\x07b\xffc\n", 64);
         assert_eq!(shown, "a\\x07b\\xffc\\x0a");
+        shown.clear();
+        push_clean(
+            &mut shown,
+            "gnp\u{202e}.exe\u{ad}e\u{301}\u{301}".as_bytes(),
+            64,
+        );
+        assert_eq!(shown, "gnp\\u{202e}.exe\\xade\u{301}\\u{301}");
         let mut cut = String::new();
         push_clean(&mut cut, &[b'x'; 40], 8);
         assert_eq!(cut, "xxxxxxxx\u{2026}");

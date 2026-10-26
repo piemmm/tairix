@@ -1,6 +1,6 @@
 [package]
 name = "tairix-discovery"
-description = "TAIRiX link-local service discovery client: sessions, typed requests and incremental answers over the `discovery-v1` channel to `discoveryd` (`plans/ZEROCONF.md` Z4)."
+description = "TAIRiX link-local service discovery client: sessions, typed requests and incremental answers over the `discovery-v1` channel to `discoveryd`, the walk that follows what the segment offers, and the storage catalogue (`plans/ZEROCONF.md` Z4, Z8)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,6 +23,9 @@ program = ["dep:tairix-rt"]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # Fallible allocation for the session's buffers.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The names a walk follows: wire-form names and which of them the link
+# answers for.
+tairix-net = { path = "../net", version = "=0.0.0" }
 
 # For the `program` feature only: the IPC call, the private delivery port and
 # wait-set the doorbell parks on, and the clock.

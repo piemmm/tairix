@@ -15,6 +15,8 @@ workspace = true
 # The one definition of time's units: the seconds operand is scaled by its
 # nanoseconds-per-second, and the tests count durations in it.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# The one rule for a hidden character, which `utf8::shown` and `quote` escape
-# text from elsewhere by.
+# The one rule for showing text from elsewhere, which `utf8::shown`, `quote`
+# and `report` show and escape it by.
 tairix-visible = { path = "../visible", version = "=0.0.0" }
+# The UTS #39 restriction level `utf8::mixes_scripts` reads.
+tairix-unicode = { path = "../unicode", version = "=0.0.0" }

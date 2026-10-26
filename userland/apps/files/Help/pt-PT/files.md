@@ -23,12 +23,26 @@ ilegível é recusado, nunca adivinhado.
 
 O ambiente de trabalho inicia o explorador por si e mantém-no na barra de
 ícones: o menu do seu lugar lista os seus próprios locais e tudo o que
-estiver montado, e escolher um abre lá uma janela; *Definições…* é a
-última linha. Um clique no lugar abre uma na pasta que as definições
-escolherem. Pedir uma pasta que já tem uma janela traz
-essa janela para a frente, em vez de abrir outra. Esta instância não tem a
-linha *Sair* — faz parte do ambiente de trabalho, e fechar as suas janelas
-apenas a arruma.
+estiver montado, e escolher um abre lá uma janela; *Rede* e *Definições…*
+são as últimas linhas. Um clique no lugar abre uma na pasta que as
+definições escolherem. Pedir uma pasta que já tem uma janela traz essa
+janela para a frente, em vez de abrir outra. Esta instância não tem a linha
+*Sair* — faz parte do ambiente de trabalho, e fechar as suas janelas apenas
+a arruma.
+
+*Rede*, no menu do lugar logo acima de *Definições…*, abre uma janela com os
+computadores da rede local que partilham ficheiros. Cada um é listado com o
+seu nome, o endereço em que é alcançado, o seu grupo de trabalho ou domínio
+e aquilo que é, e a lista vai-se preenchendo à medida que os computadores
+respondem. A rede só é percorrida enquanto uma janela a mostra. Um
+computador que deixou de responder fica a cinzento até ser esquecido; um
+nome que mistura alfabetos como precisa a imitação de outro nome mostra um
+sinal de aviso em vez da sua imagem; e quando um computador oferece mais do
+que algumas entradas, as restantes são contadas numa linha própria em vez de
+afastarem as outras. Os nomes na rede são escolhidos por quem gere cada
+computador, por isso um nome nunca prova que computador está a ver. A
+ligação às partilhas de um computador não está disponível neste sistema, e
+abrir um di-lo.
 
 Iniciado pelo nome a partir de uma shell (ou aberto numa pasta a partir do
 ambiente de trabalho), é antes uma aplicação normal: uma janela, que termina

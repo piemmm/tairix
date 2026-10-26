@@ -45,6 +45,27 @@ fn on<'a>(question: u32, link: &[u8], change: Change, label: &'a [u8]) -> Entry<
     }
 }
 
+/// An answer of `question`, a resolve's text, on `eth0`.
+fn text_of(question: u32, change: Change, octets: &[u8]) -> Entry<'_> {
+    Entry::Answer {
+        request: question,
+        interface: iface(b"eth0"),
+        change,
+        ttl: 120,
+        answer: Answer::Text { octets },
+    }
+}
+
+/// An added answer of the kind question `id` asks for: text when it is
+/// `text`, else an instance.
+fn answer(text: u32, id: u32, label: &[u8]) -> Entry<'_> {
+    if id == text {
+        text_of(id, Change::Added, label)
+    } else {
+        instance(id, Change::Added, label)
+    }
+}
+
 /// The requests `verdict` names, each still taking answers.
 fn told(questions: &mut Questions, verdict: Verdict) -> Vec<(u32, u32)> {
     let mut named = Vec::new();
@@ -239,13 +260,13 @@ fn a_link_holds_no_more_than_an_honest_engines_cache_across_every_question() {
         let label = alloc::format!("i{n}");
         let id = if n % 2 == 0 { browse } else { text };
         assert!(matches!(
-            questions.on_answer(&instance(id, Change::Added, label.as_bytes()), true, 0),
+            questions.on_answer(&answer(text, id, label.as_bytes()), true, 0),
             Verdict::Tell(_)
         ));
     }
     for id in [browse, text] {
         assert_eq!(
-            questions.on_answer(&instance(id, Change::Added, b"one more"), true, 0),
+            questions.on_answer(&answer(text, id, b"one more"), true, 0),
             Verdict::Lie
         );
     }
@@ -260,7 +281,7 @@ fn a_link_holds_no_more_than_an_honest_engines_cache_across_every_question() {
     // everything it held.
     let _ = questions.on_answer(&instance(browse, Change::Retired, b"i0"), true, 0);
     assert!(matches!(
-        questions.on_answer(&instance(text, Change::Added, b"one more"), true, 0),
+        questions.on_answer(&text_of(text, Change::Added, b"one more"), true, 0),
         Verdict::Tell(_)
     ));
     questions.unsubscribe(text, 1, 2);
@@ -568,9 +589,28 @@ fn a_flush_names_a_request_once_for_each_question_it_held_there() {
     let text = questions
         .subscribe(Form::Text, ipp(), 1, 1, ACCOUNT, &mut |_| true)
         .unwrap();
-    for id in [service, text] {
+    let target = b"\x04host\x05local\x00";
+    let answers = [
+        Entry::Answer {
+            request: service,
+            interface: iface(b"eth0"),
+            change: Change::Added,
+            ttl: 120,
+            answer: Answer::Service {
+                priority: 0,
+                weight: 0,
+                port: 631,
+                target,
+            },
+        },
+        text_of(text, Change::Added, b"A"),
+    ];
+    for (id, answer) in [service, text].into_iter().zip(answers) {
         ask(&mut questions, id);
-        let _ = questions.on_answer(&instance(id, Change::Added, b"A"), true, 0);
+        assert!(matches!(
+            questions.on_answer(&answer, true, 0),
+            Verdict::Tell(_)
+        ));
     }
     assert_eq!(flushed(&mut questions, iface(b"eth0")), [(1, 1), (1, 1)]);
 }
@@ -864,4 +904,94 @@ fn runs_stay_in_step_through_random_churn() {
         }
         questions.assert_consistent();
     }
+}
+
+/// An honest engine answers a question only with the kind its form asks for,
+/// so an answer of another kind, live or held, is a lie.
+#[test]
+fn an_answer_of_another_kind_than_its_question_asks_is_a_lie() {
+    let (mut questions, browse) = asked();
+    let text = questions
+        .subscribe(Form::Text, ipp(), 1, 2, ACCOUNT, &mut |_| true)
+        .unwrap();
+    ask(&mut questions, text);
+    let v4 = questions
+        .subscribe(Form::AddressV4, host(1), 1, 3, ACCOUNT, &mut |_| true)
+        .unwrap();
+    ask(&mut questions, v4);
+    let v6 = Entry::Answer {
+        request: v4,
+        interface: iface(b"eth0"),
+        change: Change::Added,
+        ttl: 120,
+        answer: Answer::Address {
+            address: tairix_net::IpAddr::V6(tairix_net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        },
+    };
+    for (lie, why) in [
+        (text_of(browse, Change::Added, b"x"), "a browse told text"),
+        (instance(text, Change::Added, b"x"), "text told an instance"),
+        (v6, "an IPv4 lookup told an IPv6 address"),
+    ] {
+        assert_eq!(questions.on_answer(&lie, true, 0), Verdict::Lie, "{why}");
+    }
+    let _ = questions.on_answer(&instance(browse, Change::Added, b"A"), true, 0);
+    assert_eq!(
+        questions.subscribe(Form::Instance, ipp(), 2, 9, ACCOUNT, &mut |_| true),
+        Ok(browse)
+    );
+    let (_, token) = questions.next_replay().expect("owed a replay");
+    questions.replay_sent(browse, token);
+    assert_eq!(
+        questions.on_held(token, &text_of(browse, Change::Added, b"A")),
+        Verdict::Lie,
+        "a replay is held to its question's form too"
+    );
+}
+
+/// A computer is one answer for as long as its key, whatever it is called or
+/// wherever it answers, so its retirement matches it however it was renamed.
+#[test]
+fn a_computer_is_known_by_its_key() {
+    let mut questions = table();
+    let id = questions
+        .subscribe(
+            Form::Computer,
+            Name::from_labels(&[]).unwrap(),
+            1,
+            1,
+            ACCOUNT,
+            &mut |_| true,
+        )
+        .unwrap();
+    ask(&mut questions, id);
+    let computer = |change, key, name| Entry::Answer {
+        request: id,
+        interface: iface(b"eth0"),
+        change,
+        ttl: 0,
+        answer: Answer::Computer {
+            key,
+            address: tairix_net::IpAddr::V4(tairix_net::Ipv4Addr::new(192, 168, 1, 9)),
+            name,
+            membership: tairix_abi::discovery_ipc::Membership::Unstated,
+        },
+    };
+    assert!(matches!(
+        questions.on_answer(&computer(Change::Added, 7, "PC"), true, 0),
+        Verdict::Tell(_)
+    ));
+    assert_eq!(
+        questions.on_answer(&computer(Change::Added, 7, "STUDY"), true, 0),
+        Verdict::Stale,
+        "one key is one answer, however it is called"
+    );
+    assert!(matches!(
+        questions.on_answer(&computer(Change::Retired, 7, "STUDY"), true, 0),
+        Verdict::Tell(_)
+    ));
+    assert!(matches!(
+        questions.on_answer(&computer(Change::Added, 7, "STUDY"), true, 0),
+        Verdict::Tell(_)
+    ));
 }

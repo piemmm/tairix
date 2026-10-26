@@ -556,6 +556,9 @@ pub enum DriverError {
     /// ready rather than answering it ([`crate::blkio::Answer::Hold`]). Maps
     /// to the reissuable [`Errno::WouldBlock`] wherever it reaches a caller.
     NotReady = 27,
+    /// The caller was being terminated, so the operation was abandoned
+    /// before it was answered. Maps to [`Errno::Interrupted`].
+    Interrupted = 28,
 }
 
 impl DriverError {
@@ -604,6 +607,7 @@ impl DriverError {
             25 => Ok(Self::ReadOnly),
             26 => Ok(Self::TimedOut),
             27 => Ok(Self::NotReady),
+            28 => Ok(Self::Interrupted),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -639,6 +643,7 @@ impl DriverError {
             Self::Stale => Errno::Stale,
             Self::ReadOnly => Errno::ReadOnly,
             Self::TimedOut => Errno::TimedOut,
+            Self::Interrupted => Errno::Interrupted,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -683,6 +688,7 @@ impl DriverError {
             Errno::MediumError => Self::MediumError,
             Errno::DeviceOffline => Self::DeviceOffline,
             Errno::WouldBlock | Errno::EndpointStalled => Self::Busy,
+            Errno::Interrupted => Self::Interrupted,
             _ => Self::DeviceFault,
         }
     }
@@ -1599,6 +1605,7 @@ mod tests {
             DriverError::ReadOnly,
             DriverError::TimedOut,
             DriverError::NotReady,
+            DriverError::Interrupted,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));

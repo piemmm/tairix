@@ -236,6 +236,8 @@ const fn key_label(key: SortKey) -> &'static str {
         SortKey::Free => "Free space",
         SortKey::Filesystem => "Filesystem",
         SortKey::Health => "Health",
+        SortKey::Address => "Address",
+        SortKey::Workgroup => "Workgroup",
     }
 }
 

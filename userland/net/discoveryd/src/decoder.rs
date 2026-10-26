@@ -1,4 +1,5 @@
-//! The decoder: the sandboxed worker that runs the multicast DNS engines.
+//! The decoder: the sandboxed worker that runs the multicast DNS and
+//! WS-Discovery engines.
 //!
 //! It is the only process that ever parses a byte a peer sent, so it holds
 //! nothing: the kernel's sandbox spawn mode brands it capability-empty and
@@ -17,27 +18,36 @@
 //! so the front reads a field rather than a record. A record that does not
 //! read as its question's form (a browse `PTR` naming an instance of another
 //! type) is not an answer to it.
+//!
+//! Each link also runs a WS-Discovery engine, browsing only while the front
+//! asks the computers question. It names a computer by asking the front to
+//! fetch its metadata — the front builds and sends the request, so this
+//! process can steer a connection at nothing — and reads the response the
+//! front relays back unread.
 
 use alloc::vec::Vec;
 
-use tairix_abi::discovery_ipc::{Answer, Change, Entry, ServiceTypeField};
+use tairix_abi::discovery_ipc::{Answer, Change, Entry, Membership, ServiceTypeField};
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::time::Duration64;
 use tairix_hash::HashSeed;
 use tairix_net::dns::Name;
 use tairix_net::dnssd::{ServiceInstance, ServiceType};
+use tairix_net::http::HostName;
 use tairix_net::mdns::{
     Answer as EngineAnswer, AnswerChange, Destination, MdnsEngine, QuestionId, RData, Record,
     Sender, MAX_MESSAGE_LEN, MAX_QUESTIONS,
 };
-use tairix_net::rate::{BucketLevel, TokenBucket};
+use tairix_net::rate::TokenBucket;
+use tairix_net::wsd::{self, Change as WsdChange, Computer, Output as WsdOutput, WsdEngine};
 use tairix_net::IpAddr;
 use tairix_rng::{FastRng, RandU64};
 use tairix_sandbox::session::{FrameOut, SessionService, SessionStep};
 use tairix_util::fallible;
 
 use crate::wire::{
-    Edge, Form, FromDecoder, ToDecoder, GROUP_BURST, GROUP_RATE, GROUP_RESERVE, MAX_FROM_DECODER,
+    Budgets, Edge, FetchRequest, Form, FromDecoder, FromWsd, ToDecoder, ToWsd, GROUP_BURST,
+    GROUP_RATE, GROUP_RESERVE, MAX_FROM_DECODER, WSD_BURST, WSD_RATE,
 };
 
 /// The service a decoder worker serves over its pipes.
@@ -47,6 +57,8 @@ pub struct Decoder {
     links: Vec<Link>,
     /// Every question the front asks, at its id.
     questions: Vec<Option<Question>>,
+    /// The computers question's id, while the front asks it.
+    computers: Option<u32>,
     /// The deadline the front was last told of. It starts as the front's own
     /// belief about a fresh decoder: nothing due.
     reported: Option<u64>,
@@ -72,20 +84,29 @@ struct Question {
     name: Name,
 }
 
-/// One interface's engine.
+/// One interface's engines.
 struct Link {
     name: [u8; IF_NAME_LEN],
     engine: MdnsEngine,
     /// The interface's group budget, charged as the front charges it.
     group: TokenBucket,
+    wsd: WsdEngine,
+    /// The interface's WS-Discovery budget, charged as the front charges it.
+    wsd_group: TokenBucket,
 }
 
 impl Link {
-    /// When its engine next has work the budget lets it do.
+    /// When its engines next have work their budgets let them do.
     fn deadline(&self) -> Option<u64> {
-        let due = self.engine.next_deadline()?;
-        let affordable = self.group.ready_at(GROUP_RESERVE)?;
-        Some(due.max(affordable).saturating_total_nanos())
+        let mdns = self
+            .engine
+            .next_deadline()
+            .and_then(|due| Some(due.max(self.group.ready_at(GROUP_RESERVE)?)));
+        let wsd = self.wsd.next_deadline(self.wsd_group.ready_at(0));
+        mdns.into_iter()
+            .chain(wsd)
+            .min()
+            .map(|due| due.saturating_total_nanos())
     }
 }
 
@@ -207,7 +228,7 @@ impl Decoder {
                 let at = self.links.iter().position(|link| link.name == interface);
                 let up = matches!(edge, Edge::Up(_));
                 let carried = match (edge, at) {
-                    (Edge::Up(budget), None) => self.link_up(configured, interface, budget, out),
+                    (Edge::Up(budgets), None) => self.link_up(configured, interface, budgets, out),
                     (Edge::Down, Some(at)) => {
                         self.links.swap_remove(at);
                         true
@@ -242,7 +263,47 @@ impl Decoder {
             ToDecoder::Replay { question, token } => {
                 self.replay(&mut configured.frame, question, token, out)
             }
+            ToDecoder::Wsd(frame) => self.on_wsd(configured, frame, out),
         }
+    }
+
+    /// Hand one WS-Discovery frame to its interface's engine, relaying the
+    /// computers it learns or loses.
+    fn on_wsd(
+        &mut self,
+        configured: &mut Configured,
+        frame: ToWsd<'_>,
+        out: &mut dyn FrameOut,
+    ) -> bool {
+        let (now, interface) = match frame {
+            ToWsd::Datagram { now, interface, .. }
+            | ToWsd::Fetched { now, interface, .. }
+            | ToWsd::FetchFailed { now, interface, .. } => (now, interface),
+        };
+        self.now = self.now.max(now);
+        let at = Duration64::from_nanos(self.now);
+        let computers = self.computers;
+        let Some(link) = self.links.iter_mut().find(|link| link.name == interface) else {
+            // The front relays only to an engine it has told up.
+            return !matches!(frame, ToWsd::Datagram { .. });
+        };
+        let frame_out = &mut configured.frame;
+        let mut alive = true;
+        let mut relay = |change: WsdChange| {
+            alive &= relay_computer(frame_out, out, interface, computers, &change);
+        };
+        match frame {
+            ToWsd::Datagram {
+                source, payload, ..
+            } => {
+                link.wsd.on_datagram(at, payload, source, &mut relay);
+            }
+            ToWsd::Fetched {
+                fetch, response, ..
+            } => link.wsd.on_fetched(at, fetch, response, &mut relay),
+            ToWsd::FetchFailed { fetch, .. } => link.wsd.on_fetch_failed(at, fetch),
+        }
+        alive
     }
 
     /// Hand one relayed datagram to its interface's engine, relaying what it
@@ -269,6 +330,7 @@ impl Decoder {
             name,
             engine,
             group,
+            ..
         } = link;
         let emitted = engine.on_message(
             Duration64::from_nanos(self.now),
@@ -329,8 +391,11 @@ impl Decoder {
             }
             self.questions.resize(slot + 1, None);
         }
-        if self.questions[slot].is_some() {
+        if self.questions[slot].is_some() || (form == Form::Computer && self.computers.is_some()) {
             return false;
+        }
+        if form == Form::Computer {
+            self.computers = Some(question);
         }
         let asked = Question {
             id: question,
@@ -351,19 +416,26 @@ impl Decoder {
             return false;
         };
         *slot = None;
+        if self.computers == Some(question) {
+            self.computers = None;
+            for link in &mut self.links {
+                link.wsd.stop();
+            }
+            return true;
+        }
         for link in &mut self.links {
             link.engine.stop_asking(QuestionId::new(question));
         }
         true
     }
 
-    /// Start an engine for `interface`, spending `budget`, and ask it every
+    /// Start engines for `interface`, spending `budgets`, and ask them every
     /// question.
     fn link_up(
         &mut self,
         configured: &mut Configured,
         interface: [u8; IF_NAME_LEN],
-        budget: BucketLevel,
+        budgets: Budgets,
         out: &mut dyn FrameOut,
     ) -> bool {
         if self.links.try_reserve(1).is_err() {
@@ -372,7 +444,9 @@ impl Decoder {
         self.links.push(Link {
             name: interface,
             engine: MdnsEngine::new(configured.cache),
-            group: TokenBucket::with_level(GROUP_BURST, GROUP_RATE, budget),
+            group: TokenBucket::with_level(GROUP_BURST, GROUP_RATE, budgets.group),
+            wsd: WsdEngine::new(configured.cache),
+            wsd_group: TokenBucket::with_level(WSD_BURST, WSD_RATE, budgets.wsd),
         });
         let link = self.links.len() - 1;
         (0..self.questions.len()).all(|slot| match self.questions[slot] {
@@ -401,13 +475,18 @@ impl Decoder {
             return false;
         };
         let Configured { rng, frame, .. } = configured;
+        let Some(record_type) = asked.form.record_type() else {
+            link.wsd
+                .browse(Duration64::from_nanos(*now), &mut || draw(rng));
+            return true;
+        };
         let mut alive = true;
         let name = link.name;
         let asked_on = link.engine.ask(
             Duration64::from_nanos(*now),
             QuestionId::new(asked.id),
             asked.name,
-            asked.form.record_type(),
+            record_type,
             &mut || draw(rng),
             &mut |answer| {
                 alive &= relay(frame, out, name, questions, answer);
@@ -426,7 +505,18 @@ impl Decoder {
         out: &mut dyn FrameOut,
     ) -> bool {
         if let Some(asked) = asked(&self.questions, question) {
-            let record_type = asked.form.record_type();
+            let Some(record_type) = asked.form.record_type() else {
+                for link in &self.links {
+                    for (key, addr, computer) in link.wsd.computers() {
+                        let entry =
+                            computer_entry(question, link.name, Change::Added, key, addr, computer);
+                        if !send(frame, out, &FromDecoder::Held { token, entry }) {
+                            return false;
+                        }
+                    }
+                }
+                return send(frame, out, &FromDecoder::Replayed { token });
+            };
             for link in &self.links {
                 let cache = link.engine.cache();
                 let key = cache.key_of(&asked.name, record_type);
@@ -462,6 +552,7 @@ impl Decoder {
                 name,
                 engine,
                 group,
+                ..
             } = link;
             let mut alive = true;
             while group.ready(now, GROUP_RESERVE) {
@@ -491,7 +582,129 @@ impl Decoder {
                 return false;
             }
         }
+        self.transmit_wsd(configured, out)
+    }
+
+    /// Run every WS-Discovery engine's due work at the current instant: send
+    /// what its link's budget can pay for, and ask the front for each fetch
+    /// it is due to make.
+    fn transmit_wsd(&mut self, configured: &mut Configured, out: &mut dyn FrameOut) -> bool {
+        let now = Duration64::from_nanos(self.now);
+        let computers = self.computers;
+        let Configured {
+            rng,
+            message,
+            frame,
+            ..
+        } = configured;
+        for link in &mut self.links {
+            let Link {
+                name,
+                wsd,
+                wsd_group,
+                ..
+            } = link;
+            let mut alive = true;
+            loop {
+                let output = wsd.poll(
+                    now,
+                    &mut || draw(rng),
+                    message,
+                    &mut |change| {
+                        alive &= relay_computer(frame, out, *name, computers, &change);
+                    },
+                    &mut || wsd_group.allow(now),
+                );
+                let sent = match output {
+                    Some(WsdOutput::Transmit(emit)) => send(
+                        frame,
+                        out,
+                        &FromDecoder::Wsd(FromWsd::Transmit {
+                            interface: *name,
+                            at: self.now,
+                            payload: &message[..emit.len],
+                        }),
+                    ),
+                    Some(WsdOutput::Fetch(fetch)) => send(
+                        frame,
+                        out,
+                        &FromDecoder::Wsd(FromWsd::Fetch(FetchRequest {
+                            interface: *name,
+                            fetch: fetch.id,
+                            addr: fetch.addr,
+                            port: fetch.port,
+                            path: fetch.path.as_str(),
+                            endpoint: fetch.endpoint.as_str(),
+                            name: fetch.name.map(HostName::as_str),
+                        })),
+                    ),
+                    None => break,
+                };
+                if !(sent && alive) {
+                    return false;
+                }
+            }
+            if !alive {
+                return false;
+            }
+        }
         true
+    }
+}
+
+/// Relay one WS-Discovery change as the computers question's answer.
+fn relay_computer(
+    frame: &mut [u8],
+    out: &mut dyn FrameOut,
+    interface: [u8; IF_NAME_LEN],
+    computers: Option<u32>,
+    change: &WsdChange,
+) -> bool {
+    let Some(request) = computers else {
+        return true;
+    };
+    let mut answer = |change, key, addr, computer: &Computer| {
+        let entry = computer_entry(request, interface, change, key, addr, computer);
+        send(frame, out, &FromDecoder::Answer(entry))
+    };
+    match change {
+        WsdChange::Found {
+            key,
+            addr,
+            computer,
+        } => answer(Change::Added, *key, *addr, computer),
+        WsdChange::Gone {
+            key,
+            addr,
+            computer,
+        } => answer(Change::Retired, *key, *addr, computer),
+    }
+}
+
+/// `computer` as the computers question's answer on `interface`.
+fn computer_entry(
+    request: u32,
+    interface: [u8; IF_NAME_LEN],
+    change: Change,
+    key: u64,
+    address: IpAddr,
+    computer: &Computer,
+) -> Entry<'_> {
+    Entry::Answer {
+        request,
+        interface,
+        change,
+        ttl: 0,
+        answer: Answer::Computer {
+            key,
+            address,
+            name: computer.name.as_str(),
+            membership: match &computer.membership {
+                wsd::Membership::Workgroup(group) => Membership::Workgroup(group.as_str()),
+                wsd::Membership::Domain(domain) => Membership::Domain(domain.as_str()),
+                wsd::Membership::Unstated => Membership::Unstated,
+            },
+        },
     }
 }
 

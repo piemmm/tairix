@@ -69,7 +69,11 @@
 //!   permanent empty-Trash model (`FM11`).
 //! * [`error`] — [`BrowseError`], the fail-closed navigation outcomes.
 //! * [`source`] — the [`DirectorySource`] seam.
-//! * [`browser`] — the [`Browser`] navigation model.
+//! * [`browser`] — the [`Browser`] navigation model and the [`Location`] it
+//!   is at: a folder, or the network.
+//! * [`network`](mod@network) — the Network location's [`NetworkItem`]s: the
+//!   storage endpoints the network catalogue offers, shown through the one
+//!   display-safety policy (`plans/ZEROCONF.md` Z9).
 //! * [`layout`](mod@layout) — the [`ListView`]/[`GridView`] item-view geometry
 //!   and the [`ViewLayout`] dispatch (the one visible-window/item-rect/hit-test
 //!   definition the renderer and the pointer hit-test share), plus [`ViewMode`],
@@ -140,6 +144,7 @@ pub mod layout;
 pub mod marquee;
 pub mod media;
 pub mod mode_edit;
+pub mod network;
 pub mod open_with;
 pub mod owner_edit;
 pub mod places;
@@ -159,11 +164,11 @@ pub mod vfs;
 pub mod watch;
 
 pub use activate::{Activation, BundleIntent};
-pub use browser::{Browser, PendingEntry, PendingRename};
+pub use browser::{Browser, Item, Location, PendingEntry, PendingRename};
 pub use chrome::{
-    apply_command, context_choice_from_item, context_menu, ContextChoice, ContextCommand,
-    ContextMenuModel, ContextQuick, ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand,
-    ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
+    apply_command, context_choice_from_item, context_menu, network_context_menu, ContextChoice,
+    ContextCommand, ContextMenuModel, ContextQuick, ManagerTool, ManagerToolModel, ToolbarBand,
+    ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
 pub use clipboard::{
     drop_operation, plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan,
@@ -187,6 +192,7 @@ pub use media::{
     Ending, Family, MediaType, Site,
 };
 pub use mode_edit::{validate_mode, InvalidMode};
+pub use network::{NetworkEndpoint, NetworkItem, Omission};
 pub use open_with::{
     applications_for, association_from_manifest, blank_documents, quick_applications,
     AppAssociation, OpenWithCandidate, OpenWithChooser,

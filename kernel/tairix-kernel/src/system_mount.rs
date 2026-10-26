@@ -383,7 +383,12 @@ pub fn install_system_mount<B: Block + 'static>(
     // below is published its operations still fail closed. The service
     // also observes endpoint teardown, so a surprise-removed disk's
     // volume transitions the moment its serving driver dies.
-    crate::volume_service::VOLUME_SERVICE.install(audit, pressure, watches);
+    crate::volume_service::VOLUME_SERVICE.install(
+        audit,
+        pressure,
+        watches,
+        &crate::hwtree_store::HW_TREE,
+    );
     tairix_kernel_core::callreg::install_vanish_observer(&crate::volume_service::VOLUME_SERVICE);
     // Locate the `/System` extent on a first window, then drop it so the
     // second, owned window is the one promoted into the `'static` mount.

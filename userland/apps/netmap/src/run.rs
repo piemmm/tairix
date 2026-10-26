@@ -53,10 +53,10 @@ mod program {
     };
     use tairix_netmap::settings::{ProbePane, Request as SettingsRequest};
     use tairix_netmap::{
-        layout, settings, win_sizing, AdvertisedService, Collect, Command, ConnectOutcome,
-        Discovery, Inventory, MapView, NodeMenu, OpenSession, Posture, Probe, ProbeAction,
-        ProbeCampaign, ProbeSettings, Reachability, Reaction, Snapshot, REFRESH_NS, WIN_HEIGHT,
-        WIN_WIDTH,
+        discover, layout, settings, win_sizing, AdvertisedService, Collect, Command,
+        ConnectOutcome, Discovery, Inventory, MapView, NodeMenu, OpenSession, Posture, Probe,
+        ProbeAction, ProbeCampaign, ProbeSettings, Reachability, Reaction, Snapshot, REFRESH_NS,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_procinfo::IpcTransport;
     use tairix_raster::Surface;
@@ -161,7 +161,7 @@ mod program {
             if self.discovery.is_none() {
                 let session = Session::open(RtTransport, self.doorbell)?;
                 self.open_session.open(session.id());
-                self.discovery = Some((session, Discovery::new()));
+                self.discovery = Some((session, Discovery::new(discover::BOUNDS, REFRESH_NS)));
             }
             let Some((session, engine)) = self.discovery.as_mut() else {
                 return Err(DiscoveryError::Unavailable);
@@ -176,15 +176,19 @@ mod program {
                 self.open_session.close();
                 return Err(err);
             }
-            engine.reconcile(session, named, tairix_rt::clock_get());
+            engine.reconcile(
+                session,
+                &discover::segment_roots(named),
+                tairix_rt::clock_get(),
+            );
             Ok(Discovered {
-                services: engine.services(),
-                names: engine.names(),
+                services: discover::advertised(engine.services()),
+                names: discover::names(engine.names()),
                 truncated: engine.truncated(),
                 refused: engine.refused().copied(),
                 stalled: engine.stalled().copied(),
                 unsettled: engine.stalled().is_some() || engine.deferred(),
-                locked_out: engine.locked_out(),
+                locked_out: discover::locked_out(engine),
             })
         }
     }
@@ -297,7 +301,7 @@ mod program {
                 addr: bytes,
                 port,
             };
-            if tairix_rt::net::connect(socket, to).is_err() {
+            if tairix_rt::net::connect(socket, to, None).is_err() {
                 let _ = tairix_rt::net::close(socket);
                 probe.fail_connect(token);
                 return;

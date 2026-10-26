@@ -30,6 +30,7 @@
 //! record). The list responses are described on
 //! [`UserEntry`] / [`GroupEntry`].
 
+use crate::le::{Reader, Writer};
 use crate::{CapabilityId, Errno};
 
 /// Version of the `users_admin` request/response encoding.
@@ -108,110 +109,6 @@ impl UsersAdminOp {
     }
 }
 
-/// A fail-closed little-endian reader over a request/response buffer.
-///
-/// Every accessor either yields a validated value or an [`Errno`]; nothing
-/// is ever read past the buffer's end.
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Cursor<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0 }
-    }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Errno> {
-        let end = self.at.checked_add(n).ok_or(Errno::LengthOutOfRange)?;
-        if end > self.bytes.len() {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let out = &self.bytes[self.at..end];
-        self.at = end;
-        Ok(out)
-    }
-
-    fn u8(&mut self) -> Result<u8, Errno> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u16(&mut self) -> Result<u16, Errno> {
-        let b = self.take(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
-    }
-
-    fn u32(&mut self) -> Result<u32, Errno> {
-        let b = self.take(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    /// A `u16`-length-prefixed UTF-8 string.
-    fn str(&mut self) -> Result<&'a str, Errno> {
-        let len = self.u16()? as usize;
-        let bytes = self.take(len)?;
-        core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
-    }
-
-    /// Whether every byte has been consumed (a request is exactly one
-    /// record; trailing bytes are rejected).
-    const fn exhausted(&self) -> bool {
-        self.at == self.bytes.len()
-    }
-}
-
-/// A fail-closed little-endian writer over a caller-supplied buffer.
-///
-/// Every append either fits or reports [`Errno::BufferTooSmall`]; nothing
-/// is ever written past the buffer's end.
-struct Writer<'a> {
-    out: &'a mut [u8],
-    at: usize,
-}
-
-impl<'a> Writer<'a> {
-    fn new(out: &'a mut [u8]) -> Self {
-        Self { out, at: 0 }
-    }
-
-    fn bytes(&mut self, bytes: &[u8]) -> Result<(), Errno> {
-        let end = self
-            .at
-            .checked_add(bytes.len())
-            .ok_or(Errno::BufferTooSmall)?;
-        if end > self.out.len() {
-            return Err(Errno::BufferTooSmall);
-        }
-        self.out[self.at..end].copy_from_slice(bytes);
-        self.at = end;
-        Ok(())
-    }
-
-    fn u8(&mut self, v: u8) -> Result<(), Errno> {
-        self.bytes(&[v])
-    }
-
-    fn u16(&mut self, v: u16) -> Result<(), Errno> {
-        self.bytes(&v.to_le_bytes())
-    }
-
-    fn u32(&mut self, v: u32) -> Result<(), Errno> {
-        self.bytes(&v.to_le_bytes())
-    }
-
-    /// A `u16`-length-prefixed UTF-8 string; a string longer than a `u16`
-    /// can carry is refused.
-    fn str(&mut self, s: &str) -> Result<(), Errno> {
-        let len = u16::try_from(s.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        self.u16(len)?;
-        self.bytes(s.as_bytes())
-    }
-
-    const fn written(&self) -> usize {
-        self.at
-    }
-}
-
 /// A validated, borrowed capability-grant list.
 ///
 /// Constructed only by a successful decode (every raw value passed
@@ -250,7 +147,7 @@ impl<'a> GrantList<'a> {
 
     /// Decode a grant list at the cursor, validating the count bound and
     /// every id.
-    fn decode(cur: &mut Cursor<'a>) -> Result<Self, Errno> {
+    fn decode(cur: &mut Reader<'a>) -> Result<Self, Errno> {
         let count = cur.u16()? as usize;
         if count > USERS_ADMIN_MAX_GRANTS {
             return Err(Errno::LengthOutOfRange);
@@ -293,7 +190,7 @@ impl<'a> GidList<'a> {
     }
 
     /// Decode a gid list at the cursor, validating the count bound.
-    fn decode(cur: &mut Cursor<'a>) -> Result<Self, Errno> {
+    fn decode(cur: &mut Reader<'a>) -> Result<Self, Errno> {
         let count = cur.u16()? as usize;
         if count > USERS_ADMIN_MAX_GIDS {
             return Err(Errno::LengthOutOfRange);
@@ -419,7 +316,7 @@ impl<'a> UsersAdminRequest<'a> {
         if bytes.len() > USERS_ADMIN_MAX_REQUEST {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut cur = Cursor::new(bytes);
+        let mut cur = Reader::new(bytes);
         if cur.u16()? != USERS_ADMIN_VERSION {
             return Err(Errno::AbiVersionUnsupported);
         }
@@ -685,7 +582,7 @@ impl<'a> UserEntry<'a> {
     }
 
     /// Decode one entry at the cursor.
-    fn decode(cur: &mut Cursor<'a>) -> Result<Self, Errno> {
+    fn decode(cur: &mut Reader<'a>) -> Result<Self, Errno> {
         Ok(Self {
             username: cur.str()?,
             uid: cur.u32()?,
@@ -720,7 +617,7 @@ impl<'a> GroupEntry<'a> {
     }
 
     /// Decode one entry at the cursor.
-    fn decode(cur: &mut Cursor<'a>) -> Result<Self, Errno> {
+    fn decode(cur: &mut Reader<'a>) -> Result<Self, Errno> {
         Ok(Self {
             name: cur.str()?,
             gid: cur.u32()?,
@@ -780,11 +677,10 @@ impl<'a> ListResponseBuilder<'a> {
 
     /// Back-patch the entry count and return the encoded byte length.
     #[must_use]
-    pub fn finish(self) -> usize {
-        let len = self.w.written();
-        // The header was written by `new`, so slots 2..4 exist.
-        self.w.out[2..4].copy_from_slice(&self.count.to_le_bytes());
-        len
+    pub fn finish(mut self) -> usize {
+        // The header `new` wrote holds the count at offset 2.
+        self.w.patch_u16(2, self.count);
+        self.w.written()
     }
 }
 
@@ -811,8 +707,8 @@ pub fn decode_group_list(bytes: &[u8]) -> Result<GroupListIter<'_>, Errno> {
     Ok(GroupListIter { cur, remaining })
 }
 
-fn decode_list_header(bytes: &[u8]) -> Result<(Cursor<'_>, u16), Errno> {
-    let mut cur = Cursor::new(bytes);
+fn decode_list_header(bytes: &[u8]) -> Result<(Reader<'_>, u16), Errno> {
+    let mut cur = Reader::new(bytes);
     if cur.u16()? != USERS_ADMIN_VERSION {
         return Err(Errno::AbiVersionUnsupported);
     }
@@ -824,7 +720,7 @@ fn decode_list_header(bytes: &[u8]) -> Result<(Cursor<'_>, u16), Errno> {
 /// then stops at the first structural defect (fail closed, never a
 /// partial record).
 pub struct UserListIter<'a> {
-    cur: Cursor<'a>,
+    cur: Reader<'a>,
     remaining: u16,
 }
 
@@ -848,7 +744,7 @@ impl<'a> Iterator for UserListIter<'a> {
 /// Iterator over decoded [`GroupEntry`] records; the group analogue of
 /// [`UserListIter`].
 pub struct GroupListIter<'a> {
-    cur: Cursor<'a>,
+    cur: Reader<'a>,
     remaining: u16,
 }
 

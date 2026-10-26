@@ -56,32 +56,47 @@ pub(crate) const fn level_label(level: Level) -> &'static str {
     }
 }
 
-/// A [`Write`] adapter that neutralises control characters and the backslash.
+/// A [`Write`] adapter that neutralises the characters that hide or misstate
+/// text, and the backslash.
 ///
-/// Every character that could let attacker-controlled text escape its field —
-/// a C0 control (including newline and `ESC`), `DEL`, or a C1 control — is
-/// rendered as the visible escape `\xNN` (two lowercase hex digits; every such
-/// code point is `<= 0x9F`). The backslash itself is doubled so the escaping is
-/// unambiguous. All other characters, including printable multi-byte UTF-8,
-/// pass through unchanged, and unbroken runs of them are forwarded in one call.
-pub(crate) struct EscapeWriter<'w, W: Write + ?Sized> {
-    pub(crate) inner: &'w mut W,
+/// Every character that could let attacker-controlled text escape its field or
+/// misstate it — a control (including newline and `ESC`), a bidirectional
+/// override, a zero-width character, a mark stacked or doubled past what a
+/// reader can tell apart ([`tairix_visible::Faithful`]) — is rendered as a
+/// visible escape: `\xNN` below U+0100, `\u{N}` above. The backslash itself
+/// is doubled so the escaping is unambiguous. All other characters, including
+/// printable multi-byte UTF-8, pass through unchanged, and unbroken runs of
+/// them are forwarded in one call.
+struct EscapeWriter<'w, W: Write + ?Sized> {
+    inner: &'w mut W,
+    faithful: tairix_visible::Faithful,
+}
+
+impl<'w, W: Write + ?Sized> EscapeWriter<'w, W> {
+    fn new(inner: &'w mut W) -> Self {
+        Self {
+            inner,
+            faithful: tairix_visible::Faithful::default(),
+        }
+    }
 }
 
 impl<W: Write + ?Sized> Write for EscapeWriter<'_, W> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let mut clean = 0usize;
         for (i, c) in s.char_indices() {
-            if c == '\\' || c.is_control() {
+            let escaped = self.faithful.escapes(c);
+            if c == '\\' || escaped {
                 if clean < i {
                     self.inner.write_str(&s[clean..i])?;
                 }
+                let code = u32::from(c);
                 if c == '\\' {
                     self.inner.write_str("\\\\")?;
+                } else if code <= 0xff {
+                    write!(self.inner, "\\x{code:02x}")?;
                 } else {
-                    // `is_control()` code points are all `<= 0x9F`, so two hex
-                    // digits always suffice.
-                    write!(self.inner, "\\x{:02x}", c as u32)?;
+                    write!(self.inner, "\\u{{{code:x}}}")?;
                 }
                 clean = i + c.len_utf8();
             }
@@ -93,16 +108,17 @@ impl<W: Write + ?Sized> Write for EscapeWriter<'_, W> {
     }
 }
 
-/// Write `text` to `out` with control characters and backslashes neutralised.
+/// Write `text` to `out` with the characters that hide or misstate it, and
+/// backslashes, neutralised.
 pub(crate) fn write_escaped<W: Write + ?Sized>(out: &mut W, text: &str) -> fmt::Result {
-    EscapeWriter { inner: out }.write_str(text)
+    EscapeWriter::new(out).write_str(text)
 }
 
-/// Render `value` to `out`, neutralising control characters in any string it
-/// contains (a `Str`, or a `Str` inside a `List`); numeric, address, hex, and
-/// enumerated renderings are already control-free.
+/// Render `value` to `out`, neutralising the characters that hide or misstate
+/// any string it contains (a `Str`, or a `Str` inside a `List`); numeric,
+/// address, hex, and enumerated renderings are already clean.
 pub(crate) fn write_value<W: Write + ?Sized>(out: &mut W, value: &FieldValue<'_>) -> fmt::Result {
-    write!(EscapeWriter { inner: out }, "{value}")
+    write!(EscapeWriter::new(out), "{value}")
 }
 
 /// Render one committed record as a readable boot-console line, without a
@@ -287,6 +303,18 @@ mod tests {
         assert!(line.contains("\\x0a"), "newline escaped: {line:?}");
         assert!(line.contains("\\x0d"), "carriage return escaped: {line:?}");
         assert!(line.contains("\\\\x"), "backslash doubled: {line:?}");
+    }
+
+    #[test]
+    fn characters_that_reorder_or_hide_caller_text_are_escaped() {
+        let hostile = "paid \u{202e}0001$\u{202c} to\u{200b}x\u{ad} re\u{301}\u{301}f";
+        let record = base("user.1000.proc.0707", Level::Error, hostile);
+        let line = render(&record, Duration64::ZERO);
+        assert!(
+            line.contains("paid \\u{202e}0001$\\u{202c} to\\u{200b}x\\xad re\u{301}\\u{301}f"),
+            "every hidden character and the doubled mark escaped: {line:?}"
+        );
+        assert!(!line.chars().any(tairix_visible::is_hidden), "{line:?}");
     }
 
     #[test]

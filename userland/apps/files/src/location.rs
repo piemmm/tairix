@@ -8,7 +8,7 @@
 use alloc::string::String;
 
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
-use tairix_browse::vfs::{spell_absolute_path, spell_title_location};
+use tairix_browse::vfs::{spell_absolute_path, spell_title_of};
 use tairix_browse::{Browser, DirectorySource};
 
 /// What the window must do after the desktop reports a *secondary* press on
@@ -49,21 +49,22 @@ pub fn leave_directory<S: DirectorySource>(browser: &mut Browser<S>) -> Leave {
 /// refusal only arises where there *was* a parent; spelling from the split
 /// keeps that an observation rather than an assumption.
 fn refusal<S: DirectorySource>(browser: &Browser<S>) -> String {
-    let parent = browser.components().split_last().map_or_else(
-        || spell_absolute_path(&[]),
-        |(_, rest)| spell_absolute_path(rest),
-    );
-    alloc::format!("could not open {parent}")
+    let parent = browser
+        .folder()
+        .and_then(<[String]>::split_last)
+        .map_or(&[][..], |(_, rest)| rest);
+    alloc::format!("could not open {}", spell_absolute_path(parent))
 }
 
 /// The title the window carries while it shows `browser`'s location.
 ///
 /// The title *is* the location, fitted to the protocol's bounded title field by
 /// the shared spelling — so a path too long for the field is shortened the one
-/// way every surface shortens text, never refused.
+/// way every surface shortens text, never refused. The network, which has no
+/// path, is called by its name.
 #[must_use]
 pub fn location_title<S: DirectorySource>(browser: &Browser<S>) -> String {
-    spell_title_location(browser.components(), WINDOW_TITLE_MAX)
+    spell_title_of(browser.folder(), WINDOW_TITLE_MAX)
 }
 
 /// The title the window should carry, or `None` when `shown` — the text the

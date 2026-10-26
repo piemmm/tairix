@@ -222,8 +222,9 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   something that has not appeared yet and has no readiness event: a
   bounded, doubling one-shot ladder, so a boot on which the thing never
   appears ends after the ladder's finite length rather than a poll loop.
-  The clock service's configuration store and RTC, and the service
-  manager's enrolment overrides, climb it. `RestartPacer` is for restarting
+  The clock service's server selection and RTC read climb it; what waits on
+  a volume being mounted waits on the mount table's notice instead.
+  `RestartPacer` is for restarting
   something that keeps dying: a capped, doubling, saturating delay,
   forgotten once a restart stays up for a stable window. What fails may be
   killed on purpose by a crafted input, and restarting it at once would
@@ -305,10 +306,12 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   `name: reason` line, `-b`'s space, an indicator style's suffixes), which
   force the shell styles to quote and take a backslash in the C ones. Each
   formats into its destination without allocating. Three deliberate
-  departures from GNU 9.4: the hidden characters are `lib/visible`'s `is_hidden`'s, so
-  a name holding a bidirectional or zero-width character is escaped where GNU
-  leaves it raw; the shell styles keep GNU's form save its two faults with a
-  name holding a `'` that ends in an escape — a needless leading `''`, and,
+  departures from GNU 9.4: what is escaped is what `lib/visible`'s `Faithful`
+  escapes — the hidden characters, and a mark stacked or doubled past telling
+  apart — so a name holding a bidirectional or zero-width character or a
+  doubled accent is escaped where GNU leaves it raw; the shell styles keep
+  GNU's form save its two faults with a name holding a `'` that ends in an
+  escape — a needless leading `''`, and,
   when such a name also begins with an escape, a dropped `$` that stops the
   word reading back as the name; and a marked character takes no backslash
   inside `"…"`, where a shell keeps the backslash. Every command app's
@@ -318,7 +321,8 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   lines and records (offset, name, length, what it declares) with facts
   beneath them, and holds a report to `MAX_REPORT_LINES` lines of at most
   `MAX_LINE_BYTES` bytes, saying once that it stops when it fills; `clean`
-  shows text a file carries with its control bytes escaped, and `digest` a key
+  shows text a file carries with its stray bytes and hidden characters
+  escaped, and `digest` a key
   or hash as one run of hex. The picture reports (`lib/image`) and the
   executable and manifest reports (`lib/binfmt`) build with it, and
   `lib/sandbox` carries every report over its one reply, so each is cut,
@@ -335,16 +339,23 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   past U+10FFFF). `lib/syntax`'s lexers step over one character by it,
   `wc` counts characters by it, and TextEdit decodes its grid by it, so no
   hand-written decoder admits a lead the standard rejects. `shown` answers a
-  name as a surface shows it, each of `lib/visible`'s hidden characters U+FFFD
-  and borrowed where there is none: the rows `procinfo::field_lossy` decodes
-  (process names, volume labels, mount targets) and the names the file
-  manager and the document host show pass through it. `fold` and `folded` are
-  the letters a reader looks a name up by — a Latin-1 letter folded to the letter it is written on, every letter in
-  lower case — and `reader_order` the order a list of names is read in: the
-  folded letters, then the bytes, so distinct names never compare equal. The
-  place chooser and the program library's search match by the fold, and
-  `lib/tz`'s place listing, Settings' region list and the program library sort
-  by the order.
+  name as a surface shows it, as `lib/visible` shows text from elsewhere — each
+  hidden character U+FFFD, and a combining sequence cut at one U+FFFD where it
+  would carry more than four nonspacing marks or one twice, judged over
+  canonical decompositions so `é` then U+0301 is a doubled acute — and
+  borrowed where nothing needs showing: the rows `procinfo::field_lossy`
+  decodes (process names, volume labels, mount targets) and the names the file
+  manager and the document host show pass through it. `mixes_scripts` says
+  when a name mixes scripts the way an impersonation needs (UTS #39's
+  minimally restrictive level: Latin with Cyrillic or Greek among others), so
+  a surface can mark it — the file manager's Network view draws such an
+  endpoint with a caution in place of its picture. `fold` and `folded` are
+  the letters a reader looks a name up by — a Latin-1 letter folded to the
+  letter it is written on, every letter in lower case — and `reader_order`
+  the order a list of names is read in: the folded letters, then the bytes,
+  so distinct names never compare equal. The place chooser and the program
+  library's search match by the fold, and `lib/tz`'s place listing, Settings'
+  region list and the program library sort by the order.
 
 ## How to grow the crate
 

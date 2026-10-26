@@ -89,8 +89,9 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   (`ByteWindow`, `LineWindow`), so a last-N view costs memory in N rather
   than in the input.
 * `utf8` — which bytes begin a UTF-8 sequence and how long it is
-  (`sequence_len`, Unicode Table 3-7), a name as it is shown, each of
-  `lib/visible`'s hidden characters U+FFFD (`shown`), and the letters and order
-  a reader looks names up by (`fold`, `folded`, `reader_order`).
+  (`sequence_len`, Unicode Table 3-7), a name as it is shown, as
+  `lib/visible` shows text from elsewhere (`shown`), whether a name mixes
+  scripts the way an impersonation needs (`mixes_scripts`), and the letters
+  and order a reader looks names up by (`fold`, `folded`, `reader_order`).
 
 Long-form documentation: `docs/src/lib/util.md`.

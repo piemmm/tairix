@@ -165,14 +165,43 @@ pub(crate) fn serve<F>(
 where
     F: FilesystemWrite + Send + 'static,
 {
+    serve_as(vfs, volumes, accounts, false)
+}
+
+/// [`mounted`], its volume registered as a user-space server's.
+pub(crate) fn mounted_served<F>(fs: F, accounts: &[Account<'_>]) -> Serving<F>
+where
+    F: FilesystemWrite + Send + 'static,
+{
+    serve_as(
+        vfs(false),
+        alloc::vec![(volume_handle(), fs)],
+        accounts,
+        true,
+    )
+}
+
+/// [`serve`], each volume registered as a server's when `served`.
+fn serve_as<F>(
+    vfs: Vfs,
+    volumes: Vec<(DriverHandle, F)>,
+    accounts: &[Account<'_>],
+    served: bool,
+) -> Serving<F>
+where
+    F: FilesystemWrite + Send + 'static,
+{
     let mounted: &'static LateFilesystem<F> = crate::forever(Box::new(LateFilesystem::new()));
     mounted.install_vfs(vfs).expect("install vfs");
     let drivers = volumes
         .into_iter()
         .map(|(handle, fs)| {
-            mounted
-                .register(handle, fs, "vol", "memfs", [0u8; 16], None)
-                .expect("register driver")
+            if served {
+                mounted.register_served(handle, fs, "vol", "memfs", [0u8; 16], None)
+            } else {
+                mounted.register(handle, fs, "vol", "memfs", [0u8; 16], None)
+            }
+            .expect("register driver")
         })
         .collect();
     let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));

@@ -7,8 +7,10 @@ TAIRiX separates **filesystem policy** from **filesystem I/O**:
   `kernel/core::fs` (the VFS). It is architecture-neutral and depends only
   on `lib/abi`, `lib/caps`, and `kernel/sec`.
 - **I/O** — reading and writing blocks and parsing an on-disk format —
-  lives in the `drivers/filesystem/*` crates (`arxfs`, `ext4`, `fat32`)
-  behind the [`Filesystem`] trait in `lib/abi`. The VFS never duplicates a
+  lives in the `drivers/filesystem/*` crates (`arxfs`, `ext4`, `fat32`,
+  `adfs`, `iso9660`, `udf`) behind the [`Filesystem`] trait in `lib/abi`; on
+  removable media each runs in user space
+  ([Volumes served from user space](./served.md)). The VFS never duplicates a
   driver's block I/O. The frozen `Filesystem` trait is mount/unmount only;
   path I/O delegates to a driver through the separate versioned
   `FilesystemRead` and `FilesystemWrite` traits (`AGENTS.md` §2.4 / §9).
@@ -415,7 +417,9 @@ A pin's last reference may drop anywhere, so the drop only queues its release
 — one spin lock, no allocation — and wakes the write-back flusher unless a
 drop since its last pass already has. A close tells the driver at once when
 its lock is free; the flusher's pass tells it of whatever else was queued
-before it publishes.
+before it publishes. A volume a user-space server serves is reaped inline
+instead: the flusher, serving every volume, never waits on a server, so the
+next operation on the volume tells its driver first.
 
 ## Content generations
 

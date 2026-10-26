@@ -25,6 +25,10 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # allocation-free container crate, so a freestanding image that links the log
 # before it has a heap acquires no allocator requirement from it.
 tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The one rule for showing text from elsewhere (`Faithful`, its lossless
+# twin), so a rendered line escapes every character a caller's text could
+# hide behind. Allocation-free, like this crate.
+tairix-visible = { path = "../visible", version = "=0.0.0" }
 # The log-attestation key is a secret: it is scrubbed from memory on drop with
 # the audited `zeroize` crate (zero-on-free; no hand-rolled
 # wiping, and `zeroize`'s volatile writes are not elided by the optimiser).

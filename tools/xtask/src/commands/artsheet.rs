@@ -39,7 +39,7 @@ use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_wintersun_figure::digest as figure_digest;
 use tairix_wintersun_figure::humanoid;
-use tairix_wintersun_figure::identity::{Identity, RECORD_EXTENSION, RECORD_LEN};
+use tairix_wintersun_figure::identity::{Identity, RECORD_EXTENSION};
 use tairix_wintersun_figure::mesh::{self, LEVELS};
 use tairix_wintersun_figure::motion::Kind;
 use tairix_wintersun_figure::paint::{self, Brush, Veil, MAX_FIGURE_POINTS};
@@ -293,7 +293,7 @@ fn measure(root: &Path) -> Result<String, String> {
             ledger,
             "preset {} record {} parts {} tones {} reach {:.6}",
             entry.name,
-            hex(&identity),
+            tairix_util::hex::encode(&identity.encode()),
             rig.parts().len(),
             tones.len(),
             rig.reach()
@@ -434,18 +434,7 @@ fn record(entry: &Figure<'_>) -> Result<String, String> {
     let identity = entry
         .identity()
         .map_err(|e| format!("artsheet: {} is refused: {e}", entry.name))?;
-    Ok(hex(&identity))
-}
-
-/// A record's bytes as lowercase hex.
-fn hex(identity: &Identity) -> String {
-    identity
-        .encode()
-        .iter()
-        .fold(String::with_capacity(2 * RECORD_LEN), |mut out, byte| {
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
+    Ok(tairix_util::hex::encode(&identity.encode()))
 }
 
 /// The sides `entry` is measured at.

@@ -2,10 +2,10 @@
 //!
 //! Two property families over per-run-seeded pseudo-random inputs:
 //!
-//! - **Addresses**: [`Ipv6Scope::of`] and [`ScopedIpv6Addr::new`] are
-//!   total over arbitrary 128-bit addresses and zone indices, never
-//!   panic, and uphold the scope/zone invariants (a constructed scoped
-//!   address carries a zone exactly when its scope is not global).
+//! - **Addresses**: [`Ipv6Scope::of`] and [`zone_of`] are total over
+//!   arbitrary 128-bit addresses and interfaces, never panic, and uphold
+//!   the scope/zone invariant (an address is qualified by a zone exactly
+//!   when it has a scope narrower than global).
 //! - **Checksum**: any split of a byte stream across incremental
 //!   [`Checksum::push`] calls folds identically to the one-shot
 //!   [`internet_checksum`], and the pseudo-header seeds fold identically
@@ -20,10 +20,8 @@
 //! the deadline elapses. The seed is logged at the start, so a
 //! fresh-seed crash stays reproducible via `TAIRIX_FUZZ_SEED`.
 
-use core::num::NonZeroU32;
-
 use tairix_fuzzseed::Prng;
-use tairix_net::addr::{Ipv6Scope, ScopedIpv6Addr};
+use tairix_net::addr::{zone_of, Ipv6Scope};
 use tairix_net::checksum::Checksum;
 use tairix_net::{internet_checksum, Ipv4Addr, Ipv6Addr};
 
@@ -42,16 +40,24 @@ fn exercise_scope(rng: &mut Prng) {
     }
     let addr = Ipv6Addr::from(octets);
     let scope = Ipv6Scope::of(&addr);
-    let zone = NonZeroU32::new(rng.next_u32());
-    // A refusal is the fail-closed path; reaching past the call at all
-    // proves "no panic", so only the accepted case has invariants.
-    if let Ok(scoped) = ScopedIpv6Addr::new(addr, zone) {
-        let scope = scope.expect("a constructed address must have a scope");
-        assert_eq!(scoped.scope(), scope);
-        // The zone is present exactly when the scope is not global.
-        assert_eq!(scoped.zone().is_some(), scope != Ipv6Scope::Global);
-        assert_eq!(scoped.addr(), addr);
-    }
+    let mut interface = [0u8; 16];
+    rng.fill(&mut interface);
+    let zone = zone_of(std::net::IpAddr::V6(addr), interface);
+    assert_eq!(
+        zone.is_some(),
+        scope.is_some_and(|scope| scope < Ipv6Scope::Global)
+    );
+    assert!(
+        zone.is_none_or(|zone| zone == interface),
+        "the zone is where it was met"
+    );
+    assert_eq!(
+        zone_of(
+            std::net::IpAddr::V4(Ipv4Addr::from(rng.next_u32())),
+            interface
+        ),
+        None
+    );
 }
 
 fn exercise_checksum(rng: &mut Prng, buf: &mut [u8]) {

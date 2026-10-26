@@ -45,10 +45,10 @@ them:
   caller drops rather than guesses. Link-local unicast (`fe80::/10`) and
   the loopback address are link-local scope; ULA is global *scope* per
   RFC 4193.
-- `ScopedIpv6Addr` — an address paired with the zone (interface) index
-  its scope requires. A non-global-scope address without a zone — the
-  "link-local, but on which interface?" ambiguity — is unrepresentable:
-  the constructor refuses it with a typed error.
+- `zone_of` — the zone an address of narrower than global scope is
+  qualified by: the interface it was met on. Such an address names a host
+  only within its zone, so a TCP peer, a connection's identity and the
+  link a reply leaves by all carry it (`tcp::listen::Peer::link`).
 
 ### `checksum` — the Internet checksum, defined once
 
@@ -503,10 +503,11 @@ Every name and label a peer sends is display text no consumer may trust, so
 §5.1 form for a terminal, `WireName` renders an uncompressed wire-form name
 (the octets in presentation form when it does not decode), and `DisplayLabel`
 renders a label for a display that draws text — printable Unicode kept, as
-DNS-SD instance names are written, and every character `lib/util`'s
-`tairix_visible::is_hidden` names — a control, a line or paragraph separator, a
-bidirectional control, a default-ignorable character — escaped as `\DDD`, so no
-label can pass for another by an invisible difference. `mdns::TxtStrings::over`
+DNS-SD instance names are written, and every character a faithful rendering
+escapes (`tairix_visible::Faithful`: a control, a line or paragraph separator,
+a bidirectional control, a default-ignorable character, a mark stacked or
+doubled past telling apart) escaped as `\DDD`, so no label can pass for another
+by a difference a reader cannot see. `mdns::TxtStrings::over`
 walks the length-prefixed strings of any `TXT` rdata.
 
 `Stack::dhcp_dns_servers()` is the pure source that feeds a real resolver
@@ -767,6 +768,63 @@ written — so a record it emits reads back as the attribute set it was given
 — and it delegates the final check to the one `TxtRecord` constructor rather
 than asserting the invariant a second time. Host-tested, and fuzzed in the
 same harness as the engine (`fuzz_net_mdns`).
+
+### `http` — the strict HTTP/1.1 exchange metadata rides
+
+`http` is the least of HTTP/1.1 a WS-Discovery metadata fetch needs, and no
+more: `write_post` writes a `POST` of a body to an absolute path of visible
+ASCII, its `Host` field naming the URL's authority — an address, or a
+`HostName`, RFC 3986's `reg-name` held to its unreserved characters in labels
+of at most 63 and refused where its last label spells a number — and asking
+the server to close the connection once it has answered, and
+`read_response` reads the whole of what the server sent before it closed —
+a status line, headers, and a body framed by `Content-Length` or chunked
+coding, or running to the close — and returns the body of a `200` within a
+caller's bound. It refuses rather than guesses at every ambiguity a peer
+could use to make two readers disagree about where a message ends:
+`Content-Length`s that disagree, one beside `Transfer-Encoding`, a coding other than
+`chunked`, obsolete line folding, a bare carriage return or line feed, a
+malformed chunk, or bytes past the message. No socket, no clock.
+
+### `wsd` — WS-Discovery and the computers it names
+
+`wsd` is WS-Discovery as Windows computers and Samba's `wsdd` announce
+themselves: the April 2005 draft over SOAP-over-UDP, with WS-Addressing
+2004/08, DPWS 2006/02 and WS-Transfer, and Microsoft's `pub:Computer`
+metadata naming a computer and its workgroup or domain. Nothing here answers a
+probe: this host is never a target.
+
+- The codec reads `Hello`, `Bye`, `ProbeMatches` and `ResolveMatches`
+  envelopes over [`lib/xml`](xml.md) with every name resolved by namespace,
+  refusing an envelope that says one thing twice, and the WS-Transfer
+  `GetResponse` over the `http` exchange; it writes the `Probe`, `Resolve`
+  and metadata `Get` this host sends from fixed text around values whose
+  grammar it has already vetted: an `Endpoint` holds only URI characters XML
+  need not escape, a `MetadataPath` nothing that could end a request line,
+  and an `XAddr` only `http` to a literal address or a `HostName`.
+- `WsdEngine` is one link's state machine: probe rounds while something
+  browses, answers believed only to this host's own recent probes and
+  resolves, message ids that tell a repeat from a fresh message, and
+  `AppSequence`s that tell a stale announcement from a fresh one — an answer
+  is current however it is numbered, since some targets (a QNAP NAS) give
+  every answer a fresh instance. A target is fetched only at the address its
+  message came from, by the `XAddrs` URL naming that address or else one
+  naming a host: a name is never resolved for a peer, only written in the
+  request's `Host` field. A computer is reported only once its metadata is
+  read, kept at the address it was first heard at until that one falls
+  silent, and expired once it stops answering. A fetch whose target moved or
+  changed while it flew is made again rather than believed. It holds at most
+  128 targets, four per sender, and two fetches in flight; its sends are
+  built only once the caller's budget agrees to pay for them, so work the
+  budget cannot cover stays due.
+
+Host-tested against messages shaped as Windows and `wsdd` send them, and
+against a QNAP NAS's captured traffic, which `wsd::vectors` holds under the
+`test-support` feature for the service that speaks it; fuzzed
+(`fuzz_net_wsd`): the parsers total over noise and mutated messages, the
+engine fetching only from a sender and naming only a name spelled in a
+datagram that sender sent, keeping at most two fetches in flight, and
+reporting a computer gone only after it was found and only once.
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 
@@ -1153,6 +1211,11 @@ reconstructs nothing (fail closed). The `fuzz_net_tcp` listener driver
 floods a bounded listener with hostile SYN/ACK/RST traffic and asserts no
 panic, bounded half-open and accept queues, and that every emitted segment
 parses.
+
+A `Peer` carries the link its address was met on when that address is
+narrower than global (`Peer::arrived`, `addr::zone_of`): one link-local
+address on two links is two peers, a cookie minted on one link validates on
+that link alone, and the caller answers each peer on its own link.
 
 ## Hardware offload: the software path is the oracle
 

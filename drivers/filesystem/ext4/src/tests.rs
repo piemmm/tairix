@@ -1037,7 +1037,7 @@ fn mutation_is_refused_on_an_unsupported_feature_set() {
         INCOMPAT_FILETYPE | INCOMPAT_INLINE_DATA,
     );
     let mut fs = Ext4::open(SizedBlock::over(data)).expect("opens read-only");
-    assert_eq!(fs.write_refusal(), Some("unsupported_feature"));
+    assert_eq!(fs.write_refusal(), Some(WriteRefusal::UnsupportedFeature));
     let hello = fs.lookup(fs.root(), b"hello.txt").expect("still readable");
     assert_eq!(
         fs.create(fs.root(), b"x", NodeKind::RegularFile, &FILE_RECORD),
@@ -2431,14 +2431,14 @@ fn a_torn_commit_on_an_unjournaled_volume_leaves_it_for_a_checker() {
         fs.create(root, b"f", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::DeviceFault)
     );
-    assert_eq!(fs.write_refusal(), Some("commit_failed"));
+    assert_eq!(fs.write_refusal(), Some(WriteRefusal::CommitFailed));
     assert_eq!(
         fs.create(root, b"g", NodeKind::RegularFile, &FILE_RECORD),
         Err(DriverError::ReadOnly),
         "a stopped handle takes no further operation"
     );
     let mut after = crashed(&medium);
-    assert_eq!(after.write_refusal(), Some("needs_check"));
+    assert_eq!(after.write_refusal(), Some(WriteRefusal::NeedsCheck));
     assert!(after.node_info(after.root()).is_ok(), "reads go on");
     // The device recovers and the handle is closed: what it holds goes out
     // whole and the volume is clean again.
@@ -3439,4 +3439,39 @@ fn a_truncate_of_an_unlinked_held_file_spanning_transactions_lists_it_once() {
     );
     assert_eq!(fs.unpin(small), Ok(Unpinned::Freed));
     assert!(orphan_chain(&mut fs).is_empty());
+}
+
+#[test]
+fn the_served_driver_opens_as_the_kernel_says_and_names_its_generation() {
+    use tairix_fsserve::{ServedFormat, WritebackBudget};
+    let budget = WritebackBudget {
+        backing: 1 << 30,
+        gauge: &tairix_reclaim::Unpressured,
+    };
+    let image = || {
+        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID)
+            .expect("format")
+            .into_block()
+            .expect("the volume closes")
+    };
+    let mut writable = Served::open(image(), false, budget).expect("opens writable");
+    assert_eq!(writable.format, writable.fs.generation().format());
+    assert_eq!(writable.write_refusal, None);
+    assert_eq!(writable.offer().root, writable.fs.root());
+    let root = writable.fs.root();
+    writable
+        .fs
+        .create(root, b"made", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("a writable volume takes a new file");
+
+    let mut read_only = Served::open(image(), true, budget).expect("opens read-only");
+    assert_eq!(
+        read_only.write_refusal, None,
+        "a volume the kernel serves read-only is no refusal of the format's"
+    );
+    let root = read_only.fs.root();
+    assert!(read_only
+        .fs
+        .create(root, b"made", NodeKind::RegularFile, &FILE_RECORD)
+        .is_err());
 }

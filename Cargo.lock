@@ -115,6 +115,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccm"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be9b34d99d395af800e996c5784f810f8400ccd64202f91859dc677825b5378"
+dependencies = [
+ "aead",
+ "cipher",
+ "ctr",
+ "ctutils",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -155,6 +167,17 @@ dependencies = [
  "crypto-common",
  "inout",
  "zeroize",
+]
+
+[[package]]
+name = "cmac"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac78aa94ce13e432b332a4d1bf2eff167d3a2520188ee05b337180a42fd2e62e"
+dependencies = [
+ "cipher",
+ "dbl",
+ "digest",
 ]
 
 [[package]]
@@ -219,6 +242,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cts"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6ae47d18aa4f3701bc9b644cf9a74a45e6eace39feabeab15864728aa1e45a9"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "ctutils"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -253,6 +285,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dbl"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0d7a944e61df464668c5f51f56cc667396a8821434273112948ea0b66e405d7"
+dependencies = [
+ "hybrid-array",
 ]
 
 [[package]]
@@ -506,6 +547,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
+
+[[package]]
+name = "md4"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd76fb0fd6b2e4be62a73f8e0858ca97f81babcb1af322dcaca196f735f17f80"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1154,6 +1214,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
+ "tairix-discovery",
  "tairix-font",
  "tairix-fsmeta",
  "tairix-fuzzseed",
@@ -1162,6 +1223,7 @@ dependencies = [
  "tairix-icon",
  "tairix-input",
  "tairix-log",
+ "tairix-net",
  "tairix-path",
  "tairix-procinfo",
  "tairix-raster",
@@ -1169,6 +1231,7 @@ dependencies = [
  "tairix-rt",
  "tairix-theme",
  "tairix-util",
+ "tairix-visible",
 ]
 
 [[package]]
@@ -1463,12 +1526,17 @@ dependencies = [
  "aes",
  "aes-gcm",
  "bcrypt-pbkdf",
+ "ccm",
  "chacha20",
  "chacha20poly1305",
+ "cmac",
  "crypto-bigint",
  "ctr",
+ "cts",
  "ed25519-dalek",
  "hmac",
+ "md-5",
+ "md4",
  "ml-kem",
  "p256",
  "p384",
@@ -1480,6 +1548,7 @@ dependencies = [
  "tairix-cpuops",
  "tairix-mix",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -1530,6 +1599,14 @@ dependencies = [
  "tairix-tz",
  "tairix-util",
  "tairix-window",
+]
+
+[[package]]
+name = "tairix-der"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fuzzseed",
 ]
 
 [[package]]
@@ -1656,6 +1733,7 @@ name = "tairix-discovery"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-net",
  "tairix-rt",
  "tairix-util",
 ]
@@ -2040,12 +2118,15 @@ name = "tairix-drv-fs-adfs"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-collections",
  "tairix-fsmeta",
  "tairix-fsprobe",
+ "tairix-fsserve",
  "tairix-fuzzseed",
  "tairix-hash",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -2053,16 +2134,19 @@ name = "tairix-drv-fs-arxfs"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-collections",
  "tairix-compress",
  "tairix-crc32c",
  "tairix-crypto",
  "tairix-fsmeta",
  "tairix-fsprobe",
+ "tairix-fsserve",
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-log",
  "tairix-reclaim",
+ "tairix-rt",
  "tairix-util",
  "tairix-writeback",
  "zeroize",
@@ -2073,13 +2157,16 @@ name = "tairix-drv-fs-ext4"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-collections",
  "tairix-crc32c",
  "tairix-fsprobe",
+ "tairix-fsserve",
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-reclaim",
+ "tairix-rt",
  "tairix-util",
  "tairix-writeback",
 ]
@@ -2089,9 +2176,13 @@ name = "tairix-drv-fs-fat32"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-collections",
  "tairix-fsprobe",
+ "tairix-fsserve",
+ "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2099,12 +2190,16 @@ name = "tairix-drv-fs-iso9660"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-compress",
  "tairix-crc32",
  "tairix-fsmeta",
  "tairix-fsprobe",
+ "tairix-fsserve",
  "tairix-fuzzseed",
+ "tairix-reclaim",
+ "tairix-rt",
  "tairix-test-iso9660-image",
  "tairix-util",
 ]
@@ -2114,11 +2209,15 @@ name = "tairix-drv-fs-udf"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-collections",
  "tairix-fsmeta",
  "tairix-fsprobe",
+ "tairix-fsserve",
  "tairix-fuzzseed",
+ "tairix-reclaim",
+ "tairix-rt",
  "tairix-util",
  "tairix-writeback",
 ]
@@ -2532,6 +2631,7 @@ dependencies = [
  "tairix-browse",
  "tairix-buildcfg",
  "tairix-controls",
+ "tairix-discovery",
  "tairix-display",
  "tairix-font",
  "tairix-fscopy",
@@ -2644,6 +2744,20 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-raidmeta",
  "tairix-test-iso9660-image",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-fsserve"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-drvrt",
+ "tairix-procinfo",
+ "tairix-reclaim",
+ "tairix-rt",
+ "tairix-sync",
  "tairix-util",
 ]
 
@@ -3033,6 +3147,7 @@ dependencies = [
  "tairix-fbcon",
  "tairix-fdt",
  "tairix-fsprobe",
+ "tairix-fsserve",
  "tairix-hash",
  "tairix-inline",
  "tairix-itest-harness",
@@ -3086,6 +3201,7 @@ dependencies = [
  "tairix-devmatch",
  "tairix-fbcon",
  "tairix-fsmeta",
+ "tairix-fsserve",
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
@@ -3406,6 +3522,7 @@ dependencies = [
  "tairix-crypto",
  "tairix-fuzzseed",
  "tairix-inline",
+ "tairix-visible",
  "zeroize",
 ]
 
@@ -3627,6 +3744,7 @@ dependencies = [
  "tairix-mix",
  "tairix-net",
  "tairix-visible",
+ "tairix-xml",
 ]
 
 [[package]]
@@ -4410,6 +4528,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-smb"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-collections",
+ "tairix-crypto",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "zeroize",
+]
+
+[[package]]
 name = "tairix-sound"
 version = "0.0.0"
 dependencies = [
@@ -4539,6 +4669,7 @@ dependencies = [
  "tairix-sandbox",
  "tairix-soundtheme",
  "tairix-theme",
+ "tairix-visible",
  "tairix-window",
 ]
 
@@ -8478,6 +8609,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-unicode"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-unlink"
 version = "0.0.0"
 dependencies = [
@@ -8586,6 +8721,7 @@ name = "tairix-util"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-unicode",
  "tairix-visible",
 ]
 
@@ -8666,6 +8802,9 @@ dependencies = [
 [[package]]
 name = "tairix-visible"
 version = "0.0.0"
+dependencies = [
+ "tairix-unicode",
+]
 
 [[package]]
 name = "tairix-vt"
@@ -8939,6 +9078,12 @@ dependencies = [
  "tairix-drv-display-framebuffer",
  "tairix-drv-display-gpu-virtio",
  "tairix-drv-dma-bcm2835",
+ "tairix-drv-fs-adfs",
+ "tairix-drv-fs-arxfs",
+ "tairix-drv-fs-ext4",
+ "tairix-drv-fs-fat32",
+ "tairix-drv-fs-iso9660",
+ "tairix-drv-fs-udf",
  "tairix-drv-gpio-bcm2835",
  "tairix-drv-input-usb-hid",
  "tairix-drv-input-virtio-input",
@@ -8964,6 +9109,7 @@ dependencies = [
  "tairix-fontd",
  "tairix-fontface",
  "tairix-fsmeta",
+ "tairix-fsserve",
  "tairix-fuzzseed",
  "tairix-fwcfg",
  "tairix-geometry",

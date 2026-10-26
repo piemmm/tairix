@@ -19,12 +19,18 @@
 //! production wrapper chain, which every other link test bypasses — and to
 //! descriptors held across renames, unlinks, detaches and removals on real
 //! formats, which no in-memory driver can stand in for.
+//!
+//! Every volume is served as on a running system (`plans/FSSERVE.md` FSS5):
+//! the attach publishes its volume node, and the harness plays `devmgr` and
+//! the format's driver bundle, opening the real driver over the volume's grant
+//! and answering the kernel's proxy through `lib/fsserve` from a thread of
+//! its own until the node leaves the tree.
 
 extern crate std;
 
 use std::boxed::Box;
 use std::string::String;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc as StdArc, Mutex};
 use std::thread;
@@ -46,7 +52,11 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::fs::{
     OpenFlags, FS_INITIAL_UMASK, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE, FS_OWNER_UNCHANGED,
 };
+use tairix_abi::fsserve::{FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX, FSSERVE_WINDOW_LEN};
+use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use tairix_abi::memory::PAGE_SIZE;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
+use tairix_abi::time::Time64;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{
     CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno, FileStat, LockRange,
@@ -59,12 +69,16 @@ use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_drv_fs_iso9660::Iso9660;
 use tairix_drv_fs_udf::{FormatOptions, Udf};
+use tairix_fsserve::{
+    Clock, GrantedVolume, ServedFormat, ServedHost, Server, VolumeAccess, WritebackBudget,
+};
 use tairix_hash::{HashSeed, SipHash13};
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::filelock::{self, LockedNode, Request};
+use tairix_kernel_core::fs::served::{mint_served_endpoint, SERVED_ENDPOINT_CAPACITY};
 use tairix_kernel_core::fs::{
     Acting, At, Authority, CreateMode, FilesystemService, FinalLink, FrozenAuthority, Grant,
-    NodeHandle, Opened, Start,
+    NodeHandle, Opened, ServeChannel, Start,
 };
 use tairix_kernel_core::fswatch::WatchRegistry;
 use tairix_kernel_core::{sharedreg, Path, Vfs};
@@ -74,8 +88,9 @@ use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTableBuilder, ProcessId, UserId, UserRecord,
 };
 use tairix_log::{Event, FieldValue, Sink};
-use tairix_reclaim::{FreeMemorySource, MemoryPressure};
+use tairix_reclaim::{FreeMemorySource, MemoryPressure, Unpressured};
 
+use crate::hwtree_store::HwTreeStore;
 use crate::root_mount::LATE_IDENTITY;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::test_support::{RamBlock, BLOCK_SIZE};
@@ -160,12 +175,16 @@ fn audited_count(id: u32, volume: &str, key: &str) -> Vec<Option<u64>> {
 /// The service's own event ids, as the volume manager and an operator read
 /// them back.
 const ATTACH_REFUSED: u32 = 4173;
+const DETACHED: u32 = 4174;
 const DETACH_REFUSED: u32 = 4175;
 const SURPRISE_REMOVED_CLEAN: u32 = 4176;
 const SURPRISE_REMOVED_LOST: u32 = 4178;
 const FORCE_UNMOUNTED: u32 = 4179;
 const ATTACHED_READ_ONLY: u32 = 4180;
 const NAME_TAKEN: u32 = 4181;
+const SERVE_RESUMED: u32 = 4193;
+const SERVE_REFUSED: u32 = 4194;
+const SERVER_LOST: u32 = 4195;
 
 /// The address-space registry endpoint teardown revokes per-endpoint
 /// grants against.
@@ -366,21 +385,59 @@ const SECTORS_8MIB: u64 = (8 << 20) / 512;
 /// Inode count the ARXFS fixture volume is formatted with.
 const ARXFS_INODES: u32 = 64;
 
-/// The shared-memory facility double behind the kernel window: one leaked
-/// `BLK_DATA_LEN` buffer serves every translation (the test creates one
-/// region).
+/// Where the one block-service window's frames are numbered, and where the
+/// served filesystem windows' are numbered from.
+const BLOCK_WINDOW_PHYS: u64 = 0x4000_0000;
+const SERVED_WINDOW_PHYS: u64 = 0x1_0000_0000;
+
+/// The pages a served filesystem's data window spans.
+const SERVED_WINDOW_PAGES: u64 = (FSSERVE_WINDOW_LEN / PAGE_SIZE) as u64;
+
+/// A leaked test window, carried with its provenance to the thread that
+/// serves it rather than as an address an interpreter cannot follow.
+#[derive(Clone, Copy)]
+struct Window(*mut u8);
+
+// SAFETY: every window is leaked process-lifetime memory, and the
+// request/reply protocol gives one side at a time the turn.
+unsafe impl Send for Window {}
+
+impl Window {
+    fn ptr(self) -> *mut u8 {
+        self.0
+    }
+}
+
+/// The shared-memory facility double behind the kernel's windows: every
+/// block-service region resolves to the one leaked `BLK_DATA_LEN` window the
+/// scenarios' block servers write through, and each served filesystem's
+/// window to a buffer of its own.
 struct TestFacility {
     window: *mut u8,
+    served: Mutex<Vec<(u64, Window)>>,
+    next_served: AtomicU64,
 }
-// SAFETY: the window is leaked process-lifetime memory; the facility only
-// hands the raw pointer out and frees nothing.
+// SAFETY: the windows are leaked process-lifetime memory; the facility only
+// hands their raw pointers out and frees nothing.
 unsafe impl Sync for TestFacility {}
 
 impl SharedMemFacility for TestFacility {
     fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
-        // A single contiguous chunk (the block-service data window is small).
+        let phys_base = if pages == SERVED_WINDOW_PAGES {
+            let phys = SERVED_WINDOW_PHYS
+                + self.next_served.fetch_add(1, Ordering::Relaxed) * FSSERVE_WINDOW_LEN as u64;
+            let window: &'static mut [u8] =
+                Box::leak(vec![0u8; FSSERVE_WINDOW_LEN].into_boxed_slice());
+            self.served
+                .lock()
+                .unwrap()
+                .push((phys, Window(window.as_mut_ptr())));
+            phys
+        } else {
+            BLOCK_WINDOW_PHYS
+        };
         Ok(vec![SharedChunk {
-            phys_base: 0x4000_0000,
+            phys_base,
             order: 0,
             pages,
         }])
@@ -397,12 +454,18 @@ impl SharedMemFacility for TestFacility {
     }
     fn free_region(&self, _chunks: &[SharedChunk], _memory: tairix_kernel_mem::SharedMemory) {}
     fn kernel_window(&self, chunks: &[SharedChunk], _len: usize) -> Option<core::ptr::NonNull<u8>> {
-        // The single-chunk region resolves to the one leaked test window.
-        if chunks.len() == 1 {
-            core::ptr::NonNull::new(self.window)
-        } else {
-            None
+        let [chunk] = chunks else {
+            return None;
+        };
+        if chunk.phys_base == BLOCK_WINDOW_PHYS {
+            return core::ptr::NonNull::new(self.window);
         }
+        self.served
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(phys, _)| *phys == chunk.phys_base)
+            .and_then(|&(_, window)| core::ptr::NonNull::new(window.ptr()))
     }
 }
 
@@ -466,15 +529,15 @@ impl ServedDevice {
 }
 
 /// Serve blkio requests over `endpoint` against `device`, moving data
-/// through the raw `window` pointer, until `stop` is set.
+/// through `window`, until `stop` is set.
 fn serve(
     endpoint: StdArc<CallEndpoint>,
-    window: usize,
+    window: Window,
     device: StdArc<Mutex<ServedDevice>>,
     stop: StdArc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let window = window as *mut u8;
+        let window = window.ptr();
         while !stop.load(Ordering::Relaxed) {
             let RecvCall::Received(call) = endpoint.recv_call(BLK_REQUEST_LEN) else {
                 thread::yield_now();
@@ -594,8 +657,263 @@ fn register_endpoint(id: u64, owner: u64) -> StdArc<CallEndpoint> {
     endpoint
 }
 
+/// The hardware tree the service publishes its volume nodes into, and the
+/// block-service node every scenario's volume manager runs for.
+static TREE: HwTreeStore = HwTreeStore::new();
+const PUBLISHER: u32 = 2;
+
+/// Whether the drivers started from now on defer their commits, as a driver
+/// with a monotonic clock does, rather than publishing every operation.
+static DEFER: AtomicBool = AtomicBool::new(false);
+
+/// Each volume node a test driver serves, and the process that driver runs
+/// as.
+static DRIVEN: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
+
+/// The process numbers test drivers run as.
+static NEXT_DRIVER: AtomicU64 = AtomicU64::new(0x7D_0000);
+
+/// A test driver's clock: frozen when it defers, so a commit it holds falls
+/// due only when a scenario says, and absent otherwise.
+struct DriverClock {
+    defer: bool,
+}
+
+impl Clock for DriverClock {
+    fn now_ns(&self) -> Option<u64> {
+        self.defer.then_some(1)
+    }
+
+    fn wall_time(&self) -> Option<Time64> {
+        None
+    }
+}
+
+/// The kernel's operations on one served volume, as its driver's syscalls
+/// reach them past the grant check.
+struct ServiceAccess(u64);
+
+impl VolumeAccess for ServiceAccess {
+    fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), Errno> {
+        let len = buf.len();
+        VOLUME_SERVICE.read(self.0, lba, len, &mut |offset, chunk| {
+            buf[offset..offset + chunk.len()].copy_from_slice(chunk);
+            Ok(())
+        })
+    }
+
+    fn write(&self, lba: u64, buf: &[u8]) -> Result<(), Errno> {
+        VOLUME_SERVICE.write(self.0, lba, buf.len(), &mut |offset, chunk| {
+            let len = chunk.len();
+            chunk.copy_from_slice(&buf[offset..offset + len]);
+            Ok(())
+        })
+    }
+
+    fn ctl(
+        &self,
+        ctl: &tairix_abi::volume::VolumeCtl,
+    ) -> Result<Option<tairix_abi::volume::VolumeInfo>, Errno> {
+        VOLUME_SERVICE.ctl(self.0, ctl)
+    }
+}
+
+/// Attach `request` as the volume manager does, then serve each volume node
+/// the attach published as `devmgr` and the format's driver would.
+fn attach_served(
+    facility: &'static TestFacility,
+    request: &VolumeAttachRequest<'_>,
+) -> Result<(), Errno> {
+    let attached = VOLUME_SERVICE.attach(request, Some(PUBLISHER));
+    serve_published(facility);
+    attached
+}
+
+/// Each volume node under the publisher no driver serves yet: its id, the
+/// served volume its grant names, and the format its key binds.
+fn undriven_volume_nodes() -> Vec<(u32, u64, VolumeFsType)> {
+    let mut found = Vec::new();
+    TREE.for_each_node(&mut |node| {
+        if node.parent() != PUBLISHER {
+            return;
+        }
+        let Some(volume) = node.resources().iter().find_map(HwResource::volume_id) else {
+            return;
+        };
+        let fstype = [
+            VolumeFsType::ARXFS,
+            VolumeFsType::Ext4,
+            VolumeFsType::Fat32,
+            VolumeFsType::Iso9660,
+            VolumeFsType::Udf,
+            VolumeFsType::Adfs,
+        ]
+        .into_iter()
+        .find(|fstype| {
+            node.match_keys()
+                .iter()
+                .any(|key| key.compatible_bytes() == fstype.served_compatible())
+        })
+        .expect("a volume node names its format");
+        found.push((node.id(), volume, fstype));
+    });
+    let driven = DRIVEN.lock().unwrap();
+    found.retain(|(node, ..)| driven.iter().all(|(served, _)| served != node));
+    found
+}
+
+/// Start a driver for every volume node none serves, each having served or
+/// refused its volume before this returns.
+fn serve_published(facility: &'static TestFacility) {
+    for (node, volume, fstype) in undriven_volume_nodes() {
+        start_driver(facility, node, volume, fstype);
+    }
+}
+
+/// Start the driver of `fstype` for volume node `node`, as `devmgr` loads its
+/// bundle, and wait until it has served or refused volume `volume`.
+fn start_driver(facility: &'static TestFacility, node: u32, volume: u64, fstype: VolumeFsType) {
+    let owner = NEXT_DRIVER.fetch_add(1, Ordering::Relaxed);
+    DRIVEN.lock().unwrap().push((node, owner));
+    let defer = DEFER.load(Ordering::Relaxed);
+    let (offered, outcome) = mpsc::channel();
+    let driver = Driver {
+        facility,
+        node,
+        volume,
+        owner,
+        defer,
+    };
+    match fstype {
+        VolumeFsType::ARXFS => driver.start::<tairix_drv_fs_arxfs::Served>(offered),
+        VolumeFsType::Ext4 => driver.start::<tairix_drv_fs_ext4::Served>(offered),
+        VolumeFsType::Fat32 => driver.start::<tairix_drv_fs_fat32::Served>(offered),
+        VolumeFsType::Iso9660 => driver.start::<tairix_drv_fs_iso9660::Served>(offered),
+        VolumeFsType::Udf => driver.start::<tairix_drv_fs_udf::Served>(offered),
+        VolumeFsType::Adfs => driver.start::<tairix_drv_fs_adfs::Served>(offered),
+    }
+    // Every path of the driver's start sends, and a driver that dies first
+    // drops the sender, so this waits on completion rather than the clock.
+    outcome
+        .recv()
+        .expect("the driver serves or refuses its volume");
+}
+
+/// The process a scenario's driver for `node` runs as.
+fn driver_of(node: u32) -> u64 {
+    DRIVEN
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(served, _)| *served == node)
+        .map(|&(_, owner)| owner)
+        .expect("a driver serves the node")
+}
+
+/// One served driver, as its bundle runs.
+#[derive(Clone, Copy)]
+struct Driver {
+    facility: &'static TestFacility,
+    node: u32,
+    volume: u64,
+    owner: u64,
+    defer: bool,
+}
+
+impl Driver {
+    fn start<F: ServedFormat + 'static>(self, offered: mpsc::Sender<()>) {
+        thread::spawn(move || self.run::<F>(&offered));
+    }
+
+    /// Open the volume over its grant, offer it, and answer the kernel until
+    /// the node leaves the tree — when `devmgr` unloads the driver — or its
+    /// endpoint goes; the driver's process then ends, taking its endpoint.
+    fn run<F: ServedFormat>(self, offered: &mpsc::Sender<()>) {
+        let host: &'static ServedHost<DriverClock> =
+            Box::leak(Box::new(ServedHost::new(DriverClock { defer: self.defer })));
+        let budget = WritebackBudget {
+            backing: 1 << 30,
+            gauge: &Unpressured,
+        };
+        let opened = GrantedVolume::open(ServiceAccess(self.volume)).and_then(|granted| {
+            let read_only = granted.info().read_only;
+            F::open(granted, read_only, budget)
+        });
+        let mut opened = match opened {
+            Ok(opened) => opened,
+            Err(why) => {
+                let _ = VOLUME_SERVICE.refuse(self.volume, why);
+                let _ = offered.send(());
+                return;
+            }
+        };
+        opened.fs.set_volume_host(
+            DriverHandle::from_raw(self.volume).expect("a volume id"),
+            host,
+        );
+        let offer = opened.offer();
+        let (channel, window) = self.channel();
+        let endpoint = StdArc::clone(&channel.endpoint);
+        let outcome = VOLUME_SERVICE.serve(self.volume, &offer, channel);
+        let _ = offered.send(());
+        if outcome.is_ok() {
+            let mut server = Server::new(opened.fs, host).expect("a server");
+            let mut reply = vec![0u8; FSSERVE_REPLY_MAX];
+            while TREE.is_live(self.node) && !endpoint.is_closed() {
+                let RecvCall::Received(call) = endpoint.recv_call(FSSERVE_REQUEST_MAX) else {
+                    thread::yield_now();
+                    continue;
+                };
+                // SAFETY: the window is a leaked `FSSERVE_WINDOW_LEN`-byte
+                // buffer alive for the process, and the proxy leaves it alone
+                // while a call it posted is in service, so this is the only
+                // borrow of it in use.
+                let window = unsafe { core::slice::from_raw_parts_mut(window, FSSERVE_WINDOW_LEN) };
+                let len = server.answer(&call.request, window, &mut reply);
+                let _ = endpoint.reply(call.ticket, &reply[..len], &SINK);
+            }
+        }
+        tairix_kernel_core::callreg::teardown_owned_by(self.owner, &ASPACES, &SINK);
+    }
+
+    /// The endpoint and data window the kernel makes a driver at
+    /// `volume_serve`, and the window's bytes.
+    fn channel(self) -> (ServeChannel, *mut u8) {
+        let creator = TaskCapabilities::derive(
+            ProcessId(self.owner),
+            UserId(0),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &SINK,
+        );
+        let endpoint = StdArc::new(
+            CallEndpoint::create_served(
+                EndpointId(mint_served_endpoint().expect("an endpoint id")),
+                &creator,
+                CallEndpointLimits {
+                    max_request: u32::try_from(FSSERVE_REQUEST_MAX).unwrap(),
+                    max_reply: u32::try_from(FSSERVE_REPLY_MAX).unwrap(),
+                    capacity: SERVED_ENDPOINT_CAPACITY,
+                },
+                tairix_abi::RLIMIT_INFINITY,
+                &SINK,
+            )
+            .expect("a served endpoint"),
+        );
+        tairix_kernel_core::callreg::register(StdArc::clone(&endpoint), &SINK)
+            .expect("register the served endpoint");
+        let (_va, region) =
+            sharedreg::create(self.facility, ProcessId(self.owner), SERVED_WINDOW_PAGES)
+                .expect("a data window");
+        let window = sharedreg::kernel_hold(self.facility, region).expect("held");
+        let bytes = window.as_ptr();
+        (ServeChannel { endpoint, window }, bytes)
+    }
+}
+
 #[test]
-fn a_recovered_volume_is_served_only_under_its_recovered_posture() {
+fn a_reattached_mount_takes_its_new_posture_in_place() {
     let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
     let handle = tairix_abi::DriverHandle::from_raw(0x7A11).expect("handle");
     let path = tairix_kernel_core::Path::parse("/Storage/usb9").expect("path");
@@ -606,23 +924,20 @@ fn a_recovered_volume_is_served_only_under_its_recovered_posture() {
             super::mount_template(None),
         )
         .expect("the volume was attached writable");
-    let mut served = false;
-    super::reattach_then_serve(
+    super::reattach(
         &vfs,
         tairix_kernel_core::Attachment::new(handle, None, super::mount_flags(true)),
         path.clone(),
         super::mount_template(None),
-        || {
-            served = true;
-            assert!(
-                vfs.mounts().resolve(&path).is_read_only(),
-                "the live driver is served only once the mount is read-only"
-            );
-            Ok(())
-        },
     )
-    .expect("the volume is served again");
-    assert!(served);
+    .expect("the mount moves to its new posture");
+    let mounts = vfs.mounts();
+    let resolved = mounts.resolve(&path);
+    assert!(
+        resolved.is_read_only(),
+        "read-only before any driver serves it"
+    );
+    assert_eq!(resolved.path(), &path, "under the same path");
 }
 
 /// The stand-in answers a climb and a byte write with the transient device
@@ -661,7 +976,26 @@ fn an_unwired_service_fails_closed() {
         fstype: VolumeFsType::Fat32,
         name: b"usb1",
     };
-    assert_eq!(service.attach(&attach), Err(Errno::NotImplemented));
+    assert_eq!(
+        service.attach(&attach, Some(PUBLISHER)),
+        Err(Errno::NotImplemented)
+    );
+    assert_eq!(service.awaiting_server(1), Err(Errno::NotImplemented));
+    assert_eq!(
+        service.refuse(1, DriverError::BadMagic),
+        Err(Errno::NotImplemented)
+    );
+    assert_eq!(
+        service.ctl(
+            1,
+            &tairix_abi::volume::VolumeCtl {
+                op: tairix_abi::volume::VolumeCtlOp::Info,
+                lba: 0,
+                blocks: 0,
+            }
+        ),
+        Err(Errno::NotImplemented)
+    );
     assert_eq!(
         service.detach(&VolumeDetachRequest {
             volume_id: [7; 16],
@@ -826,7 +1160,12 @@ fn boot() -> Booted {
     // The directory-watch registry production wires, so every volume the
     // scenarios attach claims its change table as a hot-plugged one does.
     let watches: &'static WatchRegistry = Box::leak(Box::new(WatchRegistry::new()));
-    VOLUME_SERVICE.install(&SINK, pressure, Some(watches));
+    TREE.seed(vec![
+        HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root),
+        HwNode::new(PUBLISHER, HW_NODE_ROOT_ID, HwDeviceClass::Storage),
+    ])
+    .expect("seed the scenarios' tree once");
+    VOLUME_SERVICE.install(&SINK, pressure, Some(watches), &TREE);
     // The production boot wiring also registers the service as the
     // endpoint-vanish observer (the surprise-removal trigger).
     tairix_kernel_core::callreg::install_vanish_observer(&VOLUME_SERVICE);
@@ -839,7 +1178,11 @@ fn boot() -> Booted {
         .expect("install identity once");
     let window: &'static mut [u8] = Box::leak(vec![0u8; BLK_DATA_LEN].into_boxed_slice());
     let window = window.as_mut_ptr();
-    let facility: &'static TestFacility = Box::leak(Box::new(TestFacility { window }));
+    let facility: &'static TestFacility = Box::leak(Box::new(TestFacility {
+        window,
+        served: Mutex::new(Vec::new()),
+        next_served: AtomicU64::new(0),
+    }));
     install_shared_mem_facility(facility);
     LATE_FILESYSTEM
         .install_vfs(Vfs::with_default_layout(UserId(0), GroupId(0)))
@@ -877,7 +1220,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
@@ -895,7 +1238,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         fstype: VolumeFsType::Fat32,
         name: b"usb1",
     };
-    VOLUME_SERVICE.attach(&attach).expect("attach");
+    attach_served(facility, &attach).expect("attach");
     assert_eq!(
         VOLUME_FOREST.resolve(&expected_identity),
         Some(vec![String::from("Storage"), String::from("usb1")]),
@@ -912,7 +1255,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         name: b"usb2",
         ..attach
     };
-    assert_eq!(VOLUME_SERVICE.attach(&dup), Err(Errno::Busy));
+    assert_eq!(attach_served(facility, &dup), Err(Errno::Busy));
 
     // --- Use: the mounted volume serves reads through the production
     // `fs_*` service under the system principal. ---
@@ -1015,6 +1358,393 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_held_descriptor_holds_its_volume_attached_scenario(window_ptr, facility);
     a_descriptor_stays_with_its_node_scenario(window_ptr, facility);
     a_fat_files_lock_follows_it_through_writes_and_renames_scenario(window_ptr, facility);
+    a_lost_driver_is_restarted_and_serves_again_scenario(window_ptr, facility);
+    a_volume_its_driver_cannot_open_is_retracted_scenario(window_ptr, facility);
+    a_driver_offering_another_format_is_refused_scenario(window_ptr, facility);
+    a_conflicted_volume_its_driver_refuses_is_kept_scenario(window_ptr, facility);
+    a_volume_awaiting_its_driver_detaches_scenario(window_ptr, facility);
+    a_volume_out_of_the_table_still_detaches_scenario(window_ptr, facility);
+}
+
+/// The served volume, and the node it is published as, of the attached
+/// volume named `name`.
+fn served_volume(name: &str) -> (u64, u32) {
+    let state = VOLUME_SERVICE.state.lock();
+    let volume = state
+        .iter()
+        .find(|volume| volume.name == name)
+        .expect("the volume is attached");
+    let (_, node) = volume.node.expect("its node is published");
+    (volume.served.as_ref().expect("in service").id(), node)
+}
+
+/// What a grant on `volume` reads of its first block, or why not.
+fn read_first_block(volume: u64) -> Result<(), Errno> {
+    VOLUME_SERVICE.read(volume, 0, BLOCK_SIZE, &mut |_, _| Ok(()))
+}
+
+/// A driver that dies leaves its volume mounted behind the fail-closed
+/// stand-in, reporting itself recovering; the node stays published, so the
+/// driver `devmgr` restarts serves the same volume again and it returns to
+/// service.
+fn a_lost_driver_is_restarted_and_serves_again_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C080, b"restarted payload");
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0080,
+            owner: 0x70_1080,
+            region_task: 0x70_0080,
+            name: b"again1",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    round.outcome.expect("the volume attaches");
+    assert_volume_reads("/Storage/again1/hello.txt", b"restarted payload");
+    let (volume, node) = served_volume("again1");
+    let held = Descriptor::open(0, "/Storage/again1/hello.txt", OpenFlags::READ)
+        .expect("a descriptor of the volume");
+
+    tairix_kernel_core::callreg::teardown_owned_by(driver_of(node), &ASPACES, &SINK);
+    assert_eq!(
+        audited(SERVER_LOST, "again1"),
+        [Some(String::from("nothing_unpublished"))]
+    );
+    assert_eq!(
+        mount_record(b"again1").availability(),
+        MountAvailability::Recovering
+    );
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        read_as(0, "/Storage/again1/hello.txt", 0, &mut buf).err(),
+        Some(Errno::DeviceFault),
+        "the stand-in answers until a driver serves the volume again"
+    );
+    assert_eq!(
+        held.read(0, &mut buf),
+        Err(Errno::DeviceFault),
+        "a descriptor held across the loss answers the device fault while the volume waits"
+    );
+    assert!(
+        TREE.is_live(node),
+        "the node stays for the restarted driver"
+    );
+    assert_eq!(VOLUME_SERVICE.awaiting_server(volume), Ok(()));
+
+    start_driver(facility, node, volume, VolumeFsType::Fat32);
+    assert_eq!(audited(SERVE_RESUMED, "again1"), [None]);
+    assert_eq!(
+        mount_record(b"again1").availability(),
+        MountAvailability::Available
+    );
+    assert_eq!(
+        held.read(0, &mut buf),
+        Err(Errno::Stale),
+        "its hold went with the lost driver, so the restarted one never answers it"
+    );
+    drop(held);
+    assert_volume_reads("/Storage/again1/hello.txt", b"restarted payload");
+    assert_eq!(
+        VOLUME_SERVICE.awaiting_server(volume),
+        Err(Errno::AlreadyExists),
+        "no second driver may serve it too"
+    );
+    retire(identity, false, round);
+    assert!(!TREE.is_live(node), "the detach withdrew its node");
+    assert_every_attached_volume_is_served();
+}
+
+/// A volume the kernel's probe recognises but its driver will not open — an
+/// ext volume with an incompatible feature no driver here knows — is
+/// retracted with the driver's refusal on record, never published.
+fn a_volume_its_driver_cannot_open_is_retracted_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let identity = [0xEA; 16];
+    let mut image = ext4_image(identity);
+    image.data[EXT4_INCOMPAT_BYTE] |= 0x80;
+    let owner = 0x70_1081;
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0081,
+            owner,
+            region_task: 0x70_0081,
+            name: b"badext",
+            fstype: VolumeFsType::Ext4,
+        },
+        ServedDevice::new(image),
+    );
+    round
+        .outcome
+        .expect("the attach succeeds: only the driver can tell");
+    assert_eq!(
+        audited(SERVE_REFUSED, "badext"),
+        [Some(String::from("driver_refused"))]
+    );
+    assert_eq!(VOLUME_FOREST.resolve(&identity), None, "never published");
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        read_as(0, "/Storage/badext/hello.txt", 0, &mut buf).err(),
+        Some(Errno::NotFound),
+        "nor mounted"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: false,
+        }),
+        Err(Errno::NotFound),
+        "nothing remains to detach"
+    );
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    round.stop.store(true, Ordering::Relaxed);
+    round.server.join().expect("server thread");
+    assert_every_attached_volume_is_served();
+}
+
+/// The kernel holds a driver to the volume's own probe: a driver offering it
+/// as another format is refused and the volume retracted, so its grant then
+/// reaches nothing. Before any driver serves it, its grant reaches only whole
+/// blocks of its own extent.
+fn a_driver_offering_another_format_is_refused_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C082, b"impostor payload");
+    let copy = RamBlock {
+        data: image.data.clone(),
+    };
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let owner = 0x70_1082;
+    let round = insert_unserved(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0082,
+            owner,
+            region_task: 0x70_0082,
+            name: b"liar1",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    round.outcome.expect("the volume attaches");
+    let (volume, node) = served_volume("liar1");
+    read_first_block(volume).expect("a grant reads its own volume");
+    assert_eq!(
+        VOLUME_SERVICE.read(volume, blocks, BLOCK_SIZE, &mut |_, _| Ok(())),
+        Err(Errno::LengthOutOfRange),
+        "never past its end"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.read(volume, 0, BLOCK_SIZE / 2, &mut |_, _| Ok(())),
+        Err(Errno::LengthOutOfRange),
+        "and only in whole blocks"
+    );
+    assert_eq!(read_first_block(volume + 1000), Err(Errno::NotFound));
+
+    let budget = WritebackBudget {
+        backing: 1 << 30,
+        gauge: &Unpressured,
+    };
+    let offer = tairix_drv_fs_fat32::Served::open(copy, false, budget)
+        .expect("the copy opens")
+        .offer();
+    let liar = Driver {
+        facility,
+        node,
+        volume,
+        owner: NEXT_DRIVER.fetch_add(1, Ordering::Relaxed),
+        defer: false,
+    };
+    let (channel, _) = liar.channel();
+    let lie = tairix_abi::fsserve::ServeOffer {
+        format: tairix_abi::volume::FormatName::Ext4,
+        ..offer
+    };
+    assert_eq!(
+        VOLUME_SERVICE.serve(volume, &lie, channel),
+        Err(Errno::BadMagic)
+    );
+    assert_eq!(
+        audited(SERVE_REFUSED, "liar1"),
+        [Some(String::from("format_mismatch"))]
+    );
+    assert!(!TREE.is_live(node), "its node is withdrawn");
+    assert_eq!(read_first_block(volume), Err(Errno::NotFound));
+    assert_eq!(
+        VOLUME_SERVICE.detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: false,
+        }),
+        Err(Errno::NotFound)
+    );
+    tairix_kernel_core::callreg::teardown_owned_by(liar.owner, &ASPACES, &SINK);
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    round.stop.store(true, Ordering::Relaxed);
+    round.server.join().expect("server thread");
+}
+
+/// A conflicted re-insert whose driver will not serve it is kept, read-only
+/// behind its stand-in: its retained set is the audited force-unmount's to
+/// discard, never a refusal's.
+fn a_conflicted_volume_its_driver_refuses_is_kept_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let round = dirty_yank_round(
+        window_ptr,
+        facility,
+        &YankScenario {
+            owner: 0x70_1083,
+            endpoint_id: 0xB1D0_5E17_0000_0083,
+            serial: 0x0D15_C083,
+            region_task: 0x70_0083,
+            name: b"keep1",
+            unflushed: Unflushed::DeviceWrite,
+        },
+    );
+    let mut mutated = round.at_yank;
+    mutated[512 + 488..512 + 492].copy_from_slice(&4321u32.to_le_bytes());
+    let inserted = insert_unserved(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0084,
+            owner: 0x70_1084,
+            region_task: 0x70_0084,
+            name: b"keep1",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(RamBlock { data: mutated }),
+    );
+    inserted
+        .outcome
+        .expect("the conflicted re-insert is attached");
+    let (volume, node) = served_volume("keep1");
+    VOLUME_SERVICE
+        .refuse(volume, DriverError::DeviceFault)
+        .expect("its driver refuses it");
+    assert_eq!(
+        audited(SERVE_REFUSED, "keep1"),
+        [Some(String::from("driver_refused"))]
+    );
+    assert!(!TREE.is_live(node), "no driver will serve it");
+    assert_eq!(
+        mount_record(b"keep1").availability(),
+        MountAvailability::RecoveryConflict,
+        "it stays, its retained set held"
+    );
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        round.held.read(0, &mut buf),
+        Err(Errno::Stale),
+        "a descriptor held across the removal reaches nothing of the returned volume"
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&VolumeDetachRequest {
+            volume_id: round.identity,
+            force: false,
+        }),
+        Err(Errno::NotEmpty),
+        "only its retained set refuses the plain detach, not the stale descriptor"
+    );
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: round.identity,
+            force: true,
+        })
+        .expect("the audited force retracts it");
+    assert_eq!(VOLUME_FOREST.resolve(&round.identity), None);
+    inserted.stop.store(true, Ordering::Relaxed);
+    inserted.server.join().expect("server thread");
+}
+
+/// A volume no driver has served yet has no mount to take out of the table,
+/// so a plain detach withdraws it at once: its node, its grant and its entry.
+fn a_volume_awaiting_its_driver_detaches_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C085, b"awaiting payload");
+    let owner = 0x70_1085;
+    let round = insert_unserved(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0085,
+            owner,
+            region_task: 0x70_0085,
+            name: b"wait1",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    round.outcome.expect("the volume attaches");
+    let (volume, node) = served_volume("wait1");
+    assert_eq!(VOLUME_SERVICE.awaiting_server(volume), Ok(()));
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: false,
+        })
+        .expect("a volume no driver serves detaches plainly");
+    assert_eq!(audited(DETACHED, "wait1"), [None]);
+    assert!(!TREE.is_live(node), "its node is withdrawn");
+    assert_eq!(
+        read_first_block(volume),
+        Err(Errno::NotFound),
+        "and its grant reaches nothing"
+    );
+    assert_eq!(VOLUME_FOREST.resolve(&identity), None);
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    round.stop.store(true, Ordering::Relaxed);
+    round.server.join().expect("server thread");
+    assert_every_attached_volume_is_served();
+}
+
+/// A volume the registry still calls mounted but the table no longer holds —
+/// as a reattach the heap refused leaves one — detaches plainly: the detach
+/// asks the table, never the registry, whether there is a mount to take.
+fn a_volume_out_of_the_table_still_detaches_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C086, b"untabled payload");
+    let owner = 0x70_1086;
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0086,
+            owner,
+            region_task: 0x70_0086,
+            name: b"gone1",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    round.outcome.expect("the volume attaches");
+    let handle = served_handle("gone1");
+    LATE_FILESYSTEM
+        .vfs()
+        .expect("installed")
+        .mounts_write()
+        .detach(handle)
+        .expect("the mount leaves the table");
+    retire(identity, false, round);
+    assert_eq!(audited(DETACHED, "gone1"), [None]);
+    assert_eq!(VOLUME_FOREST.resolve(&identity), None);
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    assert_every_attached_volume_is_served();
 }
 
 /// A drive whose medium changes retracts the node it published the first
@@ -1039,20 +1769,23 @@ fn a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, first_region) = sharedreg::create(facility, ProcessId(0x70_0050), 8).expect("region");
     let attach = |window: u64, name: &[u8]| {
-        VOLUME_SERVICE.attach(&VolumeAttachRequest {
-            endpoint: endpoint_id,
-            window,
-            first_lba: 0,
-            blocks,
-            fstype: VolumeFsType::Fat32,
-            name,
-        })
+        attach_served(
+            facility,
+            &VolumeAttachRequest {
+                endpoint: endpoint_id,
+                window,
+                first_lba: 0,
+                blocks,
+                fstype: VolumeFsType::Fat32,
+                name,
+            },
+        )
     };
     attach(first_region, b"disc1").expect("attach the first disc");
     assert_volume_reads("/Storage/disc1/hello.txt", b"first disc payload");
@@ -1117,20 +1850,23 @@ fn a_medium_that_leaves_while_its_volume_attaches_retracts_it_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         register_endpoint(endpoint_id, owner),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0060), 8).expect("region");
     let attaching = thread::spawn(move || {
-        VOLUME_SERVICE.attach(&VolumeAttachRequest {
-            endpoint: endpoint_id,
-            window: region,
-            first_lba: 0,
-            blocks,
-            fstype: VolumeFsType::Fat32,
-            name: b"gone1",
-        })
+        attach_served(
+            facility,
+            &VolumeAttachRequest {
+                endpoint: endpoint_id,
+                window: region,
+                first_lba: 0,
+                blocks,
+                fstype: VolumeFsType::Fat32,
+                name: b"gone1",
+            },
+        )
     });
     let held = has_request.recv_timeout(Duration::from_secs(60));
     if held.is_ok() {
@@ -1178,19 +1914,22 @@ fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         register_endpoint(endpoint_id, owner),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let attach = move |window: u64| {
-        VOLUME_SERVICE.attach(&VolumeAttachRequest {
-            endpoint: endpoint_id,
-            window,
-            first_lba: 0,
-            blocks,
-            fstype: VolumeFsType::Fat32,
-            name: b"card1",
-        })
+        attach_served(
+            facility,
+            &VolumeAttachRequest {
+                endpoint: endpoint_id,
+                window,
+                first_lba: 0,
+                blocks,
+                fstype: VolumeFsType::Fat32,
+                name: b"card1",
+            },
+        )
     };
     let (_va, first) = sharedreg::create(facility, ProcessId(0x70_0061), 8).expect("region");
     attach(first).expect("attach the card");
@@ -1245,7 +1984,7 @@ fn a_medium_that_leaves_while_its_volume_recovers_retracts_it_scenario(
 fn an_attach_naming_a_retracted_publication_is_refused_scenario() {
     let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&AMPLE)));
     let service: &'static RuntimeVolumeService = Box::leak(Box::new(RuntimeVolumeService::new()));
-    service.install(&SINK, pressure, None);
+    service.install(&SINK, pressure, None, &TREE);
     let (endpoint, window) = (0xB1D0_5E17_0000_0063_u64, 0x63);
     let holder = service.pin_device(endpoint, window).expect("a slot");
     service.publication_retracted(EndpointId(endpoint));
@@ -1257,7 +1996,7 @@ fn an_attach_naming_a_retracted_publication_is_refused_scenario() {
         fstype: VolumeFsType::Fat32,
         name: b"stale1",
     };
-    assert_eq!(service.attach(&request), Err(Errno::Stale));
+    assert_eq!(service.attach(&request, Some(PUBLISHER)), Err(Errno::Stale));
     assert_eq!(
         audited(ATTACH_REFUSED, "stale1"),
         [Some(String::from("publication_retracted"))]
@@ -1297,19 +2036,55 @@ enum Unflushed {
     Nothing,
     /// A write the device took into its cache, which the journal retains.
     DeviceWrite,
-    /// A transaction the volume's driver reports open and never published.
-    DriverTransaction,
+}
+
+/// The shared client of a disk the service has connected.
+type DeviceClient = alloc::sync::Weak<
+    crate::shared_block::SharedBlock<
+        crate::block_cache::BlockCache<tairix_kernel_core::fs::blkclient::BlkClient>,
+    >,
+>;
+
+/// The client of the disk served over `endpoint`, watched without being held.
+fn device_client(endpoint: u64) -> DeviceClient {
+    let devices = VOLUME_SERVICE.devices.lock();
+    let shared = devices
+        .iter()
+        .find(|slot| slot.endpoint == endpoint)
+        .and_then(|slot| slot.connected.as_ref())
+        .expect("the disk is connected");
+    alloc::sync::Arc::downgrade(&shared.device)
+}
+
+/// A volume whose device left holds nothing of it: no served volume, and,
+/// once the slots no operation holds are retired, no client of the disk.
+fn assert_the_departed_disk_is_let_go(identity: [u8; 16], client: &DeviceClient) {
+    assert!(
+        VOLUME_SERVICE
+            .state
+            .lock()
+            .iter()
+            .filter(|volume| volume.id == identity)
+            .all(|volume| volume.served.is_none()),
+        "a volume whose device left lets its served volume go"
+    );
+    VOLUME_SERVICE.retire_unused_devices();
+    assert!(
+        client.upgrade().is_none(),
+        "and with it the departed disk's client"
+    );
 }
 
 /// One served, attached FAT32 volume for the surprise-removal scenarios,
 /// yanked by tearing its endpoint's owner down. Returns the volume's
-/// identity after the server thread has ended, and a descriptor of its
-/// `hello.txt` held across the removal.
+/// identity after the server thread has ended, its disk's client as it
+/// stood before the yank, and a descriptor of its `hello.txt` held across
+/// the removal.
 fn attach_then_yank(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
     scenario: &YankScenario,
-) -> ([u8; 16], Descriptor) {
+) -> ([u8; 16], DeviceClient, Descriptor) {
     let endpoint = register_endpoint(scenario.endpoint_id, scenario.owner);
     let (image, identity) = fat32_image(scenario.serial, b"scenario payload");
     let blocks = (image.data.len() / BLOCK_SIZE) as u64;
@@ -1317,22 +2092,24 @@ fn attach_then_yank(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region) =
         sharedreg::create(facility, ProcessId(scenario.region_task), 8).expect("region");
-    VOLUME_SERVICE
-        .attach(&VolumeAttachRequest {
+    attach_served(
+        facility,
+        &VolumeAttachRequest {
             endpoint: scenario.endpoint_id,
             window: region,
             first_lba: 0,
             blocks,
             fstype: VolumeFsType::Fat32,
             name: scenario.name,
-        })
-        .expect("attach scenario volume");
+        },
+    )
+    .expect("attach scenario volume");
     let name = core::str::from_utf8(scenario.name).expect("ascii name");
     let path = std::format!("/Storage/{name}/hello.txt");
     match scenario.unflushed {
@@ -1341,26 +2118,22 @@ fn attach_then_yank(
         Unflushed::DeviceWrite => {
             write_as(0, &path, 0, b"D").expect("write dirties the journal");
         }
-        // What a driver deferring its commit reports, far enough out that
-        // nothing publishes it first.
-        Unflushed::DriverTransaction => {
-            LATE_FILESYSTEM.note_writeback_due(served_handle(name), Some(u64::MAX - 1));
-        }
     }
     let held = Descriptor::open(0, &path, OpenFlags::READ).expect("a descriptor of the volume");
+    let client = device_client(scenario.endpoint_id);
     // Yank the stick: the serving driver dies and the kernel tears its
     // endpoint down, which drives the vanish observer synchronously.
     tairix_kernel_core::callreg::teardown_owned_by(scenario.owner, &ASPACES, &SINK);
     stop.store(true, Ordering::Relaxed);
     server.join().expect("scenario server thread");
-    (identity, held)
+    (identity, client, held)
 }
 
 /// Surprise removal with uncommitted writes (`plans/DEVICES.md` D4a): the
 /// volume becomes unavailable-dirty — root visible, every operation
 /// failing closed, plain detach refused.
 fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
-    let (identity, held) = attach_then_yank(
+    let (identity, client, held) = attach_then_yank(
         window_ptr,
         facility,
         &YankScenario {
@@ -1380,6 +2153,7 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     );
     assert_links_and_attributes_fault_on_a_vanished_usb2(&held);
     drop(held);
+    assert_the_departed_disk_is_let_go(identity, &client);
     assert_eq!(
         VOLUME_FOREST.resolve(&identity),
         Some(vec![String::from("Storage"), String::from("usb2")]),
@@ -1493,7 +2267,7 @@ fn assert_every_attached_volume_is_served() {
 /// Surprise removal with nothing uncommitted: the volume is simply
 /// retracted — no drama.
 fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
-    let (identity, held) = attach_then_yank(
+    let (identity, client, held) = attach_then_yank(
         window_ptr,
         facility,
         &YankScenario {
@@ -1512,6 +2286,7 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         "a descriptor held across a clean removal reaches nothing"
     );
     drop(held);
+    assert_the_departed_disk_is_let_go(identity, &client);
     assert_eq!(
         VOLUME_FOREST.resolve(&identity),
         None,
@@ -1552,22 +2327,24 @@ fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0030), 8).expect("region");
     for (name, first_lba) in [(&b"pull1"[..], 0), (b"pull2", extent_blocks)] {
-        VOLUME_SERVICE
-            .attach(&VolumeAttachRequest {
+        attach_served(
+            facility,
+            &VolumeAttachRequest {
                 endpoint: endpoint_id,
                 window: region,
                 first_lba,
                 blocks: extent_blocks,
                 fstype: VolumeFsType::Fat32,
                 name,
-            })
-            .expect("attach a partition");
+            },
+        )
+        .expect("attach a partition");
     }
     assert_volume_reads("/Storage/pull1/hello.txt", b"first partition payload");
     assert_volume_reads("/Storage/pull2/hello.txt", b"second partition payload");
@@ -1611,23 +2388,37 @@ fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
 
 /// Surprise removal while the volume's driver holds a transaction it never
 /// published: those writes were acknowledged and never reached the device, so
-/// the removal is recorded as the loss it is, never as a clean one.
+/// the removal is recorded as the loss it is, never as a clean one. The driver
+/// says so in its own replies, which is all the kernel can know of a store it
+/// does not hold.
 fn an_unpublished_transaction_is_recorded_lost_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
 ) {
-    let (identity, held) = attach_then_yank(
+    let identity = [0xE9; 16];
+    let owner = 0x70_1030;
+    DEFER.store(true, Ordering::Relaxed);
+    let round = insert(
         window_ptr,
         facility,
-        &YankScenario {
-            owner: 0x70_1030,
+        &Insertion {
             endpoint_id: 0xB1D0_5E17_0000_0030,
-            serial: 0x0D15_C00C,
+            owner,
             region_task: 0x70_0030,
             name: b"usb9",
-            unflushed: Unflushed::DriverTransaction,
+            fstype: VolumeFsType::Ext4,
         },
+        ServedDevice::new(ext4_image(identity)),
     );
+    DEFER.store(false, Ordering::Relaxed);
+    round.outcome.expect("the volume attaches");
+    write_as(0, "/Storage/usb9/hello.txt", 0, b"U")
+        .expect("the driver takes the write into its open transaction");
+    let held = Descriptor::open(0, "/Storage/usb9/hello.txt", OpenFlags::READ)
+        .expect("a descriptor of the volume");
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    round.stop.store(true, Ordering::Relaxed);
+    round.server.join().expect("scenario server thread");
     assert_eq!(
         VOLUME_FOREST.resolve(&identity),
         Some(vec![String::from("Storage"), String::from("usb9")]),
@@ -1693,22 +2484,24 @@ fn dirty_yank_round(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region) =
         sharedreg::create(facility, ProcessId(scenario.region_task), 8).expect("region");
-    VOLUME_SERVICE
-        .attach(&VolumeAttachRequest {
+    attach_served(
+        facility,
+        &VolumeAttachRequest {
             endpoint: scenario.endpoint_id,
             window: region,
             first_lba: 0,
             blocks,
             fstype: VolumeFsType::Fat32,
             name: scenario.name,
-        })
-        .expect("attach re-insert round volume");
+        },
+    )
+    .expect("attach re-insert round volume");
     let path = std::format!(
         "/Storage/{}/hello.txt",
         core::str::from_utf8(scenario.name).expect("ascii name")
@@ -1746,8 +2539,21 @@ struct Insertion {
     fstype: VolumeFsType,
 }
 
-/// Serve `device` and attach the volume it holds, as an inserted stick is.
+/// Serve `device` and attach the volume it holds, as an inserted stick is,
+/// its volume then served by its format's driver.
 fn insert(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    insertion: &Insertion,
+    device: ServedDevice,
+) -> Inserted {
+    let inserted = insert_unserved(window_ptr, facility, insertion, device);
+    serve_published(facility);
+    inserted
+}
+
+/// [`insert`], with no driver started for the volume the attach published.
+fn insert_unserved(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
     insertion: &Insertion,
@@ -1759,20 +2565,23 @@ fn insert(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region) =
         sharedreg::create(facility, ProcessId(insertion.region_task), 8).expect("region");
-    let outcome = VOLUME_SERVICE.attach(&VolumeAttachRequest {
-        endpoint: insertion.endpoint_id,
-        window: region,
-        first_lba: 0,
-        blocks,
-        fstype: insertion.fstype,
-        name: insertion.name,
-    });
+    let outcome = VOLUME_SERVICE.attach(
+        &VolumeAttachRequest {
+            endpoint: insertion.endpoint_id,
+            window: region,
+            first_lba: 0,
+            blocks,
+            fstype: insertion.fstype,
+            name: insertion.name,
+        },
+        Some(PUBLISHER),
+    );
     Inserted {
         device,
         stop,
@@ -1957,21 +2766,23 @@ fn forced_unmount_of_a_healthy_volume_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0006), 8).expect("region");
-    VOLUME_SERVICE
-        .attach(&VolumeAttachRequest {
+    attach_served(
+        facility,
+        &VolumeAttachRequest {
             endpoint: endpoint_id,
             window: region,
             first_lba: 0,
             blocks,
             fstype: VolumeFsType::Fat32,
             name: b"usb4",
-        })
-        .expect("attach healthy volume");
+        },
+    )
+    .expect("attach healthy volume");
     // Dirty the journal so a discard would be observable, then force.
     write_as(0, "/Storage/usb4/hello.txt", 0, b"F").expect("write dirties the journal");
     VOLUME_SERVICE
@@ -2045,7 +2856,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
@@ -2059,11 +2870,8 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
         fstype: VolumeFsType::Fat32,
         name,
     };
-    VOLUME_SERVICE
-        .attach(&attach_extent(b"part1", 0))
-        .expect("attach the first partition");
-    VOLUME_SERVICE
-        .attach(&attach_extent(b"part2", extent_blocks))
+    attach_served(facility, &attach_extent(b"part1", 0)).expect("attach the first partition");
+    attach_served(facility, &attach_extent(b"part2", extent_blocks))
         .expect("attach the second partition");
 
     assert_eq!(
@@ -2105,9 +2913,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
 
     // The disk's last volume went, so the shared client was released: a
     // fresh attach connects anew rather than reusing a retired one.
-    VOLUME_SERVICE
-        .attach(&attach_extent(b"part1", 0))
-        .expect("re-attach the first partition");
+    attach_served(facility, &attach_extent(b"part1", 0)).expect("re-attach the first partition");
     assert_eq!(
         device.lock().unwrap().geometries,
         2,
@@ -2144,22 +2950,24 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0009), 8).expect("region");
 
-    VOLUME_SERVICE
-        .attach(&VolumeAttachRequest {
+    attach_served(
+        facility,
+        &VolumeAttachRequest {
             endpoint: endpoint_id,
             window: region,
             first_lba: 0,
             blocks,
             fstype: VolumeFsType::Fat32,
             name: b"odd1",
-        })
-        .expect("attach the volume whose class word is unreadable");
+        },
+    )
+    .expect("attach the volume whose class word is unreadable");
 
     assert_eq!(
         mount_record(b"odd1").medium(),
@@ -2203,21 +3011,24 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
     let stalled_stop = StdArc::new(AtomicBool::new(false));
     let stalled_server = serve(
         register_endpoint(stalled_endpoint, 0x70_1040),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&stalled),
         StdArc::clone(&stalled_stop),
     );
     let (_va, stalled_region) =
         sharedreg::create(facility, ProcessId(0x70_0040), 8).expect("region");
     let stalled_attach = thread::spawn(move || {
-        VOLUME_SERVICE.attach(&VolumeAttachRequest {
-            endpoint: stalled_endpoint,
-            window: stalled_region,
-            first_lba: 0,
-            blocks: stalled_blocks,
-            fstype: VolumeFsType::Fat32,
-            name: b"stall1",
-        })
+        attach_served(
+            facility,
+            &VolumeAttachRequest {
+                endpoint: stalled_endpoint,
+                window: stalled_region,
+                first_lba: 0,
+                blocks: stalled_blocks,
+                fstype: VolumeFsType::Fat32,
+                name: b"stall1",
+            },
+        )
     });
     has_request
         .recv_timeout(Duration::from_secs(60))
@@ -2229,21 +3040,24 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         register_endpoint(endpoint, 0x70_1041),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::new(Mutex::new(ServedDevice::new(image))),
         StdArc::clone(&stop),
     );
     let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0041), 8).expect("region");
     let (attached, outcome) = mpsc::channel();
     let healthy_attach = thread::spawn(move || {
-        let result = VOLUME_SERVICE.attach(&VolumeAttachRequest {
-            endpoint,
-            window: region,
-            first_lba: 0,
-            blocks,
-            fstype: VolumeFsType::Fat32,
-            name: b"well1",
-        });
+        let result = attach_served(
+            facility,
+            &VolumeAttachRequest {
+                endpoint,
+                window: region,
+                first_lba: 0,
+                blocks,
+                fstype: VolumeFsType::Fat32,
+                name: b"well1",
+            },
+        );
         attached.send(result).unwrap();
     });
     let healthy = outcome.recv_timeout(Duration::from_secs(60));
@@ -2353,22 +3167,24 @@ fn link_round_trip_through_the_real_service_scenario(
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
-        window_ptr as usize,
+        Window(window_ptr),
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
     let (_va, region_id) = sharedreg::create(facility, ProcessId(0x70_200A), 8).expect("region");
 
-    VOLUME_SERVICE
-        .attach(&VolumeAttachRequest {
+    attach_served(
+        facility,
+        &VolumeAttachRequest {
             endpoint: endpoint_id,
             window: region_id,
             first_lba: 0,
             blocks: device_blocks,
             fstype: VolumeFsType::ARXFS,
             name: b"arx1",
-        })
-        .expect("attach the ARXFS volume");
+        },
+    )
+    .expect("attach the ARXFS volume");
 
     // A symbolic link: created, then read back verbatim.
     FS_SERVICE
@@ -2428,6 +3244,10 @@ fn link_round_trip_through_the_real_service_scenario(
 const EXT4_STATE_BYTE: usize = 1024 + 0x3A;
 const EXT4_STATE_ERRORS: u8 = 0x02;
 const EXT4_SUPERBLOCK_LBA: u64 = (1024 / BLOCK_SIZE) as u64;
+
+/// The top byte of an ext4 superblock's `s_feature_incompat`, whose high bit
+/// no ext driver defines.
+const EXT4_INCOMPAT_BYTE: usize = 1024 + 0x60 + 3;
 
 /// Format the unjournaled ext4 image `Ext4::format` lays, carrying
 /// `hello.txt`.

@@ -130,7 +130,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FOREIGN-MEDIA | ISO 9660, UDF, USB optical drives, and copies that keep holes and foreign metadata (`plans/FOREIGN-MEDIA.md`) | in progress |
 | EXT4-RW | ext2/ext3/ext4 written as Linux leaves them: jbd2 journaling and crash replay, every checksum, lazily initialised groups, extent trees to full depth, indexed directories, POSIX ACLs, over the shared `lib/writeback` core | done |
 | EXFAT | An exFAT driver, for the removable drives other systems format | planned |
-| FS-USERSPACE | Serve the filesystem drivers that parse removable media from user space (`plans/OPEN-DEFECTS.md`) | planned |
+| FS-USERSPACE | `fsserve-v1`, serving a filesystem from user space, and the removable-media drivers moved onto it (`plans/FSSERVE.md` FSS1–FSS5, `plans/OPEN-DEFECTS.md` D1072); network attachments are FSSERVE FSS6, with SMB9 | done |
 
 ### Drivers, devices and graphics hardware
 
@@ -156,7 +156,9 @@ plan's ledger. A `blocked` row names its blocker.
 | NETWORK | The dual-stack network stack (`plans/NETWORK.md`) | done |
 | DHCP | The DHCPv4 and DHCPv6 clients (`plans/DHCP.md`) | done |
 | DNS | The DNS stub resolver (`plans/DNS.md`) | in progress |
-| ZEROCONF | mDNS / DNS-SD discovery: `discoveryd`, the `lib/discovery` client and `dns-sd` (`plans/ZEROCONF.md`) | in progress |
+| ZEROCONF | mDNS / DNS-SD and WS-Discovery: `discoveryd`, the `lib/discovery` client and catalogue, `dns-sd` (`plans/ZEROCONF.md`) | in progress |
+| SMB | SMB 3 network shares: `lib/smb`, the `smbfs` service, private and placed mounts, `mount -t smb`, `smbtree` (`plans/SMB.md`) | in progress |
+| KERBEROS | The Kerberos 5 client and its GSS-API mechanism (`plans/KERBEROS.md`) | planned |
 | TELNET | The `telnet` client (`plans/TELNET.md`) | blocked: T2 needs a TLS stream transport over `lib/crypto` |
 | SSH | The SSH client, server and tools (`plans/SSH.md`) | in progress |
 | NETMAP | `netmap.app`, the network map and inventory, and the neighbour/route/traceroute read seams it needs (`plans/NETMAP.md`) | in progress |
@@ -256,11 +258,14 @@ non-cryptographic generator, and the entropy and hardware-RNG seams), the
 allocation-free `lib/inline` beside the heap-backed `lib/collections`,
 `lib/memguard` (the one guard-region sentinel and canary window, shared by the
 slab guard, the kthread stack guard and every port's boot-stack guard),
-`lib/visible` (the one rule for a character that draws nothing yet hides,
-reorders or breaks the text around it, linking no allocator so every port's
-boot console holds its glyphs to it: `lib/vt`, `lib/curses`, `lib/util`,
-`lib/controls`, `lib/devids`, `lib/font`, `lib/fsmeta`, `lib/net`, `lib/tz`,
-`lib/window`, `fontd`, the desktop session's alerts, TextEdit, `xtask devids`),
+`lib/visible` (the one rule for showing text from elsewhere — a character
+that draws nothing yet hides, reorders or breaks the text around it shown as
+U+FFFD, a combining sequence held to UTS #39's mark limits — read from
+`lib/unicode`'s tables and linking no allocator, so every port's boot console
+holds its glyphs to it: `lib/vt`, `lib/curses`, `lib/util`, `lib/controls`,
+`lib/browse`, `lib/devids`, `lib/font`, `lib/fsmeta`, `lib/log`, `lib/net`,
+`lib/tz`, `lib/window`, `fontd`, the Switchboard, the desktop session's alerts,
+TextEdit, `xtask devids`),
 `lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry),
 `lib/mix` (the one SplitMix64 and lowbias32 integer finalisers, which seeded
 draws, load slots and the land generator's and ray tracer's lattices key by),
@@ -270,11 +275,18 @@ the land generator and the ray tracer draw from),
 program crate compiles under on a bare-metal target; `std`, as it runs only
 in build scripts),
 `lib/xml` (the one fail-closed XML element scanner, read by the SVG decoder
-and OpenRaster's layer stack), `lib/bytedev` (the one byte-addressed reader
+and OpenRaster's layer stack), `lib/der` (the one strict DER codec, which
+SPNEGO and Kerberos read and write through), `lib/smb` (the pure SMB 3
+protocol engine the sandboxed `smbfs` worker runs), `lib/unicode` (the
+Unicode character properties showing text from elsewhere needs — the hidden
+characters, the UTS #39 mark-sequence and restriction-level checks — from
+tables generated out of a pinned UCD snapshot), `lib/bytedev` (the one byte-addressed reader
 over a block device, which every filesystem driver addressing a device in bytes
 or in a block of its own, and the volume probe, read through), `lib/fscopy` (the one file copy, keeping holes and
-extended attributes and reporting what a destination could not keep), and
-`lib/util`.
+extended attributes and reporting what a destination could not keep),
+`lib/fsserve` (the one dispatch of `fsserve-v1` onto the filesystem driver
+traits, which every user-space filesystem driver serves its volume through),
+and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
 README requires this file to name them:
@@ -301,7 +313,7 @@ README requires this file to name them:
 | `quote` | `ls`, `printf`, `elsh`, `servicectl`, `edit`, `vim`, `man`, `fstree`, the file manager, `lib/fscopy`'s omission report, and every command app that names a file or other text from elsewhere in a message, a prompt, a `-v` report or its standard output (`cat`, `cp`, `du`, `head`, `mv`, `rm`, `stat`, `tail`, `wc`, …) |
 | `report` | `lib/image`'s picture reports, `lib/binfmt`'s executable and manifest reports, `lib/sandbox`'s one report reply, and the `fstree` and TextEdit views that show them |
 | `retry` | `timed`, `init` (`RetryLadder`); `init`, `devmgr`, the desktop session, `lib/sandbox` (`RestartPacer`) |
-| `utf8` | `lib/syntax`, `wc`, TextEdit (`sequence_len`); `lib/controls`, the taskbar (`fold`, `folded`); `lib/tz`, Settings, the taskbar (`reader_order`); `lib/browse`, `lib/procinfo`, `lib/window`, the file manager, `elsh` (`shown`) |
+| `utf8` | `lib/syntax`, `wc`, TextEdit (`sequence_len`); `lib/controls`, the taskbar (`fold`, `folded`); `lib/tz`, Settings, the taskbar (`reader_order`); `lib/browse`, `lib/procinfo`, `lib/window`, the file manager, `elsh` (`shown`); `lib/browse` (`mixes_scripts`) |
 | `seconds` | `ping`, `traceroute` |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, the greeter, the desktop session's elevation prompt, lock and clipboard, `lib/controls`' masked field, the Supervisor's control commands, `signkeys`, `mkimage`, `discoveryd`'s and `netstack`'s keys, `kernel/core`'s boot id, file-watch records and kernel-thread stacks; the caches `lib/font`, `lib/raster`, the compositor and WinterSun erase (`wipe_with`) |
 | `size` | `du`, `df` (the GNU spelling); `lib/procinfo`, Settings, the desktop session (`format_binary`) |

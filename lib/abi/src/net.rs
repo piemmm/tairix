@@ -338,12 +338,24 @@ pub enum SocketRequest<'a> {
         local: SocketAddr,
     },
     /// Set a socket's default peer: subsequent [`Send`](Self::Send)s may omit
-    /// a destination, and inbound datagrams are filtered to this peer.
+    /// a destination, and inbound datagrams are filtered to this peer. On a
+    /// stream socket, open a connection to it.
     Connect {
         /// The socket handle.
         socket: SocketId,
         /// The peer address and port.
         peer: SocketAddr,
+        /// The one logical interface a stream connection runs over, or
+        /// [`None`] for the first that reaches the peer.
+        ///
+        /// A link-local peer names a host only on one link, so a client that
+        /// learned one on a link names that link. With none named it is
+        /// reached over the one link that could carry it, and refused as
+        /// ambiguous where several could; a named one that cannot reach the
+        /// peer refuses the connection rather than choosing another. A
+        /// datagram socket names its link per send, so naming one here is
+        /// refused, as it is for an echo socket.
+        interface: Option<[u8; IF_NAME_LEN]>,
     },
     /// Send one datagram. `dest` is [`None`] to use the connected peer, or a
     /// destination address and port. The payload follows the header.
@@ -354,13 +366,15 @@ pub enum SocketRequest<'a> {
         dest: Option<SocketAddr>,
         /// The one logical interface the datagram leaves by, or [`None`] for
         /// the stack's own choice: the first interface that reaches a unicast
-        /// destination, every interface for a multicast group.
+        /// destination — for a link-local one, the one link that could carry
+        /// it, refused as ambiguous where several could — and every interface
+        /// for a multicast group.
         ///
         /// A link-scoped protocol names it, because a link-local destination
         /// names no link by itself and a message built from one link's state
         /// must not reach another's. A named interface that cannot carry the
         /// datagram refuses it rather than choosing another. Only a datagram
-        /// socket names one; a connected stream is bound to its link.
+        /// socket names one here; a stream names its link when it connects.
         interface: Option<[u8; IF_NAME_LEN]>,
         /// The datagram payload (at most [`SOCKET_MAX_DATAGRAM`] bytes).
         payload: &'a [u8],
@@ -495,14 +509,17 @@ impl<'a> SocketRequest<'a> {
                 put_u64(out, DELIVER_OFFSET, deliver_port);
             }
             Self::Bind { socket, local } => {
-                put_u16(out, 6, OP_BIND);
-                put_u32(out, SOCKET_OFFSET, socket);
-                local.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
+                put_op(out, OP_BIND, socket);
+                put_addr(out, local);
             }
-            Self::Connect { socket, peer } => {
-                put_u16(out, 6, OP_CONNECT);
-                put_u32(out, SOCKET_OFFSET, socket);
-                peer.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
+            Self::Connect {
+                socket,
+                peer,
+                interface,
+            } => {
+                put_op(out, OP_CONNECT, socket);
+                put_addr(out, peer);
+                write_interface(&mut out[INTERFACE_OFFSET..Self::HEADER_LEN], interface)?;
             }
             Self::Send {
                 socket,
@@ -510,43 +527,32 @@ impl<'a> SocketRequest<'a> {
                 interface,
                 payload,
             } => {
-                put_u16(out, 6, OP_SEND);
-                put_u32(out, SOCKET_OFFSET, socket);
+                put_op(out, OP_SEND, socket);
                 if let Some(dest) = dest {
-                    dest.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
+                    put_addr(out, dest);
                 }
                 write_interface(&mut out[INTERFACE_OFFSET..Self::HEADER_LEN], interface)?;
                 out[Self::HEADER_LEN..total].copy_from_slice(payload);
             }
-            Self::Close { socket } => {
-                put_u16(out, 6, OP_CLOSE);
-                put_u32(out, SOCKET_OFFSET, socket);
-            }
+            Self::Close { socket } => put_op(out, OP_CLOSE, socket),
             Self::Shutdown { socket, how } => {
-                put_u16(out, 6, OP_SHUTDOWN);
-                put_u32(out, SOCKET_OFFSET, socket);
+                put_op(out, OP_SHUTDOWN, socket);
                 out[SHUTDOWN_HOW_OFFSET] = how.as_u8();
             }
             Self::JoinMulticast { socket, group } => {
-                put_u16(out, 6, OP_JOIN);
-                put_u32(out, SOCKET_OFFSET, socket);
-                group.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
+                put_op(out, OP_JOIN, socket);
+                put_addr(out, group);
             }
             Self::LeaveMulticast { socket, group } => {
-                put_u16(out, 6, OP_LEAVE);
-                put_u32(out, SOCKET_OFFSET, socket);
-                group.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
+                put_op(out, OP_LEAVE, socket);
+                put_addr(out, group);
             }
-            Self::Listen { socket } => {
-                put_u16(out, 6, OP_LISTEN);
-                put_u32(out, SOCKET_OFFSET, socket);
-            }
+            Self::Listen { socket } => put_op(out, OP_LISTEN, socket),
             Self::Accept {
                 socket,
                 deliver_port,
             } => {
-                put_u16(out, 6, OP_ACCEPT);
-                put_u32(out, SOCKET_OFFSET, socket);
+                put_op(out, OP_ACCEPT, socket);
                 put_u64(out, DELIVER_OFFSET, deliver_port);
             }
             Self::SendEcho {
@@ -556,12 +562,11 @@ impl<'a> SocketRequest<'a> {
                 hop_limit,
                 payload,
             } => {
-                put_u16(out, 6, OP_SEND_ECHO);
-                put_u32(out, SOCKET_OFFSET, socket);
+                put_op(out, OP_SEND_ECHO, socket);
                 out[HOP_LIMIT_OFFSET] = hop_limit.map_or(0, NonZeroU8::get);
                 put_u16(out, SEQUENCE_OFFSET, sequence);
                 if let Some(dest) = dest {
-                    dest.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
+                    put_addr(out, dest);
                 }
                 out[Self::HEADER_LEN..total].copy_from_slice(payload);
             }
@@ -620,7 +625,13 @@ impl<'a> SocketRequest<'a> {
                 interface,
                 payload,
             }),
-            // Only a send names an egress; the field is reserved elsewhere.
+            Self::Connect { socket, peer, .. } => Ok(Self::Connect {
+                socket,
+                peer,
+                interface,
+            }),
+            // Only a send or a connect names a link; the field is reserved
+            // elsewhere.
             _ if interface.is_some() => Err(Errno::BadMagic),
             other => Ok(other),
         }
@@ -644,7 +655,11 @@ impl<'a> SocketRequest<'a> {
                         socket,
                         local: addr,
                     }),
-                    OP_CONNECT => Ok(Self::Connect { socket, peer: addr }),
+                    OP_CONNECT => Ok(Self::Connect {
+                        socket,
+                        peer: addr,
+                        interface: None,
+                    }),
                     _ => {
                         // A multicast group is an address, not a port pair.
                         if addr.port != 0 {
@@ -791,6 +806,17 @@ impl<'a> SocketRequest<'a> {
             deliver_port: read_u64(bytes, DELIVER_OFFSET),
         })
     }
+}
+
+/// Write a request's operation and the socket it is on.
+fn put_op(out: &mut [u8], op: u16, socket: SocketId) {
+    put_u16(out, 6, op);
+    put_u32(out, SOCKET_OFFSET, socket);
+}
+
+/// Write the address a request names.
+fn put_addr(out: &mut [u8], addr: SocketAddr) {
+    addr.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
 }
 
 /// Write an optional interface name into its all-zero-when-absent block.
@@ -1721,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_send_names_an_egress_and_only_a_well_formed_one() {
+    fn only_a_send_or_a_connect_names_a_link_and_only_a_well_formed_one() {
         let send = SocketRequest::Send {
             socket: 2,
             dest: Some(v6(5353)),
@@ -1965,6 +1991,12 @@ mod tests {
         round_trip(SocketRequest::Connect {
             socket: 1,
             peer: v4(10, 0, 2, 2, 53),
+            interface: None,
+        });
+        round_trip(SocketRequest::Connect {
+            socket: 4,
+            peer: v6(5357),
+            interface: Some(if_name(b"eth1")),
         });
         round_trip(SocketRequest::Send {
             socket: 2,
@@ -2014,6 +2046,10 @@ mod tests {
             socket: 8,
             deliver_port: 0,
         });
+    }
+
+    #[test]
+    fn every_echo_request_round_trips() {
         round_trip(SocketRequest::Socket {
             family: NetAddrFamily::V6,
             sock_type: SocketType::IcmpEcho,
@@ -2241,6 +2277,7 @@ mod tests {
         let request = SocketRequest::Connect {
             socket: 1,
             peer: v4(10, 0, 0, 1, 80),
+            interface: None,
         };
         let mut buf = [0u8; SocketRequest::HEADER_LEN];
         request.encode(&mut buf).expect("encode");
@@ -2266,6 +2303,7 @@ mod tests {
         let request = SocketRequest::Connect {
             socket: 1,
             peer: v4(10, 0, 0, 1, 80),
+            interface: None,
         };
         let mut buf = [0u8; SocketRequest::HEADER_LEN];
         request.encode(&mut buf).expect("encode");

@@ -1,11 +1,12 @@
 //! A minimal, fail-closed XML element scanner (`lib/xml`).
 //!
-//! Its readers — the SVG decoder, OpenRaster's layer stack — need no general
-//! XML tree: the scanner yields the document's elements in order with their
-//! attributes and character data, and ignores comments, processing
-//! instructions, and the doctype. Anything structurally broken — an
-//! unterminated tag, quote, or comment — is an [`XmlError::Malformed`]
-//! rejection, never a panic, and the document's size is held to fixed bounds.
+//! Its readers — the SVG decoder, OpenRaster's layer stack, the WS-Discovery
+//! decoder — need no general XML tree: the scanner yields the document's
+//! elements in order with their attributes, character data and namespaces,
+//! and ignores comments, processing instructions, and the doctype. Anything
+//! structurally broken — an unterminated tag, quote, or comment, or an
+//! attribute given twice — is an [`XmlError::Malformed`] rejection, never a
+//! panic, and the document's size is held to fixed bounds.
 //!
 //! Slicing is always at ASCII delimiters (`<`, `>`, `=`, quotes, whitespace),
 //! and every UTF-8 continuation byte is `>= 0x80`, so byte offsets never split
@@ -25,13 +26,15 @@ use alloc::vec::Vec;
 /// Why a document was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum XmlError {
-    /// An unterminated tag, quote, comment or element, or a close tag that
-    /// does not match the element it ends.
+    /// An unterminated tag, quote, comment or element, a close tag that does
+    /// not match the element it ends, an attribute given twice, or a name
+    /// with an empty prefix or local part.
     Malformed,
     /// The document holds no element.
     MissingRoot,
-    /// The document nests deeper than [`MAX_DEPTH`] or holds more than
-    /// [`MAX_ELEMENTS`] elements.
+    /// The document nests deeper than [`MAX_DEPTH`], holds more than
+    /// [`MAX_ELEMENTS`] elements, or gives one element more than
+    /// [`MAX_ATTRIBUTES`] attributes.
     TooComplex,
 }
 
@@ -47,6 +50,15 @@ pub const MAX_DEPTH: usize = 64;
 /// A fixed security bound: it caps the memory a hostile asset can make the
 /// decoder allocate before it has drawn anything.
 pub const MAX_ELEMENTS: usize = 8192;
+
+/// The most attributes accepted on one element.
+///
+/// A fixed security bound: it keeps the check that no attribute is given
+/// twice linear in the document however its attributes are spread.
+pub const MAX_ATTRIBUTES: usize = 256;
+
+/// The namespace the `xml` prefix is bound to without being declared.
+const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// One node of an element's content: a child element, or a run of character
 /// data.
@@ -75,6 +87,12 @@ pub struct Element<'a> {
     /// element in some other namespace (which therefore matches nothing the
     /// reader looks for).
     pub name: &'a str,
+    /// The namespace the element's name is in: the one its prefix is bound
+    /// to or, unprefixed, the default namespace in force; `None` when there
+    /// is none, or the prefix is bound by nothing. A namespace name is
+    /// compared as written, so one spelled with a character reference matches
+    /// nothing.
+    pub namespace: Option<&'a str>,
     /// The attributes in document order, each a `(name, value)` pair. A value
     /// carrying an entity reference is decoded, and so owns its text.
     pub attrs: Vec<(&'a str, Cow<'a, str>)>,
@@ -89,6 +107,20 @@ pub struct Element<'a> {
 }
 
 impl<'a> Element<'a> {
+    /// The local part of the element's name, whatever its prefix.
+    #[must_use]
+    pub fn local_name(&self) -> &'a str {
+        self.name
+            .split_once(':')
+            .map_or(self.name, |(_, local)| local)
+    }
+
+    /// Whether the element is `local` in `namespace`.
+    #[must_use]
+    pub fn is(&self, namespace: &str, local: &str) -> bool {
+        self.namespace == Some(namespace) && self.local_name() == local
+    }
+
     /// The value of attribute `name`, or `None` if the element lacks it.
     #[must_use]
     pub fn attr(&self, name: &str) -> Option<&str> {
@@ -143,6 +175,102 @@ impl<'a> Element<'a> {
     /// Append one child element.
     fn push_child(&mut self, child: Element<'a>) {
         self.content.push(Content::Element(child));
+    }
+}
+
+/// The namespace bindings in force at an element, for resolving a qualified
+/// name its text or attributes carry (an XML Schema `QName`), as WS-Discovery's
+/// `Types` list does.
+///
+/// A scope is entered element by element as a reader walks down the tree, so
+/// the bindings are read from each element's own declarations rather than
+/// copied onto every element.
+#[derive(Clone, Copy, Debug)]
+pub struct Scope<'s, 'a> {
+    element: &'s Element<'a>,
+    outer: Option<&'s Scope<'s, 'a>>,
+}
+
+impl<'s, 'a> Scope<'s, 'a> {
+    /// The bindings in force at the document's root `element`.
+    #[must_use]
+    pub const fn root(element: &'s Element<'a>) -> Self {
+        Self {
+            element,
+            outer: None,
+        }
+    }
+
+    /// The bindings in force at `child`, an element of this scope's element.
+    #[must_use]
+    pub const fn enter<'t>(&'t self, child: &'t Element<'a>) -> Scope<'t, 'a> {
+        Scope {
+            element: child,
+            outer: Some(self),
+        }
+    }
+
+    /// The element this scope is at.
+    #[must_use]
+    pub const fn element(&self) -> &'s Element<'a> {
+        self.element
+    }
+
+    /// The namespace `prefix` is bound to here, `""` asking for the default
+    /// namespace.
+    #[must_use]
+    pub fn namespace(&self, prefix: &str) -> Option<&'a str> {
+        if prefix == "xml" {
+            return Some(XML_NAMESPACE);
+        }
+        let mut scope = Some(self);
+        while let Some(at) = scope {
+            if let Some(bound) = declared(at.element, prefix) {
+                return (!bound.is_empty()).then_some(bound);
+            }
+            scope = at.outer;
+        }
+        None
+    }
+
+    /// `qname` resolved here: its namespace — the default namespace for an
+    /// unprefixed name, as a `QName`'s is — and its local part, or `None` for
+    /// a malformed name or a prefix bound by nothing.
+    #[must_use]
+    pub fn resolve<'q>(&self, qname: &'q str) -> Option<(Option<&'a str>, &'q str)> {
+        match split_name(qname)? {
+            (Some(prefix), local) => Some((Some(self.namespace(prefix)?), local)),
+            (None, local) => Some((self.namespace(""), local)),
+        }
+    }
+}
+
+/// The namespace `element` itself declares for `prefix`, `""` naming the
+/// default namespace and an empty value undeclaring it.
+fn declared<'a>(element: &Element<'a>, prefix: &str) -> Option<&'a str> {
+    element.attrs.iter().find_map(|(key, value)| {
+        let named = match key.strip_prefix("xmlns") {
+            Some("") => prefix.is_empty(),
+            Some(rest) => rest.strip_prefix(':') == Some(prefix) && !prefix.is_empty(),
+            None => false,
+        };
+        match value {
+            Cow::Borrowed(uri) if named => Some(*uri),
+            // A namespace name holding a reference matches nothing.
+            Cow::Owned(_) if named => Some(""),
+            _ => None,
+        }
+    })
+}
+
+/// A name split at its prefix, or `None` when either side of the colon is
+/// empty.
+fn split_name(name: &str) -> Option<(Option<&str>, &str)> {
+    match name.split_once(':') {
+        Some((prefix, local)) if prefix.is_empty() || local.is_empty() => None,
+        Some((prefix, local)) => Some((Some(prefix), local)),
+        None if name.is_empty() => None,
+        None => Some((None, name)),
     }
 }
 
@@ -279,35 +407,49 @@ pub fn parse<'a>(input: &'a str, namespace: &str) -> Result<Element<'a>, XmlErro
     }
 }
 
+/// The prefix an attribute named `key` declares a namespace for, `""` for the
+/// default namespace, or `None` when it declares none.
+fn declares(key: &str) -> Option<&str> {
+    match key.strip_prefix("xmlns")? {
+        "" => Some(""),
+        rest => rest.strip_prefix(':'),
+    }
+}
+
 /// Forget the namespace prefixes `node` declared, now that its scope has
 /// ended.
 fn drop_namespaces(namespaces: &mut Vec<(&str, &str)>, node: &Element<'_>) {
     let declared = node
         .attrs
         .iter()
-        .filter(|(key, _)| key.starts_with("xmlns:"))
+        .filter(|(key, _)| declares(key).is_some())
         .count();
     namespaces.truncate(namespaces.len().saturating_sub(declared));
 }
 
-/// An element or attribute name with its namespace prefix resolved.
+/// The namespace `prefix` is bound to in `namespaces`, `""` asking for the
+/// default namespace.
+fn bound<'a>(namespaces: &[(&str, &'a str)], prefix: &str) -> Option<&'a str> {
+    if prefix == "xml" {
+        return Some(XML_NAMESPACE);
+    }
+    namespaces
+        .iter()
+        .rev()
+        .find(|(declared, _)| *declared == prefix)
+        .map(|(_, uri)| *uri)
+        .filter(|uri| !uri.is_empty())
+}
+
+/// An element name as the reader sees it.
 ///
 /// An unprefixed name, or one whose prefix is bound to `namespace`, keeps
 /// only its local part; anything else keeps its prefix, so it matches none
 /// of the elements the reader looks for and is skipped.
 fn local_name<'a>(name: &'a str, namespaces: &[(&str, &str)], namespace: &str) -> &'a str {
-    let Some((prefix, local)) = name.split_once(':') else {
-        return name;
-    };
-    let bound = namespaces
-        .iter()
-        .rev()
-        .find(|(declared, _)| *declared == prefix)
-        .map(|(_, uri)| *uri);
-    if bound == Some(namespace) {
-        local
-    } else {
-        name
+    match name.split_once(':') {
+        Some((prefix, local)) if bound(namespaces, prefix) == Some(namespace) => local,
+        _ => name,
     }
 }
 
@@ -324,18 +466,18 @@ fn parse_start_tag<'a>(
         Some(idx) => (&body[..idx], &body[idx..]),
         None => (body, ""),
     };
-    if raw_name.is_empty() {
-        return Err(XmlError::Malformed);
-    }
+    let (prefix, _) = split_name(raw_name).ok_or(XmlError::Malformed)?;
     let raw = parse_attrs(rest)?;
     // In scope for this element's own name as well as its subtree's.
     for (key, value) in &raw {
-        if let Some(prefix) = key.strip_prefix("xmlns:") {
-            namespaces.push((prefix, value));
+        if let Some(declared) = declares(key) {
+            // A namespace name holding a reference matches nothing.
+            namespaces.push((declared, if value.contains('&') { "" } else { value }));
         }
     }
     Ok(Element {
         name: local_name(raw_name, namespaces, namespace),
+        namespace: bound(namespaces, prefix.unwrap_or("")),
         attrs: raw
             .into_iter()
             .map(|(key, value)| (key, decode_entities(value)))
@@ -419,7 +561,9 @@ fn find_sub(input: &str, from: usize, needle: &str) -> Option<usize> {
 }
 
 /// Parse an attribute list (`key="value"` pairs). Valueless attributes are
-/// ignored; a malformed quoting is a [`XmlError::Malformed`] rejection.
+/// ignored; a malformed quoting, a malformed name, or a name given twice is a
+/// [`XmlError::Malformed`] rejection, and more than [`MAX_ATTRIBUTES`] is
+/// [`XmlError::TooComplex`].
 fn parse_attrs(s: &str) -> Result<Vec<(&str, &str)>, XmlError> {
     let bytes = s.as_bytes();
     let n = bytes.len();
@@ -459,9 +603,13 @@ fn parse_attrs(s: &str) -> Result<Vec<(&str, &str)>, XmlError> {
             }
             let value = &s[value_start..i];
             i += 1;
-            if !key.is_empty() {
-                attrs.push((key, value));
+            if split_name(key).is_none() || attrs.iter().any(|&(seen, _)| seen == key) {
+                return Err(XmlError::Malformed);
             }
+            if attrs.len() == MAX_ATTRIBUTES {
+                return Err(XmlError::TooComplex);
+            }
+            attrs.push((key, value));
         }
     }
     Ok(attrs)

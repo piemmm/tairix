@@ -23,7 +23,7 @@ use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, NoArtwork};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
-use crate::browser::Browser;
+use crate::browser::{Browser, Location};
 use crate::clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError};
 use crate::delete::{DeletePlan, DeleteTarget};
 use crate::entry::{Entry, Listed};
@@ -935,7 +935,10 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
     let places = Places::new(&home(), &[volume("Storage", "/Storage", None)]);
     // At the root, no place matches, so nothing is selected.
-    assert_eq!(places.index_of(browser.components()), None);
+    assert_eq!(
+        browser.folder().and_then(|folder| places.index_of(folder)),
+        None
+    );
     // Standing on a place selects exactly it.
     assert_eq!(places.index_of(&["Storage".to_string()]), Some(2));
     // A directory *inside* a place is not that place: an exact match only,
@@ -1267,8 +1270,8 @@ fn names(browser: &Browser<MockFs>) -> Vec<&str> {
 #[test]
 fn open_root_lists_the_four_top_level_directories() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root lists");
-    assert!(browser.is_root());
-    assert_eq!(browser.path(), "/");
+    assert!(!browser.can_go_up());
+    assert_eq!(browser.path().as_deref(), Some("/"));
     // The source lists the four in insertion order; the browser shows them in
     // the shared default order (directories, then case-insensitive by name).
     assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
@@ -1292,14 +1295,14 @@ fn open_at_starts_at_the_named_directory_with_working_climb() {
     // climbing returns toward the root exactly as a descent would have.
     let start = crate::vfs::components_from_absolute_path("/System").expect("valid path");
     let mut browser = Browser::open_at(MockFs::fixture(), start).expect("System lists");
-    assert!(!browser.is_root());
-    assert_eq!(browser.path(), "/System");
+    assert!(browser.can_go_up());
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert_eq!(names(&browser), ["Fonts", "Security", "Kernel"]);
     assert_eq!(browser.focus_index(), Some(0));
     // A fresh open has no back history, so the first climb goes to the parent
     // rather than a remembered directory.
     assert_eq!(browser.go_up(), Ok(true));
-    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.path().as_deref(), Some("/"));
     assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
@@ -1308,8 +1311,8 @@ fn open_at_empty_components_is_exactly_open_root() {
     // `open_root` is defined as `open_at(source, [])`; prove the empty path
     // opens the root so the trusted picker's home-or-root fallback is honest.
     let browser = Browser::open_at(MockFs::fixture(), Vec::new()).expect("root lists");
-    assert!(browser.is_root());
-    assert_eq!(browser.path(), "/");
+    assert!(!browser.can_go_up());
+    assert_eq!(browser.path().as_deref(), Some("/"));
     assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
@@ -1357,12 +1360,12 @@ fn descend_and_climb_track_the_path_and_entries() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     // Sorted root order is [Archive, Storage, System, Users]; System is index 2.
     browser.open_index(2).expect("enter System");
-    assert!(!browser.is_root());
-    assert_eq!(browser.path(), "/System");
+    assert!(browser.can_go_up());
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert_eq!(names(&browser), ["Fonts", "Security", "Kernel"]);
 
     assert_eq!(browser.go_up(), Ok(true));
-    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.path().as_deref(), Some("/"));
     assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
@@ -1370,7 +1373,7 @@ fn descend_and_climb_track_the_path_and_entries() {
 fn go_up_at_the_root_is_a_no_op() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     assert_eq!(browser.go_up(), Ok(false));
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
     assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
@@ -1380,7 +1383,7 @@ fn opening_a_regular_file_is_rejected_and_changes_nothing() {
     browser.open_index(2).expect("enter System");
     // Index 2 under /System is the regular file "Kernel".
     assert_eq!(browser.open_index(2), Err(BrowseError::NotADirectory));
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert_eq!(names(&browser), ["Fonts", "Security", "Kernel"]);
 }
 
@@ -1388,7 +1391,7 @@ fn opening_a_regular_file_is_rejected_and_changes_nothing() {
 fn opening_an_out_of_range_index_is_rejected() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     assert_eq!(browser.open_index(99), Err(BrowseError::NoSuchEntry));
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
 }
 
 #[test]
@@ -1401,7 +1404,7 @@ fn descending_into_an_unreadable_directory_fails_closed() {
         browser.open_index(1),
         Err(BrowseError::Source(Errno::PermissionDenied))
     );
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert_eq!(names(&browser), ["Fonts", "Security", "Kernel"]);
 }
 
@@ -1410,7 +1413,7 @@ fn an_empty_directory_has_no_selection() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter Fonts");
-    assert_eq!(browser.path(), "/System/Fonts");
+    assert_eq!(browser.path().as_deref(), Some("/System/Fonts"));
     assert!(browser.entries().is_empty());
     assert_eq!(browser.focus_index(), None);
     assert_eq!(focused(&browser), None);
@@ -1422,7 +1425,7 @@ fn open_selected_descends_into_the_selected_directory() {
     // Sorted root order is [Archive, Storage, System, Users]; Users is index 3.
     browser.select(3).expect("select Users");
     browser.open_selected().expect("enter Users");
-    assert_eq!(browser.path(), "/Users");
+    assert_eq!(browser.path().as_deref(), Some("/Users"));
     assert_eq!(names(&browser), ["alice"]);
 }
 
@@ -1992,18 +1995,18 @@ fn a_browser_navigates_the_vfs_source_end_to_end() {
     assert_eq!(browser.entries(), &[Entry::directory("System")]);
 
     browser.open_index(0).expect("descend into /System");
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert_eq!(
         browser.entries(),
         &[Entry::directory("Fonts"), Entry::file("motd.txt")]
     );
 
     browser.open_index(0).expect("descend into /System/Fonts");
-    assert_eq!(browser.path(), "/System/Fonts");
+    assert_eq!(browser.path().as_deref(), Some("/System/Fonts"));
     assert!(browser.entries().is_empty());
 
     assert!(browser.go_up().expect("climb back"));
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
 }
 
 #[test]
@@ -2220,7 +2223,7 @@ fn a_browser_refuses_to_descend_into_a_bundle() {
     // The bundle is modelled as a sealed unit: the browser opens nothing
     // itself (launching is the app layer's job), so descending is refused.
     assert_eq!(browser.open_index(0), Err(BrowseError::NotADirectory));
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
 }
 
 /// A short listing spanning both groups and mixed case, in a deliberately
@@ -3771,15 +3774,15 @@ fn descending_records_back_history_and_go_back_returns() {
 
     // Sorted root order is [Archive, Storage, System, Users]; System is index 2.
     browser.open_index(2).expect("enter System");
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     // The directory left behind is now on the back history.
     assert!(browser.can_go_back());
     assert!(!browser.can_go_forward());
 
     // Back returns to the root and offers the visited directory forward again.
     assert_eq!(browser.go_back(), Ok(true));
-    assert_eq!(browser.path(), "/");
-    assert!(browser.is_root());
+    assert_eq!(browser.path().as_deref(), Some("/"));
+    assert!(!browser.can_go_up());
     assert!(!browser.can_go_back());
     assert!(browser.can_go_forward());
     // The listing came back in the shared sorted order.
@@ -3787,7 +3790,7 @@ fn descending_records_back_history_and_go_back_returns() {
 
     // Forward steps back into the directory we came from.
     assert_eq!(browser.go_forward(), Ok(true));
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert!(browser.can_go_back());
     assert!(!browser.can_go_forward());
 }
@@ -3797,7 +3800,7 @@ fn go_back_and_go_forward_are_no_ops_with_empty_history() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     assert_eq!(browser.go_back(), Ok(false));
     assert_eq!(browser.go_forward(), Ok(false));
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
     assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
@@ -3807,10 +3810,10 @@ fn go_up_records_history_like_any_navigation() {
     browser.open_index(2).expect("enter System");
     // Climbing up records /System so Back can return into it.
     assert_eq!(browser.go_up(), Ok(true));
-    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.path().as_deref(), Some("/"));
     assert!(browser.can_go_back());
     assert_eq!(browser.go_back(), Ok(true));
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
 }
 
 #[test]
@@ -3823,11 +3826,11 @@ fn a_fresh_navigation_clears_the_forward_history() {
     // A new descent (root → Users) abandons the forward branch, exactly as a
     // web browser's forward history is discarded when you take a new turn.
     browser.open_index(3).expect("enter Users");
-    assert_eq!(browser.path(), "/Users");
+    assert_eq!(browser.path().as_deref(), Some("/Users"));
     assert!(!browser.can_go_forward());
     assert!(browser.can_go_back());
     assert_eq!(browser.go_back(), Ok(true));
-    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.path().as_deref(), Some("/"));
 }
 
 #[test]
@@ -3839,7 +3842,7 @@ fn go_back_is_transactional_when_the_previous_directory_becomes_unreadable() {
     let mut browser = Browser::open_root(fs).expect("root");
     browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter Fonts");
-    assert_eq!(browser.path(), "/System/Fonts");
+    assert_eq!(browser.path().as_deref(), Some("/System/Fonts"));
 
     // Back to the now-unreadable /System fails closed: the browser and its
     // history are left exactly as they were, so Back can still be retried.
@@ -3847,7 +3850,7 @@ fn go_back_is_transactional_when_the_previous_directory_becomes_unreadable() {
         browser.go_back(),
         Err(BrowseError::Source(Errno::PermissionDenied))
     );
-    assert_eq!(browser.path(), "/System/Fonts");
+    assert_eq!(browser.path().as_deref(), Some("/System/Fonts"));
     assert!(browser.can_go_back());
     assert!(!browser.can_go_forward());
 }
@@ -3862,10 +3865,10 @@ fn navigation_history_is_bounded_and_drops_the_oldest() {
     // one location on the back stack (and clears forward, so forward stays
     // empty throughout the building phase).
     for _ in 0..(HISTORY_MAX + 50) {
-        if browser.is_root() {
-            browser.open_index(2).expect("enter System");
-        } else {
+        if browser.can_go_up() {
             assert_eq!(browser.go_up(), Ok(true));
+        } else {
+            browser.open_index(2).expect("enter System");
         }
     }
 
@@ -4666,8 +4669,8 @@ fn activating_a_directory_descends_into_it() {
         Ok(Activation::Descended)
     );
     // The engine performed the navigation itself: the listing changed.
-    assert_eq!(browser.path(), "/Docs");
-    assert!(!browser.is_root());
+    assert_eq!(browser.path().as_deref(), Some("/Docs"));
+    assert!(browser.can_go_up());
 }
 
 #[test]
@@ -4683,7 +4686,7 @@ fn activating_a_bundle_names_it_for_launch_without_descending() {
             path: "/Editor.app".to_string()
         })
     );
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
     assert_eq!(focused(&browser).map(Entry::name), Some("Editor.app"));
 }
 
@@ -4697,8 +4700,8 @@ fn browsing_a_bundle_descends_into_it_instead_of_launching_it() {
         browser.activate_selected(BundleIntent::Browse),
         Ok(Activation::Descended)
     );
-    assert_eq!(browser.path(), "/Editor.app");
-    assert!(!browser.is_root());
+    assert_eq!(browser.path().as_deref(), Some("/Editor.app"));
+    assert!(browser.can_go_up());
     // What is inside a bundle is what the user asked to see.
     let inside: Vec<&str> = browser.entries().iter().map(Entry::name).collect();
     assert_eq!(inside, ["AppInfo", "Run"]);
@@ -4714,7 +4717,7 @@ fn the_browse_intent_changes_nothing_for_a_directory_or_a_file() {
         browser.activate_selected(BundleIntent::Browse),
         Ok(Activation::Descended)
     );
-    assert_eq!(browser.path(), "/Docs");
+    assert_eq!(browser.path().as_deref(), Some("/Docs"));
 
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
@@ -4724,7 +4727,7 @@ fn the_browse_intent_changes_nothing_for_a_directory_or_a_file() {
             path: "/notes.txt".to_string()
         })
     );
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
 }
 
 #[test]
@@ -4741,7 +4744,7 @@ fn browsing_an_unreadable_bundle_fails_closed_and_stays_put() {
         browser.activate_selected(BundleIntent::Browse),
         Err(BrowseError::Source(_))
     ));
-    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.path().as_deref(), Some("/"));
     assert_eq!(focused(&browser).map(Entry::name), Some("Sealed.app"));
 }
 
@@ -4755,7 +4758,7 @@ fn activating_a_file_names_it_for_open_without_descending() {
             path: "/notes.txt".to_string()
         })
     );
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
     assert_eq!(focused(&browser).map(Entry::name), Some("notes.txt"));
 }
 
@@ -4803,7 +4806,7 @@ fn activating_an_out_of_range_index_is_refused() {
         Err(BrowseError::NoSuchEntry)
     );
     // The browser is untouched by the refused activation.
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
 }
 
 #[test]
@@ -4823,7 +4826,7 @@ fn activating_an_unreadable_directory_fails_closed_and_stays_put() {
     );
     // The descent failed before any state changed: the browser is still on
     // /System, showing the same entries.
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert_eq!(names(&browser), names_before);
 }
 
@@ -5502,7 +5505,7 @@ fn navigation_clears_the_selection() {
     browser.select_all();
     // Enter /System (index 2 in the sorted root).
     browser.open_index(2).expect("enter System");
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert!(browser.selection().is_empty());
     assert_eq!(browser.focus_index(), Some(0));
 }
@@ -5541,7 +5544,7 @@ fn an_empty_directory_has_an_empty_selection() {
     browser.open_index(2).expect("enter System");
     // /System index 0 is Fonts, an empty directory.
     browser.open_index(0).expect("enter Fonts");
-    assert_eq!(browser.path(), "/System/Fonts");
+    assert_eq!(browser.path().as_deref(), Some("/System/Fonts"));
     assert!(browser.entries().is_empty());
     assert!(browser.selection().is_empty());
     assert!(browser.clipboard(ClipboardOp::Copy).is_none());
@@ -7611,13 +7614,13 @@ fn apply_command_drives_navigation_view_and_sort() {
         .position(|e| e.name() == "System")
         .expect("fixture has System");
     browser.open_index(sys).expect("enter System");
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert_eq!(apply_command(&mut browser, ToolbarCommand::Up), Ok(true));
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
 
     // Back now returns to /System (there is history), reporting a change.
     assert_eq!(apply_command(&mut browser, ToolbarCommand::Back), Ok(true));
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
 }
 
 #[test]
@@ -7926,20 +7929,20 @@ fn browser_navigate_to_jumps_to_an_off_spine_location_and_records_history() {
     // so only the jump-to-arbitrary-location primitive can reach it.
     let start = crate::vfs::components_from_absolute_path("/System").expect("valid path");
     let mut browser = Browser::open_at(MockFs::fixture(), start).expect("System lists");
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
     assert!(!browser.can_go_back());
 
     let moved = browser
         .navigate_to(vec!["Users".to_string()])
         .expect("Users lists");
     assert!(moved);
-    assert_eq!(browser.path(), "/Users");
+    assert_eq!(browser.path().as_deref(), Some("/Users"));
     assert_eq!(names(&browser), ["alice"]);
     // History records the move like any navigation, so Back returns to where
     // the jump started.
     assert!(browser.can_go_back());
     assert!(browser.go_back().expect("back to System"));
-    assert_eq!(browser.path(), "/System");
+    assert_eq!(browser.path().as_deref(), Some("/System"));
 }
 
 #[test]
@@ -7950,7 +7953,7 @@ fn browser_navigate_to_the_current_directory_is_a_no_op() {
     let moved = browser.navigate_to(Vec::new()).expect("no-op");
     assert!(!moved);
     assert!(!browser.can_go_back());
-    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.path().as_deref(), Some("/"));
 }
 
 #[test]
@@ -7964,7 +7967,7 @@ fn browser_navigate_to_an_unlistable_location_fails_closed() {
         result.err(),
         Some(BrowseError::Source(Errno::PermissionDenied))
     );
-    assert_eq!(browser.path(), "/");
+    assert_eq!(browser.path().as_deref(), Some("/"));
     assert!(!browser.can_go_back());
 }
 
@@ -10878,6 +10881,25 @@ mod title_location {
         );
     }
 
+    /// A name that would hide, reorder or stack over what it says is shown
+    /// escaped, so a title can never read as a name it is not.
+    #[test]
+    fn a_name_that_hides_what_it_says_is_shown_escaped() {
+        let hostile = comps(&[
+            "Users",
+            "invoice\u{202e}fdp.exe",
+            "a\u{200b}b\u{301}\u{301}",
+        ]);
+
+        let title = spell_title_location(&hostile, BUDGET);
+
+        assert_eq!(
+            title,
+            "/Users/invoice\u{FFFD}fdp.exe/a\u{FFFD}b\u{301}\u{FFFD}"
+        );
+        assert!(WindowTitle::new(&title).is_ok());
+    }
+
     /// The replacement mark is wider than the byte it stands for, so a name
     /// made entirely of them must still be fitted, not overflow the field.
     #[test]
@@ -10899,6 +10921,8 @@ mod title_location {
             "notes.txt",
             "\u{4e2d}\u{6587}\u{6587}\u{4ef6}.txt",
             "bad\u{7}name.conf",
+            "invoice\u{202e}fdp.exe",
+            "e\u{301}\u{301}\u{301}\u{301}\u{301}.txt",
         ] {
             for budget in 0..=24 {
                 let mut title = String::from("*");
@@ -10906,10 +10930,7 @@ mod title_location {
                 let spelled = &title[1..];
                 assert!(spelled.len() <= budget, "{spelled:?} exceeds {budget}");
                 assert!(WindowTitle::new(&title).is_ok(), "{title:?} is refused");
-                let shown: String = name
-                    .chars()
-                    .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
-                    .collect();
+                let shown: String = tairix_visible::shown_chars(name).collect();
                 if shown.len() <= budget {
                     assert_eq!(spelled, shown);
                 } else if budget >= ELLIPSIS.len() {
@@ -11353,7 +11374,7 @@ mod occupancy {
             browser
                 .entries()
                 .iter()
-                .map(|entry| icon_for_entry(entry, browser.components()))
+                .map(|entry| icon_for_entry(entry, browser.folder().expect("a folder")))
                 .collect::<Vec<_>>(),
             vec![IconKind::Folder, IconKind::FolderFilled]
         );
@@ -11380,7 +11401,7 @@ mod occupancy {
         assert_eq!(probes_of(&tally, "/locked"), 1);
         assert_eq!(browser.entries()[0].occupancy(), &Occupancy::Indeterminate);
         assert_eq!(
-            icon_for_entry(&browser.entries()[0], browser.components()),
+            icon_for_entry(&browser.entries()[0], browser.folder().expect("a folder")),
             IconKind::Folder
         );
     }
@@ -11495,7 +11516,7 @@ mod occupancy {
         *answer.borrow_mut() = Some(true);
         assert!(resolve_visible(&mut deferred));
         assert_eq!(
-            icon_for_entry(&deferred.entries()[0], deferred.components()),
+            icon_for_entry(&deferred.entries()[0], deferred.folder().expect("a folder")),
             IconKind::FolderFilled
         );
         assert!(!resolve_visible(&mut deferred));
@@ -11781,7 +11802,10 @@ mod deferred {
     fn an_open_whose_listing_is_not_ready_yet_is_empty_and_listing() {
         let (browser, source) = browser();
         assert!(browser.is_listing());
-        assert_eq!(browser.listing_target(), Some(&[][..]));
+        assert_eq!(
+            browser.listing_target(),
+            Some(&Location::Folder(Vec::new()))
+        );
         assert!(browser.entries().is_empty());
         assert_eq!(source.asked_for("/"), 1);
     }
@@ -11810,13 +11834,13 @@ mod deferred {
         source.deliver("/");
         browser.resume().expect("resume");
 
-        let before = browser.components().to_vec();
+        let before = browser.folder().expect("a folder").to_vec();
         let _ = browser.select(0);
         browser.open_selected().expect("navigate");
         assert!(browser.is_listing());
         assert_eq!(
-            browser.components(),
-            before.as_slice(),
+            browser.folder(),
+            Some(before.as_slice()),
             "the location moved before the listing arrived"
         );
         assert!(!browser.can_go_back(), "the history moved early");
@@ -11824,7 +11848,7 @@ mod deferred {
 
         source.deliver("/Users");
         assert!(browser.resume().expect("resume"));
-        assert_eq!(browser.components(), ["Users"]);
+        assert_eq!(browser.folder(), Some(&[String::from("Users")][..]));
         assert!(browser.can_go_back(), "the departure was not recorded");
         assert_eq!(browser.entries().len(), 1);
     }
@@ -11837,12 +11861,18 @@ mod deferred {
 
         let _ = browser.select(0);
         browser.open_selected().expect("navigate");
-        assert_eq!(browser.listing_target(), Some(&[String::from("Users")][..]));
+        assert_eq!(
+            browser.listing_target(),
+            Some(&Location::Folder(vec![String::from("Users")]))
+        );
         // Asking to re-read where it still is, while `/Users` is in flight: the
         // last gesture wins and the earlier target is forgotten.
         source.ready.borrow_mut().clear();
         browser.refresh().expect("refresh");
-        assert_eq!(browser.listing_target(), Some(&[][..]));
+        assert_eq!(
+            browser.listing_target(),
+            Some(&Location::Folder(Vec::new()))
+        );
         source.deliver("/Users");
         assert!(
             !browser.resume().expect("resume"),
@@ -11864,7 +11894,7 @@ mod deferred {
             Err(BrowseError::Source(Errno::PermissionDenied))
         ));
         assert!(!browser.is_listing(), "a refusal leaves nothing pending");
-        assert!(browser.components().is_empty(), "the location moved");
+        assert_eq!(browser.folder(), Some(&[][..]), "the location moved");
         assert!(!browser.can_go_back(), "the history moved");
         assert_eq!(browser.entries().len(), 2, "the entries were lost");
     }
@@ -11878,23 +11908,27 @@ mod deferred {
         let _ = browser.select(0);
         browser.open_selected().expect("navigate");
         browser.resume().expect("resume");
-        assert_eq!(browser.components(), ["Users"]);
+        assert_eq!(browser.folder(), Some(&[String::from("Users")][..]));
 
         // Back and forward are pending too, and each commits exactly the move
         // its own step owes.
         source.ready.borrow_mut().clear();
         assert!(browser.go_back().expect("back"));
-        assert_eq!(browser.components(), ["Users"], "back moved early");
+        assert_eq!(
+            browser.folder(),
+            Some(&[String::from("Users")][..]),
+            "back moved early"
+        );
         source.deliver("/");
         assert!(browser.resume().expect("resume"));
-        assert!(browser.components().is_empty());
+        assert_eq!(browser.folder(), Some(&[][..]));
         assert!(browser.can_go_forward());
 
         source.ready.borrow_mut().clear();
         assert!(browser.go_forward().expect("forward"));
         source.deliver("/Users");
         assert!(browser.resume().expect("resume"));
-        assert_eq!(browser.components(), ["Users"]);
+        assert_eq!(browser.folder(), Some(&[String::from("Users")][..]));
         assert!(browser.can_go_back());
         assert!(!browser.can_go_forward());
     }
@@ -12460,7 +12494,7 @@ fn activating_a_link_acts_on_what_it_names() {
         browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::Descended)
     );
-    assert_eq!(browser.components(), ["Docs".to_string()].as_slice());
+    assert_eq!(browser.folder(), Some(["Docs".to_string()].as_slice()));
     browser.go_up().expect("climb back");
 
     // A link to a file is opened through the link: the kernel follows the

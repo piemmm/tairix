@@ -23,11 +23,26 @@ rifiutata, mai indovinata.
 
 Il desktop avvia il browser per voi e lo tiene sulla barra delle icone: il
 menu della sua posizione elenca i vostri luoghi e tutto ciò che è montato, e
-sceglierne uno vi apre una finestra; *Impostazioni…* è l'ultima voce. Un
-clic sulla posizione ne apre una nella cartella scelta nelle impostazioni.
-Chiedere una cartella che ha già una finestra porta quella finestra in primo
-piano anziché aprirne un'altra. Questa istanza non ha la voce *Esci*: fa
-parte del desktop, e chiuderne le finestre semplicemente la mette via.
+sceglierne uno vi apre una finestra; *Rete* e *Impostazioni…* sono le ultime
+voci. Un clic sulla posizione ne apre una nella cartella scelta nelle
+impostazioni. Chiedere una cartella che ha già una finestra porta quella
+finestra in primo piano anziché aprirne un'altra. Questa istanza non ha la
+voce *Esci*: fa parte del desktop, e chiuderne le finestre semplicemente la
+mette via.
+
+*Rete*, nel menu della posizione subito sopra *Impostazioni…*, apre una
+finestra sui computer della rete locale che condividono file. Ognuno è
+elencato con il suo nome, l'indirizzo a cui lo si raggiunge, il suo gruppo
+di lavoro o dominio e che cosa è, e l'elenco si riempie man mano che i
+computer rispondono. La rete viene esplorata solo finché una finestra la
+mostra. Un computer che non risponde più appare in grigio finché non viene
+dimenticato; un nome che mescola alfabeti come serve a imitare un altro nome
+porta un segnale di avvertimento al posto della sua immagine; e quando un
+computer offre più di qualche voce, le altre sono contate in una riga a sé
+anziché scalzare le restanti. I nomi in rete li sceglie chi gestisce ciascun
+computer, quindi un nome non prova mai quale computer state guardando. La
+connessione alle condivisioni di un computer non è disponibile su questo
+sistema, e aprirne uno lo dice.
 
 Avviato per nome da una shell (o aperto su una cartella dal desktop) è
 invece una normale applicazione: una finestra, che termina quando la

@@ -1,16 +1,18 @@
-//! The runtime volume attach/detach service (`plans/DEVICES.md` D3b).
+//! The runtime volume attach/detach service (`plans/DEVICES.md` D3b,
+//! `plans/FSSERVE.md` FSS5).
 //!
 //! The production [`VolumeService`] behind the `volume_attach` /
 //! `volume_detach` syscalls: it connects the kernel blkio client to the
 //! block-service endpoint + shared window a user-space block driver serves
 //! (the USB mass-storage per-LUN nodes), windows the probed partition
-//! extent, opens the matched filesystem, mounts it under its
-//! `/Storage/<name>` catalog view location with the removable-media
-//! flags, and publishes the volume's stable identity into the volume
-//! forest so `id::<volume-id>/…` paths resolve. Detach reverses it:
-//! flush, unmount, unregister, unpublish — failing closed (the volume
-//! stays attached) rather than discarding uncommitted data or a node a
-//! descriptor holds.
+//! extent, and publishes a volume node its format's user-space filesystem
+//! driver binds. When that driver serves the volume (`volume_serve`), the
+//! kernel's proxy for it is mounted under its `/Storage/<name>` catalog view
+//! location with the removable-media flags, and the volume's stable identity
+//! is published into the volume forest so `id::<volume-id>/…` paths resolve.
+//! Detach reverses it: flush, unmount, unregister, unpublish — failing closed
+//! (the volume stays attached) rather than discarding uncommitted data or a
+//! node a descriptor holds.
 //!
 //! The syscall layer has already verified `CAP_FS_MOUNT` and the caller's
 //! endpoint/window resource grants; this service re-validates everything
@@ -19,8 +21,9 @@
 //! events; root publication itself flows through the shared
 //! `publish_volume_identity` definition in `crate::system_mount`).
 //!
-//! An attach, recovery or detach parks on device I/O, so each runs under
-//! its *device's* own sleeping lock (`DeviceSlot`): the volumes of one disk
+//! An attach, recovery, serve or detach parks on device I/O or orders against
+//! one that does, so each runs under its *device's* own sleeping lock
+//! (`DeviceSlot`): the volumes of one disk
 //! take its one client in turn and never interleave a half-built volume,
 //! while a disk that stops answering holds up only the volumes that live on
 //! it. What concerns every device is settled atomically where it lives — a
@@ -100,24 +103,25 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NameMatching,
-    NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeStats,
+    NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, Unpinned, VolumeStats, WriteRefusal,
 };
+use tairix_abi::fsserve::{is_served_endpoint, ServeOffer};
+use tairix_abi::hwtree::HwDeviceClass;
 use tairix_abi::sysinfo::MountAvailability;
-use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
-use tairix_abi::{DriverError, DriverHandle, Errno, SeekRegion};
+use tairix_abi::volume::{
+    FormatName, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType, VolumeInfo,
+};
+use tairix_abi::{DriverError, DriverHandle, Errno, HwMatchKey, HwNode, HwResource, SeekRegion};
 use tairix_bytedev::ByteDevice;
-use tairix_drv_fs_adfs::Adfs;
-use tairix_drv_fs_arxfs::{Keying, ARXFS};
-use tairix_drv_fs_ext4::Ext4;
-use tairix_drv_fs_fat32::Fat32;
-use tairix_drv_fs_iso9660::Iso9660;
-use tairix_drv_fs_udf::Udf;
 use tairix_fsprobe::{Evidence, ProbedVolume, Recognised};
 use tairix_kernel_core::callreg::EndpointVanishObserver;
 use tairix_kernel_core::devres::installed_shared_mem_facility;
 use tairix_kernel_core::fs::blkclient::BlkClient;
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
-use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
+use tairix_kernel_core::fs::served::ServedFs;
+use tairix_kernel_core::fs::{
+    ChunkSink, ChunkSource, JournaledBlock, RetainedWrites, ServeChannel, VolumeNodes,
+};
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{
@@ -131,14 +135,15 @@ use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::{OnceCell, SpinLock};
 
 use crate::block_cache::{BlockCache, REMOVABLE_DISK_OWNER};
+use crate::hwtree_store::HwTreeStore;
 use crate::kernel_fs::KernelFs;
+use crate::served_volume::ServedVolume;
 use crate::shared_block::{OwnedBlockWindow, SharedBlock};
 use crate::system_mount::{cached, publish_volume_identity, LATE_FILESYSTEM, VOLUME_FOREST};
 use crate::volume_policy::{GroupMappedFs, LATE_STORAGE_GID};
-use crate::writeback_bound::{bound_volume, WritebackBounded};
 
-/// Audit event: a runtime volume was attached, mounted, and its root
-/// published (drives.md `fs.hotplug.root_added`).
+/// Audit event: a runtime volume was first served by its driver, mounted,
+/// and its root published (drives.md `fs.hotplug.root_added`).
 const VOLUME_ATTACHED: EventId = EventId(4172);
 
 /// Audit event: a runtime volume was attached read-only because its
@@ -205,6 +210,28 @@ const VOLUME_REINSERT_REPLAYED: EventId = EventId(4185);
 /// and the retained byte count still held.
 const VOLUME_REINSERT_CONFLICT: EventId = EventId(4186);
 
+/// Audit event: a runtime volume was attached and its node published; it
+/// is mounted once its format's driver serves it (drives.md
+/// `fs.serve.awaiting`).
+const VOLUME_AWAITING_DRIVER: EventId = EventId(4192);
+
+/// Audit event: a driver serves a volume again, after the last one was lost
+/// or its medium came back (drives.md `fs.serve.resumed`).
+const VOLUME_SERVE_RESUMED: EventId = EventId(4193);
+
+/// Audit event: a volume could not be served — its driver could not open it,
+/// or the kernel could not mount what the driver offered — and was retracted
+/// (drives.md `fs.serve.refused`). `cause` says which, `error` why, and
+/// `discarded_bytes` what of its device writes could not be committed; a
+/// conflicted volume is kept instead, its retained set the force-unmount's.
+const VOLUME_SERVE_REFUSED: EventId = EventId(4194);
+
+/// Audit event: the driver serving a volume is gone; the volume stays
+/// mounted behind the fail-closed stand-in until a driver serves it again
+/// (drives.md `fs.serve.lost`). The `cause` field says whether writes it held
+/// unpublished were lost with it.
+const VOLUME_SERVER_LOST: EventId = EventId(4195);
+
 /// Base of the runtime volume mount-handle space (`"VOL"` tagged). Fresh
 /// handles are minted from here, disjoint from the boot volumes' fixed
 /// handles by construction.
@@ -253,23 +280,71 @@ struct AttachedVolume {
     /// flush.
     window: u64,
     /// The volume's uncommitted-write journal, shared with the
-    /// [`JournaledBlock`] under the mounted filesystem.
+    /// [`JournaledBlock`] its served volume writes through.
     journal: Arc<SpinLock<RetainedWrites>>,
-    /// The registry's filesystem-type label, for the unavailable-stub
-    /// re-registration on a dirty surprise removal.
-    fstype: &'static str,
+    /// The format family the kernel's probe recognised.
+    fstype: VolumeFsType,
+    /// Its place in the mount table.
+    mount: Mount,
+    /// The object its volume grant names, until it leaves service: let go
+    /// then, so the window goes with its last transfer.
+    served: Option<Arc<ServedVolume>>,
+    /// The volume node published for its driver, with the node it was
+    /// published under; `None` once withdrawn.
+    node: Option<(u32, u32)>,
     /// The attached extent's first device LBA — the frame of reference
     /// the journal's retained LBAs and evidence window live in. A
     /// re-insert may replay only onto the identical extent.
     first_lba: u64,
     /// The attached extent's block count.
     blocks: u64,
-    /// Whether the serving driver is still live.
+    /// Whether its device is still there, and how it came back if it left.
     availability: Availability,
     /// An operation is building, recovering or retracting the volume: no
     /// other acts on the entry until it ends, and a surprise removal of its
     /// device is that operation's to apply as it does ([`VolumeClaim`]).
     claimed: bool,
+}
+
+impl AttachedVolume {
+    /// Whether a driver's grant on `volume` names this volume, and a driver
+    /// may still serve it.
+    fn granted_as(&self, volume: u64) -> bool {
+        self.served
+            .as_ref()
+            .is_some_and(|served| served.id() == volume && !served.retired())
+    }
+}
+
+/// A volume's place in the mount table.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Mount {
+    /// No driver has served it yet, so it is not mounted.
+    Pending,
+    /// Mounted as `format`, served over the endpoint `server` while a
+    /// driver serves it.
+    Mounted {
+        format: FormatName,
+        server: Option<u64>,
+    },
+}
+
+impl Mount {
+    /// The endpoint a driver serves the volume over, while one does.
+    const fn server(self) -> Option<u64> {
+        match self {
+            Self::Mounted { server, .. } => server,
+            Self::Pending => None,
+        }
+    }
+
+    /// What the mount table shows the volume as, once it is mounted.
+    const fn format(self) -> Option<FormatName> {
+        match self {
+            Self::Mounted { format, .. } => Some(format),
+            Self::Pending => None,
+        }
+    }
 }
 
 /// The fail-closed stand-in for a volume no operation may reach: registered
@@ -487,6 +562,8 @@ struct Wiring {
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
     watches: Option<&'static WatchRegistry>,
+    /// The tree volume nodes are published into.
+    tree: &'static HwTreeStore,
 }
 
 /// The production runtime volume attach/detach service. One static
@@ -505,8 +582,14 @@ pub struct RuntimeVolumeService {
     /// only for lookups and brief mutations, never across device I/O, and
     /// is taken inside the registry guard, never around it.
     devices: SpinLock<Vec<DeviceSlot>>,
+    /// The volumes drivers serve, in ascending order of the id their grants
+    /// name. Taken alone or inside the registry guard, and held only for a
+    /// lookup or an edit.
+    served: SpinLock<Vec<Arc<ServedVolume>>>,
     /// The next mount handle to mint.
     next_handle: AtomicU64,
+    /// The next served-volume id to mint.
+    next_served: AtomicU64,
 }
 
 /// One served block device's place in the registry: the lock every whole
@@ -560,14 +643,19 @@ struct VolumeClaim<'a> {
 
 impl Drop for VolumeClaim<'_> {
     fn drop(&mut self) {
-        let present_on = {
+        let (present_on, server) = {
             let mut state = self.service.state.lock();
-            state.iter_mut().find(|v| v.id == self.id).and_then(|v| {
-                v.claimed = false;
-                v.availability
-                    .device_present()
-                    .then_some((v.endpoint, v.window))
-            })
+            state
+                .iter_mut()
+                .find(|v| v.id == self.id)
+                .map_or((None, None), |v| {
+                    v.claimed = false;
+                    let present_on = v
+                        .availability
+                        .device_present()
+                        .then_some((v.endpoint, v.window));
+                    (present_on, v.mount.server())
+                })
         };
         // Asked outside the registry guard: the endpoint registry calls the
         // vanish observer, which takes that guard, under its own.
@@ -577,6 +665,11 @@ impl Drop for VolumeClaim<'_> {
             } else if self.service.retracted(endpoint, window) {
                 self.service.handle_vanished(endpoint, Removal::Publication);
             }
+        }
+        if let Some(server) =
+            server.filter(|&server| !tairix_kernel_core::callreg::contains(EndpointId(server)))
+        {
+            self.service.server_lost(server);
         }
     }
 }
@@ -602,6 +695,39 @@ enum DetachClaim<'a> {
     Busy(String),
 }
 
+/// The facts of a volume awaiting its driver a serve or a refusal acts on,
+/// snapshotted out of the registry so the work below never runs under its
+/// guard.
+struct ServeTarget {
+    id: [u8; 16],
+    name: String,
+    path: Path,
+    handle: DriverHandle,
+    endpoint: u64,
+    window: u64,
+    journal: Arc<SpinLock<RetainedWrites>>,
+    fstype: VolumeFsType,
+    /// What the mount table shows it as, if a driver served it before.
+    mounted_as: Option<FormatName>,
+    served: Arc<ServedVolume>,
+    conflicted: bool,
+}
+
+/// Publish into `tree` the node a volume of `fstype` is served through: its
+/// format's driver binds it, and inherits the grant on served volume `served`
+/// alone.
+fn publish_volume_node(
+    tree: &HwTreeStore,
+    publisher: u32,
+    fstype: VolumeFsType,
+    served: u64,
+) -> Result<u32, Errno> {
+    let mut node = HwNode::new(0, publisher, HwDeviceClass::Storage);
+    node.push_match_key(HwMatchKey::compatible(fstype.served_compatible())?)?;
+    node.push_resource(HwResource::volume(served))?;
+    tree.publish_child(publisher, node)
+}
+
 /// The facts of an attached volume a detach acts on, snapshotted out of the
 /// registry so its device I/O never runs under the registry guard.
 struct DetachTarget {
@@ -611,6 +737,8 @@ struct DetachTarget {
     window: u64,
     journal: Arc<SpinLock<RetainedWrites>>,
     availability: Availability,
+    /// A driver serves it, whose filesystem state the detach flushes first.
+    served: bool,
 }
 
 /// The one production service instance the boot handover installs.
@@ -625,23 +753,27 @@ impl RuntimeVolumeService {
             wiring: OnceCell::new(),
             state: SpinLock::new(Vec::new()),
             devices: SpinLock::new(Vec::new()),
+            served: SpinLock::new(Vec::new()),
             next_handle: AtomicU64::new(VOLUME_HANDLE_BASE + 1),
+            next_served: AtomicU64::new(1),
         }
     }
 
-    /// Wire the service with the boot path's audit sink, pressure gauge and
-    /// directory-watch registry. First-wins and idempotent, like the other
-    /// late-installed seams.
+    /// Wire the service with the boot path's audit sink, pressure gauge,
+    /// directory-watch registry and hardware tree. First-wins and idempotent,
+    /// like the other late-installed seams.
     pub fn install(
         &self,
         audit: &'static (dyn Sink + Sync),
         pressure: &'static MemoryPressure,
         watches: Option<&'static WatchRegistry>,
+        tree: &'static HwTreeStore,
     ) {
         let _ = self.wiring.set(Wiring {
             audit,
             pressure,
             watches,
+            tree,
         });
     }
 
@@ -671,10 +803,11 @@ impl RuntimeVolumeService {
             at
         } else {
             devices.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+            let op = Arc::try_new(SleepLock::new(())).map_err(|_| Errno::OutOfMemory)?;
             devices.push(DeviceSlot {
                 endpoint,
                 window,
-                op: Arc::new(SleepLock::new(())),
+                op,
                 connected: None,
                 pins: 0,
                 retracted: false,
@@ -793,6 +926,147 @@ impl RuntimeVolumeService {
         Ok(VolumeClaim { service: self, id })
     }
 
+    /// Whether an attached volume holds the catalog name `name`, mounted or
+    /// still awaiting its driver.
+    fn name_reserved(&self, name: &str) -> bool {
+        self.state.lock().iter().any(|v| v.name == name)
+    }
+
+    /// Build the served volume over `window` and enter it under a fresh id.
+    fn new_served(
+        &self,
+        window: VolumeWindow,
+        read_only: bool,
+    ) -> Result<Arc<ServedVolume>, Errno> {
+        let id = self.next_served.fetch_add(1, Ordering::Relaxed);
+        let served = Arc::try_new(ServedVolume::new(id, window, read_only)?)
+            .map_err(|_| Errno::OutOfMemory)?;
+        let mut registry = self.served.lock();
+        registry.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        let at = registry.partition_point(|v| v.id() < id);
+        registry.insert(at, Arc::clone(&served));
+        Ok(served)
+    }
+
+    /// The served volume a grant names.
+    fn served(&self, volume: u64) -> Result<Arc<ServedVolume>, Errno> {
+        let registry = self.served.lock();
+        registry
+            .binary_search_by_key(&volume, |v| v.id())
+            .map(|at| Arc::clone(&registry[at]))
+            .map_err(|_| Errno::NotFound)
+    }
+
+    /// The device the volume a grant on `volume` names lives on.
+    fn served_device(&self, volume: u64) -> Result<(u64, u64), Errno> {
+        self.state
+            .lock()
+            .iter()
+            .find(|v| v.granted_as(volume))
+            .map(|v| (v.endpoint, v.window))
+            .ok_or(Errno::NotFound)
+    }
+
+    /// Take `served` out of service and out of the registry, and withdraw
+    /// `node`, so its driver is unloaded. The grant the driver holds on it
+    /// names nothing from here on, and a served volume's id is never reused.
+    fn retire_served(&self, served: Option<&ServedVolume>, node: Option<(u32, u32)>) {
+        if let Some(served) = served {
+            served.retire();
+            let mut registry = self.served.lock();
+            if let Ok(at) = registry.binary_search_by_key(&served.id(), |v| v.id()) {
+                registry.remove(at);
+            }
+        }
+        if let (Some((publisher, node)), Ok(wiring)) = (node, self.wiring()) {
+            // Gone already when the device's own node left, taking it along.
+            let _ = wiring.tree.remove_child(publisher, node);
+        }
+    }
+
+    /// Record the node published for volume `id`.
+    fn set_node(&self, id: &[u8; 16], node: Option<(u32, u32)>) {
+        if let Some(volume) = self.state.lock().iter_mut().find(|v| v.id == *id) {
+            volume.node = node;
+        }
+    }
+
+    /// Retract volume `id` from the registry and from everywhere it reached.
+    fn retract(&self, id: &[u8; 16]) {
+        let entry = {
+            let mut state = self.state.lock();
+            state
+                .iter()
+                .position(|v| v.id == *id)
+                .map(|at| state.remove(at))
+        };
+        if let Some(entry) = entry {
+            self.withdraw(&entry);
+        }
+    }
+
+    /// Withdraw what `entry`, out of the registry, reached: its served volume
+    /// and its node, and once it was mounted its mount, its registered driver
+    /// and its published identity.
+    fn withdraw(&self, entry: &AttachedVolume) {
+        self.retire_served(entry.served.as_deref(), entry.node);
+        if entry.mount.format().is_some() {
+            if let Ok(vfs) = LATE_FILESYSTEM.vfs() {
+                let _ = vfs.mounts_write().detach(entry.handle);
+            }
+            let _ = LATE_FILESYSTEM.unregister(entry.handle);
+            let _ = VOLUME_FOREST.unpublish(&entry.id);
+        }
+    }
+
+    /// Claim the volume awaiting a driver that a grant on `volume` names, on
+    /// `device`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such volume there; [`Errno::AlreadyExists`]
+    /// for one a driver serves already; [`Errno::Busy`] for one another
+    /// operation holds.
+    fn claim_awaiting(
+        &self,
+        volume: u64,
+        device: (u64, u64),
+    ) -> Result<(VolumeClaim<'_>, ServeTarget), Errno> {
+        let mut state = self.state.lock();
+        let entry = state
+            .iter_mut()
+            .find(|v| v.granted_as(volume) && (v.endpoint, v.window) == device)
+            .ok_or(Errno::NotFound)?;
+        let served = entry.served.clone().ok_or(Errno::NotFound)?;
+        if entry.mount.server().is_some() {
+            return Err(Errno::AlreadyExists);
+        }
+        if entry.claimed {
+            return Err(Errno::Busy);
+        }
+        entry.claimed = true;
+        let target = ServeTarget {
+            id: entry.id,
+            name: entry.name.clone(),
+            path: entry.path.clone(),
+            handle: entry.handle,
+            endpoint: entry.endpoint,
+            window: entry.window,
+            journal: Arc::clone(&entry.journal),
+            fstype: entry.fstype,
+            mounted_as: entry.mount.format(),
+            served,
+            conflicted: entry.availability == Availability::RecoveryConflict,
+        };
+        Ok((
+            VolumeClaim {
+                service: self,
+                id: entry.id,
+            },
+            target,
+        ))
+    }
+
     /// Claim the volume `id` for a detach holding the device `held` (`None`
     /// for one whose device is gone): it must still be on that device, or
     /// have lost its device, and no other operation may hold it.
@@ -814,6 +1088,7 @@ impl RuntimeVolumeService {
             window: volume.window,
             journal: Arc::clone(&volume.journal),
             availability: volume.availability,
+            served: volume.mount.server().is_some(),
         };
         DetachClaim::Held(
             VolumeClaim {
@@ -839,50 +1114,211 @@ impl RuntimeVolumeService {
         ))
     }
 
-    /// Register the live driver, enter `volume` into the registry claimed
-    /// by this attach, then publish its identity last; each failure unwinds
-    /// everything already done, so a refused attach leaves no trace. The
-    /// entry precedes the publication, so a detach that finds the published
-    /// volume finds it registered too, and waits on its device for the
-    /// attach to end.
+    /// Mount what `offer` describes, served over `channel`, for `target`: in
+    /// the mount table for the first time, or in place of the stand-in of a
+    /// volume a driver served before.
     ///
-    /// A volume whose identity is already published or registered is
-    /// attached already, under another name: that is `Busy`, never the name
-    /// conflict the volume manager answers by trying the volume again
-    /// elsewhere.
-    fn register_and_publish(
-        &self,
-        vfs: &Vfs,
-        opened: OpenedVolume,
-        volume: AttachedVolume,
-        health: VolumeIoSource,
-        audit: &'static (dyn Sink + Sync),
-    ) -> Result<VolumeClaim<'_>, (&'static str, Errno)> {
-        let (handle, id) = (volume.handle, volume.id);
-        let name = volume.name.clone();
-        if register_with_health(handle, opened, &name, id, health).is_err() {
-            let _ = vfs.mounts_write().detach(handle);
-            return Err(("handle_in_use", Errno::Busy));
+    /// # Errors
+    ///
+    /// `(cause, errno)` pairs the serve path audits as it retracts the
+    /// volume.
+    fn mount_served(
+        target: &ServeTarget,
+        offer: &ServeOffer,
+        channel: ServeChannel,
+        device: &SharedDevice,
+        wiring: &Wiring,
+    ) -> Result<(), (&'static str, Errno)> {
+        // The kernel named the format from its own probe; a driver names
+        // only the generation it is.
+        if offer.format.family() != target.fstype {
+            return Err(("format_mismatch", Errno::BadMagic));
         }
-        // Under the driver's lock, so an operation that takes it after finds
-        // the projection gone; a node an open pinned meanwhile answers stale.
-        let unwind = || {
-            let driver = LATE_FILESYSTEM.driver(handle).ok();
-            let _held = driver.as_deref().map(DriverLock::lock);
-            let _ = vfs.mounts_write().detach(handle);
-            let _ = LATE_FILESYSTEM.unregister(handle);
+        let vfs = LATE_FILESYSTEM
+            .vfs()
+            .map_err(|err| ("no_mount_table", err))?;
+        let fs = ServedFs::new(
+            channel.endpoint,
+            channel.window,
+            *offer,
+            target.served.activity(),
+            wiring.audit,
+        )
+        .map_err(|err| ("proxy_unbuilt", err))?;
+        let state = fs.state();
+        let map_gid = identity_map_gid(target.fstype);
+        let handle = target.handle.as_u64();
+        let (driver, watch) = match map_gid {
+            Some(gid) => cached(
+                GroupMappedFs::new(fs, gid),
+                handle,
+                target.id,
+                wiring.pressure,
+                wiring.audit,
+                wiring.watches,
+            ),
+            None => cached(
+                fs,
+                handle,
+                target.id,
+                wiring.pressure,
+                wiring.audit,
+                wiring.watches,
+            ),
         };
-        let claim = self.enter(volume).inspect_err(|_| unwind())?;
-        if let Err(err) = publish_volume_identity(id, &["Storage", &name], &name, audit) {
-            self.state.lock().retain(|v| v.id != id);
-            unwind();
-            let errno = match err {
-                VolumePublishError::NilIdentity => Errno::OutOfRange,
-                VolumePublishError::AlreadyPublished => Errno::Busy,
+        let read_only = target.served.read_only() || offer.write_refusal.is_some();
+        let attachment = Attachment::new(target.handle, device.medium, mount_flags(read_only));
+        let template = mount_template(map_gid);
+        let register = |driver, watch| {
+            register_with_health(
+                target.handle,
+                driver,
+                watch,
+                &target.name,
+                offer.format.as_str(),
+                target.id,
+                device.health.clone(),
+            )
+            .map_err(|()| ("handle_in_use", Errno::Busy))
+        };
+        if target.mounted_as.is_some() {
+            // The posture goes first, under the stand-in's lock while it still
+            // answers the mount: no operation reaches the live driver under the
+            // posture it replaces, and one that takes the lock after the move
+            // finds its projection gone. The volume returns under a fresh
+            // registration, so a descriptor held across the loss answers stale.
+            let standing = LATE_FILESYSTEM.driver(target.handle).ok();
+            let _held = standing.as_deref().map(DriverLock::lock);
+            reattach(vfs, attachment, target.path.clone(), template)?;
+            let _ = LATE_FILESYSTEM.unregister(target.handle);
+            register(driver, watch)?;
+        } else {
+            vfs.mounts_write()
+                .attach_at(attachment, target.path.clone(), template)
+                .map_err(|_| ("name_in_use", Errno::AlreadyExists))?;
+            let unmount = || {
+                let _ = vfs.mounts_write().detach(target.handle);
             };
-            return Err(("identity_unpublishable", errno));
+            // Published before the driver is reachable, so a refusal has no
+            // operation to turn away: one would wait on a driver that is
+            // inside this very call.
+            publish_volume_identity(
+                target.id,
+                &["Storage", &target.name],
+                &target.name,
+                wiring.audit,
+            )
+            .map_err(|err| {
+                unmount();
+                (
+                    "identity_unpublishable",
+                    match err {
+                        VolumePublishError::NilIdentity => Errno::OutOfRange,
+                        VolumePublishError::AlreadyPublished => Errno::Busy,
+                    },
+                )
+            })?;
+            register(driver, watch).inspect_err(|_| {
+                unmount();
+                let _ = VOLUME_FOREST.unpublish(&target.id);
+            })?;
         }
-        Ok(claim)
+        let _ = LATE_FILESYSTEM.set_served_state(target.handle, Some(state));
+        let _ = LATE_FILESYSTEM.set_availability(
+            target.handle,
+            if target.conflicted {
+                MountAvailability::RecoveryConflict
+            } else {
+                MountAvailability::Available
+            },
+        );
+        Ok(())
+    }
+
+    /// Retract `target`, which no driver will serve, for `cause` and `error`,
+    /// committing first what its device holds of it.
+    ///
+    /// A conflicted volume is kept: its retained set is the audited
+    /// force-unmount's to discard, never a refusal's, so only its served
+    /// volume and node go and the stand-in keeps answering its mount.
+    fn retract_unserved(
+        &self,
+        target: &ServeTarget,
+        audit: &'static (dyn Sink + Sync),
+        cause: &'static str,
+        error: Errno,
+    ) {
+        let discarded = if target.conflicted {
+            let node = self
+                .state
+                .lock()
+                .iter_mut()
+                .find(|v| v.id == target.id)
+                .and_then(|v| {
+                    v.served = None;
+                    v.node.take()
+                });
+            self.retire_served(Some(&target.served), node);
+            None
+        } else {
+            let flushed = self
+                .device_for(target.endpoint, target.window)
+                .map(|device| device.window().flush());
+            let bytes = {
+                let mut journal = target.journal.lock();
+                if matches!(flushed, Some(Ok(()) | Err(DriverError::Unsupported))) {
+                    journal.commit();
+                    0
+                } else {
+                    let bytes = journal.retained_bytes();
+                    journal.discard_all();
+                    bytes
+                }
+            };
+            self.retract(&target.id);
+            Some(bytes)
+        };
+        let volume = Field {
+            key: "volume",
+            value: FieldValue::Str(&target.name),
+        };
+        let cause = Field {
+            key: "cause",
+            value: FieldValue::Str(cause),
+        };
+        let error = Field {
+            key: "error",
+            value: FieldValue::Error(error),
+        };
+        match discarded {
+            Some(bytes) => {
+                let discarded = Field {
+                    key: "discarded_bytes",
+                    value: FieldValue::UnsignedInt(bytes),
+                };
+                log(
+                    audit,
+                    &Event {
+                        level: Level::Warn,
+                        id: VOLUME_SERVE_REFUSED,
+                        message: "volume-service: the volume could not be served; retracted",
+                        fields: &[volume, cause, error, discarded],
+                    },
+                );
+            }
+            None => {
+                log(
+                    audit,
+                    &Event {
+                        level: Level::Warn,
+                        id: VOLUME_SERVE_REFUSED,
+                        message: "volume-service: the conflicted volume could not be served; \
+                                  kept read-only for its force-unmount",
+                        fields: &[volume, cause, error],
+                    },
+                );
+            }
+        }
     }
 
     /// Audit a refused attach and hand back its errno.
@@ -965,7 +1401,7 @@ impl RuntimeVolumeService {
     fn audit_write_refusal(
         audit: &'static (dyn Sink + Sync),
         name: &str,
-        write_refusal: Option<&'static str>,
+        write_refusal: Option<WriteRefusal>,
     ) {
         if let Some(cause) = write_refusal {
             Self::audit_event(
@@ -973,7 +1409,7 @@ impl RuntimeVolumeService {
                 VOLUME_ATTACHED_READ_ONLY,
                 "volume-service: the filesystem refuses to write this volume; mounted read-only",
                 name,
-                Some(cause),
+                Some(cause.as_str()),
             );
         }
     }
@@ -1030,287 +1466,53 @@ impl Default for RuntimeVolumeService {
     }
 }
 
-/// The filesystem opened over the partition window, together with its
-/// identity and registration facts.
-struct OpenedVolume {
-    driver: alloc::boxed::Box<dyn KernelFs>,
-    watch: Option<ClaimRef>,
-    identity: [u8; 16],
-    fstype: &'static str,
-    /// Why the driver refuses to write a volume it was asked to open
-    /// writable, which then mounts read-only.
-    write_refusal: Option<&'static str>,
-}
-
-/// The disk stack every runtime volume is opened over: its extent of the
-/// one shared, cached device, behind the uncommitted-write journal.
-type VolumeWindow = PartitionBlock<JournaledBlock<OwnedBlockWindow<BlockCache<BlkClient>>>>;
-
-/// Open the requested filesystem over the extent window, honouring the
-/// device's write policy.
-///
-/// `map_gid` is the storage-group identity map an **ownerless** format is
-/// mounted under (`plans/DEVICES.md` D3d): a FAT32 volume is wrapped so
-/// every node appears system-owned under that group with group
-/// read/write. `None` (the gid cell not yet installed, or a format with
-/// a real owner model) leaves the driver unwrapped.
-fn open_filesystem(
-    window: VolumeWindow,
-    fstype: VolumeFsType,
-    read_only: bool,
-    map_gid: Option<GroupId>,
-    wiring: &Wiring,
-    volume_handle: u64,
-) -> Result<OpenedVolume, Errno> {
-    match fstype {
-        VolumeFsType::ARXFS => {
-            // A removable volume is attached plaintext: an encrypted one
-            // refuses the open with a typed error, and key-provisioned attach
-            // arrives with the volume manager's key policy — the kernel never
-            // guesses a secret.
-            let fs = if read_only {
-                ARXFS::open_read_only(window, Keying::Plaintext)
-            } else {
-                ARXFS::open(window, Keying::Plaintext)
-            }
-            .map_err(DriverError::as_errno)?;
-            let identity = fs.volume_uuid();
-            serve_staged(fs, identity, !read_only, wiring, volume_handle).map(|(driver, watch)| {
-                OpenedVolume {
-                    driver,
-                    watch,
-                    identity,
-                    fstype: "arxfs",
-                    write_refusal: None,
-                }
-            })
-        }
-        VolumeFsType::Ext4 => {
-            let fs = if read_only {
-                Ext4::open_read_only(window)
-            } else {
-                Ext4::open(window)
-            }
-            .map_err(DriverError::as_errno)?;
-            let identity = fs.volume_uuid();
-            let fstype = fs.generation().name();
-            let write_refusal = if read_only { None } else { fs.write_refusal() };
-            let writes = !read_only && write_refusal.is_none();
-            serve_staged(fs, identity, writes, wiring, volume_handle).map(|(driver, watch)| {
-                OpenedVolume {
-                    driver,
-                    watch,
-                    identity,
-                    fstype,
-                    write_refusal,
-                }
-            })
-        }
-        VolumeFsType::Fat32 => {
-            let fs = Fat32::open(window).map_err(DriverError::as_errno)?;
-            let identity = fs.volume_identity();
-            Ok(ownerless(
-                fs,
-                identity,
-                "fat32",
-                map_gid,
-                wiring,
-                volume_handle,
-            ))
-        }
-        VolumeFsType::Adfs => {
-            let fs = Adfs::open(window).map_err(DriverError::as_errno)?;
-            let identity = fs.volume_identity();
-            Ok(ownerless(
-                fs,
-                identity,
-                "adfs",
-                map_gid,
-                wiring,
-                volume_handle,
-            ))
-        }
-        VolumeFsType::Iso9660 => {
-            let fs = Iso9660::open(window).map_err(DriverError::as_errno)?;
-            let identity = fs.volume_identity();
-            let mut opened = ownerless(fs, identity, "iso9660", map_gid, wiring, volume_handle);
-            opened.write_refusal = (!read_only).then_some("format_read_only");
-            Ok(opened)
-        }
-        VolumeFsType::Udf => {
-            let fs = Udf::open(window).map_err(DriverError::as_errno)?;
-            let identity = fs.volume_identity();
-            let write_refusal = if read_only { None } else { fs.write_refusal() };
-            let mut opened = ownerless(fs, identity, "udf", map_gid, wiring, volume_handle);
-            opened.write_refusal = write_refusal;
-            Ok(opened)
-        }
-    }
-}
-
-/// Serve a volume of a format that keeps no owner records, or whose records
-/// name no principal here, under the storage-group identity map when the
-/// group is provisioned; without it the driver's own restrictive
-/// system-owned posture stands (fail closed). A node whose record the format
-/// does keep is served as recorded.
-fn ownerless<F>(
-    fs: F,
-    identity: [u8; 16],
-    fstype: &'static str,
-    map_gid: Option<GroupId>,
-    wiring: &Wiring,
-    volume_handle: u64,
-) -> OpenedVolume
-where
-    F: FilesystemRead
-        + FilesystemWrite
-        + FilesystemSecurity
-        + FilesystemStats
-        + FilesystemAttrsProvider
-        + Send
-        + 'static,
-{
-    let (driver, watch) = match map_gid {
-        Some(gid) => cached(
-            GroupMappedFs::new(fs, gid),
-            volume_handle,
-            identity,
-            wiring.pressure,
-            wiring.audit,
-            wiring.watches,
-        ),
-        None => cached(
-            fs,
-            volume_handle,
-            identity,
-            wiring.pressure,
-            wiring.audit,
-            wiring.watches,
-        ),
-    };
-    OpenedVolume {
-        driver,
-        watch,
-        identity,
-        fstype,
-        write_refusal: None,
-    }
-}
-
-/// Cache a driver that stages writes, its write-back set first bounded to
-/// this machine's RAM when the handle `writes`; a handle that cannot write
-/// never stages a block. An attach the bound refuses fails closed rather
-/// than mounting unbounded.
-fn serve_staged<F>(
-    fs: F,
-    identity: [u8; 16],
-    writes: bool,
-    wiring: &Wiring,
-    volume_handle: u64,
-) -> Result<(Box<dyn KernelFs>, Option<ClaimRef>), Errno>
-where
-    F: WritebackBounded
-        + FilesystemRead
-        + FilesystemWrite
-        + FilesystemSecurity
-        + FilesystemStats
-        + FilesystemAttrsProvider
-        + Send
-        + 'static,
-{
-    let fs = if writes {
-        bound_volume(fs, volume_handle, wiring.pressure, wiring.audit)
-            .map_err(DriverError::as_errno)?
-    } else {
-        fs
-    };
-    Ok(cached(
-        fs,
-        volume_handle,
-        identity,
-        wiring.pressure,
-        wiring.audit,
-        wiring.watches,
-    ))
-}
+/// The disk stack every runtime volume is served over: its extent of the one
+/// shared, cached device, behind the uncommitted-write journal.
+pub(crate) type VolumeWindow =
+    PartitionBlock<JournaledBlock<OwnedBlockWindow<BlockCache<BlkClient>>>>;
 
 /// Where the catalog shows a volume named `name`.
 fn storage_path(name: &str) -> Result<Path, (&'static str, Errno)> {
     Path::parse(&format!("/Storage/{name}")).map_err(|_| ("mount_path_invalid", Errno::OutOfRange))
 }
 
-/// Mount the volume served by `handle` at `path` with the removable-media
-/// flags. Fails closed with the `(cause, errno)` pair the attach path
-/// audits.
+/// Move the mount at `path` to `attachment`'s posture.
 ///
-/// The mount carries the storage medium `device` reports, and `ro` when
-/// the device's write policy or the filesystem driver's own refusal asks
-/// for it, so a write is refused as read-only rather than as unsupported.
-fn mount_storage_volume(
-    vfs: &Vfs,
-    path: &Path,
-    device: &SharedDevice,
-    read_only: bool,
-    handle: DriverHandle,
-    map_gid: Option<GroupId>,
-) -> Result<(), (&'static str, Errno)> {
-    vfs.mounts_write()
-        .attach_at(
-            Attachment::new(handle, device.medium, mount_flags(read_only)),
-            path.clone(),
-            mount_template(map_gid),
-        )
-        .map_err(|_| ("name_in_use", Errno::AlreadyExists))
-}
-
-/// Re-attach a recovered volume at `path` under `attachment`'s posture, then
-/// `serve` it.
-///
-/// The posture goes first: until `serve` registers the live driver, the
-/// fail-closed stand-in answers the mount, so no operation reaches the live
-/// driver under the posture it replaces. For a format whose driver opens
-/// writable whatever the posture, the mount is all that keeps a conflicted
-/// volume from being written.
-fn reattach_then_serve(
+/// A refusal leaves the path unmounted — fail closed — and cannot occur
+/// while the volume's claim is held: only that operation touches the handle,
+/// and the path is unmounted and mounted again under one mount-table guard.
+fn reattach(
     vfs: &Vfs,
     attachment: Attachment,
     path: Path,
     template: Metadata,
-    serve: impl FnOnce() -> Result<(), (&'static str, Errno)>,
 ) -> Result<(), (&'static str, Errno)> {
-    {
-        let mut mounts = vfs.mounts_write();
-        let _ = mounts.detach(attachment.driver());
-        mounts
-            .attach_at(attachment, path, template)
-            .map_err(|_| ("mount_path_invalid", Errno::Busy))?;
-    }
-    serve()
+    let mut mounts = vfs.mounts_write();
+    let _ = mounts.detach(attachment.driver());
+    mounts
+        .attach_at(attachment, path, template)
+        .map_err(|_| ("mount_path_invalid", Errno::Busy))
 }
 
-/// Register `driver` under `handle` and attach the live block-health
-/// overlay the mount snapshot reads (`plans/FIX-IO.md` IO2/IO3), the one
-/// place both the attach and recover paths register a served volume so the
-/// health wiring cannot diverge between them. Returns `Err(())` when the
-/// handle is already registered (fail closed — the caller unwinds); the
-/// `set_io_source` cannot miss, the handle having just been registered by
+/// Register `driver`, a user-space server's proxy, under `handle`, its
+/// releases reaped by the operations on the volume, and attach the live
+/// block-health overlay the mount snapshot reads (`plans/FIX-IO.md`
+/// IO2/IO3): the one place a served volume is registered, so the wiring
+/// cannot diverge between a first serve and a later one. Returns `Err(())`
+/// when the handle is already registered (fail closed — the caller unwinds);
+/// the `set_io_source` cannot miss, the handle having just been registered by
 /// the one operation that holds it.
 fn register_with_health(
     handle: DriverHandle,
-    opened: OpenedVolume,
+    driver: Box<dyn KernelFs>,
+    watch: Option<ClaimRef>,
     source: &str,
+    fstype: &str,
     volume_id: [u8; 16],
     health: VolumeIoSource,
 ) -> Result<(), ()> {
     LATE_FILESYSTEM
-        .register(
-            handle,
-            opened.driver,
-            source,
-            opened.fstype,
-            volume_id,
-            opened.watch,
-        )
+        .register_served(handle, driver, source, fstype, volume_id, watch)
         .map_err(|_| ())?;
     let _ = LATE_FILESYSTEM.set_io_source(handle, health);
     Ok(())
@@ -1395,7 +1597,7 @@ fn connect_device(
     let device = SharedBlock::new(client).map_err(|err| ("geometry_unreadable", err.as_errno()))?;
     Ok(SharedDevice {
         endpoint: request.endpoint,
-        device: Arc::new(device),
+        device: Arc::try_new(device).map_err(|_| ("device_unallocated", Errno::OutOfMemory))?,
         read_only,
         medium,
         health,
@@ -1473,20 +1675,21 @@ fn identity_map_gid(fstype: VolumeFsType) -> Option<GroupId> {
 /// mutation-evidence shadow seeded from the window the recognised volume
 /// declares (D4c). A volume with no declared window (or an unreadable one)
 /// simply holds no evidence; a later re-insert then fails closed to the
-/// conflict path.
+/// conflict path. `None` when the journal cannot be allocated.
 fn seeded_journal<B: Block>(
     client: &mut B,
     request: &VolumeAttachRequest<'_>,
     block_size: u32,
     evidence: Option<Evidence>,
-) -> Arc<SpinLock<RetainedWrites>> {
-    let journal = Arc::new(SpinLock::new(RetainedWrites::new(
+) -> Option<Arc<SpinLock<RetainedWrites>>> {
+    let journal = Arc::try_new(SpinLock::new(RetainedWrites::new(
         block_size,
         // Budget from discovered physical RAM (the growable kernel heap's
         // bootstrap size is no longer the memory to size a cache against);
         // falls back to the bootstrap size before RAM is published.
         CacheBudget::from_backing(tairix_kernel_core::memstats::cache_backing_bytes()),
-    )));
+    )))
+    .ok()?;
     if let Some((lba, len)) =
         evidence.and_then(|evidence| evidence_blocks(request, block_size, evidence))
     {
@@ -1494,7 +1697,7 @@ fn seeded_journal<B: Block>(
             journal.lock().set_evidence(lba, &bytes);
         }
     }
-    journal
+    Some(journal)
 }
 
 /// The device blocks covering `evidence` in the requested extent, as the
@@ -1593,7 +1796,11 @@ fn audit_recovery_outcome(
 }
 
 impl VolumeService for RuntimeVolumeService {
-    fn attach(&self, request: &VolumeAttachRequest<'_>) -> Result<(), Errno> {
+    fn attach(
+        &self,
+        request: &VolumeAttachRequest<'_>,
+        publisher: Option<u32>,
+    ) -> Result<(), Errno> {
         let wiring = self.wiring()?;
         let audit = wiring.audit;
         // The frame validated the name as short ASCII; re-derive the &str.
@@ -1623,70 +1830,64 @@ impl VolumeService for RuntimeVolumeService {
         let block_size = device.block_size();
         let mut disk = device.window();
 
+        // The kernel names the volume from its own probe, never from the
+        // driver that will serve it, so no driver can claim another
+        // volume's identity.
+        let recognised =
+            recognise_extent(&mut disk, request).filter(|volume| volume.fstype == request.fstype);
         // A re-insert of a surprise-removed volume is recovered in place
         // — proven unmutated and replayed, or held read-only with its
-        // retained set — never re-attached as a duplicate (D4c). The
-        // recognised volume names its durable identity; an extent
-        // recognised as nothing simply attaches fresh.
-        let recognised = recognise_extent(&mut disk, request);
+        // retained set — never re-attached as a duplicate (D4c).
         if let Some((target, _claim)) = self.claim_reinsert_target(recognised.as_ref()) {
-            return self.recover(request, wiring, &device, &target);
+            return self.recover(request, publisher, wiring, &device, &target);
         }
-
-        // A name another volume holds is answered before the filesystem is
-        // opened: opening can replay a journal and walk the volume, all for a
-        // name the volume manager then tries the volume under again.
+        // A name another volume holds is answered before the volume is judged,
+        // so the volume manager tries its next candidate at once.
         let path = storage_path(name).map_err(|(cause, errno)| refused(cause, errno))?;
-        if vfs.mounts().resolve(&path).path() == &path {
+        if vfs.mounts().resolve(&path).path() == &path || self.name_reserved(name) {
             return Err(Self::name_taken(audit, name));
+        }
+        let Some(probed) = recognised else {
+            return Err(refused("volume_unrecognised", Errno::BadMagic));
+        };
+        let publisher =
+            publisher.ok_or_else(|| refused("no_publisher", Errno::PermissionDenied))?;
+        // A volume whose identity another root publishes is attached already,
+        // under another name: that is no name for the volume manager to try
+        // its next candidate over.
+        let unpublishable = if probed.identity == [0; 16] {
+            Some(Errno::OutOfRange)
+        } else {
+            VOLUME_FOREST.resolve(&probed.identity).map(|_| Errno::Busy)
+        };
+        if let Some(errno) = unpublishable {
+            return Err(refused("identity_unpublishable", errno));
         }
 
         // Thread the device through the uncommitted-write journal, its
         // mutation-evidence shadow seeded from the window the volume declares.
-        let evidence = recognised.and_then(|volume| volume.evidence);
-        let journal = seeded_journal(&mut disk, request, block_size, evidence);
-        // The device's reported-health overlay, shared by every volume on
-        // it, for the mount snapshot.
-        let health = device.health.clone();
+        let journal = seeded_journal(&mut disk, request, block_size, probed.evidence)
+            .ok_or_else(|| refused("journal_unallocated", Errno::OutOfMemory))?;
         let journaled = JournaledBlock::new(disk, Arc::clone(&journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
-
-        // Open the matched filesystem and take its stable identity.
-        let map_gid = identity_map_gid(request.fstype);
-        let handle_raw = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        let opened = open_filesystem(
-            window,
-            request.fstype,
-            device.read_only,
-            map_gid,
-            wiring,
-            handle_raw,
-        )
-        .map_err(|err| refused("filesystem_unmountable", err))?;
-        let handle = DriverHandle::from_raw(handle_raw)
+        let handle = DriverHandle::from_raw(self.next_handle.fetch_add(1, Ordering::Relaxed))
             .map_err(|_| refused("handle_invalid", Errno::OutOfRange))?;
-
-        // Mount under the catalog view location with the removable-media
-        // flags; the device's write policy, or the driver's refusal, is
-        // carried as `ro`.
-        let write_refusal = opened.write_refusal;
-        let read_only = device.read_only || write_refusal.is_some();
-        mount_storage_volume(vfs, &path, &device, read_only, handle, map_gid).map_err(
-            |(cause, errno)| match errno {
-                Errno::AlreadyExists => Self::name_taken(audit, name),
-                _ => refused(cause, errno),
-            },
-        )?;
+        let served = self
+            .new_served(window, device.read_only)
+            .map_err(|err| refused("served_volume_unbuilt", err))?;
         let volume = AttachedVolume {
-            id: opened.identity,
+            id: probed.identity,
             name: String::from(name),
             path,
             handle,
             endpoint: request.endpoint,
             window: request.window,
             journal,
-            fstype: opened.fstype,
+            fstype: request.fstype,
+            mount: Mount::Pending,
+            served: Some(Arc::clone(&served)),
+            node: None,
             first_lba: request.first_lba,
             blocks: request.blocks,
             availability: Availability::Available,
@@ -1695,22 +1896,117 @@ impl VolumeService for RuntimeVolumeService {
         // Released as the attach returns, when a surprise removal that
         // landed while the volume was built is applied.
         let _claim = self
-            .register_and_publish(vfs, opened, volume, health, audit)
+            .enter(volume)
             .map_err(|(cause, errno)| refused(cause, errno))?;
+        let node = publish_volume_node(wiring.tree, publisher, request.fstype, served.id())
+            .map_err(|err| {
+                self.retract(&probed.identity);
+                refused("volume_node_unpublished", err)
+            })?;
+        self.set_node(&probed.identity, Some((publisher, node)));
         RuntimeVolumeService::audit_event(
             audit,
-            VOLUME_ATTACHED,
-            "volume-service: runtime volume attached and published",
+            VOLUME_AWAITING_DRIVER,
+            "volume-service: runtime volume attached; awaiting its filesystem driver",
             name,
             None,
         );
-        Self::audit_write_refusal(audit, name, write_refusal);
         Ok(())
     }
 
     fn detach(&self, request: &VolumeDetachRequest) -> Result<(), Errno> {
         let audit = self.wiring()?.audit;
         self.detach_volume(&request.volume_id, request.force, audit)
+    }
+
+    fn read(
+        &self,
+        volume: u64,
+        lba: u64,
+        len: usize,
+        deliver: &mut ChunkSink<'_>,
+    ) -> Result<(), Errno> {
+        self.wiring()?;
+        self.served(volume)?.read(lba, len, deliver)
+    }
+
+    fn write(
+        &self,
+        volume: u64,
+        lba: u64,
+        len: usize,
+        fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno> {
+        self.wiring()?;
+        self.served(volume)?.write(lba, len, fill)
+    }
+
+    fn ctl(&self, volume: u64, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno> {
+        self.wiring()?;
+        self.served(volume)?.ctl(ctl)
+    }
+
+    fn awaiting_server(&self, volume: u64) -> Result<(), Errno> {
+        self.wiring()?;
+        let state = self.state.lock();
+        let entry = state
+            .iter()
+            .find(|v| v.granted_as(volume))
+            .ok_or(Errno::NotFound)?;
+        match entry.mount.server() {
+            None => Ok(()),
+            Some(_) => Err(Errno::AlreadyExists),
+        }
+    }
+
+    fn serve(&self, volume: u64, offer: &ServeOffer, channel: ServeChannel) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        // Taken in turn with the attaches, recoveries and detaches on the
+        // volume's device, so a serve never races one.
+        let (endpoint, window) = self.served_device(volume)?;
+        let pin = self.pin_device(endpoint, window)?;
+        let _op = pin.op.lock();
+        let (_claim, target) = self.claim_awaiting(volume, (endpoint, window))?;
+        let device = self
+            .device_for(endpoint, window)
+            .ok_or(Errno::DeviceOffline)?;
+        let server = channel.endpoint.id().0;
+        if let Err((cause, errno)) = Self::mount_served(&target, offer, channel, &device, wiring) {
+            self.retract_unserved(&target, wiring.audit, cause, errno);
+            return Err(errno);
+        }
+        if let Some(entry) = self.state.lock().iter_mut().find(|v| v.id == target.id) {
+            entry.mount = Mount::Mounted {
+                format: offer.format,
+                server: Some(server),
+            };
+        }
+        let (event, message) = if target.mounted_as.is_some() {
+            (
+                VOLUME_SERVE_RESUMED,
+                "volume-service: a filesystem driver serves the volume again",
+            )
+        } else {
+            (
+                VOLUME_ATTACHED,
+                "volume-service: runtime volume served, mounted and published",
+            )
+        };
+        Self::audit_event(wiring.audit, event, message, &target.name, None);
+        if !target.served.read_only() {
+            Self::audit_write_refusal(wiring.audit, &target.name, offer.write_refusal);
+        }
+        Ok(())
+    }
+
+    fn refuse(&self, volume: u64, why: DriverError) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        let (endpoint, window) = self.served_device(volume)?;
+        let pin = self.pin_device(endpoint, window)?;
+        let _op = pin.op.lock();
+        let (_claim, target) = self.claim_awaiting(volume, (endpoint, window))?;
+        self.retract_unserved(&target, wiring.audit, "driver_refused", why.as_errno());
+        Ok(())
     }
 }
 
@@ -1763,16 +2059,22 @@ impl RuntimeVolumeService {
             window,
             journal,
             availability,
+            served,
         } = target;
         let refused = |cause: &'static str, errno: Errno| -> Errno { refuse(&name, cause, errno) };
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| refused("no_mount_table", err))?;
+        // The table's own word, not the registry's: a reattach the heap
+        // refused leaves a volume once mounted out of it, still detachable.
+        let mounted = vfs.mounts().attachment(handle).is_some();
         // Asked before anything is revoked or discarded, so a volume the table
         // would keep loses nothing to a detach that cannot happen.
-        vfs.mounts()
-            .detachable(handle)
-            .map_err(|err| refused("not_detachable", err.to_errno()))?;
+        if mounted {
+            vfs.mounts()
+                .detachable(handle)
+                .map_err(|err| refused("not_detachable", err.to_errno()))?;
+        }
 
         // Held from the count of the volume's open nodes to the retraction:
         // no pin is taken meanwhile, no write lands between the final commit
@@ -1783,23 +2085,9 @@ impl RuntimeVolumeService {
         let driver = LATE_FILESYSTEM.driver(handle).ok();
         let nodes = LATE_FILESYSTEM.nodes(handle);
         let mut fs = driver.as_deref().map(DriverLock::lock);
-        let open = match (nodes.as_deref(), fs.as_deref_mut()) {
-            (Some(nodes), Some(fs)) => {
-                nodes.reap(fs);
-                nodes.outstanding()
-            }
-            _ => 0,
-        };
+        let open = settle_holds(nodes.as_deref(), fs.as_deref_mut(), force);
         if open != 0 && !force {
             return Err(Self::refuse_open_nodes(audit, &name, open));
-        }
-        if force {
-            if let (Some(nodes), Some(fs)) = (nodes.as_deref(), fs.as_deref_mut()) {
-                // A node the driver fails to free is left to the format's own
-                // recovery, as after a crash.
-                let _ = fs.release_pins();
-                nodes.retire();
-            }
         }
 
         // A surprise-removed volume never detaches implicitly: discarding
@@ -1808,12 +2096,21 @@ impl RuntimeVolumeService {
         // detach still commits a healthy volume cleanly when it can; only
         // when nothing can be committed does it discard.
         let commit_refusal = match availability {
-            Availability::Available => commit_for_detach(
-                fs.as_deref_mut(),
-                self.device_for(endpoint, window).as_ref(),
-                &journal,
-            )
-            .err(),
+            Availability::Available => {
+                // A volume no driver serves has no filesystem state to flush:
+                // what a lost driver held unpublished went with it.
+                let live = if served {
+                    fs.as_deref_mut()
+                        .map(Some)
+                        .ok_or(("driver_missing", Errno::NotImplemented))
+                } else {
+                    Ok(None)
+                };
+                live.and_then(|live| {
+                    commit_for_detach(live, self.device_for(endpoint, window).as_ref(), &journal)
+                })
+                .err()
+            }
             Availability::UnavailableDirty => {
                 Some(("volume_unavailable_dirty", Errno::DeviceFault))
             }
@@ -1841,21 +2138,21 @@ impl RuntimeVolumeService {
         };
 
         // Retract, still under the driver's lock: the projections leave the
-        // table, the stand-in takes the driver's place and the registration
-        // ends, so a held descriptor answers stale; then the published
-        // identity is withdrawn. The claim kept a surprise removal
-        // off the entry, so it is still registered; the disk's client closes
-        // once no operation holds its slot.
-        vfs.mounts_write()
-            .detach(handle)
-            .map_err(|err| refused("not_detachable", err.to_errno()))?;
-        self.state.lock().retain(|v| v.id != *id);
+        // table and the stand-in takes the driver's place, so a held
+        // descriptor answers stale; then the volume leaves the registry, the
+        // tree and the namespace. The claim kept a surprise removal off the
+        // entry, and the disk's client closes once no operation holds its
+        // slot.
+        if mounted {
+            vfs.mounts_write()
+                .detach(handle)
+                .map_err(|err| refused("not_detachable", err.to_errno()))?;
+        }
         if let Some(fs) = fs.as_deref_mut() {
             *fs = Box::new(UnavailableFs);
         }
-        let _ = LATE_FILESYSTEM.unregister(handle);
+        self.retract(id);
         drop(fs);
-        let _ = VOLUME_FOREST.unpublish(id);
         audit_detach_outcome(audit, &name, Forced::of(discarded, open));
         Ok(())
     }
@@ -1932,11 +2229,34 @@ fn audit_detach_outcome(audit: &'static (dyn Sink + Sync), name: &str, forced: O
     );
 }
 
+/// How many descriptors hold pins of `nodes` once the releases waiting are
+/// reaped into `fs`. When `force`, `fs` lets every hold go and the
+/// registration is retired, so those descriptors answer stale.
+fn settle_holds(
+    nodes: Option<&VolumeNodes>,
+    fs: Option<&mut Box<dyn KernelFs>>,
+    force: bool,
+) -> usize {
+    let (Some(nodes), Some(fs)) = (nodes, fs) else {
+        return 0;
+    };
+    nodes.reap(fs);
+    let open = nodes.outstanding();
+    if force {
+        // A node the driver fails to free is left to the format's own
+        // recovery, as after a crash.
+        let _ = fs.release_pins();
+        nodes.retire();
+    }
+    open
+}
+
 /// Commit everything a departing volume holds: flush the filesystem's own
-/// state through `fs`, its driver held by the caller, then the device's
-/// cache, and empty the journal — after a committed flush nothing is
-/// uncommitted. A vanished endpoint or window (`NotFound` — the device was
-/// unplugged mid-detach) is tolerated only when the journal is clean.
+/// state through `fs` when a driver serves it, its driver held by the
+/// caller, then the device's cache, and empty the journal — after a
+/// committed flush nothing is uncommitted. A vanished endpoint or window
+/// (`NotFound` — the device was unplugged mid-detach) is tolerated only when
+/// the journal is clean.
 ///
 /// # Errors
 ///
@@ -1948,9 +2268,10 @@ fn commit_for_detach(
     device: Option<&SharedDevice>,
     journal: &Arc<SpinLock<RetainedWrites>>,
 ) -> Result<(), (&'static str, Errno)> {
-    let fs = fs.ok_or(("driver_missing", Errno::NotImplemented))?;
-    fs.flush()
-        .map_err(|err| ("filesystem_flush_failed", err.as_errno()))?;
+    if let Some(fs) = fs {
+        fs.flush()
+            .map_err(|err| ("filesystem_flush_failed", err.as_errno()))?;
+    }
     // The device cache is flushed through the volume's own shared window,
     // so the flush is serialised against the sibling volumes still driving
     // the same disk rather than racing them over the one staging buffer.
@@ -2002,6 +2323,8 @@ struct RecoveryTarget {
     path: Path,
     /// The existing registry handle, re-pointed at the live driver.
     handle: DriverHandle,
+    /// What the mount table calls the volume, its stand-in's included.
+    format: FormatName,
     /// The published 16-byte identity the re-insert matched.
     id: [u8; 16],
     /// The journal holding the retained set and the evidence shadow.
@@ -2036,9 +2359,11 @@ enum VanishOutcome {
     Unavailable {
         name: String,
         handle: DriverHandle,
-        fstype: &'static str,
+        format: FormatName,
         id: [u8; 16],
         pending: Pending,
+        served: Option<Arc<ServedVolume>>,
+        node: Option<(u32, u32)>,
     },
 }
 
@@ -2053,29 +2378,33 @@ enum Pending {
 
 impl RuntimeVolumeService {
     /// Claim the volume an attach's `recognised` extent re-inserts, if
-    /// any: its identity must match an unavailable volume no other operation
-    /// holds. Only a volume whose serving driver is gone is a recovery
+    /// any: its identity and format must match an unavailable volume no
+    /// other operation holds. Only a volume whose serving driver is gone is a recovery
     /// target: a live volume with the same identity is a duplicate, refused
     /// by the normal attach path.
     fn claim_reinsert_target(
         &self,
         recognised: Option<&ProbedVolume>,
     ) -> Option<(RecoveryTarget, VolumeClaim<'_>)> {
-        let identity = recognised?.identity;
+        let recognised = recognised?;
+        let identity = recognised.identity;
         let mut state = self.state.lock();
         let volume = state.iter_mut().find(|v| {
             v.id == identity
+                && v.fstype == recognised.fstype
                 && !v.claimed
                 && matches!(
                     v.availability,
                     Availability::UnavailableDirty | Availability::UnavailableLost
                 )
         })?;
+        let format = volume.mount.format()?;
         volume.claimed = true;
         let target = RecoveryTarget {
             name: volume.name.clone(),
             path: volume.path.clone(),
             handle: volume.handle,
+            format,
             id: volume.id,
             journal: Arc::clone(&volume.journal),
             first_lba: volume.first_lba,
@@ -2155,111 +2484,96 @@ impl RuntimeVolumeService {
     }
 
     /// Recover the unavailable volume `target` over the re-inserted
-    /// device: verify and replay ([`Self::attempt_replay`]), then rebuild
-    /// the volume in place — same handle, mount path, catalog name, and
-    /// published root — live and writable when proven, read-only with the
-    /// retained set kept when not. The caller holds the re-inserted device's
-    /// operation lock and the claim on `target`, whose release applies a
-    /// surprise removal that landed while the volume was rebuilt.
+    /// device: verify and replay ([`Self::attempt_replay`]), then serve the
+    /// volume in place — same handle, mount path, catalog name, and
+    /// published root — over a fresh served volume and node, writable when
+    /// proven and read-only with the retained set kept when not. The
+    /// stand-in answers the mount until the new driver serves it. The caller
+    /// holds the re-inserted device's operation lock and the claim on
+    /// `target`, whose release applies a surprise removal that landed while
+    /// the volume was rebuilt.
     fn recover(
         &self,
         request: &VolumeAttachRequest<'_>,
+        publisher: Option<u32>,
         wiring: &Wiring,
         device: &SharedDevice,
         target: &RecoveryTarget,
     ) -> Result<(), Errno> {
-        let device_read_only = device.read_only;
-        let block_size = device.block_size();
-        let mut disk = device.window();
         let audit = wiring.audit;
         let refused = |cause, errno| Self::refuse_attach(audit, &target.name, cause, errno);
+        let publisher =
+            publisher.ok_or_else(|| refused("no_publisher", Errno::PermissionDenied))?;
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| refused("no_mount_table", err))?;
-
-        let outcome =
-            Self::attempt_replay(request, &mut disk, block_size, target, device_read_only);
+        let mut disk = device.window();
+        let outcome = Self::attempt_replay(
+            request,
+            &mut disk,
+            device.block_size(),
+            target,
+            device.read_only,
+        );
         let conflict = matches!(outcome, RecoveryOutcome::Conflict(_));
         // A conflicted volume returns read-only until its retained set is
-        // explicitly discarded; a proven one returns per the device.
-        let read_only = device_read_only || conflict;
-
-        // Rebuild the volume over the retained journal and the re-inserted
-        // device's shared window, carrying the device's reported-health
-        // overlay onto the remounted volume.
-        let health = device.health.clone();
+        // explicitly discarded, down to the blocks its driver may write.
+        let read_only = device.read_only || conflict;
         let journaled = JournaledBlock::new(disk, Arc::clone(&target.journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
-        let map_gid = identity_map_gid(request.fstype);
-        let opened = open_filesystem(
-            window,
-            request.fstype,
-            read_only,
-            map_gid,
-            wiring,
-            target.handle.as_u64(),
-        )
-        .map_err(|err| refused("recovery_open_failed", err))?;
-        if opened.identity != target.id {
-            // The head that matched the probe does not govern the opened
-            // volume: never adopt a different identity into this entry.
-            return Err(refused("recovery_identity_mismatch", Errno::BadMagic));
-        }
-
-        // A refusal here leaves the handle and path unresolved — fail closed,
-        // audited — and cannot occur while the claim is held: only this
-        // operation touches the handle, and the path is unmounted and mounted
-        // again under one mount-table guard.
-        let fstype = opened.fstype;
-        let write_refusal = opened.write_refusal;
-        let read_only = read_only || write_refusal.is_some();
+        let served = self
+            .new_served(window, read_only)
+            .map_err(|err| refused("served_volume_unbuilt", err))?;
         // Under the stand-in's lock, so an operation that takes it after the
-        // move finds its projection gone. The volume returns under a fresh
-        // registration: a descriptor held across the removal answers stale.
+        // move finds its projection gone. The stand-in answers under a fresh
+        // registration: a descriptor held across the removal answers stale,
+        // and holds up no detach.
         let standing = LATE_FILESYSTEM.driver(target.handle).ok();
         let held = standing.as_deref().map(DriverLock::lock);
-        reattach_then_serve(
+        reattach(
             vfs,
             Attachment::new(target.handle, device.medium, mount_flags(read_only)),
             target.path.clone(),
-            mount_template(map_gid),
-            || {
-                let _ = LATE_FILESYSTEM.unregister(target.handle);
-                register_with_health(target.handle, opened, &target.name, target.id, health)
-                    .map_err(|()| ("handle_in_use", Errno::Busy))?;
-                // A conflicted volume stays read-only `RecoveryConflict`, over
-                // which the health overlay never competes; a cleanly recovered
-                // one reads `Available` and reflects its device's ongoing
-                // health.
-                let _ = LATE_FILESYSTEM.set_availability(
-                    target.handle,
-                    if conflict {
-                        MountAvailability::RecoveryConflict
-                    } else {
-                        MountAvailability::Available
-                    },
-                );
-                Ok(())
-            },
+            mount_template(identity_map_gid(request.fstype)),
         )
-        .map_err(|(cause, errno)| refused(cause, errno))?;
+        .map_err(|(cause, errno)| {
+            self.retire_served(Some(&served), None);
+            refused(cause, errno)
+        })?;
+        let _ = LATE_FILESYSTEM.unregister(target.handle);
+        let _ = LATE_FILESYSTEM.register(
+            target.handle,
+            Box::new(UnavailableFs),
+            &target.name,
+            target.format.as_str(),
+            target.id,
+            None,
+        );
         drop(held);
-        {
-            let mut state = self.state.lock();
-            if let Some(entry) = state.iter_mut().find(|v| v.id == target.id) {
-                entry.endpoint = request.endpoint;
-                entry.window = request.window;
-                entry.fstype = fstype;
-                entry.availability = if conflict {
-                    Availability::RecoveryConflict
-                } else {
-                    Availability::Available
-                };
-            }
+        let _ = LATE_FILESYSTEM.set_io_source(target.handle, device.health.clone());
+        let _ = LATE_FILESYSTEM.set_availability(
+            target.handle,
+            if conflict {
+                MountAvailability::RecoveryConflict
+            } else {
+                MountAvailability::Recovering
+            },
+        );
+        if let Some(entry) = self.state.lock().iter_mut().find(|v| v.id == target.id) {
+            entry.endpoint = request.endpoint;
+            entry.window = request.window;
+            entry.served = Some(Arc::clone(&served));
+            entry.availability = if conflict {
+                Availability::RecoveryConflict
+            } else {
+                Availability::Available
+            };
         }
         audit_recovery_outcome(audit, &target.name, &outcome, &target.journal);
-        Self::audit_write_refusal(audit, &target.name, write_refusal);
+        let node = publish_volume_node(wiring.tree, publisher, request.fstype, served.id())
+            .map_err(|err| refused("volume_node_unpublished", err))?;
+        self.set_node(&target.id, Some((publisher, node)));
         Ok(())
     }
 
@@ -2284,6 +2598,11 @@ impl RuntimeVolumeService {
                         || slot_retracted(&devices, v.endpoint, v.window))
             })?
         };
+        // A volume no driver ever served holds nothing a caller was told was
+        // written.
+        let Some(format) = state[index].mount.format() else {
+            return Some(VanishOutcome::Clean(state.remove(index)));
+        };
         // Writes the driver acknowledged but never gave the device are in no
         // journal, and go with the driver: a removal holding some is a loss.
         let unpublished = LATE_FILESYSTEM.holds_unpublished(state[index].handle);
@@ -2302,16 +2621,23 @@ impl RuntimeVolumeService {
         let Some(pending) = pending else {
             return Some(VanishOutcome::Clean(state.remove(index)));
         };
-        state[index].availability = match pending {
+        let entry = &mut state[index];
+        entry.availability = match pending {
             Pending::Retained(_) => Availability::UnavailableDirty,
             Pending::Lost(_) => Availability::UnavailableLost,
         };
+        entry.mount = Mount::Mounted {
+            format,
+            server: None,
+        };
         Some(VanishOutcome::Unavailable {
-            name: state[index].name.clone(),
-            handle: state[index].handle,
-            fstype: state[index].fstype,
-            id: state[index].id,
+            name: entry.name.clone(),
+            handle: entry.handle,
+            format,
+            id: entry.id,
             pending,
+            served: entry.served.take(),
+            node: entry.node.take(),
         })
     }
 
@@ -2327,7 +2653,7 @@ impl RuntimeVolumeService {
             return;
         };
         while let Some(outcome) = self.vanish_outcome(endpoint, removal) {
-            Self::apply_vanish(outcome, wiring.audit);
+            self.apply_vanish(outcome, wiring.audit);
         }
         self.release_vanished_cache(endpoint, removal);
     }
@@ -2352,17 +2678,13 @@ impl RuntimeVolumeService {
     }
 
     /// Carry out one volume's surprise-removal `outcome`.
-    fn apply_vanish(outcome: VanishOutcome, audit: &'static (dyn Sink + Sync)) {
+    fn apply_vanish(&self, outcome: VanishOutcome, audit: &'static (dyn Sink + Sync)) {
         match outcome {
             VanishOutcome::Clean(entry) => {
                 // No sleeping lock may be taken here, so the registration is
                 // only retired: its pins go with the driver, and a deletion
                 // they deferred is the format's own recovery's to finish.
-                if let Ok(vfs) = LATE_FILESYSTEM.vfs() {
-                    let _ = vfs.mounts_write().detach(entry.handle);
-                }
-                let _ = LATE_FILESYSTEM.unregister(entry.handle);
-                let _ = VOLUME_FOREST.unpublish(&entry.id);
+                self.withdraw(&entry);
                 RuntimeVolumeService::audit_event(
                     audit,
                     VOLUME_SURPRISE_REMOVED_CLEAN,
@@ -2374,29 +2696,22 @@ impl RuntimeVolumeService {
             VanishOutcome::Unavailable {
                 name,
                 handle,
-                fstype,
+                format,
                 id,
                 pending,
+                served,
+                node,
             } => {
-                // The fail-closed stand-in takes over the volume's
-                // registration in place: the real driver (and its plaintext
-                // cache) drops, so nothing of the vanished medium is ever
-                // served as live, and a descriptor held across the removal
-                // answers the device fault; the mount and the published root
-                // stay visible — and the registry entry is marked
-                // unavailable, so the mount snapshot never shows the vanished
-                // volume as healthy.
-                if let Some(nodes) = LATE_FILESYSTEM.nodes(handle) {
-                    let _ = LATE_FILESYSTEM.register_with_nodes(
-                        handle,
-                        alloc::boxed::Box::new(UnavailableFs),
-                        &name,
-                        fstype,
-                        id,
-                        None,
-                        nodes,
-                    );
-                }
+                // Its driver goes with the device. The fail-closed stand-in
+                // takes over the volume's registration in place: the proxy
+                // (and its plaintext cache) drops, so nothing of the vanished
+                // medium is ever served as live, and a descriptor held across
+                // the removal answers the device fault; the mount and the
+                // published root stay visible — and the registry entry is
+                // marked unavailable, so the mount snapshot never shows the
+                // vanished volume as healthy.
+                self.retire_served(served.as_deref(), node);
+                Self::stand_in(handle, &name, format, id);
                 let _ = LATE_FILESYSTEM.set_availability(
                     handle,
                     match pending {
@@ -2440,9 +2755,92 @@ impl RuntimeVolumeService {
     }
 }
 
+impl RuntimeVolumeService {
+    /// Put the fail-closed stand-in in the place of the driver registered for
+    /// `handle`, under its registration, so a descriptor opened through it
+    /// answers the device fault rather than going stale, and no operation
+    /// finds the handle unregistered in between. Parks on nothing.
+    fn stand_in(handle: DriverHandle, name: &str, format: FormatName, id: [u8; 16]) {
+        if let Some(nodes) = LATE_FILESYSTEM.nodes(handle) {
+            let _ = LATE_FILESYSTEM.register_with_nodes(
+                handle,
+                Box::new(UnavailableFs),
+                name,
+                format.as_str(),
+                id,
+                None,
+                nodes,
+            );
+        }
+    }
+
+    /// The filesystem driver serving over `server` is gone: the fail-closed
+    /// stand-in answers its volume, which reports itself recovering until the
+    /// driver `devmgr` restarts serves it again. Takes no sleeping lock, like
+    /// the surprise-removal path.
+    fn server_lost(&self, server: u64) {
+        let Ok(wiring) = self.wiring() else {
+            return;
+        };
+        let lost = {
+            let mut state = self.state.lock();
+            state
+                .iter_mut()
+                .find(|v| v.mount.server() == Some(server) && !v.claimed)
+                .and_then(|v| {
+                    let format = v.mount.format()?;
+                    v.mount = Mount::Mounted {
+                        format,
+                        server: None,
+                    };
+                    let conflicted = v.availability == Availability::RecoveryConflict;
+                    Some((
+                        v.name.clone(),
+                        v.handle,
+                        format,
+                        v.id,
+                        conflicted,
+                        (v.endpoint, v.window),
+                    ))
+                })
+        };
+        let Some((name, handle, format, id, conflicted, (endpoint, window))) = lost else {
+            return;
+        };
+        let unpublished = LATE_FILESYSTEM.holds_unpublished(handle);
+        Self::stand_in(handle, &name, format, id);
+        if let Some(device) = self.device_for(endpoint, window) {
+            let _ = LATE_FILESYSTEM.set_io_source(handle, device.health);
+        }
+        let _ = LATE_FILESYSTEM.set_availability(
+            handle,
+            if conflicted {
+                MountAvailability::RecoveryConflict
+            } else {
+                MountAvailability::Recovering
+            },
+        );
+        Self::audit_event(
+            wiring.audit,
+            VOLUME_SERVER_LOST,
+            "volume-service: the volume's filesystem driver is gone; awaiting its restart",
+            &name,
+            Some(if unpublished {
+                "unpublished_writes_lost"
+            } else {
+                "nothing_unpublished"
+            }),
+        );
+    }
+}
+
 impl EndpointVanishObserver for RuntimeVolumeService {
     fn endpoint_vanished(&self, id: EndpointId) {
-        self.handle_vanished(id.0, Removal::Endpoint);
+        if is_served_endpoint(id.0) {
+            self.server_lost(id.0);
+        } else {
+            self.handle_vanished(id.0, Removal::Endpoint);
+        }
     }
 
     /// The medium left: the endpoint's device slots are marked retracted,

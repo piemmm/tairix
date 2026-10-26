@@ -75,6 +75,11 @@ version = "1.2.62"
 sha256 = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
 
 [[source-pin]]
+name = "ccm"
+version = "0.6.1"
+sha256 = "0be9b34d99d395af800e996c5784f810f8400ccd64202f91859dc677825b5378"
+
+[[source-pin]]
 name = "cfg-if"
 version = "1.0.4"
 sha256 = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
@@ -93,6 +98,11 @@ sha256 = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
 name = "cipher"
 version = "0.5.2"
 sha256 = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
+
+[[source-pin]]
+name = "cmac"
+version = "0.8.0"
+sha256 = "ac78aa94ce13e432b332a4d1bf2eff167d3a2520188ee05b337180a42fd2e62e"
 
 [[source-pin]]
 name = "cmov"
@@ -130,6 +140,11 @@ version = "0.10.1"
 sha256 = "baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21"
 
 [[source-pin]]
+name = "cts"
+version = "0.7.0"
+sha256 = "e6ae47d18aa4f3701bc9b644cf9a74a45e6eace39feabeab15864728aa1e45a9"
+
+[[source-pin]]
 name = "ctutils"
 version = "0.4.5"
 sha256 = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
@@ -143,6 +158,11 @@ sha256 = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
 name = "curve25519-dalek-derive"
 version = "0.1.1"
 sha256 = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+
+[[source-pin]]
+name = "dbl"
+version = "0.5.0"
+sha256 = "f0d7a944e61df464668c5f51f56cc667396a8821434273112948ea0b66e405d7"
 
 [[source-pin]]
 name = "der"
@@ -268,6 +288,16 @@ sha256 = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
 name = "matchers"
 version = "0.2.0"
 sha256 = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+
+[[source-pin]]
+name = "md-5"
+version = "0.11.0"
+sha256 = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+
+[[source-pin]]
+name = "md4"
+version = "0.11.0"
+sha256 = "bd76fb0fd6b2e4be62a73f8e0858ca97f81babcb1af322dcaca196f735f17f80"
 
 [[source-pin]]
 name = "memchr"

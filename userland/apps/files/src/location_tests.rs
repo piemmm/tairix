@@ -28,19 +28,19 @@ fn leaving_a_subdirectory_climbs_to_its_parent() {
     let mut browser = deep();
 
     assert_eq!(leave_directory(&mut browser), Leave::Climbed);
-    assert_eq!(browser.path(), "/Users/ann");
+    assert_eq!(browser.path().as_deref(), Some("/Users/ann"));
     assert_eq!(leave_directory(&mut browser), Leave::Climbed);
-    assert_eq!(browser.path(), "/Users");
+    assert_eq!(browser.path().as_deref(), Some("/Users"));
 }
 
 /// The gesture closes the window only where there is nothing left to leave.
 #[test]
 fn leaving_the_root_closes_the_window() {
     let mut browser = browser();
-    assert!(browser.is_root());
+    assert!(!browser.can_go_up());
 
     assert_eq!(leave_directory(&mut browser), Leave::Closed);
-    assert!(browser.is_root(), "a closing gesture navigates nowhere");
+    assert!(!browser.can_go_up(), "a closing gesture navigates nowhere");
 }
 
 /// An unreadable ancestor must not destroy the window: the climb is refused
@@ -58,8 +58,8 @@ fn a_parent_that_cannot_be_listed_is_refused_not_treated_as_the_top() {
         "the user is told which place was refused"
     );
     assert_eq!(
-        browser.path(),
-        "/Storage/Backup",
+        browser.path().as_deref(),
+        Some("/Storage/Backup"),
         "a refused climb leaves the listing where it was"
     );
 }
@@ -95,4 +95,30 @@ fn every_location_yields_a_title_the_channel_accepts() {
             break;
         }
     }
+}
+
+/// A browser that has moved from the root to the network.
+fn on_network() -> Browser<FakeFs> {
+    let mut browser = browser();
+    assert!(browser.navigate_to_network());
+    assert!(browser.show_network(alloc::vec::Vec::new()));
+    browser
+}
+
+#[test]
+fn the_network_is_titled_by_its_name_and_never_by_a_path() {
+    let browser = on_network();
+    assert_eq!(
+        location_title(&browser),
+        tairix_browse::network::NETWORK_TITLE
+    );
+    assert!(WindowTitle::new(&location_title(&browser)).is_ok());
+    assert_eq!(retitle(&browser, "/"), Some("Network".to_string()));
+}
+
+#[test]
+fn leaving_the_network_closes_the_window_for_it_has_no_parent() {
+    let mut browser = on_network();
+    assert_eq!(leave_directory(&mut browser), Leave::Closed);
+    assert!(browser.is_network(), "a closing gesture navigates nowhere");
 }

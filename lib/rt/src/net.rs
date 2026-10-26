@@ -196,13 +196,26 @@ pub fn bind(socket: SocketId, local: SocketAddr) -> Result<u16, Errno> {
 }
 
 /// Set `socket`'s default peer: later [`send`]s may omit a destination and
-/// inbound datagrams are filtered to this peer.
+/// inbound datagrams are filtered to this peer. A stream socket opens a
+/// connection to it, over `interface` when one is named.
 ///
 /// # Errors
 ///
-/// The typed [`Errno`] the stack returned.
-pub fn connect(socket: SocketId, peer: SocketAddr) -> Result<(), Errno> {
-    status_call(&SocketRequest::Connect { socket, peer })
+/// The typed [`Errno`] the stack returned — [`Errno::NetworkUnreachable`]
+/// when no interface (or not the named one) reaches the peer, and
+/// [`Errno::OutOfRange`] for a datagram or echo socket naming an interface,
+/// or a link-local peer named without one where several links could reach
+/// it.
+pub fn connect(
+    socket: SocketId,
+    peer: SocketAddr,
+    interface: Option<[u8; IF_NAME_LEN]>,
+) -> Result<(), Errno> {
+    status_call(&SocketRequest::Connect {
+        socket,
+        peer,
+        interface,
+    })
 }
 
 /// Send one datagram from `socket`. `dest` is [`None`] to use the
@@ -213,9 +226,10 @@ pub fn connect(socket: SocketId, peer: SocketAddr) -> Result<(), Errno> {
 ///
 /// The typed [`Errno`] the stack returned — [`Errno::NotConnected`] with
 /// no `dest` and no connected peer, [`Errno::NetworkUnreachable`] (on a
-/// named interface: that one cannot carry it), [`Errno::MessageTooLarge`],
-/// [`Errno::OutOfMemory`] when the request cannot be built, or a transport
-/// error.
+/// named interface: that one cannot carry it), [`Errno::OutOfRange`] for a
+/// link-local destination named without an interface where several links
+/// could carry it, [`Errno::MessageTooLarge`], [`Errno::OutOfMemory`] when
+/// the request cannot be built, or a transport error.
 pub fn send(
     socket: SocketId,
     dest: Option<SocketAddr>,
@@ -423,6 +437,7 @@ impl EchoSocket {
                 addr,
                 port: 0,
             },
+            None,
         ) {
             let _ = close(socket);
             return Err(errno);

@@ -1,0 +1,24 @@
+[package]
+name = "tairix-der"
+description = "TAIRiX shared DER codec: the one first-party reader and writer of ASN.1's Distinguished Encoding Rules (ITU-T X.690 §10) that SPNEGO and Kerberos share — identifiers of every class and number, definite minimal lengths, and INTEGER, BOOLEAN, ENUMERATED, BIT STRING, OCTET STRING, NULL, OBJECT IDENTIFIER, GeneralString and GeneralizedTime contents, each held to DER's one canonical form. no_std + alloc, forbids unsafe, zero-copy and depth-bounded when reading, and fail-closed on any malformed or non-canonical encoding (it reads what a stranger sent)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Time64` and `CivilTime`: a GeneralizedTime is read into the one instant
+# type and validated by the one calendar, never a second date routine.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it at the start of the test,
+# and bounds the smoke/soak loop. Test scaffolding only; never in a TAIRiX
+# build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

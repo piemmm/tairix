@@ -643,6 +643,7 @@ tairix/
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── curses/          # First-party curses / TUI screen-model library.
 │   ├── cursor/          # Shared pointer cursors.
+│   ├── der/             # The one strict DER codec (SPNEGO, Kerberos).
 │   ├── devids/          # Hardware-identity databases: PCI, USB, IEEE OUI.
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table match.
 │   ├── disasm/          # Instruction decoders for the four Tier-1 ISAs.
@@ -663,6 +664,7 @@ tairix/
 │   │                    #   the tree seam tools walk and change trees through.
 │   ├── fsmeta/          # Shared extended-file-metadata model.
 │   ├── fsprobe/         # Shared filesystem signature/label/identity probe.
+│   ├── fsserve/         # Served-filesystem runtime: fsserve-v1 onto the driver traits.
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.
 │   ├── geometry/        # Shared screen geometry + desktop DPI/UI scale.
 │   ├── glob/            # Shared filename-glob matcher.
@@ -717,6 +719,7 @@ tairix/
 │   ├── saver/           # The saver side of a screensaver: its loop, region, font relay.
 │   ├── scatter/         # Keyed scatter: places on a land-fixed lattice, thinned by rank.
 │   ├── seat/            # Arch-neutral seat model.
+│   ├── smb/             # The pure SMB 3 protocol engine (no I/O, clock, or RNG).
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
 │   │                    #   MPEG audio, streamed from any input; the gated
 │   │                    #   FLAC encoder.
@@ -735,6 +738,7 @@ tairix/
 │   ├── touch/           # Seat touch gesture recogniser: frames to pointer, scroll, pinch.
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
 │   ├── tz/              # Civil time zones: compiled IANA rule store reader.
+│   ├── unicode/         # Unicode properties for showing untrusted text (UCD tables).
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
 │   ├── useradmin/       # Shared `users_admin` client: requests, listings, refusals.
 │   ├── users/           # User-account database.
@@ -743,7 +747,7 @@ tairix/
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.
 │   ├── virtio_net/      # Arch-neutral virtio-net device logic.
-│   ├── visible/         # The one hidden-character rule; links no allocator.
+│   ├── visible/         # The one rule for showing untrusted text; links no allocator.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
 │   ├── wallpaper/       # Desktop user-scope settings document, wallpaper
 │   │                    #   catalog, fit geometry, the savers' option values,
@@ -1696,7 +1700,10 @@ You are not exempt from any rule above. In addition:
     | Dynamic address configuration: the DHCPv4 client (RFC 2131/2132) engine and its stack integration | `plans/DHCP.md` |
     | The interactive network terminal client: the `telnet` command, its Network Virtual Terminal option negotiation, and the terminal relay | `plans/TELNET.md` |
     | Name resolution: the DNS stub resolver (RFC 1035/RFC 5452) engine and its socket integration | `plans/DNS.md` |
-    | Link-local service discovery: the mDNS/DNS-SD engine, the three-gate publication authority (attested identity, granted type, demonstrated port ownership), the unprivileged socket-owning decoder, per-interface posture and cache scoping, and the permanent LLMNR/NetBIOS exclusion | `plans/ZEROCONF.md` |
+    | Link-local service discovery: the mDNS/DNS-SD engine, the three-gate publication authority (attested identity, granted type, demonstrated port ownership), the unprivileged socket-owning decoder, per-interface posture and cache scoping, the permanent LLMNR/NetBIOS exclusion, WS-Discovery, and the storage catalogue and `files.app` Network view | `plans/ZEROCONF.md` |
+    | Network shares: the SMB 3 client (`lib/smb`), the `smbfs` service and its sandboxed workers, share enumeration, private and administrator-placed mounts, credentials bound to endpoint pins, `mount -t smb`, `smbtree`, and the files.app *Network* menu row | `plans/SMB.md`; `plans/FSSERVE.md`; `plans/KERBEROS.md`; `plans/ZEROCONF.md` (Z8–Z10) |
+    | Serving a filesystem from user space: `fsserve-v1`, the kernel's served-filesystem proxy, the partition-scoped volume block grant and `volume_io`, the volume node and `volume_serve` a filesystem driver bundle serves its volume through, moving the removable-media drivers out of ring 0, and the network attachments with their owner-bound presentation and `CAP_FS_SERVE` | `plans/FSSERVE.md` |
+    | Kerberos: the `lib/krb5` client, KDC location by DNS SRV, the accepted enctypes, and the GSS-API mechanism | `plans/KERBEROS.md` |
     | Remote access: the SSH engine, the `sshd` monitor and its capability-empty per-connection worker, the no-signing-oracle key exchange, host keys, the `authorized_keys` ACL grant, the `ssh` client and key tooling, the agent, forwarding, and SFTP/SCP | `plans/SSH.md` |
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | Storage/media I/O fault isolation: per-request deadlines, the per-device health state machine, the recovery **grace window** (blip ride-through before failing closed), fault-domain (hub/controller) quiesce/resume, RAID/ARXFS composition | `plans/FIX-IO.md` |

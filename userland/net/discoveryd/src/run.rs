@@ -3,17 +3,19 @@
 //!
 //! One binary, two roles. Spawned in the sandbox's session-worker role it is
 //! the decoder, holding two pipe ends and nothing else; started normally it is
-//! the front, holding the multicast DNS sockets and the discovery endpoint.
+//! the front, holding the multicast DNS and WS-Discovery sockets, the
+//! connections metadata is fetched over, and the discovery endpoint.
 //!
 //! # The reactor
 //!
 //! One wait-set: the delivery port the stack posts datagrams and link events
-//! to — registered only while the front will take them — the decoder's two
-//! pipe ends, registered as its session wants them, the discovery endpoint,
-//! the exits of its clients, room in each client port a doorbell is owed to
-//! — watched only while one is, and changed only for a port whose count
-//! crossed zero — and a timeout for the one instant the front must next act
-//! by. The loop parks; it never polls.
+//! to — registered only while the front will take them — the port fetch
+//! connections' events arrive on, the decoder's two pipe ends, registered as
+//! its session wants them, the discovery endpoint, the exits of its clients,
+//! room in each client port a doorbell is owed to — watched only while one
+//! is, and changed only for a port whose count crossed zero — and a timeout
+//! for the one instant the front must next act by. The loop parks; it never
+//! polls.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -30,19 +32,18 @@ mod program {
         DISCOVERY_ENDPOINT, DISCOVERY_MAX_REPLY, DISCOVERY_MAX_REQUEST,
     };
     use tairix_abi::discovery_policy::{DISCOVERY_POLICY_MAX, DISCOVERY_POLICY_PATH};
-    use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
+    use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId, SocketStreamEvent};
     use tairix_abi::net_ipc::{address_parts, NetAddrFamily, IF_NAME_LEN};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{Errno, FieldValue, Origin, ProcId};
     use tairix_caps::CapabilitySet;
     use tairix_discoveryd::decoder::Decoder;
     use tairix_discoveryd::events::{GRANTS_REFUSED, SERVICE_STARTED, SERVICE_UNAVAILABLE};
-    use tairix_discoveryd::front::{Caller, Front, Host, Sockets};
+    use tairix_discoveryd::front::{Caller, Front, Host, Protocol, Sockets};
     use tairix_discoveryd::grants::Grants;
     use tairix_inline::ArrayString;
     use tairix_log::{Event, EventId, Field, Level};
-    use tairix_net::mdns::{GROUP_V4, GROUP_V6, PORT};
-    use tairix_net::IpAddr;
+    use tairix_net::{mdns, wsd, IpAddr};
     use tairix_rt::{LogSink, PrivatePort};
     use tairix_sandbox::rt::{
         serve_session_stdio, session_worker_role, RtSessionLauncher, SessionMembers,
@@ -58,6 +59,10 @@ mod program {
     /// drains before the loop returns to its wait-set.
     const DELIVER_CAPACITY: usize = 64;
 
+    /// Fetch-connection mailbox depth: a few events for each fetch in flight,
+    /// and the most one wake drains. The stack holds the rest until it does.
+    const STREAM_CAPACITY: usize = 32;
+
     /// Calls the discovery endpoint holds at once — a fixed memory bound on
     /// the service's clients, each of whose calls is answered at once.
     const CALL_CAPACITY: usize = 16;
@@ -69,6 +74,7 @@ mod program {
     const TOKEN_CALL: u64 = 4;
     const TOKEN_EXIT: u64 = 5;
     const TOKEN_ROOM: u64 = 6;
+    const TOKEN_STREAM: u64 = 7;
 
     /// The audit sink every record is written through.
     static LOG_SINK: LogSink = LogSink;
@@ -76,6 +82,8 @@ mod program {
     /// The kernel, as the front sees it.
     struct RtHost {
         sockets: Sockets,
+        /// Where fetch connections' events are delivered.
+        stream_port: u64,
     }
 
     impl Host for RtHost {
@@ -85,16 +93,42 @@ mod program {
 
         fn transmit(
             &mut self,
+            protocol: Protocol,
             interface: [u8; IF_NAME_LEN],
             to: SocketAddr,
             payload: &[u8],
         ) -> Result<(), Errno> {
-            let socket = match to.family {
-                NetAddrFamily::V4 => self.sockets.v4,
-                NetAddrFamily::V6 => self.sockets.v6,
+            let sockets = &self.sockets;
+            let socket = match (protocol, to.family) {
+                (Protocol::MulticastDns, NetAddrFamily::V4) => sockets.v4,
+                (Protocol::MulticastDns, NetAddrFamily::V6) => sockets.v6,
+                (Protocol::WsDiscovery, NetAddrFamily::V4) => sockets.wsd_v4,
+                (Protocol::WsDiscovery, NetAddrFamily::V6) => sockets.wsd_v6,
             }
             .ok_or(Errno::NotFound)?;
             tairix_rt::net::send(socket, Some(to), Some(interface), payload)
+        }
+
+        fn fetch_open(
+            &mut self,
+            interface: [u8; IF_NAME_LEN],
+            to: SocketAddr,
+        ) -> Result<SocketId, Errno> {
+            let socket = tairix_rt::net::stream_socket(to.family, self.stream_port)?;
+            if let Err(errno) = tairix_rt::net::connect(socket, to, Some(interface)) {
+                let _ = tairix_rt::net::close(socket);
+                return Err(errno);
+            }
+            Ok(socket)
+        }
+
+        fn fetch_send(&mut self, socket: SocketId, bytes: &[u8]) -> Result<usize, Errno> {
+            tairix_rt::net::stream_send(socket, bytes)
+                .map(|taken| usize::try_from(taken).unwrap_or(bytes.len()))
+        }
+
+        fn fetch_close(&mut self, socket: SocketId) {
+            let _ = tairix_rt::net::close(socket);
         }
 
         fn ring(&mut self, port: u64, doorbell: &[u8]) -> Result<(), Errno> {
@@ -141,9 +175,14 @@ mod program {
         errno: Errno,
     }
 
-    /// Open one family's socket on the multicast DNS port and join its group,
-    /// delivering to `deliver`. A refused step closes what was opened.
-    fn listen(family: NetAddrFamily, group: IpAddr, deliver: u64) -> Result<SocketId, Refused> {
+    /// Open one family's socket on `port` and join `group`, delivering to
+    /// `deliver`. A refused step closes what was opened.
+    fn listen(
+        family: NetAddrFamily,
+        group: IpAddr,
+        port: u16,
+        deliver: u64,
+    ) -> Result<SocketId, Refused> {
         let socket = tairix_rt::net::socket(family, deliver).map_err(|errno| Refused {
             step: "open",
             errno,
@@ -151,7 +190,7 @@ mod program {
         let local = SocketAddr {
             family,
             addr: [0u8; 16],
-            port: PORT,
+            port,
         };
         let (group_family, group_addr) = address_parts(group);
         let joined = tairix_rt::net::bind(socket, local)
@@ -324,23 +363,33 @@ mod program {
         let Ok(port) = PrivatePort::bind(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY) else {
             return unavailable("the delivery port could not be bound");
         };
+        let Ok(streams) = PrivatePort::bind(SocketStreamEvent::MAX_WIRE_LEN, STREAM_CAPACITY)
+        else {
+            return unavailable("the fetch connections' port could not be bound");
+        };
         let deliver = port.id();
-        let v4 = listen(NetAddrFamily::V4, IpAddr::V4(GROUP_V4), deliver);
-        let v6 = listen(NetAddrFamily::V6, IpAddr::V6(GROUP_V6), deliver);
-        let (v4_state, v6_state) = (describe(&v4), describe(&v6));
+        let (mdns_v4, mdns_v6) = (IpAddr::V4(mdns::GROUP_V4), IpAddr::V6(mdns::GROUP_V6));
+        let (wsd_v4, wsd_v6) = (IpAddr::V4(wsd::GROUP_V4), IpAddr::V6(wsd::GROUP_V6));
+        let v4 = listen(NetAddrFamily::V4, mdns_v4, mdns::PORT, deliver);
+        let v6 = listen(NetAddrFamily::V6, mdns_v6, mdns::PORT, deliver);
+        let wsd_v4 = listen(NetAddrFamily::V4, wsd_v4, wsd::PORT, deliver);
+        let wsd_v6 = listen(NetAddrFamily::V6, wsd_v6, wsd::PORT, deliver);
+        let states = [&v4, &v6, &wsd_v4, &wsd_v6].map(describe);
         let families = [
-            Field {
-                key: "ipv4",
-                value: FieldValue::Str(v4_state.as_str()),
-            },
-            Field {
-                key: "ipv6",
-                value: FieldValue::Str(v6_state.as_str()),
-            },
-        ];
+            ("ipv4", &states[0]),
+            ("ipv6", &states[1]),
+            ("wsd_ipv4", &states[2]),
+            ("wsd_ipv6", &states[3]),
+        ]
+        .map(|(key, state)| Field {
+            key,
+            value: FieldValue::Str(state.as_str()),
+        });
         let sockets = Sockets {
             v4: v4.ok(),
             v6: v6.ok(),
+            wsd_v4: wsd_v4.ok(),
+            wsd_v6: wsd_v6.ok(),
         };
         if sockets.v4.is_none() && sockets.v6.is_none() {
             tairix_log::log(
@@ -360,11 +409,25 @@ mod program {
         if !bind_endpoint(set) {
             return unavailable("the discovery endpoint could not be bound");
         }
+        let stream_port = streams.id();
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Port,
+            stream_port,
+            TOKEN_STREAM,
+        ) != 0
+        {
+            return unavailable("the fetch connections' port could not be watched");
+        }
         let grants = load_grants();
         let Ok(mut front) = Front::new(
             RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
             LOG_SINK,
-            RtHost { sockets },
+            RtHost {
+                sockets,
+                stream_port,
+            },
             sockets,
             grants,
         ) else {
@@ -375,21 +438,27 @@ mod program {
             &Event {
                 level: Level::Info,
                 id: SERVICE_STARTED,
-                message: "discoveryd: joined the multicast DNS groups",
+                message: "discoveryd: joined the discovery groups",
                 fields: &families,
             },
         );
-        serve(&mut front, set, deliver)
+        serve(&mut front, set, deliver, stream_port)
     }
 
     /// Serve for the life of the service, returning only the exit code of a
     /// failure it cannot serve past.
-    fn serve<L>(front: &mut Front<L, LogSink, RtHost>, set: u64, deliver: u64) -> i32
+    fn serve<L>(
+        front: &mut Front<L, LogSink, RtHost>,
+        set: u64,
+        deliver: u64,
+        stream_port: u64,
+    ) -> i32
     where
         L: tairix_sandbox::supervise::SessionLauncher,
     {
-        let (Some(mut scratch), Some(mut request), Some(mut reply)) = (
+        let (Some(mut scratch), Some(mut stream), Some(mut request), Some(mut reply)) = (
             fallible::filled(SocketDatagram::MAX_WIRE_LEN, 0u8),
+            fallible::filled(SocketStreamEvent::MAX_WIRE_LEN, 0u8),
             fallible::filled(DISCOVERY_MAX_REQUEST, 0u8),
             fallible::filled(DISCOVERY_MAX_REPLY, 0u8),
         ) else {
@@ -463,6 +532,15 @@ mod program {
                                 break;
                             };
                             front.on_delivery(now, &delivery);
+                        }
+                    }
+                    TOKEN_STREAM => {
+                        for _ in 0..STREAM_CAPACITY {
+                            let Ok(event) = tairix_rt::net::stream_recv(stream_port, &mut stream)
+                            else {
+                                break;
+                            };
+                            front.on_stream(now, &event);
                         }
                     }
                     TOKEN_READ => front.on_decoder_readable(now),

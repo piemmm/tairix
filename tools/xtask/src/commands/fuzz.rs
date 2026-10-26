@@ -236,6 +236,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-net",
+        test: "fuzz_net_wsd",
+        description: "lib/net WS-Discovery (SOAP envelope and metadata decode over the namespace-aware XML scanner, the HTTP/1.1 response reader, the per-link engine's bounds and fetch steering)",
+    },
+    Target {
+        package: "tairix-net",
         test: "fuzz_net_ntp",
         description: "lib/net NTP client (RFC 5905 header decode, origin-nonce anti-spoof gate, poll/backoff state machine)",
     },
@@ -592,6 +597,18 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-path",
         test: "fuzz_path",
         description: "lib/path path-string parser + canonical-spelling round-trip (untrusted path bytes)",
+    },
+    Target {
+        package: "tairix-der",
+        test: "fuzz_der",
+        description:
+            "lib/der reader + writer (hostile DER from SPNEGO and Kerberos peers: never panics, accepted encodings re-encode byte for byte)",
+    },
+    Target {
+        package: "tairix-smb",
+        test: "fuzz_smb",
+        description:
+            "lib/smb decoders, framer and client connection core (hostile SMB 3 server bytes: never panics, accepted messages re-encode stably, a tampered sealed frame is never accepted)",
     },
     Target {
         package: "tairix-resref",
@@ -1180,6 +1197,30 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-elsh");
+    }
+
+    #[test]
+    fn der_codec_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_der"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-der");
+    }
+
+    #[test]
+    fn smb_engine_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_smb"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-smb");
+    }
+
+    #[test]
+    fn ws_discovery_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_net_wsd"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-net");
     }
 
     #[test]

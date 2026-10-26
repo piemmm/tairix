@@ -9,9 +9,35 @@
 //! layering does not), installed through the boot handover exactly like
 //! the [`FilesystemService`](super::FilesystemService); until it is
 //! installed every attach/detach fails closed.
+//!
+//! The same service answers the filesystem driver serving an attached volume
+//! from user space (`plans/FSSERVE.md` §4–§5): its block transfers, and its
+//! offer to serve the volume or its refusal.
 
-use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest};
-use tairix_abi::Errno;
+use alloc::sync::Arc;
+
+use tairix_abi::fsserve::ServeOffer;
+use tairix_abi::volume::{VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo};
+use tairix_abi::{DriverError, Errno};
+use tairix_kernel_ipc::CallEndpoint;
+
+use crate::sharedreg::KernelHold;
+
+/// What a served-volume read hands each chunk to, with the chunk's offset into
+/// the transfer.
+pub type ChunkSink<'a> = dyn FnMut(usize, &[u8]) -> Result<(), Errno> + 'a;
+
+/// What fills each chunk of a served-volume write, given its offset into the
+/// transfer.
+pub type ChunkSource<'a> = dyn FnMut(usize, &mut [u8]) -> Result<(), Errno> + 'a;
+
+/// The channel the kernel made for a driver it accepts to serve a volume.
+pub struct ServeChannel {
+    /// The endpoint the driver receives the kernel's calls on.
+    pub endpoint: Arc<CallEndpoint>,
+    /// The kernel's hold on the data window it mapped for the driver.
+    pub window: KernelHold,
+}
 
 /// The runtime volume attach/detach operations the syscall handlers
 /// delegate to.
@@ -32,7 +58,14 @@ pub trait VolumeService: Sync {
     /// window, an unusable geometry, an unmountable volume, a name or
     /// identity collision, or [`Errno::NotImplemented`] before a service
     /// is installed.
-    fn attach(&self, request: &VolumeAttachRequest<'_>) -> Result<(), Errno>;
+    ///
+    /// `publisher` is the hardware node the caller was loaded for, which the
+    /// volume's own node is published under.
+    fn attach(
+        &self,
+        request: &VolumeAttachRequest<'_>,
+        publisher: Option<u32>,
+    ) -> Result<(), Errno>;
 
     /// Flush, unmount, and unpublish the runtime-attached volume
     /// `request` names.
@@ -47,6 +80,72 @@ pub trait VolumeService: Sync {
     /// refusal of a volume beneath that a force detach could not detach
     /// first, or [`Errno::NotImplemented`] before a service is installed.
     fn detach(&self, request: &VolumeDetachRequest) -> Result<(), Errno>;
+
+    /// Read `len` bytes of whole blocks from `lba` of served volume `volume`,
+    /// handing `deliver` each chunk with its offset into the transfer.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such volume, [`Errno::DeviceOffline`] for
+    /// one retired, [`Errno::LengthOutOfRange`] for a transfer that is not
+    /// whole blocks or runs past the volume, the device's error, or what
+    /// `deliver` refused.
+    fn read(
+        &self,
+        volume: u64,
+        lba: u64,
+        len: usize,
+        deliver: &mut ChunkSink<'_>,
+    ) -> Result<(), Errno>;
+
+    /// Write `len` bytes of whole blocks to `lba` of served volume `volume`,
+    /// `fill` supplying each chunk at its offset into the transfer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read`], and [`Errno::ReadOnly`] for a volume that may not
+    /// be written.
+    fn write(
+        &self,
+        volume: u64,
+        lba: u64,
+        len: usize,
+        fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno>;
+
+    /// Describe, flush or discard served volume `volume`; a description
+    /// answers [`Some`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read`].
+    fn ctl(&self, volume: u64, ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno>;
+
+    /// Whether served volume `volume` awaits a driver to serve it: asked
+    /// before the kernel builds a channel for one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such volume; [`Errno::AlreadyExists`] for
+    /// one a driver serves already.
+    fn awaiting_server(&self, volume: u64) -> Result<(), Errno>;
+
+    /// Serve the filesystem a driver `offer`ed on served volume `volume` over
+    /// `channel`: build the kernel's proxy for it and mount it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such volume, [`Errno::AlreadyExists`] for
+    /// one already served, and the refusals of mounting it.
+    fn serve(&self, volume: u64, offer: &ServeOffer, channel: ServeChannel) -> Result<(), Errno>;
+
+    /// The driver of served volume `volume` could not open it, for `why`:
+    /// retract the volume.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no volume awaiting a driver under that id.
+    fn refuse(&self, volume: u64, why: DriverError) -> Result<(), Errno>;
 }
 
 /// The fail-closed default: every operation reports
@@ -54,11 +153,56 @@ pub trait VolumeService: Sync {
 pub struct NullVolumeService;
 
 impl VolumeService for NullVolumeService {
-    fn attach(&self, _request: &VolumeAttachRequest<'_>) -> Result<(), Errno> {
+    fn attach(
+        &self,
+        _request: &VolumeAttachRequest<'_>,
+        _publisher: Option<u32>,
+    ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 
     fn detach(&self, _request: &VolumeDetachRequest) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn read(
+        &self,
+        _volume: u64,
+        _lba: u64,
+        _len: usize,
+        _deliver: &mut ChunkSink<'_>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn write(
+        &self,
+        _volume: u64,
+        _lba: u64,
+        _len: usize,
+        _fill: &mut ChunkSource<'_>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn ctl(&self, _volume: u64, _ctl: &VolumeCtl) -> Result<Option<VolumeInfo>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn awaiting_server(&self, _volume: u64) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn serve(
+        &self,
+        _volume: u64,
+        _offer: &ServeOffer,
+        _channel: ServeChannel,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn refuse(&self, _volume: u64, _why: DriverError) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -82,7 +226,15 @@ mod tests {
             name: b"usb1",
         };
         assert_eq!(
-            NULL_VOLUME_SERVICE.attach(&attach),
+            NULL_VOLUME_SERVICE.attach(&attach, Some(3)),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            NULL_VOLUME_SERVICE.awaiting_server(1),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            NULL_VOLUME_SERVICE.refuse(1, DriverError::BadMagic),
             Err(Errno::NotImplemented)
         );
         assert_eq!(

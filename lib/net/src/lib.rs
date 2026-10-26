@@ -164,6 +164,7 @@ pub mod dns;
 pub mod dnssd;
 pub mod eth;
 pub mod frag;
+pub mod http;
 pub mod icmp;
 pub mod iface;
 pub mod igmp;
@@ -186,6 +187,7 @@ mod timeutil;
 pub mod trace;
 pub mod txoffload;
 pub mod udp;
+pub mod wsd;
 
 pub use addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub use checksum::internet_checksum;

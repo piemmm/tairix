@@ -58,7 +58,7 @@ use tairix_procinfo::VolumeBytes;
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
-use crate::browser::Browser;
+use crate::browser::{Browser, Item};
 use crate::chrome::{
     self, ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand, ToolbarModel,
 };
@@ -71,6 +71,7 @@ use crate::layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, View
 use crate::media::{
     entry_icon, icon_for_entry, media_for_entry, media_for_name, Ending, MediaType,
 };
+use crate::network::NetworkItem;
 use crate::open_with::{OpenWithCandidate, OpenWithChooser};
 use crate::places::{self, Place, Places, VolumeFacts};
 use crate::progress::ProgressModel;
@@ -113,6 +114,8 @@ pub enum ListColumns {
     Files,
     /// Name, free space, filesystem, health: a listing of drives alone.
     Drives,
+    /// Name, address, workgroup, type: the network.
+    Network,
 }
 
 impl ListColumns {
@@ -126,6 +129,16 @@ impl ListColumns {
             Self::Drives
         } else {
             Self::Files
+        }
+    }
+
+    /// The columns `browser`'s listing shows.
+    #[must_use]
+    pub fn of_browser<S: DirectorySource>(browser: &Browser<S>) -> Self {
+        if browser.is_network() {
+            Self::Network
+        } else {
+            Self::of(browser.entries())
         }
     }
 
@@ -152,7 +165,18 @@ impl ListColumns {
                 ("Filesystem", SortKey::Filesystem),
                 ("Health", SortKey::Health),
             ],
+            Self::Network => [
+                ("Name", SortKey::Name),
+                ("Address", SortKey::Address),
+                ("Workgroup", SortKey::Workgroup),
+                ("Type", SortKey::Kind),
+            ],
         }
+    }
+
+    /// Whether column `at` holds a quantity, set against its trailing edge.
+    const fn is_quantity(self, at: usize) -> bool {
+        at == 1 && !matches!(self, Self::Network)
     }
 
     /// The header over these columns, its caret on the column `sort` orders
@@ -165,7 +189,7 @@ impl ListColumns {
                 .enumerate()
                 .map(|(at, (title, _))| {
                     let column = HeaderColumn::new(*title);
-                    if at == 1 {
+                    if self.is_quantity(at) {
                         column.with_align(CellAlign::Trailing)
                     } else {
                         column
@@ -216,7 +240,7 @@ pub fn header_sort_at<S: DirectorySource>(
     }
     let content = content_viewport(viewport, scale, theme);
     let bounds = header_rect(scale, theme, content, toolbar);
-    let columns = ListColumns::of(browser.entries());
+    let columns = ListColumns::of_browser(browser);
     let column = columns
         .header(browser.sort_mode())
         .column_at(bounds, scale, theme, &COLUMNS, point)?;
@@ -298,7 +322,7 @@ pub fn render_into<S: DirectorySource>(
         // A frame painted a damaged part at a time draws the rail only for the
         // parts that reach it.
         if !withheld(surface, view.rail_rect()) {
-            let selected = places.index_of(browser.components());
+            let selected = browser.folder().and_then(|folder| places.index_of(folder));
             draw_sidebar(surface, scale, theme, places, &view, selected, artwork);
         }
     }
@@ -319,8 +343,8 @@ pub fn render_into<S: DirectorySource>(
     }
 
     let content = content_viewport(area, scale, theme);
-    if awaiting_listing(browser) {
-        draw_listing_cue(surface, scale, theme, content);
+    if let Some(cue) = listing_cue(browser) {
+        draw_cue(surface, scale, theme, content, cue);
     } else {
         match Tiles::of(browser.view_mode()) {
             None => draw_list(
@@ -352,6 +376,30 @@ pub fn render_into<S: DirectorySource>(
 /// vertical reading the scan-out) agree on the exact text.
 pub const LISTING_MESSAGE: &str = "Listing…";
 
+/// What the network says while the catalogue lists nothing: it is browsed for
+/// as long as it is shown, so nothing found yet is still being looked for.
+pub const NETWORK_EMPTY_MESSAGE: &str = "Looking for computers sharing files…";
+
+/// What the network says once its catalogue could no longer be read.
+pub const NETWORK_STOPPED_MESSAGE: &str = "Network browsing stopped. Refresh to try again.";
+
+/// What the listing area draws in place of items, if anything: the
+/// [`LISTING_MESSAGE`] while a listing is awaited, or what an empty network
+/// says of itself.
+fn listing_cue<S: DirectorySource>(browser: &Browser<S>) -> Option<&'static str> {
+    if awaiting_listing(browser) {
+        return Some(LISTING_MESSAGE);
+    }
+    if !browser.is_network() || browser.item_count() > 0 {
+        return None;
+    }
+    Some(if browser.network_stopped() {
+        NETWORK_STOPPED_MESSAGE
+    } else {
+        NETWORK_EMPTY_MESSAGE
+    })
+}
+
 /// Whether the listing area should show [`LISTING_MESSAGE`] instead of items.
 ///
 /// Two cases, one rule. A read of *somewhere else* is in flight, so the items on
@@ -361,10 +409,7 @@ pub const LISTING_MESSAGE: &str = "Listing…";
 /// the directory already shown is neither: it keeps its items, so a periodic
 /// re-list cannot make the view flicker.
 fn awaiting_listing<S: DirectorySource>(browser: &Browser<S>) -> bool {
-    match browser.listing_target() {
-        None => false,
-        Some(target) => target != browser.components() || browser.entries().is_empty(),
-    }
+    browser.is_listing() && (browser.listing_elsewhere() || browser.item_count() == 0)
 }
 
 /// How many entries the view lays out: none while [`LISTING_MESSAGE`] stands in
@@ -374,26 +419,20 @@ fn laid_out<S: DirectorySource>(browser: &Browser<S>) -> usize {
     if awaiting_listing(browser) {
         0
     } else {
-        browser.entries().len()
+        browser.item_count()
     }
 }
 
-/// Draw [`LISTING_MESSAGE`] centred in `content`, in the muted ink an inactive
-/// label uses: it is a state, not an error.
-fn draw_listing_cue(surface: &mut Surface, scale: Scale, theme: &Theme, content: Rect) {
+/// Draw `cue` centred in `content`, in the muted ink an inactive label uses:
+/// it is a state, not an error.
+fn draw_cue(surface: &mut Surface, scale: Scale, theme: &Theme, content: Rect, cue: &str) {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let width = font.text_width(LISTING_MESSAGE);
+    let width = font.text_width(cue);
     let x = content
         .left()
         .saturating_add_unsigned(content.width.saturating_sub(width) / 2);
     let y = font.centred_top(content.top(), content.height);
-    font.draw_text(
-        surface,
-        x,
-        y,
-        LISTING_MESSAGE,
-        theme.palette().on_surface_muted.into(),
-    );
+    font.draw_text(surface, x, y, cue, theme.palette().on_surface_muted.into());
 }
 
 /// The manager-only chrome drawn around the shared browser view.
@@ -801,12 +840,12 @@ fn draw_list<S: DirectorySource>(
 ) {
     let view = list_view(browser, scale, theme, content, toolbar);
     let offset = browser.scroll_offset();
-    let parent = browser.components();
-    let entries = browser.entries();
+    let folder = browser
+        .folder()
+        .map(|parent| (crate::vfs::spell_absolute_path(parent), parent));
     let presentation = *browser.presentation();
-    let columns = ListColumns::of(entries);
+    let columns = ListColumns::of_browser(browser);
     let header = header_rect(scale, theme, content, toolbar);
-    let dir = crate::vfs::spell_absolute_path(parent);
     let mut scratch = String::new();
     if !withheld(surface, header) {
         columns
@@ -815,7 +854,7 @@ fn draw_list<S: DirectorySource>(
     }
     view.view(offset).paint(surface, |surface| {
         for index in view.visible_range(offset) {
-            let (Some(entry), Some(bounds)) = (entries.get(index), view.row_rect(index)) else {
+            let (Some(item), Some(bounds)) = (browser.item(index), view.row_rect(index)) else {
                 break;
             };
             // A repaint clipped to a few rows must not pay every row's
@@ -823,15 +862,31 @@ fn draw_list<S: DirectorySource>(
             if withheld(surface, bounds) {
                 continue;
             }
-            let (kind, request, side) = row_art(
-                (&dir, parent),
-                entry,
-                bounds,
-                (scale, theme, presentation.pictures),
-                &mut scratch,
-            );
-            let selected = (browser.is_selected(index), presentation.endings);
-            let mut row = entry_row((entry, parent), columns, selected, kind);
+            let selected = browser.is_selected(index);
+            let (mut row, request, side) = match (item, &folder) {
+                (Item::Entry(entry), Some((dir, parent))) => {
+                    let (kind, request, side) = row_art(
+                        (dir, parent),
+                        entry,
+                        bounds,
+                        (scale, theme, presentation.pictures),
+                        &mut scratch,
+                    );
+                    let row = entry_row(
+                        (entry, parent),
+                        columns,
+                        (selected, presentation.endings),
+                        kind,
+                    );
+                    (row, request, side)
+                }
+                (Item::Network(item), _) => {
+                    let (_, request, side) = network_row_art(item, bounds, scale, theme);
+                    (network_row(item, selected), request, side)
+                }
+                // An entry is only ever listed in a folder.
+                (Item::Entry(_), None) => break,
+            };
             if browser.drop_mark() == Some(index) {
                 row.set_state(row.state().with_pointer(PointerState::DragTarget));
             }
@@ -874,29 +929,21 @@ fn draw_grid<S: DirectorySource>(
 ) {
     let view = grid_view(browser, tiles, scale, theme, content, chrome.toolbar);
     let offset = browser.scroll_offset();
-    let parent = browser.components();
-    let entries = browser.entries();
     // Spelled once for the whole frame; a tile that names its own file
     // appends its leaf into one reused buffer rather than allocating a path.
-    let dir = crate::vfs::spell_absolute_path(parent);
+    let folder = browser
+        .folder()
+        .map(|parent| (crate::vfs::spell_absolute_path(parent), parent));
     let mut scratch = String::new();
     let shadow = IconTile::shadow_cast(scale, theme);
     view.view(offset).paint(surface, |surface| {
         for index in view.visible_range(offset) {
-            let (Some(entry), Some(bounds)) = (entries.get(index), view.cell_rect(index)) else {
+            let (Some(item), Some(bounds)) = (browser.item(index), view.cell_rect(index)) else {
                 break;
             };
             if withheld(surface, bounds) {
                 continue;
             }
-            let (kind, request, side) = tile_art(
-                tiles,
-                (&dir, parent),
-                entry,
-                bounds,
-                (scale, theme, browser.presentation().pictures),
-                &mut scratch,
-            );
             let mut state = ControlState::idle();
             if browser.is_selected(index) {
                 state.selection = SelectionState::Selected;
@@ -904,7 +951,25 @@ fn draw_grid<S: DirectorySource>(
             if browser.drop_mark() == Some(index) {
                 state.pointer = PointerState::DragTarget;
             }
-            let mut tile = tiles.tile(entry, state, kind, browser.presentation().endings);
+            let (mut tile, request, side) = match (item, &folder) {
+                (Item::Entry(entry), Some((dir, parent))) => {
+                    let (kind, request, side) = tile_art(
+                        tiles,
+                        (dir, parent),
+                        entry,
+                        bounds,
+                        (scale, theme, browser.presentation().pictures),
+                        &mut scratch,
+                    );
+                    let tile = tiles.tile(entry, state, kind, browser.presentation().endings);
+                    (tile, request, side)
+                }
+                (Item::Network(item), _) => {
+                    let (_, request, side) = network_tile_art(tiles, item, bounds, scale, theme);
+                    (tiles.network_tile(item, state), request, side)
+                }
+                (Item::Entry(_), None) => break,
+            };
             if chrome.renaming == Some(index) {
                 tile = tile.with_name_withheld();
             }
@@ -1136,13 +1201,69 @@ fn row_art<'a>(
     (scale, theme, pictures): (Scale, &Theme, Pictures),
     scratch: &'a mut String,
 ) -> (IconKind, IconRequest<'a>, u32) {
+    let (kind, request) = entry_icon(dir, parent, entry, pictures, scratch);
+    (kind, request, row_icon_side(bounds, scale, theme))
+}
+
+/// The side a list row laid out at `bounds` draws its picture at.
+fn row_icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
     // A row derives the side from its height and text alone, so an empty one
     // set in the same text answers for every row.
-    let side = TableRow::new(Vec::new())
+    TableRow::new(Vec::new())
         .with_text_role(ROW_TEXT)
-        .icon_side(bounds, scale, theme);
-    let (kind, request) = entry_icon(dir, parent, entry, pictures, scratch);
-    (kind, request, side)
+        .icon_side(bounds, scale, theme)
+}
+
+/// What the list row for network `item` laid out at `bounds` asks the artwork
+/// lookup for — the picture its kind wears, never one a peer supplied — and
+/// the side the row draws it at.
+fn network_row_art(
+    item: &NetworkItem,
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> (IconKind, IconRequest<'static>, u32) {
+    let kind = item.icon();
+    (
+        kind,
+        IconRequest::kind(kind),
+        row_icon_side(bounds, scale, theme),
+    )
+}
+
+/// What the grid tile for network `item` laid out at `bounds` asks the artwork
+/// lookup for, and the side its picture is drawn at.
+fn network_tile_art(
+    tiles: Tiles,
+    item: &NetworkItem,
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> (IconKind, IconRequest<'static>, u32) {
+    let kind = item.icon();
+    (
+        kind,
+        IconRequest::kind(kind),
+        tiles.layout().icon_side(bounds, scale, theme),
+    )
+}
+
+/// The list row for network `item`: its name, where it is reached, the
+/// workgroup it belongs to and what it is. An item that cannot be reached, or
+/// that stands for what is not listed, reads disabled.
+fn network_row(item: &NetworkItem, selected: bool) -> TableRow {
+    let cells = vec![
+        TableCell::new(item.label()).with_icon(item.icon()),
+        TableCell::new(item.address()),
+        TableCell::new(item.membership()),
+        TableCell::new(item.kind_label()),
+    ];
+    let mut row = TableRow::new(cells).with_text_role(ROW_TEXT);
+    if !item.is_available() {
+        row.set_state(ControlState::disabled());
+    }
+    row.set_selected(selected);
+    row
 }
 
 /// What a drive's row states in the three columns after its name: its free
@@ -1152,7 +1273,9 @@ fn drive_cells(facts: &VolumeFacts, columns: ListColumns) -> [String; 3] {
     let free = match (facts.free, columns) {
         (None, _) => String::new(),
         (Some(bytes), ListColumns::Drives) => format_size(bytes),
-        (Some(bytes), ListColumns::Files) => alloc::format!("{} free", format_size(bytes)),
+        (Some(bytes), ListColumns::Files | ListColumns::Network) => {
+            alloc::format!("{} free", format_size(bytes))
+        }
     };
     [
         free,
@@ -1265,7 +1388,26 @@ impl Tiles {
         icon: IconKind,
         endings: HiddenEndings,
     ) -> IconTile {
-        let label = entry_label(entry, endings).into_owned();
+        self.labelled(entry_label(entry, endings).into_owned(), state, icon)
+    }
+
+    /// The [`IconTile`] for network `item`: the picture its kind wears and its
+    /// name, read disabled where it cannot be reached or stands for what is
+    /// not listed.
+    #[must_use]
+    pub fn network_tile(self, item: &NetworkItem, state: ControlState) -> IconTile {
+        let state = if item.is_available() {
+            state
+        } else {
+            ControlState {
+                enabled: false,
+                ..state
+            }
+        };
+        self.labelled(String::from(item.label()), state, item.icon())
+    }
+
+    fn labelled(self, label: String, state: ControlState, icon: IconKind) -> IconTile {
         let cut = name_cut(&label);
         let tile = IconTile::new(label, icon)
             .with_layout(self.layout())
@@ -1289,9 +1431,9 @@ pub fn name_cut(name: &str) -> Cut {
 }
 
 /// The name shown for an entry: the name the volume holds less the ending
-/// `endings` hide ([`HiddenEndings::shown`]), with any character in it that
-/// would draw nothing shown as U+FFFD ([`tairix_util::utf8::shown`]), so two
-/// names that differ never look alike.
+/// `endings` hide ([`HiddenEndings::shown`]), shown as a name from elsewhere
+/// is ([`tairix_util::utf8::shown`]), so two names that differ never look
+/// alike.
 ///
 /// No kind suffix is appended — both views carry the entry's icon
 /// ([`icon_for_entry`]), so the label is the name and nothing else. Every
@@ -1716,8 +1858,15 @@ pub fn scroll_wheel<S: DirectorySource>(
 /// that the change repaints only the slots it altered.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShownListing {
-    slots: Vec<(Rect, Entry, bool)>,
+    slots: Vec<(Rect, ShownItem, bool)>,
     scroll: (u64, u64),
+}
+
+/// An item as a [`ShownListing`] keeps it, to tell whether its slot redraws.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ShownItem {
+    Entry(Entry),
+    Network(NetworkItem),
 }
 
 /// The item view as `browser` draws it now: each shown entry's rectangle,
@@ -1736,8 +1885,11 @@ pub fn shown_listing<S: DirectorySource>(
         .visible_range(offset)
         .filter_map(|index| {
             let rect = view.item_rect(offset, index)?;
-            let entry = browser.entries().get(index)?.clone();
-            Some((rect, entry, browser.is_selected(index)))
+            let item = match browser.item(index)? {
+                Item::Entry(entry) => ShownItem::Entry(entry.clone()),
+                Item::Network(item) => ShownItem::Network(item.clone()),
+            };
+            Some((rect, item, browser.is_selected(index)))
         })
         .collect();
     let model = view.scroll_model(offset);
@@ -1843,17 +1995,37 @@ fn entry_at<S: DirectorySource>(
         return Some(index);
     };
     let at = view.view(offset).to_content(point)?;
-    let entry = browser.entries().get(index)?;
-    let endings = browser.presentation().endings;
-    entry_parts(
-        tiles,
-        (entry, endings),
-        grid.cell_rect(index)?,
-        scale,
-        theme,
-    )?
-    .contains(at)
-    .then_some(index)
+    item_parts(browser, tiles, index, grid.cell_rect(index)?, scale, theme)?
+        .contains(at)
+        .then_some(index)
+}
+
+/// What the `tiles` tile for item `index` of `browser`'s listing, laid out in
+/// `cell`, is made of: an entry's as [`entry_parts`] gives it, a network item's
+/// by the name it draws.
+fn item_parts<S: DirectorySource>(
+    browser: &Browser<S>,
+    tiles: Tiles,
+    index: usize,
+    cell: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<TileParts> {
+    match browser.item(index)? {
+        Item::Entry(entry) => entry_parts(
+            tiles,
+            (entry, browser.presentation().endings),
+            cell,
+            scale,
+            theme,
+        ),
+        Item::Network(item) => {
+            let name = item.label();
+            tiles
+                .layout()
+                .parts(cell, scale, theme, name, name_cut(name))
+        }
+    }
 }
 
 /// The part every `tiles` tile holds whatever its name — its picture with its
@@ -1899,10 +2071,9 @@ pub fn drop_folder_at<S: DirectorySource>(
     toolbar: ToolbarBand,
     point: Point,
 ) -> Option<(Vec<String>, Option<usize>)> {
-    if browser
-        .listing_target()
-        .is_some_and(|target| target != browser.components())
-    {
+    // The network has no folder to drop into.
+    let shown = browser.folder()?;
+    if browser.listing_elsewhere() {
         return None;
     }
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
@@ -1910,7 +2081,7 @@ pub fn drop_folder_at<S: DirectorySource>(
     if !view.view(offset).viewport().contains(point) {
         return None;
     }
-    let mut folder = browser.components().to_vec();
+    let mut folder = shown.to_vec();
     let tile = entry_at(browser, &view, scale, theme, point).and_then(|index| {
         let entry = browser.entries().get(index)?;
         (entry.kind().resolved() == Some(EntryKind::Directory)).then(|| {
@@ -1965,16 +2136,7 @@ pub fn entry_target<S: DirectorySource>(
         return Some(shown);
     };
     let scrolled = view.view(offset);
-    let parts = entry_parts(
-        tiles,
-        (
-            browser.entries().get(index)?,
-            browser.presentation().endings,
-        ),
-        grid.cell_rect(index)?,
-        scale,
-        theme,
-    )?;
+    let parts = item_parts(browser, tiles, index, grid.cell_rect(index)?, scale, theme)?;
     let target = scrolled
         .to_window(parts.picture.or(parts.name)?)?
         .intersection(&shown);
@@ -2071,7 +2233,7 @@ fn list_name_rect<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
 ) -> Option<Rect> {
-    let parent = browser.components();
+    let parent = browser.folder()?;
     let kind = icon_for_entry(entry, parent);
     let columns = ListColumns::of(browser.entries());
     let endings = browser.presentation().endings;

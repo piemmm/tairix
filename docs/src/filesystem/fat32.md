@@ -207,6 +207,14 @@ the format requires, and the driver declares that rule
 rename: `B.TXT` beside `b.txt` is a clash, and a rename to a case variant of an
 entry's own name re-spells the entry. No Unicode normalisation is applied.
 
+## Served from user space
+
+On removable media the driver is served from user space ([Volumes served from user space](./served.md)): its `Run`
+binary binds `tairix,volume-fat32` and runs with `CAP_FS_SERVE` and
+`CAP_LOG_EMIT`. A volume the kernel serves read-only stays so, its writes
+refused at the block layer and by the read-only mount. The kernel itself still
+links the driver, to read the boot partition.
+
 ## Limitations
 
 - The driver writes through to the block device synchronously; there is

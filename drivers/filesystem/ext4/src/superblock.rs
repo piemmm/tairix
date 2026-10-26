@@ -6,6 +6,7 @@
 //! read-only-compatible feature is one the write path maintains, and nothing
 //! recorded against it says writing is unsafe.
 
+use tairix_abi::volume::FormatName;
 use tairix_abi::DriverError;
 
 use crate::bytes::{le16, le32, low32, put_le16, put_le32};
@@ -170,13 +171,14 @@ pub enum Generation {
 }
 
 impl Generation {
-    /// The generation's name, as a user and `mount` know it.
+    /// What the mount table calls a volume of this generation, as a user and
+    /// `mount` know it.
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub const fn format(self) -> FormatName {
         match self {
-            Self::Ext2 => "ext2",
-            Self::Ext3 => "ext3",
-            Self::Ext4 => "ext4",
+            Self::Ext2 => FormatName::Ext2,
+            Self::Ext3 => FormatName::Ext3,
+            Self::Ext4 => FormatName::Ext4,
         }
     }
 

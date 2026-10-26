@@ -364,6 +364,17 @@ and a listener's `Accepted`). Stream timers (retransmit, delayed ACK,
 persist, user timeout, TIME-WAIT) fold into the wait-set deadline and run on
 the timer wake, so the stream path is event-driven with no polling.
 
+An IPv6 address narrower than global — link-local above all — names a host
+only on its own link (RFC 4007), so TCP carries the link with it
+(`tairix_net::addr::zone_of`): a listener's peer, an established connection's
+key and a reply's egress all name the interface such a peer was met on, so one
+link-local address on two links is two peers, a SYN is answered on the link it
+came in on, and a segment for a connection on one link is not taken from
+another. A connect, a datagram or an echo to such an address that names no
+interface goes out its default zone — the one link that could carry it — and
+is refused (`OutOfRange`) as ambiguous where several could, never sent out
+whichever comes first.
+
 Each connection a listener completes becomes a pending child socket queued
 on that listener in completion order: the children link each other by
 handle and the listener holds the queue's two ends, so `Accept` takes the

@@ -3,9 +3,10 @@
 
 use super::Decoder;
 use crate::wire::{
-    Edge, Form, FromDecoder, ToDecoder, CACHE_KEY_LEN, GROUP_BURST, GROUP_RATE, GROUP_RESERVE,
-    MAX_TO_DECODER, RNG_KEY_LEN,
+    Budgets, Edge, Form, FromDecoder, FromWsd, ToDecoder, ToWsd, CACHE_KEY_LEN, GROUP_BURST,
+    GROUP_RATE, GROUP_RESERVE, MAX_TO_DECODER, RNG_KEY_LEN, WSD_BURST, WSD_RATE,
 };
+use crate::wsd_fixtures;
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::discovery_ipc::{Answer, Change, Entry};
@@ -43,6 +44,8 @@ enum Said {
     Transmit([u8; IF_NAME_LEN], Destination),
     Linked([u8; IF_NAME_LEN], bool),
     Stopped(u32),
+    WsdTransmit([u8; IF_NAME_LEN]),
+    Fetch([u8; IF_NAME_LEN], u32, IpAddr, u16, Vec<u8>),
 }
 
 fn label_of(entry: &Entry<'_>) -> Vec<u8> {
@@ -59,6 +62,10 @@ fn label_of(entry: &Entry<'_>) -> Vec<u8> {
             answer: Answer::Service { port, .. },
             ..
         } => alloc::format!("port {port}").into_bytes(),
+        Entry::Answer {
+            answer: Answer::Computer { name, .. },
+            ..
+        } => name.as_bytes().to_vec(),
         _ => Vec::new(),
     }
 }
@@ -92,6 +99,16 @@ impl Collected {
                     FromDecoder::Transmit { interface, to, .. } => Said::Transmit(interface, to),
                     FromDecoder::Linked { interface, up } => Said::Linked(interface, up),
                     FromDecoder::Stopped { question } => Said::Stopped(question),
+                    FromDecoder::Wsd(FromWsd::Transmit { interface, .. }) => {
+                        Said::WsdTransmit(interface)
+                    }
+                    FromDecoder::Wsd(FromWsd::Fetch(request)) => Said::Fetch(
+                        request.interface,
+                        request.fetch,
+                        request.addr,
+                        request.port,
+                        request.path.as_bytes().to_vec(),
+                    ),
                 },
             )
             .collect()
@@ -177,15 +194,22 @@ fn datagram(now: u64, interface: &[u8], payload: &[u8]) -> Vec<u8> {
     })
 }
 
-fn link(now: u64, interface: &[u8], up: bool) -> Vec<u8> {
-    let edge = if up {
-        Edge::Up(BucketLevel {
+/// Both of an interface's send budgets full at `now`.
+fn full(now: u64) -> Budgets {
+    Budgets {
+        group: BucketLevel {
             scaled: u64::from(GROUP_BURST) * SEC,
             at: now,
-        })
-    } else {
-        Edge::Down
-    };
+        },
+        wsd: BucketLevel {
+            scaled: u64::from(WSD_BURST) * SEC,
+            at: now,
+        },
+    }
+}
+
+fn link(now: u64, interface: &[u8], up: bool) -> Vec<u8> {
+    let edge = if up { Edge::Up(full(now)) } else { Edge::Down };
     frame(&ToDecoder::Link {
         now,
         interface: iface(interface),
@@ -575,7 +599,10 @@ fn linked_holding(now: u64, scaled: u64) -> (Decoder, Collected) {
     let up = frame(&ToDecoder::Link {
         now,
         interface: iface(b"eth0"),
-        edge: Edge::Up(BucketLevel { scaled, at: now }),
+        edge: Edge::Up(Budgets {
+            group: BucketLevel { scaled, at: now },
+            ..full(now)
+        }),
     });
     assert_eq!(handled(&mut decoder, &up, &mut out), SessionStep::Continue);
     out.take();
@@ -638,4 +665,244 @@ fn scheduled_sends_stop_at_the_reserve() {
     assert!(sent
         .iter()
         .all(|&(at, to)| at == SEC && to == Destination::Group));
+}
+
+const NINE: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9));
+
+fn wsd(now: u64, payload: &[u8]) -> Vec<u8> {
+    frame(&ToDecoder::Wsd(ToWsd::Datagram {
+        now,
+        interface: iface(b"eth0"),
+        source: NINE,
+        payload,
+    }))
+}
+
+fn fetched(now: u64, fetch: u32, response: &[u8]) -> Vec<u8> {
+    frame(&ToDecoder::Wsd(ToWsd::Fetched {
+        now,
+        interface: iface(b"eth0"),
+        fetch,
+        response,
+    }))
+}
+
+fn root() -> Name {
+    Name::from_labels(&[]).unwrap()
+}
+
+/// A decoder running `eth0` and asking the computers question as id `3`,
+/// having heard `192.168.1.9` announce itself; returns the fetch it asked.
+fn announced() -> (Decoder, Collected, u32) {
+    let (mut decoder, mut out) = linked();
+    handled(&mut decoder, &ask(0, 3, Form::Computer, &root()), &mut out);
+    assert!(
+        out.take().contains(&Said::WsdTransmit(iface(b"eth0"))),
+        "it probes at once"
+    );
+    handled(
+        &mut decoder,
+        &wsd(SEC, &wsd_fixtures::hello(1, 1)),
+        &mut out,
+    );
+    let fetch = out.take().into_iter().find_map(|said| match said {
+        Said::Fetch(interface, fetch, addr, port, path) => {
+            assert_eq!(
+                (interface, addr, port, path.as_slice()),
+                (iface(b"eth0"), NINE, 5357, &b"/meta"[..])
+            );
+            Some(fetch)
+        }
+        _ => None,
+    });
+    (
+        decoder,
+        out,
+        fetch.expect("the announced computer's metadata is fetched"),
+    )
+}
+
+#[test]
+fn an_announced_computer_is_named_from_its_metadata() {
+    let (mut decoder, mut out, fetch) = announced();
+    assert_eq!(
+        handled(
+            &mut decoder,
+            &fetched(
+                2 * SEC,
+                fetch,
+                &wsd_fixtures::metadata("STUDY/Workgroup:HOME")
+            ),
+            &mut out
+        ),
+        SessionStep::Continue
+    );
+    assert_eq!(
+        out.answers(),
+        [Said::Answer(
+            3,
+            iface(b"eth0"),
+            Change::Added,
+            b"STUDY".to_vec()
+        )]
+    );
+}
+
+#[test]
+fn a_renamed_computer_is_retired_and_added_again() {
+    let (mut decoder, mut out, fetch) = announced();
+    handled(
+        &mut decoder,
+        &fetched(
+            2 * SEC,
+            fetch,
+            &wsd_fixtures::metadata("STUDY/Workgroup:HOME"),
+        ),
+        &mut out,
+    );
+    out.take();
+    handled(
+        &mut decoder,
+        &wsd(3 * SEC, &wsd_fixtures::hello(2, 2)),
+        &mut out,
+    );
+    let Some(Said::Fetch(_, again, ..)) = out
+        .take()
+        .into_iter()
+        .find(|said| matches!(said, Said::Fetch(..)))
+    else {
+        panic!("a new metadata version is fetched");
+    };
+    handled(
+        &mut decoder,
+        &fetched(
+            4 * SEC,
+            again,
+            &wsd_fixtures::metadata("LIBRARY/Workgroup:HOME"),
+        ),
+        &mut out,
+    );
+    assert_eq!(
+        out.answers(),
+        [
+            Said::Answer(3, iface(b"eth0"), Change::Retired, b"STUDY".to_vec()),
+            Said::Answer(3, iface(b"eth0"), Change::Added, b"LIBRARY".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn a_replay_of_the_computers_question_holds_every_named_computer() {
+    let (mut decoder, mut out, fetch) = announced();
+    handled(
+        &mut decoder,
+        &fetched(
+            2 * SEC,
+            fetch,
+            &wsd_fixtures::metadata("STUDY/Workgroup:HOME"),
+        ),
+        &mut out,
+    );
+    out.take();
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Replay {
+            question: 3,
+            token: 11,
+        }),
+        &mut out,
+    );
+    assert_eq!(
+        out.take()
+            .into_iter()
+            .filter(|said| !matches!(said, Said::Deadline(_)))
+            .collect::<Vec<_>>(),
+        [Said::Held(11, 3), Said::Replayed(11)]
+    );
+}
+
+#[test]
+fn a_failed_fetch_names_nothing_and_a_stopped_question_hears_nothing() {
+    let (mut decoder, mut out, fetch) = announced();
+    let failed = frame(&ToDecoder::Wsd(ToWsd::FetchFailed {
+        now: 2 * SEC,
+        interface: iface(b"eth0"),
+        fetch,
+    }));
+    handled(&mut decoder, &failed, &mut out);
+    assert!(out.answers().is_empty());
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Stop { question: 3 }),
+        &mut out,
+    );
+    assert!(out.take().contains(&Said::Stopped(3)));
+    handled(
+        &mut decoder,
+        &wsd(3 * SEC, &wsd_fixtures::hello(2, 2)),
+        &mut out,
+    );
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Tick { now: 60 * SEC }),
+        &mut out,
+    );
+    assert!(
+        !out.take()
+            .iter()
+            .any(|said| matches!(said, Said::Fetch(..) | Said::WsdTransmit(_))),
+        "nothing is fetched or sent for a question no one asks"
+    );
+}
+
+#[test]
+fn a_second_computers_question_or_a_datagram_for_no_link_ends_the_session() {
+    let (mut decoder, mut out) = linked();
+    handled(&mut decoder, &ask(0, 3, Form::Computer, &root()), &mut out);
+    assert_eq!(
+        handled(&mut decoder, &ask(0, 4, Form::Computer, &root()), &mut out),
+        SessionStep::Finished
+    );
+    let (mut decoder, mut out) = linked();
+    let stray = frame(&ToDecoder::Wsd(ToWsd::Datagram {
+        now: SEC,
+        interface: iface(b"wlan0"),
+        source: NINE,
+        payload: b"x",
+    }));
+    assert_eq!(
+        handled(&mut decoder, &stray, &mut out),
+        SessionStep::Finished
+    );
+}
+
+/// A probe the WS-Discovery budget cannot pay for waits until it can, and is
+/// charged at the instant the decoder names.
+#[test]
+fn a_probe_the_ws_discovery_budget_cannot_pay_for_waits_due_until_it_can() {
+    let mut decoder = configured();
+    let mut out = Collected::default();
+    let up = frame(&ToDecoder::Link {
+        now: 0,
+        interface: iface(b"eth0"),
+        edge: Edge::Up(Budgets {
+            wsd: BucketLevel { scaled: 0, at: 0 },
+            ..full(0)
+        }),
+    });
+    handled(&mut decoder, &up, &mut out);
+    handled(&mut decoder, &ask(0, 3, Form::Computer, &root()), &mut out);
+    let said = out.take();
+    assert!(
+        !said.contains(&Said::WsdTransmit(iface(b"eth0"))),
+        "no budget, no probe"
+    );
+    let affordable = SEC.div_ceil(u64::from(WSD_RATE));
+    assert_eq!(said.last(), Some(&Said::Deadline(Some(affordable))));
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Tick { now: affordable }),
+        &mut out,
+    );
+    assert!(out.take().contains(&Said::WsdTransmit(iface(b"eth0"))));
 }

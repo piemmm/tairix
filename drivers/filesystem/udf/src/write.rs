@@ -7,7 +7,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkCommandCost;
 use tairix_abi::driver::block::Block;
-use tairix_abi::driver::filesystem::{FilesystemWrite, NodeId, NodeKind, NodeSecurity, VolumeHost};
+use tairix_abi::driver::filesystem::{
+    FilesystemWrite, NodeId, NodeKind, NodeSecurity, VolumeHost, WriteRefusal,
+};
 use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
 use tairix_abi::{DriverError, DriverHandle};
@@ -32,9 +34,6 @@ const IMPLEMENTATION: &[u8] = b"*TAIRiX UDF";
 /// The physical partition's reference: the one partition a written volume
 /// has.
 const PARTITION: u16 = 0;
-
-/// Why a volume is refused writes once a change failed part-way through.
-const DAMAGED: &str = "damaged";
 
 /// What a writer keeps between operations.
 pub(crate) struct State {
@@ -242,7 +241,7 @@ impl<B: Block> Udf<B> {
         let outcome = body(self);
         if matches!(outcome, Err(err) if err != DriverError::NoSpace) && self.write.writes != writes
         {
-            self.refusal = Some(DAMAGED);
+            self.refusal = Some(WriteRefusal::Damaged);
         }
         let now = self.refusal.is_some()
             || !self.write.schedule.defers()
@@ -799,7 +798,7 @@ impl<B: Block> Udf<B> {
         // cannot be given back is space lost, not a change undone.
         for block in spare {
             if self.release(block.block, 1).is_err() {
-                self.refusal = Some(DAMAGED);
+                self.refusal = Some(WriteRefusal::Damaged);
             }
         }
         Ok(())

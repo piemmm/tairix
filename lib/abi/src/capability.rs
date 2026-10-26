@@ -811,6 +811,20 @@ impl CapabilityId {
     /// and `CAP_SYSINFO_HW` only reads.
     pub const GPIO: Self = Self(52);
 
+    /// Serve a volume's filesystem to the kernel from user space: read and
+    /// write the volume through its block grant (`volume_io`) and offer the
+    /// filesystem on it (`volume_serve`).
+    ///
+    /// It guards the class of user-space filesystem drivers, and a volume's
+    /// own grant scopes it to that one volume, as `CAP_SHM` and a region's
+    /// grant scope a mapping. The kernel spawns a format's driver for the
+    /// volume node it publishes, holding that node's grant.
+    ///
+    /// Not covered by an existing capability: `CAP_FS_MOUNT` places a volume
+    /// in the namespace and `CAP_DRV_LOAD` loads drivers; neither reads a
+    /// volume's blocks or answers for what is on them.
+    pub const FS_SERVE: Self = Self(53);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -873,6 +887,7 @@ impl CapabilityId {
         (Self::NET_DISCOVER_ALL, "CAP_NET_DISCOVER_ALL"),
         (Self::SETTINGS_WRITE, "CAP_SETTINGS_WRITE"),
         (Self::GPIO, "CAP_GPIO"),
+        (Self::FS_SERVE, "CAP_FS_SERVE"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -1021,6 +1036,7 @@ mod tests {
         assert_eq!(CapabilityId::NET_DISCOVER_ALL.as_u16(), 50);
         assert_eq!(CapabilityId::SETTINGS_WRITE.as_u16(), 51);
         assert_eq!(CapabilityId::GPIO.as_u16(), 52);
+        assert_eq!(CapabilityId::FS_SERVE.as_u16(), 53);
     }
 
     #[test]
@@ -1073,6 +1089,7 @@ mod tests {
             Some("CAP_SETTINGS_WRITE")
         );
         assert_eq!(CapabilityId::GPIO.name(), Some("CAP_GPIO"));
+        assert_eq!(CapabilityId::FS_SERVE.name(), Some("CAP_FS_SERVE"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -1083,15 +1100,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=52 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=53 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=52 {
+        for raw in 1..=53 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(53).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(54).expect("in range").name(), None);
     }
 
     #[test]

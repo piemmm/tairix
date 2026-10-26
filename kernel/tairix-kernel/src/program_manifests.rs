@@ -1302,15 +1302,17 @@ mod tests {
     // window frame region the desktop session maps, and CAP_PROC_SPAWN
     // to launch an activated <Name>.app bundle through the ordinary
     // signed app-load gate (plans/NEW-FILEMANAGER.md FM6b — double-click
-    // / Enter on a bundle spawns its own Run, never a private path).
-    // Not an embedded spawn-floor program, so the list lives only in
-    // this pin.
+    // / Enter on a bundle spawns its own Run, never a private path), and
+    // CAP_NET, which the discovery service admits its Network view's browse
+    // against (plans/ZEROCONF.md Z9). Not an embedded spawn-floor program,
+    // so the list lives only in this pin.
     const FILES_BROWSER_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
         CapabilityId::SHM,
         CapabilityId::PROC_SPAWN,
         CapabilityId::LOG_EMIT,
+        CapabilityId::NET,
     ];
 
     // The windowed terminal `terminal` (plans/APPWIN.md AW4,

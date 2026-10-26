@@ -21,14 +21,29 @@ répertoire est un listage ordinaire, soumis aux permissions, sous l'identité
 de l'utilisateur qui le lance : un répertoire illisible est refusé, jamais
 deviné.
 
-Le bureau démarre le navigateur pour vous et le garde dans la barre
-d'icônes : le menu de son emplacement liste vos propres lieux et tout ce qui
-est monté, et choisir l'un d'eux y ouvre une fenêtre ; *Paramètres…* vient
-en dernier. Un clic sur l'emplacement en ouvre une à l'endroit que
+Le bureau démarre le navigateur pour vous et le garde dans la barre d'icônes
+: le menu de son emplacement liste vos propres lieux et tout ce qui est
+monté, et choisir l'un d'eux y ouvre une fenêtre ; *Réseau* et *Paramètres…*
+viennent en dernier. Un clic sur l'emplacement en ouvre une à l'endroit que
 choisissent les paramètres. Demander un dossier qui a déjà une fenêtre amène
 cette fenêtre au premier plan au lieu d'en ouvrir une autre. Cette instance
 n'a pas de ligne *Quitter* — elle fait partie du bureau, et fermer ses
 fenêtres la range simplement.
+
+*Réseau*, dans le menu de l'emplacement juste au-dessus de *Paramètres…*,
+ouvre une fenêtre sur les ordinateurs du réseau local qui partagent des
+fichiers. Chacun est listé avec son nom, l'adresse à laquelle on le joint,
+son groupe de travail ou son domaine, et ce qu'il est, et la liste se
+remplit à mesure que les ordinateurs répondent. Le réseau n'est parcouru que
+tant qu'une fenêtre l'affiche. Un ordinateur qui ne répond plus est grisé
+jusqu'à ce qu'il soit oublié ; un nom qui mélange des alphabets comme
+l'exige l'imitation d'un autre nom porte un signe d'avertissement à la place
+de son image ; et lorsqu'un ordinateur propose plus que quelques entrées,
+les autres sont comptées dans une ligne à part plutôt que d'évincer le
+reste. Les noms sur le réseau sont choisis par qui fait fonctionner chaque
+ordinateur : un nom ne prouve donc jamais quel ordinateur vous regardez. La
+connexion aux partages d'un ordinateur n'est pas disponible sur ce système,
+et en ouvrir un le dit.
 
 Lancé par son nom depuis un shell (ou ouvert sur un dossier depuis le
 bureau), c'est au contraire une application ordinaire : une seule fenêtre,

@@ -1,42 +1,45 @@
 # Link-local service discovery (`discoveryd`)
 
-`discoveryd` is the multicast DNS / DNS-SD service, installed at
+`discoveryd` is the link-local discovery service — multicast DNS / DNS-SD, and
+the computers WS-Discovery names — installed at
 `/System/Services/discoveryd.app/Run` and started by PID 1 at boot: a segment
 takes time to answer, so the service should already be listening when a program
 first asks. It requires `network-up`, so it starts once the network stack
 answers, and since its sockets live in the stack, a stack relaunch stops it and
 starts it again against the new one. The staged design is `plans/ZEROCONF.md`. Programs reach it through
-[`lib/discovery`](../lib/discovery.md); the protocol engine is
-`tairix_net::mdns` ([`lib/net`](../lib/net.md)); the containment is the
-supervised session of [`lib/sandbox`](../security/sandbox.md).
+[`lib/discovery`](../lib/discovery.md); the protocol engines are
+`tairix_net::mdns` and `tairix_net::wsd` ([`lib/net`](../lib/net.md)); the
+containment is the supervised session of [`lib/sandbox`](../security/sandbox.md).
 
 It asks and answers questions for its clients. It publishes nothing of its own
 yet.
 
 ## The authority split
 
-A multicast DNS datagram is written by whoever shares the segment — a café's
-network, a compromised printer. The process that parses it therefore holds
-nothing worth taking.
+A multicast DNS or WS-Discovery datagram, and a computer's metadata, are
+written by whoever shares the segment — a café's network, a compromised
+printer. The process that parses them therefore holds nothing worth taking.
 
 | | Front | Decoder |
 |---|---|---|
 | Is | the service as started | the same binary, respawned in the kernel's sandbox spawn mode |
-| Holds | the two multicast DNS sockets, the discovery endpoint, `CAP_NET`, `CAP_SANDBOX_SPAWN`, `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the grant store, read once at start), `CAP_LOG_EMIT` | two pipe ends; an empty capability record and the sandbox syscall allow-list |
-| Parses | nothing a peer sent; only fixed fields from its decoder, each bounds-checked | every datagram, through one engine per interface |
+| Holds | the multicast DNS and WS-Discovery sockets, the connections metadata is fetched over, the discovery endpoint, `CAP_NET`, `CAP_SANDBOX_SPAWN`, `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the grant store, read once at start), `CAP_LOG_EMIT` | two pipe ends; an empty capability record and the sandbox syscall allow-list |
+| Parses | nothing a peer sent; only fixed fields from its decoder, each bounds-checked | every datagram and metadata response, through one engine of each protocol per interface |
 | Has a clock | yes | no: each frame that moves time carries the instant |
 | Has randomness | the kernel CSPRNG | none of its own: its cache key and CSPRNG key arrive in its first frame |
 
-The network stack reserves the multicast DNS port and groups to the service's
-account (`DISCOVERYD_UID`), so no other process can hear the segment's answers
-or send a query that draws unicast replies from every responder on it.
+The network stack reserves the multicast DNS and WS-Discovery ports and groups
+to the service's account (`DISCOVERYD_UID`), so no other process can hear the
+segment's answers or send a query that draws unicast replies from every
+responder on it.
 
 ## Clients
 
 A client opens a **session** on the reserved `DISCOVERY_ENDPOINT`, naming a
 delivery port its own process owns, and starts typed requests in it
 (`tairix_abi::discovery_ipc`): browse a service type, resolve an instance, look
-up a host's addresses, name a link-local address, or enumerate every type. The
+up a host's addresses, name a link-local address, enumerate every type, or
+browse the computers WS-Discovery names. The
 kernel attests the port's owner
 ([`call_peer_port`](../architecture/syscalls.md)); any other port, bound or
 not, is refused alike, so no caller can aim the service's doorbell at another
@@ -64,6 +67,7 @@ touched:
 | any | `CAP_NET` |
 | host, reverse | nothing more |
 | browse, resolve | a grant for the type, or `CAP_NET_DISCOVER_ALL` |
+| computers | a grant for `_smb._tcp`, or `CAP_NET_DISCOVER_ALL`: what a computer offers is learned from its file service |
 | enumerate types | `CAP_NET_DISCOVER_ALL` |
 
 Grants live in `/System/Security/Policy/Discovery`. The image builder writes
@@ -168,6 +172,33 @@ a flush, a link edge, or a replaced decoder in flight is stale and dropped; one
 no honest decoder sends — about an id that holds no question, or a stop it was
 never told — condemns it.
 
+## Computers
+
+The computers question is asked of each link's WS-Discovery engine — the April
+2005 draft Windows and Samba's `wsdd` speak — rather than of multicast DNS.
+While it is asked the engine probes for `wsdp:Device` targets every minute, in
+SOAP-over-UDP's four sendings, and names each target that says it is a
+`pub:Computer` by fetching its metadata: a WS-Transfer `Get` at the address its
+message came from, by the `XAddrs` URL naming that address or else one naming a
+host, as a QNAP NAS's does. The name is never resolved, only written in the
+request's `Host` field, so a peer can steer a fetch at nobody but itself. An
+answer is the computer's name, its workgroup or domain, the address it answers
+at, and a key — a keyed hash of its endpoint — that is its identity for as long
+as the service runs. A rename, or a move to another address, crosses as the old
+answer retired and the new one added; a computer heard on both families keeps
+the address it was first heard at until that one falls silent, so it does not
+flip between them every round. A computer that says goodbye, or answers no
+round for two and a half minutes, is retired.
+
+The engine believes a `ProbeMatches` or `ResolveMatches` only when it answers a
+probe or resolve the engine sent in the last ten seconds, ignores a message it
+has seen in the last 64 and an announcement older than the target's last in its
+`AppSequence` — an answer is current however it is numbered, since a QNAP NAS
+gives every answer a fresh instance — holds at most 128 targets per link and
+four per sender, and has at most two fetches in flight per link, retrying a
+failed one after 30 seconds, doubling to five minutes. A fetch whose target
+moved or changed while it flew is made again rather than believed.
+
 ## The channel
 
 Every frame is one fixed layout behind a one-byte tag, and both directions
@@ -180,16 +211,20 @@ exactly its bytes.
 | front → decoder | `Configure` | the cache key and CSPRNG key; the first frame, sent once |
 | front → decoder | `Datagram` | the instant, the arrival interface, the sender's address and port, whether it went to the group, the payload unread |
 | front → decoder | `Tick` | the instant |
-| front → decoder | `Link` | the instant, an interface, and whether its link came up — with its group budget as the front holds it — or went down |
+| front → decoder | `Link` | the instant, an interface, and whether its link came up — with its multicast DNS and WS-Discovery send budgets as the front holds them — or went down |
 | front → decoder | `Ask` | the instant, a question id below `MAX_QUESTIONS`, its form, and the name |
 | front → decoder | `Stop` | a question id, which the decoder acknowledges with `Stopped` |
 | front → decoder | `Replay` | a question id and a token naming the requests owed it |
+| front → decoder | `Wsd` `Datagram` | the instant, the arrival interface, the sender's address, the payload unread |
+| front → decoder | `Wsd` `Fetched` / `FetchFailed` | the instant, the interface and the fetch id, and for a fetch that completed the whole response, at most 16 KiB, unread |
 | decoder → front | `Deadline` | the earliest instant any engine next needs time, or none |
 | decoder → front | `Answer` | one edge in one question's answers, already typed |
 | decoder → front | `Held` / `Replayed` | a replay's answers, then its end |
 | decoder → front | `Transmit` | a datagram an engine built, its interface, the instant it was charged at, and its destination |
 | decoder → front | `Linked` | the acknowledgement of one link edge |
 | decoder → front | `Stopped` | the acknowledgement of one stop, after which nothing about the question follows |
+| decoder → front | `Wsd` `Transmit` | a WS-Discovery datagram for an interface's groups and the instant it was charged at |
+| decoder → front | `Wsd` `Fetch` | a fetch id, the interface, the target's address and port, the path and endpoint its URL and message named, and the name its URL gives its host, if it gives one |
 
 The decoder acknowledges every link edge. The front believes an answer about a
 link, and sends a datagram built for it, only once every edge it told the
@@ -227,6 +262,25 @@ sends one, so guessing would only hide a bug.
   that defends a name this host owns. Since an honest decoder spends exactly
   as the front charges, a datagram past the budget, or charged at an instant
   the front has not reached, condemns it.
+- **WS-Discovery has budgets of its own.** Its relay admission is a burst of
+  16 at 4 per second per sender, 256 at 128 per second in all, across 32
+  tracked senders, so neither protocol can crowd out the other; its sends go
+  only to `239.255.255.250` and `ff02::c` on the interface's families, within
+  a budget of 8 at 2 per second the decoder spends as the front charges it.
+- **A fetch goes only where a sender is.** The front makes a fetch only to an
+  address it relayed a WS-Discovery datagram from on that interface in the
+  last two and a half minutes, over a stream connection pinned to that
+  interface, with the request it builds itself — the decoder names only where,
+  to whom, and a host name for the `Host` field, held to the URL host grammar
+  before it is written — and at most eight in flight in all. A fetch it will
+  not make is told back as failed; one past the two an engine may have in
+  flight on a link, or reusing an id it has in flight, condemns the decoder. A
+  response is taken whole only when the target closes the connection in order
+  after the whole request was sent, within 16 KiB and five seconds; anything
+  else is a failure and the connection is closed. Each link holds its fetches'
+  outcomes in fixed slots until the decoder's queue takes them, so an outcome
+  never waits on memory, and a link that goes down closes its fetches and owes
+  nothing of them.
 - **Back-pressure costs nothing per datagram.** The decoder's queue holds
   64 KiB. A datagram it has no room for is held, and the front stops draining
   its delivery port until the queue drains.
@@ -247,8 +301,9 @@ sends one, so guessing would only hide a bug.
 ## The reactor
 
 One wait-set holds the delivery port (registered only while the front takes
-datagrams, and drained at most one mailbox's worth per wake), the decoder's two
-pipe ends, the discovery endpoint, the thread's peer-exit feed, and room on any
+datagrams, and drained at most one mailbox's worth per wake), the port the
+fetch connections' events arrive on, the decoder's two pipe ends, the
+discovery endpoint, the thread's peer-exit feed, and room on any
 client port a doorbell is owed to, with a timeout for the one instant the front
 must next act by. A port is watched only while a doorbell is owed there, and the
 watches change only for a port whose count crossed zero since the last turn. A
@@ -262,7 +317,7 @@ decoder launch is its `6001`.
 
 | Id | Name | Level | Meaning |
 |---|---|---|---|
-| `25_001` | `SERVICE_STARTED` | Info | The front holds its multicast DNS sockets; carries each address family's outcome — joined, or the step the stack refused and why. |
+| `25_001` | `SERVICE_STARTED` | Info | The front holds its sockets; carries each protocol and address family's outcome — joined, or the step the stack refused and why. Multicast DNS is required; WS-Discovery is not. |
 | `25_002` | `DECODER_STARTED` | Info | A decoder started and was keyed; carries its generation. |
 | `25_003` | `SERVICE_UNAVAILABLE` | Error | The service cannot serve and is exiting; carries the reason, and each family's outcome when no socket could be opened. |
 | `25_004` | `REQUEST_DENIED` | Warn | A client request was refused for want of authority; carries what was lacking, the caller's uid, and the type asked for. |
@@ -286,19 +341,28 @@ request that lost answers offered nothing more, the runs kept in step through
 random churn, a query the budget cannot pay for waiting due, scheduled sends
 stopping at the reserve, overspending and a replacement inheriting what was
 spent, a client churning fresh names leaving another's first query unharmed,
-per-account request bounds, and id wrap that never names a live session or
-request.
+per-account request bounds, id wrap that never names a live session or
+request, and WS-Discovery's relay and send budgets, fetch admission, the
+request a fetch sends and the response it returns, short sends, a slow,
+oversized or reset fetch, a fetch past the engine's bound or reusing an id, the
+longest fetch a decoder may ask for, a link going down mid-fetch, an answer of
+another kind than its question asks, a computer announced, fetched and answered
+end to end, and a QNAP NAS's captured answer, from an ephemeral port and naming
+its host, fetched at its address under that name and answered.
 
 `fuzz_discoveryd` is enrolled in `cargo xtask fuzz`: both codecs canonical under
 random frames and single-bit mutations, the decoder total over hostile and
 well-formed datagrams with time running backwards, and the front against a
 decoder saying anything at all while it holds its no-spin bound, configures each
-decoder first and once, spaces its ticks, contains the decoder, and relays to
-its replacement. It also drives random calls from several accounts and
-processes against a real decoder — foreign doorbell ports, doorbells that block
-or vanish, segment answers, link edges, and the decoder killed and replaced
-mid-sweep — checking the front's tables after every step, and that nothing
-any client asked for is left once every client has gone.
+decoder first and once, spaces its ticks, contains the decoder, relays to its
+replacement, sends only to its protocols' groups, and opens a fetch only to a
+WS-Discovery sender heard on that link. It also drives random calls from
+several accounts and processes against a real decoder — foreign doorbell
+ports, doorbells that block or vanish, segment answers, computers announcing
+themselves and their metadata fetched, link edges, and the decoder killed and
+replaced mid-sweep — checking the front's tables after every step, that a
+computer is named, and that nothing any client asked for is left once every
+client has gone.
 
 The live vertical `tairix-test-discovery-qemu-aarch64` boots the production
 aarch64 image with a host-side multicast DNS responder on the wire and runs

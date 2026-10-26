@@ -47,11 +47,16 @@ pub enum SortKey {
     Filesystem,
     /// How well a volume root's volume is serving, healthiest first.
     Health,
+    /// Where a network endpoint is reached; entries that are no endpoint come
+    /// first, as being reached nowhere.
+    Address,
+    /// The workgroup or domain a network endpoint belongs to.
+    Workgroup,
 }
 
 impl SortKey {
     /// Every key, in the order a menu offering them numbers its rows.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Name,
         Self::Kind,
         Self::Size,
@@ -59,6 +64,8 @@ impl SortKey {
         Self::Free,
         Self::Filesystem,
         Self::Health,
+        Self::Address,
+        Self::Workgroup,
     ];
 }
 
@@ -116,13 +123,13 @@ impl SortMode {
 
     /// The next order in the fixed cycle the toolbar's Sort command steps
     /// through: name ↑, name ↓, kind ↑, kind ↓, size ↑, size ↓, modified ↑,
-    /// modified ↓, then back to name ↑. A volume's own orders, which only a
-    /// list's column header chooses, step back to name ↑. The wrap makes it
-    /// total.
+    /// modified ↓, then back to name ↑. A volume's or a network endpoint's
+    /// own orders, which only a list's column header chooses, step back to
+    /// name ↑. The wrap makes it total.
     #[must_use]
     pub const fn next(self) -> Self {
         use SortDirection::{Ascending, Descending};
-        use SortKey::{Filesystem, Free, Health, Kind, Modified, Name, Size};
+        use SortKey::{Address, Filesystem, Free, Health, Kind, Modified, Name, Size, Workgroup};
         let (key, direction) = match (self.key, self.direction) {
             (Name, Ascending) => (Name, Descending),
             (Name, Descending) => (Kind, Ascending),
@@ -131,7 +138,9 @@ impl SortMode {
             (Size, Ascending) => (Size, Descending),
             (Size, Descending) => (Modified, Ascending),
             (Modified, Ascending) => (Modified, Descending),
-            (Modified, Descending) | (Free | Filesystem | Health, _) => (Name, Ascending),
+            (Modified, Descending) | (Free | Filesystem | Health | Address | Workgroup, _) => {
+                (Name, Ascending)
+            }
         };
         Self {
             key,
@@ -237,6 +246,8 @@ fn ordered(a: &Entry, b: &Entry, mode: SortMode, types: (&str, &str)) -> Orderin
             SortKey::Free => free(a).cmp(&free(b)),
             SortKey::Filesystem => name_cmp(filesystem(a), filesystem(b)),
             SortKey::Health => health(a).cmp(&health(b)),
+            // No entry is a network endpoint.
+            SortKey::Address | SortKey::Workgroup => Ordering::Equal,
         };
         let primary = match mode.direction {
             SortDirection::Ascending => primary,
@@ -252,7 +263,7 @@ fn ordered(a: &Entry, b: &Entry, mode: SortMode, types: (&str, &str)) -> Orderin
 /// otherwise-equal comparison by the raw bytes so distinct names never
 /// compare equal. Allocation-free: it folds byte by byte rather than building
 /// lowercased copies.
-fn name_cmp(a: &str, b: &str) -> Ordering {
+pub(crate) fn name_cmp(a: &str, b: &str) -> Ordering {
     let folded = a
         .bytes()
         .map(|byte| byte.to_ascii_lowercase())

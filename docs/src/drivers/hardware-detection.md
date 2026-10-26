@@ -175,6 +175,12 @@ address *inside* that outbound window. The bootstrap floor (§18.6) seeds
 only the first nodes needed to reach the driver store; everything below a
 discovered bus is published by that bus's user-space driver.
 
+The kernel publishes one kind of node itself: for each removable volume it
+attaches, a `tairix,volume-<format>` node under the storage node the volume
+manager was loaded for, carrying the one `Volume` resource the format's driver
+is granted ([Volumes served from user space](../filesystem/served.md)). It
+withdraws the node when the volume leaves, which is what unloads the driver.
+
 The kernel **owns the published node's identity** — the emitter never names
 it (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
 caller-supplied). A driver builds the node's class, match keys, and resource

@@ -1,9 +1,9 @@
 //! Which bytes begin a UTF-8 sequence, and how long it is (Unicode 15.0,
 //! Table 3-7), for the decoders that must step over or validate text by hand;
-//! a name as it is shown, its hidden characters escaped; and the letters a
-//! reader looks a name up by.
+//! a name as it is shown, as `tairix_visible` shows text from elsewhere; and
+//! the letters a reader looks a name up by.
 
-use tairix_visible::{is_hidden, Shown};
+use tairix_visible::shown_chars;
 
 /// How many bytes the sequence `lead` begins, or `None` for a byte no
 /// well-formed sequence begins with: a continuation byte, `0xC0`/`0xC1`
@@ -50,35 +50,78 @@ pub fn reader_order(a: &str, b: &str) -> core::cmp::Ordering {
 }
 
 /// `text` as it is shown where what it says must be what is drawn, as a
-/// name is: each [`is_hidden`] character replaced by U+FFFD, so two names
-/// that differ only by one never look alike. Borrowed when there is none.
+/// name is: as [`tairix_visible::Shown`] shows it, so two names that differ
+/// never look alike. Borrowed when it is shown as written.
 #[must_use]
 pub fn shown(text: &str) -> alloc::borrow::Cow<'_, str> {
-    if !text.chars().any(is_hidden) {
+    if shown_chars(text).eq(text.chars()) {
         return alloc::borrow::Cow::Borrowed(text);
     }
-    alloc::borrow::Cow::Owned(alloc::format!("{}", Shown(text)))
+    let mut out =
+        alloc::string::String::with_capacity(text.len() + char::REPLACEMENT_CHARACTER.len_utf8());
+    out.extend(shown_chars(text));
+    alloc::borrow::Cow::Owned(out)
+}
+
+/// Whether `text` mixes scripts the way an impersonation needs — Latin with
+/// Cyrillic or Greek, or any mixture no stricter UTS #39 restriction level
+/// admits — so a surface showing it can say it may not be what it looks like.
+#[must_use]
+pub fn mixes_scripts(text: &str) -> bool {
+    tairix_unicode::restriction_level(text)
+        == tairix_unicode::RestrictionLevel::MinimallyRestrictive
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::borrow::Cow;
     use core::cmp::Ordering;
 
-    use super::{fold, folded, reader_order, sequence_len, shown};
+    use super::{fold, folded, mixes_scripts, reader_order, sequence_len, shown};
+
+    /// A name shown as written is borrowed — a combining sequence within its
+    /// limits and a replacement character it already holds included — and
+    /// one shown otherwise is owned.
+    #[test]
+    fn a_name_is_borrowed_when_shown_as_written_and_owned_when_not() {
+        for written in [
+            "",
+            "report.pdf",
+            "e\u{300}\u{301}\u{302}\u{303}x",
+            "caf\u{fffd}",
+        ] {
+            assert!(
+                matches!(shown(written), Cow::Borrowed(text) if text == written),
+                "{written:?}"
+            );
+        }
+        for (text, seen) in [
+            ("report\u{200b}.pdf", "report\u{fffd}.pdf"),
+            ("e\u{301}\u{301}\u{301}x", "e\u{301}\u{fffd}x"),
+        ] {
+            assert!(
+                matches!(shown(text), Cow::Owned(ref owned) if owned == seen),
+                "{text:?}"
+            );
+        }
+    }
 
     #[test]
-    fn a_name_is_shown_with_what_hides_in_it_made_visible() {
-        assert!(matches!(
-            shown("report.pdf"),
-            alloc::borrow::Cow::Borrowed("report.pdf")
-        ));
-        assert_eq!(shown("report\u{200b}.pdf"), "report\u{fffd}.pdf");
-        assert_eq!(shown("a\u{202e}b\nc"), "a\u{fffd}b\u{fffd}c");
-        assert_ne!(
-            shown("ab"),
-            shown("a\u{200b}b"),
-            "two names that differ never look alike"
-        );
+    fn a_name_mixing_scripts_to_impersonate_is_told_apart() {
+        for text in [
+            "paypal",
+            "caf\u{e9}",
+            "Ελληνικά",
+            "日本語abc",
+            "한국어abc",
+            "",
+        ] {
+            assert!(!mixes_scripts(text), "{text:?}");
+        }
+        // Cyrillic а and о among Latin; Greek Ο among Latin.
+        for text in ["p\u{430}yp\u{430}l", "g\u{43e}\u{43e}gle", "\u{39f}ffice"] {
+            assert!(mixes_scripts(text), "{text:?}");
+        }
     }
 
     #[test]

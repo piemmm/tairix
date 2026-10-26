@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::WriteRefusal;
 use tairix_writeback::RUN_BYTES;
 
 use crate::tests::{SizedBlock, ONE_GROUP_SECTORS, TEST_UUID};
@@ -159,7 +160,7 @@ fn a_read_only_handle_stages_nothing_and_writes_no_data() {
         Err(DriverError::ReadOnly)
     );
     assert!(fs.dirty.is_empty());
-    assert_eq!(fs.write_refusal(), Some("opened_read_only"));
+    assert_eq!(fs.write_refusal(), Some(WriteRefusal::OpenedReadOnly));
 }
 
 /// File data is written only inside the volume, wherever a write starts in

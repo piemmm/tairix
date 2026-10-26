@@ -86,6 +86,7 @@ mod dir;
 mod mkfs;
 mod newmap;
 mod oldmap;
+mod served;
 
 #[cfg(test)]
 mod tests;
@@ -96,6 +97,7 @@ use newmap::NewMap;
 use oldmap::{OldMap, OLD_SECTOR_SIZE, OLD_SECTOR_SIZE_U32};
 
 pub use mkfs::AdfsVariant;
+pub use served::{Served, BIND_KEYS};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4144_4653_0000_0001; // "ADFS" + index

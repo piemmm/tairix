@@ -40,7 +40,7 @@ use core::fmt::{self, Write};
 
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
-use tairix_visible::is_hidden;
+use tairix_visible::Faithful;
 
 use crate::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::timeutil::{from_nanos, nanos, NEVER, ONE_SEC_NANOS};
@@ -340,10 +340,10 @@ impl fmt::Display for Presentation<'_> {
 /// A label a peer chose, for a display that draws text rather than
 /// interpreting it: printable Unicode — spaces and punctuation included, as
 /// DNS-SD instance names are written (RFC 6763 §4.1.1) — as it stands, a
-/// backslash as `\\`, and `\DDD` for every octet of a control, of a
-/// character that formats, joins or hides text rather than showing it, and of
-/// invalid UTF-8. So nothing invisible or reordering can hide in a label to
-/// make it pass for another.
+/// backslash as `\\`, and `\DDD` for every octet of invalid UTF-8 and of a
+/// character a faithful rendering escapes ([`Faithful`]: a control, a
+/// character that formats, joins or hides text, a mark stacked or doubled past
+/// telling apart). So nothing can hide in a label to make it pass for another.
 #[derive(Clone, Copy, Debug)]
 pub struct DisplayLabel<'a>(pub &'a [u8]);
 
@@ -351,10 +351,12 @@ impl fmt::Display for DisplayLabel<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for chunk in self.0.utf8_chunks() {
             let valid = chunk.valid();
+            let mut faithful = Faithful::default();
             for (at, ch) in valid.char_indices() {
+                let escaped = faithful.escapes(ch);
                 match ch {
                     '\\' => f.write_str("\\\\")?,
-                    ch if is_hidden(ch) => valid.as_bytes()[at..at + ch.len_utf8()]
+                    _ if escaped => valid.as_bytes()[at..at + ch.len_utf8()]
                         .iter()
                         .try_for_each(|byte| write!(f, "\\{byte:03}"))?,
                     ch => f.write_char(ch)?,

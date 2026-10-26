@@ -5,12 +5,20 @@
 //! specifically to catch the edge cases a self-consistent round-trip test
 //! agrees with itself about. Each vector's identifier is recorded so it can
 //! be looked up.
+//!
+//! No published AES-CCM vector uses SMB 3's widths (an 11-byte nonce and a
+//! 16-byte tag), so the CCM answers were produced by `cryptography`'s
+//! `AESCCM` over OpenSSL, an implementation independent of the one under
+//! test.
 
 use super::{
-    aes128gcm_open, aes128gcm_seal, aes256gcm_open, aes256gcm_seal, open, seal, AeadError, AeadKey,
-    AeadNonce, AeadTag, Aes128Gcm, Aes128GcmKey, Aes256Gcm, Aes256GcmKey, AesGcmNonce, AesGcmTag,
-    AES128_GCM_KEY_LEN, AES256_GCM_KEY_LEN, AES_GCM_NONCE_LEN, AES_GCM_TAG_LEN,
+    aes128ccm_open, aes128ccm_seal, aes128gcm_open, aes128gcm_seal, aes256ccm_open, aes256ccm_seal,
+    aes256gcm_open, aes256gcm_seal, open, seal, AeadError, AeadKey, AeadNonce, AeadTag, Aes128Ccm,
+    Aes128Gcm, Aes128GcmKey, Aes256Gcm, Aes256GcmKey, AesCcmNonce, AesGcmNonce, AesGcmTag,
+    AES128_GCM_KEY_LEN, AES256_GCM_KEY_LEN, AES_CCM_NONCE_LEN, AES_CCM_TAG_LEN, AES_GCM_NONCE_LEN,
+    AES_GCM_TAG_LEN,
 };
+use crate::test_hex::hex;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -333,4 +341,84 @@ fn aes_gcm_widths_are_the_declared_sizes() {
     assert_eq!(AES_GCM_TAG_LEN, 16);
     assert_eq!(AES128_GCM_KEY_LEN, 16);
     assert_eq!(AES256_GCM_KEY_LEN, 32);
+}
+
+const CCM_NONCE: AesCcmNonce = [
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
+];
+
+const CCM_AAD: [u8; 20] = [
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33,
+];
+
+const CCM_PLAINTEXT: &[u8] = b"SMB 3 encrypts every message.";
+
+#[test]
+fn aes_ccm_matches_independent_answers() {
+    let mut buf = CCM_PLAINTEXT.to_vec();
+    let tag = aes128ccm_seal(
+        &hex("000102030405060708090a0b0c0d0e0f"),
+        &CCM_NONCE,
+        &CCM_AAD,
+        &mut buf,
+    )
+    .expect("seal");
+    assert_eq!(
+        buf,
+        hex::<29>("1f223ffbf39d34c5ed7e90135610becb570daa206fb01f9c9921e166b3")
+    );
+    assert_eq!(tag, hex("73fb3b58449081faacf153dbe949eb43"));
+
+    let key256 = hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    let mut buf = CCM_PLAINTEXT.to_vec();
+    let tag = aes256ccm_seal(&key256, &CCM_NONCE, &CCM_AAD, &mut buf).expect("seal");
+    assert_eq!(
+        buf,
+        hex::<29>("7413adb87ce678640c0b0bd5960df5f955b6bd085cfac850d233eb7475")
+    );
+    assert_eq!(tag, hex("c48e71bf7669b290d6151e9a6231f51c"));
+    aes256ccm_open(&key256, &CCM_NONCE, &CCM_AAD, &mut buf, &tag).expect("open");
+    assert_eq!(buf, CCM_PLAINTEXT);
+}
+
+#[test]
+fn aes_ccm_rejects_every_alteration_and_leaves_no_plaintext() {
+    let key = [0x42; 16];
+    let cipher = Aes128Ccm::new(&key);
+    let mut sealed = CCM_PLAINTEXT.to_vec();
+    let tag = cipher
+        .seal(&CCM_NONCE, &CCM_AAD, &mut sealed)
+        .expect("seal");
+
+    let mut flipped = sealed.clone();
+    flipped[3] ^= 1;
+    let mut bad_tag = tag;
+    bad_tag[15] ^= 1;
+    let mut bad_nonce = CCM_NONCE;
+    bad_nonce[0] ^= 1;
+    for (buf, nonce, aad, tag) in [
+        (flipped, CCM_NONCE, &CCM_AAD[..], tag),
+        (sealed.clone(), CCM_NONCE, &CCM_AAD[..], bad_tag),
+        (sealed.clone(), bad_nonce, &CCM_AAD[..], tag),
+        (sealed.clone(), CCM_NONCE, &CCM_AAD[1..], tag),
+    ] {
+        let mut buf = buf;
+        assert_eq!(
+            cipher.open(&nonce, aad, &mut buf, &tag),
+            Err(AeadError::Authentication)
+        );
+        assert!(buf.iter().all(|&b| b == 0), "a rejected message is zeroed");
+    }
+    assert_eq!(
+        aes128ccm_open(&key, &CCM_NONCE, &CCM_AAD, &mut sealed, &tag),
+        Ok(())
+    );
+    assert_eq!(sealed, CCM_PLAINTEXT);
+}
+
+#[test]
+fn aes_ccm_widths_are_smb_3s() {
+    assert_eq!(AES_CCM_NONCE_LEN, 11);
+    assert_eq!(AES_CCM_TAG_LEN, 16);
 }

@@ -131,7 +131,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  75 | `port_resolve` | `user_ptr` (name), `len`                | `endpoint`    | —               | no    |
 |  76 | `file_map`     | `u32 fd`, `u64 offset`, `u64 len`       | `u64` (base)  | —               | no    |
 |  77 | `file_unmap`   | `u64 base`, `u64 len`                   | `errno`       | —               | no    |
-|  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
+|  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len`, `u64 at_ns` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
 |  79 | `pointer_read` | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 |  80 | `volume_attach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
 |  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
@@ -207,6 +207,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 152 | `fs_punch`     | `u32 fd`, `u64 offset`, `u64 len`       | `errno`       | —                       | yes     |
 | 153 | `fs_umask`     | `u32 mask`                              | `u64` (previous mask) | —               | no      |
 | 154 | `fs_access`    | `u32 dirfd`, `user_ptr?` (path), `len`, `u32 want`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | no |
+| 155 | `volume_read`  | `u64 volume`, `u64 lba`, `user_ptr` (out), `len` | `errno` | `CAP_FS_SERVE`          | no      |
+| 156 | `volume_write` | `u64 volume`, `u64 lba`, `user_ptr`, `len` | `errno`      | `CAP_FS_SERVE`          | no      |
+| 157 | `volume_ctl`   | `u64 volume`, `user_ptr` (`VolumeCtl`), `len`, `user_ptr` (reply), `len` | `u64` (bytes) | `CAP_FS_SERVE` | no |
+| 158 | `volume_serve` | `u64 volume`, `user_ptr` (`ServeFrame`), `len`, `user_ptr` (`ServeGrant` out), `len` | `u64` (bytes) | `CAP_FS_SERVE` | yes |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -227,6 +231,13 @@ storage, keeping the file's length, on a handle opened for writing, and is
 refused `NotSupported` where the format keeps no holes. Both are gated in the
 handler exactly as `fs_read` is, and they are what the copy engine
 (`lib/fscopy`) keeps a sparse file's holes through.
+
+`volume_read`, `volume_write`, `volume_ctl` and `volume_serve` (nos. 155–158)
+are a user-space filesystem driver's whole reach: whole blocks of the one
+volume its node's `HwResourceKind::Volume` grant names, and the offer of that
+volume to the kernel. The dispatcher checks `CAP_FS_SERVE`, the class
+capability of every such driver; the handler checks the grant. See
+[Serving a filesystem](../abi/fsserve.md).
 
 **Every path-taking call resolves its path one way.** A relative path starts
 at the directory its `dirfd` holds: a descriptor the caller holds on a
@@ -463,7 +474,10 @@ screen extent, so it accumulates and clamps displacements into the
 on-screen pointer position; a driver needs no display-geometry authority.
 A pointer-input driver holding `CAP_INPUT_INJECT` injects each decoded
 motion, button edge, or scroll tick for the seat its device belongs to
-(the desktop scrollbar consumes the scroll record); the kernel copies the
+(the desktop scrollbar consumes the scroll record), with `at_ns`, when its
+device reported it, or `POINTER_EDGE_UNTIMED` where the driver cannot say
+— the time the seat's chatter filter measures a button edge by, held to no
+later than the call; the kernel copies the
 record in
 through the validated boundary, decodes it fail-closed, and the seat
 registry routes it by who holds the seat — a held seat's record is queued
@@ -535,7 +549,8 @@ to its reads, writes, metadata and lock requests until it is closed, and never
 reaches what is attached under its old name later. `fs_close` releases the
 node's pin at once when its volume is free and otherwise leaves it to the
 write-back flusher; every other release — an exit, an unmap, a spawn unwind —
-leaves it to the flusher.
+leaves it to the flusher, or, on a volume a user-space server serves, to the
+next operation on that volume.
 
 **The descriptor decides the identity**, so every call operating a
 descriptor's contents is ungated at the dispatcher and applies the backing's
@@ -655,6 +670,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
 | `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_access`, `fs_chdir` (the path-taking calls), `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fd_grant`, and — enforced *in the handler* against the identity a node-backed descriptor acts as: the caller's own, or the one frozen into a conferred or granted descriptor — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `fs_lock`, `fs_lock_query`, `file_map` |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
+| `CAP_FS_SERVE`     | `volume_read`, `volume_write`, `volume_ctl`, `volume_serve` (each also needs the caller's grant on the volume it names) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
 | `CAP_SYSTEM_POWER` | `system_power`             |

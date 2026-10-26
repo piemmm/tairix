@@ -37,14 +37,16 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::time::Duration64;
 
-use crate::addr::{Ecn, IpAddr};
+use crate::addr::{zone_of, Ecn, IpAddr};
 use crate::tcp::conn::{OutSegment, Tcb, TcpConfig};
 use crate::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
 use crate::timeutil::{nanos, NEVER};
 
-/// The peer (remote) endpoint of a connection: address and port.
+/// The peer (remote) endpoint of a connection: address, port, and the link a
+/// link-local address is scoped to.
 ///
 /// The [`Tcb`] itself is address-agnostic (the caller folds the
 /// pseudo-header checksum), but a listener must demultiplex by peer, so the
@@ -55,6 +57,21 @@ pub struct Peer {
     pub addr: IpAddr,
     /// The remote port.
     pub port: u16,
+    /// The link the address is on when it is IPv6 link-local, so two hosts
+    /// sharing one on different links stay two peers: [`zone_of`].
+    pub link: Option<[u8; IF_NAME_LEN]>,
+}
+
+impl Peer {
+    /// The peer that sent from `addr`:`port` over `interface`.
+    #[must_use]
+    pub fn arrived(addr: IpAddr, port: u16, interface: [u8; IF_NAME_LEN]) -> Self {
+        Self {
+            addr,
+            port,
+            link: zone_of(addr, interface),
+        }
+    }
 }
 
 /// An accepted connection handed to the application by [`Listener::accept`]:
@@ -647,14 +664,18 @@ fn ip_octets(ip: IpAddr) -> [u8; 16] {
 }
 
 /// The connection-identity bytes the cookie MAC is computed over: both
-/// addresses and both ports. Distinct 4-tuples yield distinct tuples, so a
-/// cookie minted for one connection never validates for another.
-fn cookie_tuple(local: IpAddr, local_port: u16, peer: Peer) -> [u8; 36] {
-    let mut t = [0u8; 36];
+/// addresses, both ports, and the peer's link. Distinct peers yield distinct
+/// tuples, so a cookie minted for one connection never validates for
+/// another — nor on another link.
+fn cookie_tuple(local: IpAddr, local_port: u16, peer: Peer) -> [u8; 36 + IF_NAME_LEN] {
+    let mut t = [0u8; 36 + IF_NAME_LEN];
     t[..16].copy_from_slice(&ip_octets(local));
     t[16..32].copy_from_slice(&ip_octets(peer.addr));
     t[32..34].copy_from_slice(&local_port.to_be_bytes());
     t[34..36].copy_from_slice(&peer.port.to_be_bytes());
+    if let Some(link) = peer.link {
+        t[36..].copy_from_slice(&link);
+    }
     t
 }
 

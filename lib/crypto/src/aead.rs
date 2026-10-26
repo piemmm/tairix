@@ -3,10 +3,11 @@
 //! TAIRiX's own AEAD is ChaCha20-Poly1305 (RFC 8439), and it is what the
 //! unqualified [`seal`] and [`open`] below are: every first-party consumer
 //! that gets to choose — encrypted swap, ARXFS, the app-data vault, the
-//! realm session — uses it. AES-GCM is here for one reason only, and its
-//! entry points say so in their names: a foreign SSH peer may offer
-//! `aes{128,256}-gcm@openssh.com` and nothing else we accept. The two are
-//! not peers, and the naming is the distinction.
+//! realm session — uses it. AES-GCM and AES-CCM are here for one reason only,
+//! and their entry points say so in their names: a foreign protocol fixes
+//! them — SSH's `aes{128,256}-gcm@openssh.com`, and SMB 3's encryption, CCM
+//! for 3.0 and 3.0.2 and either for 3.1.1. They are not peers of the native
+//! AEAD, and the naming is the distinction.
 //!
 //! ChaCha20-Poly1305
 //! backs the kernel's encrypted-swap layer: any page of
@@ -34,10 +35,10 @@
 
 use core::fmt;
 
-use aes_gcm::{
-    Aes128Gcm as Aes128GcmCore, Aes256Gcm as Aes256GcmCore, Nonce as AesGcmNonceArray,
-    Tag as AesGcmTagArray,
-};
+use aes::{Aes128, Aes256};
+use aes_gcm::{Aes128Gcm as Aes128GcmCore, Aes256Gcm as Aes256GcmCore};
+use ccm::consts::{U11, U16};
+use ccm::Ccm;
 use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag};
 
@@ -127,7 +128,7 @@ pub fn open(
 
 /// Length, in bytes, of an AES-GCM nonce. RFC 5116 §5.1's 96-bit nonce is
 /// the only width AES-GCM accepts without an extra GHASH derivation step,
-/// and the one `aes*-gcm@openssh.com` (RFC 5647) uses.
+/// and the one `aes*-gcm@openssh.com` (RFC 5647) and SMB 3.1.1 use.
 pub const AES_GCM_NONCE_LEN: usize = 12;
 
 /// Length, in bytes, of an AES-GCM authentication tag.
@@ -139,20 +140,37 @@ pub type AesGcmNonce = [u8; AES_GCM_NONCE_LEN];
 /// An AES-GCM authentication tag as raw bytes.
 pub type AesGcmTag = [u8; AES_GCM_TAG_LEN];
 
+/// Length, in bytes, of an AES-CCM nonce as SMB 3 uses it (MS-SMB2 §2.2.41):
+/// eleven bytes, leaving a four-byte block counter.
+pub const AES_CCM_NONCE_LEN: usize = 11;
+
+/// Length, in bytes, of an AES-CCM authentication tag as SMB 3 uses it.
+pub const AES_CCM_TAG_LEN: usize = 16;
+
+/// An AES-CCM nonce as raw bytes.
+pub type AesCcmNonce = [u8; AES_CCM_NONCE_LEN];
+
+/// An AES-CCM authentication tag as raw bytes.
+pub type AesCcmTag = [u8; AES_CCM_TAG_LEN];
+
 /// Emit the key type, the keyed cipher, and the one-shot seal and open for
-/// one AES-GCM key size.
+/// one AES mode and key size.
 ///
-/// The two sizes differ only in the underlying key schedule, so the wrapper
-/// is written once rather than twice.
-macro_rules! aes_gcm_variant {
+/// The variants differ in the upstream cipher, the nonce and tag widths and
+/// what a rejected message leaves behind, so the wrapper is written once.
+macro_rules! aes_aead_variant {
     (
         $core:ty,
         $spec:literal,
         $key_len:ident = $width:literal,
         $key_ty:ident,
+        $nonce_ty:ty,
+        $tag_ty:ty,
         $cipher:ident,
         $seal:ident,
-        $open:ident
+        $open:ident,
+        reuse = $reuse:literal,
+        rejected = $rejected:literal
     ) => {
         #[doc = concat!("Length, in bytes, of an ", $spec, " key.")]
         pub const $key_len: usize = $width;
@@ -163,10 +181,9 @@ macro_rules! aes_gcm_variant {
         #[doc = concat!($spec, " with its key expanded once.")]
         ///
         /// For a caller sealing or opening many messages under one key — a
-        /// transport direction between rekeys — the AES key schedule and the
-        /// GHASH key are derived here rather than per message, which is most
-        /// of what a short message costs. The upstream cipher wipes both when
-        /// this is dropped.
+        /// transport direction between rekeys — the key schedule is derived
+        /// here rather than per message, which is most of what a short
+        /// message costs. The upstream cipher wipes it when this is dropped.
         pub struct $cipher {
             inner: $core,
         }
@@ -185,38 +202,31 @@ macro_rules! aes_gcm_variant {
             /// On return `buffer` holds the ciphertext and the returned tag
             /// authenticates both it and `aad`.
             ///
-            /// GCM fails catastrophically on `(key, nonce)` reuse — a repeat
-            /// leaks the GHASH authentication key and so the ability to forge
-            /// any message under that key. Nothing here generates nonces;
-            /// RFC 5647 gives SSH a fixed field plus a monotonic invocation
-            /// counter, and the caller owns that discipline.
+            #[doc = $reuse]
+            /// Nothing here generates nonces: the protocol's construction —
+            /// RFC 5647's counter for SSH, the transform header's for SMB 3 —
+            /// is the caller's discipline.
             ///
             /// # Errors
             ///
             /// Returns [`AeadError::Authentication`] if the upstream cipher
-            /// refuses the inputs, which for AES-GCM means a message past its
-            /// `~64 GiB` per-nonce limit.
+            /// refuses the inputs, which means a message past the mode's
+            /// per-nonce limit.
             pub fn seal(
                 &self,
-                nonce: &AesGcmNonce,
+                nonce: &$nonce_ty,
                 aad: &[u8],
                 buffer: &mut [u8],
-            ) -> Result<AesGcmTag, AeadError> {
-                let tag = self
-                    .inner
-                    .encrypt_inout_detached(&AesGcmNonceArray::from(*nonce), aad, buffer.into())
-                    .map_err(|_| AeadError::Authentication)?;
-                let mut out = [0u8; AES_GCM_TAG_LEN];
-                out.copy_from_slice(tag.as_slice());
-                Ok(out)
+            ) -> Result<$tag_ty, AeadError> {
+                self.inner
+                    .encrypt_inout_detached(&(*nonce).into(), aad, buffer.into())
+                    .map(Into::into)
+                    .map_err(|_| AeadError::Authentication)
             }
 
             /// Open `buffer` in place under `nonce`, `aad`, and `tag`.
             ///
-            /// The tag is checked *before* anything is decrypted, so a
-            /// rejected message leaves `buffer` holding the ciphertext it
-            /// arrived as and never the plaintext — the failure
-            /// CVE-2023-42811 was.
+            #[doc = $rejected]
             ///
             /// # Errors
             ///
@@ -224,18 +234,13 @@ macro_rules! aes_gcm_variant {
             /// verify.
             pub fn open(
                 &self,
-                nonce: &AesGcmNonce,
+                nonce: &$nonce_ty,
                 aad: &[u8],
                 buffer: &mut [u8],
-                tag: &AesGcmTag,
+                tag: &$tag_ty,
             ) -> Result<(), AeadError> {
                 self.inner
-                    .decrypt_inout_detached(
-                        &AesGcmNonceArray::from(*nonce),
-                        aad,
-                        buffer.into(),
-                        &AesGcmTagArray::from(*tag),
-                    )
+                    .decrypt_inout_detached(&(*nonce).into(), aad, buffer.into(), &(*tag).into())
                     .map_err(|_| AeadError::Authentication)
             }
         }
@@ -255,10 +260,10 @@ macro_rules! aes_gcm_variant {
         #[doc = concat!("As [`", stringify!($cipher), "::seal`].")]
         pub fn $seal(
             key: &$key_ty,
-            nonce: &AesGcmNonce,
+            nonce: &$nonce_ty,
             aad: &[u8],
             buffer: &mut [u8],
-        ) -> Result<AesGcmTag, AeadError> {
+        ) -> Result<$tag_ty, AeadError> {
             $cipher::new(key).seal(nonce, aad, buffer)
         }
 
@@ -270,17 +275,63 @@ macro_rules! aes_gcm_variant {
         #[doc = concat!("As [`", stringify!($cipher), "::open`].")]
         pub fn $open(
             key: &$key_ty,
-            nonce: &AesGcmNonce,
+            nonce: &$nonce_ty,
             aad: &[u8],
             buffer: &mut [u8],
-            tag: &AesGcmTag,
+            tag: &$tag_ty,
         ) -> Result<(), AeadError> {
             $cipher::new(key).open(nonce, aad, buffer, tag)
         }
     };
 }
 
-aes_gcm_variant!(
+/// One AES-GCM key size.
+macro_rules! gcm_variant {
+    ($core:ty, $spec:literal, $key_len:ident = $width:literal, $key_ty:ident, $cipher:ident, $seal:ident, $open:ident) => {
+        aes_aead_variant!(
+            $core,
+            $spec,
+            $key_len = $width,
+            $key_ty,
+            AesGcmNonce,
+            AesGcmTag,
+            $cipher,
+            $seal,
+            $open,
+            reuse = "GCM fails catastrophically on `(key, nonce)` reuse: a repeat \
+                     leaks the GHASH authentication key and so the ability to forge \
+                     any message under that key.",
+            rejected = "The tag is checked *before* anything is decrypted, so a \
+                        rejected message leaves `buffer` holding the ciphertext it \
+                        arrived as and never the plaintext — the failure \
+                        CVE-2023-42811 was."
+        );
+    };
+}
+
+/// One AES-CCM key size, with SMB 3's nonce and tag widths.
+macro_rules! ccm_variant {
+    ($core:ty, $spec:literal, $key_len:ident = $width:literal, $key_ty:ident, $cipher:ident, $seal:ident, $open:ident) => {
+        aes_aead_variant!(
+            $core,
+            $spec,
+            $key_len = $width,
+            $key_ty,
+            AesCcmNonce,
+            AesCcmTag,
+            $cipher,
+            $seal,
+            $open,
+            reuse = "CCM's counter keystream repeats under a reused `(key, nonce)`, \
+                     so a repeat discloses the XOR of the two plaintexts.",
+            rejected = "CCM authenticates the plaintext, so the message is decrypted \
+                        before the tag is checked; a rejected message's `buffer` is \
+                        zeroed rather than left holding unauthenticated plaintext."
+        );
+    };
+}
+
+gcm_variant!(
     Aes128GcmCore,
     "AES-128-GCM",
     AES128_GCM_KEY_LEN = 16,
@@ -289,7 +340,7 @@ aes_gcm_variant!(
     aes128gcm_seal,
     aes128gcm_open
 );
-aes_gcm_variant!(
+gcm_variant!(
     Aes256GcmCore,
     "AES-256-GCM",
     AES256_GCM_KEY_LEN = 32,
@@ -297,6 +348,24 @@ aes_gcm_variant!(
     Aes256Gcm,
     aes256gcm_seal,
     aes256gcm_open
+);
+ccm_variant!(
+    Ccm<Aes128, U16, U11>,
+    "AES-128-CCM",
+    AES128_CCM_KEY_LEN = 16,
+    Aes128CcmKey,
+    Aes128Ccm,
+    aes128ccm_seal,
+    aes128ccm_open
+);
+ccm_variant!(
+    Ccm<Aes256, U16, U11>,
+    "AES-256-CCM",
+    AES256_CCM_KEY_LEN = 32,
+    Aes256CcmKey,
+    Aes256Ccm,
+    aes256ccm_seal,
+    aes256ccm_open
 );
 
 #[cfg(test)]

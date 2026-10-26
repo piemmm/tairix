@@ -388,10 +388,14 @@ registry.
   system line.
 * **Terminal-injection defence.** Every attacker-controlled string — the
   message, component, requested source, and string `data.*` values — is passed
-  through an escaping writer that renders any control character (C0, `DEL`, or
-  C1) as a visible `\xNN` and doubles a backslash, so caller text can never
-  move the cursor, change colour, clear the screen, forge a prefix, or split
-  itself across lines. The emitted line is control-byte-free regardless of
+  through an escaping writer that renders every character a faithful
+  rendering escapes (`tairix_visible::Faithful`: the C0 and C1 controls,
+  `DEL`, the bidirectional controls and the other default-ignorable
+  characters, and a mark stacked or doubled past telling apart) as a visible
+  escape — `\xNN` below U+0100, `\u{N}` above — and doubles a
+  backslash, so caller text can never move the cursor, change colour, clear
+  the screen, forge a prefix, split itself across lines, or reorder what a
+  viewer shows. The emitted line is control-byte-free regardless of
   input (asserted by the `fuzz_render` harness). Field names obey the
   `FieldName` grammar and non-string values render as control-free text, so
   both pass through unchanged.

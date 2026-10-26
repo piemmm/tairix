@@ -1,7 +1,11 @@
 use alloc::borrow::Cow;
+use core::fmt::Write as _;
 use core::mem::size_of;
 
-use super::{parse, parse_peak_bytes, Content, Element, XmlError, MAX_DEPTH, MAX_ELEMENTS};
+use super::{
+    parse, parse_peak_bytes, Content, Element, Scope, XmlError, MAX_ATTRIBUTES, MAX_DEPTH,
+    MAX_ELEMENTS,
+};
 
 const SPACE: &str = "urn:example";
 
@@ -32,6 +36,105 @@ fn a_prefix_bound_to_the_readers_namespace_is_dropped_and_any_other_kept() {
     assert_eq!(root.name, "a");
     let names: alloc::vec::Vec<&str> = root.children().map(|child| child.name).collect();
     assert_eq!(names, ["b", "y:c"]);
+}
+
+#[test]
+fn every_element_knows_its_namespace() {
+    let root = parse(
+        concat!(
+            r#"<e:Envelope xmlns:e="urn:env" xmlns="urn:default">"#,
+            r#"<Body><w:Hello xmlns:w="urn:wsd"/><plain xmlns=""/><u:stray/></Body>"#,
+            r#"</e:Envelope>"#,
+        ),
+        "",
+    )
+    .expect("a document");
+    assert!(root.is("urn:env", "Envelope"));
+    assert_eq!(
+        root.name, "e:Envelope",
+        "a reader naming no namespace keeps the prefix"
+    );
+    let body = root.children().next().expect("a body");
+    assert!(body.is("urn:default", "Body"), "the default namespace");
+    let names: alloc::vec::Vec<_> = body
+        .children()
+        .map(|child| (child.namespace, child.local_name()))
+        .collect();
+    assert_eq!(
+        names,
+        [(Some("urn:wsd"), "Hello"), (None, "plain"), (None, "stray"),],
+        "an empty default undeclares it, and an unbound prefix is in no namespace"
+    );
+    let referenced = parse(r#"<x:a xmlns:x="urn:&#120;"/>"#, "").expect("a document");
+    assert_eq!(
+        referenced.namespace, None,
+        "a referenced namespace matches nothing"
+    );
+}
+
+#[test]
+fn a_qualified_name_in_text_resolves_where_it_stands() {
+    let root = parse(
+        concat!(
+            r#"<a xmlns:p="urn:outer" xmlns="urn:default">"#,
+            r#"<b xmlns:p="urn:inner"><t>p:Device Computer q:Other :bad</t></b>"#,
+            r#"</a>"#,
+        ),
+        "",
+    )
+    .expect("a document");
+    let outer = Scope::root(&root);
+    let b = root.children().next().expect("b");
+    let at_b = outer.enter(b);
+    let t = b.children().next().expect("t");
+    let at_t = at_b.enter(t);
+    let text = t.text();
+    let mut names = text.split_whitespace().map(|qname| at_t.resolve(qname));
+    assert_eq!(
+        names.next(),
+        Some(Some((Some("urn:inner"), "Device"))),
+        "shadowed"
+    );
+    assert_eq!(names.next(), Some(Some((Some("urn:default"), "Computer"))));
+    assert_eq!(names.next(), Some(None), "an unbound prefix");
+    assert_eq!(names.next(), Some(None), "an empty prefix");
+    assert_eq!(
+        outer.resolve("p:Device"),
+        Some((Some("urn:outer"), "Device"))
+    );
+    assert_eq!(
+        at_t.namespace("xml"),
+        Some("http://www.w3.org/XML/1998/namespace")
+    );
+    assert_eq!(at_t.element().local_name(), "t");
+}
+
+#[test]
+fn an_attribute_given_twice_or_too_many_is_refused() {
+    assert_eq!(
+        parse(r#"<a b="1" b="2"/>"#, SPACE),
+        Err(XmlError::Malformed)
+    );
+    assert_eq!(
+        parse(r#"<a xmlns:p="urn:x" xmlns:p="urn:y"/>"#, SPACE),
+        Err(XmlError::Malformed),
+        "a prefix bound twice on one element"
+    );
+    assert_eq!(parse(r#"<a :b="1"/>"#, SPACE), Err(XmlError::Malformed));
+    assert_eq!(parse("<:a/>", SPACE), Err(XmlError::Malformed));
+    assert_eq!(parse("<a:/>", SPACE), Err(XmlError::Malformed));
+    let attributes = |count: usize| -> alloc::string::String {
+        let mut names = alloc::string::String::new();
+        for i in 0..count {
+            let _ = write!(names, "c{i}=\"\" ");
+        }
+        alloc::format!("<a {names}/>")
+    };
+    assert!(parse(&attributes(MAX_ATTRIBUTES), SPACE).is_ok());
+    assert_eq!(
+        parse(&attributes(MAX_ATTRIBUTES + 1), SPACE),
+        Err(XmlError::TooComplex)
+    );
 }
 
 #[test]
@@ -83,7 +186,11 @@ fn held(element: &Element<'_>) -> u64 {
 fn a_parse_holds_no_more_than_its_length_bounds() {
     let deep = alloc::format!("{}{}", "<a>".repeat(MAX_DEPTH), "</a>".repeat(MAX_DEPTH));
     let wide = alloc::format!("<a>{}</a>", "<b/>".repeat(MAX_ELEMENTS - 1));
-    let attributed = alloc::format!("<a {}/>", "b=\"\" ".repeat(512));
+    let mut full = alloc::string::String::new();
+    for name in ('\u{4e00}'..).take(MAX_ATTRIBUTES) {
+        let _ = write!(full, "{name}=\"\" ");
+    }
+    let attributed = alloc::format!("<a>{}</a>", alloc::format!("<b {full}/>").repeat(4));
     let decoded = alloc::format!("<a>{}</a>", "&amp;x<b/>".repeat(256));
     let runs = alloc::format!("<a>{}</a>", "x<b/>".repeat(1024));
     for document in [deep, wide, attributed, decoded, runs] {

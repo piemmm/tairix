@@ -338,8 +338,11 @@ small for one group, a zero count or the nil `uuid` is refused with
 ## Capabilities
 
 Loading requires `CAP_DRV_LOAD`; every other call is reached through the
-handle the host minted at load. The kernel's runtime volume service links
-the driver and serves it in-kernel today.
+handle the host minted at load. On removable media the driver is served from
+user space ([Volumes served from user space](./served.md)): its `Run` binary binds `tairix,volume-ext4`, runs with
+`CAP_FS_SERVE` and `CAP_LOG_EMIT`, opens the volume read-only when the kernel
+says so and otherwise writable with its write-back bounded, and names the
+generation the mount table shows.
 
 ## Tests
 

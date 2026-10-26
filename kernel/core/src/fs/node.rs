@@ -8,9 +8,11 @@
 //! held included, so the drop only queues the release on the registration's
 //! [`VolumeNodes`], in the [`ReleaseSlot`] reserved before the pin was taken.
 //! A close tells the driver when its lock is free, and the write-back flusher
-//! otherwise ([`VolumeNodes::reap`]). The queue's spin lock is a leaf: only
-//! the kernel heap's own lock is taken beneath it, by an admission growing
-//! the reservation.
+//! otherwise ([`VolumeNodes::reap`]) — save a registration
+//! [reaped inline](VolumeNodes::reaped_inline), whose driver answers from a
+//! server the flusher must never wait on: the next operation on its volume
+//! tells it. The queue's spin lock is a leaf: only the kernel heap's own lock
+//! is taken beneath it, by an admission growing the reservation.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -20,7 +22,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
-use tairix_abi::CapabilityQuery;
+use tairix_abi::{CapabilityQuery, DriverError};
 use tairix_caps::CapabilitySet;
 use tairix_sync::SpinLock;
 
@@ -34,11 +36,14 @@ use crate::sleeplock::{SleepGuard, SleepLock};
 /// was registered under may be. Detach, retraction, recovery and a clean
 /// surprise removal retire a registration, and a descriptor of a retired one
 /// answers [`VfsError::Stale`]; the stand-in for a volume that vanished with
-/// work unpublished takes the registration over instead.
+/// work unpublished, or whose server was lost, takes the registration over
+/// instead.
 pub struct VolumeNodes {
     instance: u64,
     retired: AtomicBool,
-    /// A release was queued that the write-back flusher has not reaped.
+    /// The operations on the volume reap its releases, never the flusher.
+    inline: bool,
+    /// A release was queued that has not been reaped.
     reap_due: AtomicBool,
     queue: SpinLock<ReleaseQueue>,
 }
@@ -54,18 +59,40 @@ struct ReleaseQueue {
 }
 
 impl VolumeNodes {
-    /// A registration numbered `instance`, holding no pin.
+    /// A registration numbered `instance`, holding no pin, whose releases the
+    /// write-back flusher reaps.
     #[must_use]
     pub fn new(instance: u64) -> Self {
+        Self::with_reaping(instance, false)
+    }
+
+    /// A registration numbered `instance`, holding no pin, whose releases the
+    /// operations on the volume reap: its driver answers from a user-space
+    /// server, which the write-back flusher, serving every volume, must never
+    /// wait on.
+    #[must_use]
+    pub fn reaped_inline(instance: u64) -> Self {
+        Self::with_reaping(instance, true)
+    }
+
+    fn with_reaping(instance: u64, inline: bool) -> Self {
         Self {
             instance,
             retired: AtomicBool::new(false),
+            inline,
             reap_due: AtomicBool::new(false),
             queue: SpinLock::new(ReleaseQueue {
                 outstanding: 0,
                 pending: VecDeque::new(),
             }),
         }
+    }
+
+    /// Whether the operations on the volume reap its releases, rather than
+    /// the write-back flusher.
+    #[must_use]
+    pub fn reaps_inline(&self) -> bool {
+        self.inline
     }
 
     /// The registration's number.
@@ -144,7 +171,10 @@ impl VolumeNodes {
     /// the driver is never called under the queue's lock.
     ///
     /// A retired registration's releases are dropped: its driver let every
-    /// pin go before it was retired, or is gone.
+    /// pin go before it was retired, or is gone. One reaped inline whose
+    /// driver answers [`DriverError::Busy`] — a server that has not answered
+    /// an earlier call on its holds, so the release was never sent — keeps
+    /// it, first in line, for the next operation's reap.
     pub fn reap<F: FilesystemRead + ?Sized>(&self, fs: &mut F) {
         if self.is_retired() {
             self.queue.lock().pending.clear();
@@ -155,22 +185,40 @@ impl VolumeNodes {
             let Some(pinned) = next else {
                 return;
             };
-            // The hold goes whatever this answers; a node the driver failed
-            // to free is left to the format's own checker.
-            let _ = fs.unpin(pinned);
+            match fs.unpin(pinned) {
+                // Back in the slot it was just taken from, so nothing allocates.
+                Err(DriverError::Busy) if self.inline => {
+                    self.queue.lock().pending.push_front(pinned);
+                    self.reap_due.store(true, Ordering::Release);
+                    return;
+                }
+                // The hold goes whatever else this answers; a node the driver
+                // failed to free is left to the format's own checker.
+                _ => {}
+            }
         }
     }
 
-    /// Queue `pinned`'s release, answering whether it made the registration
-    /// due: only then need the write-back flusher be woken, so a burst of
-    /// releases between two of its passes wakes it once.
+    /// Before an operation on a volume reaped inline, `fs` locked by the
+    /// caller: tell it of the releases queued since the last.
+    pub fn reap_inline<F: FilesystemRead + ?Sized>(&self, fs: &mut F) {
+        // A load first: every operation asks, and almost none finds one due.
+        if self.inline && self.is_reap_due() && self.take_reap_due() {
+            self.reap(fs);
+        }
+    }
+
+    /// Queue `pinned`'s release, answering whether the write-back flusher
+    /// must be woken for it: only when it made a registration the flusher
+    /// reaps due, so a burst of releases between two of its passes wakes it
+    /// once.
     fn queue_release(&self, pinned: NodeId) -> bool {
         {
             let mut queue = self.queue.lock();
             queue.outstanding -= 1;
             queue.pending.push_back(pinned);
         }
-        !self.reap_due.swap(true, Ordering::AcqRel)
+        !self.reap_due.swap(true, Ordering::AcqRel) && !self.inline
     }
 }
 
@@ -249,12 +297,13 @@ impl<F: ?Sized> DerefMut for DriverGuard<'_, F> {
     }
 }
 
-/// Wakes the write-back flusher when a hold ends with releases still waiting.
+/// Wakes the write-back flusher when a hold ends with releases it reaps still
+/// waiting.
 struct ReapReport<'a>(&'a VolumeNodes);
 
 impl Drop for ReapReport<'_> {
     fn drop(&mut self) {
-        if self.0.is_reap_due() {
+        if self.0.is_reap_due() && !self.0.inline {
             crate::waitq::request_writeback_reap();
         }
     }

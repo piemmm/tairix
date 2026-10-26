@@ -128,7 +128,7 @@ pub fn format_hex_u64(value: u64, buf: &mut [u8; 16]) -> &str {
         // `(value >> shift) & 0xF` is in `0..=15`; cast to `u8` is lossless.
         #[allow(clippy::cast_possible_truncation)]
         let nibble = ((value >> ((15 - i) * 4)) & 0xF) as u8;
-        *slot = hex_nibble(nibble);
+        *slot = crate::hex::digit(nibble);
     }
     core::str::from_utf8(&buf[..]).unwrap_or("?")
 }
@@ -201,23 +201,9 @@ pub fn format_hex_bytes<'b>(bytes: &[u8], buf: &'b mut [u8]) -> &'b str {
     let rendered = bytes.len().min(buf.len() / 2);
     let (slots, _odd_trailing_byte) = buf.as_chunks_mut::<2>();
     for (byte, slot) in bytes.iter().zip(slots.iter_mut()) {
-        slot[0] = hex_nibble(byte >> 4);
-        slot[1] = hex_nibble(byte & 0xF);
+        *slot = crate::hex::digits(*byte);
     }
     core::str::from_utf8(&buf[..rendered * 2]).unwrap_or("?")
-}
-
-/// One nibble as its lowercase hex digit — the single hex spelling both
-/// renderers above share.
-///
-/// A value above `0xF` cannot reach here from a masked shift; answering `?`
-/// rather than indexing past the digits keeps the function total.
-const fn hex_nibble(nibble: u8) -> u8 {
-    match nibble {
-        0..=9 => b'0' + nibble,
-        0xA..=0xF => b'a' + (nibble - 0xA),
-        _ => b'?',
-    }
 }
 
 #[cfg(test)]

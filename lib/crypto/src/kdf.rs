@@ -18,13 +18,22 @@
 //! is a standard *construction* over the same audited HMAC primitive — the
 //! same shape as `tairix-rng`'s HMAC-DRBG — never a hand-rolled primitive. Verification goes through [`crate::ct_eq`]
 //! ([`pbkdf2_sha256_verify`]) so a stored hash comparison cannot leak through
-//! timing.
+//! timing. PBKDF2-HMAC-SHA1 ([`pbkdf2_sha1`]) is the same construction for one
+//! foreign format: the RFC 3962 Kerberos string-to-key.
+//!
+//! The NIST SP 800-108 KDF in counter mode ([`kdf_counter_sha256`],
+//! [`kdf_counter_sha384`]) is how SMB 3 derives its signing and encryption
+//! keys from a session key (MS-SMB2 §3.1.4.2) and how the RFC 8009 Kerberos
+//! enctypes derive theirs.
 
 use core::fmt;
 use core::num::NonZeroU32;
 
-use hmac::{Hmac, KeyInit as _, Mac};
-use sha2::Sha256;
+use hmac::digest::OutputSizeUser;
+use hmac::{EagerHash, Hmac, KeyInit as _, Mac};
+use sha1::Sha1;
+use sha2::{Sha256, Sha384};
+use zeroize::Zeroize;
 
 use crate::constant_time::ct_eq;
 use crate::mac::{hmac_sha256, HmacSha256Key};
@@ -59,36 +68,162 @@ pub const PASSWORD_HASH_LEN: usize = 32;
 /// A PBKDF2-HMAC-SHA256 password hash as raw bytes.
 pub type PasswordHash = [u8; PASSWORD_HASH_LEN];
 
+/// A derivation was asked for an output length it does not define: empty,
+/// or more blocks than its 32-bit block counter can number.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct KdfLengthError(());
+
+impl fmt::Display for KdfLengthError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("key derivation output length out of range")
+    }
+}
+
+/// The keyed PRF both derivations below iterate: HMAC over `D` under `key`.
+fn prf<D: EagerHash>(key: &[u8]) -> Hmac<D> {
+    // SAFETY-INVARIANT: HMAC accepts a key of any length, so construction
+    // from an arbitrary slice can never return `InvalidLength`.
+    Hmac::<D>::new_from_slice(key).expect("HMAC accepts any key length")
+}
+
+/// Fill `chunk` with PBKDF2 block `index` (RFC 8018 §5.2), truncated:
+/// `T_i = U_1 ⊕ … ⊕ U_c` with `U_1 = HMAC(password, salt ‖ INT(i))` and
+/// `U_j = HMAC(password, U_{j-1})`, `key` being HMAC keyed by the password.
+fn pbkdf2_block<D: EagerHash>(
+    key: &Hmac<D>,
+    salt: &[u8],
+    index: u32,
+    iterations: NonZeroU32,
+    chunk: &mut [u8],
+) {
+    let mut mac = key.clone();
+    mac.update(salt);
+    mac.update(&index.to_be_bytes());
+    let mut u = mac.finalize().into_bytes();
+    let mut block = u.clone();
+    for _ in 1..iterations.get() {
+        let mut mac = key.clone();
+        mac.update(&u);
+        u.zeroize();
+        u = mac.finalize().into_bytes();
+        for (acc, byte) in block.iter_mut().zip(u.iter()) {
+            *acc ^= byte;
+        }
+    }
+    chunk.copy_from_slice(&block[..chunk.len()]);
+    u.zeroize();
+    block.zeroize();
+}
+
+/// Fill `out` with PBKDF2 over HMAC-`D`: `T_1 ‖ T_2 ‖ …` truncated to `out`.
+fn pbkdf2<D: EagerHash>(
+    password: &[u8],
+    salt: &[u8],
+    iterations: NonZeroU32,
+    out: &mut [u8],
+) -> Result<(), KdfLengthError> {
+    let width = <Hmac<D> as OutputSizeUser>::output_size();
+    if out.is_empty() || u32::try_from(out.len().div_ceil(width)).is_err() {
+        return Err(KdfLengthError(()));
+    }
+    let key = prf::<D>(password);
+    for (index, chunk) in (1u32..).zip(out.chunks_mut(width)) {
+        pbkdf2_block(&key, salt, index, iterations, chunk);
+    }
+    Ok(())
+}
+
 /// Derive a [`PasswordHash`] from `password` and `salt` with `iterations`
 /// rounds of PBKDF2-HMAC-SHA256 (RFC 8018 §5.2).
 ///
 /// The output length equals the HMAC output, so exactly one PBKDF2 block is
-/// computed: `U_1 = HMAC(password, salt ‖ INT(1))`, `U_i = HMAC(password,
-/// U_{i-1})`, and the hash is the XOR of all `U_i`. `iterations` is
-/// [`NonZeroU32`] because zero rounds is not a defined PBKDF2 input; the
-/// type, not a runtime check, rules it out. Callers choose the cost; the
-/// users-database format pins its own accepted range.
+/// computed. `iterations` is [`NonZeroU32`] because zero rounds is not a
+/// defined PBKDF2 input; the type, not a runtime check, rules it out. Callers
+/// choose the cost; the users-database format pins its own accepted range.
 #[must_use]
 pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: NonZeroU32) -> PasswordHash {
-    // SAFETY-INVARIANT: HMAC accepts a key of any length, so construction
-    // from an arbitrary password slice can never return `InvalidLength`.
-    let prf = Hmac::<Sha256>::new_from_slice(password).expect("HMAC accepts any key length");
-
-    let mut mac = prf.clone();
-    mac.update(salt);
-    mac.update(&1u32.to_be_bytes());
-    let mut block: PasswordHash = mac.finalize().into_bytes().into();
-
-    let mut out = block;
-    for _ in 1..iterations.get() {
-        let mut mac = prf.clone();
-        mac.update(&block);
-        block = mac.finalize().into_bytes().into();
-        for (acc, byte) in out.iter_mut().zip(block.iter()) {
-            *acc ^= byte;
-        }
-    }
+    let mut out = [0u8; PASSWORD_HASH_LEN];
+    pbkdf2_block(&prf::<Sha256>(password), salt, 1, iterations, &mut out);
     out
+}
+
+/// Fill `out` with PBKDF2-HMAC-SHA1 of `password` under `salt` and
+/// `iterations` (RFC 8018 §5.2), the RFC 3962 Kerberos string-to-key's
+/// first step.
+///
+/// # Errors
+///
+/// [`KdfLengthError`] if `out` is empty or longer than PBKDF2 defines.
+pub fn pbkdf2_sha1(
+    password: &[u8],
+    salt: &[u8],
+    iterations: NonZeroU32,
+    out: &mut [u8],
+) -> Result<(), KdfLengthError> {
+    pbkdf2::<Sha1>(password, salt, iterations, out)
+}
+
+/// Fill `out` with the NIST SP 800-108 counter-mode KDF over HMAC-`D`:
+/// block `i` is `HMAC(key, [i]₃₂ ‖ label ‖ 0x00 ‖ context ‖ [L]₃₂)`, where
+/// `L` is `out`'s length in bits.
+fn kdf_counter<D: EagerHash>(
+    key: &[u8],
+    label: &[u8],
+    context: &[u8],
+    out: &mut [u8],
+) -> Result<(), KdfLengthError> {
+    let bits = out
+        .len()
+        .checked_mul(8)
+        .and_then(|bits| u32::try_from(bits).ok())
+        .filter(|&bits| bits > 0)
+        .ok_or(KdfLengthError(()))?;
+    let key = prf::<D>(key);
+    let width = <Hmac<D> as OutputSizeUser>::output_size();
+    for (index, chunk) in (1u32..).zip(out.chunks_mut(width)) {
+        let mut mac = key.clone();
+        mac.update(&index.to_be_bytes());
+        mac.update(label);
+        mac.update(&[0]);
+        mac.update(context);
+        mac.update(&bits.to_be_bytes());
+        let mut block = mac.finalize().into_bytes();
+        chunk.copy_from_slice(&block[..chunk.len()]);
+        block.zeroize();
+    }
+    Ok(())
+}
+
+/// Fill `out` with the SP 800-108 counter-mode KDF over HMAC-SHA256 —
+/// MS-SMB2 §3.1.4.2's key derivation and RFC 8009's KDF-HMAC-SHA2 for
+/// `aes128-cts-hmac-sha256-128`.
+///
+/// # Errors
+///
+/// [`KdfLengthError`] if `out` is empty or its length in bits overflows
+/// the 32-bit `L` field.
+pub fn kdf_counter_sha256(
+    key: &[u8],
+    label: &[u8],
+    context: &[u8],
+    out: &mut [u8],
+) -> Result<(), KdfLengthError> {
+    kdf_counter::<Sha256>(key, label, context, out)
+}
+
+/// Fill `out` with the SP 800-108 counter-mode KDF over HMAC-SHA384 —
+/// RFC 8009's KDF-HMAC-SHA2 for `aes256-cts-hmac-sha384-192`.
+///
+/// # Errors
+///
+/// As [`kdf_counter_sha256`].
+pub fn kdf_counter_sha384(
+    key: &[u8],
+    label: &[u8],
+    context: &[u8],
+    out: &mut [u8],
+) -> Result<(), KdfLengthError> {
+    kdf_counter::<Sha384>(key, label, context, out)
 }
 
 /// Verify that `expected` is the PBKDF2-HMAC-SHA256 hash of `password` under

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-visible"
-description = "TAIRiX visible text: the one rule for the characters that draw nothing yet can hide, reorder or break the text around them, and text shown with each replaced by U+FFFD. no_std, links no allocator, so the boot console can hold every glyph to it."
+description = "TAIRiX visible text: the one rule for showing text from elsewhere so what is drawn is what is there — each character that draws nothing yet can hide, reorder or break the text around it replaced by U+FFFD, and each combining sequence held to UTS #39's mark limits. no_std, links no allocator, so the boot console can hold every glyph to it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The character properties the rule is read from, generated from the pinned
+# Unicode Character Database: which characters hide, which are nonspacing
+# marks, and the UTS #39 mark-sequence check. Allocation-free, as this crate is.
+tairix-unicode = { path = "../unicode", version = "=0.0.0" }

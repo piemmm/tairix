@@ -32,15 +32,16 @@ public `tairix_abi::blkio` protocol.
    spelling a reserved name, takes `_<fingerprint>` of the volume's own
    identity, lengthened while taken. A label never yields `_`, so it cannot
    spell another volume's generated name.
-4. Asks the kernel to attach and publish each volume (the
-   `CAP_FS_MOUNT`-gated, audited `volume_attach` syscall). The kernel
-   re-validates the caller's grants, the extent, and the name, opens the
-   filesystem itself, mounts under `/Storage/<name>`
-   (`noexec`, `ro` per the device), and publishes the
-   durable `id::` root.
-5. Exits `0` — publication is a run-to-completion job; the kernel-held
-   mount outlives the instance, and a re-plug re-discovers the node and
-   reloads the driver afresh.
+4. Asks the kernel to attach each volume (the `CAP_FS_MOUNT`-gated, audited
+   `volume_attach` syscall). The kernel re-validates the caller's grants, the
+   extent, and the name, recognises the volume itself, and publishes a volume
+   node under this driver's node; the format's user-space driver serves it,
+   and the kernel mounts it under `/Storage/<name>` (`noexec`, `ro` per the
+   device) and publishes the durable `id::` root
+   (`docs/src/filesystem/served.md`).
+5. Exits `0` — attaching is a run-to-completion job; the kernel-held volume
+   outlives the instance, and a re-plug re-discovers the node and reloads the
+   driver afresh.
 
 ## Required capabilities
 
@@ -54,12 +55,12 @@ republish this device's transport and nothing else.
 
 ## Limitations
 
-- Removal is not handled here: surprise-removal state, retained dirty
-  data, force-unmount, and verified re-insert are the staged D4 work
-  (`plans/DEVICES.md` §2.5). A cleanly detached volume is withdrawn
-  through `volume_detach` by that machinery, not by this driver.
-- Only the kernel-attachable filesystems (ARXFS / ext4 / FAT32) are
-  recognised; anything else is left untouched and logged.
+- Removal is not handled here: surprise removal, retained dirty data,
+  force-unmount, and verified re-insert are the kernel's
+  (`plans/DEVICES.md` D4), and a detach is `volume_detach`'s.
+- Only the formats a served driver ships for — ARXFS, ext2/3/4, FAT32,
+  ADFS, ISO 9660 and UDF — are attached; anything else is left untouched and
+  logged.
 - The probe is read-only by construction (`write_blocks` refuses), so a
   hostile or corrupt medium can never be mutated by probing it.
 

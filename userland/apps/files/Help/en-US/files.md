@@ -21,11 +21,24 @@ unreadable directory is refused, never guessed at.
 
 The desktop starts the browser for you and keeps it on the icon bar: its
 slot's menu lists your own places and whatever is mounted, and choosing one
-opens a window there; *Settings…* comes last. A click on the slot opens one
-where the settings choose. Asking for a folder that already has a window
-brings that window to the front rather than opening another. That copy has
-no *Quit* row — it is part of the desktop, and closing its windows simply
-puts it away.
+opens a window there; *Network* and *Settings…* come last. A click on the
+slot opens one where the settings choose. Asking for a folder that already
+has a window brings that window to the front rather than opening another.
+That copy has no *Quit* row — it is part of the desktop, and closing its
+windows simply puts it away.
+
+*Network*, on the slot's menu just above *Settings…*, opens a window onto
+the computers on the local network that share files. Each is listed with its
+name, the address it is reached at, its workgroup or domain, and what it is,
+and the list fills in as computers answer. The network is looked through
+only while a window shows it. A computer that has stopped answering is
+greyed until it is forgotten; a name that mixes alphabets the way an
+imitation of another name needs wears a warning sign in place of its
+picture; and when one computer offers more than a few entries, the rest are
+counted in a row of their own rather than crowding out the others. Names on
+the network are chosen by whoever runs each computer, so a name is never
+proof of which computer you are looking at. Connecting to a computer's
+shares is not available on this system, and opening one says so.
 
 Run by name from a shell (or opened on a folder from the desktop) it is an
 ordinary application instead: one window, and it ends when you close it.

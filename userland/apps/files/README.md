@@ -295,13 +295,31 @@ bands nothing — no timer, no poll. Dropping the pipeline tears the cache
 down, overwriting the artwork first, so the pixels go back on a window
 close and a fail-loud exit alike.
 
+## The Network view
+
+The slot menu's *Network* row, above *Settings…*, opens a window on the
+`lib/browse` network location (`plans/ZEROCONF.md` Z9): the storage
+endpoints the `lib/discovery` catalogue lists, drawn by the same renderer as
+any folder. The `netbrowse` module (host-tested) decides when the reader is
+asked to collect from or close the discovery session: it is open only while a
+window shows the network or is on its way there, the service's doorbell is a
+member of the event wait-set, and at most one collect is out at a time. Every
+call to `discoveryd` is made on the reader thread; where the kernel grants no
+reader thread they are made on the loop, as every read then is. Opening
+an endpoint states that connecting to network shares is not available, since
+this system has no SMB client to mount one with (`plans/ZEROCONF.md` Z11).
+
 ## Capabilities
 
 `CAP_CONSOLE_WRITE` (fail-loud diagnostics), `CAP_FS_ACCESS` (its
 directory listings and the shipped icon assets it reads — every read
 still permission-checked per inode under the launching user's identity),
-`CAP_SHM` (the granted window frame region), and `CAP_PROC_SPAWN`. See
-`AppInfo.toml`.
+`CAP_SHM` (the granted window frame region), `CAP_PROC_SPAWN`,
+`CAP_LOG_EMIT` (the record a crashed decode worker leaves), and `CAP_NET`,
+which the discovery service admits the Network view's browse against; the
+view opens no socket of its own. The manifest's `browses = ["_smb._tcp"]` is
+the grant that browse is scoped to, and with it the computers WS-Discovery
+names: it holds no `CAP_NET_DISCOVER_ALL`. See `AppInfo.toml`.
 
 `CAP_PROC_SPAWN` covers two uses and **no new capability was added for
 the artwork**: launching an activated `<Name>.app` bundle through the

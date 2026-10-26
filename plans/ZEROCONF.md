@@ -23,8 +23,10 @@ and keeps LLMNR and NetBIOS permanently out (§1 below).
 | Z5 | Publication: the three-gate authority check (attested / granted / owned), manifest `publishes` section, grant store | planned |
 | Z6 | Per-interface `discovery.mode` posture, per-network identity, service-manager advertise/goodbye lifecycle | planned |
 | Z7 | Attested records over TOFU host keys — **decision pending**, may be dropped | planned |
-| Z8 | The catalogue query surface: storage-class filter, per-source fairness, endpoint pinning, and the discovered-share mount into `Storage:` | planned |
-| Z9 | The `files.app` Network view over the existing renderer; gated on the §6.6 display-safety policy | planned |
+| Z8 | The catalogue query surface: storage-class filter over `_smb._tcp` instances, WS-Discovery computers (Z10) and hosts the user names, per-source fairness, the endpoint a choice carries | done |
+| Z9 | The `files.app` Network view over the existing renderer, opened by a *Network* menu row above *Settings…*; its names drawn through the §6.6 display-safety policy | done |
+| Z10 | WS-Discovery: the `lib/net::wsd` engine (SOAP-over-UDP Probe/ProbeMatches/Hello/Bye/Resolve, the WS-Transfer `pub:Computer` reading), the 3702 sockets and metadata fetch in the `discoveryd` front, the decode in its sandboxed worker, the discovery-v1 computers query | done |
+| Z11 | The discovered-share mount into `Storage:` with §6.3's forced flags, and the QEMU vertical that mounts a discovered share | blocked: awaits the SMB client and `smbfs` (`plans/SMB.md` SMB5, SMB9) |
 
 ## 0. Scope and decisions (binding)
 
@@ -287,19 +289,27 @@ credential-phishing one.
 relationship it has with the mount table today, and consistent with its
 refusal to grow subsystems owned elsewhere.
 
-- **One renderer.** The view supplies entries to the existing
-  `ListView`/`GridView` through a second source beside `DirectorySource`.
-  `Browser`'s location becomes a sum type — a path, or the catalogue — so
-  there is no second renderer and no fake path.
+- **One renderer.** `Browser`'s location is a sum type,
+  `Location::Folder(path)` or `Location::Network`, and what it shows is one
+  value holding either a folder's entries or the network's `NetworkItem`s, so
+  the existing `ListView`/`GridView` draw both, there is no fake path, and no
+  verb that names a node — delete, paste, a drag, a new folder — can reach an
+  endpoint. The catalogue's answers reach the browser through `show_network`
+  beside the `DirectorySource` a folder is listed through.
 - **Storage-class types only.** A printer is not a file manager's business.
   This makes `files.app` the worked example of §5's grant-scoped browse: it
   declares the storage types and does **not** hold `CAP_NET_DISCOVER_ALL`.
-- **Activation mounts.** Choosing an entry performs §6.3 and navigates to the
-  resulting `/Storage/<name>`, an ordinary path from that instant.
+- **Activation mounts** (Z11). Choosing an entry performs §6.3 and navigates
+  to the resulting `/Storage/<name>`, an ordinary path from that instant. The
+  engine names the endpoint as displayed (`Activation::MountEndpoint`); a
+  system with no client for its protocol says so and navigates nowhere.
 - **§28, absolutely.** Discovery is I/O and never runs on the event loop: the
-  view requests through the existing reader desk and collects. Records arrive
-  continuously, so arrivals coalesce and repaint once per present rather than
-  once per record, scoped to what changed.
+  session and catalogue are the reader thread's, reached through a latest-wins
+  desk with one collect out at a time, and the service's doorbell is a member
+  of the loop's wait-set. Only a process granted no reader thread makes the
+  calls on the loop, as it makes every read. Records arrive continuously, so arrivals coalesce
+  into one answer per collect, which each window takes once and repaints
+  scoped to the slots it altered.
 - **Browsing runs only while the view is open.** A multicast query announces
   what you are looking for to the whole segment; browsing continuously in the
   background, as other systems do, leaks that permanently and wakes the
@@ -320,26 +330,15 @@ refusal to grow subsystems owned elsewhere.
   is given; inducing a user to mount a network share while an app waits on a
   file is further outside it still.
 
-### 6.6 Escalation — untrusted display text is a live gap, wider than this plan
+### 6.6 Untrusted display text
 
-Designing §6.5 surfaced a defect that already exists and is **not** zeroconf's
-to fix. Recorded here rather than scoped around:
-
-Two sanitisers guard untrusted text and they disagree.
-`lib/controls::window::sanitize_label` replaces control characters with a space
-and caps length at 512; `lib/browse::vfs::shown_name` replaces them with U+FFFD
-and caps nothing. Both filter on `char::is_control`, which is the `Cc` category
-alone. Confirmed against this toolchain: U+202E RIGHT-TO-LEFT OVERRIDE and
-U+200B ZERO WIDTH SPACE are `Cf`, U+0301 is `Mn`, and Cyrillic U+0430 is `Ll` —
-**all four pass both filters**, and the console atlas covers Cyrillic and Greek,
-so a homograph name renders indistinguishably from its Latin twin today.
-
-This reaches any untrusted name drawn on any surface: a FAT32 volume's
-filenames reach it now, with no network involved. The fix is one shared
-display-safety policy in `lib/controls` — the single definition the two
-divergent helpers should already have been — not a `files.app` or
-discovery-side filter. It is a **prerequisite for Z9**, not part of it, and is
-raised for a decision on where it is scheduled.
+Every name discovery surfaces — instance and host names, TXT values,
+WS-Discovery friendly names — is shown through the one display-safety policy,
+`tairix_util::utf8::shown` (`plans/SMB.md` SMB1, done): hidden characters as
+U+FFFD, combining sequences held to UTS #39's mark limits, and
+`utf8::mixes_scripts` marking a name whose scripts could impersonate another.
+Discovery adds no filter of its own, and Z9 marks a mixed-script name in the
+Network view.
 
 ## 7. Posture and privacy
 
@@ -403,6 +402,7 @@ Strictness must not break correct peers:
 ```
 lib/net/src/mdns.rs         pure engine: state machine, cache, suppression
 lib/net/src/dnssd.rs        instance/type/domain triple, TXT grammar
+lib/net/src/wsd.rs          WS-Discovery engine (Z10)
 lib/sandbox/src/supervise.rs  the supervised streaming session
 lib/discovery/              userland client (mirrors lib/resolver)
 lib/abi/src/discovery_ipc.rs     the discovery-v1 session ABI
@@ -809,13 +809,30 @@ about. Z1–Z6 deliver the security result without inventing protocol. Z7 is
 built only on an explicit decision to build it, and is dropped cleanly
 otherwise — nothing in Z1–Z6 depends on it.
 
-### Z8 — the catalogue and the mount path
+### Z8 — the catalogue
 
-The `lib/discovery` catalogue query (incremental, cancellable, bounded,
-per-source-fair); the storage-class service-type set as data beside the
-reserved set; endpoint identity pinning and the §6.4 credential rule; the
-discovered-share mount through the storage resolver with §6.3's forced flags
-and no relaxation. Host-tested, plus a live QEMU vertical that mounts a
+`tairix_discovery::catalogue::Catalogue`, over `tairix_discovery::walk` — the
+request walk `netmap` shares, hoisted from it so the two cannot drift. It
+browses each storage type (`STORAGE_TYPES`, data: `_smb._tcp`, the share
+protocols this system mounts) and asks the computers question; it resolves
+each instance and looks up its `.local` host. A Z10 computer is one entry with
+an `_smb._tcp` instance at the same address on the same link, named by the
+instance and carrying the computer's workgroup or domain. It lists at most
+256 endpoints and four per source on one link, counting the rest against
+their source rather than dropping them silently, and up to 32 hosts the user
+names. Every name but a named host is peer-authored and drawn through the §6.6
+policy by the consumer. Browsing is covered by the storage-class grant
+(`browses = ["_smb._tcp"]`) — what an endpoint offers is learned only by
+connecting. It is a query: nothing in it has a path, and nothing raises a
+credential prompt. A choice carries its `Endpoint` — link, name, what found it,
+host, addresses, port — to the mount, which pins credentials to what the
+connection proves (§6.4, `plans/SMB.md` SMB9).
+
+### Z11 — the discovered-share mount
+
+The mount through `smbfs` (`plans/SMB.md`) with §6.3's forced flags and no
+relaxation, from the `Endpoint` the choice carried: re-resolution that
+disagrees with it fails closed and re-presents. A live QEMU vertical mounts a
 discovered share and proves `/` never touched an interface to find it.
 
 ### Z9 — the `files.app` Network view
@@ -825,9 +842,57 @@ renderer; reader-desk integration with coalesced arrivals; per-source display
 quota; service-type icons; liveness marking; browse only while the view is
 open; no view in the trusted picker.
 
-**Prerequisite:** the §6.6 shared display-safety policy. Z9 does not start
-until that lands, because drawing attacker-authored names on a trusted
-surface is the whole point of the view.
+**Prerequisite (met):** the §6.6 shared display-safety policy, since drawing
+attacker-authored names on a trusted surface is the whole point of the view.
+
+### Z10 — WS-Discovery
+
+Windows announces itself over WS-Discovery, never over mDNS, so without it a
+Windows file server is reachable only by name. It is held to every rule above.
+
+- **Dialect.** The April 2005 WS-Discovery draft with WS-Addressing 2004/08,
+  DPWS 2006/02, WS-Transfer and WS-MetadataExchange 2004/09 and Microsoft's
+  `pub` namespace — what Windows computers and Samba's `wsdd` speak. WS-Discovery
+  1.1 (OASIS 2009) is spoken by printers and scanners, which are not storage,
+  and is not implemented. Probes ask for `wsdp:Device` spelled with that prefix,
+  since `wsdd` answers no other spelling; a computer is a target whose `Types`
+  hold `pub:Computer`, resolved by namespace, never by prefix. Nothing is
+  published: TAIRiX answers no probe.
+- **Engine.** `lib/net::wsd`: the codec over `lib/xml` with namespace scoping,
+  refusing an envelope that says one thing twice; `XAddr` only `http`, to a
+  literal address or a `lib/net::http` `HostName`, and `MetadataPath` and
+  `Endpoint` grammars that cannot end a request line or escape XML; the
+  `GetResponse`'s `pub:Computer` name and workgroup or domain over the strict
+  `lib/net::http` reader. `WsdEngine` per link: probe rounds every minute in
+  SOAP-over-UDP's four sendings, answers believed only to its own probes and
+  resolves of the last ten seconds, 64 remembered message ids, and
+  `AppSequence` ordering of unasked announcements only — an answer is current
+  however numbered, since QNAP's QTS gives every answer a fresh instance. A
+  target is fetched only at the address its message came from, by the
+  `XAddrs` URL naming that address or else one naming a host, as QTS's does: a
+  name is never resolved for a peer, only written in the request's `Host`
+  field. It is reported only once its metadata reads, kept at the address it
+  was first heard at until that one falls silent, a fetch whose target moved
+  or changed while it flew made again, expiry after 150 seconds of silence;
+  128 targets, four per sender, two fetches in flight, backoff from 30 seconds
+  to five minutes. A rename or a move is the old report gone and the new one
+  found under one key. Held to messages shaped as Windows and `wsdd` send them
+  and to a QTS 4.3.4 NAS's captured traffic (`wsd::vectors`); fuzzed
+  (`fuzz_net_wsd`).
+- **Front.** UDP 3702 on `239.255.255.250` and `ff02::c`, reserved to the
+  service account as 5353 is, with relay and send budgets of its own. A fetch
+  goes only to an address the front relayed a WS-Discovery datagram from on
+  the same interface within the engine's 150-second expiry, over a stream
+  pinned to that interface, with a request the front builds; it takes the
+  response whole only when the target closes in order after the whole request,
+  within 16 KiB and five seconds, and never parses HTTP — the worker does
+  (§4). Each link holds its fetches in two fixed slots until the decoder takes
+  their outcomes, so an outcome never waits on memory; a fetch past them, or
+  reusing an id in flight, condemns the decoder.
+- **Into discovery-v1.** `Query::Computers`, admitted by a grant for
+  `_smb._tcp` or `CAP_NET_DISCOVER_ALL`, answered by `Answer::Computer`: a key
+  stable for the service's life, the address, the name and the membership, a
+  rename crossing as the old answer retired and the new one added.
 
 ## 13. Cross-references
 

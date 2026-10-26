@@ -13,7 +13,7 @@
 //! nothing, so the read-only picker never builds a clipboard.
 //!
 //! Paths are root-first component lists — the same
-//! [`components`](crate::Browser::components) vocabulary the whole engine uses —
+//! [`folder`](crate::Browser::folder) vocabulary the whole engine uses —
 //! so the ancestor test that forbids pasting a directory into itself is an
 //! exact component-prefix comparison, never a fragile string prefix (which
 //! would confuse `/ab` with a child of `/a`).

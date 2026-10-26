@@ -9,14 +9,19 @@
 //! because the bare SHA-1 digest is deliberately not exposed to build a
 //! textbook check from.
 //!
-//! The Poly1305 known answer is RFC 8439 §2.5.2 verbatim.
+//! The Poly1305 known answer is RFC 8439 §2.5.2 verbatim. HMAC-SHA384's is
+//! RFC 4231 test case 1, AES-CMAC's are RFC 4493 §4's, and AES-GMAC's is the
+//! NIST GCM vector with an empty plaintext (`gcmEncryptExtIV128`, count 0),
+//! each cross-checked with `cryptography` over OpenSSL.
 
 use super::{
-    hmac_sha1, hmac_sha1_verify, hmac_sha256, hmac_sha256_parts, hmac_sha256_verify, hmac_sha512,
-    hmac_sha512_parts, hmac_sha512_verify, poly1305, poly1305_verify, HmacSha1Key, HmacSha256Key,
-    HmacSha512Key, Poly1305Key, HMAC_SHA1_TAG_LEN, HMAC_SHA256_TAG_LEN, HMAC_SHA512_TAG_LEN,
-    POLY1305_TAG_LEN,
+    aes128_cmac, aes128_cmac_verify, aes128_gmac, aes128_gmac_verify, hmac_sha1, hmac_sha1_verify,
+    hmac_sha256, hmac_sha256_parts, hmac_sha256_verify, hmac_sha384, hmac_sha384_verify,
+    hmac_sha512, hmac_sha512_parts, hmac_sha512_verify, poly1305, poly1305_verify, HmacSha1Key,
+    HmacSha256Key, HmacSha384Key, HmacSha512Key, Poly1305Key, HMAC_SHA1_TAG_LEN,
+    HMAC_SHA256_TAG_LEN, HMAC_SHA512_TAG_LEN, POLY1305_TAG_LEN,
 };
+use crate::test_hex::hex;
 
 use crate::hash::{sha256, sha512};
 
@@ -257,4 +262,94 @@ fn hash_and_mac_states_wipe_themselves_on_drop() {
     wipes::<sha1::Sha1>();
     wipes::<sha2::block_api::Sha256VarCore>();
     wipes::<sha2::block_api::Sha512VarCore>();
+}
+
+#[test]
+fn hmac_sha384_matches_rfc_4231() {
+    // HMAC zero-extends a short key to the block size, so the RFC's 20-byte
+    // key is the fixed-width key with zeros after it.
+    let mut key: HmacSha384Key = [0; 48];
+    key[..20].fill(0x0b);
+    let tag = hmac_sha384(&key, b"Hi There");
+    assert_eq!(
+        tag,
+        hex::<48>(
+            "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59c\
+             faea9ea9076ede7f4af152e8b2fa9cb6"
+        )
+    );
+    assert!(hmac_sha384_verify(&key, b"Hi There", &tag));
+    assert!(!hmac_sha384_verify(&key, b"Hi there", &tag));
+}
+
+/// RFC 4493 §4's key, shared by its four examples.
+const CMAC_KEY: [u8; 16] = [
+    0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+];
+
+/// RFC 4493 §4's message; the examples take its first 0, 16, 40 and 64 bytes.
+fn cmac_message() -> [u8; 64] {
+    hex(
+        "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
+         30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+    )
+}
+
+#[test]
+fn aes128_cmac_matches_rfc_4493() {
+    let message = cmac_message();
+    for (len, expected) in [
+        (0, "bb1d6929e95937287fa37d129b756746"),
+        (16, "070a16b46b4d4144f79bdd9dd04a287c"),
+        (40, "dfa66747de9ae63030ca32611497c827"),
+        (64, "51f0bebf7e3b9d92fc49741779363cfe"),
+    ] {
+        assert_eq!(
+            aes128_cmac(&CMAC_KEY, &message[..len]),
+            hex(expected),
+            "{len} bytes"
+        );
+    }
+}
+
+#[test]
+fn aes128_cmac_verification_refuses_any_other_value() {
+    let message = cmac_message();
+    let tag = aes128_cmac(&CMAC_KEY, &message);
+    assert!(aes128_cmac_verify(&CMAC_KEY, &message, &tag));
+    let mut forged = tag;
+    forged[0] ^= 0x80;
+    assert!(!aes128_cmac_verify(&CMAC_KEY, &message, &forged));
+    assert!(!aes128_cmac_verify(&CMAC_KEY, &message[..63], &tag));
+}
+
+#[test]
+fn aes128_gmac_matches_the_nist_empty_plaintext_vector() {
+    let key = hex("77be63708971c4e240d1cb79e8d77feb");
+    let nonce = hex("e0e00f19fed7ba0136a797f3");
+    let data = hex::<16>("7a43ec1d9c0a5a78a0b16533a6213cab");
+    let tag = aes128_gmac(&key, &nonce, &data).expect("within the limit");
+    assert_eq!(tag, hex("209fcc8d3675ed938e9c7166709dd946"));
+    assert!(aes128_gmac_verify(&key, &nonce, &data, &tag));
+}
+
+#[test]
+fn aes128_gmac_binds_the_nonce_and_the_data() {
+    let key = [0x42; 16];
+    let nonce = [7; 12];
+    let tag = aes128_gmac(&key, &nonce, b"an SMB 3.1.1 message").expect("within the limit");
+    let mut other_nonce = nonce;
+    other_nonce[11] ^= 1;
+    assert!(!aes128_gmac_verify(
+        &key,
+        &other_nonce,
+        b"an SMB 3.1.1 message",
+        &tag
+    ));
+    assert!(!aes128_gmac_verify(
+        &key,
+        &nonce,
+        b"an SMB 3.1.1 messagf",
+        &tag
+    ));
 }

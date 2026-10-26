@@ -46,12 +46,14 @@ title reaches the screen with the data, never ahead of it.
 The map keeps one discovery session open, ringing a doorbell port that is a
 member of the window's own wait-set, so it collects only when the service says
 its answers moved. A message on that port counts only when the kernel attests
-the service sent it and it names the map's own session. The pure `Discovery` engine enumerates the segment's service
-types, browses each, resolves each instance, looks up each host under
+the service sent it and it names the map's own session. The map walks
+everything the segment offers with `lib/discovery`'s walk
+([`tairix_discovery::walk`](../lib/discovery.md)): it enumerates the segment's
+service types, browses each, resolves each instance, looks up each host under
 `.local` an instance resolves to — a unicast name is not the link's to answer
 — and asks for the names of the link-local addresses on the map, every kind
-bounded (`MAX_TYPES`, `MAX_SERVICES`, `MAX_HOSTS`, `MAX_REVERSES`), together
-well inside what the service grants one account. It reconciles the open
+bounded (the map's `BOUNDS`: 64 browses, 256 resolves, 128 hosts, 128 names),
+together well inside what the service grants one account. It reconciles the open
 requests against what is held once per collect, walking down from the type
 list, so a type that goes takes every browse, resolve and lookup below it with
 it, and a request whose updates the service dropped is asked again — started

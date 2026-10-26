@@ -86,7 +86,7 @@ use tairix_abi::driver::filesystem::NodeKind;
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyInput, PointerInput, POINTER_EDGE_UNTIMED};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
@@ -1281,6 +1281,19 @@ where
                 .aspaces
                 .read()
                 .grant_covers(caller.process(), &HwResource::endpoint(endpoint))
+    }
+
+    /// Refuse `caller` unless one of its grants names served volume `volume`.
+    fn serves_volume(&self, caller: &CallerContext<'_>, volume: u64) -> Result<(), Errno> {
+        if self
+            .aspaces
+            .read()
+            .grant_covers(caller.process(), &HwResource::volume(volume))
+        {
+            Ok(())
+        } else {
+            Err(Errno::PermissionDenied)
+        }
     }
 
     /// Whether `caller` may post to `ep`: its send capabilities and, for a
@@ -8080,6 +8093,7 @@ where
         seat: u64,
         buf: u64,
         len: usize,
+        at_ns: u64,
     ) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
         // is non-null (`UserPtr`). A record is fixed-width: a `len` that
@@ -8113,7 +8127,15 @@ where
         let now_ns = self
             .arch
             .monotonic_ns(SchedulerArch::current_cpu(self.arch));
-        let consumed = self.seat_registry.inject_pointer(seat, record, now_ns)?;
+        // No device reported a record after the call that hands it over.
+        let at_ns = (at_ns != POINTER_EDGE_UNTIMED).then(|| at_ns.min(now_ns));
+        let consumed = self.seat_registry.inject_pointer(
+            seat,
+            record,
+            caller.process().0,
+            at_ns,
+            crate::seat::CLICK_DEBOUNCE.window_ns(),
+        )?;
         // The pointer analogue of `key_inject`'s liveness witness: the
         // first delivered pointer record proves an (autoloaded) pointer
         // driver is routing through the arbiter. The per-kind latch fires
@@ -8823,15 +8845,16 @@ where
         // the storage node the volume manager matched — so holding the
         // mount authority alone can never reach another driver's
         // transport (no ambient authority).
-        {
+        let publisher = {
             let aspaces = self.aspaces.read();
             if !aspaces.grant_covers(caller.process(), &HwResource::endpoint(decoded.endpoint))
                 || !aspaces.grant_covers(caller.process(), &HwResource::shared(decoded.window))
             {
                 return Err(Errno::PermissionDenied);
             }
-        }
-        self.volume_service.attach(&decoded).map(|()| 0)
+            aspaces.loaded_node(caller.process())
+        };
+        self.volume_service.attach(&decoded, publisher).map(|()| 0)
     }
 
     fn volume_detach(
@@ -8855,6 +8878,166 @@ where
         }
         let decoded = tairix_abi::volume::VolumeDetachRequest::decode(&payload)?;
         self.volume_service.detach(&decoded).map(|()| 0)
+    }
+
+    fn volume_read(
+        &self,
+        caller: &CallerContext<'_>,
+        volume: u64,
+        lba: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        self.serves_volume(caller, volume)?;
+        if len > tairix_abi::volume::VOLUME_IO_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        self.volume_service
+            .read(volume, lba, len, &mut |offset, chunk| {
+                let at = buf.checked_add(offset as u64).ok_or(Errno::BadAddress)?;
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_out(space, physmap, VirtAddr::new(at), chunk)
+                }) {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            })
+            .map(|()| 0)
+    }
+
+    fn volume_write(
+        &self,
+        caller: &CallerContext<'_>,
+        volume: u64,
+        lba: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        self.serves_volume(caller, volume)?;
+        if len > tairix_abi::volume::VOLUME_IO_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        self.volume_service
+            .write(volume, lba, len, &mut |offset, chunk| {
+                let at = buf.checked_add(offset as u64).ok_or(Errno::BadAddress)?;
+                match self.with_caller_aspace(caller, |space, physmap| {
+                    copy_in(space, physmap, VirtAddr::new(at), chunk)
+                }) {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(err)) => Err(copy_fault_errno(err)),
+                    None => Err(Errno::BadAddress),
+                }
+            })
+            .map(|()| 0)
+    }
+
+    fn volume_ctl(
+        &self,
+        caller: &CallerContext<'_>,
+        volume: u64,
+        request: u64,
+        request_len: usize,
+        reply: u64,
+        reply_cap: usize,
+    ) -> SyscallResult {
+        self.serves_volume(caller, volume)?;
+        if request_len != tairix_abi::volume::VOLUME_CTL_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut frame = [0u8; tairix_abi::volume::VOLUME_CTL_LEN];
+        self.copy_in_user(caller, request, &mut frame)?;
+        let ctl = tairix_abi::volume::VolumeCtl::decode(&frame)?;
+        let Some(info) = self.volume_service.ctl(volume, &ctl)? else {
+            return Ok(0);
+        };
+        let encoded = info.encode();
+        if reply_cap < encoded.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        self.copy_out_user(caller, reply, &encoded)?;
+        Ok(encoded.len() as u64)
+    }
+
+    fn volume_serve(
+        &self,
+        caller: &CallerContext<'_>,
+        volume: u64,
+        frame: u64,
+        frame_len: usize,
+        grant: u64,
+        grant_cap: usize,
+    ) -> SyscallResult {
+        use tairix_abi::fsserve::{
+            ServeFrame, ServeGrant, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX, FSSERVE_WINDOW_LEN,
+            SERVE_FRAME_LEN, SERVE_GRANT_LEN,
+        };
+        self.serves_volume(caller, volume)?;
+        if frame_len != SERVE_FRAME_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut bytes = [0u8; SERVE_FRAME_LEN];
+        self.copy_in_user(caller, frame, &mut bytes)?;
+        let offer = match ServeFrame::decode(&bytes)? {
+            ServeFrame::Refuse(why) => return self.volume_service.refuse(volume, why).map(|()| 0),
+            ServeFrame::Serve(offer) => offer,
+        };
+        if grant_cap < SERVE_GRANT_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Built only for a volume that awaits its driver; the bind decides
+        // again, atomically, once they exist.
+        self.volume_service.awaiting_server(volume)?;
+        let id = crate::fs::served::mint_served_endpoint().ok_or(Errno::NoSpace)?;
+        let limits = CallEndpointLimits {
+            max_request: u32::try_from(FSSERVE_REQUEST_MAX).map_err(|_| Errno::OutOfRange)?,
+            max_reply: u32::try_from(FSSERVE_REPLY_MAX).map_err(|_| Errno::OutOfRange)?,
+            capacity: crate::fs::served::SERVED_ENDPOINT_CAPACITY,
+        };
+        let queue_limit = self.soft_limit(caller, LimitKind::IpcQueueBytes);
+        let endpoint = alloc::sync::Arc::try_new(CallEndpoint::create_served(
+            EndpointId(id),
+            caller.caps,
+            limits,
+            queue_limit,
+            self.audit,
+        )?)
+        .map_err(|_| Errno::OutOfMemory)?;
+        crate::callreg::register(alloc::sync::Arc::clone(&endpoint), self.audit)?;
+        let unbind = || {
+            if let Some(endpoint) = crate::callreg::unregister(EndpointId(id)) {
+                endpoint.destroy(self.audit);
+            }
+        };
+        let pages = (FSSERVE_WINDOW_LEN / PAGE_SIZE) as u64;
+        let (base_va, region) =
+            crate::sharedreg::create(self.shared_mem_facility, caller.process(), pages)
+                .inspect_err(|_| unbind())?;
+        self.publish_region_mapping(caller.process(), base_va, pages);
+        let unmap = || {
+            self.release_shared_mapping(caller.process(), base_va);
+            unbind();
+        };
+        let window = crate::sharedreg::kernel_hold(self.shared_mem_facility, region)
+            .inspect_err(|_| unmap())?;
+        // Written before the bind, so a driver that cannot receive its grant
+        // never leaves a volume served by nobody.
+        let answer = ServeGrant {
+            endpoint: id,
+            window: base_va,
+            window_len: u32::try_from(FSSERVE_WINDOW_LEN).map_err(|_| Errno::OutOfRange)?,
+        }
+        .encode();
+        if let Err(err) = self.copy_out_user(caller, grant, &answer) {
+            unmap();
+            return Err(err);
+        }
+        let channel = crate::fs::ServeChannel { endpoint, window };
+        if let Err(err) = self.volume_service.serve(volume, &offer, channel) {
+            unmap();
+            return Err(err);
+        }
+        Ok(SERVE_GRANT_LEN as u64)
     }
 
     fn file_unmap(&self, caller: &CallerContext<'_>, base: u64, len: u64) -> SyscallResult {
@@ -28699,7 +28882,13 @@ mod tests {
         // A short inject buffer is refused before the registry is
         // consulted; a short read buffer likewise.
         assert_eq!(
-            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN - 1),
+            h.pointer_inject(
+                &ctx,
+                SEAT_PRIMARY,
+                0x1000,
+                PointerInput::WIRE_LEN - 1,
+                POINTER_EDGE_UNTIMED
+            ),
             Err(Errno::BufferTooSmall)
         );
         assert_eq!(
@@ -28715,14 +28904,26 @@ mod tests {
         // A record injected while the seat is unowned is consumed and
         // discarded — never queued for a future owner, never an error.
         assert_eq!(
-            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            h.pointer_inject(
+                &ctx,
+                SEAT_PRIMARY,
+                0x1000,
+                PointerInput::WIRE_LEN,
+                POINTER_EDGE_UNTIMED
+            ),
             Ok(PointerInput::WIRE_LEN as u64)
         );
 
         // Held: the record routes whole to the owner's drain.
         assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
         assert_eq!(
-            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            h.pointer_inject(
+                &ctx,
+                SEAT_PRIMARY,
+                0x1000,
+                PointerInput::WIRE_LEN,
+                POINTER_EDGE_UNTIMED
+            ),
             Ok(PointerInput::WIRE_LEN as u64)
         );
         assert_eq!(
@@ -28786,7 +28987,13 @@ mod tests {
         .with_seat_registry(seat);
 
         assert_eq!(
-            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            h.pointer_inject(
+                &ctx,
+                SEAT_PRIMARY,
+                0x1000,
+                PointerInput::WIRE_LEN,
+                POINTER_EDGE_UNTIMED
+            ),
             Err(Errno::BadMagic)
         );
     }
@@ -28826,7 +29033,13 @@ mod tests {
 
         sink.clear();
         assert_eq!(
-            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            h.pointer_inject(
+                &ctx,
+                SEAT_PRIMARY,
+                0x1000,
+                PointerInput::WIRE_LEN,
+                POINTER_EDGE_UNTIMED
+            ),
             Ok(PointerInput::WIRE_LEN as u64)
         );
         let witnesses = |sink: &TestSink| {
@@ -28837,10 +29050,87 @@ mod tests {
         };
         assert_eq!(witnesses(sink), 1, "first delivery emits one witness");
         assert_eq!(
-            h.pointer_inject(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            h.pointer_inject(
+                &ctx,
+                SEAT_PRIMARY,
+                0x1000,
+                PointerInput::WIRE_LEN,
+                POINTER_EDGE_UNTIMED
+            ),
             Ok(PointerInput::WIRE_LEN as u64)
         );
         assert_eq!(witnesses(sink), 1, "no further witness on later injects");
+    }
+
+    /// `pointer_inject` hands the seat the device time its driver states,
+    /// never a later one than the call's own, and none for
+    /// `POINTER_EDGE_UNTIMED`: a press stated past the clock lands inside the
+    /// window of the release before it and is dropped as chatter with the
+    /// release closing it, and an untimed press is delivered however close.
+    #[test]
+    fn pointer_inject_judges_a_button_edge_by_its_stated_device_time() {
+        use tairix_abi::input::PointerButtonCode;
+        const RELEASE_AT: u64 = 0x1000 + PointerInput::WIRE_LEN as u64;
+        const NOW_NS: u64 = 10_000_000_000;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let press = PointerInput::Pressed(PointerButtonCode::Primary);
+        let release = PointerInput::Released(PointerButtonCode::Primary);
+        let mut records = press.to_le_bytes().to_vec();
+        records.extend_from_slice(&release.to_le_bytes());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &records);
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let queue: &'static crate::console::ConsoleInputQueue =
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+        assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
+        arch.set_monotonic_ns(NOW_NS);
+
+        let len = PointerInput::WIRE_LEN;
+        for (at, stated) in [
+            (RELEASE_AT, NOW_NS),
+            (0x1000, u64::MAX - 1),
+            (RELEASE_AT, NOW_NS),
+            (0x1000, POINTER_EDGE_UNTIMED),
+        ] {
+            assert_eq!(
+                h.pointer_inject(&ctx, SEAT_PRIMARY, at, len, stated),
+                Ok(len as u64)
+            );
+        }
+        let mut delivered = alloc::vec::Vec::new();
+        while h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, len) == Ok(len as u64) {
+            let bytes = h
+                .with_caller_aspace(&ctx, |space, physmap| {
+                    let mut buf = [0u8; PointerInput::WIRE_LEN];
+                    copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                    buf
+                })
+                .expect("caller has a registered space");
+            delivered.push(PointerInput::from_bytes(&bytes).expect("decodes"));
+        }
+        assert_eq!(delivered, [release, press]);
     }
 
     /// A touch handler over a fresh seat registry, its caller (task 2) given an

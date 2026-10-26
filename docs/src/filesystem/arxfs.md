@@ -1113,7 +1113,11 @@ virtio transport, so a riscv64 MMIO sibling runs identical code.
 ## Capabilities
 
 Loading requires `CAP_DRV_LOAD` at `register` time. The driver runs in
-user space; it does not request `CAP_DRV_KERNEL`. The read/write methods
+user space; it does not request `CAP_DRV_KERNEL`. The kernel links it for the
+root and `/System`; on removable media it is served from user space ([Volumes served from user space](./served.md)):
+its `Run` binary binds `tairix,volume-arxfs`, runs with `CAP_FS_SERVE` and
+`CAP_LOG_EMIT`, and opens a volume plaintext, so an encrypted one is refused
+with the typed error its open gives. The read/write methods
 are reached only through the `DriverHandle` the host minted at load time,
 and the VFS only delegates a write to a non-`READ_ONLY` mount.
 

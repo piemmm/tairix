@@ -128,3 +128,15 @@ fn a_service_or_instance_outside_its_grammar_is_refused() {
         Err(Errno::OutOfRange)
     );
 }
+
+#[test]
+fn browsing_computers_asks_ws_discovery_and_needs_the_file_service_grant() {
+    let planned = plan(&Query::Computers).unwrap();
+    assert!(
+        matches!(planned.needs, Needs::Type(ty) if ty.name() == b"smb" && ty.transport() == Transport::Tcp),
+        "what a computer offers is learned from its file service"
+    );
+    assert_eq!(planned.asks.len(), 1);
+    assert_eq!(planned.asks[0].form, Form::Computer);
+    assert_eq!(planned.asks[0].name, Name::from_labels(&[]).unwrap());
+}

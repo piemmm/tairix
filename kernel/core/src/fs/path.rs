@@ -184,31 +184,28 @@ impl Path {
 
 /// Whether `name` is a component [`Path::parse`] admits.
 pub(crate) fn is_component(name: &str) -> bool {
-    validate_component(name).is_ok()
+    tairix_abi::fs::is_component(name.as_bytes())
 }
 
 /// Validate a single path component against the [`Path`] invariants.
 fn validate_component(name: &str) -> Result<(), VfsError> {
-    if name == "." || name == ".." {
-        return Err(VfsError::InvalidPath);
+    if is_component(name) {
+        Ok(())
+    } else {
+        Err(VfsError::InvalidPath)
     }
-    validate_name(name)
 }
 
-/// The spelling checks every name must pass, whoever supplied it: bounded
-/// length, no NUL, no embedded separator.
+/// The spelling every name must have, whoever supplied it.
 ///
 /// Shared by [`Path::parse`] — which additionally forbids the `.`/`..`
-/// tokens — and by [`parse_link_target`], which permits them, so the two
-/// grammars cannot drift apart on what a *name* may contain.
+/// tokens — and by [`parse_link_target`], which permits them.
 fn validate_name(name: &str) -> Result<(), VfsError> {
-    if name.is_empty() || name.len() > MAX_COMPONENT_LEN {
-        return Err(VfsError::InvalidPath);
+    if tairix_abi::fs::is_name(name.as_bytes()) {
+        Ok(())
+    } else {
+        Err(VfsError::InvalidPath)
     }
-    if name.bytes().any(|b| b == 0 || b == b'/') {
-        return Err(VfsError::InvalidPath);
-    }
-    Ok(())
 }
 
 /// One step of a path: a caller's or a symbolic link's target's.

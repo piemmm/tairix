@@ -1,16 +1,21 @@
 //! The filesystem-browser navigation model.
 //!
-//! A [`Browser`] holds the directory it is currently showing — an absolute
-//! path and the entries the [`DirectorySource`] returned for it — plus a
-//! selection cursor for keyboard navigation. It descends into a child
-//! directory, climbs back to the parent, and re-reads the current directory,
-//! taking the path policy and the permission decision from the source's
-//! VFS rather than re-implementing them here.
+//! A [`Browser`] holds the [`Location`] it is currently showing — a directory
+//! and the entries the [`DirectorySource`] returned for it, or the network and
+//! the items the catalogue offers there — plus a selection cursor for keyboard
+//! navigation. It descends into a child directory, climbs back to the parent,
+//! and re-reads the current directory, taking the path policy and the
+//! permission decision from the source's VFS rather than re-implementing them
+//! here.
 //!
 //! Every move is **transactional and fail-closed**: the
-//! browser computes the new path, asks the source to list it, and only adopts
-//! the new path *and* its entries if that read succeeds. A refused or failing
-//! read leaves the browser exactly where it was.
+//! browser computes the new location, asks for its listing, and only adopts
+//! the new location *and* what it lists once that read succeeds. A refused or
+//! failing read leaves the browser exactly where it was.
+//!
+//! The network has no path (`plans/ZEROCONF.md` §6.1), so no verb that names
+//! a node — rename, delete, paste, a new folder, a drag — reaches anything
+//! there: each is a folder's, and asks for [`Browser::folder`].
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -27,6 +32,7 @@ use crate::delete::{DeletePlan, DeleteTarget};
 use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget, Listed};
 use crate::error::BrowseError;
 use crate::layout::{BandMarks, ViewMode};
+use crate::network::{self, NetworkEndpoint, NetworkItem};
 use crate::places::{PlaceKind, Places};
 use crate::presentation::{HiddenEndings, Presentation};
 use crate::rename::{renamed, validate_new_name, RenameError};
@@ -97,15 +103,74 @@ impl PendingEntry {
     }
 }
 
-/// A live view of one directory, with a selection cursor.
+/// Where a [`Browser`] is.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Location {
+    /// A directory, by its root-first components; none is the root `/`.
+    Folder(Vec<String>),
+    /// The storage endpoints the network catalogue offers.
+    Network,
+}
+
+/// One item a [`Browser`] lists.
+#[derive(Copy, Clone, Debug)]
+pub enum Item<'a> {
+    /// An entry of the folder shown.
+    Entry(&'a Entry),
+    /// One of the network's items.
+    Network(&'a NetworkItem),
+}
+
+/// Where a browser is and what it lists there, as one value, so a folder's
+/// entries and the network's items can never be shown together.
+#[derive(Clone, Debug)]
+enum Shown {
+    Folder {
+        components: Vec<String>,
+        entries: Vec<Entry>,
+    },
+    Network {
+        items: Vec<NetworkItem>,
+        /// The catalogue could no longer be read, so nothing is listed.
+        stopped: bool,
+    },
+}
+
+impl Shown {
+    /// How many items it lists.
+    fn count(&self) -> usize {
+        match self {
+            Self::Folder { entries, .. } => entries.len(),
+            Self::Network { items, .. } => items.len(),
+        }
+    }
+
+    /// Where it is, given up for the history.
+    fn into_location(self) -> Location {
+        match self {
+            Self::Folder { components, .. } => Location::Folder(components),
+            Self::Network { .. } => Location::Network,
+        }
+    }
+
+    /// Whether it is `location`.
+    fn is_at(&self, location: &Location) -> bool {
+        match (self, location) {
+            (Self::Folder { components, .. }, Location::Folder(target)) => components == target,
+            (Self::Network { .. }, Location::Network) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A live view of one location, with a selection cursor.
 ///
 /// `S` is the injected [`DirectorySource`]; on a running system it is backed
 /// by the VFS, and in tests by an in-memory tree.
 #[derive(Clone, Debug)]
 pub struct Browser<S: DirectorySource> {
     source: S,
-    components: Vec<String>,
-    entries: Vec<Entry>,
+    shown: Shown,
     selected: usize,
     selection: Selection,
     /// The entry a carried drag would drop into, while it is lit. Any change
@@ -120,13 +185,13 @@ pub struct Browser<S: DirectorySource> {
     /// How far the item view is scrolled, and the bar in the right-edge
     /// gutter that draws it.
     scroll: ScrollColumn,
-    /// Directories visited before the current one, oldest first; the last is
+    /// Locations visited before the current one, oldest first; the last is
     /// where [`go_back`](Self::go_back) returns to.
-    back: VecDeque<Vec<String>>,
-    /// Directories stepped away from by [`go_back`](Self::go_back), oldest
+    back: VecDeque<Location>,
+    /// Locations stepped away from by [`go_back`](Self::go_back), oldest
     /// first; the last is where [`go_forward`](Self::go_forward) returns to.
     /// Cleared by any fresh navigation, as a browser's forward history is.
-    forward: VecDeque<Vec<String>>,
+    forward: VecDeque<Location>,
     /// The navigation waiting on its listing, if any.
     ///
     /// Nothing else in this struct moves while it is set: the location, the
@@ -151,7 +216,7 @@ pub struct Browser<S: DirectorySource> {
 /// history move committing it owes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Pending {
-    target: Vec<String>,
+    target: Location,
     step: Step,
 }
 
@@ -189,7 +254,7 @@ impl<S: DirectorySource> Browser<S> {
     /// listing its children (an empty slice is the root `/`, so
     /// [`open_root`](Self::open_root) is exactly `open_at(source, [])`).
     ///
-    /// The browser starts *at* that directory: [`components`](Self::components)
+    /// The browser starts *at* that directory: [`folder`](Self::folder)
     /// is the given path and [`go_up`](Self::go_up) climbs toward the root from
     /// there, with an empty back/forward history exactly as a fresh open has,
     /// through the same listing, sort, and selection path `open_root` uses.
@@ -208,7 +273,7 @@ impl<S: DirectorySource> Browser<S> {
         let pending = match listed {
             Listing::Ready(_) => None,
             Listing::Pending => Some(Pending {
-                target: components.clone(),
+                target: Location::Folder(components.clone()),
                 step: Step::Reload,
             }),
         };
@@ -217,14 +282,41 @@ impl<S: DirectorySource> Browser<S> {
             Listing::Pending => Vec::new(),
         };
         sort_entries(&mut entries, sort_mode);
-        Ok(Self {
+        Ok(Self::opened(
             source,
-            components,
-            entries,
+            Shown::Folder {
+                components,
+                entries,
+            },
+            pending,
+        ))
+    }
+
+    /// Open the browser at the network, its items arriving with the first
+    /// catalogue answer ([`show_network`](Self::show_network)).
+    #[must_use]
+    pub fn open_network(source: S) -> Self {
+        Self::opened(
+            source,
+            Shown::Network {
+                items: Vec::new(),
+                stopped: false,
+            },
+            Some(Pending {
+                target: Location::Network,
+                step: Step::Reload,
+            }),
+        )
+    }
+
+    fn opened(source: S, shown: Shown, pending: Option<Pending>) -> Self {
+        Self {
+            source,
+            shown,
             selected: 0,
             selection: Selection::new(),
             drop_mark: None,
-            sort_mode,
+            sort_mode: SortMode::default_order(),
             view_mode: ViewMode::default(),
             presentation: Presentation::EXACT,
             scroll: ScrollColumn::new(),
@@ -234,7 +326,7 @@ impl<S: DirectorySource> Browser<S> {
             focus_intent: None,
             climbing: None,
             drives_shown: false,
-        })
+        }
     }
 
     /// Which item view the browser is showing.
@@ -307,36 +399,26 @@ impl<S: DirectorySource> Browser<S> {
         }
         self.sort_mode = mode;
         self.drop_mark = None;
-        let Some(place) = self.sort_tracking_places() else {
-            // Without the memory to follow each entry nothing is carried.
-            sort_entries(&mut self.entries, mode);
+        let place = match &mut self.shown {
+            Shown::Folder { entries, .. } => {
+                sort_tracking(entries, |a, b| crate::sort::entry_cmp(a, b, mode))
+            }
+            Shown::Network { items, .. } => {
+                sort_tracking(items, |a, b| network::item_cmp(a, b, mode))
+            }
+        };
+        let Some(place) = place else {
+            // Without the memory to follow each item nothing is carried.
+            match &mut self.shown {
+                Shown::Folder { entries, .. } => sort_entries(entries, mode),
+                Shown::Network { items, .. } => network::order(items, mode),
+            }
             self.selection.clear();
             self.clamp_selection();
             return;
         };
         self.selected = place.get(self.selected).copied().unwrap_or(0);
         self.selection.remap(|before| place.get(before).copied());
-    }
-
-    /// Sort the listing into [`sort_mode`](Self::sort_mode) in the order
-    /// [`sort_entries`] gives, answering where each entry went, by its index
-    /// before, or [`None`] without the memory to track them (the listing is
-    /// then untouched).
-    fn sort_tracking_places(&mut self) -> Option<Vec<usize>> {
-        let count = self.entries.len();
-        let mut tagged: Vec<(Entry, usize)> = Vec::new();
-        let mut place = Vec::new();
-        tagged.try_reserve_exact(count).ok()?;
-        place.try_reserve_exact(count).ok()?;
-        tagged.extend(mem::take(&mut self.entries).into_iter().zip(0..));
-        let mode = self.sort_mode;
-        tagged.sort_by(|a, b| crate::sort::entry_cmp(&a.0, &b.0, mode));
-        place.resize(count, 0);
-        for (after, &(_, before)) in tagged.iter().enumerate() {
-            place[before] = after;
-        }
-        self.entries = tagged.into_iter().map(|(entry, _)| entry).collect();
-        Some(place)
     }
 
     /// How the listing is presented.
@@ -359,7 +441,9 @@ impl<S: DirectorySource> Browser<S> {
     /// [`BrowseError::Source`] when the fresh read is refused at once; the
     /// presentation is taken all the same.
     pub fn set_presentation(&mut self, presentation: Presentation) -> Result<bool, BrowseError> {
-        let relisted = presentation.hidden_items != self.presentation.hidden_items;
+        // Hidden items are a folder's: nothing a peer names is hidden.
+        let relisted = presentation.hidden_items != self.presentation.hidden_items
+            && matches!(self.shown, Shown::Folder { .. });
         self.presentation = presentation;
         if !relisted {
             return Ok(false);
@@ -376,16 +460,18 @@ impl<S: DirectorySource> Browser<S> {
     /// carrying the focus and selection on the rest.
     fn leave_out_hidden(&mut self) {
         let presentation = self.presentation;
+        let Shown::Folder { entries, .. } = &mut self.shown else {
+            return;
+        };
         let mut placed = Vec::new();
-        if placed.try_reserve_exact(self.entries.len()).is_err() {
-            self.entries
-                .retain(|entry| presentation.lists(entry.name()));
+        if placed.try_reserve_exact(entries.len()).is_err() {
+            entries.retain(|entry| presentation.lists(entry.name()));
             self.selection.clear();
             self.clamp_selection();
             return;
         }
         let mut kept = 0;
-        for entry in &self.entries {
+        for entry in entries.iter() {
             if presentation.lists(entry.name()) {
                 placed.push(Some(kept));
                 kept += 1;
@@ -393,34 +479,88 @@ impl<S: DirectorySource> Browser<S> {
                 placed.push(None);
             }
         }
-        self.entries
-            .retain(|entry| presentation.lists(entry.name()));
+        entries.retain(|entry| presentation.lists(entry.name()));
         self.carry_selection(&Placement::table(placed));
     }
 
-    /// The current directory's path components, root-first. Empty at the root.
+    /// The directory shown, by its root-first components (none at the root),
+    /// or `None` at the network, which has no path.
     #[must_use]
-    pub fn components(&self) -> &[String] {
-        &self.components
+    pub fn folder(&self) -> Option<&[String]> {
+        match &self.shown {
+            Shown::Folder { components, .. } => Some(components),
+            Shown::Network { .. } => None,
+        }
     }
 
-    /// The current directory as an absolute path string (`/`, `/System`,
-    /// `/System/Fonts`, …).
+    /// Whether the browser shows the network.
     #[must_use]
-    pub fn path(&self) -> String {
-        crate::vfs::spell_absolute_path(&self.components)
+    pub const fn is_network(&self) -> bool {
+        matches!(self.shown, Shown::Network { .. })
     }
 
-    /// `true` if the browser is showing the filesystem root.
+    /// Whether the browser shows `location`.
     #[must_use]
-    pub fn is_root(&self) -> bool {
-        self.components.is_empty()
+    pub fn is_at(&self, location: &Location) -> bool {
+        self.shown.is_at(location)
     }
 
-    /// The entries of the current directory, in the source's order.
+    /// Where the browser is.
+    #[must_use]
+    pub fn location(&self) -> Location {
+        match &self.shown {
+            Shown::Folder { components, .. } => Location::Folder(components.clone()),
+            Shown::Network { .. } => Location::Network,
+        }
+    }
+
+    /// The directory shown as an absolute path string (`/`, `/System`,
+    /// `/System/Fonts`, …), or `None` at the network.
+    #[must_use]
+    pub fn path(&self) -> Option<String> {
+        self.folder().map(crate::vfs::spell_absolute_path)
+    }
+
+    /// The entries of the directory shown, in the listing's order; none at the
+    /// network.
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
-        &self.entries
+        match &self.shown {
+            Shown::Folder { entries, .. } => entries,
+            Shown::Network { .. } => &[],
+        }
+    }
+
+    /// The items the network shows, in the listing's order; none in a folder.
+    #[must_use]
+    pub fn network_items(&self) -> &[NetworkItem] {
+        match &self.shown {
+            Shown::Network { items, .. } => items,
+            Shown::Folder { .. } => &[],
+        }
+    }
+
+    /// How many items the location shown lists: a folder's entries or the
+    /// network's items.
+    #[must_use]
+    pub fn item_count(&self) -> usize {
+        self.shown.count()
+    }
+
+    /// The item at `index` of what the location shown lists.
+    #[must_use]
+    pub fn item(&self, index: usize) -> Option<Item<'_>> {
+        match &self.shown {
+            Shown::Folder { entries, .. } => entries.get(index).map(Item::Entry),
+            Shown::Network { items, .. } => items.get(index).map(Item::Network),
+        }
+    }
+
+    /// Whether the network is shown but its catalogue could no longer be
+    /// read, so it lists nothing.
+    #[must_use]
+    pub const fn network_stopped(&self) -> bool {
+        matches!(self.shown, Shown::Network { stopped: true, .. })
     }
 
     /// Draw each listed entry that is the root of one of `places`' mounted
@@ -432,7 +572,14 @@ impl<S: DirectorySource> Browser<S> {
     /// that does is a lookup per entry, so `/Storage` costs its entries times
     /// the logarithm of its volumes, never their product.
     pub fn mark_volume_roots(&mut self, places: &Places) -> bool {
-        let here = self.components.as_slice();
+        let Shown::Folder {
+            components,
+            entries,
+        } = &mut self.shown
+        else {
+            return false;
+        };
+        let here = components.as_slice();
         let mut roots: Vec<(&str, DriveMark)> = places
             .rows()
             .iter()
@@ -455,7 +602,7 @@ impl<S: DirectorySource> Browser<S> {
         }
         roots.sort_unstable_by(|a, b| a.0.cmp(b.0));
         let (mut changed, mut shown) = (false, false);
-        for entry in &mut self.entries {
+        for entry in entries {
             let drive = if entry.is_directory() {
                 roots
                     .binary_search_by(|(leaf, _)| (*leaf).cmp(entry.name()))
@@ -484,13 +631,15 @@ impl<S: DirectorySource> Browser<S> {
     /// delivery repaints only for an answer that changed a cue.
     pub fn resolve_occupancy(&mut self, range: core::ops::Range<usize>) -> bool {
         let mut changed = false;
-        crate::source::resolve_occupancy(
-            &mut self.source,
-            &mut self.components,
-            &mut self.entries,
-            range,
-            |_| changed = true,
-        );
+        if let Shown::Folder {
+            components,
+            entries,
+        } = &mut self.shown
+        {
+            crate::source::resolve_occupancy(&mut self.source, components, entries, range, |_| {
+                changed = true;
+            });
+        }
         changed
     }
 
@@ -499,7 +648,7 @@ impl<S: DirectorySource> Browser<S> {
     /// [`chosen_index`](Self::chosen_index).
     #[must_use]
     pub fn focus_index(&self) -> Option<usize> {
-        if self.entries.is_empty() {
+        if self.item_count() == 0 {
             None
         } else {
             Some(self.selected)
@@ -521,7 +670,13 @@ impl<S: DirectorySource> Browser<S> {
     /// The entry at [`chosen_index`](Self::chosen_index).
     #[must_use]
     pub fn chosen_entry(&self) -> Option<&Entry> {
-        self.chosen_index().map(|index| &self.entries[index])
+        self.entries().get(self.chosen_index()?)
+    }
+
+    /// The network item at [`chosen_index`](Self::chosen_index).
+    #[must_use]
+    pub fn chosen_network_item(&self) -> Option<&NetworkItem> {
+        self.network_items().get(self.chosen_index()?)
     }
 
     /// The [`chosen_entry`](Self::chosen_entry)'s name.
@@ -555,7 +710,7 @@ impl<S: DirectorySource> Browser<S> {
     /// Returns [`BrowseError::NoSuchEntry`] if `index` is out of range; the
     /// selection is unchanged.
     pub fn select(&mut self, index: usize) -> Result<(), BrowseError> {
-        if index >= self.entries.len() {
+        if index >= self.item_count() {
             return Err(BrowseError::NoSuchEntry);
         }
         self.focus_on(index);
@@ -575,7 +730,7 @@ impl<S: DirectorySource> Browser<S> {
     /// nothing selected the focus itself is selected instead, so the first key
     /// lands on the entry the cursor rests on. A no-op on an empty directory.
     pub fn select_next(&mut self) {
-        if let Some(last) = self.entries.len().checked_sub(1) {
+        if let Some(last) = self.item_count().checked_sub(1) {
             let next = self.stepped(|focus| focus.saturating_add(1).min(last));
             self.focus_on(next);
             self.selection.single(next);
@@ -586,7 +741,7 @@ impl<S: DirectorySource> Browser<S> {
     /// it alone, or select the focus when nothing is selected. A no-op on an
     /// empty directory.
     pub fn select_previous(&mut self) {
-        if !self.entries.is_empty() {
+        if self.item_count() > 0 {
             let previous = self.stepped(|focus| focus.saturating_sub(1));
             self.focus_on(previous);
             self.selection.single(previous);
@@ -626,7 +781,7 @@ impl<S: DirectorySource> Browser<S> {
     /// Returns [`BrowseError::NoSuchEntry`] if `index` is out of range; the
     /// selection and focus are unchanged.
     pub fn toggle_selection(&mut self, index: usize) -> Result<(), BrowseError> {
-        if index >= self.entries.len() {
+        if index >= self.item_count() {
             return Err(BrowseError::NoSuchEntry);
         }
         self.focus_on(index);
@@ -642,7 +797,7 @@ impl<S: DirectorySource> Browser<S> {
     /// Returns [`BrowseError::NoSuchEntry`] if `index` is out of range; the
     /// selection and focus are unchanged.
     pub fn extend_selection_to(&mut self, index: usize) -> Result<(), BrowseError> {
-        if index >= self.entries.len() {
+        if index >= self.item_count() {
             return Err(BrowseError::NoSuchEntry);
         }
         self.focus_on(index);
@@ -654,7 +809,7 @@ impl<S: DirectorySource> Browser<S> {
     /// left where it was; an empty directory stays with an empty selection.
     pub fn select_all(&mut self) {
         self.focus_intent = None;
-        self.selection.select_all(self.entries.len());
+        self.selection.select_all(self.item_count());
     }
 
     /// Drop the whole selection (leaving the focus cursor where it is).
@@ -669,7 +824,7 @@ impl<S: DirectorySource> Browser<S> {
     /// any entry's mark changed.
     pub(crate) fn move_band(&mut self, base: &Selection, from: &BandMarks, to: &BandMarks) -> bool {
         self.focus_intent = None;
-        let count = self.entries.len();
+        let count = self.item_count();
         let selection = &mut self.selection;
         let mut changed = false;
         from.each_not_in(to, |index| {
@@ -695,7 +850,8 @@ impl<S: DirectorySource> Browser<S> {
     /// answering the entry that was lit. An index past the listing lights
     /// nothing.
     pub fn set_drop_mark(&mut self, index: Option<usize>) -> Option<usize> {
-        let lit = index.filter(|&index| index < self.entries.len());
+        // Only a folder's entries take a drop.
+        let lit = index.filter(|&index| index < self.entries().len());
         mem::replace(&mut self.drop_mark, lit)
     }
 
@@ -706,23 +862,21 @@ impl<S: DirectorySource> Browser<S> {
     }
 
     /// The selected entries as listed, in listing order: what a
-    /// [`clipboard`](Self::clipboard) or a drag carries.
+    /// [`clipboard`](Self::clipboard) or a drag carries. None off a folder.
     #[must_use]
     pub fn listed_selection(&self) -> Vec<Listed> {
+        let Shown::Folder {
+            components,
+            entries,
+        } = &self.shown
+        else {
+            return Vec::new();
+        };
         self.selection
             .iter()
-            .filter_map(|index| self.entries.get(index))
-            .map(|entry| self.listed(entry))
+            .filter_map(|index| entries.get(index))
+            .map(|entry| listed(components, entry))
             .collect()
-    }
-
-    fn listed(&self, entry: &Entry) -> Listed {
-        let mut path = self.components.clone();
-        path.push(String::from(entry.name()));
-        Listed {
-            path,
-            id: entry.id(),
-        }
     }
 
     /// Capture the current selection onto a cut/copy [`Clipboard`] for `op`, or
@@ -746,33 +900,45 @@ impl<S: DirectorySource> Browser<S> {
     /// the read-only picker composes the same [`Browser`] and never builds one.
     #[must_use]
     pub fn plan_delete(&self) -> Option<DeletePlan> {
+        let Shown::Folder {
+            components,
+            entries,
+        } = &self.shown
+        else {
+            return None;
+        };
         let targets = self
             .selection
             .iter()
-            .filter_map(|index| self.entries.get(index))
-            .map(|entry| DeleteTarget::new(self.listed(entry), entry.is_directory_backed()))
+            .filter_map(|index| entries.get(index))
+            .map(|entry| DeleteTarget::new(listed(components, entry), entry.is_directory_backed()))
             .collect();
         DeletePlan::new(targets)
     }
 
-    /// Whether the shown directory's listing follows it, so a change the
+    /// Whether the shown listing follows its location, so a change the
     /// embedder made there arrives as a reported change and needs no
-    /// [`refresh`](Self::refresh).
+    /// [`refresh`](Self::refresh). The network's catalogue answers every
+    /// change itself.
     #[must_use]
     pub fn follows(&self) -> bool {
-        self.source.follows(&self.components)
+        match &self.shown {
+            Shown::Folder { components, .. } => self.source.follows(components),
+            Shown::Network { .. } => true,
+        }
     }
 
-    /// Re-read the current directory from the source, keeping the focus and
-    /// selection on the entries they named; a focus whose entry went rests
-    /// where it was.
+    /// Read the location shown again, keeping the focus and selection on the
+    /// items they named; a focus whose item went rests where it was. The
+    /// network is read again from the catalogue's next answer
+    /// ([`show_network`](Self::show_network)).
     ///
     /// # Errors
     ///
     /// Returns [`BrowseError::Source`] if the directory can no longer be
     /// listed; the previously loaded entries are left untouched.
     pub fn refresh(&mut self) -> Result<(), BrowseError> {
-        let target = self.components.clone();
+        let target = self.location();
         self.begin(target, Step::Reload)?;
         Ok(())
     }
@@ -796,15 +962,17 @@ impl<S: DirectorySource> Browser<S> {
         typed: &str,
         shown: HiddenEndings,
     ) -> Result<PendingRename, RenameError> {
-        let chosen = self.chosen_entry().ok_or(RenameError::NoSelection)?;
+        let (Some(dir), Some(chosen)) = (self.folder(), self.chosen_entry()) else {
+            return Err(RenameError::NoSelection);
+        };
         let current = chosen.name();
         let new_name = renamed(chosen, shown, typed);
-        validate_new_name(&new_name, current, &self.entries)?;
+        validate_new_name(&new_name, current, self.entries())?;
         Ok(PendingRename {
             from: self.child_path(current)?,
             to: self.child_path(&new_name)?,
             name: new_name.into_owned(),
-            dir: self.components.clone(),
+            dir: dir.to_vec(),
         })
     }
 
@@ -825,7 +993,7 @@ impl<S: DirectorySource> Browser<S> {
         moved: Result<(), Errno>,
     ) -> Result<bool, RenameError> {
         moved.map_err(RenameError::from_volume)?;
-        if self.components != pending.dir {
+        if self.folder() != Some(pending.dir.as_slice()) {
             return Ok(false);
         }
         self.refresh()
@@ -838,9 +1006,11 @@ impl<S: DirectorySource> Browser<S> {
     /// directory — the one child-path spelling every write verb (rename,
     /// create, launch/open) shares, so a verb can never name a different node
     /// than the browser shows. Surfaces the kernel's own [`Errno`] on a
-    /// spelling failure for each caller to map onto its own error type.
+    /// spelling failure for each caller to map onto its own error type; the
+    /// network has no children by path, so naming one there is
+    /// [`Errno::NotFound`].
     fn spell_child(&self, name: &str) -> Result<String, Errno> {
-        let mut components = self.components.clone();
+        let mut components = self.folder().ok_or(Errno::NotFound)?.to_vec();
         components.push(String::from(name));
         crate::vfs::absolute_path(&components)
     }
@@ -864,7 +1034,8 @@ impl<S: DirectorySource> Browser<S> {
     /// A [`CreateError`] for a name that cannot be spelled or that the
     /// listing already holds.
     pub fn prepare_entry(&self, name: &str) -> Result<PendingEntry, CreateError> {
-        validate_new_entry_name(name, &self.entries)?;
+        let dir = self.folder().ok_or(CreateError::NoFolder)?.to_vec();
+        validate_new_entry_name(name, self.entries())?;
         let path = self.spell_child(name).map_err(|errno| match errno {
             Errno::LengthOutOfRange => CreateError::TooLong,
             _ => CreateError::Invalid,
@@ -872,7 +1043,7 @@ impl<S: DirectorySource> Browser<S> {
         Ok(PendingEntry {
             path,
             name: String::from(name),
-            dir: self.components.clone(),
+            dir,
         })
     }
 
@@ -893,7 +1064,7 @@ impl<S: DirectorySource> Browser<S> {
             Errno::AlreadyExists => CreateError::Clash,
             refused => CreateError::Refused(refused),
         })?;
-        if self.components != pending.dir {
+        if self.folder() != Some(pending.dir.as_slice()) {
             return Ok(false);
         }
         self.refresh()
@@ -925,7 +1096,7 @@ impl<S: DirectorySource> Browser<S> {
         let Some(name) = self.focus_intent.as_deref() else {
             return;
         };
-        if let Some(index) = self.entries.iter().position(|e| e.name() == name) {
+        if let Some(index) = self.entries().iter().position(|e| e.name() == name) {
             self.selected = index;
             self.selection.single(index);
             self.focus_intent = None;
@@ -965,11 +1136,15 @@ impl<S: DirectorySource> Browser<S> {
             EntryChange::Upsert(entry) => presentation.lists(entry.name()),
             EntryChange::Remove(_) => true,
         });
+        // A watch reports a folder; the network is not one.
+        let Shown::Folder { entries, .. } = &mut self.shown else {
+            return Ok(None);
+        };
         if changes.is_empty() {
             return Ok(None);
         }
-        let (placement, moved) = merge_changes(&mut self.entries, changes, self.sort_mode)
-            .ok_or(BrowseError::OutOfMemory)?;
+        let (placement, moved) =
+            merge_changes(entries, changes, self.sort_mode).ok_or(BrowseError::OutOfMemory)?;
         self.carry_selection(&placement);
         Ok(moved.then_some(placement))
     }
@@ -979,20 +1154,35 @@ impl<S: DirectorySource> Browser<S> {
     /// selection on their entries, and each folder's occupancy shown while it
     /// is probed again — a format that stamps no directory when its contents
     /// change (FAT) leaves an unchanged record proving nothing.
-    fn relist(&mut self, mut entries: Vec<Entry>) {
+    fn relist(&mut self, mut fresh: Vec<Entry>) {
         let presentation = self.presentation;
-        entries.retain(|entry| presentation.lists(entry.name()));
-        sort_entries(&mut entries, self.sort_mode);
-        let old = mem::take(&mut self.entries);
+        let Shown::Folder { entries, .. } = &mut self.shown else {
+            return;
+        };
+        fresh.retain(|entry| presentation.lists(entry.name()));
+        sort_entries(&mut fresh, self.sort_mode);
+        let old = mem::replace(entries, fresh);
         // Without the memory to match the two listings nothing is carried
         // across: the selection goes, and each folder is probed afresh.
-        let placed = carried(&old, &mut entries).unwrap_or_default();
+        let placed = carried(&old, entries).unwrap_or_default();
         drop(old);
-        self.entries = entries;
         self.carry_selection(&Placement::table(placed));
         // A whole listing read after the write that set the intent and not
         // showing its name will not show it later: the name went again.
         self.focus_intent = None;
+    }
+
+    /// Replace the network's items with `fresh`, a later catalogue answer
+    /// already in the listing's order, keeping the focus and selection on the
+    /// items they named.
+    fn relist_network(&mut self, fresh: Vec<NetworkItem>) {
+        let Shown::Network { items, stopped } = &mut self.shown else {
+            return;
+        };
+        let placed = network::carried(items, &fresh).unwrap_or_default();
+        *items = fresh;
+        *stopped = false;
+        self.carry_selection(&Placement::table(placed));
     }
 
     /// Carry the focus and selection across a listing change, by where
@@ -1032,7 +1222,7 @@ impl<S: DirectorySource> Browser<S> {
     /// * [`BrowseError::Source`] if the child directory cannot be listed; the
     ///   browser stays on the current directory.
     pub fn open_index(&mut self, index: usize) -> Result<(), BrowseError> {
-        let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
+        let entry = self.entries().get(index).ok_or(BrowseError::NoSuchEntry)?;
         if !entry.is_directory() {
             return Err(BrowseError::NotADirectory);
         }
@@ -1054,12 +1244,19 @@ impl<S: DirectorySource> Browser<S> {
     /// * [`BrowseError::Source`] if the child cannot be listed; the browser
     ///   stays on the current directory.
     fn descend_index(&mut self, index: usize) -> Result<(), BrowseError> {
-        let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
+        let Shown::Folder {
+            components,
+            entries,
+        } = &self.shown
+        else {
+            return Err(BrowseError::NoSuchEntry);
+        };
+        let entry = entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
         // Build the child path and list it *before* mutating any state, so a
         // failed read leaves the browser exactly where it was.
-        let mut child = self.components.clone();
+        let mut child = components.clone();
         child.push(String::from(entry.name()));
-        self.navigate_recording(child)
+        self.navigate_recording(Location::Folder(child))
     }
 
     /// Activate the selected entry — the double-click / `Enter` decision.
@@ -1097,7 +1294,16 @@ impl<S: DirectorySource> Browser<S> {
         index: usize,
         intent: BundleIntent,
     ) -> Result<Activation, BrowseError> {
-        let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
+        let (components, entries) = match &self.shown {
+            Shown::Network { items, .. } => {
+                return activate_network(items.get(index).ok_or(BrowseError::NoSuchEntry)?);
+            }
+            Shown::Folder {
+                components,
+                entries,
+            } => (components, entries),
+        };
+        let entry = entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
         let kind = entry.kind();
         let name = String::from(entry.name());
         // A bundle browsed rather than run is a directory like any other, and
@@ -1115,7 +1321,7 @@ impl<S: DirectorySource> Browser<S> {
         // link named after the program is not that shape.
         let launch = entry
             .target()
-            .map(|target| resolve_target(&self.spelled_path(), target));
+            .map(|target| resolve_target(&crate::vfs::spell_absolute_path(components), target));
         match kind {
             EntryKind::Directory | EntryKind::Link(LinkTarget::Directory) => {
                 self.open_index(index)?;
@@ -1135,12 +1341,6 @@ impl<S: DirectorySource> Browser<S> {
             // bytes, which are a path and not content.
             EntryKind::Link(LinkTarget::Dangling) => Err(BrowseError::Source(Errno::NotFound)),
         }
-    }
-
-    /// The absolute path of the directory currently shown — the base a link's
-    /// relative target resolves against.
-    fn spelled_path(&self) -> String {
-        crate::vfs::spell_absolute_path(&self.components)
     }
 
     /// Spell the validated absolute path of a child named `name` in the current
@@ -1165,14 +1365,20 @@ impl<S: DirectorySource> Browser<S> {
     /// Returns [`BrowseError::Source`] if the parent cannot be listed; the
     /// browser stays on the current directory.
     pub fn go_up(&mut self) -> Result<bool, BrowseError> {
-        if self.components.is_empty() {
+        let Some((_, parent)) = self.folder().and_then(<[String]>::split_last) else {
             return Ok(false);
-        }
-
-        let mut parent = self.components.clone();
-        parent.pop();
-        self.navigate_recording(parent)?;
+        };
+        let parent = parent.to_vec();
+        self.navigate_recording(Location::Folder(parent))?;
         Ok(true)
+    }
+
+    /// Whether there is a parent [`go_up`](Self::go_up) climbs to: a folder
+    /// below the root. The network has none.
+    #[must_use]
+    pub fn can_go_up(&self) -> bool {
+        self.folder()
+            .is_some_and(|components| !components.is_empty())
     }
 
     /// Navigate to the directory named by root-first `components`, listing it
@@ -1201,11 +1407,97 @@ impl<S: DirectorySource> Browser<S> {
     ///
     /// Returns [`BrowseError::Source`] if `components` cannot be listed.
     pub fn navigate_to(&mut self, components: Vec<String>) -> Result<bool, BrowseError> {
-        if components == self.components {
+        if self.folder() == Some(components.as_slice()) {
             return Ok(false);
         }
-        self.navigate_recording(components)?;
+        self.navigate_recording(Location::Folder(components))?;
         Ok(true)
+    }
+
+    /// Navigate to the network, recording the move like any other: it lands
+    /// with the catalogue's next answer ([`show_network`](Self::show_network)),
+    /// and until then the browser stays where it is. Answers `false` when the
+    /// network is already shown.
+    pub fn navigate_to_network(&mut self) -> bool {
+        if self.is_network() {
+            return false;
+        }
+        self.pending = Some(Pending {
+            target: Location::Network,
+            step: Step::Fresh,
+        });
+        self.climbing = None;
+        true
+    }
+
+    /// Whether the browser shows the network, or a navigation waits on the
+    /// catalogue's answer to show it: while any browser does, the catalogue is
+    /// browsed, and only then.
+    #[must_use]
+    pub fn wants_network(&self) -> bool {
+        self.is_network() || self.awaits_network()
+    }
+
+    /// Whether a navigation to the network — or a reload of it — waits on the
+    /// catalogue's next answer.
+    #[must_use]
+    pub fn awaits_network(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.target == Location::Network)
+    }
+
+    /// Adopt `items`, the catalogue's latest answer: commit a navigation that
+    /// waits on it, or bring the network shown up to date with the focus and
+    /// selection kept on the items they named. Answers whether what is shown
+    /// changed; in a folder with nothing waiting it changes nothing.
+    pub fn show_network(&mut self, mut items: Vec<NetworkItem>) -> bool {
+        network::order(&mut items, self.sort_mode);
+        if let Some(pending) = self
+            .pending
+            .take_if(|pending| pending.target == Location::Network)
+        {
+            self.commit(
+                pending.step,
+                Shown::Network {
+                    items,
+                    stopped: false,
+                },
+            );
+            return true;
+        }
+        match &self.shown {
+            Shown::Network {
+                items: shown,
+                stopped,
+            } if *stopped || *shown != items => {
+                self.relist_network(items);
+                true
+            }
+            Shown::Network { .. } | Shown::Folder { .. } => false,
+        }
+    }
+
+    /// The catalogue can no longer be read: a navigation waiting on it is
+    /// refused, leaving the browser where it was, and a network shown lists
+    /// nothing until a refresh reads it again. Answers whether what is shown
+    /// changed.
+    pub fn stop_network(&mut self) -> bool {
+        if self.awaits_network() {
+            self.pending = None;
+        }
+        let Shown::Network { items, stopped } = &mut self.shown else {
+            return false;
+        };
+        if *stopped {
+            return false;
+        }
+        items.clear();
+        *stopped = true;
+        self.selection.clear();
+        self.clamp_selection();
+        self.drop_mark = None;
+        true
     }
 
     /// Whether there is a previous directory [`go_back`](Self::go_back) can
@@ -1266,7 +1558,7 @@ impl<S: DirectorySource> Browser<S> {
     /// Transactional: `target` is listed *before* any state or history
     /// changes, so a refused or failing read leaves the browser — and its
     /// history — exactly where they were.
-    fn navigate_recording(&mut self, target: Vec<String>) -> Result<(), BrowseError> {
+    fn navigate_recording(&mut self, target: Location) -> Result<(), BrowseError> {
         self.begin(target, Step::Fresh)
     }
 
@@ -1278,55 +1570,82 @@ impl<S: DirectorySource> Browser<S> {
     /// refusal changes nothing at all — not the location, not the entries, not
     /// either history — and a pending navigation replaces any earlier one, so a
     /// user clicking twice goes where they last clicked rather than queueing.
-    fn begin(&mut self, target: Vec<String>, step: Step) -> Result<(), BrowseError> {
+    fn begin(&mut self, target: Location, step: Step) -> Result<(), BrowseError> {
         self.climbing = None;
+        let Location::Folder(components) = target else {
+            // The network lands with the catalogue's next answer.
+            self.pending = Some(Pending {
+                target: Location::Network,
+                step,
+            });
+            return Ok(());
+        };
         // A reload is asked because the directory may have changed, so an
         // answer already on its way cannot satisfy it; a move to somewhere
         // else has nothing on its way to mistake for fresh.
         let listed = match step {
-            Step::Reload => self.source.refresh(&target),
-            Step::Fresh | Step::Back | Step::Forward => self.source.list(&target),
+            Step::Reload => self.source.refresh(&components),
+            Step::Fresh | Step::Back | Step::Forward => self.source.list(&components),
         };
         match listed.map_err(BrowseError::Source)? {
             Listing::Ready(entries) => {
                 self.pending = None;
-                self.commit(target, step, entries);
+                self.commit(
+                    step,
+                    Shown::Folder {
+                        components,
+                        entries,
+                    },
+                );
                 Ok(())
             }
             Listing::Pending => {
-                self.pending = Some(Pending { target, step });
+                self.pending = Some(Pending {
+                    target: Location::Folder(components),
+                    step,
+                });
                 Ok(())
             }
         }
     }
 
-    /// Apply the history move `step` owes, adopt `target` as the location, and
-    /// adopt `entries`.
-    fn commit(&mut self, target: Vec<String>, step: Step, entries: Vec<Entry>) {
+    /// Apply the history move `step` owes and adopt `shown` as the location
+    /// and what it lists.
+    fn commit(&mut self, step: Step, shown: Shown) {
         self.climbing = None;
-        match step {
-            Step::Reload => {
-                self.relist(entries);
-                return;
+        if step == Step::Reload {
+            match (&self.shown, shown) {
+                (Shown::Folder { .. }, Shown::Folder { entries, .. }) => self.relist(entries),
+                (Shown::Network { .. }, Shown::Network { items, .. }) => {
+                    self.relist_network(items);
+                }
+                // A reload is of the location shown, so this cannot be one;
+                // adopting it whole leaves the history as it was.
+                (_, shown) => {
+                    self.shown = shown;
+                    self.adopt_shown();
+                }
             }
+            return;
+        }
+        let previous = mem::replace(&mut self.shown, shown).into_location();
+        match step {
             Step::Fresh => {
-                let previous = mem::replace(&mut self.components, target);
                 Self::push_bounded(&mut self.back, previous);
                 self.forward.clear();
             }
             Step::Back => {
                 self.back.pop_back();
-                let previous = mem::replace(&mut self.components, target);
                 Self::push_bounded(&mut self.forward, previous);
             }
             Step::Forward => {
                 self.forward.pop_back();
-                let previous = mem::replace(&mut self.components, target);
                 Self::push_bounded(&mut self.back, previous);
             }
+            Step::Reload => {}
         }
         self.focus_intent = None;
-        self.adopt_entries(entries);
+        self.adopt_shown();
     }
 
     /// Whether a navigation is waiting on its listing.
@@ -1342,10 +1661,18 @@ impl<S: DirectorySource> Browser<S> {
     /// Where the pending navigation is going, or `None` when nothing is
     /// pending.
     #[must_use]
-    pub fn listing_target(&self) -> Option<&[String]> {
+    pub fn listing_target(&self) -> Option<&Location> {
+        self.pending.as_ref().map(|pending| &pending.target)
+    }
+
+    /// Whether a navigation is waiting on a listing of somewhere other than
+    /// the location shown: what is listed belongs to a place the user has
+    /// asked to leave.
+    #[must_use]
+    pub fn listing_elsewhere(&self) -> bool {
         self.pending
             .as_ref()
-            .map(|pending| pending.target.as_slice())
+            .is_some_and(|pending| !self.shown.is_at(&pending.target))
     }
 
     /// Ask the source again for the pending navigation's listing, committing it
@@ -1363,20 +1690,36 @@ impl<S: DirectorySource> Browser<S> {
     /// was, so a refused listing is reported in place rather than stranding the
     /// view in a directory it could not read.
     pub fn resume(&mut self) -> Result<bool, BrowseError> {
-        let Some(pending) = self.pending.take() else {
+        // The network commits through `show_network`, not its source.
+        let Some(Pending {
+            target: Location::Folder(components),
+            step,
+        }) = self
+            .pending
+            .take_if(|pending| matches!(pending.target, Location::Folder(_)))
+        else {
             return Ok(false);
         };
-        match self.source.list(&pending.target) {
+        match self.source.list(&components) {
             Ok(Listing::Ready(entries)) => {
-                self.commit(pending.target, pending.step, entries);
+                self.commit(
+                    step,
+                    Shown::Folder {
+                        components,
+                        entries,
+                    },
+                );
                 Ok(true)
             }
             Ok(Listing::Pending) => {
-                self.pending = Some(pending);
+                self.pending = Some(Pending {
+                    target: Location::Folder(components),
+                    step,
+                });
                 Ok(false)
             }
             Err(errno) => {
-                if self.climbing.as_ref() != Some(&pending.target) {
+                if self.climbing.as_ref() != Some(&components) {
                     self.climbing = None;
                 }
                 Err(BrowseError::Source(errno))
@@ -1393,12 +1736,15 @@ impl<S: DirectorySource> Browser<S> {
     ///
     /// Whatever refuses a navigation other than its listing.
     pub fn climb(&mut self) -> Result<bool, BrowseError> {
-        let mut from = self
+        let Some(mut from) = self
             .climbing
             .take()
-            .unwrap_or_else(|| self.components.clone());
+            .or_else(|| self.folder().map(<[String]>::to_vec))
+        else {
+            return Ok(false);
+        };
         while from.pop().is_some() {
-            match self.begin(from.clone(), Step::Fresh) {
+            match self.begin(Location::Folder(from.clone()), Step::Fresh) {
                 Ok(()) => {
                     if self.pending.is_some() {
                         self.climbing = Some(from);
@@ -1415,34 +1761,82 @@ impl<S: DirectorySource> Browser<S> {
     /// Push `location` onto `stack`, dropping the oldest entries to keep the
     /// stack within [`HISTORY_MAX`] so navigation history cannot grow without
     /// bound.
-    fn push_bounded(stack: &mut VecDeque<Vec<String>>, location: Vec<String>) {
+    fn push_bounded(stack: &mut VecDeque<Location>, location: Location) {
         stack.push_back(location);
         while stack.len() > HISTORY_MAX {
             stack.pop_front();
         }
     }
 
-    /// Replace the loaded entries — ordered by the current sort mode — with a
-    /// fresh directory's: nothing selected and the focus at the top, since the
-    /// old indices name nothing here.
-    fn adopt_entries(&mut self, mut entries: Vec<Entry>) {
-        let presentation = self.presentation;
-        entries.retain(|entry| presentation.lists(entry.name()));
-        sort_entries(&mut entries, self.sort_mode);
-        self.entries = entries;
+    /// Take what was just committed as a fresh location's listing — a
+    /// folder's entries filtered by the presentation and ordered by the sort
+    /// mode, the network's already ordered — with nothing selected and the
+    /// focus at the top, since the old indices name nothing here.
+    fn adopt_shown(&mut self) {
+        if let Shown::Folder { entries, .. } = &mut self.shown {
+            let presentation = self.presentation;
+            entries.retain(|entry| presentation.lists(entry.name()));
+            sort_entries(entries, self.sort_mode);
+        }
+        self.drives_shown = false;
         self.selected = 0;
         self.selection.clear();
         self.drop_mark = None;
         self.scroll.set_offset(0);
     }
 
-    /// Clamp the focus cursor into the current entry range (to the last
-    /// entry, or to `0` when the directory is empty).
+    /// Clamp the focus cursor into the current item range (to the last item,
+    /// or to `0` when nothing is listed).
     fn clamp_selection(&mut self) {
-        self.selected = match self.entries.len().checked_sub(1) {
+        self.selected = match self.item_count().checked_sub(1) {
             Some(last) => self.selected.min(last),
             None => 0,
         };
+    }
+}
+
+/// Sort `items` by `cmp`, answering where each went, by its index before, or
+/// [`None`] without the memory to track them (the items are then untouched).
+fn sort_tracking<T>(
+    items: &mut Vec<T>,
+    cmp: impl Fn(&T, &T) -> core::cmp::Ordering,
+) -> Option<Vec<usize>> {
+    let count = items.len();
+    let mut tagged: Vec<(T, usize)> = Vec::new();
+    let mut place = Vec::new();
+    tagged.try_reserve_exact(count).ok()?;
+    place.try_reserve_exact(count).ok()?;
+    tagged.extend(mem::take(items).into_iter().zip(0..));
+    tagged.sort_by(|a, b| cmp(&a.0, &b.0));
+    place.resize(count, 0);
+    for (after, &(_, before)) in tagged.iter().enumerate() {
+        place[before] = after;
+    }
+    items.extend(tagged.into_iter().map(|(item, _)| item));
+    Some(place)
+}
+
+/// What activating `item`, listed at the network, does: an endpoint that can
+/// be reached is named for the caller to mount; one that cannot is refused,
+/// and a row standing for what is not listed names nothing.
+fn activate_network(item: &NetworkItem) -> Result<Activation, BrowseError> {
+    let endpoint = item.endpoint().ok_or(BrowseError::NoSuchEntry)?;
+    if !endpoint.is_available() {
+        return Err(BrowseError::Unreachable);
+    }
+    Ok(Activation::MountEndpoint(alloc::boxed::Box::new(
+        NetworkEndpoint::clone(endpoint),
+    )))
+}
+
+/// `entry` of the folder at `components` as it was listed: its path, and the
+/// node the listing showed.
+fn listed(components: &[String], entry: &Entry) -> Listed {
+    let mut path = components.to_vec();
+    path.push(String::from(entry.name()));
+    Listed {
+        path,
+        id: entry.id(),
     }
 }
 

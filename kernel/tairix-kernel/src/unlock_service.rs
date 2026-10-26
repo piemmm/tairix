@@ -339,7 +339,8 @@ pub fn service_caps() -> CapabilitySet {
 /// IRQ-woken report pump cannot be starved by CPU-bound work; and
 /// [`CapabilityId::FS_MOUNT`] for the
 /// `volmgr` storage-policy driver to request the audited kernel attach of
-/// each recognised volume. A driver whose
+/// each recognised volume; and [`CapabilityId::FS_SERVE`] for a served
+/// filesystem driver to serve the volume its node's grant names. A driver whose
 /// manifest does not request them receives nothing extra (the per-driver
 /// intersection still binds — no ambient authority).
 /// The driver never receives `CAP_DRV_LOAD`: it is the *caller's* key to the
@@ -428,6 +429,8 @@ pub fn autoload_caps() -> CapabilitySet {
     // matched driver was refused at the load gate for escalation and the board
     // ran at whatever rate the boot floor had left.
     caps.insert(CapabilityId::CPUFREQ);
+    // A served filesystem driver serves the one volume its node's grant names.
+    caps.insert(CapabilityId::FS_SERVE);
     caps
 }
 
@@ -1229,6 +1232,9 @@ mod tests {
             // requests a capability this set lacks is refused outright as an
             // escalation, so every mass-storage node fails to bind.
             CapabilityId::SYSINFO_HW,
+            // A served filesystem driver serves the volume its node's grant
+            // names (`CAP_FS_SERVE`).
+            CapabilityId::FS_SERVE,
         ] {
             assert!(!service.contains(cap));
             assert!(autoload.contains(cap));

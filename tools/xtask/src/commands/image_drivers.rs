@@ -211,6 +211,55 @@ pub const PCF8523_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"pcf8523", b"Run
 /// the chip leaf `pcf85063a`.
 pub const PCF85063A_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"pcf85063a", b"Run"];
 
+/// A filesystem driver served from user space (`plans/FSSERVE.md` FSS5): its
+/// package, the bind table the kernel's volume nodes of its format match, and
+/// its store path, in class `filesystem` with the format as the leaf.
+pub struct ServedFsDriver {
+    /// The driver crate, whose `Run` binary shares its name.
+    pub package: &'static str,
+    /// The driver's own bind table.
+    pub bind_keys: &'static [tairix_abi::DriverBindKey],
+    /// Where the store holds it.
+    pub store_path: &'static [&'static [u8]],
+}
+
+/// The ISO 9660 driver: every disc the optical vertical attaches is one.
+pub const ISO9660_DRIVER: ServedFsDriver = ServedFsDriver {
+    package: "tairix-drv-fs-iso9660",
+    bind_keys: tairix_drv_fs_iso9660::BIND_KEYS,
+    store_path: &[b"Drivers", b"filesystem", b"iso9660", b"Run"],
+};
+
+/// Every format a removable volume is served as.
+pub const SERVED_FS_DRIVERS: &[ServedFsDriver] = &[
+    ServedFsDriver {
+        package: "tairix-drv-fs-arxfs",
+        bind_keys: tairix_drv_fs_arxfs::BIND_KEYS,
+        store_path: &[b"Drivers", b"filesystem", b"arxfs", b"Run"],
+    },
+    ServedFsDriver {
+        package: "tairix-drv-fs-ext4",
+        bind_keys: tairix_drv_fs_ext4::BIND_KEYS,
+        store_path: &[b"Drivers", b"filesystem", b"ext4", b"Run"],
+    },
+    ServedFsDriver {
+        package: "tairix-drv-fs-fat32",
+        bind_keys: tairix_drv_fs_fat32::BIND_KEYS,
+        store_path: &[b"Drivers", b"filesystem", b"fat32", b"Run"],
+    },
+    ISO9660_DRIVER,
+    ServedFsDriver {
+        package: "tairix-drv-fs-udf",
+        bind_keys: tairix_drv_fs_udf::BIND_KEYS,
+        store_path: &[b"Drivers", b"filesystem", b"udf", b"Run"],
+    },
+    ServedFsDriver {
+        package: "tairix-drv-fs-adfs",
+        bind_keys: tairix_drv_fs_adfs::BIND_KEYS,
+        store_path: &[b"Drivers", b"filesystem", b"adfs", b"Run"],
+    },
+];
+
 /// Cross-compile `package` for the freestanding aarch64 target, convert the
 /// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
 /// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
@@ -230,10 +279,31 @@ fn build_bundle(
     bind_keys: &[tairix_abi::DriverBindKey],
     profile: ImageProfile,
 ) -> Result<Vec<u8>, String> {
+    sign_bundle(ctx, arch, package, &[], caps, bind_keys, profile)
+}
+
+/// [`build_bundle`] for a `Run` binary built with the package `features`.
+fn sign_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    package: &str,
+    features: &[&str],
+    caps: &[CapabilityId],
+    bind_keys: &[tairix_abi::DriverBindKey],
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
     // A driver crate's `Run` binary shares the package name; cargo resolves
     // the crate from `-p <package>`, and every program links the one shared
     // PIE script, so no per-crate source directory is needed here.
-    let elf = cross_compile_pie_elf(ctx, arch, "image-drivers", package, package, profile)?;
+    let elf = cross_compile_pie_elf(
+        ctx,
+        arch,
+        "image-drivers",
+        package,
+        package,
+        features,
+        profile,
+    )?;
     let rxe = elf_to_rxe(
         &elf,
         &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
@@ -1535,10 +1605,56 @@ pub fn usb_audio_driver_store_files(
         .map_err(Clone::clone)
 }
 
+/// Build and sign one served filesystem driver's bundle.
+///
+/// Every one runs with exactly `tairix_fsserve::REQUIRED_CAPABILITIES` — the
+/// volume its node's grant names, served under `CAP_FS_SERVE`, and its
+/// diagnostics — and binds only the volume nodes the kernel publishes for its
+/// format. Its `Run` binary is behind the crate's `program` feature, because
+/// the kernel links two of these libraries for its own volumes.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_served_fs_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    driver: &ServedFsDriver,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    sign_bundle(
+        ctx,
+        arch,
+        driver.package,
+        &["program"],
+        tairix_fsserve::REQUIRED_CAPABILITIES,
+        driver.bind_keys,
+        profile,
+    )
+}
+
+/// One served filesystem driver's signed bundle, paired with its store path.
+///
+/// # Errors
+///
+/// As [`build_served_fs_bundle`].
+pub fn served_fs_store_file(
+    ctx: &Context,
+    arch: PieArch,
+    driver: &ServedFsDriver,
+    profile: ImageProfile,
+) -> Result<AppStoreFile, String> {
+    Ok(store_file(
+        driver.store_path,
+        build_served_fs_bundle(ctx, arch, driver, profile)?,
+    ))
+}
+
 /// The signed **USB optical set** — the xHCI host-controller driver, the USB
-/// mass-storage driver and the volume manager — each paired with its store
-/// path: the `/System/Drivers/` set the USB optical vertical plants, from the
-/// controller down to the volume a disc is attached as. No display or input
+/// mass-storage driver, the volume manager and the ISO 9660 driver that serves
+/// a disc's volume — each paired with its store path: the `/System/Drivers/`
+/// set the USB optical vertical plants, from the controller down to the
+/// mounted disc. No display or input
 /// driver rides with them, so the console stays the text console the serial
 /// script drives. Built once per xtask process and memoised.
 ///
@@ -1561,6 +1677,7 @@ pub fn optical_driver_store_files(
                     build_usb_msd_bundle(ctx, arch, profile)?,
                 ),
                 store_file(VOLMGR_STORE_PATH, build_volmgr_bundle(ctx, arch, profile)?),
+                served_fs_store_file(ctx, arch, &ISO9660_DRIVER, profile)?,
             ])
         })
         .as_ref()

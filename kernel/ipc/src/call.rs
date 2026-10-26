@@ -81,6 +81,29 @@ mod state {
     pub(super) const CLOSED: u32 = 1;
 }
 
+/// What entitles a creator to bind an endpoint.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum BindAuthority {
+    /// The creator's own capabilities.
+    Capability,
+    /// The live seat lease the handler attested, for a seat-scoped reserved
+    /// id.
+    SeatLease,
+    /// A serve the kernel accepted, for an id in the served range.
+    ServedVolume,
+}
+
+impl BindAuthority {
+    /// How an attested bind's record names its authority.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Capability => "capability",
+            Self::SeatLease => "seat-lease",
+            Self::ServedVolume => "served-volume",
+        }
+    }
+}
+
 /// An opaque, unforgeable handle correlating a posted request with its
 /// reply.
 ///
@@ -360,7 +383,7 @@ impl CallEndpoint {
             required_recv_caps,
             limits,
             queue_limit,
-            false,
+            BindAuthority::Capability,
             audit,
         )
     }
@@ -400,7 +423,45 @@ impl CallEndpoint {
             required_recv_caps,
             limits,
             queue_limit,
-            true,
+            BindAuthority::SeatLease,
+            audit,
+        )
+    }
+
+    /// Create the endpoint a filesystem driver serves its volume on, owned
+    /// by `driver`, on an id in the served range
+    /// (`tairix_abi::fsserve::is_served_endpoint`).
+    ///
+    /// The kernel creates it as part of a serve it accepted, so the bind
+    /// authority is that acceptance rather than anything the driver holds.
+    /// Its senders must hold `CAP_IPC_ENDPOINT` and, from user space, a grant
+    /// for it that is never minted: only the kernel posts to it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an id outside the served range, and
+    /// otherwise as [`Self::create`].
+    pub fn create_served<S: Sink + ?Sized>(
+        id: EndpointId,
+        driver: &TaskCapabilities,
+        limits: CallEndpointLimits,
+        queue_limit: u64,
+        audit: &S,
+    ) -> Result<Self, Errno> {
+        if !tairix_abi::fsserve::is_served_endpoint(id.0) {
+            Self::record_create_denied(id, audit);
+            return Err(Errno::OutOfRange);
+        }
+        let mut senders = CapabilitySet::empty();
+        senders.insert(tairix_abi::CapabilityId::IPC_ENDPOINT);
+        Self::create_gated(
+            id,
+            driver,
+            senders,
+            CapabilitySet::empty(),
+            limits,
+            queue_limit,
+            BindAuthority::ServedVolume,
             audit,
         )
     }
@@ -425,11 +486,8 @@ impl CallEndpoint {
         );
     }
 
-    /// The one create path both public constructors share.
-    /// `reserved_bind_attested` is the handler's kernel-attested
-    /// alternative authority for a reserved id (see
-    /// [`Self::create_seat_attested`]); it never relaxes the
-    /// restricted-sender gate.
+    /// The one create path the public constructors share, `authority` saying
+    /// what entitles the creator to bind `id`.
     #[allow(
         clippy::too_many_arguments,
         reason = "the two public constructors' inputs plus the one that tells them apart"
@@ -441,7 +499,7 @@ impl CallEndpoint {
         required_recv_caps: CapabilitySet,
         limits: CallEndpointLimits,
         queue_limit: u64,
-        reserved_bind_attested: bool,
+        authority: BindAuthority,
         audit: &S,
     ) -> Result<Self, Errno> {
         let CallEndpointLimits {
@@ -475,18 +533,28 @@ impl CallEndpoint {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
             return Err(Errno::OutOfRange);
         }
+        // A served volume's endpoint is the kernel's to make, so a squatter
+        // can never stand in for the driver of a volume it was not given.
+        if tairix_abi::fsserve::is_served_endpoint(id.0)
+            != matches!(authority, BindAuthority::ServedVolume)
+        {
+            record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
+            return Err(Errno::OutOfRange);
+        }
 
         if !required_recv_caps.is_subset_of(creator.effective()) {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
         }
 
-        // A restricted-sender endpoint is privileged unconditionally; a
-        // reserved id is privileged unless the handler kernel-attested the
-        // alternative bind authority (the live seat lease).
-        let reserved_unauthorized =
-            tairix_abi::ipc::is_reserved_endpoint(id.0) && !reserved_bind_attested;
-        if (!required_send_caps.is_empty() || reserved_unauthorized)
+        // A restricted-sender endpoint is privileged unless the kernel made
+        // it for a serve it accepted; a reserved id is privileged unless the
+        // handler kernel-attested the live seat lease.
+        let sender_unauthorized =
+            !required_send_caps.is_empty() && !matches!(authority, BindAuthority::ServedVolume);
+        let reserved_unauthorized = tairix_abi::ipc::is_reserved_endpoint(id.0)
+            && !matches!(authority, BindAuthority::SeatLease);
+        if (sender_unauthorized || reserved_unauthorized)
             && !creator.has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
         {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
@@ -509,10 +577,15 @@ impl CallEndpoint {
             key: "process",
             value: tairix_log::FieldValue::UnsignedInt(creator.process().0),
         };
-        if reserved_bind_attested {
-            // The seat-attested bind is a distinct security decision:
-            // record it distinguishably from a capability-authorised bind.
-            record(
+        // A bind the kernel attested is a distinct security decision:
+        // recorded distinguishably from a capability-authorised one.
+        let _ = match authority {
+            BindAuthority::Capability => record(
+                audit,
+                AuditEvent::CallEndpointCreated,
+                &[id_field, server_field],
+            ),
+            BindAuthority::SeatLease | BindAuthority::ServedVolume => record(
                 audit,
                 AuditEvent::CallEndpointCreated,
                 &[
@@ -520,17 +593,11 @@ impl CallEndpoint {
                     server_field,
                     Field {
                         key: "bind",
-                        value: tairix_log::FieldValue::Str("seat-lease"),
+                        value: tairix_log::FieldValue::Str(authority.as_str()),
                     },
                 ],
-            );
-        } else {
-            record(
-                audit,
-                AuditEvent::CallEndpointCreated,
-                &[id_field, server_field],
-            );
-        }
+            ),
+        };
 
         Ok(Self {
             id,
@@ -1622,6 +1689,72 @@ mod tests {
         .err()
         .expect("privileged bind requires IPC_BIND_PRIVILEGED");
         assert_eq!(err, Errno::PermissionDenied);
+    }
+
+    const SERVED_LIMITS: CallEndpointLimits = CallEndpointLimits {
+        max_request: 64,
+        max_reply: 64,
+        capacity: 2,
+    };
+
+    #[test]
+    fn a_served_volume_endpoint_is_the_kernels_to_make_and_takes_only_its_posts() {
+        let sink = RecordingSink::new();
+        let served = EndpointId(tairix_abi::fsserve::served_endpoint(7));
+        // The driver holds no bind privilege: the kernel's acceptance of its
+        // serve is the authority.
+        let driver = task_with(9, &[]);
+        let ep = CallEndpoint::create_served(
+            served,
+            &driver,
+            SERVED_LIMITS,
+            tairix_abi::RLIMIT_INFINITY,
+            &sink,
+        )
+        .expect("the kernel makes it");
+        assert_eq!(ep.owner(), 9);
+        assert_eq!(
+            ep.required_send_caps(),
+            &caps_of(&[CapabilityId::IPC_ENDPOINT])
+        );
+        // A process naming the range itself is refused, privileged or not.
+        let privileged = task_with(2, &[CapabilityId::IPC_BIND_PRIVILEGED]);
+        assert_eq!(
+            CallEndpoint::create(
+                served,
+                &privileged,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                SERVED_LIMITS,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
+            .err(),
+            Some(Errno::OutOfRange)
+        );
+        // …and the kernel makes no served endpoint outside it.
+        assert_eq!(
+            CallEndpoint::create_served(
+                EndpointId(0x77),
+                &driver,
+                SERVED_LIMITS,
+                tairix_abi::RLIMIT_INFINITY,
+                &sink,
+            )
+            .err(),
+            Some(Errno::OutOfRange)
+        );
+        // Only a sender holding the endpoint class capability may post.
+        let stranger = task_with(3, &[]);
+        assert_eq!(
+            ep.post(&stranger, POSTER_SCHED, b"x", u64::MAX, &sink)
+                .err(),
+            Some(Errno::PermissionDenied)
+        );
+        let kernel = task_with(4, &[CapabilityId::IPC_ENDPOINT]);
+        assert!(ep
+            .post(&kernel, POSTER_SCHED, b"x", u64::MAX, &sink)
+            .is_ok());
     }
 
     #[test]

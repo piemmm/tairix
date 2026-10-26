@@ -955,7 +955,7 @@ fn a_climb_passes_every_ancestor_that_went_too() {
     tree.remove(&["a", "b", "c"]);
     tree.remove(&["a", "b"]);
     assert_eq!(browser.climb(), Ok(true));
-    assert_eq!(browser.components(), at(&["a"]));
+    assert_eq!(browser.folder(), Some(at(&["a"]).as_slice()));
 }
 
 /// Where each listing answers later, a refusal that lands climbs on from the
@@ -973,7 +973,7 @@ fn a_climb_carries_on_from_a_refusal_that_lands_later() {
     assert!(browser.resume().is_err(), "and refused when it answers");
     assert_eq!(browser.climb(), Ok(true));
     assert_eq!(browser.resume(), Ok(true));
-    assert_eq!(browser.components(), at(&["a"]));
+    assert_eq!(browser.folder(), Some(at(&["a"]).as_slice()));
 }
 
 /// With every folder above gone too there is nowhere to climb to.

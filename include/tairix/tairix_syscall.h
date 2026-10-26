@@ -179,6 +179,10 @@ extern "C" {
 #define TAIRIX_SYS_FS_PUNCH 152u
 #define TAIRIX_SYS_FS_UMASK 153u
 #define TAIRIX_SYS_FS_ACCESS 154u
+#define TAIRIX_SYS_VOLUME_READ 155u
+#define TAIRIX_SYS_VOLUME_WRITE 156u
+#define TAIRIX_SYS_VOLUME_CTL 157u
+#define TAIRIX_SYS_VOLUME_SERVE 158u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -729,7 +733,7 @@ int32_t tairix_sys_fs_set_mode(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3
 uint64_t tairix_sys_port_resolve(void * a0, uintptr_t a1);
 uint64_t tairix_sys_file_map(uint32_t a0, uint64_t a1, uint64_t a2);
 int32_t tairix_sys_file_unmap(uint64_t a0, uint64_t a1);
-uint64_t tairix_sys_pointer_inject(uint64_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_pointer_inject(uint64_t a0, void * a1, uintptr_t a2, uint64_t a3);
 uint64_t tairix_sys_pointer_read(uint64_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_volume_attach(void * a0, uintptr_t a1);
 int32_t tairix_sys_volume_detach(void * a0, uintptr_t a1);
@@ -806,6 +810,10 @@ uint64_t tairix_sys_fs_seek_region(uint32_t a0, uint64_t a1, uint32_t a2);
 int32_t tairix_sys_fs_punch(uint32_t a0, uint64_t a1, uint64_t a2);
 uint64_t tairix_sys_fs_umask(uint32_t a0);
 int32_t tairix_sys_fs_access(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3, uint32_t a4);
+int32_t tairix_sys_volume_read(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
+int32_t tairix_sys_volume_write(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
+uint64_t tairix_sys_volume_ctl(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+uint64_t tairix_sys_volume_serve(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */

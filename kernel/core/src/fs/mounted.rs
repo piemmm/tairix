@@ -64,7 +64,7 @@ use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord, VolumeIoHealthRecord,
     VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
-use tairix_abi::time::{is_plausible_wall_time, Time64};
+use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
     RenameFlags, SeekRegion, UnlinkFlags, FS_MODE_MASK,
@@ -82,6 +82,7 @@ use crate::fswatch::ClaimRef;
 use crate::wallclock::WallClockSource;
 
 use super::blkmeter::VolumeIoSource;
+use super::served::ServedState;
 
 use super::delegate::{
     map_driver_error, DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, Expect, FinalLink,
@@ -176,6 +177,9 @@ struct DriverEntry<F: 'static> {
     usage: Arc<SpinLock<VolumeStats>>,
     /// The registration the volume's descriptors pin through.
     nodes: Arc<VolumeNodes>,
+    /// What a user-space driver serving the volume last said of itself: the
+    /// writes it holds unpublished, and how its conduct reads.
+    served: Option<Arc<ServedState>>,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entries`]
@@ -206,13 +210,15 @@ struct SnapshotEntry<F: 'static> {
 fn overlaid_availability(
     stored: MountAvailability,
     health: Option<&VolumeIoSource>,
+    served: Option<&ServedState>,
 ) -> MountAvailability {
     if !matches!(stored, MountAvailability::Available) {
         return stored;
     }
-    health
+    let device = health
         .and_then(VolumeIoSource::live_availability)
-        .unwrap_or(MountAvailability::Available)
+        .unwrap_or(MountAvailability::Available);
+    served.map_or(device, |served| device.worse_of(served.availability()))
 }
 
 /// A set-once VFS policy layer plus a registry of backing filesystem drivers
@@ -346,18 +352,46 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         volume_id: [u8; 16],
         watch: Option<ClaimRef>,
     ) -> Result<Arc<DriverLock<F>>, RegisterError> {
-        let instance = self.instances.fetch_add(1, Ordering::Relaxed);
-        let nodes =
-            Arc::try_new(VolumeNodes::new(instance)).map_err(|_| RegisterError::OutOfMemory)?;
+        let nodes = self.registration(VolumeNodes::new)?;
         self.register_with_nodes(handle, driver, source, fstype, volume_id, watch, nodes)
     }
 
+    /// [`register`](Self::register) a driver that answers from a user-space
+    /// server, under a fresh registration
+    /// [reaped inline](VolumeNodes::reaped_inline).
+    ///
+    /// # Errors
+    ///
+    /// As [`register`](Self::register).
+    pub fn register_served(
+        &self,
+        handle: DriverHandle,
+        driver: F,
+        source: &str,
+        fstype: &str,
+        volume_id: [u8; 16],
+        watch: Option<ClaimRef>,
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let nodes = self.registration(VolumeNodes::reaped_inline)?;
+        self.register_with_nodes(handle, driver, source, fstype, volume_id, watch, nodes)
+    }
+
+    /// A fresh registration built by `make`, numbered after every earlier one.
+    fn registration(
+        &self,
+        make: fn(u64) -> VolumeNodes,
+    ) -> Result<Arc<VolumeNodes>, RegisterError> {
+        let instance = self.instances.fetch_add(1, Ordering::Relaxed);
+        Arc::try_new(make(instance)).map_err(|_| RegisterError::OutOfMemory)
+    }
+
     /// [`register`](Self::register) `driver` under the existing registration
-    /// `nodes`: the stand-in for a volume that vanished with work unpublished
-    /// takes over the registration `handle` serves, so the descriptors opened
-    /// through it answer the stand-in while the volume is away. With `handle`
-    /// registered under `nodes`, its driver is replaced in place, so no
-    /// operation finds the handle unregistered in between.
+    /// `nodes`: the stand-in for a volume that vanished with work unpublished,
+    /// or whose server was lost, takes over the registration `handle` serves,
+    /// so the descriptors opened through it answer the stand-in while the
+    /// volume is away. With `handle` registered under `nodes`, its driver is
+    /// replaced in place, so no operation finds the handle unregistered in
+    /// between.
     ///
     /// # Errors
     ///
@@ -402,7 +436,14 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             watch,
             usage,
             nodes,
+            served: None,
         };
+        // Taken before the entry is visible, so the fast path takes it and
+        // cannot park — the surprise-removal path registers a stand-in from a
+        // context that must not — and no operation reaches the driver before
+        // it has its host: one that did would wait on a server that may be
+        // inside the very call serving it.
+        let mut fs = shared.lock();
         let replaced = {
             let mut drivers = self.drivers.lock();
             let at = drivers.iter().position(|e| e.handle == raw);
@@ -429,14 +470,11 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         drop(replaced);
         // The entry is in place before the driver learns of the timer, so a
         // driver that reports a deadline from inside this call has a slot to
-        // report it into. This acquire cannot park and cannot spin: the lock
-        // was created above and its handle has not left this function, so the
-        // fast path takes it — which matters because the surprise-removal path
-        // registers a stand-in from a context that must not park, and
-        // because the registry's own spin lock is released first either way.
+        // report it into.
         if let Ok(Some(host)) = self.volume_host.get() {
-            shared.lock().set_volume_host(handle, *host);
+            fs.set_volume_host(handle, *host);
         }
+        drop(fs);
         // What the mount listing reports of the volume moved — its name,
         // type, space and availability — though the table's own mounts did
         // not: an unlocked root is exactly this.
@@ -510,7 +548,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// and one is taken from the registry at a time, so the pass allocates
     /// nothing and one registered or withdrawn beneath it moves none of the
     /// others. A volume busy elsewhere stays due, and the hold that frees it
-    /// wakes the flusher again.
+    /// wakes the flusher again. One [reaped inline](VolumeNodes::reaped_inline)
+    /// is never visited: its driver answers from a server the flusher must
+    /// not wait on.
     pub(super) fn reap_due(&self)
     where
         F: FilesystemRead,
@@ -534,7 +574,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         });
         drivers[from..]
             .iter()
-            .find(|e| e.nodes.is_reap_due())
+            .find(|e| e.nodes.is_reap_due() && !e.nodes.reaps_inline())
             .map(|e| (Arc::clone(&e.driver), Arc::clone(&e.nodes)))
     }
 
@@ -611,7 +651,9 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             .lock()
             .iter()
             .find(|e| e.handle == raw)
-            .is_some_and(|e| e.writeback.holds_open())
+            .is_some_and(|e| {
+                e.writeback.holds_open() || e.served.as_ref().is_some_and(|s| s.holds_unpublished())
+            })
     }
 
     /// The soonest write-back deadline any registered volume has published,
@@ -706,6 +748,29 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         Ok(())
     }
 
+    /// Attach what the user-space driver serving the volume registered for
+    /// `handle` reports of itself, so the unplug classification counts the
+    /// writes it holds unpublished and the mount snapshot reflects its
+    /// conduct; `None` once that driver is gone.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] when `handle` names no registered volume.
+    pub fn set_served_state(
+        &self,
+        handle: DriverHandle,
+        served: Option<Arc<ServedState>>,
+    ) -> Result<(), Errno> {
+        let handle = handle.as_u64();
+        let mut drivers = self.drivers.lock();
+        let entry = drivers
+            .iter_mut()
+            .find(|e| e.handle == handle)
+            .ok_or(Errno::NotImplemented)?;
+        entry.served = served;
+        Ok(())
+    }
+
     /// A snapshot of every fault-aware block-backed volume's live I/O health,
     /// one [`VolumeIoHealthRecord`] per registered volume that has a block
     /// health source, for the `sysinfo` volume-health query
@@ -724,7 +789,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             VolumeIoHealthRecord::new(
                 entry.volume_id,
                 source.dev,
-                overlaid_availability(entry.availability, Some(source)),
+                overlaid_availability(entry.availability, Some(source), entry.served.as_deref()),
                 source.counters.snapshot(),
             )
         })
@@ -900,7 +965,11 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 fstype: e.fstype.clone(),
                 driver: Arc::clone(&e.driver),
                 volume_id: e.volume_id,
-                availability: overlaid_availability(e.availability, e.io.as_ref()),
+                availability: overlaid_availability(
+                    e.availability,
+                    e.io.as_ref(),
+                    e.served.as_deref(),
+                ),
                 usage: Arc::clone(&e.usage),
             })
             .collect();
@@ -934,8 +1003,7 @@ impl<F: FilesystemWrite + Send + 'static> VolumeHost for LateFilesystem<F> {
     /// is plausible, which a dead clock battery's year 2000 is not.
     fn wall_time(&self) -> Option<Time64> {
         let clock = self.wall_clock.get().ok().flatten()?;
-        let reading = clock.read(crate::waitq::wait_now_ns()?);
-        (reading.state().is_set() && is_plausible_wall_time(reading.time())).then(|| reading.time())
+        clock.read(crate::waitq::wait_now_ns()?).stamp()
     }
 
     fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>) {
@@ -1389,6 +1457,7 @@ where
         if !handle.projection.is_live() || handle.node.volume().is_retired() {
             return Err(Errno::Stale);
         }
+        handle.node.volume().reap_inline(&mut *fs);
         op(&mut fs, volume)
     }
 
@@ -1513,6 +1582,7 @@ where
         if !serve.projection.is_live() || served.nodes.is_retired() {
             return Err(gone);
         }
+        served.nodes.reap_inline(&mut *fs);
         op(&mut fs, &served)
     }
 
@@ -1920,11 +1990,14 @@ fn covered_after(vfs: &Vfs, path: &Path, after: &[u8]) -> Result<Vec<String>, Vf
     Ok(names)
 }
 
-/// Flush `driver`'s buffered writes to its device. `abi-v1` has no dedicated
-/// I/O errno, so a device fault collapses onto the code the VFS gives a driver
+/// Flush `driver`'s buffered writes to its device, its releases reaped inline
+/// first so what they free is committed too. `abi-v1` has no dedicated I/O
+/// errno, so a device fault collapses onto the code the VFS gives a driver
 /// fault.
-fn flush<F: FilesystemWrite>(driver: &DriverLock<F>) -> Result<(), Errno> {
-    driver.lock().flush().map_err(|_| VfsError::Io.to_errno())
+fn flush<F: FilesystemRead + FilesystemWrite>(driver: &DriverLock<F>) -> Result<(), Errno> {
+    let mut fs = driver.lock();
+    driver.nodes().reap_inline(&mut *fs);
+    fs.flush().map_err(|_| VfsError::Io.to_errno())
 }
 
 /// Map a driver structural node kind to the userland [`FileKind`] the

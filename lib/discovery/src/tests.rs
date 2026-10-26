@@ -4,14 +4,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::discovery_ipc::{
-    encode_id_reply, Answer, Change, CollectWriter, DiscoveryRequest, Entry, Query,
+    encode_id_reply, Answer, Change, CollectWriter, DiscoveryRequest, Entry, Membership, Query,
     ServiceTypeField, Transport as Proto,
 };
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::Errno;
 
-use super::{Applied, DiscoveryError, Held, OwnedAnswer, Session, Transport};
+use super::{Applied, DiscoveryError, Held, OwnedAnswer, OwnedMembership, Session, Transport};
 
 fn iface(name: &[u8]) -> [u8; IF_NAME_LEN] {
     let mut out = [0u8; IF_NAME_LEN];
@@ -167,6 +167,49 @@ fn a_held_set_follows_every_edge_and_every_flush() {
     );
     assert_eq!(held.apply(&Entry::Lost { request: 1 }), Applied::Lost);
     assert!(held.is_lost());
+}
+
+/// A computer is one answer under its key: a rename arrives as the old name
+/// retired and the new one added, and a repeat changes nothing.
+#[test]
+fn a_computer_is_held_under_its_key_and_renamed_by_retiring_it() {
+    let computer = |name, change| Entry::Answer {
+        request: 1,
+        interface: iface(b"eth0"),
+        change,
+        ttl: 0,
+        answer: Answer::Computer {
+            key: 9,
+            address: core::net::IpAddr::V4(core::net::Ipv4Addr::new(10, 0, 0, 5)),
+            name,
+            membership: Membership::Workgroup("HOME"),
+        },
+    };
+    let mut held = Held::default();
+    assert_eq!(held.apply(&computer("PC", Change::Added)), Applied::Changed);
+    assert_eq!(
+        held.apply(&computer("PC", Change::Added)),
+        Applied::Unchanged
+    );
+    assert_eq!(
+        held.apply(&computer("PC", Change::Retired)),
+        Applied::Changed
+    );
+    assert_eq!(
+        held.apply(&computer("STUDY", Change::Added)),
+        Applied::Changed
+    );
+    assert_eq!(held.answers().len(), 1);
+    assert!(matches!(
+        &held.answers()[0].answer,
+        OwnedAnswer::Computer { name, membership: OwnedMembership::Workgroup(group), .. }
+            if name == "STUDY" && group == "HOME"
+    ));
+    assert_eq!(
+        held.apply(&computer("STUDY", Change::Retired)),
+        Applied::Changed
+    );
+    assert!(held.answers().is_empty());
 }
 
 #[test]

@@ -461,8 +461,9 @@ no permission decision of its own.
 
 ### The navigation model
 
-`Browser` holds the current directory's path and entries plus a selection
-cursor:
+`Browser` holds the `Location` it shows — a directory's path and entries, or
+the network's items (below) — plus a selection cursor. `folder()` is the
+directory's components, or `None` at the network, which has no path:
 
 - `open_root` opens at `/` and lists it; `open_at(source, components)` opens
   *at* a given directory (root-first `components`, empty being `/`, so
@@ -472,8 +473,8 @@ cursor:
   model. The desktop session's trusted picker opens at the user's
   `Home` folder this way (below).
 - `open_index` / `open_selected` descend into a directory entry; `go_up`
-  climbs to the parent and returns `Ok(false)` at the root (no parent is not
-  an error).
+  climbs to the parent and returns `Ok(false)` at the root and at the network
+  (no parent is not an error); `can_go_up` says whether there is one.
 - `refresh` re-reads the current directory, clamping the selection into the
   new listing.
 - `select`, `select_next`, and `select_previous` move the selection, clamping
@@ -501,8 +502,45 @@ refused or failing read leaves the browser on the directory it was already
 showing — a `go_back` / `go_forward` / location jump to a directory that
 has become unreadable leaves the browser *and its history* exactly as they
 were. The fail-closed outcomes are the `BrowseError` variants: `Source`
-(the wrapped boundary `Errno`, e.g. `PermissionDenied`), `NoSuchEntry`, and
-`NotADirectory`.
+(the wrapped boundary `Errno`, e.g. `PermissionDenied`), `NoSuchEntry`,
+`NotADirectory`, `OutOfMemory`, and `Unreachable` (a network endpoint no
+address is known for).
+
+### The network location
+
+The network is a location with no path (`plans/ZEROCONF.md` Z9, §6.1): a
+`Browser` reaches it through `navigate_to_network` or `open_network`, and
+its history holds it like any folder, so Back and Forward cross between the
+two. What it lists are `NetworkItem`s built once per catalogue answer by
+`network::items` from the `lib/discovery` storage catalogue (Z8): each
+endpoint, then a row counting what one source offered past its quota, then
+a row saying the catalogue is short of what the segment offers. Every name
+a peer chose is shown through `tairix_util::utf8::shown`; an endpoint whose
+name `mixes_scripts` draws `IconKind::AlertWarning` in place of its own
+picture and says so in the type column; one with no known address reads
+disabled. Its picture comes from what found it — a computer, or a server
+its file service names — never from anything the peer supplied, so a
+stranger cannot draw itself as one of the user's drives.
+
+A navigation to the network waits, as a folder's waits on its listing, for
+the embedder's next catalogue answer (`show_network`), which commits it;
+`stop_network` refuses it in place when the catalogue cannot be read, and
+empties a network already shown, which then says it stopped. While it is
+shown, a later answer replaces the items with the selection kept on what it
+named (`NetworkItem`'s identity: an advertised endpoint is its instance at
+its host, a computer nothing advertised is the one at its address), and
+`listing_damage` repaints only the slots it altered. `wants_network` is
+what the embedder browses for: while any browser shows the network or is
+on its way there, and only then; `awaits_network` is whether an answer is
+waited on, which a network shown while a folder is on its way is not.
+
+Nothing that names a node reaches the network: `plan_delete`, `clipboard`,
+`listed_selection` and `chosen_entry` find nothing there,
+`prepare_entry` is refused, no item takes a drop, and the New Folder tool is
+disabled (`ManagerToolModel::for_browser`). The list shows Name, Address,
+Workgroup and Type, ordered by `SortKey::Name`, `Address`, `Workgroup` and
+`Kind`, and the right-click menu is `network_context_menu`: Display ▸ and
+Open, numbered as the folder menu is so one decoder reads both.
 
 ### The frame model — the toolbar
 
@@ -513,7 +551,7 @@ The drawn window chrome — the `lib/controls` toolbar
 
 - `ToolbarModel::for_browser(browser)` snapshots which `ToolbarCommand` is
   currently actionable. **Back / Forward / Up** reflect the navigation
-  history and depth (`can_go_back` / `can_go_forward` / `!is_root`);
+  history and depth (`can_go_back` / `can_go_forward` / `can_go_up`);
   **Refresh**, the **view toggle**, and **Sort** are always available.
   `is_enabled(command)` gives the drawn button its enabled state — an
   unavailable tool renders *disabled*, never hidden, so the toolbar's shape
@@ -556,9 +594,9 @@ declares the root plate as *Display ▸*, then the selection's own submenu and
 *New ▸*, then *Select All* and *Clear Selection*, then *Paste*. The selection's
 submenu holds the verbs that act on it and is labelled with what it acts on:
 the one chosen item's kind and name — `File ‘notes.txt’`, `Folder ‘Docs’` —
-the name spelled as a reader is shown it (`vfs::push_shown_name`: a control
-character as U+FFFD, a name too long for the label cut in the middle with its
-extension kept), or `Selection` for several items. With nothing selected that
+the name spelled as a reader is shown it (`vfs::push_shown_name`: shown as
+`tairix_util::utf8::shown` shows a name, and cut in the middle with its
+extension kept when too long for the label), or `Selection` for several items. With nothing selected that
 submenu is declared disabled with its reason and holds no row. Every command
 row carries its `label()` and keyboard `shortcut()`, and the `Run` binary sends
 the menu as a `WindowRequest::OpenMenu`
@@ -687,7 +725,11 @@ identically (`AGENTS.md` §2.2). It is exhaustive over the three entry kinds:
   naming the bundle for the caller to launch through the ordinary signed
   app-load gate;
 - a **regular file** returns `OpenFile { path }`, naming the file for the
-  caller to open in the associated viewer.
+  caller to open in the associated viewer;
+- at the network, an **endpoint** that can be reached returns
+  `MountEndpoint`, naming it as it was displayed for the caller to mount
+  (`plans/ZEROCONF.md` §6.3); one with no known address is `Unreachable`,
+  and a row standing for what is not listed names nothing.
 
 A bundle is both a program and a directory, so activating one is genuinely
 ambiguous and the caller passes a `BundleIntent` saying which the *gesture*
@@ -1583,6 +1625,25 @@ cannot be started — is stated in an alert holding no window, since the window
 that asked may have moved on, and on `stderr` where the desktop draws none. The autostarted file manager takes the first slot on the taskbar's
 application strip and opens a window on demand (`plans/NEW-TASKBAR.md` T4).
 
+The slot menu's **Network** row (`AppMenuSymbol::Network`, directly above
+*Settings…* in both roles) brings forward the window showing the network,
+or opens one. The browse is the reader thread's: a `netbrowse::Browse` on the
+loop decides each turn whether a window wants the network, submits a collect
+or a close to the reader's latest-wins `network` desk, and takes the answer
+into every such window once (by its generation); the reader holds the
+`lib/discovery` session and `Catalogue` under a lock of their own, so the
+calls to `discoveryd` hold no other desk up. Where the kernel grants no reader
+thread the calls are made where they are asked, slower but never wrong. The
+session opens with the first
+window that wants the network and closes as the last one leaves, its
+doorbell a member of the loop's wait-set: the service rings when what it
+holds moves, the loop asks for one collect at a time, and a pass that left
+work is asked again at `netbrowse::PACE_NS` on a one-shot deadline. A
+catalogue that cannot be read is stated and asked again only when the user
+refreshes. Opening an endpoint states that connecting to network shares is
+not available on this system (`plans/ZEROCONF.md` Z11 awaits the SMB client,
+`plans/SMB.md` SMB5, SMB9). The trusted picker composes no network view.
+
 ### In-place rename
 
 `F2` renames the selected item in place. The *edit* is modelled in
@@ -2472,8 +2533,9 @@ editor, which stays put; the cursor over them is the shared `RowList`.
 
 Values are opaque bytes, so every one is shown through the shared
 `tairix_fsmeta::attr::display_value` escaping (`\xNN` for each character
-`tairix_visible::is_hidden` names, and each byte of a value that is not
-UTF-8): nothing a volume stored reaches a surface raw. Clicking a
+`tairix_visible::Faithful` escapes — a hidden character, or a mark past its
+combining sequence's limits — and each byte of a value that is not UTF-8):
+nothing a volume stored reaches a surface raw, and no two values look alike. Clicking a
 row loads it into the `key = value` editor for editing in place — and a value
 whose bytes a typed line could not reproduce is offered back by key alone, with
 the reason stated, rather than lossily rewritten. *Set* applies the line and

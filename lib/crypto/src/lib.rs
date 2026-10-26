@@ -37,14 +37,19 @@ pub mod kdf;
 pub mod kem;
 pub mod mac;
 pub mod nistp;
+pub mod ntlm;
 pub mod sign;
 pub mod stream;
+#[cfg(test)]
+mod test_hex;
 
 pub use aead::{
-    aes128gcm_open, aes128gcm_seal, aes256gcm_open, aes256gcm_seal, open, seal, AeadError, AeadKey,
-    AeadNonce, AeadTag, Aes128Gcm, Aes128GcmKey, Aes256Gcm, Aes256GcmKey, AesGcmNonce, AesGcmTag,
-    AEAD_KEY_LEN, AEAD_NONCE_LEN, AEAD_TAG_LEN, AES128_GCM_KEY_LEN, AES256_GCM_KEY_LEN,
-    AES_GCM_NONCE_LEN, AES_GCM_TAG_LEN,
+    aes128ccm_open, aes128ccm_seal, aes128gcm_open, aes128gcm_seal, aes256ccm_open, aes256ccm_seal,
+    aes256gcm_open, aes256gcm_seal, open, seal, AeadError, AeadKey, AeadNonce, AeadTag, Aes128Ccm,
+    Aes128CcmKey, Aes128Gcm, Aes128GcmKey, Aes256Ccm, Aes256CcmKey, Aes256Gcm, Aes256GcmKey,
+    AesCcmNonce, AesCcmTag, AesGcmNonce, AesGcmTag, AEAD_KEY_LEN, AEAD_NONCE_LEN, AEAD_TAG_LEN,
+    AES128_CCM_KEY_LEN, AES128_GCM_KEY_LEN, AES256_CCM_KEY_LEN, AES256_GCM_KEY_LEN,
+    AES_CCM_NONCE_LEN, AES_CCM_TAG_LEN, AES_GCM_NONCE_LEN, AES_GCM_TAG_LEN,
 };
 pub use agree::{
     KeyAgreementError, X25519PublicKey, X25519SecretKey, X25519SharedSecret, X25519_PUBLIC_KEY_LEN,
@@ -52,7 +57,8 @@ pub use agree::{
 };
 pub use backend::{self_test_passed, CryptoBackend};
 pub use cipher::{
-    Aes128Ctr, Aes128Key, Aes192Ctr, Aes192Key, Aes256Ctr, Aes256Key, AesCtrIv, CipherError,
+    aes128_cts_decrypt, aes128_cts_encrypt, aes256_cts_decrypt, aes256_cts_encrypt, Aes128Ctr,
+    Aes128Key, Aes192Ctr, Aes192Key, Aes256Ctr, Aes256Key, AesCtrIv, CipherError, CtsLengthError,
     AES128_KEY_LEN, AES192_KEY_LEN, AES256_KEY_LEN, AES_BLOCK_LEN,
 };
 pub use constant_time::ct_eq;
@@ -66,9 +72,9 @@ pub use hash::{
     Sha512Stream, SHA256_OUTPUT_LEN, SHA384_OUTPUT_LEN, SHA512_OUTPUT_LEN,
 };
 pub use kdf::{
-    bcrypt_pbkdf, bcrypt_pbkdf_scratch_len, derive_key, pbkdf2_sha256, pbkdf2_sha256_verify,
-    BcryptPbkdfError, DerivedKey, PasswordHash, BCRYPT_PBKDF_MAX_OUTPUT_LEN, DERIVED_KEY_LEN,
-    PASSWORD_HASH_LEN,
+    bcrypt_pbkdf, bcrypt_pbkdf_scratch_len, derive_key, kdf_counter_sha256, kdf_counter_sha384,
+    pbkdf2_sha1, pbkdf2_sha256, pbkdf2_sha256_verify, BcryptPbkdfError, DerivedKey, KdfLengthError,
+    PasswordHash, BCRYPT_PBKDF_MAX_OUTPUT_LEN, DERIVED_KEY_LEN, PASSWORD_HASH_LEN,
 };
 pub use kem::{
     mlkem768_encapsulate, KemError, MlKem768Ciphertext, MlKem768EncapsulationKey,
@@ -77,11 +83,14 @@ pub use kem::{
     MLKEM768_SHARED_KEY_LEN,
 };
 pub use mac::{
-    hmac_sha1, hmac_sha1_parts, hmac_sha1_verify, hmac_sha256, hmac_sha256_parts,
-    hmac_sha256_verify, hmac_sha512, hmac_sha512_parts, hmac_sha512_verify, poly1305,
-    poly1305_verify, HmacSha1Key, HmacSha1Tag, HmacSha256Key, HmacSha256Tag, HmacSha512Key,
-    HmacSha512Tag, Poly1305Key, Poly1305Tag, HMAC_SHA1_KEY_LEN, HMAC_SHA1_TAG_LEN,
-    HMAC_SHA256_KEY_LEN, HMAC_SHA256_TAG_LEN, HMAC_SHA512_KEY_LEN, HMAC_SHA512_TAG_LEN,
+    aes128_cmac, aes128_cmac_verify, aes128_gmac, aes128_gmac_verify, hmac_sha1, hmac_sha1_parts,
+    hmac_sha1_verify, hmac_sha256, hmac_sha256_parts, hmac_sha256_verify, hmac_sha384,
+    hmac_sha384_parts, hmac_sha384_verify, hmac_sha512, hmac_sha512_parts, hmac_sha512_verify,
+    poly1305, poly1305_verify, Aes128MacKey, AesGmacNonce, AesMacTag, HmacSha1Key, HmacSha1Tag,
+    HmacSha256Key, HmacSha256Tag, HmacSha384Key, HmacSha384Tag, HmacSha512Key, HmacSha512Tag,
+    Poly1305Key, Poly1305Tag, AES128_MAC_KEY_LEN, AES_GMAC_NONCE_LEN, AES_MAC_TAG_LEN,
+    HMAC_SHA1_KEY_LEN, HMAC_SHA1_TAG_LEN, HMAC_SHA256_KEY_LEN, HMAC_SHA256_TAG_LEN,
+    HMAC_SHA384_KEY_LEN, HMAC_SHA384_TAG_LEN, HMAC_SHA512_KEY_LEN, HMAC_SHA512_TAG_LEN,
     POLY1305_KEY_LEN, POLY1305_TAG_LEN,
 };
 pub use nistp::{

@@ -12,17 +12,21 @@
 //! 3. Against a decoder saying anything at all, the front never panics, never
 //!    asks to be woken at or before the instant it last acted on, configures
 //!    every decoder first and once under fresh keys and tells it its links
-//!    before relaying from one, spaces its ticks, contains a decoder that
-//!    says what no decoder says, relays again once the replacement starts,
-//!    delivers a tick owed while its queue was full once the queue drains,
-//!    and sends only to the group or to a peer it relayed from.
+//!    before relaying from one or handing it a fetch made there, spaces its
+//!    ticks, contains a decoder that says what no decoder says, relays again
+//!    once the replacement starts, delivers a tick owed while its queue was
+//!    full once the queue drains, sends only to its protocols' groups, and
+//!    opens a fetch only to a WS-Discovery sender heard on that link.
 //! 4. Any call bytes from any caller are answered with a reply the client's
-//!    decoders read, and never panic the front. Across random calls from
-//!    several accounts and processes against a real decoder — joins, stops,
-//!    collects, closes, exits, foreign doorbell ports, doorbells that block
-//!    or vanish, segment traffic, link edges and decoder exits — its tables
-//!    stay consistent after every step, and once every client has gone
-//!    nothing they asked for is left behind.
+//!    decoders read, and never panic the front. Each sweep first names a
+//!    computer: a session asks for computers, one announces itself, and its
+//!    fetched metadata is collected. Across random calls from several
+//!    accounts and processes against a real decoder after that — joins,
+//!    stops, collects, closes, exits, foreign doorbell ports, doorbells that
+//!    block or vanish, segment traffic, computers announcing themselves and
+//!    their metadata fetched, link edges and decoder exits — its tables stay
+//!    consistent after every step, and once every client has gone nothing
+//!    they asked for is left behind.
 //!
 //! Every structural case runs on every iteration; the random draws choose
 //! content within it.
@@ -39,19 +43,22 @@ use tairix_abi::discovery_ipc::{
     Answer, Change, CollectReply, DiscoveryRequest, Entry, Families, Query, ServiceTypeField,
     Transport, DISCOVERY_MAX_REPLY,
 };
-use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketLinkEvent};
+use tairix_abi::net::{
+    SocketAddr, SocketDatagram, SocketDelivery, SocketId, SocketLinkEvent, SocketStreamEvent,
+    StreamCloseReason,
+};
 use tairix_abi::net_ipc::{address_parts, IF_NAME_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::{CapabilityId, CapabilitySummary, Errno, Origin, ProcId, TrustDomain};
 use tairix_discoveryd::decoder::Decoder;
 use tairix_discoveryd::front::{
-    Caller, Front, Host, Sockets, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE,
+    Caller, Front, Host, Protocol, Sockets, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE,
 };
 use tairix_discoveryd::grants::Grants;
 use tairix_discoveryd::wire::{
-    Edge, Form, FromDecoder, ToDecoder, CACHE_KEY_LEN, DATAGRAM_HEADER_LEN, GROUP_BURST,
-    MAX_FROM_DECODER, MAX_TO_DECODER, RNG_KEY_LEN,
+    Budgets, Edge, FetchRequest, Form, FromDecoder, FromWsd, ToDecoder, ToWsd, CACHE_KEY_LEN,
+    DATAGRAM_HEADER_LEN, GROUP_BURST, MAX_FROM_DECODER, MAX_TO_DECODER, RNG_KEY_LEN, WSD_BURST,
 };
 use tairix_fuzzseed::Prng;
 use tairix_log::{Event, Sink};
@@ -60,6 +67,7 @@ use tairix_net::mdns::{
     Destination, MessageWriter, RData, Record, Section, GROUP_V4, GROUP_V6, MAX_QUESTIONS,
 };
 use tairix_net::rate::BucketLevel;
+use tairix_net::wsd;
 use tairix_sandbox::loopback::LoopbackSession;
 use tairix_sandbox::proto::{ProtoError, FRAME_HEADER_LEN};
 use tairix_sandbox::session::{
@@ -73,17 +81,24 @@ const SMOKE_ITERATIONS: u64 = 200;
 const SEC: u64 = 1_000 * MS;
 
 /// The kinds of thing a hostile decoder says, one per round in turn.
-const SAYINGS: usize = 14;
+const SAYINGS: usize = 17;
 
-/// A group budget as full as one can be, at the start of time.
-const FULL: BucketLevel = BucketLevel {
-    scaled: GROUP_BURST as u64 * SEC,
-    at: 0,
+/// Both send budgets as full as they can be, at the start of time.
+const FULL: Budgets = Budgets {
+    group: BucketLevel {
+        scaled: GROUP_BURST as u64 * SEC,
+        at: 0,
+    },
+    wsd: BucketLevel {
+        scaled: WSD_BURST as u64 * SEC,
+        at: 0,
+    },
 };
 
-/// The family sockets the front listens on.
+/// The sockets the front listens on.
 const V4: u32 = 1;
 const V6: u32 = 2;
+const WSD_V4: u32 = 3;
 
 const INTERFACES: [&[u8]; 3] = [b"eth0", b"wlan0", b"bond1"];
 
@@ -94,15 +109,20 @@ impl Sink for Quiet {
     fn write_event(&self, _event: &Event<'_>) {}
 }
 
-/// What the front sent and rang.
+/// What the front sent, rang and fetched.
 #[derive(Default)]
 struct World {
     draws: u8,
-    sent: Vec<SocketAddr>,
+    sent: Vec<(Protocol, SocketAddr)>,
     /// How the next doorbell post goes: taken, or this refusal.
     ring: Option<Errno>,
     /// Doorbells refused for want of room.
     blocked: u32,
+    /// Every WS-Discovery datagram's link and sender the front was handed.
+    heard: Vec<([u8; IF_NAME_LEN], [u8; 16])>,
+    /// Fetch connections opened and not yet closed.
+    open: Vec<SocketId>,
+    opened: u32,
 }
 
 /// A stand-in host: each draw a fresh byte pattern, so generations differ.
@@ -119,12 +139,43 @@ impl Host for Keys {
 
     fn transmit(
         &mut self,
+        protocol: Protocol,
         _interface: [u8; IF_NAME_LEN],
         to: SocketAddr,
         _payload: &[u8],
     ) -> Result<(), Errno> {
-        self.0.borrow_mut().sent.push(to);
+        self.0.borrow_mut().sent.push((protocol, to));
         Ok(())
+    }
+
+    fn fetch_open(
+        &mut self,
+        interface: [u8; IF_NAME_LEN],
+        to: SocketAddr,
+    ) -> Result<SocketId, Errno> {
+        let mut world = self.0.borrow_mut();
+        assert!(
+            world.heard.contains(&(interface, to.addr)),
+            "a fetch went to {to:?}, which sent nothing on that link"
+        );
+        world.opened += 1;
+        let socket = 1000 + world.opened;
+        world.open.push(socket);
+        Ok(socket)
+    }
+
+    fn fetch_send(&mut self, socket: SocketId, bytes: &[u8]) -> Result<usize, Errno> {
+        assert!(
+            self.0.borrow().open.contains(&socket),
+            "a send on a closed fetch"
+        );
+        Ok(bytes.len())
+    }
+
+    fn fetch_close(&mut self, socket: SocketId) {
+        let mut world = self.0.borrow_mut();
+        assert!(world.open.contains(&socket), "a fetch closed twice");
+        world.open.retain(|open| *open != socket);
     }
 
     fn ring(&mut self, _port: u64, _doorbell: &[u8]) -> Result<(), Errno> {
@@ -231,9 +282,15 @@ fn exercise_codecs(rng: &mut Prng, noise: &[u8]) {
             now: rng.next_u64(),
             interface: iface(rng),
             edge: if rng.next_u64() & 1 == 0 {
-                Edge::Up(BucketLevel {
-                    scaled: rng.next_u64() % (u64::from(GROUP_BURST) * SEC + 1),
-                    at: rng.next_u64(),
+                Edge::Up(Budgets {
+                    group: BucketLevel {
+                        scaled: rng.next_u64() % (u64::from(GROUP_BURST) * SEC + 1),
+                        at: rng.next_u64(),
+                    },
+                    wsd: BucketLevel {
+                        scaled: rng.next_u64() % (u64::from(WSD_BURST) * SEC + 1),
+                        at: rng.next_u64(),
+                    },
                 })
             } else {
                 Edge::Down
@@ -252,6 +309,23 @@ fn exercise_codecs(rng: &mut Prng, noise: &[u8]) {
             question: question(rng),
             token: rng.next_u32(),
         },
+        ToDecoder::Wsd(ToWsd::Datagram {
+            now: rng.next_u64(),
+            interface: iface(rng),
+            source: peer(rng.next_u8()),
+            payload: noise,
+        }),
+        ToDecoder::Wsd(ToWsd::Fetched {
+            now: rng.next_u64(),
+            interface: iface(rng),
+            fetch: rng.next_u32(),
+            response: noise,
+        }),
+        ToDecoder::Wsd(ToWsd::FetchFailed {
+            now: rng.next_u64(),
+            interface: iface(rng),
+            fetch: rng.next_u32(),
+        }),
     ];
     for shape in shapes {
         let mut bytes = encoded(&shape);
@@ -320,6 +394,20 @@ fn exercise_decoder_codec(rng: &mut Prng, noise: &[u8]) {
         FromDecoder::Stopped {
             question: question(rng),
         },
+        FromDecoder::Wsd(FromWsd::Transmit {
+            interface: iface(rng),
+            at: rng.next_u64(),
+            payload,
+        }),
+        FromDecoder::Wsd(FromWsd::Fetch(FetchRequest {
+            interface: iface(rng),
+            fetch: rng.next_u32(),
+            addr: peer(rng.next_u8()),
+            port: rng.next_u16() | 1,
+            path: rng.pick(&["/", "/meta", "/a/b?c=d"]),
+            endpoint: rng.pick(&["urn:uuid:0001", "uuid:x", "http://[fe80::1]/e"]),
+            name: *rng.pick(&[None, Some("OFFICE"), Some("nas.example")]),
+        })),
     ] {
         let mut bytes = from_decoder(&shape);
         assert_eq!(FromDecoder::decode(&bytes), Ok(shape));
@@ -335,7 +423,7 @@ fn exercise_decoder_codec(rng: &mut Prng, noise: &[u8]) {
     }
 }
 
-const FORMS: [Form; 7] = [
+const FORMS: [Form; 8] = [
     Form::Instance,
     Form::Service,
     Form::Text,
@@ -343,6 +431,7 @@ const FORMS: [Form; 7] = [
     Form::AddressV6,
     Form::Pointer,
     Form::Type,
+    Form::Computer,
 ];
 
 fn from_decoder(frame: &FromDecoder<'_>) -> Vec<u8> {
@@ -407,6 +496,53 @@ fn exercise_decoder_order(rng: &mut Prng, noise: &[u8], configure: &[u8]) {
         unlinked.handle(&stray, &mut Believed),
         SessionStep::Finished
     );
+    let mut unlinked = Decoder::new();
+    assert_eq!(
+        unlinked.handle(configure, &mut Believed),
+        SessionStep::Continue
+    );
+    let stray = encoded(&ToDecoder::Wsd(ToWsd::Datagram {
+        now: 0,
+        interface: named(b"eth0"),
+        source: peer(rng.next_u8()),
+        payload: noise,
+    }));
+    assert_eq!(
+        unlinked.handle(&stray, &mut Believed),
+        SessionStep::Finished,
+        "nor a WS-Discovery datagram for a link it was not told of"
+    );
+}
+
+/// A computer announcing itself, from a small pool of endpoints and
+/// addresses so announcements collide, its metadata at the sender's address
+/// or under a name its URL gives, which is fetched there too.
+fn hello(rng: &mut Prng, from: IpAddr) -> Vec<u8> {
+    let host = match (rng.below(3), from) {
+        (0, _) => String::from("OFFICE"),
+        (_, IpAddr::V4(v4)) => v4.to_string(),
+        (_, IpAddr::V6(v6)) => format!("[{v6}]"),
+    };
+    format!(
+        r#"<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof" xmlns:pub="http://schemas.microsoft.com/windows/pub/2005/07"><soap:Header><wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello</wsa:Action><wsa:MessageID>urn:uuid:m{}</wsa:MessageID><wsd:AppSequence InstanceId="1" MessageNumber="{}"/></soap:Header><soap:Body><wsd:Hello><wsa:EndpointReference><wsa:Address>urn:uuid:{}</wsa:Address></wsa:EndpointReference><wsd:Types>wsdp:Device pub:Computer</wsd:Types><wsd:XAddrs>http://{host}:5357/meta</wsd:XAddrs><wsd:MetadataVersion>{}</wsd:MetadataVersion></wsd:Hello></soap:Body></soap:Envelope>"#,
+        rng.next_u32(),
+        rng.next_u32(),
+        rng.below(4),
+        rng.below(3),
+    )
+    .into_bytes()
+}
+
+/// A metadata response naming a computer from a small pool.
+fn metadata(rng: &mut Prng) -> Vec<u8> {
+    let body = format!(
+        r#"<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsx="http://schemas.xmlsoap.org/ws/2004/09/mex" xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof" xmlns:pub="http://schemas.microsoft.com/windows/pub/2005/07"><soap:Body><wsx:Metadata><wsx:MetadataSection Dialect="http://schemas.xmlsoap.org/ws/2006/02/devprof/Relationship"><wsdp:Relationship Type="http://schemas.xmlsoap.org/ws/2006/02/devprof/host"><wsdp:Host><wsdp:Types>pub:Computer</wsdp:Types><pub:Computer>{}/Workgroup:HOME</pub:Computer></wsdp:Host></wsdp:Relationship></wsx:MetadataSection></wsx:Metadata></soap:Body></soap:Envelope>"#,
+        rng.pick(&["STUDY", "LIBRARY", "OFFICE"]),
+    );
+    let mut response =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    response.extend_from_slice(body.as_bytes());
+    response
 }
 
 /// Invariant 2, for links and questions that end.
@@ -456,6 +592,47 @@ fn exercise_decoder_edges(
     }
 }
 
+/// Invariant 2, for WS-Discovery: an announcement and noise from a drawn
+/// sender, and a fetch's outcome, well-formed or not, for a drawn id.
+fn feed_wsd(rng: &mut Prng, decoder: &mut Decoder, noise: &[u8], now: u64) {
+    let from = peer(rng.next_u8());
+    let announced = hello(rng, from);
+    let answered = metadata(rng);
+    let interface = iface(rng);
+    let fetch = rng.next_u32() % 8;
+    for frame in [
+        ToWsd::Datagram {
+            now,
+            interface,
+            source: from,
+            payload: &announced,
+        },
+        ToWsd::Datagram {
+            now,
+            interface,
+            source: from,
+            payload: noise,
+        },
+        ToWsd::Fetched {
+            now,
+            interface,
+            fetch,
+            response: if rng.below(2) == 0 { &answered } else { noise },
+        },
+        ToWsd::FetchFailed {
+            now,
+            interface,
+            fetch: rng.next_u32() % 8,
+        },
+    ] {
+        assert_eq!(
+            decoder.handle(&encoded(&ToDecoder::Wsd(frame)), &mut Believed),
+            SessionStep::Continue,
+            "WS-Discovery traffic never ends a configured decoder"
+        );
+    }
+}
+
 /// Invariant 2.
 fn exercise_decoder(rng: &mut Prng, noise: &[u8]) {
     let configure = encoded(&ToDecoder::Configure {
@@ -481,9 +658,14 @@ fn exercise_decoder(rng: &mut Prng, noise: &[u8]) {
         ("printer.local", Form::AddressV4),
         ("host.local", Form::AddressV6),
         ("_services._dns-sd._udp.local", Form::Type),
+        (".", Form::Computer),
     ];
     for (question, (name, form)) in (0u32..).zip(asks) {
-        let name = Name::encode(name).expect("fixed names encode");
+        let name = if form == Form::Computer {
+            Name::from_labels(&[]).expect("the root")
+        } else {
+            Name::encode(name).expect("fixed names encode")
+        };
         let ask = encoded(&ToDecoder::Ask {
             now: 0,
             question,
@@ -516,10 +698,11 @@ fn exercise_decoder(rng: &mut Prng, noise: &[u8]) {
                 "a datagram never ends a configured decoder"
             );
         }
+        feed_wsd(rng, &mut decoder, noise, now);
         let tick = encoded(&ToDecoder::Tick { now });
         assert_eq!(decoder.handle(&tick, &mut Believed), SessionStep::Continue);
         let replay = encoded(&ToDecoder::Replay {
-            question: round % 4,
+            question: round % 5,
             token: round,
         });
         assert_eq!(
@@ -665,6 +848,25 @@ fn delivery<'a>(rng: &mut Prng, last: u8, payload: &'a [u8]) -> SocketDatagram<'
     }
 }
 
+/// A WS-Discovery datagram from `peer(last)` on a drawn link, recorded as
+/// heard so the fetches it licenses can be checked.
+fn wsd_delivery<'a>(
+    rng: &mut Prng,
+    world: &Keys,
+    last: u8,
+    payload: &'a [u8],
+) -> SocketDatagram<'a> {
+    let mut datagram = delivery(rng, last, payload);
+    datagram.socket = WSD_V4;
+    datagram.source.port = wsd::PORT;
+    world
+        .0
+        .borrow_mut()
+        .heard
+        .push((datagram.interface, datagram.source.addr));
+    datagram
+}
+
 /// One turn of the owner's loop at `now`, holding the invariant that keeps
 /// it from spinning.
 fn wake<L: SessionLauncher>(front: &mut Front<L, Quiet, Keys>, now: u64) {
@@ -783,6 +985,7 @@ fn say(wires: &Wires, kind: usize, rng: &mut Prng, noise: &[u8], now: u64) -> bo
             })),
             true,
         ),
+        14..=16 => wsd_said(kind, rng, now),
         // A whole frame of noise: believed or contained, and aligned either way.
         5 => (framed(&noise[..noise.len().min(64)]), false),
         6 => {
@@ -797,6 +1000,48 @@ fn say(wires: &Wires, kind: usize, rng: &mut Prng, noise: &[u8], now: u64) -> bo
     };
     wire.says.extend_from_slice(&said);
     condemned
+}
+
+/// What the decoder's WS-Discovery engines say in a round of `kind`, framed,
+/// and whether it is something no decoder says.
+fn wsd_said(kind: usize, rng: &mut Prng, now: u64) -> (Vec<u8>, bool) {
+    match kind {
+        // A WS-Discovery datagram for the group, within its budget.
+        14 => (
+            framed(&from_decoder(&FromDecoder::Wsd(FromWsd::Transmit {
+                interface: named(b"eth0"),
+                at: now,
+                payload: b"probe",
+            }))),
+            false,
+        ),
+        // One built at an instant the front has not reached.
+        15 => (
+            framed(&from_decoder(&FromDecoder::Wsd(FromWsd::Transmit {
+                interface: named(b"eth0"),
+                at: now + 1,
+                payload: b"probe",
+            }))),
+            true,
+        ),
+        // A fetch of a peer it may or may not have heard, by address or by
+        // the name its URL gave: made or refused, never a reason to contain
+        // the decoder.
+        _ => (
+            framed(&from_decoder(&FromDecoder::Wsd(FromWsd::Fetch(
+                FetchRequest {
+                    interface: iface(rng),
+                    fetch: rng.next_u32(),
+                    addr: peer(rng.next_u8()),
+                    port: 5357,
+                    path: "/meta",
+                    endpoint: "urn:uuid:0001",
+                    name: *rng.pick(&[None, Some("OFFICE")]),
+                },
+            )))),
+            false,
+        ),
+    }
 }
 
 fn set_stalled(wires: &Wires, stalled: bool) {
@@ -816,6 +1061,8 @@ fn exercise_front(rng: &mut Prng, noise: &[u8]) {
         Sockets {
             v4: Some(V4),
             v6: Some(V6),
+            wsd_v4: Some(WSD_V4),
+            wsd_v6: None,
         },
         Grants::default(),
     )
@@ -831,6 +1078,8 @@ fn exercise_front(rng: &mut Prng, noise: &[u8]) {
         revive(&mut front, &mut now);
         wake(&mut front, now);
         last = last.wrapping_add(1);
+        let announced = wsd_delivery(rng, &world, last, noise);
+        front.on_delivery(now, &SocketDelivery::Datagram(announced));
         front.on_delivery(now, &SocketDelivery::Datagram(delivery(rng, last, noise)));
         drain(&mut front, now);
         {
@@ -889,21 +1138,35 @@ fn check_written(wires: &Wires, world: &Keys) {
                     edge: Edge::Down,
                     ..
                 } => linked.retain(|name| name != interface),
-                ToDecoder::Datagram { interface, .. } => assert!(
+                ToDecoder::Datagram { interface, .. }
+                | ToDecoder::Wsd(ToWsd::Datagram { interface, .. }) => assert!(
                     linked.contains(interface),
                     "a datagram is relayed only from a link the decoder runs"
+                ),
+                ToDecoder::Wsd(
+                    ToWsd::Fetched { interface, .. } | ToWsd::FetchFailed { interface, .. },
+                ) => assert!(
+                    linked.contains(interface),
+                    "a fetch is answered only on a link the decoder runs"
                 ),
                 ToDecoder::Ask { .. } | ToDecoder::Stop { .. } | ToDecoder::Replay { .. } => {}
             }
         }
     }
-    // Whatever the decoders asked, the front sent only to the groups or to a
-    // peer it had relayed from.
-    for to in &world.0.borrow().sent {
-        let group = [IpAddr::V4(GROUP_V4), IpAddr::V6(GROUP_V6)]
+    // Whatever the decoders asked, the front sent only to its protocols'
+    // groups.
+    for (protocol, to) in &world.0.borrow().sent {
+        let (groups, port) = match protocol {
+            Protocol::MulticastDns => ([IpAddr::V4(GROUP_V4), IpAddr::V6(GROUP_V6)], 5353),
+            Protocol::WsDiscovery => (
+                [IpAddr::V4(wsd::GROUP_V4), IpAddr::V6(wsd::GROUP_V6)],
+                wsd::PORT,
+            ),
+        };
+        let group = groups
             .iter()
-            .any(|group| address_parts(*group).1 == to.addr && to.port == 5353);
-        assert!(group, "sent to {to:?}, which is not a group");
+            .any(|group| address_parts(*group).1 == to.addr && to.port == port);
+        assert!(group, "sent to {to:?}, which is not a {protocol:?} group");
     }
 }
 
@@ -1032,7 +1295,8 @@ const POOL_TYPES: [&[u8]; 2] = [b"_ipp", b"_http"];
 
 /// A query from the small pool every client draws from, so requests join.
 fn pooled<'a>(rng: &mut Prng, hosts: &'a [Name; 2]) -> Query<'a> {
-    match rng.below(4) {
+    match rng.below(5) {
+        4 => Query::Computers,
         0 | 1 => Query::Browse {
             service: ServiceTypeField {
                 name: &POOL_TYPES[rng.below(2)][1..],
@@ -1090,6 +1354,7 @@ struct Reached {
     opened: u32,
     started: u32,
     answers: u32,
+    computers: u32,
     blocked: u32,
     deaths: u32,
 }
@@ -1107,8 +1372,11 @@ fn read_reply(call: &DiscoveryRequest<'_>, reply: &[u8], reached: &mut Reached) 
         DiscoveryRequest::Collect { .. } => {
             if let Ok(collected) = CollectReply::parse(reply) {
                 for entry in collected.entries() {
-                    if matches!(entry, Entry::Answer { .. }) {
+                    if let Entry::Answer { answer, .. } = entry {
                         reached.answers += 1;
+                        if matches!(answer, Answer::Computer { .. }) {
+                            reached.computers += 1;
+                        }
                     }
                 }
             } else {
@@ -1139,8 +1407,12 @@ struct Crowd {
 }
 
 impl Crowd {
+    /// The client that names each sweep's first computer.
+    const BROWSER: usize = 0;
+
     /// The front with its links up, and five processes over three accounts,
-    /// so accounts span processes.
+    /// so accounts span processes. The first, [`Self::BROWSER`], may browse
+    /// computers; the rest hold what they draw.
     fn new(rng: &mut Prng) -> Self {
         let world = Keys::default();
         let dead: Rc<Cell<bool>> = Rc::default();
@@ -1151,6 +1423,8 @@ impl Crowd {
             Sockets {
                 v4: Some(V4),
                 v6: None,
+                wsd_v4: Some(WSD_V4),
+                wsd_v6: None,
             },
             Grants::default(),
         )
@@ -1161,11 +1435,12 @@ impl Crowd {
         settle(&mut front, 0);
         let clients = (0..5u8)
             .map(|n| {
+                let browser = usize::from(n) == Self::BROWSER;
                 let mut summary = CapabilitySummary::EMPTY;
-                if rng.below(8) != 0 {
+                if rng.below(8) != 0 || browser {
                     summary.insert(CapabilityId::NET);
                 }
-                if rng.below(4) != 0 {
+                if rng.below(4) != 0 || browser {
                     summary.insert(CapabilityId::NET_DISCOVER_ALL);
                 }
                 Asker {
@@ -1266,13 +1541,21 @@ impl Crowd {
                 }
                 None
             }
-            11..=13 => {
+            11 | 12 => {
                 let payload = pool_response(rng);
                 let last = rng.next_u8() & !1;
                 self.front.on_delivery(
                     now,
                     &SocketDelivery::Datagram(delivery(rng, last, &payload)),
                 );
+                None
+            }
+            13 => {
+                self.announce_computer(rng, now);
+                None
+            }
+            16 => {
+                self.answer_fetch(rng, now);
                 None
             }
             14 => {
@@ -1304,6 +1587,93 @@ impl Crowd {
                 self.front.retry_rings();
                 None
             }
+        }
+    }
+
+    /// Name one computer before the random steps, so every sweep reaches the
+    /// naming path and the steps after meet a computer the front knows.
+    fn name_a_computer(&mut self, rng: &mut Prng, reached: &mut Reached) {
+        let browser = Self::BROWSER;
+        let open = DiscoveryRequest::Open {
+            deliver_port: self.clients[browser].owned,
+        };
+        self.serve(&open, browser, false, reached);
+        let &(_, session) = self.opened.last().expect("the browser opens a session");
+        let start = DiscoveryRequest::Start {
+            session,
+            query: Query::Computers,
+        };
+        self.serve(&start, browser, false, reached);
+        settle(&mut self.front, self.now);
+        self.announce_computer(rng, self.now);
+        settle(&mut self.front, self.now);
+        let socket = *self
+            .world
+            .0
+            .borrow()
+            .open
+            .last()
+            .expect("its metadata is fetched");
+        let response = metadata(rng);
+        self.deliver_fetch(self.now, socket, &response, StreamCloseReason::PeerClosed);
+        settle(&mut self.front, self.now);
+        let named = reached.computers;
+        let collect = DiscoveryRequest::Collect {
+            session,
+            capacity: u32::try_from(DISCOVERY_MAX_REPLY).expect("fits"),
+        };
+        self.serve(&collect, browser, false, reached);
+        assert_eq!(
+            reached.computers,
+            named + 1,
+            "the computer announced and described is named once"
+        );
+    }
+
+    /// A computer from the announcers' pool says Hello on a drawn link.
+    fn announce_computer(&mut self, rng: &mut Prng, now: u64) {
+        let last = 2 * (rng.next_u8() % 4);
+        let payload = hello(rng, peer(last));
+        let datagram = wsd_delivery(rng, &self.world, last, &payload);
+        self.front
+            .on_delivery(now, &SocketDelivery::Datagram(datagram));
+    }
+
+    /// Carry one open fetch connection to its end: a whole response, or a
+    /// connection cut off.
+    fn answer_fetch(&mut self, rng: &mut Prng, now: u64) {
+        let open = self.world.0.borrow().open.clone();
+        if open.is_empty() {
+            return;
+        }
+        let socket = *rng.pick(&open);
+        let response = metadata(rng);
+        let reason = if rng.below(4) == 0 {
+            StreamCloseReason::Reset
+        } else {
+            StreamCloseReason::PeerClosed
+        };
+        self.deliver_fetch(now, socket, &response, reason);
+    }
+
+    /// `response` whole on `socket`'s fetch, then the connection closed for
+    /// `reason`.
+    fn deliver_fetch(
+        &mut self,
+        now: u64,
+        socket: SocketId,
+        response: &[u8],
+        reason: StreamCloseReason,
+    ) {
+        for event in [
+            SocketStreamEvent::Connected { socket },
+            SocketStreamEvent::Data {
+                socket,
+                payload: response,
+            },
+            SocketStreamEvent::Closed { socket, reason },
+        ] {
+            self.front.on_stream(now, &event);
         }
     }
 
@@ -1376,6 +1746,7 @@ impl Crowd {
 fn exercise_clients(rng: &mut Prng, noise: &[u8], reached: &mut Reached) {
     let hosts = POOL_HOSTS.map(|host| Name::encode(host).expect("fixed names encode"));
     let mut crowd = Crowd::new(rng);
+    crowd.name_a_computer(rng, reached);
     for _ in 0..96 {
         crowd.world.0.borrow_mut().ring = match rng.below(4) {
             0 => Some(Errno::WouldBlock),
@@ -1407,6 +1778,17 @@ fn exercise_clients(rng: &mut Prng, noise: &[u8], reached: &mut Reached) {
     crowd.assert_left_idle(reached);
 }
 
+/// One sweep names a computer whatever it draws: the naming path is reached
+/// by construction, where the random steps alone rarely completed it.
+#[test]
+fn every_client_sweep_names_a_computer() {
+    for seed in [1, 40, 57, 10_194_581_964_832_627_012] {
+        let mut reached = Reached::default();
+        exercise_clients(&mut Prng::new(seed), &[0xA5; 32], &mut reached);
+        assert!(reached.computers > 0, "seed {seed} named no computer");
+    }
+}
+
 #[test]
 fn hostile_frames_and_decoders_never_break_the_front() {
     let mut rng = Prng::new(tairix_fuzzseed::start(
@@ -1434,12 +1816,14 @@ fn hostile_frames_and_decoders_never_break_the_front() {
         opened,
         started,
         answers,
+        computers,
         blocked,
         deaths,
     } = reached;
     assert!(
-        opened > 0 && started > 0 && answers > 0 && blocked > 0 && deaths > 0,
+        opened > 0 && started > 0 && answers > 0 && computers > 0 && blocked > 0 && deaths > 0,
         "the client sweep reached too little: {opened} opened, {started} started, \
-         {answers} answers, {blocked} doorbells blocked, {deaths} decoder exits"
+         {answers} answers, {computers} computers named, {blocked} doorbells blocked, \
+         {deaths} decoder exits"
     );
 }

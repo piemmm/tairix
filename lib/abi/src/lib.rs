@@ -37,6 +37,7 @@ pub mod field;
 pub mod filelock;
 pub mod font_ipc;
 pub mod fs;
+pub mod fsserve;
 pub(crate) mod hex;
 pub mod home;
 pub mod hwlink;
@@ -160,7 +161,7 @@ pub use input::{
     KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
     KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
     KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, MOD_ALT, MOD_CTRL, MOD_MASK,
-    MOD_META, MOD_SHIFT, POINTER_INPUT_MAGIC,
+    MOD_META, MOD_SHIFT, POINTER_EDGE_UNTIMED, POINTER_INPUT_MAGIC,
 };
 pub use ipc::{
     CallRecvFlags, IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, PORT_NAME_MAX_LEN,

@@ -107,6 +107,13 @@ pub const LABEL_MAX: usize = 63;
 /// `tairix_net::dnssd` takes it from here.
 pub const SERVICE_NAME_MAX: usize = 15;
 
+/// The longest computer name a WS-Discovery answer carries, in octets: a DNS
+/// label's length, which bounds both a NetBIOS and a DNS host name.
+pub const COMPUTER_NAME_MAX: usize = LABEL_MAX;
+
+/// The longest workgroup or domain name a WS-Discovery answer carries.
+pub const MEMBERSHIP_NAME_MAX: usize = NAME_MAX;
+
 /// The largest `TXT` rdata this system holds, emits, or carries, in octets —
 /// the bound `tairix_net::mdns` holds records to, taken from here.
 ///
@@ -184,6 +191,7 @@ const QUERY_RESOLVE: u8 = 2;
 const QUERY_HOST: u8 = 3;
 const QUERY_REVERSE: u8 = 4;
 const QUERY_TYPES: u8 = 5;
+const QUERY_COMPUTERS: u8 = 6;
 
 const OFF_SESSION: usize = 8;
 const OFF_REQUEST: usize = 12;
@@ -337,6 +345,9 @@ pub enum Query<'a> {
     /// Every service type the segment offers (RFC 6763 §9): answered with
     /// [`Answer::Type`].
     Types,
+    /// The computers announcing themselves over WS-Discovery: answered with
+    /// [`Answer::Computer`].
+    Computers,
 }
 
 /// One call on [`DISCOVERY_ENDPOINT`].
@@ -559,6 +570,10 @@ fn encode_query(query: &Query<'_>, frame: &mut [u8]) -> Result<(), Errno> {
             frame[OFF_QUERY] = QUERY_TYPES;
             Ok(())
         }
+        Query::Computers => {
+            frame[OFF_QUERY] = QUERY_COMPUTERS;
+            Ok(())
+        }
     }
 }
 
@@ -635,6 +650,7 @@ fn decode_query(bytes: &[u8]) -> Result<Query<'_>, Errno> {
             address: read_address(family, address)?,
         }),
         (QUERY_TYPES, None) => Ok(Query::Types),
+        (QUERY_COMPUTERS, None) => Ok(Query::Computers),
         _ => Err(Errno::OutOfRange),
     }
 }
@@ -795,6 +811,47 @@ pub enum Answer<'a> {
         /// The type.
         service: ServiceTypeField<'a>,
     },
+    /// A computer announced itself over WS-Discovery and named itself in its
+    /// metadata.
+    ///
+    /// A computer states no lifetime, so its entry's `ttl` is zero: the
+    /// service retires it when it says goodbye or stops answering.
+    Computer {
+        /// Its identity on this interface for as long as the service runs,
+        /// the same in the entry that retires it.
+        key: u64,
+        /// The address it answers at.
+        address: IpAddr,
+        /// Its name, UTF-8, `1..=COMPUTER_NAME_MAX` octets.
+        name: &'a str,
+        /// The workgroup or domain it belongs to.
+        membership: Membership<'a>,
+    },
+}
+
+/// What a computer belongs to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Membership<'a> {
+    /// A workgroup, by name, UTF-8, `1..=MEMBERSHIP_NAME_MAX` octets.
+    Workgroup(&'a str),
+    /// A domain, by name, UTF-8, `1..=MEMBERSHIP_NAME_MAX` octets.
+    Domain(&'a str),
+    /// Neither, or nothing the computer stated in a form read here.
+    Unstated,
+}
+
+const MEMBERSHIP_UNSTATED: u8 = 0;
+const MEMBERSHIP_WORKGROUP: u8 = 1;
+const MEMBERSHIP_DOMAIN: u8 = 2;
+
+impl<'a> Membership<'a> {
+    const fn parts(self) -> (u8, &'a str) {
+        match self {
+            Self::Unstated => (MEMBERSHIP_UNSTATED, ""),
+            Self::Workgroup(name) => (MEMBERSHIP_WORKGROUP, name),
+            Self::Domain(name) => (MEMBERSHIP_DOMAIN, name),
+        }
+    }
 }
 
 /// One entry of a collect reply.
@@ -839,6 +896,11 @@ const KIND_POINTER: u8 = 5;
 const KIND_TYPE: u8 = 6;
 const KIND_FLUSH: u8 = 7;
 const KIND_LOST: u8 = 8;
+const KIND_COMPUTER: u8 = 9;
+
+/// A computer answer's fixed payload: key, family, address, membership kind,
+/// name length and membership name length.
+const COMPUTER_FIXED_LEN: usize = 8 + 1 + 16 + 3;
 
 impl<'a> Entry<'a> {
     /// Decode one entry spanning exactly `bytes`, its length prefix included.
@@ -891,6 +953,9 @@ impl Entry<'_> {
                     Answer::Address { .. } => 17,
                     Answer::Pointer { target } => 1 + target.len(),
                     Answer::Type { service } => 2 + service.name.len(),
+                    Answer::Computer {
+                        name, membership, ..
+                    } => COMPUTER_FIXED_LEN + name.len() + membership.parts().1.len(),
                 },
                 Self::Flush { .. } | Self::Lost { .. } => 0,
             }
@@ -921,6 +986,9 @@ impl Entry<'_> {
                 answer,
             } => {
                 validate_if_name(&interface)?;
+                if matches!(answer, Answer::Computer { .. }) && ttl != 0 {
+                    return Err(Errno::OutOfRange);
+                }
                 frame[3] = change as u8;
                 put_u32(frame, 4, request);
                 frame[8..24].copy_from_slice(&interface);
@@ -1000,6 +1068,29 @@ fn encode_answer(answer: &Answer<'_>, payload: &mut [u8]) -> Result<u8, Errno> {
             payload[1] = u8::try_from(service.name.len()).map_err(|_| Errno::LengthOutOfRange)?;
             payload[2..].copy_from_slice(service.name);
             Ok(KIND_TYPE)
+        }
+        Answer::Computer {
+            key,
+            address,
+            name,
+            membership,
+        } => {
+            let (kind, group) = membership.parts();
+            bounded(name.as_bytes(), COMPUTER_NAME_MAX)?;
+            if kind != MEMBERSHIP_UNSTATED {
+                bounded(group.as_bytes(), MEMBERSHIP_NAME_MAX)?;
+            }
+            put_u64(payload, 0, key);
+            let (family, octets) = address_parts(address);
+            payload[8] = family.as_u8();
+            payload[9..25].copy_from_slice(&octets);
+            payload[25] = kind;
+            payload[26] = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
+            payload[27] = u8::try_from(group.len()).map_err(|_| Errno::LengthOutOfRange)?;
+            let named = COMPUTER_FIXED_LEN + name.len();
+            payload[COMPUTER_FIXED_LEN..named].copy_from_slice(name.as_bytes());
+            payload[named..].copy_from_slice(group.as_bytes());
+            Ok(KIND_COMPUTER)
         }
     }
 }
@@ -1085,6 +1176,12 @@ fn decode_entry(bytes: &[u8]) -> Result<Entry<'_>, Errno> {
                 },
             }
         }
+        KIND_COMPUTER => {
+            if ttl != 0 {
+                return Err(Errno::BadMagic);
+            }
+            decode_computer(payload)?
+        }
         _ => return Err(Errno::OutOfRange),
     };
     validate_if_name(&interface)?;
@@ -1094,6 +1191,43 @@ fn decode_entry(bytes: &[u8]) -> Result<Entry<'_>, Errno> {
         change: Change::from_u8(change)?,
         ttl,
         answer,
+    })
+}
+
+/// A computer answer's payload, spanning exactly `payload`.
+fn decode_computer(payload: &[u8]) -> Result<Answer<'_>, Errno> {
+    let fixed = payload
+        .get(..COMPUTER_FIXED_LEN)
+        .ok_or(Errno::BufferTooSmall)?;
+    let (kind, name_len, group_len) = (fixed[25], usize::from(fixed[26]), usize::from(fixed[27]));
+    if name_len == 0 || name_len > COMPUTER_NAME_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let group_bound = if kind == MEMBERSHIP_UNSTATED {
+        0
+    } else {
+        MEMBERSHIP_NAME_MAX
+    };
+    if (kind == MEMBERSHIP_UNSTATED) != (group_len == 0) || group_len > group_bound {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if payload.len() != COMPUTER_FIXED_LEN + name_len + group_len {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let text = |bytes| core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange);
+    let name = text(&payload[COMPUTER_FIXED_LEN..COMPUTER_FIXED_LEN + name_len])?;
+    let group = text(&payload[COMPUTER_FIXED_LEN + name_len..])?;
+    let membership = match kind {
+        MEMBERSHIP_UNSTATED => Membership::Unstated,
+        MEMBERSHIP_WORKGROUP => Membership::Workgroup(group),
+        MEMBERSHIP_DOMAIN => Membership::Domain(group),
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(Answer::Computer {
+        key: read_u64(fixed, 0),
+        address: read_address(fixed[8], &fixed[9..25])?,
+        name,
+        membership,
     })
 }
 

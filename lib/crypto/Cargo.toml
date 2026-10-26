@@ -65,13 +65,35 @@ ctr = { version = "=0.10.1", default-features = false, features = ["zeroize"] }
 # the detached decrypt on tag-verification failure.
 aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "zeroize"] }
 
+# --- Foreign-protocol constructions ---------------------------------------
+# These back only the constructions SMB 3, NTLMv2 and Kerberos fix — never a
+# bare MD4 or MD5. Each sits on the stack above, so together they add six
+# crates (`cmac` brings `dbl`) and no second `digest` or `cipher`.
+#
+# MD4 and MD5 for NTLMv2 (MS-NLMP §3.3.2): the NT hash is MD4 of the
+# password, and every NTLMv2 proof, key and signature is HMAC-MD5 or MD5.
+md4 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+md-5 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+# AES-CMAC (RFC 4493), how SMB 3.0 and 3.0.2 sign (MS-SMB2 §3.1.4.1).
+cmac = { version = "=0.8.0", default-features = false, features = ["zeroize"] }
+# AES-CCM (NIST SP 800-38C), the only cipher SMB 3.0 and 3.0.2 encrypt with
+# and one 3.1.1 may negotiate. No `alloc` or `getrandom`: the wrapper seals
+# in place with a caller-supplied nonce.
+ccm = { version = "=0.6.1", default-features = false }
+# CBC with ciphertext stealing in the CS3 arrangement, Kerberos's AES mode
+# (RFC 3962 §6, RFC 8009 §5).
+cts = { version = "=0.7.0", default-features = false }
+
+# The volatile wipe every upstream type above uses on drop, named directly
+# for the intermediates no upstream type owns: a digest's output that is
+# itself key material (the NT hash, a PBKDF2 `U_i`, a KDF block) before it
+# is folded into what the caller receives.
+zeroize = { version = "=1.9.0", default-features = false }
+
 # --- Signatures and key agreement -----------------------------------------
 # Ed25519 signing and verification: `abi-v1` manifest authentication,
 # capability-token issuance, and SSH's `ssh-ed25519` keys. `zeroize` wires
-# the crate's own key material into a volatile wipe on drop. `lib/crypto`
-# never names `zeroize` itself — every secret it holds is wiped by the
-# upstream type that owns it, so a direct dependency would widen the audit
-# surface while wiping nothing this feature does not already.
+# the crate's own key material into a volatile wipe on drop.
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize"] }
 # The dalek X25519 agreement, the sibling of the signature above, and the
 # classical half of SSH's `mlkem768x25519-sha256`. `static_secrets` is what

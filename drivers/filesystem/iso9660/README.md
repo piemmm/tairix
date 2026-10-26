@@ -27,8 +27,11 @@ untrusted disc are in `docs/src/filesystem/iso9660.md`.
 
 ## Capabilities
 
-`register` requires `CAP_DRV_LOAD`. The driver is linked into the kernel's
-volume service, which mounts a recognised disc under `/Storage`.
+`register` requires `CAP_DRV_LOAD`. The crate's `Run` binary, built with the
+`program` feature, serves a recognised disc from user space through
+`lib/fsserve` (`Served`, binding `tairix,volume-iso9660`), with `CAP_FS_SERVE`
+and `CAP_LOG_EMIT`, and the kernel mounts it read-only under `/Storage`
+(`docs/src/filesystem/served.md`).
 
 ## Stability
 

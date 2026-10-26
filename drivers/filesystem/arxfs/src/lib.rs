@@ -90,6 +90,7 @@ mod reconcile;
 mod reserve;
 mod scratch;
 mod scrub;
+mod served;
 mod superblock;
 mod transaction;
 mod unlock;
@@ -110,6 +111,7 @@ use integrity::{
 };
 pub use reserve::{release_share_blocks, system_reserve_blocks};
 pub use scrub::{PassVerdict, ScrubBudget, ScrubReport};
+pub use served::{Served, BIND_KEYS};
 pub use unlock::{
     UnlockDescriptor, ROOT_UNLOCK_NAME, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
     UNLOCK_MAX_ITERATIONS, UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,

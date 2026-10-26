@@ -385,12 +385,17 @@ pub enum AppMenuSymbol {
     SortByFilesystem,
     /// Order the volumes by how well each is serving.
     SortByHealth,
+    /// Order the network's endpoints by where each is reached.
+    SortByAddress,
+    /// Order the network's endpoints by the workgroup or domain each belongs
+    /// to.
+    SortByWorkgroup,
 }
 
 impl AppMenuSymbol {
     /// Every symbol, in wire order: the symbol with wire value `n` is
     /// `ALL[n - 1]`.
-    pub const ALL: [Self; 185] = [
+    pub const ALL: [Self; 187] = [
         Self::Open,
         Self::OpenWith,
         Self::OpenFolder,
@@ -576,6 +581,8 @@ impl AppMenuSymbol {
         Self::SortByFree,
         Self::SortByFilesystem,
         Self::SortByHealth,
+        Self::SortByAddress,
+        Self::SortByWorkgroup,
     ];
 
     /// The symbol's wire value, never zero.

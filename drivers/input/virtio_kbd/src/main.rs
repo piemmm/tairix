@@ -218,7 +218,10 @@ mod program {
                     // is ever injected twice.
                     Report::Event(event) => {
                         if let Some(record) = PointerInput::from_device_event(event) {
-                            let _ = tairix_rt::pointer_inject(seat, &record);
+                            // The virtqueue carries no device time, and a
+                            // virtio device's buttons are not switches that
+                            // bounce.
+                            let _ = tairix_rt::pointer_inject(seat, &record, None);
                         } else if let Some(record) = console.feed(*event) {
                             let _ = tairix_rt::key_inject(seat, &record);
                         }
