@@ -43,7 +43,7 @@ use crate::periodic::ServiceInterval;
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
 use crate::{ControllerStatus, DmaProgram, PortStatus, Xhci};
-use tairix_abi::usb_urb::UsbSpeed;
+use tairix_abi::usb_urb::{ReportCompletion, UsbSpeed};
 use tairix_abi::RegisterBlock;
 
 #[path = "device_iso.rs"]
@@ -1993,16 +1993,19 @@ pub const REPORT_QUEUE_CAP: usize = 16;
 const _: () = assert!(REPORT_QUEUE_CAP >= INT_ARM_DEPTH);
 
 /// One device's captured interrupt-IN reports, [`REPORT_QUEUE_CAP`] deep,
-/// each up to the endpoint's transfer length.
+/// each up to the endpoint's transfer length, with the instant it was
+/// captured.
 ///
 /// Copied out of the DMA slot at capture time so the slot can be re-armed at
-/// once, decoupling device polling from how promptly the class driver runs.
-/// Its memory is sized once, from the transfer length, at the class driver's
-/// first report request.
+/// once, decoupling device polling from how promptly the class driver runs —
+/// and timed then too, so a class driver reading a backlog still learns when
+/// each report came. Its memory is sized once, from the transfer length, at
+/// the class driver's first report request.
 #[derive(Default)]
 struct ReportQueue {
     bytes: Vec<u8>,
     lens: [u16; REPORT_QUEUE_CAP],
+    captured_ns: [u64; REPORT_QUEUE_CAP],
     slot: usize,
     head: usize,
     len: usize,
@@ -2031,9 +2034,10 @@ impl ReportQueue {
         Ok(())
     }
 
-    /// Buffer a report of `len` bytes that `fill` writes, dropping the
-    /// oldest when the queue is full; returns whether a report was lost, the
-    /// oldest or this one when it cannot fit. Nothing is kept if `fill` fails.
+    /// Buffer a report of `len` bytes that `fill` writes, captured at
+    /// `captured_ns`, dropping the oldest when the queue is full; returns
+    /// whether a report was lost, the oldest or this one when it cannot fit.
+    /// Nothing is kept if `fill` fails.
     ///
     /// # Errors
     ///
@@ -2041,6 +2045,7 @@ impl ReportQueue {
     fn push_with<E>(
         &mut self,
         len: usize,
+        captured_ns: u64,
         fill: impl FnOnce(&mut [u8]) -> Result<(), E>,
     ) -> Result<bool, E> {
         let Some(stored) = u16::try_from(len).ok().filter(|_| len <= self.slot) else {
@@ -2054,27 +2059,34 @@ impl ReportQueue {
         let at = (self.head + self.len) % REPORT_QUEUE_CAP;
         fill(&mut self.bytes[at * self.slot..][..len])?;
         self.lens[at] = stored;
+        self.captured_ns[at] = captured_ns;
         self.len += 1;
         Ok(lost)
     }
 
-    /// Move the oldest report into `buf`, returning its length.
+    /// Move the oldest report into `buf`, answering its length and when it
+    /// was captured.
     ///
     /// # Errors
     ///
     /// [`DriverError::BufferTooSmall`] when `buf` cannot hold it; it stays
     /// queued.
-    fn pop_into(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
+    fn pop_into(&mut self, buf: &mut [u8]) -> Result<Option<ReportCompletion>, DriverError> {
         if self.len == 0 {
             return Ok(None);
         }
-        let len = usize::from(self.lens[self.head]);
+        let stored = self.lens[self.head];
+        let len = usize::from(stored);
         buf.get_mut(..len)
             .ok_or(DriverError::BufferTooSmall)?
             .copy_from_slice(&self.bytes[self.head * self.slot..][..len]);
+        let report = ReportCompletion {
+            transferred: u32::from(stored),
+            captured_ns: self.captured_ns[self.head],
+        };
         self.head = (self.head + 1) % REPORT_QUEUE_CAP;
         self.len -= 1;
-        Ok(Some(len))
+        Ok(Some(report))
     }
 
     /// Drop every queued report.
@@ -5364,7 +5376,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     ///
     /// The service step captures every report off the controller's ring as
     /// it arrives, so a starved class driver collects buffered reports
-    /// rather than losing them.
+    /// rather than losing them, each with the service step's instant.
     ///
     /// # Errors
     ///
@@ -5381,7 +5393,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
         index: usize,
         request: usize,
         buf: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
+    ) -> Result<Option<ReportCompletion>, DriverError> {
         {
             let Some(device) = self.device_mut(index) else {
                 // Not enumerated: there is no endpoint to drain.
@@ -5395,8 +5407,8 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
         }
         self.ensure_reports_armed(index)?;
         let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
-        if let Some(len) = device.reports.pop_into(buf)? {
-            return Ok(Some(len));
+        if let Some(report) = device.reports.pop_into(buf)? {
+            return Ok(Some(report));
         }
         if let Some(err) = self
             .device_mut(index)
@@ -5519,12 +5531,20 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// [`DriverError::NotFound`] when no device is live at `index`, or a
     /// fault reading the slot.
     fn enqueue_report(&mut self, index: usize, at: usize, len: usize) -> Result<(), DriverError> {
-        let Self { devices, dma, .. } = self;
+        let Self {
+            devices,
+            dma,
+            now_ns,
+            ..
+        } = self;
         let device = devices
             .get_mut(index)
             .and_then(Option::as_mut)
             .ok_or(DriverError::NotFound)?;
-        if device.reports.push_with(len, |slot| dma.read(at, slot))? {
+        if device
+            .reports
+            .push_with(len, *now_ns, |slot| dma.read(at, slot))?
+        {
             device.dropped_reports = device.dropped_reports.saturating_add(1);
         }
         Ok(())

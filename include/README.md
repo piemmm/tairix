@@ -29,8 +29,10 @@ pull in exactly what they need, plus an umbrella that includes them all:
   their magics and wire sizes, the record-kind / button / key-class / modifier
   field codes (`TAIRIX_INPUT_KIND_*`, `TAIRIX_INPUT_BUTTON_NONE`, `TAIRIX_KEY_CLASS_*`,
   `TAIRIX_MOD_*`), the pointer-button and named-key discriminants
-  (`TAIRIX_POINTER_BUTTON_*`, `TAIRIX_KEY_*`), and the device time a pointer
-  driver states when it has none (`TAIRIX_POINTER_EDGE_UNTIMED`).
+  (`TAIRIX_POINTER_BUTTON_*`, `TAIRIX_KEY_*`), the device time a pointer
+  driver states when it has none (`TAIRIX_POINTER_EDGE_UNTIMED`), and the
+  size of the timed record `pointer_read` writes
+  (`TAIRIX_TIMED_POINTER_WIRE_LEN`).
 - `tairix/tairix_appinfo.h` — the application-bundle manifest header
   (`tairix_appinfo_header_t`) and its constants (`TAIRIX_APPINFO_*`, `TAIRIX_BUNDLE_*`,
   `TAIRIX_MIME_*`), the curated shared-library directory

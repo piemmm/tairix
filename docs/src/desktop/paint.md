@@ -81,7 +81,14 @@ palette picture, whose pixels are one entry each.
   opacity (the most a stroke builds to), flow (what each dab adds) and spacing
   (between dabs, carried across the path's segments). A stroke builds from the
   picture as it stood, so it never darkens where it crosses itself. The airbrush
-  goes on laying dabs while held still (`AIRBRUSH_INTERVAL_NS`). The clone tool
+  also lays a dab for every `AIRBRUSH_INTERVAL_NS` it is held, where the pointer
+  was at that instant (`brush::Spray`), timed by when the device reported each
+  move. That place is known only afterwards, so the dab is laid one report
+  behind: along the way the pointer went once the next report says where, or
+  where it stands once it has gone unreported for `AIRBRUSH_STILL_NS`, which
+  only a pointer held still does. Paint for time a window was slow to read
+  therefore falls along the stroke, never in a blob at each report, and dabs
+  owed at one place are laid as one pass, however long the wait. The clone tool
   paints what lies at a fixed offset, set by an Alt-click, from the picture as
   the stroke began. The pencil sets whole pixels.
 - **Fills and gradients** — a fill takes the region joined to the pixel pressed

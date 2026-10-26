@@ -148,8 +148,11 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   faintest flow still reaches it), so a stroke never darkens where it crosses
   itself;
   dabs (`brush::Tip`: size, hardness, opacity, flow, spacing) are laid along
-  the path with the spacing carried between segments, the airbrush on a timer
-  while held still; the clone tool reads from the stroke's starting picture
+  the path with the spacing carried between segments; the airbrush adds a dab
+  per interval held, laid one report behind where the pointer was at that
+  instant by the device times its reports carry, and at the point only once a
+  silence longer than any report's transit shows it was held still
+  (`brush::Spray`); the clone tool reads from the stroke's starting picture
   at the Alt-clicked offset. Shapes are integer fixed-point with antialiased
   edges from `lib/raster` row coverage, rectangles with rounded corners.
 - **Selections** (`mask::Mask`): a rectangle held as its bounds, or an alpha

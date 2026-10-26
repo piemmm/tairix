@@ -66,4 +66,6 @@ arrived rather than when the seat owner read them, and a busy desktop never
 reads a tap as a rest. The recogniser states the next instant it must act at
 without a frame (`deadline_ns`) — a held tap's release, a touchscreen's waiting
 press — and the seat owner wakes for it on its one-shot timer, after feeding
-every frame already queued.
+every frame already queued. `expire` hands what it acts on with the instant
+its deadline fell, so a gesture is timed by when it happened however late
+that wake comes.

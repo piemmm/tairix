@@ -771,8 +771,11 @@ The pairing is the shared, pure `click::DoubleClickTracker`
 (`plans/NEW-FILEMANAGER.md` FM12), keyed on the **button** as well as the item:
 a press selects the item under the pointer, and a second press *of the same
 button* on that *same* item within the desktop's double-click interval (the one
-the session publishes in `DesktopInfo::double_click`, timed by the
-capability-free monotonic `clock_get`) completes the gesture. One
+the session publishes in `DesktopInfo::double_click`, timed by when the device
+reported each press, the `at_ns` every `WindowEvent::Pointer` carries)
+completes the gesture. Two single clicks the window was slow to read are
+therefore never one double-click, and a rename armed by a click waits its
+interval from that click's release on the same clock. One
 press of each button is therefore two gestures begun, never one completed. The
 tracker is reset whenever a press lands on chrome (a toolbar tool) rather than
 an item, and by a right-click, so neither a click *through* the chrome and back

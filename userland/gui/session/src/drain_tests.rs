@@ -32,7 +32,7 @@ use crate::keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 use crate::lock::{LockOutcome, ScreenLock, UnlockAnswer};
 use crate::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
 use crate::saver::Waking;
-use crate::shell::{DesktopShell, ShellOutcome};
+use crate::shell::{DesktopShell, ShellOutcome, Timed};
 use crate::tests::{
     app_slot_point, chain_geometry_over, compositor, moved, opaque_window, open_bar_chain, shell,
     MemoryInput, ScriptedUnlocker, PRIMARY_PRESS, PRIMARY_RELEASE, SECONDARY_PRESS,
@@ -43,7 +43,7 @@ use crate::windows::chain_geometry;
 /// The session program, reduced to what a drain hands it: it opens the icon
 /// bar's menus as the real one does and records everything else.
 struct Program {
-    routed: Vec<(ShellOutcome, Option<KeyInput>)>,
+    routed: Vec<(Timed<ShellOutcome>, Option<KeyInput>)>,
     settles: usize,
     /// Routing an outcome this accepts locks the screen.
     lock_on: fn(&ShellOutcome) -> bool,
@@ -81,7 +81,10 @@ impl Program {
     }
 
     fn outcomes(&self) -> Vec<&ShellOutcome> {
-        self.routed.iter().map(|(outcome, _)| outcome).collect()
+        self.routed
+            .iter()
+            .map(|(outcome, _)| &outcome.value)
+            .collect()
     }
 }
 
@@ -89,11 +92,11 @@ impl SeatRouter for Program {
     fn route(
         &mut self,
         seat: &mut Seat<'_>,
-        outcome: ShellOutcome,
+        outcome: Timed<ShellOutcome>,
         key: Option<KeyInput>,
         _now_ns: u64,
     ) -> Routed {
-        if let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) = &outcome {
+        if let ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) = &outcome.value {
             let request = request.clone();
             let opened = {
                 let geom = chain_geometry(seat.shell.session(), seat.compositor);
@@ -113,12 +116,12 @@ impl SeatRouter for Program {
                 "a plate drawn"
             );
         }
-        if (self.lock_on)(&outcome) {
+        if (self.lock_on)(&outcome.value) {
             assert!(seat
                 .lock
                 .engage(("ann", "ann"), seat.shell, seat.compositor));
         }
-        let decided = (self.decide)(&outcome);
+        let decided = (self.decide)(&outcome.value);
         self.routed.push((outcome, key));
         decided
     }
@@ -447,7 +450,7 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
     );
     assert!(
         program.routed.iter().all(|(outcome, _)| !matches!(
-            outcome,
+            outcome.value,
             ShellOutcome::WindowManager(InputResponse::ClientPointerReleased { .. })
         )),
         "the window never sees the release it lent the drag"
@@ -707,6 +710,42 @@ fn a_key_that_locks_the_screen_keeps_the_next_from_the_shell() {
     assert_eq!(program.routed.len(), 1);
     assert_eq!(program.routed[0].1, Some(char_key('l')));
     assert_eq!(queued_keys(&keys), 1, "the second key waits for the lock");
+}
+
+/// A pointer outcome reaches the router timed by when its device reported it,
+/// however late the wake, so the desktop pairs a double-click by the user's
+/// gap and not the drain's; a key states no time, so it is timed by the wake.
+#[test]
+fn a_wake_routes_each_outcome_at_the_time_of_its_input() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let mut pointer = MemoryInput::timed(&[
+        (moved(250, 250), 5),
+        (PRIMARY_PRESS, 7),
+        (PRIMARY_RELEASE, 9),
+    ]);
+    let mut keys = keyboard(&[char_key('a')]);
+    let mut program = Program::new();
+
+    SeatDrain::new()
+        .wake(
+            &mut desk.seat(),
+            &mut pointer,
+            &mut keys,
+            &mut program,
+            1_000,
+        )
+        .expect("in-memory sources do not fault");
+
+    assert_eq!(
+        program.routed[1].0.value,
+        ShellOutcome::WindowManager(InputResponse::DesktopPressed)
+    );
+    let times: Vec<u64> = program
+        .routed
+        .iter()
+        .map(|(outcome, _)| outcome.at_ns)
+        .collect();
+    assert_eq!(times, [5, 7, 9, 1_000]);
 }
 
 /// A key that closes the chain leaves the keys after it to the shell, and

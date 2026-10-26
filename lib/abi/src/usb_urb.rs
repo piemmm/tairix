@@ -523,6 +523,56 @@ pub fn decode_completion(reply: &[u8]) -> Result<u32, Errno> {
     }
 }
 
+/// An interrupt-IN report a completion delivers: its length, and the
+/// monotonic instant the host controller captured it, which is when the
+/// device reported it to within the controller's service step.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ReportCompletion {
+    /// The bytes the report carries.
+    pub transferred: u32,
+    /// When the host controller captured it.
+    pub captured_ns: u64,
+}
+
+/// Encoded length of a [`ReportCompletion`]: a URB completion, then the
+/// `u64` capture instant.
+pub const REPORT_COMPLETION_LEN: usize = URB_COMPLETION_LEN + 8;
+
+impl ReportCompletion {
+    /// Encode `self` into `buf`, answering the length written.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `buf` cannot hold
+    /// [`REPORT_COMPLETION_LEN`] bytes.
+    pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if buf.len() < REPORT_COMPLETION_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        encode_completion(buf, self.transferred)?;
+        put_u64(buf, URB_COMPLETION_LEN, self.captured_ns);
+        Ok(REPORT_COMPLETION_LEN)
+    }
+
+    /// Decode an interrupt-IN completion: the report it delivers, else the
+    /// carried [`Errno`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_completion`], and [`Errno::BadMagic`] for a success frame
+    /// not exactly [`REPORT_COMPLETION_LEN`] long.
+    pub fn decode(reply: &[u8]) -> Result<Self, Errno> {
+        let transferred = decode_completion(reply)?;
+        if reply.len() != REPORT_COMPLETION_LEN {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            transferred,
+            captured_ns: read_u64(reply, URB_COMPLETION_LEN),
+        })
+    }
+}
+
 /// Fewest slots a stream may have: one being moved while the other is queued.
 pub const ISO_MIN_SLOTS: u16 = 2;
 
@@ -858,6 +908,8 @@ mod grant_reply {
 
 /// The longest reply a transport endpoint sends.
 pub const USB_REPLY_MAX_LEN: usize = ISO_GRANT_REPLY_LEN;
+
+const _: () = assert!(REPORT_COMPLETION_LEN <= USB_REPLY_MAX_LEN);
 
 impl IsoGrant {
     /// Encode a successful [`UsbRequest::IsoStart`] reply.

@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
-use super::{falloff, Path, Tip};
-use crate::canvas::{Canvas, Kind, Sample};
+use super::{falloff, Path, Spray, Tip, AIRBRUSH_INTERVAL_NS, AIRBRUSH_STILL_NS};
+use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
 use crate::shape::{Point, FX};
 use crate::stroke::{Blend, Coat, Stroke};
@@ -227,5 +227,155 @@ fn a_tip_on_whole_pixels_is_hard_and_lays_all_its_paint() {
         .step(),
         FX / 8,
         "never nearer than an eighth"
+    );
+}
+
+/// Dabs laid at one place as one pass build what they build one after another.
+#[test]
+fn passes_laid_as_one_build_what_they_build_one_by_one() {
+    let centre = Point::centre_of(20, 20);
+    let soft = tip(16, 0, 10);
+    for passes in [2, 7, 40] {
+        let mut one_by_one = Canvas::new(40, 40, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+        let mut stroke = Stroke::building(black(), 255, None);
+        for _ in 0..passes {
+            soft.dab(&mut stroke, &mut one_by_one, centre, true)
+                .expect("room");
+        }
+        let mut as_one = Canvas::new(40, 40, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+        let mut stroke = Stroke::building(black(), 255, None);
+        soft.dabs(&mut stroke, &mut as_one, centre, true, passes)
+            .expect("room");
+        for (x, y) in (0..40).flat_map(|y| (0..40).map(move |x| (x, y))) {
+            let (apart, together) = (alpha(&one_by_one, x, y), alpha(&as_one, x, y));
+            assert!(
+                apart.abs_diff(together) <= 1,
+                "{passes} passes at ({x}, {y}): {apart} one by one, {together} as one"
+            );
+        }
+    }
+    let mut canvas = Canvas::new(40, 40, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    let mut stroke = Stroke::building(black(), 255, None);
+    soft.dabs(&mut stroke, &mut canvas, centre, true, 0)
+        .expect("room");
+    assert_eq!(alpha(&canvas, 20, 20), 0, "no passes lay nothing");
+}
+
+/// Every dab a spray hands `dab`, as where it falls and how many fall there.
+fn sprayed(
+    spray: &mut Spray,
+    lay: impl FnOnce(&mut Spray, &mut dyn FnMut(Point, u32) -> Result<(), OutOfMemory>),
+) -> Vec<(Point, u32)> {
+    let mut laid = Vec::new();
+    lay(spray, &mut |at, passes| {
+        laid.push((at, passes));
+        Ok(())
+    });
+    laid
+}
+
+fn reported(spray: &mut Spray, from: Point, to: Point, at_ns: u64) -> Vec<(Point, u32)> {
+    sprayed(spray, |spray, dab| {
+        spray.reported(from, to, at_ns, dab).expect("room");
+    })
+}
+
+fn held(spray: &mut Spray, at: Point, now_ns: u64) -> Vec<(Point, u32)> {
+    sprayed(spray, |spray, dab| {
+        spray.held(at, now_ns, dab).expect("room");
+    })
+}
+
+const MS: u64 = 1_000_000;
+
+#[test]
+fn a_moving_airbrush_lays_its_dabs_along_the_way_it_went() {
+    let (from, to) = (Point { x: 0, y: 0 }, Point { x: 400, y: 800 });
+    assert_eq!(
+        reported(&mut Spray::new(0), from, to, AIRBRUSH_INTERVAL_NS - 1),
+        [],
+        "none falls before its interval"
+    );
+    let mut spray = Spray::new(0);
+    let along = |share: i64| Point {
+        x: to.x * share / 4,
+        y: to.y * share / 4,
+    };
+    assert_eq!(
+        reported(&mut spray, from, to, 4 * AIRBRUSH_INTERVAL_NS),
+        [(along(1), 1), (along(2), 1), (along(3), 1), (along(4), 1)],
+        "each dab where the pointer was when it fell"
+    );
+    assert_eq!(spray.due_ns(), 5 * AIRBRUSH_INTERVAL_NS + AIRBRUSH_STILL_NS);
+}
+
+/// A silence longer than any report of a move takes in reaching the window was
+/// the pointer held still: what fell in it falls where it was reported last.
+#[test]
+fn a_long_silence_before_a_move_was_the_airbrush_held_still() {
+    let (from, to) = (Point { x: 0, y: 0 }, Point { x: 400, y: 0 });
+    let mut spray = Spray::new(0);
+    let at_ns = 4 * AIRBRUSH_STILL_NS;
+    let moved = AIRBRUSH_STILL_NS / AIRBRUSH_INTERVAL_NS;
+    let still = u32::try_from(at_ns / AIRBRUSH_INTERVAL_NS - moved).expect("small");
+    let laid = reported(&mut spray, from, to, at_ns);
+    assert_eq!(laid[0], (from, still), "held still, then moved");
+    assert_eq!(laid.len(), 1 + usize::try_from(moved).expect("small"));
+    assert_eq!(laid.last(), Some(&(to, 1)));
+}
+
+#[test]
+fn a_silent_airbrush_is_laid_where_it_stands_once_the_silence_says_it_was_still() {
+    let at = Point { x: 30, y: 40 };
+    let mut spray = Spray::new(0);
+    let due = spray.due_ns();
+    assert_eq!(due, AIRBRUSH_INTERVAL_NS + AIRBRUSH_STILL_NS);
+    assert_eq!(
+        held(&mut spray, at, due - 1),
+        [],
+        "a report of a move may still be on its way"
+    );
+    assert_eq!(held(&mut spray, at, due), [(at, 1)]);
+    assert_eq!(held(&mut spray, at, 125 * MS), [], "each dab laid once");
+    assert_eq!(
+        held(&mut spray, at, 200 * MS),
+        [(at, 3)],
+        "a late wake lays what fell meanwhile"
+    );
+}
+
+/// However long the window was kept from its deadline, what fell meanwhile is
+/// one pass: its cost does not grow with the stall.
+#[test]
+fn a_stalled_airbrush_lays_what_it_owes_as_one_pass() {
+    let at = Point { x: 0, y: 0 };
+    let mut spray = Spray::new(0);
+    let now_ns = 60_000 * MS;
+    let owed = u32::try_from((now_ns - AIRBRUSH_STILL_NS) / AIRBRUSH_INTERVAL_NS).expect("small");
+    assert_eq!(held(&mut spray, at, now_ns), [(at, owed)]);
+    let to = Point { x: 10, y: 0 };
+    assert_eq!(
+        reported(&mut spray, at, to, now_ns - AIRBRUSH_STILL_NS),
+        [],
+        "what it laid is not laid again"
+    );
+    assert_eq!(
+        reported(&mut spray, to, to, now_ns),
+        [(to, 4)],
+        "what it could not yet vouch for is laid once a report does"
+    );
+}
+
+#[test]
+fn a_report_from_before_the_last_lays_nothing() {
+    let (from, to) = (Point { x: 0, y: 0 }, Point { x: 100, y: 0 });
+    let mut spray = Spray::new(500 * MS);
+    let due = spray.due_ns();
+    assert_eq!(reported(&mut spray, from, to, 400 * MS), []);
+    assert_eq!(spray.due_ns(), due);
+    assert_eq!(
+        reported(&mut spray, to, to, 525 * MS),
+        [(to, 1)],
+        "and the next is timed from the press"
     );
 }

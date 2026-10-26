@@ -1648,7 +1648,7 @@ You are not exempt from any rule above. In addition:
     | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
-    | Pointing input: the one scroll unit, horizontal and high-resolution wheels, what a scroll tells the window it lands on, touch contacts, the seat's gesture recogniser, and pinch | `plans/POINTING.md` |
+    | Pointing input: the one scroll unit, horizontal and high-resolution wheels, what a scroll tells the window it lands on, touch contacts, the seat's gesture recogniser, pinch, and the device time every pointer report carries to the application | `plans/POINTING.md` |
     | Reaching a logged-in state: the boot-time text-vs-graphical decision (`continue text\|gui`), the graphical login screen (greeter), the login service's session broker, and macOS-style fast user switching between concurrent desktop sessions | `plans/NEW-DESKTOP-LOGIN.md` |
     | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
     | Vector assets: the SVG decoder (`lib/svg`) — the path/shape grammar, curve flattening, strokes, transforms, the style cascade, gradients, its fixed input bounds, and its deliberate non-goals | `plans/SVG.md` |

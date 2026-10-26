@@ -1213,6 +1213,7 @@ mod program {
                     y,
                     action,
                     modifiers,
+                    at_ns,
                     ..
                 } => {
                     let held = key_input_event(KeyInput::ModifiersChanged {
@@ -1224,7 +1225,7 @@ mod program {
                     for input in inputs {
                         let outcome =
                             self.player
-                                .input(&input, now, &self.layout, scale, theme, reported);
+                                .input(&input, *at_ns, &self.layout, scale, theme, reported);
                         let settings = outcome.commands.iter().any(|command| {
                             matches!(command, Command::Edit(Edit::Shuffle(_) | Edit::Repeat(_)))
                         });

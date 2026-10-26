@@ -34,8 +34,8 @@ use core::num::NonZeroU32;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::usb_urb::{
     decode_completion, encode_completion, encode_error_completion, is_device_endpoint_address,
-    IsoGrant, IsoLayout, IsoStartParams, UrbRequest, UsbDirection, UsbRequest, UsbSpeed,
-    UsbTransferType, USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN,
+    IsoGrant, IsoLayout, IsoStartParams, ReportCompletion, UrbRequest, UsbDirection, UsbRequest,
+    UsbSpeed, UsbTransferType, USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_inline::BitSet256;
@@ -97,8 +97,9 @@ pub trait UrbEngine {
     /// `endpoint`, for one pending report into `data`, the whole shared
     /// buffer. `request` is the longest report the class driver expects: the
     /// endpoint is armed to it, or to one service interval's payload if that
-    /// is longer, so a report may exceed it. `Ok(Some(n))` if a report of `n`
-    /// bytes arrived, `Ok(None)` if none is pending yet (the caller retries).
+    /// is longer, so a report may exceed it. `Ok(Some(report))` with its
+    /// length and capture instant if one arrived, `Ok(None)` if none is
+    /// pending yet (the caller retries).
     ///
     /// # Errors
     ///
@@ -111,7 +112,7 @@ pub trait UrbEngine {
         endpoint: u8,
         request: usize,
         data: &mut [u8],
-    ) -> Result<Option<usize>, DriverError>;
+    ) -> Result<Option<ReportCompletion>, DriverError>;
 
     /// Drive one bulk-IN transfer on device endpoint number `endpoint`
     /// reading into `data`: arm it if not yet armed, then reap its
@@ -378,8 +379,9 @@ pub fn control_permitted(
 /// This is the controller-side body the HCD runs for a
 /// [`UsbRequest::Transfer`] it received. It is **asynchronous**:
 ///
-/// * `Ok(Some(n))` — the transfer completed; `n` bytes landed in `data`. The
-///   HCD frames a completion with [`frame_completion`] and replies now.
+/// * `Ok(Some(done))` — the transfer completed, and `done` says what landed
+///   in `data`. The HCD frames a completion with [`frame_completion`] and
+///   replies now.
 /// * `Ok(None)` — the transfer has not finished, or an interrupt-IN report
 ///   has not arrived yet. The HCD leaves the caller's URB call outstanding
 ///   and re-drives this same `request` on its next controller event; it
@@ -397,7 +399,7 @@ pub fn drive_urb<E: UrbEngine>(
     urb: &UrbRequest,
     data: &mut [u8],
     engine: &mut E,
-) -> Result<Option<u32>, Errno> {
+) -> Result<Option<UrbDone>, Errno> {
     let length = urb.length as usize;
     // The transfer may never run past the mapped shared buffer.
     if length > data.len() {
@@ -426,12 +428,12 @@ pub fn drive_urb<E: UrbEngine>(
                     engine.control_out(urb.setup, slice)
                 }
                 .map_err(DriverError::as_errno)?;
-                return Ok(done.map(|()| urb.length));
+                return Ok(done.map(|()| UrbDone::Moved(urb.length)));
             }
             engine
                 .control_in(urb.setup, slice)
                 .map_err(DriverError::as_errno)?
-                .map(|transferred| u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange))
+                .map(moved)
                 .transpose()
         }
         UsbTransferType::Interrupt => {
@@ -444,17 +446,12 @@ pub fn drive_urb<E: UrbEngine>(
             {
                 return Err(Errno::OutOfRange);
             }
-            match engine
+            // No report yet holds the URB outstanding (`Ok(None)`) rather
+            // than fabricating a completion.
+            Ok(engine
                 .interrupt_in(urb.endpoint, length, data)
                 .map_err(DriverError::as_errno)?
-            {
-                Some(transferred) => Ok(Some(
-                    u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)?,
-                )),
-                // No report yet — hold the URB outstanding (Ok(None)), do not
-                // fabricate a completion.
-                None => Ok(None),
-            }
+                .map(UrbDone::Report))
         }
         UsbTransferType::Bulk => {
             // A bulk transfer targets a device endpoint, never the shared
@@ -470,16 +467,18 @@ pub fn drive_urb<E: UrbEngine>(
                 UsbDirection::Out => engine.bulk_out(urb.endpoint, slice),
             }
             .map_err(DriverError::as_errno)?;
-            match outcome {
-                Some(transferred) => Ok(Some(
-                    u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)?,
-                )),
-                // Still in flight — hold the URB outstanding; the next
-                // controller event re-drives it.
-                None => Ok(None),
-            }
+            // Still in flight holds the URB outstanding; the next controller
+            // event re-drives it.
+            outcome.map(moved).transpose()
         }
     }
+}
+
+/// A transfer's `transferred` bytes, as its completion carries them.
+fn moved(transferred: usize) -> Result<UrbDone, Errno> {
+    u32::try_from(transferred)
+        .map(UrbDone::Moved)
+        .map_err(|_| Errno::LengthOutOfRange)
 }
 
 /// Run `operation` on the interface's own endpoint at address `endpoint`
@@ -503,23 +502,33 @@ pub fn on_own_endpoint<E: UrbEngine, T>(
     operation(engine, endpoint).map_err(DriverError::as_errno)
 }
 
+/// What a finished transfer answers its class driver with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UrbDone {
+    /// The bytes a control or bulk transfer moved.
+    Moved(u32),
+    /// An interrupt-IN report, with the instant it was captured.
+    Report(ReportCompletion),
+}
+
 /// Frame a completed transfer outcome into a URB completion in `reply`,
 /// returning the reply length.
 ///
-/// `Ok(n)` becomes a success completion carrying the bytes transferred; an
-/// `Err` becomes a status-framed error completion, so the blocked caller is
-/// always answered and fails closed. This is the wire transformation the HCD
-/// runs immediately before
+/// A moved count becomes a success completion, a report a
+/// [`ReportCompletion`], and an `Err` a status-framed error completion, so the
+/// blocked caller is always answered and fails closed. This is the wire
+/// transformation the HCD runs immediately before
 /// [`call_reply`](tairix_abi::SyscallNumber::CALL_REPLY).
 ///
 /// # Errors
 ///
-/// [`Errno::BufferTooSmall`] if `reply` cannot hold a completion frame (it
-/// must be at least [`URB_COMPLETION_LEN`](tairix_abi::usb_urb::URB_COMPLETION_LEN)).
+/// [`Errno::BufferTooSmall`] if `reply` cannot hold the frame (it must be
+/// at least [`REPORT_COMPLETION_LEN`](tairix_abi::usb_urb::REPORT_COMPLETION_LEN)).
 /// The caller sizes it so.
-pub fn frame_completion(reply: &mut [u8], result: Result<u32, Errno>) -> Result<usize, Errno> {
+pub fn frame_completion(reply: &mut [u8], result: Result<UrbDone, Errno>) -> Result<usize, Errno> {
     match result {
-        Ok(transferred) => encode_completion(reply, transferred),
+        Ok(UrbDone::Moved(transferred)) => encode_completion(reply, transferred),
+        Ok(UrbDone::Report(report)) => report.encode(reply),
         Err(err) => encode_error_completion(reply, err),
     }
 }
@@ -724,9 +733,10 @@ impl<T: UrbCall> UrbClient<T> {
     }
 
     /// Submit an interrupt-IN URB for `endpoint` reading one report into the
-    /// shared buffer, returning the bytes transferred. `length` is the
-    /// longest report expected; a report may run past it up to one service
-    /// interval's payload, so the whole shared buffer receives it.
+    /// shared buffer, returning its length and when the host controller
+    /// captured it. `length` is the longest report expected; a report may run
+    /// past it up to one service interval's payload, so the whole shared
+    /// buffer receives it.
     ///
     /// `timeout_ms` bounds the wait; without one the call waits for the
     /// device's next report whenever it comes.
@@ -742,15 +752,20 @@ impl<T: UrbCall> UrbClient<T> {
         endpoint: u8,
         length: u32,
         timeout_ms: Option<NonZeroU32>,
-    ) -> Result<u32, Errno> {
-        self.submit(&UrbRequest {
-            endpoint,
-            transfer_type: UsbTransferType::Interrupt,
-            direction: UsbDirection::In,
-            length,
-            setup: [0; 8],
-            timeout_ms,
-        })
+    ) -> Result<ReportCompletion, Errno> {
+        let mut reply = [0u8; USB_REPLY_MAX_LEN];
+        let len = self.call(
+            &UsbRequest::Transfer(UrbRequest {
+                endpoint,
+                transfer_type: UsbTransferType::Interrupt,
+                direction: UsbDirection::In,
+                length,
+                setup: [0; 8],
+                timeout_ms,
+            }),
+            &mut reply,
+        )?;
+        ReportCompletion::decode(&reply[..len])
     }
 
     /// Submit a bulk-IN URB for `endpoint` reading up to `length` bytes into
@@ -1059,7 +1074,8 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
     }
 
     /// Read interrupt-IN `endpoint`'s next report into `data`, returning its
-    /// length. `expected` is the longest report expected; the report may be
+    /// length and when the host controller captured it. `expected` is the
+    /// longest report expected; the report may be
     /// longer, up to one service interval's payload ([`UrbEngine::interrupt_in`]).
     /// With a `deadline` the wait ends there; without one it lasts until the
     /// device next reports.
@@ -1075,19 +1091,19 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
         expected: usize,
         data: &mut [u8],
         deadline: Option<Deadline>,
-    ) -> Result<usize, Errno> {
+    ) -> Result<ReportCompletion, Errno> {
         let len = u32::try_from(expected).map_err(|_| Errno::LengthOutOfRange)?;
         let timeout = match deadline {
             Some(deadline) => Some(deadline.remaining_ms().ok_or(Errno::TimedOut)?),
             None => None,
         };
-        let delivered = usize::try_from(self.client.interrupt_in(endpoint, len, timeout)?)
-            .map_err(|_| Errno::LengthOutOfRange)?;
-        let report = self.shm.get(..delivered).ok_or(Errno::LengthOutOfRange)?;
+        let report = self.client.interrupt_in(endpoint, len, timeout)?;
+        let delivered = usize::try_from(report.transferred).map_err(|_| Errno::LengthOutOfRange)?;
+        let bytes = self.shm.get(..delivered).ok_or(Errno::LengthOutOfRange)?;
         data.get_mut(..delivered)
             .ok_or(Errno::BufferTooSmall)?
-            .copy_from_slice(report);
-        Ok(delivered)
+            .copy_from_slice(bytes);
+        Ok(report)
     }
 
     /// Clear the halt of bulk endpoint `endpoint`

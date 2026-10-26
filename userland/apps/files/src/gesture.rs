@@ -731,6 +731,7 @@ mod tests {
             y: 5,
             action,
             modifiers: Modifiers::default(),
+            at_ns: 0,
         }
     }
 
@@ -824,6 +825,7 @@ mod tests {
                 y: 4,
                 action: PointerAction::Cancelled,
                 modifiers: Modifiers::default(),
+                at_ns: 0,
             }),
             PressInput::Cancelled
         );

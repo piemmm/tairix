@@ -326,7 +326,7 @@ pub trait DocumentView: SavedDocument {
     fn focus_changed(&mut self, focused: bool, layout: &Self::Layout, damage: &mut Region);
 
     /// Feed `input` — a key, the modifiers held, or the pointer — at
-    /// `now_ns`.
+    /// `now_ns`: for the pointer, when its device reported it.
     fn input(
         &mut self,
         input: &InputEvent,
@@ -425,7 +425,7 @@ pub trait DocumentView: SavedDocument {
 
     /// Feed `input` that reached the window's dialog — a key while it holds
     /// the keyboard, or the pointer over it in the drawing's pixels — at
-    /// `now_ns`.
+    /// `now_ns`: for the pointer, when its device reported it.
     fn dialog_input(
         &mut self,
         _input: &InputEvent,
@@ -501,7 +501,7 @@ pub trait AppView {
     fn focus_changed(&mut self, focused: bool, layout: &Self::Layout, damage: &mut Region);
 
     /// Feed `input` — a key, the modifiers held, or the pointer — at
-    /// `now_ns`.
+    /// `now_ns`: for the pointer, when its device reported it.
     fn input(
         &mut self,
         input: &InputEvent,

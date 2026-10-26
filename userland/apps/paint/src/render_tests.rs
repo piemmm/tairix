@@ -235,7 +235,7 @@ fn a_shape_being_dragged_is_drawn_as_it_will_be_put_down() {
     };
     let (from, to) = (point((5, 5)), point((40, 30)));
     let feed = |view: &mut View, event: InputEvent| {
-        view.on_pointer(&event, &layout, Scale::ONE, theme, &mut Region::new());
+        view.on_pointer(&event, 0, &layout, Scale::ONE, theme, &mut Region::new());
     };
     feed(&mut view, InputEvent::PointerMoved { to: from });
     feed(
@@ -401,7 +401,7 @@ fn an_open_list_is_drawn_over_the_canvas() {
             button: PointerButton::Primary,
         },
     ] {
-        view.on_pointer(&event, &layout, Scale::ONE, theme, &mut Region::new());
+        view.on_pointer(&event, 0, &layout, Scale::ONE, theme, &mut Region::new());
     }
     let popup = view
         .controls()
@@ -609,7 +609,7 @@ fn a_shape_dragged_beneath_a_layer_shows_as_it_will_be_put_down() {
     };
     let (from, to) = (point((5, 5)), point((40, 30)));
     let feed = |view: &mut View, event: InputEvent| {
-        view.on_pointer(&event, &layout, Scale::ONE, theme, &mut Region::new());
+        view.on_pointer(&event, 0, &layout, Scale::ONE, theme, &mut Region::new());
     };
     feed(&mut view, InputEvent::PointerMoved { to: from });
     feed(

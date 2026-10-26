@@ -172,19 +172,20 @@ mod program {
         ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
         SeatRouter, SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
         SizedRecord, SlideWant, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk,
-        WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
-        APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
-        CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
-        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
-        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
-        LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
-        MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
-        SETTINGS_LABEL, SET_TIME_PURPOSE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN,
-        TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
-        WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
+        SwitchboardServe, Timed, Trial, TrialEnd, TrialOutcome, UnlockAnswer, UnlockAsk,
+        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE,
+        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE,
+        LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED,
+        LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN,
+        LIBRARY_SHOWN_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
+        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SETTINGS_LABEL, SET_TIME_PURPOSE,
+        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED,
+        TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED,
+        WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
+        WINDOW_SIZED_MESSAGE,
     };
     use tairix_desktop_session::{machine_zone_place, moves_machine_zone, read_machine_zone};
     use tairix_desktop_session::{
@@ -8189,12 +8190,12 @@ mod program {
         fn route(
             &mut self,
             seat: &mut Seat<'_>,
-            outcome: tairix_desktop_session::ShellOutcome,
+            outcome: Timed<tairix_desktop_session::ShellOutcome>,
             key: Option<KeyInput>,
             now_ns: u64,
         ) -> Routed {
             if let tairix_desktop_session::ShellOutcome::Taskbar(TaskbarResponse::Sound(action)) =
-                &outcome
+                &outcome.value
             {
                 let (device_id, control, settled) = match *action {
                     SoundAction::Level {
@@ -9183,7 +9184,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     #[allow(clippy::too_many_lines)] // One linear match over every outcome; splitting it would hide the routing policy.
     fn route_outcome<S: DirectorySource, F: FnMut() -> S>(
-        outcome: tairix_desktop_session::ShellOutcome,
+        outcome: Timed<tairix_desktop_session::ShellOutcome>,
         key: Option<KeyInput>,
         catalogs: &Catalogs,
         files: &Files,
@@ -9213,6 +9214,10 @@ mod program {
         memory: &mut LauncherMemory,
     ) -> Routed {
         use tairix_desktop_session::ShellOutcome;
+        let Timed {
+            value: outcome,
+            at_ns,
+        } = outcome;
         match outcome {
             ShellOutcome::WindowManager(response) => match response {
                 InputResponse::Activated { window, local }
@@ -9232,7 +9237,7 @@ mod program {
                             &tairix_wm::InputEvent::PointerPressed {
                                 button: tairix_wm::PointerButton::Primary,
                             },
-                            tairix_rt::clock_get(),
+                            at_ns,
                             &mut windows.holds,
                             shell,
                             compositor,
@@ -9291,6 +9296,7 @@ mod program {
                                     tairix_abi::input::PointerButtonCode::Primary,
                                 ),
                                 modifiers: pointer_modifiers(shell),
+                                at_ns,
                             },
                         );
                     }
@@ -9317,8 +9323,7 @@ mod program {
                     // A press on the picker's question whether to replace a
                     // file answers it, and a yes saves over the file.
                     if picker.question_wm() == Some(window) {
-                        let now = tairix_rt::clock_get();
-                        let step = picker.question_click(local, now, shell, compositor);
+                        let step = picker.question_click(local, at_ns, shell, compositor);
                         step_pick(
                             step,
                             &Openers { identity, programs },
@@ -9337,8 +9342,7 @@ mod program {
                     // only the confirming button relays the transition, and
                     // the prompt window is already gone by then.
                     if confirm.wm_id() == Some(window) {
-                        let now_ns = tairix_rt::clock_get();
-                        let answer = confirm.handle_click(local, now_ns, shell, compositor);
+                        let answer = confirm.handle_click(local, at_ns, shell, compositor);
                         if let Some(answer) = answer {
                             report_power_relay(answer, *switchboard);
                         }
@@ -9346,8 +9350,7 @@ mod program {
                     // A press on the resolution prompt answers it; the serve
                     // loop puts the answer into effect.
                     if resolution.wm_id() == Some(window) {
-                        let now_ns = tairix_rt::clock_get();
-                        let _ = resolution.handle_click(local, now_ns, shell, compositor);
+                        let _ = resolution.handle_click(local, at_ns, shell, compositor);
                     }
                 }
                 InputResponse::SecondaryActivated { window, local } => {
@@ -9391,6 +9394,7 @@ mod program {
                                     tairix_abi::input::PointerButtonCode::Secondary,
                                 ),
                                 modifiers: pointer_modifiers(shell),
+                                at_ns,
                             },
                         );
                     }
@@ -9695,7 +9699,7 @@ mod program {
                             window,
                             local,
                             &tairix_wm::InputEvent::PointerMoved { to: local },
-                            tairix_rt::clock_get(),
+                            at_ns,
                             &mut windows.holds,
                             shell,
                             compositor,
@@ -9720,6 +9724,7 @@ mod program {
                                 y,
                                 action: PointerAction::Moved,
                                 modifiers: pointer_modifiers(shell),
+                                at_ns,
                             },
                         );
                     }
@@ -9738,7 +9743,7 @@ mod program {
                             window,
                             local,
                             &released,
-                            tairix_rt::clock_get(),
+                            at_ns,
                             &mut windows.holds,
                             shell,
                             compositor,
@@ -9779,6 +9784,7 @@ mod program {
                                     tairix_abi::input::PointerButtonCode::Primary,
                                 ),
                                 modifiers: pointer_modifiers(shell),
+                                at_ns,
                             },
                         );
                     }
@@ -11143,7 +11149,7 @@ mod program {
     /// `stderr` and changes nothing else.
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn route_desktop<S: DirectorySource>(
-        outcome: &tairix_desktop_session::ShellOutcome,
+        outcome: &Timed<tairix_desktop_session::ShellOutcome>,
         publisher: &Publisher,
         files: &Files,
         pinboard: &mut PinboardPanel,
@@ -11168,7 +11174,7 @@ mod program {
         // focus ring follows the window manager's one notion of focus rather
         // than a second one kept here.
         desktop.set_focused(shell.router().focused().is_none(), &layout, &mut damage);
-        let acted = match outcome {
+        let acted = match &outcome.value {
             tairix_desktop_session::ShellOutcome::WindowManager(response) => match response {
                 InputResponse::DesktopPointerMoved => {
                     desktop.pointer_moved(
@@ -11185,7 +11191,7 @@ mod program {
                     &layout,
                     compositor.scale(),
                     shell.session().active_theme(),
-                    now_ns,
+                    outcome.at_ns,
                     &programs.associations,
                     &mut damage,
                 ),
@@ -11218,7 +11224,7 @@ mod program {
         // rather than through a second path. The sources are exclusive — a
         // taskbar outcome is never also a desktop gesture — and `or` says so
         // without discarding either.
-        let action = shortcut_asked(outcome, shell, desktop).or(acted.action);
+        let action = shortcut_asked(&outcome.value, shell, desktop).or(acted.action);
         // The settings and folder edits `apply_desktop_action` performs are
         // the changes that genuinely repaint the whole layer.
         let applied = apply_desktop_action(
@@ -12906,6 +12912,7 @@ mod program {
                 y,
                 action: PointerAction::Cancelled,
                 modifiers: pointer_modifiers(shell),
+                at_ns: tairix_rt::clock_get(),
             };
             deliver(
                 server, sink, shell, compositor, windows, picker, apps, menu, &event,

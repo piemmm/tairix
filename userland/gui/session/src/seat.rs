@@ -34,7 +34,7 @@
 //! validation path; which records flow is decided by the reader it wraps
 //! (a pointer reader or a keyboard reader), not by the channel type.
 
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyInput, TimedPointer};
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::Errno;
 
@@ -128,8 +128,8 @@ impl<R: SeatEventReader> SeatInputChannel<R> {
 }
 
 impl<R: SeatEventReader> PointerInputChannel for SeatInputChannel<R> {
-    fn next_record(&mut self) -> Result<Option<[u8; PointerInput::WIRE_LEN]>, Errno> {
-        self.drain_record::<{ PointerInput::WIRE_LEN }>()
+    fn next_record(&mut self) -> Result<Option<[u8; TimedPointer::WIRE_LEN]>, Errno> {
+        self.drain_record::<{ TimedPointer::WIRE_LEN }>()
     }
 }
 
@@ -150,12 +150,12 @@ mod tests {
     use super::{SeatEventReader, SeatInputChannel};
     use crate::device::{DeviceInputSource, PointerInputChannel, TouchInputChannel};
     use crate::keyboard::KeyboardInputSource;
-    use crate::shell::InputSource;
+    use crate::shell::{InputSource, Timed};
     use alloc::collections::VecDeque;
     use alloc::vec::Vec;
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
-        PointerInput,
+        PointerInput, TimedPointer,
     };
     use tairix_abi::touch::{TouchButtons, TouchExtent, TouchFrame, TouchSurface};
     use tairix_abi::Errno;
@@ -241,24 +241,34 @@ mod tests {
     #[test]
     fn drains_a_pointer_move_from_the_seat_channel() {
         let mut channel = pointer_channel();
-        let record = PointerInput::MovedBy { dx: 7, dy: -3 };
+        let record = TimedPointer {
+            input: PointerInput::MovedBy { dx: 7, dy: -3 },
+            at_ns: 42,
+        };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
         let mut source =
             DeviceInputSource::new(channel, touch_channel(), SCREEN).expect("non-empty screen");
-        // The displacement is applied to the centre start position.
+        // The displacement is applied to the centre start position, timed by
+        // the device however late it is drained.
         assert_eq!(
-            source.poll(0),
-            Ok(Some(InputEvent::PointerMoved {
-                to: Point::new(327, 237)
+            source.poll(9_000),
+            Ok(Some(Timed {
+                value: InputEvent::PointerMoved {
+                    to: Point::new(327, 237)
+                },
+                at_ns: 42,
             }))
         );
-        assert_eq!(source.poll(0), Ok(None));
+        assert_eq!(source.poll(9_000), Ok(None));
     }
 
     #[test]
     fn drains_a_pointer_press_from_the_seat_channel() {
         let mut channel = pointer_channel();
-        let record = PointerInput::Pressed(PointerButtonCode::Secondary);
+        let record = TimedPointer {
+            input: PointerInput::Pressed(PointerButtonCode::Secondary),
+            at_ns: 7,
+        };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
         assert_eq!(
             PointerInputChannel::next_record(&mut channel),
@@ -308,7 +318,10 @@ mod tests {
     #[test]
     fn reader_fault_propagates_then_recovers() {
         let mut channel = pointer_channel();
-        let record = PointerInput::MovedBy { dx: 1, dy: 2 };
+        let record = TimedPointer {
+            input: PointerInput::MovedBy { dx: 1, dy: 2 },
+            at_ns: 0,
+        };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
         channel.reader_mut().fault_with(Errno::SeatNotOwner);
         assert_eq!(
@@ -342,7 +355,7 @@ mod tests {
         let mut channel = pointer_channel();
         channel
             .reader_mut()
-            .push(alloc::vec![0u8; PointerInput::WIRE_LEN]);
+            .push(alloc::vec![0u8; TimedPointer::WIRE_LEN]);
         let mut source =
             DeviceInputSource::new(channel, touch_channel(), SCREEN).expect("non-empty screen");
         assert_eq!(source.poll(0), Err(Errno::BadMagic));

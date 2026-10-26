@@ -244,12 +244,13 @@ impl MsdTransport for UrbTransport {
         if self.interrupt_endpoint == 0 {
             return Err(Errno::NotImplemented);
         }
-        self.link.interrupt_in(
+        let completion = self.link.interrupt_in(
             self.interrupt_endpoint,
             data.len(),
             data,
             Some(self.exchange),
-        )
+        )?;
+        usize::try_from(completion.transferred).map_err(|_| Errno::LengthOutOfRange)
     }
 
     fn discard_interrupts(&mut self) -> Result<(), Errno> {

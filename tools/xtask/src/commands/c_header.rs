@@ -1108,6 +1108,13 @@ fn generate_input() -> String {
     let pwl = PointerInput::WIRE_LEN;
     let kwl = KeyInput::WIRE_LEN;
     let _ = writeln!(out, "#define TAIRIX_POINTER_INPUT_WIRE_LEN {pwl}u");
+    // What `pointer_read` writes: the record, then the `uint64_t` time it
+    // happened at.
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_TIMED_POINTER_WIRE_LEN {}u",
+        tairix_abi::TimedPointer::WIRE_LEN
+    );
     let _ = writeln!(out, "#define TAIRIX_KEY_INPUT_WIRE_LEN {kwl}u");
     // The unit a `Scrolled` record's displacements are counted in.
     let _ = writeln!(
@@ -5145,12 +5152,20 @@ mod tests {
     }
 
     #[test]
-    fn input_header_pins_the_untimed_device_time() {
-        let want = format!(
-            "#define TAIRIX_POINTER_EDGE_UNTIMED ((uint64_t){}u)",
-            tairix_abi::POINTER_EDGE_UNTIMED
-        );
-        assert!(body("tairix_input.h").contains(&want), "missing {want}");
+    fn input_header_pins_the_device_time_and_the_timed_record() {
+        let h = body("tairix_input.h");
+        for want in [
+            format!(
+                "#define TAIRIX_POINTER_EDGE_UNTIMED ((uint64_t){}u)",
+                tairix_abi::POINTER_EDGE_UNTIMED
+            ),
+            format!(
+                "#define TAIRIX_TIMED_POINTER_WIRE_LEN {}u",
+                tairix_abi::TimedPointer::WIRE_LEN
+            ),
+        ] {
+            assert!(h.contains(&want), "missing {want}");
+        }
     }
 
     #[test]

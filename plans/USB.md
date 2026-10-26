@@ -166,7 +166,8 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
   - a **URB** (USB request block) — endpoint address, transfer type
     (control/interrupt/bulk), direction and length, its data always in the
     node's shared buffer — answered with a typed completion: status, bytes
-    transferred. Every bulk and control URB carries the class driver's
+    transferred, and for an interrupt-IN report the instant the HCD captured
+    it. Every bulk and control URB carries the class driver's
     deadline; the HCD holds a control URB no longer than
     `USB_CONTROL_TIMEOUT_MAX_MS` (5 s, USB 2.0 §9.2.6.4) whatever it asks, and
     an interrupt URB may carry none, to wait for the next report;

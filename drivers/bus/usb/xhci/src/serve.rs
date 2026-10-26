@@ -29,7 +29,7 @@ use tairix_abi::usb_urb::{
 };
 use tairix_abi::{DriverError, Errno, HwNode, HwResource};
 use tairix_log::Level;
-use tairix_usb::transport::{drive_urb, frame_completion, on_own_endpoint, UrbEngine};
+use tairix_usb::transport::{drive_urb, frame_completion, on_own_endpoint, UrbDone, UrbEngine};
 
 /// Whether a URB submitted on an interface's transport can reach its device.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -61,7 +61,7 @@ impl UrbReply {
     /// Framing into a [`USB_REPLY_MAX_LEN`] buffer cannot fail, since the
     /// buffer outsizes every completion; a failure would frame an empty
     /// reply, which the caller decodes as malformed rather than as a success.
-    pub(crate) fn new(ticket: u64, result: Result<u32, Errno>) -> Self {
+    pub(crate) fn new(ticket: u64, result: Result<UrbDone, Errno>) -> Self {
         let mut bytes = [0u8; USB_REPLY_MAX_LEN];
         let len = frame_completion(&mut bytes, result).unwrap_or(0);
         Self { ticket, bytes, len }
@@ -166,7 +166,7 @@ enum Work {
 impl Held {
     /// Its answer, framed as its kind is: a completion for a transfer, a
     /// status for an operation.
-    fn reply(&self, result: Result<u32, Errno>) -> UrbReply {
+    fn reply(&self, result: Result<UrbDone, Errno>) -> UrbReply {
         match self.work {
             Work::Transfer(_) => UrbReply::new(self.ticket, result),
             Work::Operation(_) | Work::Deferred => {
@@ -180,12 +180,12 @@ impl Held {
         &mut self,
         shm: &mut [u8],
         engine: &mut E,
-    ) -> Result<Option<u32>, Errno> {
+    ) -> Result<Option<UrbDone>, Errno> {
         self.driven = true;
         match self.work {
             Work::Transfer(urb) => drive_urb(&urb, shm, engine),
             Work::Operation(operation) => {
-                drive_operation(operation, engine).map(|done| done.map(|()| 0))
+                drive_operation(operation, engine).map(|done| done.map(|()| UrbDone::Moved(0)))
             }
             Work::Deferred => Err(Errno::WouldBlock),
         }

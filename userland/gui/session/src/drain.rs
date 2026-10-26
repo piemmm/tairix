@@ -21,7 +21,7 @@ use crate::keyboard::{is_secure_attention, KeyInputChannel, KeyboardInputSource}
 use crate::lock::{LockOutcome, ScreenLock, UnlockAnswer};
 use crate::menu::MenuChain;
 use crate::saver::Waking;
-use crate::shell::{DesktopShell, InputSource, ShellOutcome, Stopped};
+use crate::shell::{DesktopShell, InputSource, ShellOutcome, Stopped, Timed};
 
 /// What routing one outcome decided about the session.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -68,12 +68,13 @@ pub struct Seat<'a> {
 
 /// Where a seat drain hands what only the session program can act on.
 pub trait SeatRouter {
-    /// Carry `outcome` onward. `key` is the record of the keystroke it came
+    /// Carry `outcome` onward, timed by the input it came from; `now_ns` is
+    /// the wake's own instant. `key` is the record of the keystroke it came
     /// from.
     fn route(
         &mut self,
         seat: &mut Seat<'_>,
-        outcome: ShellOutcome,
+        outcome: Timed<ShellOutcome>,
         key: Option<KeyInput>,
         now_ns: u64,
     ) -> Routed;
@@ -111,10 +112,12 @@ pub trait SeatRouter {
     fn attend(&mut self, seat: &mut Seat<'_>, now_ns: u64);
 }
 
-/// A seat drain, keeping the outcome buffer its batches reuse.
+/// A seat drain, keeping the outcome buffers its batches reuse.
 #[derive(Debug, Default)]
 pub struct SeatDrain {
-    outcomes: Vec<ShellOutcome>,
+    outcomes: Vec<Timed<ShellOutcome>>,
+    /// What the icon bar answered through an open menu chain.
+    answered: Vec<ShellOutcome>,
 }
 
 impl SeatDrain {
@@ -123,11 +126,13 @@ impl SeatDrain {
     pub const fn new() -> Self {
         Self {
             outcomes: Vec::new(),
+            answered: Vec::new(),
         }
     }
 
     /// Drain one wake of `pointer` and `keyboard` into whoever holds the
-    /// seat, every event against the one instant `now_ns`.
+    /// seat, each pointer event at the time it happened and the rest at the
+    /// wake's instant `now_ns`.
     ///
     /// The pointer drains batch by batch, each routed before the next is
     /// taken, so what follows an edge goes to whoever that edge left holding
@@ -155,7 +160,15 @@ impl SeatDrain {
         let mut carried = seat.shell.pointer_carries();
         loop {
             let stopped = if seat.menu.is_open() {
-                drain_chain(seat, pointer, keyboard, router, &mut self.outcomes, now_ns)?
+                let stopped =
+                    drain_chain(seat, pointer, keyboard, router, &mut self.answered, now_ns)?;
+                self.outcomes.clear();
+                self.outcomes
+                    .extend(self.answered.drain(..).map(|value| Timed {
+                        value,
+                        at_ns: now_ns,
+                    }));
+                stopped
             } else if seat.shell.drag_active() {
                 drain_drag(seat, pointer, keyboard, router, now_ns)?
             } else {
@@ -183,7 +196,10 @@ impl SeatDrain {
                 router.attend(seat, now_ns);
                 break;
             }
-            let outcome = seat.shell.apply(event, seat.compositor, now_ns);
+            let outcome = Timed {
+                value: seat.shell.apply(event, seat.compositor, now_ns),
+                at_ns: now_ns,
+            };
             typed = true;
             if let Some(end) = route(router, seat, outcome, Some(record), now_ns) {
                 return Ok(end);
@@ -201,7 +217,7 @@ impl SeatDrain {
 fn route<R: SeatRouter>(
     router: &mut R,
     seat: &mut Seat<'_>,
-    outcome: ShellOutcome,
+    outcome: Timed<ShellOutcome>,
     key: Option<KeyInput>,
     now_ns: u64,
 ) -> Option<SeatWake> {
@@ -243,12 +259,16 @@ where
         if !seat.menu.is_open() {
             break false;
         }
-        let Some(event) = pointer.poll(now_ns)? else {
+        let Some(Timed {
+            value: event,
+            at_ns,
+        }) = pointer.poll(now_ns)?
+        else {
             break true;
         };
         moved |= matches!(event, InputEvent::PointerMoved { .. });
         seat.shell
-            .route_to_chain(seat.compositor, seat.menu, &event, seat.clipboard, now_ns);
+            .route_to_chain(seat.compositor, seat.menu, &event, seat.clipboard, at_ns);
         handled = true;
     };
     if moved {
@@ -305,7 +325,7 @@ where
         if ended.is_some() || !seat.shell.drag_active() {
             break false;
         }
-        let Some(event) = pointer.poll(now_ns)? else {
+        let Some(Timed { value: event, .. }) = pointer.poll(now_ns)? else {
             break true;
         };
         match seat.shell.drag_pointer(seat.compositor, &event) {
@@ -366,12 +386,16 @@ where
 {
     // The shell will not see the release that ends any gesture in flight.
     seat.shell.yield_pointer(seat.compositor);
-    while let Some(event) = pointer.poll(now_ns)? {
+    while let Some(Timed {
+        value: event,
+        at_ns,
+    }) = pointer.poll(now_ns)?
+    {
         if let InputEvent::PointerMoved { to } = event {
             seat.shell.track_pointer(to, seat.compositor);
         }
         seat.lock
-            .handle(&event, now_ns, verifier, seat.shell, seat.compositor);
+            .handle(&event, at_ns, verifier, seat.shell, seat.compositor);
     }
     while let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? {
         seat.lock
@@ -403,13 +427,17 @@ where
 {
     seat.shell.yield_pointer(seat.compositor);
     while prompt.is_up() {
-        let Some(event) = pointer.poll(now_ns)? else {
+        let Some(Timed {
+            value: event,
+            at_ns,
+        }) = pointer.poll(now_ns)?
+        else {
             break;
         };
         if let InputEvent::PointerMoved { to } = event {
             seat.shell.track_pointer(to, seat.compositor);
         }
-        let outcome = prompt.handle(&event, now_ns, elevator, seat.shell, seat.compositor);
+        let outcome = prompt.handle(&event, at_ns, elevator, seat.shell, seat.compositor);
         if outcome != PromptOutcome::Pending {
             return Ok(outcome);
         }
@@ -494,7 +522,7 @@ where
 {
     let mut waking = Waking::Moved;
     seat.shell.yield_pointer(seat.compositor);
-    while let Some(event) = pointer.poll(now_ns)? {
+    while let Some(Timed { value: event, .. }) = pointer.poll(now_ns)? {
         match event {
             InputEvent::PointerMoved { to } => seat.shell.track_pointer(to, seat.compositor),
             InputEvent::PointerPressed { .. }

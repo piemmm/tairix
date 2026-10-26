@@ -68,7 +68,7 @@
 use crate::driver::input::{
     InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE, POINTER_BUTTON_COUNT,
 };
-use crate::le::{put_i32, put_u16, put_u32, read_i32, read_u16, read_u32};
+use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
 use crate::Errno;
 
 /// Magic number identifying an `abi-v1` pointer input record (`"PIN1"`
@@ -321,6 +321,50 @@ impl PointerInput {
                 _ => None,
             },
         }
+    }
+}
+
+/// A pointer record as the seat hands it to its owner (`pointer_read`): the
+/// record, then when its device reported it on the monotonic clock — as its
+/// driver stated, or else when the kernel took it — so a click, a double-click
+/// or a stroke is timed by the device rather than by when the reader drained
+/// it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TimedPointer {
+    /// The record.
+    pub input: PointerInput,
+    /// When it happened.
+    pub at_ns: u64,
+}
+
+impl TimedPointer {
+    /// Encoded size: the [`PointerInput`] record, then the `u64` time.
+    pub const WIRE_LEN: usize = PointerInput::WIRE_LEN + 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..PointerInput::WIRE_LEN].copy_from_slice(&self.input.to_le_bytes());
+        put_u64(&mut out, PointerInput::WIRE_LEN, self.at_ns);
+        out
+    }
+
+    /// Decode `bytes`, validating the record as [`PointerInput::from_bytes`]
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] for fewer than [`Self::WIRE_LEN`] bytes, else
+    /// as [`PointerInput::from_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        let time = bytes
+            .get(PointerInput::WIRE_LEN..Self::WIRE_LEN)
+            .ok_or(Errno::BufferTooSmall)?;
+        Ok(Self {
+            input: PointerInput::from_bytes(bytes)?,
+            at_ns: read_u64(time, 0),
+        })
     }
 }
 
@@ -968,7 +1012,7 @@ mod tests {
 
     use super::{
         ClickDebounce, KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode,
-        PointerInput, BUTTON_NONE, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
+        PointerInput, TimedPointer, BUTTON_NONE, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
         KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MODIFIERS_CHANGED, KIND_MOVED_BY, KIND_PRESSED,
         KIND_RELEASED, KIND_SCROLLED, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, POINTER_INPUT_MAGIC,
     };
@@ -989,6 +1033,23 @@ mod tests {
         let event = PointerInput::MovedBy { dx: -17, dy: 42 };
         let decoded = PointerInput::from_bytes(&event.to_le_bytes()).expect("valid record");
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn a_timed_record_round_trips_and_validates_its_record() {
+        let timed = TimedPointer {
+            input: PointerInput::Pressed(PointerButtonCode::Secondary),
+            at_ns: 0x0011_2233_4455_6677,
+        };
+        let bytes = timed.to_le_bytes();
+        assert_eq!(TimedPointer::from_bytes(&bytes), Ok(timed));
+        assert_eq!(
+            TimedPointer::from_bytes(&bytes[..TimedPointer::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut corrupt = bytes;
+        corrupt[0] ^= 0xFF;
+        assert_eq!(TimedPointer::from_bytes(&corrupt), Err(Errno::BadMagic));
     }
 
     #[test]

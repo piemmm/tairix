@@ -23,8 +23,8 @@ use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::usb_urb::{
     decode_completion, iso_notify_endpoint_for, IsoGrant, IsoLayout, IsoNotify, IsoStartParams,
-    UrbRequest, UsbDirection, UsbRequest, UsbSpeed, UsbTransferType, ISO_GRANT_REPLY_LEN,
-    USB_REQUEST_MAX_LEN,
+    ReportCompletion, UrbRequest, UsbDirection, UsbRequest, UsbSpeed, UsbTransferType,
+    ISO_GRANT_REPLY_LEN, USB_REQUEST_MAX_LEN,
 };
 use tairix_abi::{
     DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId, PROC_ID_LEN,
@@ -191,7 +191,7 @@ impl UrbEngine for Engine<'_> {
         _endpoint: u8,
         _request: usize,
         data: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
+    ) -> Result<Option<ReportCompletion>, DriverError> {
         self.0.interrupt_calls += 1;
         if let Some(err) = self.0.fault.take() {
             return Err(err);
@@ -202,7 +202,10 @@ impl UrbEngine for Engine<'_> {
         let report = self.0.reports.remove(0);
         let n = report.len().min(data.len());
         data[..n].copy_from_slice(&report[..n]);
-        Ok(Some(n))
+        Ok(Some(ReportCompletion {
+            transferred: u32::try_from(n).map_err(|_| DriverError::LengthOutOfRange)?,
+            captured_ns: 0,
+        }))
     }
 
     fn bulk_in(&mut self, _endpoint: u8, _data: &mut [u8]) -> Result<Option<usize>, DriverError> {

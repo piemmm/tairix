@@ -2058,8 +2058,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         arg_count: 3,
         args: [
             // The seat whose desktop pointer channel is drained (only its
-            // owner may), then the record buffer. An unknown seat id fails
-            // closed with `NotFound`.
+            // owner may), then the buffer a timed record is written to. An
+            // unknown seat id fails closed with `NotFound`.
             AbiType::U64,
             AbiType::UserPtr,
             AbiType::Len,

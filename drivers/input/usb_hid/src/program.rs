@@ -68,13 +68,13 @@ impl HidLink for Link {
     }
 }
 
-/// The boot seat, told when the report its records come from reached the
-/// driver. A record the seat refuses is its decision, and the device carries
-/// on with the next.
+/// The boot seat, told when the report its records come from was captured.
+/// A record the seat refuses is its decision, and the device carries on with
+/// the next.
 struct Seat {
-    /// When the report being decoded arrived, on the monotonic clock; `None`
-    /// for the releases a departing device is let go with, which no report
-    /// carried.
+    /// When the host controller captured the report being decoded, on the
+    /// monotonic clock; `None` for the releases a departing device is let go
+    /// with, which no report carried.
     at_ns: Option<u64>,
 }
 
@@ -254,14 +254,18 @@ fn serve(link: &mut Link, bound: &mut Bound) -> i32 {
             None,
         );
         match read {
-            Ok(len) => {
+            Ok(delivered) => {
                 faults = 0;
                 let mut seat = Seat {
-                    at_ns: Some(tairix_rt::clock_get()),
+                    at_ns: Some(delivered.captured_ns),
                 };
                 // A report an application finds cut short changes nothing it
                 // holds; the device's next report carries its state again.
-                let _: Result<Decoded, DriverError> = bound.device.input(&report[..len], &mut seat);
+                let held = usize::try_from(delivered.transferred)
+                    .ok()
+                    .and_then(|len| report.get(..len))
+                    .unwrap_or_default();
+                let _: Result<Decoded, DriverError> = bound.device.input(held, &mut seat);
             }
             Err(errno) if transport_error(errno) == DriverError::NotFound => {
                 let _ = bound.device.release(&mut Seat { at_ns: None });

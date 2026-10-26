@@ -7631,6 +7631,10 @@ pub enum WindowEvent {
         /// qualified by one (a shift-click) without the app having to shadow
         /// the seat's modifier state from key events it may never see.
         modifiers: Modifiers,
+        /// When it happened, on the monotonic clock — when the device
+        /// reported it, not when the session or the app got round to it — so
+        /// a stroke laid over time is laid where the pointer was.
+        at_ns: u64,
     },
     /// The user asked the session to close the window (title-bar close).
     /// The app owns the decision: it saves, then issues
@@ -8020,6 +8024,36 @@ impl WindowEvent {
         out[24] = state.wire();
     }
 
+    /// Write a [`Self::Pointer`]'s block into the already-headed frame `out`:
+    /// the place, the action and its button, the modifiers, and when the
+    /// device reported it. A no-op for any other event.
+    fn write_pointer(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::Pointer {
+            x,
+            y,
+            action,
+            modifiers,
+            at_ns,
+            ..
+        } = *self
+        else {
+            return;
+        };
+        put_u16(out, 6, EV_POINTER);
+        put_u32(out, 16, x);
+        put_u32(out, 20, y);
+        let (kind, button) = match action {
+            PointerAction::Moved => (PTR_MOVED, crate::input::BUTTON_NONE),
+            PointerAction::Pressed(button) => (PTR_PRESSED, button.code()),
+            PointerAction::Released(button) => (PTR_RELEASED, button.code()),
+            PointerAction::Cancelled => (PTR_CANCELLED, crate::input::BUTTON_NONE),
+        };
+        put_u16(out, 24, kind);
+        put_u16(out, 26, button);
+        put_u16(out, 28, modifiers.to_bits());
+        put_u64(out, 32, at_ns);
+    }
+
     /// Write a [`Self::Scrolled`]'s block into the already-headed frame `out`:
     /// the place, the two deltas, and the modifiers. A no-op for any other
     /// event.
@@ -8182,26 +8216,7 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_KEY);
                 out[16..16 + KeyInput::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
             }
-            Self::Pointer {
-                x,
-                y,
-                action,
-                modifiers,
-                ..
-            } => {
-                put_u16(&mut out, 6, EV_POINTER);
-                put_u32(&mut out, 16, x);
-                put_u32(&mut out, 20, y);
-                let (kind, button) = match action {
-                    PointerAction::Moved => (PTR_MOVED, crate::input::BUTTON_NONE),
-                    PointerAction::Pressed(button) => (PTR_PRESSED, button.code()),
-                    PointerAction::Released(button) => (PTR_RELEASED, button.code()),
-                    PointerAction::Cancelled => (PTR_CANCELLED, crate::input::BUTTON_NONE),
-                };
-                put_u16(&mut out, 24, kind);
-                put_u16(&mut out, 26, button);
-                put_u16(&mut out, 28, modifiers.to_bits());
-            }
+            Self::Pointer { .. } => self.write_pointer(&mut out),
             Self::CloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_CLOSE_REQUESTED);
             }
@@ -8672,7 +8687,9 @@ fn read_pinch_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> 
 /// A button code on a move, or one outside the closed set, is refused rather
 /// than dropped, so an action has exactly one encoding.
 fn read_pointer_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
-    event_reserved_zero(bytes, 30)?;
+    if bytes[30..32] != [0, 0] {
+        return Err(Errno::BadMagic);
+    }
     let x = read_u32(bytes, 16);
     let y = read_u32(bytes, 20);
     let button = read_u16(bytes, 26);
@@ -8700,6 +8717,7 @@ fn read_pointer_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno
         y,
         action,
         modifiers,
+        at_ns: read_u64(bytes, 32),
     })
 }
 
@@ -12675,6 +12693,7 @@ mod tests {
                 y: 23,
                 action: PointerAction::Moved,
                 modifiers: Modifiers::default(),
+                at_ns: 1,
             },
             WindowEvent::Pointer {
                 window_id: 4,
@@ -12685,6 +12704,7 @@ mod tests {
                     shift: true,
                     ..Modifiers::default()
                 },
+                at_ns: u64::MAX,
             },
             WindowEvent::Pointer {
                 window_id: 4,
@@ -12697,6 +12717,7 @@ mod tests {
                     meta: true,
                     ..Modifiers::default()
                 },
+                at_ns: 0x0102_0304_0506_0708,
             },
             WindowEvent::Pointer {
                 window_id: 4,
@@ -12704,6 +12725,7 @@ mod tests {
                 y: 11,
                 action: PointerAction::Cancelled,
                 modifiers: Modifiers::default(),
+                at_ns: 0,
             },
         ] {
             let bytes = event.to_le_bytes();
@@ -13833,6 +13855,7 @@ mod tests {
             y: 2,
             action: PointerAction::Moved,
             modifiers: Modifiers::default(),
+            at_ns: 0,
         }
         .to_le_bytes();
         pointer[30] = 1;
@@ -13873,6 +13896,7 @@ mod tests {
             y: 2,
             action: PointerAction::Moved,
             modifiers: Modifiers::default(),
+            at_ns: 0,
         }
         .to_le_bytes();
         moved[26] = 1;
@@ -13884,6 +13908,7 @@ mod tests {
             y: 2,
             action: PointerAction::Cancelled,
             modifiers: Modifiers::default(),
+            at_ns: 0,
         }
         .to_le_bytes();
         cancelled[26] = 1;
@@ -13895,6 +13920,7 @@ mod tests {
             y: 2,
             action: PointerAction::Pressed(PointerButtonCode::Primary),
             modifiers: Modifiers::default(),
+            at_ns: 0,
         }
         .to_le_bytes();
         pressed[26] = 0;
@@ -13905,6 +13931,7 @@ mod tests {
             y: 2,
             action: PointerAction::Moved,
             modifiers: Modifiers::default(),
+            at_ns: 0,
         }
         .to_le_bytes();
         bad_action[24] = 9;
@@ -13916,6 +13943,7 @@ mod tests {
             y: 2,
             action: PointerAction::Moved,
             modifiers: Modifiers::default(),
+            at_ns: 0,
         }
         .to_le_bytes();
         bad_modifiers[28] = 0x80;

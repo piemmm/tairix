@@ -469,7 +469,7 @@ its name's drawn lines (`render::entry_body`) — and the rest of its cell is
 wallpaper. A primary press selects the icon under it (or
 clears the selection on an empty desktop) and arms the shared
 `DoubleClickTracker` under the double-click interval the user chose, so a
-second press within it activates the icon
+second press within it, by when the device reported each, activates the icon
 — the desktop can never disagree with the file manager about what a gesture
 means. Motion drives hover feedback. A secondary press opens the [pinboard's context
 menu](#the-pinboards-context-menu). While the desktop holds the keyboard, the
@@ -2782,10 +2782,13 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
   that clamps at a range end is not recovered by the turn back). Every sample
   still drives the window manager's own hover and drag state, so the folding
   is safe. Outcomes are `Ignored`, a `WindowManager` action the embedder may
-  observe, or a `Taskbar` response. One wake is one instant: the embedder
-  reads the monotonic clock once when the source wakes it and every batch of
-  that wake resolves its tap-versus-hold gesture against the same `now_ns`,
-  so a press and release an edge split are timed alike;
+  observe, or a `Taskbar` response, each `Timed` by the input it came from (a
+  folded run by its newest sample). Each event is applied at the time the
+  source states with it — a pointer record's from the seat, a touch gesture's
+  from its frame or the deadline that ended it — so a click's length, a
+  double-click's gap and a hover's dwell are the user's, however a wake or a
+  stall split them: two single clicks a stalled desktop drains together stay
+  two clicks;
 - a taskbar response is applied where the shell's own state suffices (a task
   activate/minimise outcome drives the compositor) and the bar is
   re-presented straight from the taskbar's drained per-surface repaint latch.
@@ -2822,8 +2825,12 @@ modifier released during it. A chain is settled — presented, then answered —
 once per drain phase that changed it, and before input is handed on, so the
 next holder never hit-tests a plate that has gone. What only the program can
 act on (the window channel, launches, the session authority) leaves through
-`SeatRouter`, and a channel fault comes back as its own `Errno`, so a seat
-lost in any drain ends the session with the seat-lost exit.
+`SeatRouter`, each outcome timed by its input beside the wake's own `now_ns`:
+the desktop's icons pair their clicks, and every `WindowEvent::Pointer` an
+application is sent carries (`at_ns`), the time the input happened, while the
+clock and every deadline read the wake's. A channel fault comes back as its
+own `Errno`, so a seat lost in any drain ends the session with the seat-lost
+exit.
 
 The shell holds no framebuffer and grants itself no authority: the `Compositor`
 is the embedder's and is passed in on each call. A loaded notification-icon set
@@ -2852,7 +2859,11 @@ The user's pointer policy is applied here too, so nothing above sees the
 unmapped form: the button order (a new order waits until no button is held,
 so a press and its release always map through the same one) and the speed, a
 percentage each displacement is scaled by with its sub-count remainder carried,
-so slow motion is never lost.
+so slow motion is never lost. Each event leaves timed by the record or touch
+frame it came from, or by the deadline that ended a gesture; what the source
+keeps for itself — the gesture the lone-modifier rule judges against
+keys, the wheel's rate — is timed by the wake, as the keys it is compared with
+are.
 A `Scrolled` record arrives in scroll units — `SCROLL_UNITS_PER_DETENT` a
 detent, a fine wheel's fraction of one as it is — and is accelerated by how
 fast the wheel is turning. The rate is measured in scroll units between

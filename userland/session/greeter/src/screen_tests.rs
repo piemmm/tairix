@@ -1462,8 +1462,12 @@ fn a_touch_points_and_clicks_as_the_mouse_does() {
         .expect("room for a contact");
     let mut gestures = Vec::new();
     login.feed_touch(&frame.stamped(1, 0), &mut gestures);
-    assert_eq!(gestures, [Gesture::MovedTo(SurfacePoint { x: 0, y: 0 })]);
-    let step = gesture(&mut login, gestures[0], 0);
+    assert_eq!(
+        gestures,
+        [(Gesture::MovedTo(SurfacePoint { x: 0, y: 0 }), 0)],
+        "timed by the frame's arrival"
+    );
+    let step = gesture(&mut login, gestures[0].0, 0);
     assert_ne!(
         step.present,
         Present::Nothing,
@@ -1476,9 +1480,13 @@ fn a_touch_points_and_clicks_as_the_mouse_does() {
         "the press's wait is parked on"
     );
     gestures.clear();
-    login.expire_touch(hold_ns, &mut gestures);
+    login.expire_touch(hold_ns * 3, &mut gestures);
     let press = Gesture::Pressed(TouchPress::Fingers(PointerButton::Primary));
-    assert_eq!(gestures, [press]);
+    assert_eq!(
+        gestures,
+        [(press, hold_ns)],
+        "timed when its wait ended, however late the wake"
+    );
     let pressed = gesture(&mut login, press, hold_ns);
     assert_eq!(
         pressed.present,

@@ -247,8 +247,11 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   one of its own bulk endpoints, drop the reports its interrupt-IN endpoint
   has buffered), or a stream operation (start, queue a slot, stop); a URB is
   answered with a
-  status-framed completion (bytes transferred, or an in-band `Errno`), an
-  operation with a status or a stream's grant. `transport` adds the two ends
+  status-framed completion (bytes transferred, or an in-band `Errno`) — an
+  interrupt-IN report's carrying too the instant the host controller's service
+  step captured it (`ReportCompletion`), so a class driver reading a backlog
+  still learns when each report came — an operation with a status or a
+  stream's grant. `transport` adds the two ends
   both sides share:
   - `UrbEngine` — the controller-side operation seam the HCD's live engine
     performs (`DeviceEngine` implements it, each call answering `None` while

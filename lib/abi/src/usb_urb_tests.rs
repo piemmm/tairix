@@ -408,3 +408,28 @@ fn truncated_or_corrupt_completions_fail_closed() {
     put_i32(&mut buf, 0, i32::MIN);
     assert_eq!(decode_completion(&buf), Err(Errno::BadMagic));
 }
+
+#[test]
+fn a_report_completion_carries_its_capture_instant_at_its_own_length() {
+    let report = ReportCompletion {
+        transferred: 8,
+        captured_ns: 0x0123_4567_89AB_CDEF,
+    };
+    let mut buf = [0u8; USB_REPLY_MAX_LEN];
+    let n = report.encode(&mut buf).expect("encodes");
+    assert_eq!(n, REPORT_COMPLETION_LEN);
+    assert_eq!(ReportCompletion::decode(&buf[..n]), Ok(report));
+    assert_eq!(
+        report.encode(&mut buf[..REPORT_COMPLETION_LEN - 1]),
+        Err(Errno::BufferTooSmall)
+    );
+    for len in [URB_COMPLETION_LEN, REPORT_COMPLETION_LEN + 1] {
+        assert_eq!(
+            ReportCompletion::decode(&buf[..len]),
+            Err(Errno::BadMagic),
+            "{len}"
+        );
+    }
+    let n = encode_error_completion(&mut buf, Errno::DeviceFault).expect("encodes");
+    assert_eq!(ReportCompletion::decode(&buf[..n]), Err(Errno::DeviceFault));
+}

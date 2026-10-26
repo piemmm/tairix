@@ -934,9 +934,9 @@ pub fn pointer_inject(seat: u64, record: &PointerInput, at_ns: Option<u64>) -> i
 /// Read one decoded pointer event from seat `seat`'s pointer channel into
 /// `buf` (`SyscallNumber::POINTER_READ`, `plans/PI.md` P11 — the pointer
 /// analogue of [`keyboard_read`]), returning the raw signed register (the
-/// bytes written — one [`PointerInput`] record's
-/// [`PointerInput::WIRE_LEN`], or `0` when the channel is momentarily
-/// drained — when non-negative, else `-errno`).
+/// bytes written — one [`TimedPointer`](tairix_abi::input::TimedPointer)
+/// record's `WIRE_LEN`, or `0` when the channel is momentarily drained — when
+/// non-negative, else `-errno`).
 ///
 /// The task that owns the seat (the window manager) drains the records the
 /// kernel routed to it while it held the seat. The kernel validates
@@ -944,8 +944,8 @@ pub fn pointer_inject(seat: u64, record: &PointerInput, at_ns: Option<u64>) -> i
 /// owner-gates the drain against that seat's live lease (a non-owner is
 /// refused with `SeatNotOwner` / `SeatRevoked`), and validates the
 /// `(buf, len)` pair against the caller's address space; a `buf` shorter
-/// than [`PointerInput::WIRE_LEN`] fails closed with `-errno`. A zero
-/// return is a valid empty read, so the caller loops.
+/// than a record fails closed with `-errno`. A zero return is a valid empty
+/// read, so the caller loops.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
 pub fn pointer_read(seat: u64, buf: &mut [u8]) -> i64 {
@@ -8835,15 +8835,16 @@ mod tests {
 
     #[test]
     fn pointer_read_marshals_the_seat_buffer_pointer_and_len() {
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
-        let want = i64::try_from(PointerInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
-        let (number, args) = capture(PointerInput::WIRE_LEN as u64, || {
+        use tairix_abi::input::TimedPointer;
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
+        let want = i64::try_from(TimedPointer::WIRE_LEN).expect("WIRE_LEN fits an i64");
+        let (number, args) = capture(TimedPointer::WIRE_LEN as u64, || {
             assert_eq!(pointer_read(3, &mut buf), want);
         });
         assert_eq!(number, NUM_POINTER_READ);
         assert_eq!(args[0], 3);
         assert_ne!(args[1], 0);
-        assert_eq!(args[2], PointerInput::WIRE_LEN as u64);
+        assert_eq!(args[2], TimedPointer::WIRE_LEN as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
@@ -8851,7 +8852,7 @@ mod tests {
     fn pointer_read_surfaces_negative_errno_encoding() {
         // A non-owner's drain is refused with `SeatNotOwner`; the wrapper
         // surfaces the raw `-errno` register unchanged.
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; tairix_abi::input::TimedPointer::WIRE_LEN];
         let want = -i64::from(tairix_abi::Errno::SeatNotOwner.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {

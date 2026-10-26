@@ -45,19 +45,19 @@
 use alloc::collections::VecDeque;
 
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
-use tairix_abi::input::{PointerButtonCode, PointerInput};
+use tairix_abi::input::{PointerButtonCode, PointerInput, TimedPointer};
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::Errno;
 use tairix_touch::{Gesture, Recogniser, SurfacePoint, TouchPress, TouchSettings};
 use tairix_wallpaper::{PointerSpeed, PrimaryButton};
 use tairix_wm::{InputEvent, Point, PointerButton, Rect, Scale};
 
-use crate::shell::InputSource;
+use crate::shell::{InputSource, Timed};
 
-/// A source of framed [`PointerInput`] record bytes from the kernel.
+/// A source of framed [`TimedPointer`] record bytes from the kernel.
 ///
 /// On a running system this is a capability-checked kernel input channel that
-/// hands the desktop one [`PointerInput::WIRE_LEN`]-byte record at a time;
+/// hands the desktop one [`TimedPointer::WIRE_LEN`]-byte record at a time;
 /// tests back it with an in-memory queue. It deals only in
 /// raw bytes: decoding and validating them is [`DeviceInputSource`]'s job, so
 /// the channel itself need not understand the wire format.
@@ -70,7 +70,7 @@ pub trait PointerInputChannel {
     /// Returns the kernel boundary's [`Errno`] when the channel itself faults
     /// (for example it was closed). The bytes are not interpreted here; a
     /// short or corrupt record is the decoder's concern, not the channel's.
-    fn next_record(&mut self) -> Result<Option<[u8; PointerInput::WIRE_LEN]>, Errno>;
+    fn next_record(&mut self) -> Result<Option<[u8; TimedPointer::WIRE_LEN]>, Errno>;
 }
 
 /// A source of framed [`TouchFrame`] bytes from the kernel: the seat's touch
@@ -128,8 +128,8 @@ pub struct DeviceInputSource<C, T> {
     /// What the touch frames mean.
     recogniser: Recogniser,
     /// What the frames read so far meant and the desktop has not yet been
-    /// handed.
-    gestures: VecDeque<Gesture>,
+    /// handed, each with when the frame that made it arrived.
+    gestures: VecDeque<(Gesture, u64)>,
     /// The wake's clock reading at which the pointer channel was found
     /// empty, so the touch frames read after it in that wake are not each
     /// preceded by another read of it.
@@ -552,29 +552,35 @@ impl WheelAxis {
 }
 
 impl<C: PointerInputChannel, T: TouchInputChannel> InputSource for DeviceInputSource<C, T> {
-    fn poll(&mut self, now_ns: u64) -> Result<Option<InputEvent>, Errno> {
+    fn poll(&mut self, now_ns: u64) -> Result<Option<Timed<InputEvent>>, Errno> {
         loop {
-            if let Some(gesture) = self.gestures.pop_front() {
-                return Ok(Some(self.gesture_event(gesture, now_ns)));
+            // The event is timed by its device; what the source keeps is timed
+            // by the wake, as the key events a lone modifier is judged against
+            // are.
+            if let Some((gesture, at_ns)) = self.gestures.pop_front() {
+                let value = self.gesture_event(gesture, now_ns);
+                return Ok(Some(Timed { value, at_ns }));
             }
             if self.pointer_dry_at != Some(now_ns) {
                 if let Some(bytes) = self.channel.next_record()? {
-                    let record = PointerInput::from_bytes(&bytes)?;
-                    return Ok(Some(self.pointer_event(record, now_ns)));
+                    let TimedPointer { input, at_ns } = TimedPointer::from_bytes(&bytes)?;
+                    let value = self.pointer_event(input, now_ns);
+                    return Ok(Some(Timed { value, at_ns }));
                 }
                 self.pointer_dry_at = Some(now_ns);
             }
             if let Some(bytes) = self.touch.next_frame()? {
                 let frame = TouchFrame::from_bytes(&bytes)?;
-                let gestures = &mut self.gestures;
+                let (gestures, at_ns) = (&mut self.gestures, frame.time_ns());
                 self.recogniser
-                    .feed(&frame, &mut |gesture| gestures.push_back(gesture));
+                    .feed(&frame, &mut |gesture| gestures.push_back((gesture, at_ns)));
             } else {
                 // Every queued frame has been read, so a deadline acts only
                 // on touches that truly arrived before it.
                 let gestures = &mut self.gestures;
-                self.recogniser
-                    .expire(now_ns, &mut |gesture| gestures.push_back(gesture));
+                self.recogniser.expire(now_ns, &mut |gesture, at_ns| {
+                    gestures.push_back((gesture, at_ns));
+                });
                 if self.gestures.is_empty() {
                     return Ok(None);
                 }
@@ -592,12 +598,17 @@ mod tests {
     use alloc::collections::VecDeque;
     use alloc::vec::Vec;
     use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
-    use tairix_abi::input::{PointerButtonCode, PointerInput};
+    use tairix_abi::input::{PointerButtonCode, PointerInput, TimedPointer};
     use tairix_abi::time::NANOS_PER_MILLI as MS;
     use tairix_abi::touch::{Contact, TouchButtons, TouchExtent, TouchFrame, TouchSurface};
     use tairix_abi::Errno;
     use tairix_wallpaper::{PointerSpeed, PrimaryButton};
     use tairix_wm::{InputEvent, PinchPhase, Point, PointerButton, Rect, Scale};
+
+    /// The next event `source` yields at `now_ns`, without when it happened.
+    fn polled<S: InputSource>(source: &mut S, now_ns: u64) -> Result<Option<InputEvent>, Errno> {
+        Ok(source.poll(now_ns)?.map(|timed| timed.value))
+    }
 
     /// The screen the tests resolve motion against: 640×480 at the origin,
     /// so the pointer starts at its centre (320, 240).
@@ -605,7 +616,7 @@ mod tests {
 
     /// An in-memory channel that yields queued records, optionally faulting.
     struct QueueChannel {
-        records: VecDeque<[u8; PointerInput::WIRE_LEN]>,
+        records: VecDeque<[u8; TimedPointer::WIRE_LEN]>,
         fault: Option<Errno>,
         /// How many times the channel was read, each a system call on the
         /// seat.
@@ -615,13 +626,16 @@ mod tests {
     impl QueueChannel {
         fn new(events: &[PointerInput]) -> Self {
             Self {
-                records: events.iter().map(PointerInput::to_le_bytes).collect(),
+                records: events
+                    .iter()
+                    .map(|&input| TimedPointer { input, at_ns: 0 }.to_le_bytes())
+                    .collect(),
                 fault: None,
                 reads: 0,
             }
         }
 
-        fn push_raw(&mut self, bytes: [u8; PointerInput::WIRE_LEN]) {
+        fn push_raw(&mut self, bytes: [u8; TimedPointer::WIRE_LEN]) {
             self.records.push_back(bytes);
         }
 
@@ -631,7 +645,7 @@ mod tests {
     }
 
     impl PointerInputChannel for QueueChannel {
-        fn next_record(&mut self) -> Result<Option<[u8; PointerInput::WIRE_LEN]>, Errno> {
+        fn next_record(&mut self) -> Result<Option<[u8; TimedPointer::WIRE_LEN]>, Errno> {
             self.reads += 1;
             if let Some(errno) = self.fault.take() {
                 return Err(errno);
@@ -677,7 +691,7 @@ mod tests {
             "the centre of the old screen lies past the new one's corner"
         );
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(319, 199)
             }))
@@ -697,7 +711,7 @@ mod tests {
             dy: SCROLL_UNITS_PER_DETENT,
         }]);
         assert!(source.quiet_since(0));
-        assert!(source.poll(100).is_ok());
+        assert!(polled(&mut source, 100).is_ok());
         assert!(!source.quiet_since(50), "turned since Ctrl went down");
         assert!(!source.quiet_since(100), "turned in the same wake");
         assert!(source.quiet_since(101), "but nothing since");
@@ -710,9 +724,9 @@ mod tests {
             PointerInput::Released(PointerButtonCode::Primary),
         ]);
         assert!(source.quiet_since(0), "nothing has happened yet");
-        assert!(source.poll(100).is_ok());
+        assert!(polled(&mut source, 100).is_ok());
         assert!(!source.quiet_since(50), "held");
-        assert!(source.poll(200).is_ok());
+        assert!(polled(&mut source, 200).is_ok());
         assert!(!source.quiet_since(150), "released since");
         assert!(!source.quiet_since(200), "released in the same wake");
         assert!(source.quiet_since(201));
@@ -731,18 +745,18 @@ mod tests {
             PointerInput::MovedBy { dx: -2, dy: 0 },
         ]);
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(332, 235)
             }))
         );
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(330, 235)
             }))
         );
-        assert_eq!(source.poll(0), Ok(None));
+        assert_eq!(polled(&mut source, 0), Ok(None));
     }
 
     #[test]
@@ -760,13 +774,13 @@ mod tests {
             },
         ]);
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(0, 0)
             }))
         );
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(639, 479)
             }))
@@ -790,8 +804,8 @@ mod tests {
             PointerButton::Secondary,
             PointerButton::Middle,
         ] {
-            assert_eq!(source.poll(0), Ok(Some(pressed(button))));
-            assert_eq!(source.poll(0), Ok(Some(released(button))));
+            assert_eq!(polled(&mut source, 0), Ok(Some(pressed(button))));
+            assert_eq!(polled(&mut source, 0), Ok(Some(released(button))));
         }
     }
 
@@ -803,9 +817,15 @@ mod tests {
             PointerInput::Released(PointerButtonCode::Secondary),
             PointerInput::Pressed(PointerButtonCode::Middle),
         ]);
-        assert_eq!(source.poll(0), Ok(Some(released(PointerButton::Secondary))));
-        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Middle))));
-        assert_eq!(source.poll(0), Ok(None));
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(released(PointerButton::Secondary)))
+        );
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(pressed(PointerButton::Middle)))
+        );
+        assert_eq!(polled(&mut source, 0), Ok(None));
     }
 
     #[test]
@@ -813,7 +833,7 @@ mod tests {
         let mut source = source(&[PointerInput::Pressed(PointerButtonCode::Primary)]);
         let before = source.pointer();
         assert!(matches!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerPressed { .. }))
         ));
         assert_eq!(source.pointer(), before);
@@ -827,7 +847,7 @@ mod tests {
         }]);
         let before = source.pointer();
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerScrolled {
                 dx: -DETENT,
                 dy: 4 * DETENT
@@ -935,12 +955,12 @@ mod tests {
     #[test]
     fn malformed_record_surfaces_bad_magic() {
         let mut channel = QueueChannel::new(&[]);
-        channel.push_raw([0u8; PointerInput::WIRE_LEN]);
+        channel.push_raw([0u8; TimedPointer::WIRE_LEN]);
         let mut source = DeviceInputSource::new(channel, TouchQueue::default(), SCREEN)
             .expect("non-empty screen");
         // An all-zero record has the wrong magic and must be refused, never
         // misinterpreted.
-        assert_eq!(source.poll(0), Err(Errno::BadMagic));
+        assert_eq!(polled(&mut source, 0), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -949,10 +969,10 @@ mod tests {
         channel.fault_with(Errno::NotFound);
         let mut source = DeviceInputSource::new(channel, TouchQueue::default(), SCREEN)
             .expect("non-empty screen");
-        assert_eq!(source.poll(0), Err(Errno::NotFound));
+        assert_eq!(polled(&mut source, 0), Err(Errno::NotFound));
         // After the one-shot fault clears, the queued record still decodes.
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(321, 242)
             }))
@@ -981,7 +1001,7 @@ mod tests {
     }
 
     fn drain(source: &mut TestSource, now_ms: u64) -> Vec<InputEvent> {
-        core::iter::from_fn(|| source.poll(now_ms * MS).expect("a sound stream")).collect()
+        core::iter::from_fn(|| polled(source, now_ms * MS).expect("a sound stream")).collect()
     }
 
     #[test]
@@ -1038,6 +1058,29 @@ mod tests {
         assert!(!source.quiet_since(0), "a touch press is a gesture");
     }
 
+    /// A touch gesture is timed by what made it: a frame by its arrival, a
+    /// press its wait ended by that wait's end, however late the wake.
+    #[test]
+    fn a_touch_gesture_is_timed_by_what_made_it() {
+        let mut source = source(&[]);
+        touch(
+            &mut source,
+            TouchSurface::Screen,
+            10,
+            &[Contact::finger(1, 100, 100)],
+        );
+        let placed = source.poll(10 * MS).expect("a sound stream");
+        assert_eq!(placed.map(|event| event.at_ns), Some(10 * MS));
+        assert_eq!(source.poll(10 * MS), Ok(None));
+        assert_eq!(
+            source.poll(400 * MS),
+            Ok(Some(crate::Timed {
+                value: pressed(PointerButton::Primary),
+                at_ns: 110 * MS,
+            }))
+        );
+    }
+
     /// Each source's presses reach the desktop as they happen; the pointer is
     /// quiet again only once every source has let go.
     #[test]
@@ -1057,10 +1100,13 @@ mod tests {
             [released(PointerButton::Primary)]
         );
         assert!(!source.quiet_since(0), "the mouse still holds it");
-        source
-            .channel
-            .records
-            .push_back(PointerInput::Released(PointerButtonCode::Primary).to_le_bytes());
+        source.channel.records.push_back(
+            TimedPointer {
+                input: PointerInput::Released(PointerButtonCode::Primary),
+                at_ns: 0,
+            }
+            .to_le_bytes(),
+        );
         assert_eq!(
             drain(&mut source, 1_001),
             [released(PointerButton::Primary)]
@@ -1083,10 +1129,13 @@ mod tests {
         }
         let _ = drain(&mut source, 64);
         assert_eq!(source.channel.reads, 1, "one read for the whole burst");
-        source
-            .channel
-            .records
-            .push_back(PointerInput::Pressed(PointerButtonCode::Primary).to_le_bytes());
+        source.channel.records.push_back(
+            TimedPointer {
+                input: PointerInput::Pressed(PointerButtonCode::Primary),
+                at_ns: 0,
+            }
+            .to_le_bytes(),
+        );
         assert_eq!(
             drain(&mut source, 65),
             [pressed(PointerButton::Primary)],
@@ -1202,11 +1251,26 @@ mod tests {
             PointerInput::Pressed(PointerButtonCode::Middle),
         ]);
         source.set_policy(PrimaryButton::Right, PointerSpeed::NORMAL);
-        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Secondary))));
-        assert_eq!(source.poll(0), Ok(Some(released(PointerButton::Secondary))));
-        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Primary))));
-        assert_eq!(source.poll(0), Ok(Some(released(PointerButton::Primary))));
-        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Middle))));
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(pressed(PointerButton::Secondary)))
+        );
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(released(PointerButton::Secondary)))
+        );
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(pressed(PointerButton::Primary)))
+        );
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(released(PointerButton::Primary)))
+        );
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(pressed(PointerButton::Middle)))
+        );
     }
 
     /// A button order chosen mid-press waits for the release, so the release
@@ -1218,10 +1282,19 @@ mod tests {
             PointerInput::Released(PointerButtonCode::Primary),
             PointerInput::Pressed(PointerButtonCode::Primary),
         ]);
-        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Primary))));
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(pressed(PointerButton::Primary)))
+        );
         source.set_policy(PrimaryButton::Right, PointerSpeed::NORMAL);
-        assert_eq!(source.poll(0), Ok(Some(released(PointerButton::Primary))));
-        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Secondary))));
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(released(PointerButton::Primary)))
+        );
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(pressed(PointerButton::Secondary)))
+        );
     }
 
     #[test]
@@ -1234,7 +1307,7 @@ mod tests {
         );
         let mut at = Point::new(320, 240);
         for _ in 0..4 {
-            if let Ok(Some(InputEvent::PointerMoved { to })) = slow.poll(0) {
+            if let Ok(Some(InputEvent::PointerMoved { to })) = polled(&mut slow, 0) {
                 at = to;
             }
         }
@@ -1246,7 +1319,7 @@ mod tests {
             PointerSpeed::from_percent(300).expect("a speed"),
         );
         assert_eq!(
-            fast.poll(0),
+            polled(&mut fast, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(350, 240)
             }))
@@ -1261,7 +1334,7 @@ mod tests {
         }]);
         source.set_policy(PrimaryButton::Left, PointerSpeed::MAX);
         assert_eq!(
-            source.poll(0),
+            polled(&mut source, 0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(639, 0)
             }))

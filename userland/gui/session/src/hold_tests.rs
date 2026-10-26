@@ -64,6 +64,7 @@ fn a_held_window_still_hears_a_release_and_nothing_that_starts_anything() {
         y: 1,
         action,
         modifiers: Modifiers::default(),
+        at_ns: 0,
     };
     let release = pointer(PointerAction::Released(PointerButtonCode::Primary));
     assert!(reaches_held_window(&release));
@@ -97,6 +98,7 @@ fn only_a_button_or_a_key_going_down_is_a_press() {
         y: 1,
         action,
         modifiers: Modifiers::default(),
+        at_ns: 0,
     };
     assert!(is_press(&pointer(PointerAction::Pressed(
         PointerButtonCode::Primary

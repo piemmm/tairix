@@ -2585,7 +2585,17 @@ mod program {
             let mut damage = tairix_controls::damage::sink();
             let mut outcome = None;
             match *event {
-                WindowEvent::Pointer { x, y, action, .. } => {
+                WindowEvent::Pointer {
+                    x,
+                    y,
+                    action,
+                    at_ns,
+                    ..
+                } => {
+                    let timing = PressTiming {
+                        now_ns: at_ns,
+                        ..timing
+                    };
                     for input in pointer_input_events(action, pointer_point(x, y)) {
                         outcome = outcome.or(self.dialog.on_pointer(
                             &input,

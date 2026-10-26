@@ -1084,7 +1084,8 @@ pub extern "C" fn sys_pointer_inject(seat: u64, buf: *mut c_void, len: usize, at
 
 /// `pointer_read`: read one decoded pointer event from seat `seat`'s
 /// pointer channel into `buf` (a buffer of `len` bytes, at least
-/// `TAIRIX_POINTER_INPUT_WIRE_LEN`) (`SyscallNumber::POINTER_READ`,
+/// `TAIRIX_TIMED_POINTER_WIRE_LEN`: the record, then when it happened)
+/// (`SyscallNumber::POINTER_READ`,
 /// `plans/PI.md` P11 — the pointer analogue of [`sys_keyboard_read`]).
 /// Returns the number of bytes written — one record, or `0` when the
 /// channel is momentarily drained — or a `TAIRIX_E_*` code reinterpreted into

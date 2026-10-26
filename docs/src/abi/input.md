@@ -57,6 +57,13 @@ reports motion separately from clicks, and the seat owner applies a button at
 the position its accumulated motion established — the same model as
 `lib/input`).
 
+The seat hands its owner each record as a [`TimedPointer`]
+([`TimedPointer::WIRE_LEN`], 28 bytes): the record, then a `u64` saying when
+it happened on the monotonic clock — the instant its driver stated, held to no
+later than the kernel took it, or that arrival where it stated none. Clicks,
+double-clicks and strokes are timed by that, however late the reader drains
+them.
+
 ## Fail-closed decoding
 
 [`PointerInput::from_bytes`] validates every field before returning a
@@ -176,7 +183,9 @@ always reaches the window-manager router, whatever the pointer is over: it
 is seat state, not a key any surface receives. The router keeps the current
 set and the session stamps it onto every `WindowEvent::Pointer` it delivers,
 so an application can qualify a click by a modifier (a shift-click) without
-shadowing state it could never see. In *text* focus the kernel arbiter types
+shadowing state it could never see. The event also carries `at_ns`, the time
+of the record it came from, so an application pairs its clicks and paces its
+strokes by when they happened rather than by when it got to them. In *text* focus the kernel arbiter types
 nothing for it — the shared `lib/keymap` encoder yields no bytes — so a held
 modifier never reaches a console as input.
 
@@ -190,6 +199,8 @@ modifier never reaches a console as input.
 [`PointerInput::WIRE_LEN`]: ../../tairix_abi/input/enum.PointerInput.html#associatedconstant.WIRE_LEN
 [`PointerInput::from_bytes`]: ../../tairix_abi/input/enum.PointerInput.html#method.from_bytes
 [`PointerInput::from_device_event`]: ../../tairix_abi/input/enum.PointerInput.html#method.from_device_event
+[`TimedPointer`]: ../../tairix_abi/input/struct.TimedPointer.html
+[`TimedPointer::WIRE_LEN`]: ../../tairix_abi/input/struct.TimedPointer.html#associatedconstant.WIRE_LEN
 [`PointerButtonCode`]: ../../tairix_abi/input/enum.PointerButtonCode.html
 [`Errno`]: ../../tairix_abi/error/enum.Errno.html
 [`driver::input::InputEvent`]: ../../tairix_abi/driver/input/struct.InputEvent.html

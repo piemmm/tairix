@@ -51,7 +51,7 @@ mod program {
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::display::{DamageRect, DisplayMode, OutputMode, RefreshRate};
-    use tairix_abi::input::{KeyInput, PointerInput};
+    use tairix_abi::input::{KeyInput, TimedPointer};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::session_ipc::SESSION_ENDPOINT;
@@ -416,7 +416,7 @@ mod program {
     /// Drain the seat's pointer channel into the screen, which owes its frame
     /// what the burst changed until the round draws it once.
     fn drain_pointer(screen: &mut Screen) -> Drained {
-        let mut wire = [0u8; PointerInput::WIRE_LEN];
+        let mut wire = [0u8; TimedPointer::WIRE_LEN];
         loop {
             let read = tairix_rt::pointer_read(SEAT_PRIMARY, &mut wire);
             if read == 0 {
@@ -424,13 +424,13 @@ mod program {
             }
             // Anything but one whole record is unreadable: a short count would
             // decode fresh bytes together with the tail of the last record.
-            if usize::try_from(read).ok() != Some(PointerInput::WIRE_LEN) {
+            if usize::try_from(read).ok() != Some(TimedPointer::WIRE_LEN) {
                 break Drained::Lost;
             }
-            let Ok(input) = PointerInput::from_bytes(&wire) else {
+            let Ok(timed) = TimedPointer::from_bytes(&wire) else {
                 continue;
             };
-            screen.on_pointer(&input, tairix_rt::clock_get());
+            screen.on_pointer(&timed.input, timed.at_ns);
         }
     }
 
@@ -449,8 +449,8 @@ mod program {
             } else if let Ok(frame) = TouchFrame::from_bytes(&wire) {
                 screen.feed_touch(&frame, &mut gestures);
             }
-            for gesture in gestures.drain(..) {
-                screen.on_gesture(gesture, tairix_rt::clock_get());
+            for (gesture, at_ns) in gestures.drain(..) {
+                screen.on_gesture(gesture, at_ns);
             }
             if read == 0 {
                 break Drained::Empty;

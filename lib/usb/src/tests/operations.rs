@@ -136,7 +136,8 @@ fn a_control_urb_its_device_never_answers_holds_up_nothing_else() {
     assert_eq!(
         device
             .core_mut()
-            .next_report(KEYBOARD, BOOT_REPORT_LEN, &mut report),
+            .next_report(KEYBOARD, BOOT_REPORT_LEN, &mut report)
+            .map(|got| got.map(|got| got.transferred as usize)),
         Ok(Some(BOOT_REPORT_LEN))
     );
     assert_eq!(report[2], 0x04, "the keystroke was delivered");
@@ -212,7 +213,8 @@ fn one_device_stalled_mid_enumeration_holds_up_none_beside_it() {
     assert_eq!(
         device
             .core_mut()
-            .next_report(KEYBOARD, BOOT_REPORT_LEN, &mut report),
+            .next_report(KEYBOARD, BOOT_REPORT_LEN, &mut report)
+            .map(|got| got.map(|got| got.transferred as usize)),
         Ok(Some(BOOT_REPORT_LEN)),
         "the keyboard serves while the stick enumerates"
     );
@@ -433,7 +435,8 @@ fn a_hung_command_is_aborted_failing_only_its_owner() {
     assert_eq!(
         device
             .core_mut()
-            .next_report(index, BOOT_REPORT_LEN, &mut report),
+            .next_report(index, BOOT_REPORT_LEN, &mut report)
+            .map(|got| got.map(|got| got.transferred as usize)),
         Ok(Some(BOOT_REPORT_LEN))
     );
     assert_eq!(device.elapsed_us(), start);

@@ -704,7 +704,10 @@ keyboard is in the content, so nothing the user cannot see is ever opened.
 ### Pointer
 
 A press on a program arms it and a release on the same program opens it, so a
-press slid away opens nothing; a secondary press asks for its menu. A press on
+press slid away opens nothing. The press is held on its program rather than its
+place, so a catalogue, facts or shelf refresh landing mid-click still opens it
+when the release falls on it, and nothing when the refresh moved it from under
+the pointer; a secondary press asks for its menu. A press on
 the panel's own ground is claimed and one beyond the panel dismisses. The wheel
 scrolls the content, and whatever moves the programs beneath a resting pointer
 re-derives what it lights.
@@ -1273,7 +1276,8 @@ scrolling of an overflowing launcher, and what each change owes — the tiles a
 hover or a mark moves between, the viewport a key cuts a cascade short in, the
 scrollbar the keyboard lights. The click tests cover the whole gesture: a
 release on the picture pressed opens it, a release away from it opens nothing,
-and a rebuild under a held press opens nothing at all.
+and a refresh under a held press keeps it on its program — opening it where it
+still lies under the pointer, nothing where the refresh moved it away.
 The rendering tests probe painted pixels for the bar regions; the bar's own rim
 (the theme's rim tone at the chrome weight on both built-in themes, the ground
 one `plate_border` further in, lighter than that ground on the dark theme and

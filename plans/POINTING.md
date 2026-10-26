@@ -1,10 +1,10 @@
-# POINTING — scroll axes and resolution, touch, gestures and pinch
+# POINTING — scroll axes and resolution, touch, gestures, pinch, report times
 
 Binding under `AGENTS.md`. How a wheel turn and a touch reach an application:
 the one scroll unit every layer carries, the devices that feed both axes and
-fine resolution, what a scroll tells the window it lands on, and the touch
-path — contacts, the seat's gesture recogniser, and the pinch an application
-zooms by.
+fine resolution, what a scroll tells the window it lands on, the touch path —
+contacts, the seat's gesture recogniser, and the pinch an application zooms
+by — and the time every pointer report carries to the application.
 
 ## Ledger
 
@@ -23,6 +23,7 @@ zooms by.
 | PO11 | HID over I2C on device-tree machines: the rebuilt I2C protocol, supplier links, the GPIO line interrupt, the BSC's repeated START, and the I2C-HID class driver (`plans/I2C.md` I1–I4, I8; `plans/SUPPLIERS.md`; `plans/GPIO.md` G1–G2; `plans/HID.md` H6) | planned |
 | PO12 | The DesignWare I2C controller with Intel LPSS, on x86_64's published PCI functions (`plans/I2C.md` I5–I6; `plans/FINISH-x86_64.md` S6) | planned |
 | PO13 | HID over I2C from ACPI: the namespace bus driver, `PNP0C50` with its `_DSM` and `_CRS`, and the PCH GPIO controller (`plans/ACPI.md` A1–A4; `plans/GPIO.md` G3; `plans/I2C.md` I7) | planned |
+| PO14 | Report times: a pointer record is timed by its device from the driver to the application (`pointer_inject`'s stated time, `TimedPointer`, the session's `Timed` drain, `WindowEvent::Pointer`'s `at_ns`), and clicks, double-clicks, rename waits and strokes are judged by it | done |
 
 ## The scroll unit
 
@@ -167,6 +168,32 @@ fingers scroll, how far a fingertip moves the pointer.
   audit trail can attest a launch, but not what an application did with a
   pinch.
 
+## Report times
+
+A pointer record carries when it happened to every consumer, so nothing judges
+a gesture by when it got round to the record.
+
+- **The driver states it.** `pointer_inject` takes the instant the device
+  reported the input: a USB HID report's is when the host controller's service
+  step took it in (`ReportCompletion`), and a virtio-input record states none
+  (`POINTER_EDGE_UNTIMED`). The kernel holds a stated time to no later than the
+  call and times an unstated one by its arrival.
+- **The seat keeps it.** The chatter filter judges a button edge by it, and the
+  channel queues each record with it; `pointer_read` hands the owner a
+  `TimedPointer`, the record and its time.
+- **The session applies it.** `InputSource::poll` answers each event `Timed`
+  (a touch gesture by its frame's arrival, or by the deadline that ended it:
+  the recogniser's `expire` hands that instant), `pump` applies it at that time, and each outcome is routed with it beside the
+  wake's own instant: the window manager's title-bar pair, the desktop icons'
+  pair, an alert's arming and a hover's dwell take the event's, and the clock
+  and every deadline the wake's. A folded run takes its newest sample's, in the
+  shell and in the hold-back.
+- **The application gets it.** `WindowEvent::Pointer` carries it as `at_ns`. A
+  document window's view is fed each pointer event at it, so its click runs and
+  its strokes are the user's; Paint's airbrush lays a dab one report behind
+  where the pointer was at each instant (`plans/PAINT.md`). A key, a scroll and
+  a pinch carry no time and are fed at their arrival.
+
 ## Invariants
 
 - One scroll unit at every layer; no layer converts it to or from whole
@@ -180,3 +207,6 @@ fingers scroll, how far a fingertip moves the pointer.
   owner; a frame's source and time are the kernel's, never the driver's.
 - A pinch's scale is relative to its start, and every step of one pinch goes
   to one window.
+- A pointer report is judged by when its device reported it, at every layer
+  that pairs, waits on or paces by pointer input; no layer substitutes the
+  instant it handled the report.

@@ -18,6 +18,7 @@ use super::{
     compute, Action, Computed, Marking, MenuKind, Outcome, Own, Request, View, GO_TO_ENTRY,
     GO_TO_LAYER, RENAME_ENTRY,
 };
+use crate::brush::{AIRBRUSH_INTERVAL_NS, AIRBRUSH_STILL_NS};
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
 use crate::document::{Document, Entry, NewPicture, Origin, Picture, SpriteInfo};
@@ -87,17 +88,49 @@ impl Window {
     }
 
     fn pointer(&mut self, event: InputEvent) -> Outcome {
-        self.now += 10_000_000;
+        self.pointer_at(event, self.now + 10_000_000)
+    }
+
+    /// Feed `event` as its device reported it at `at_ns`.
+    fn pointer_at(&mut self, event: InputEvent, at_ns: u64) -> Outcome {
+        self.now = at_ns;
         let theme = self.registry.active();
-        let outcome =
-            self.view
-                .on_pointer(&event, &self.layout, Scale::ONE, theme, &mut Region::new());
+        let outcome = self.view.on_pointer(
+            &event,
+            at_ns,
+            &self.layout,
+            Scale::ONE,
+            theme,
+            &mut Region::new(),
+        );
         self.apply(&outcome);
         outcome
     }
 
     fn move_to(&mut self, at: Point) -> Outcome {
         self.pointer(InputEvent::PointerMoved { to: at })
+    }
+
+    /// Serve the view's deadlines as its window's loop does, up to `until_ns`.
+    fn run_until(&mut self, until_ns: u64) {
+        for _ in 0..10_000 {
+            let theme = self.registry.active();
+            self.view
+                .arm_deadline(self.now, &self.layout, Scale::ONE, theme);
+            let Some(due) = self.view.deadline_ns().filter(|&due| due <= until_ns) else {
+                self.now = until_ns;
+                return;
+            };
+            self.now = self.now.max(due);
+            self.view.tick(
+                self.now,
+                &self.layout,
+                Scale::ONE,
+                theme,
+                &mut Region::new(),
+            );
+        }
+        panic!("a deadline that never moves on");
     }
 
     fn press(&mut self, button: PointerButton) -> Outcome {
@@ -483,25 +516,40 @@ fn the_eraser_clears_a_picture_that_can_be_clear() {
     assert_eq!(window.colour(10, 10)[3], 0);
 }
 
-#[test]
-fn the_airbrush_lays_more_paint_while_held_still() {
-    let mut window = Window::white(80, 80);
+/// Press an airbrush at picture pixel `at` at `at_ns` on a white picture
+/// `width` by `height`.
+fn airbrush_at(width: u32, height: u32, at: (u32, u32), at_ns: u64) -> Window {
+    let mut window = Window::white(width, height);
     window.act(Action::Tool(Tool::Airbrush));
-    let at = window.screen_of((40, 40));
-    window.move_to(at);
-    window.press(PointerButton::Primary);
+    let to = window.screen_of(at);
+    window.pointer_at(InputEvent::PointerMoved { to }, at_ns);
+    window.pointer_at(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        at_ns,
+    );
+    window
+}
+
+#[test]
+fn a_held_airbrush_builds_paint_once_it_is_known_to_be_still() {
+    let start = 1_000_000_000;
+    let mut window = airbrush_at(80, 80, (40, 40), start);
     let middle = |window: &Window| window.colour(40, 40)[0];
-    let first = middle(&window);
-    assert!(first < 255, "the first dab lands at once");
-    let theme = window.registry.active();
-    window
-        .view
-        .arm_deadline(window.now, &window.layout, Scale::ONE, theme);
-    let due = window.view.deadline_ns().expect("an airbrush tick is due");
-    window
-        .view
-        .tick(due, &window.layout, Scale::ONE, theme, &mut Region::new());
-    assert!(middle(&window) < first, "the tick built more up");
+    let pressed = middle(&window);
+    assert!(pressed < 255, "the first dab lands at once");
+    window.run_until(start + AIRBRUSH_INTERVAL_NS + AIRBRUSH_STILL_NS - 1);
+    assert_eq!(
+        middle(&window),
+        pressed,
+        "a silence this short may be a move still on its way"
+    );
+    window.run_until(start + AIRBRUSH_INTERVAL_NS + AIRBRUSH_STILL_NS);
+    let once = middle(&window);
+    assert!(once < pressed, "held still, it builds up");
+    window.run_until(start + 8 * AIRBRUSH_INTERVAL_NS + AIRBRUSH_STILL_NS);
+    assert!(middle(&window) < once, "and goes on building while held");
     window.release(PointerButton::Primary);
     let theme = window.registry.active();
     window
@@ -512,6 +560,54 @@ fn the_airbrush_lays_more_paint_while_held_still() {
         None,
         "nothing to wake for once let go"
     );
+}
+
+#[test]
+fn a_hold_too_short_to_vouch_for_is_sprayed_when_it_is_let_go() {
+    let start = 1_000_000_000;
+    let mut window = airbrush_at(80, 80, (40, 40), start);
+    let pressed = window.colour(40, 40)[0];
+    let let_go = start + AIRBRUSH_STILL_NS / 2;
+    window.run_until(let_go);
+    let to = window.screen_of((40, 40));
+    window.pointer_at(InputEvent::PointerMoved { to }, let_go);
+    window.pointer_at(
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        let_go,
+    );
+    assert!(window.colour(40, 40)[0] < pressed);
+}
+
+/// A sweep the window is told of sparsely is sprayed evenly along its way: the
+/// paint for the time between two reports falls where the pointer went, not
+/// in a blob at each report.
+#[test]
+fn an_airbrush_sweep_reported_sparsely_lays_no_blob_at_its_reports() {
+    let start = 1_000_000_000;
+    let gap = 80_000_000;
+    let mut window = airbrush_at(130, 40, (10, 20), start);
+    let mut at_ns = start;
+    for x in (30..=120).step_by(20) {
+        at_ns += gap;
+        window.run_until(at_ns);
+        let to = window.screen_of((x, 20));
+        window.pointer_at(InputEvent::PointerMoved { to }, at_ns);
+    }
+    window.pointer_at(
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        at_ns,
+    );
+    let laid: Vec<u8> = (30..=90).map(|x| 255 - window.colour(x, 20)[0]).collect();
+    let (least, most) = (
+        laid.iter().min().copied().unwrap_or(0),
+        laid.iter().max().copied().unwrap_or(0),
+    );
+    assert!(least > 0, "painted all along: {laid:?}");
+    assert!(most - least <= 3, "{laid:?}");
 }
 
 #[test]
@@ -918,6 +1014,7 @@ fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
     for step in 1..=3 {
         window.view.on_pointer(
             &InputEvent::ModifiersChanged { modifiers: ctrl() },
+            window.now,
             &window.layout,
             Scale::ONE,
             window.registry.active(),
@@ -949,6 +1046,7 @@ fn a_fine_ctrl_wheel_zooms_a_rung_per_detent_turned() {
     window.move_to(window.screen_of((30, 40)));
     window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: ctrl() },
+        window.now,
         &window.layout,
         Scale::ONE,
         window.registry.active(),
@@ -1260,6 +1358,7 @@ fn a_modifier_change_mid_shape_repaints_the_preview() {
     };
     let _ = window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: shift },
+        window.now,
         &window.layout,
         Scale::ONE,
         theme,
@@ -1269,6 +1368,7 @@ fn a_modifier_change_mid_shape_repaints_the_preview() {
     let mut again = Region::new();
     let _ = window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: shift },
+        window.now,
         &window.layout,
         Scale::ONE,
         theme,
@@ -2654,6 +2754,7 @@ fn dragging_the_crop_box_repaints_only_where_it_was_and_is() {
     let to = window.screen_of((33, 15));
     window.view.on_pointer(
         &InputEvent::PointerMoved { to },
+        window.now,
         &window.layout,
         Scale::ONE,
         theme,

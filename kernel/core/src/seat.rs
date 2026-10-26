@@ -39,7 +39,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::SeatGate;
-use tairix_abi::input::{ClickDebounce, KeyInput, PointerInput};
+use tairix_abi::input::{ClickDebounce, KeyInput, PointerInput, TimedPointer};
 use tairix_abi::seat::{DisplayLease, ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::time::NANOS_PER_MILLI;
@@ -68,7 +68,7 @@ use crate::console::{ConsoleDevice, ConsoleInput, NULL_CONSOLE_INPUT};
 /// oldest record (the producer never blocks).
 pub const KEYBOARD_CHANNEL_CAPACITY: usize = 64;
 
-/// Capacity, in [`PointerInput`] records, of the desktop pointer channel's
+/// Capacity, in [`TimedPointer`] records, of the desktop pointer channel's
 /// ring.
 ///
 /// The same **fixed bound** rationale as [`KEYBOARD_CHANNEL_CAPACITY`], sized
@@ -108,9 +108,9 @@ struct InputChannel<const CAP: usize, const REC: usize> {
 /// `keyboard_read`.
 type KeyboardChannel = InputChannel<KEYBOARD_CHANNEL_CAPACITY, { KeyInput::WIRE_LEN }>;
 
-/// The desktop pointer channel: [`PointerInput`] records, drained by
+/// The desktop pointer channel: [`TimedPointer`] records, drained by
 /// `pointer_read`.
-type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { PointerInput::WIRE_LEN }>;
+type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { TimedPointer::WIRE_LEN }>;
 
 /// The desktop touch channel: [`TouchFrame`]s, drained by `touch_read`.
 type TouchChannel = InputChannel<TOUCH_CHANNEL_CAPACITY, { TouchFrame::WIRE_LEN }>;
@@ -699,7 +699,8 @@ impl SeatRegistry {
     /// reported at monotonic `at_ns` if its driver knows when, to seat
     /// `seat_id`'s current foreground sink under a chatter window of
     /// `window_ns`, returning the number of bytes consumed from the record
-    /// ([`PointerInput::WIRE_LEN`]).
+    /// ([`PointerInput::WIRE_LEN`]). The record is queued timed by `at_ns`,
+    /// or by `now_ns`, its arrival, where the driver stated none.
     ///
     /// A **held** seat routes the whole record to its pointer channel. An
     /// **unowned** seat consumes and discards the record: the text console
@@ -718,6 +719,7 @@ impl SeatRegistry {
         injector: u64,
         at_ns: Option<u64>,
         window_ns: u64,
+        now_ns: u64,
     ) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
         // Chatter is filtered before the lease is consulted, so the filter's
@@ -736,7 +738,11 @@ impl SeatRegistry {
         }
         let state = slot.state.lock();
         if let Route::Desktop(_) = state.route() {
-            let bytes = record.to_le_bytes();
+            let bytes = TimedPointer {
+                input: record,
+                at_ns: at_ns.unwrap_or(now_ns),
+            }
+            .to_le_bytes();
             // Decided and delivered under one guard, exactly as for a key
             // edge: a pointer trail never crosses a lease boundary.
             slot.pointer.push(&bytes);
@@ -827,7 +833,7 @@ impl SeatRegistry {
 
     /// Drain one decoded pointer event from seat `seat_id`'s pointer
     /// channel into `out` for the kernel-attested `owner`, returning the
-    /// bytes written — one [`PointerInput`] record, or `0` when the channel
+    /// bytes written — one [`TimedPointer`] record, or `0` when the channel
     /// is drained (`pointer_read`).
     ///
     /// The drain is owner-gated through the seat's live lease
@@ -839,7 +845,7 @@ impl SeatRegistry {
     /// # Errors
     ///
     /// - [`Errno::BufferTooSmall`] — `out` cannot hold a whole record
-    ///   ([`PointerInput::WIRE_LEN`] bytes); the kernel never writes a
+    ///   ([`TimedPointer::WIRE_LEN`] bytes); the kernel never writes a
     ///   partial record.
     /// - [`Errno::NotFound`] — no live seat has that id.
     /// - [`Errno::SeatNotOwner`] — `owner` does not hold the seat.
@@ -850,7 +856,7 @@ impl SeatRegistry {
         owner: SeatOwner,
         out: &mut [u8],
     ) -> Result<usize, Errno> {
-        if out.len() < PointerInput::WIRE_LEN {
+        if out.len() < TimedPointer::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
         self.drain_leased(seat_id, owner, out, |slot, out| slot.pointer.drain_one(out))
@@ -1328,14 +1334,14 @@ mod tests {
 
     /// Every pointer record seat `SEAT_PRIMARY` holds for `owner`, drained.
     fn drained(seat: &SeatRegistry, owner: SeatOwner) -> alloc::vec::Vec<PointerInput> {
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
         let mut drained = alloc::vec::Vec::new();
         while seat
             .read_pointer(SEAT_PRIMARY, owner, &mut buf)
             .expect("drained")
             != 0
         {
-            drained.push(PointerInput::from_bytes(&buf).expect("decodes"));
+            drained.push(TimedPointer::from_bytes(&buf).expect("decodes").input);
         }
         drained
     }
@@ -1362,6 +1368,7 @@ mod tests {
                 TEST_INJECTOR,
                 Some(at),
                 TEST_WINDOW_NS,
+                TEST_NOW_NS,
             )
             .expect("injected");
         }
@@ -1380,8 +1387,15 @@ mod tests {
         seat.acquire(SEAT_PRIMARY, SeatOwner(9)).expect("acquired");
         for step in 0..3u64 {
             for (record, at) in [(PRESS, step * 10 * MS), (RELEASE, step * 10 * MS + 5 * MS)] {
-                seat.inject_pointer(SEAT_PRIMARY, record, TEST_INJECTOR, Some(at), 0)
-                    .expect("injected");
+                seat.inject_pointer(
+                    SEAT_PRIMARY,
+                    record,
+                    TEST_INJECTOR,
+                    Some(at),
+                    0,
+                    TEST_NOW_NS,
+                )
+                .expect("injected");
             }
         }
         assert_eq!(
@@ -1402,8 +1416,15 @@ mod tests {
             let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
             seat.acquire(SEAT_PRIMARY, SeatOwner(5)).expect("acquired");
             for record in [PRESS, RELEASE, PRESS, RELEASE] {
-                seat.inject_pointer(SEAT_PRIMARY, record, TEST_INJECTOR, at, TEST_WINDOW_NS)
-                    .expect("injected");
+                seat.inject_pointer(
+                    SEAT_PRIMARY,
+                    record,
+                    TEST_INJECTOR,
+                    at,
+                    TEST_WINDOW_NS,
+                    TEST_NOW_NS,
+                )
+                .expect("injected");
             }
             assert_eq!(
                 drained(&seat, SeatOwner(5)),
@@ -1423,8 +1444,15 @@ mod tests {
             (PRESS, 2, 86 * MS),
             (RELEASE, 2, 150 * MS),
         ] {
-            seat.inject_pointer(SEAT_PRIMARY, record, injector, Some(at), TEST_WINDOW_NS)
-                .expect("injected");
+            seat.inject_pointer(
+                SEAT_PRIMARY,
+                record,
+                injector,
+                Some(at),
+                TEST_WINDOW_NS,
+                TEST_NOW_NS,
+            )
+            .expect("injected");
         }
         assert_eq!(drained(&seat, SeatOwner(6)).len(), 4);
     }
@@ -1770,6 +1798,7 @@ mod tests {
                 TEST_INJECTOR,
                 Some(TEST_NOW_NS),
                 TEST_WINDOW_NS,
+                TEST_NOW_NS,
             )
             .expect("moved");
             seat.inject_touch(SEAT_PRIMARY, &touch_at(5))
@@ -1784,7 +1813,7 @@ mod tests {
                 Ok(0),
                 "the previous session's keystroke is gone"
             );
-            let mut ptr = [0u8; PointerInput::WIRE_LEN];
+            let mut ptr = [0u8; TimedPointer::WIRE_LEN];
             assert_eq!(
                 seat.read_pointer(SEAT_PRIMARY, INTRUDER, &mut ptr),
                 Ok(0),
@@ -1875,15 +1904,16 @@ mod tests {
                 PointerInput::MovedBy { dx: 1, dy: 2 },
                 TEST_INJECTOR,
                 Some(TEST_NOW_NS),
-                TEST_WINDOW_NS
+                TEST_WINDOW_NS,
+                TEST_NOW_NS
             ),
             Ok(PointerInput::WIRE_LEN)
         );
         assert!(seat.input_ready(SEAT_PRIMARY, WM));
-        let mut pbuf = [0u8; PointerInput::WIRE_LEN];
+        let mut pbuf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(
             seat.read_pointer(SEAT_PRIMARY, WM, &mut pbuf),
-            Ok(PointerInput::WIRE_LEN)
+            Ok(TimedPointer::WIRE_LEN)
         );
         assert!(!seat.input_ready(SEAT_PRIMARY, WM));
         // And a touch frame through the third.
@@ -2148,16 +2178,20 @@ mod tests {
                 record,
                 TEST_INJECTOR,
                 Some(TEST_NOW_NS),
-                TEST_WINDOW_NS
+                TEST_WINDOW_NS,
+                TEST_NOW_NS
             ),
             Ok(PointerInput::WIRE_LEN)
         );
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
         let n = seat
             .read_pointer(SEAT_PRIMARY, WM, &mut buf)
             .expect("owner drains");
-        assert_eq!(n, PointerInput::WIRE_LEN);
-        assert_eq!(PointerInput::from_bytes(&buf), Ok(record));
+        assert_eq!(n, TimedPointer::WIRE_LEN);
+        assert_eq!(
+            TimedPointer::from_bytes(&buf).map(|timed| timed.input),
+            Ok(record)
+        );
         // Drained: the channel is now empty.
         assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
     }
@@ -2175,7 +2209,8 @@ mod tests {
                 record,
                 TEST_INJECTOR,
                 Some(TEST_NOW_NS),
-                TEST_WINDOW_NS
+                TEST_WINDOW_NS,
+                TEST_NOW_NS
             ),
             Ok(PointerInput::WIRE_LEN)
         );
@@ -2183,7 +2218,7 @@ mod tests {
         // record was not retained.
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
     }
 
@@ -2199,11 +2234,12 @@ mod tests {
                 record,
                 TEST_INJECTOR,
                 Some(TEST_NOW_NS),
-                TEST_WINDOW_NS
+                TEST_WINDOW_NS,
+                TEST_NOW_NS
             ),
             Ok(PointerInput::WIRE_LEN)
         );
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
         // Holding CAP_INPUT_READ alone is not enough: the drain is gated on
         // the live lease, so the record stays queued for the owner.
         assert_eq!(
@@ -2213,14 +2249,14 @@ mod tests {
         assert_eq!(
             seat.read_pointer(SEAT_PRIMARY, WM, &mut buf)
                 .expect("owner drains"),
-            PointerInput::WIRE_LEN
+            TimedPointer::WIRE_LEN
         );
     }
 
     #[test]
     fn reading_pointer_of_an_unowned_seat_is_refused() {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(
             seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::SeatNotOwner)
@@ -2232,7 +2268,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        let mut buf = [0u8; PointerInput::WIRE_LEN - 1];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN - 1];
         assert_eq!(
             seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
             Err(Errno::BufferTooSmall)
@@ -2256,20 +2292,21 @@ mod tests {
                     record,
                     TEST_INJECTOR,
                     Some(TEST_NOW_NS),
-                    TEST_WINDOW_NS
+                    TEST_WINDOW_NS,
+                    TEST_NOW_NS
                 ),
                 Ok(PointerInput::WIRE_LEN)
             );
         }
         // The very first record (dx == 0) was evicted, so the oldest
         // surviving record is the second pushed (dx == 1).
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(
             seat.read_pointer(SEAT_PRIMARY, WM, &mut buf),
-            Ok(PointerInput::WIRE_LEN)
+            Ok(TimedPointer::WIRE_LEN)
         );
         assert_eq!(
-            PointerInput::from_bytes(&buf),
+            TimedPointer::from_bytes(&buf).map(|timed| timed.input),
             Ok(PointerInput::MovedBy { dx: 1, dy: 0 })
         );
     }
@@ -2286,7 +2323,7 @@ mod tests {
             seat.inject(SEAT_PRIMARY, press_char('k')),
             Ok(KeyInput::WIRE_LEN)
         );
-        let mut buf = [0u8; PointerInput::WIRE_LEN];
+        let mut buf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(seat.read_pointer(SEAT_PRIMARY, WM, &mut buf), Ok(0));
         assert_eq!(
             seat.read_key(SEAT_PRIMARY, WM, &mut buf),
@@ -2354,7 +2391,7 @@ mod tests {
         assert_eq!(TouchFrame::from_bytes(&buf), Ok(touch_at(1)));
         // The touch channel never answers a pointer or key drain.
         assert_eq!(
-            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf[..PointerInput::WIRE_LEN]),
+            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf[..TimedPointer::WIRE_LEN]),
             Ok(0)
         );
     }

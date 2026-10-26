@@ -1016,6 +1016,25 @@ impl<A: DocumentApp> DocWindow<A> {
         }
     }
 
+    /// The window at `owned` gained or lost the keyboard: a tool window's is
+    /// this window's, a dialog's is the view's to show.
+    fn owned_focus(&mut self, owned: usize, focused: bool) {
+        let Some(pane) = self.owned.get_mut(owned) else {
+            return;
+        };
+        pane.chrome.focused = focused;
+        match pane.kind {
+            Owned::Tool(_) => self.note_focus(),
+            // Its look follows the keyboard, and it is small: repainted whole.
+            Owned::Dialog(_) => {
+                self.view
+                    .dialog_focus_changed(focused, &self.layout, &mut self.damage);
+                pane.chrome.owe(Repaint::Whole);
+                self.owe_reported();
+            }
+        }
+    }
+
     /// Tell the view whether it has the keyboard.
     fn tell_focus(&mut self, focused: bool) {
         self.focus_told = focused;
@@ -1927,16 +1946,17 @@ impl<A: DocumentApp> Host<A> {
 
     /// Window `index`'s pointer is at `at` in its view's drawing — over the
     /// window, or over the window it owns at `owned` — with `modifiers` held,
-    /// and `inputs` are what it did there: note where it is, owe the tip and
-    /// cursor beneath it a check, and feed the view the modifiers and then
-    /// `inputs` unless the window is still loading. What lands on its dialog
-    /// is the dialog's.
+    /// and `inputs` are what it did there at `at_ns`: note where it is, owe the
+    /// tip and cursor beneath it a check, and feed the view the modifiers and
+    /// then `inputs` unless the window is still loading. What lands on its
+    /// dialog is the dialog's.
     fn point(
         &mut self,
         (index, owned): (usize, Option<usize>),
         at: Point,
         modifiers: AbiModifiers,
         inputs: impl Iterator<Item = InputEvent>,
+        at_ns: u64,
     ) {
         let window = &mut self.windows[index];
         let (pointing, fed) = match owned.and_then(|owned| window.owned.get_mut(owned)) {
@@ -1949,12 +1969,12 @@ impl<A: DocumentApp> Host<A> {
             return;
         }
         let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
-        self.feed(index, fed, core::iter::once(held).chain(inputs));
+        self.feed(index, fed, core::iter::once(held).chain(inputs), at_ns);
     }
 
-    fn feed(&mut self, index: usize, fed: Fed, inputs: impl Iterator<Item = InputEvent>) {
+    /// Feed window `index`'s view `inputs`, which happened at `now`.
+    fn feed(&mut self, index: usize, fed: Fed, inputs: impl Iterator<Item = InputEvent>, now: u64) {
         let id = self.windows[index].id();
-        let now = tairix_rt::clock_get();
         for input in inputs {
             let Some(index) = self.index_of(id) else {
                 return;
@@ -2097,7 +2117,8 @@ impl<A: DocumentApp> Host<A> {
             } => self.menu_closed(index, *open_id, *outcome),
             WindowEvent::Key { key, .. } => {
                 if !window.loading() {
-                    self.feed(index, Fed::Window, core::iter::once(key_input_event(*key)));
+                    let key = core::iter::once(key_input_event(*key));
+                    self.feed(index, Fed::Window, key, tairix_rt::clock_get());
                 }
             }
             WindowEvent::Pointer {
@@ -2105,6 +2126,7 @@ impl<A: DocumentApp> Host<A> {
                 y,
                 action,
                 modifiers,
+                at_ns,
                 ..
             } => {
                 let at = pointer_point(*x, *y);
@@ -2113,6 +2135,7 @@ impl<A: DocumentApp> Host<A> {
                     at,
                     *modifiers,
                     pointer_input_events(*action, at),
+                    *at_ns,
                 );
             }
             // A scrolled strip puts another tool under the pointer, which is
@@ -2131,6 +2154,7 @@ impl<A: DocumentApp> Host<A> {
                     at,
                     *modifiers,
                     scroll_input_events(at, *dx, *dy),
+                    tairix_rt::clock_get(),
                 );
             }
             WindowEvent::Pinch {
@@ -2143,7 +2167,7 @@ impl<A: DocumentApp> Host<A> {
             } => {
                 let at = pointer_point(*x, *y);
                 let pinch = pinch_input_events(at, *phase, *scale);
-                self.point((index, None), at, *modifiers, pinch);
+                self.point((index, None), at, *modifiers, pinch, tairix_rt::clock_get());
             }
             WindowEvent::Minimized { .. }
             | WindowEvent::ToolMoved { .. }
@@ -2190,17 +2214,20 @@ impl<A: DocumentApp> Host<A> {
             // It asks for no file; one handed to it anyway is let go.
             WindowEvent::FilePicked { handle, .. } => release(*handle),
             WindowEvent::Key { key, .. } => {
-                self.feed_app(index, core::iter::once(key_input_event(*key)));
+                let key = core::iter::once(key_input_event(*key));
+                self.feed_app(index, key, tairix_rt::clock_get());
             }
             WindowEvent::Pointer {
                 x,
                 y,
                 action,
                 modifiers,
+                at_ns,
                 ..
             } => {
                 let at = pointer_point(*x, *y);
-                self.point_app(index, at, *modifiers, pointer_input_events(*action, at));
+                let inputs = pointer_input_events(*action, at);
+                self.point_app(index, at, *modifiers, inputs, *at_ns);
             }
             WindowEvent::Scrolled {
                 x,
@@ -2211,7 +2238,8 @@ impl<A: DocumentApp> Host<A> {
                 ..
             } => {
                 let at = pointer_point(*x, *y);
-                self.point_app(index, at, *modifiers, scroll_input_events(at, *dx, *dy));
+                let inputs = scroll_input_events(at, *dx, *dy);
+                self.point_app(index, at, *modifiers, inputs, tairix_rt::clock_get());
             }
             WindowEvent::Pinch {
                 x,
@@ -2223,7 +2251,7 @@ impl<A: DocumentApp> Host<A> {
             } => {
                 let at = pointer_point(*x, *y);
                 let pinch = pinch_input_events(at, *phase, *scale);
-                self.point_app(index, at, *modifiers, pinch);
+                self.point_app(index, at, *modifiers, pinch, tairix_rt::clock_get());
             }
             WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
@@ -2272,23 +2300,7 @@ impl<A: DocumentApp> Host<A> {
                     self.act_tool(index, id, event);
                 }
             }
-            WindowEvent::Focus { focused, .. } => {
-                pane.chrome.focused = *focused;
-                match pane.kind {
-                    Owned::Tool(_) => window.note_focus(),
-                    // Its look follows the keyboard, and it is small: repainted
-                    // whole.
-                    Owned::Dialog(_) => {
-                        window.view.dialog_focus_changed(
-                            *focused,
-                            &window.layout,
-                            &mut window.damage,
-                        );
-                        pane.chrome.owe(Repaint::Whole);
-                        window.owe_reported();
-                    }
-                }
-            }
+            WindowEvent::Focus { focused, .. } => window.owned_focus(owned, *focused),
             WindowEvent::RedrawRequested { .. } => pane.chrome.owe(Repaint::Whole),
             WindowEvent::ContentReleased { .. } => pane.chrome.pane.release_frames(),
             // Only a dialog is resized but by its view: the desktop fitted it
@@ -2307,7 +2319,8 @@ impl<A: DocumentApp> Host<A> {
             WindowEvent::FilePicked { handle, .. } => release(*handle),
             WindowEvent::Key { key, .. } => {
                 if !window.loading() {
-                    self.feed(index, fed, core::iter::once(key_input_event(*key)));
+                    let key = core::iter::once(key_input_event(*key));
+                    self.feed(index, fed, key, tairix_rt::clock_get());
                 }
             }
             WindowEvent::Pointer {
@@ -2315,11 +2328,12 @@ impl<A: DocumentApp> Host<A> {
                 y,
                 action,
                 modifiers,
+                at_ns,
                 ..
             } => {
                 let at = pane.to_view(pointer_point(*x, *y));
                 let inputs = pointer_input_events(*action, at);
-                self.point((index, Some(owned)), at, *modifiers, inputs);
+                self.point((index, Some(owned)), at, *modifiers, inputs, *at_ns);
             }
             WindowEvent::Scrolled {
                 x,
@@ -2336,7 +2350,8 @@ impl<A: DocumentApp> Host<A> {
                 }
                 let at = pane.to_view(pointer_point(*x, *y));
                 let inputs = scroll_input_events(at, *dx, *dy);
-                self.point((index, Some(owned)), at, *modifiers, inputs);
+                let now = tairix_rt::clock_get();
+                self.point((index, Some(owned)), at, *modifiers, inputs, now);
             }
             WindowEvent::Pinch {
                 x,
@@ -2348,7 +2363,8 @@ impl<A: DocumentApp> Host<A> {
             } => {
                 let at = pane.to_view(pointer_point(*x, *y));
                 let pinch = pinch_input_events(at, *phase, *scale);
-                self.point((index, Some(owned)), at, *modifiers, pinch);
+                let now = tairix_rt::clock_get();
+                self.point((index, Some(owned)), at, *modifiers, pinch, now);
             }
             // Never minimised but with its window, and asking for no picker,
             // menu or preview.
@@ -2594,17 +2610,19 @@ impl<A: DocumentApp> Host<A> {
         at: Point,
         modifiers: AbiModifiers,
         inputs: impl Iterator<Item = InputEvent>,
+        at_ns: u64,
     ) {
         let window = &mut self.app_windows[index];
         window.chrome.pointing.at = Some(at);
         window.chrome.pointing.owed = true;
         let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
-        self.feed_app(index, core::iter::once(held).chain(inputs));
+        self.feed_app(index, core::iter::once(held).chain(inputs), at_ns);
     }
 
-    fn feed_app(&mut self, index: usize, inputs: impl Iterator<Item = InputEvent>) {
+    /// Feed application window `index`'s view `inputs`, which happened at
+    /// `now`.
+    fn feed_app(&mut self, index: usize, inputs: impl Iterator<Item = InputEvent>, now: u64) {
         let id = self.app_windows[index].id();
-        let now = tairix_rt::clock_get();
         for input in inputs {
             let Some(index) = self.app_index_of(id) else {
                 return;

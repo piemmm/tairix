@@ -343,27 +343,21 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     // anything queued behind it is an occurrence the app must see in order.
     match (queue.back_mut(), *next) {
         (
-            Some(WindowEvent::Pointer {
-                action: PointerAction::Moved,
-                x,
-                y,
-                modifiers,
-                ..
-            }),
+            Some(
+                held @ WindowEvent::Pointer {
+                    action: PointerAction::Moved,
+                    ..
+                },
+            ),
             WindowEvent::Pointer {
                 action: PointerAction::Moved,
-                x: newest_x,
-                y: newest_y,
-                modifiers: newest_modifiers,
                 ..
             },
         ) => {
-            // The fold delivers the newest sample whole: keeping the older
-            // modifiers beside the newer position would report a state the
-            // pointer was never in.
-            *x = newest_x;
-            *y = newest_y;
-            *modifiers = newest_modifiers;
+            // The fold delivers the newest sample whole: an older field kept
+            // beside the newer position would report a state the pointer was
+            // never in, or an instant it was not there.
+            *held = *next;
             true
         }
         (

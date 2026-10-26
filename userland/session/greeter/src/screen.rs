@@ -491,17 +491,20 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
     }
 
     /// Read one touch frame, adding what it meant to `gestures` for
-    /// [`on_gesture`](Self::on_gesture) to answer.
-    pub fn feed_touch(&mut self, frame: &TouchFrame, gestures: &mut Vec<Gesture>) {
+    /// [`on_gesture`](Self::on_gesture) to answer, each with when the frame
+    /// arrived.
+    pub fn feed_touch(&mut self, frame: &TouchFrame, gestures: &mut Vec<(Gesture, u64)>) {
+        let at_ns = frame.time_ns();
         self.touch
-            .feed(frame, &mut |gesture| gestures.push(gesture));
+            .feed(frame, &mut |gesture| gestures.push((gesture, at_ns)));
     }
 
-    /// Add what a touch meant by waiting until `now_ns` to `gestures`; run
-    /// once every queued frame has been fed.
-    pub fn expire_touch(&mut self, now_ns: u64, gestures: &mut Vec<Gesture>) {
-        self.touch
-            .expire(now_ns, &mut |gesture| gestures.push(gesture));
+    /// Add what a touch meant by waiting until `now_ns` to `gestures`, each
+    /// with when its wait ended; run once every queued frame has been fed.
+    pub fn expire_touch(&mut self, now_ns: u64, gestures: &mut Vec<(Gesture, u64)>) {
+        self.touch.expire(now_ns, &mut |gesture, at_ns| {
+            gestures.push((gesture, at_ns));
+        });
     }
 
     /// Answer one touch gesture, as [`on_pointer`](Self::on_pointer) answers

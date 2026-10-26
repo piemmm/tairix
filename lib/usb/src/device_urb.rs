@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 use core::future::Future;
 
-use tairix_abi::usb_urb::{IsoLayout, UrbRequest, UsbDirection, UsbTransferType};
+use tairix_abi::usb_urb::{IsoLayout, ReportCompletion, UrbRequest, UsbDirection, UsbTransferType};
 use tairix_abi::{DriverError, RegisterBlock};
 use tairix_inline::ArrayVec;
 
@@ -247,7 +247,7 @@ impl<'h, H: RegisterBlock + 'h, M: DmaBank + 'h> UrbEngine for DeviceEngine<'_, 
         endpoint: u8,
         request: usize,
         data: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
+    ) -> Result<Option<ReportCompletion>, DriverError> {
         // The URB names an endpoint *number*; only the interface's own
         // interrupt-IN endpoint is read.
         if !endpoint_dci(endpoint, true).is_some_and(|dci| self.owns_report_endpoint(dci)) {

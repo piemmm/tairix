@@ -230,11 +230,13 @@ impl Recogniser {
             .min()
     }
 
-    /// Act on every deadline at or before `now_ns`.
-    pub fn expire(&mut self, now_ns: u64, out: &mut dyn FnMut(Gesture)) {
+    /// Act on every deadline at or before `now_ns`, handing each gesture with
+    /// the instant its deadline fell: when it happened, however late the wake.
+    pub fn expire(&mut self, now_ns: u64, out: &mut dyn FnMut(Gesture, u64)) {
         for slot in &mut self.tracks {
             if let Some(track) = slot {
-                track.expire(now_ns, out);
+                let fell_ns = track.deadline_ns().map_or(now_ns, |due| due.min(now_ns));
+                track.expire(now_ns, &mut |gesture| out(gesture, fell_ns));
                 if track.is_idle() {
                     *slot = None;
                 }

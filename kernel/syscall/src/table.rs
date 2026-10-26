@@ -1089,9 +1089,9 @@ pub trait SyscallHandlers {
     /// owner-gates the drain against the seat's live lease — a caller that
     /// does not hold the seat is refused with [`Errno::SeatNotOwner`] /
     /// [`Errno::SeatRevoked`] — then drains one
-    /// [`tairix_abi::input::PointerInput`] record the seat registry routed
+    /// [`tairix_abi::input::TimedPointer`] record the seat registry routed
     /// to the channel into `buf` (at least
-    /// [`tairix_abi::input::PointerInput::WIRE_LEN`] bytes), copies it out
+    /// [`tairix_abi::input::TimedPointer::WIRE_LEN`] bytes), copies it out
     /// through the validated boundary, and returns the number of bytes
     /// written — or `0` when the channel is drained.
     ///

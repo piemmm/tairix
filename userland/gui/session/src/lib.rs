@@ -328,7 +328,7 @@ pub use settings::{
     PINBOARD_UNATTESTED_MESSAGE,
 };
 pub use shell::{
-    DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, DESKTOP_RESTYLED,
+    DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, Timed, DESKTOP_RESTYLED,
     DESKTOP_RESTYLED_MESSAGE, SETTINGS_REQUEST_REFUSED, SETTINGS_REQUEST_REFUSED_MESSAGE,
 };
 pub use switchboard::{

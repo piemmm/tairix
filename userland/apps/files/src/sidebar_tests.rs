@@ -89,6 +89,7 @@ fn press(point: Point) -> WindowEvent {
         y: u32::try_from(point.y).unwrap_or(0),
         action: PointerAction::Pressed(PointerButtonCode::Primary),
         modifiers: Modifiers::default(),
+        at_ns: 0,
     }
 }
 
@@ -100,6 +101,7 @@ fn motion(point: Point) -> WindowEvent {
         y: u32::try_from(point.y).unwrap_or(0),
         action: PointerAction::Moved,
         modifiers: Modifiers::default(),
+        at_ns: 0,
     }
 }
 

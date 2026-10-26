@@ -115,6 +115,18 @@ pub const SETTINGS_REQUEST_REFUSED: EventId = EventId(20_019);
 /// The exact message [`SETTINGS_REQUEST_REFUSED`] is emitted with.
 pub const SETTINGS_REQUEST_REFUSED_MESSAGE: &str = "request only Settings may make refused";
 
+/// Something the input path carries, with when the input it came from
+/// happened on the monotonic clock — as its device reported it, where it did:
+/// what clicks, double-clicks and strokes are timed by, whenever the desktop
+/// gets round to draining them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Timed<T> {
+    /// What happened.
+    pub value: T,
+    /// When it happened.
+    pub at_ns: u64,
+}
+
 /// A source of live pointer/keyboard events for the desktop.
 ///
 /// On a running system this is backed by the kernel's input channel; tests
@@ -122,10 +134,9 @@ pub const SETTINGS_REQUEST_REFUSED_MESSAGE: &str = "request only Settings may ma
 /// through which device events reach the desktop, so the `no_std` GUI crates
 /// hold no input capability of their own.
 pub trait InputSource {
-    /// Take the next pending input event, or `None` when the stream is
-    /// momentarily drained. `now_ns` is the monotonic time the stream is being
-    /// drained at, which a source pacing what it reports against how fast it
-    /// arrives — the wheel's acceleration — measures by.
+    /// Take the next pending input event with when it happened, or `None`
+    /// when the stream is momentarily drained. `now_ns` is the monotonic time
+    /// the stream is being drained at.
     ///
     /// # Errors
     ///
@@ -133,7 +144,7 @@ pub trait InputSource {
     /// (for example the channel was closed). A faulting source ends the
     /// current [`pump`](DesktopShell::pump) without disturbing the desktop
     /// state already applied; the embedder replaces or re-polls the source.
-    fn poll(&mut self, now_ns: u64) -> Result<Option<InputEvent>, Errno>;
+    fn poll(&mut self, now_ns: u64) -> Result<Option<Timed<InputEvent>>, Errno>;
 }
 
 /// What the [`DesktopShell`] did with one input event.
@@ -3020,17 +3031,18 @@ impl DesktopShell {
     }
 
     /// Drain `source` into `outcomes`, which it clears first, up to and
-    /// including the next edge, applying each event against `now_ns`, and say
-    /// where it stopped.
+    /// including the next edge, applying each event at the time it happened,
+    /// and say where it stopped.
     ///
     /// An edge is any event but a motion, scroll or pinch-update sample.
     /// Routing one can
     /// hand the seat to another holder — a menu chain, the lock, another
     /// session — so the batch ends there and the embedder routes it before
     /// draining the rest into whoever holds the seat then. Samples never move
-    /// the seat, so a burst of them drains as one batch. Every batch of a wake
-    /// gets that wake's one `now_ns`, so a press and release an edge split are
-    /// timed alike.
+    /// the seat, so a burst of them drains as one batch. However a wake splits
+    /// them, a press and its release are timed by when they happened, so a
+    /// click's length and a double-click's gap are the user's and not the
+    /// drain's.
     ///
     /// Every event is applied in order, so the window manager's hover, drag
     /// and cursor state follow the whole stream; only the outcomes handed on
@@ -3057,7 +3069,7 @@ impl DesktopShell {
         source: &mut S,
         compositor: &mut Compositor,
         now_ns: u64,
-        outcomes: &mut Vec<ShellOutcome>,
+        outcomes: &mut Vec<Timed<ShellOutcome>>,
     ) -> Result<Stopped, Errno>
     where
         S: InputSource + ?Sized,
@@ -3066,7 +3078,10 @@ impl DesktopShell {
         let mut applied = false;
         let drained = loop {
             match source.poll(now_ns) {
-                Ok(Some(event)) => {
+                Ok(Some(Timed {
+                    value: event,
+                    at_ns,
+                })) => {
                     let edge = !matches!(
                         event,
                         InputEvent::PointerMoved { .. }
@@ -3076,14 +3091,20 @@ impl DesktopShell {
                                 ..
                             }
                     );
-                    let outcome = self.apply(event, compositor, now_ns);
+                    let outcome = self.apply(event, compositor, at_ns);
                     applied = true;
                     let unfolded = match outcomes.last_mut() {
-                        Some(last) => fold_outcome(last, outcome),
+                        Some(last) => {
+                            let unfolded = fold_outcome(&mut last.value, outcome);
+                            if unfolded.is_none() {
+                                last.at_ns = at_ns;
+                            }
+                            unfolded
+                        }
                         None => Some(outcome),
                     };
-                    if let Some(outcome) = unfolded {
-                        outcomes.push(outcome);
+                    if let Some(value) = unfolded {
+                        outcomes.push(Timed { value, at_ns });
                     }
                     if edge {
                         break Ok(Stopped::AtEdge);

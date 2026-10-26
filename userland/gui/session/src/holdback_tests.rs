@@ -30,6 +30,7 @@ fn moved(window_id: u64, x: u32) -> WindowEvent {
         y: 4,
         action: PointerAction::Moved,
         modifiers: Modifiers::default(),
+        at_ns: 0,
     }
 }
 
@@ -40,6 +41,7 @@ fn pressed(window_id: u64) -> WindowEvent {
         y: 1,
         action: PointerAction::Pressed(PointerButtonCode::Primary),
         modifiers: Modifiers::default(),
+        at_ns: 0,
     }
 }
 
@@ -50,6 +52,7 @@ fn released(window_id: u64) -> WindowEvent {
         y: 1,
         action: PointerAction::Released(PointerButtonCode::Primary),
         modifiers: Modifiers::default(),
+        at_ns: 0,
     }
 }
 
@@ -60,6 +63,7 @@ fn cancelled(window_id: u64) -> WindowEvent {
         y: 1,
         action: PointerAction::Cancelled,
         modifiers: Modifiers::default(),
+        at_ns: 0,
     }
 }
 
@@ -70,6 +74,7 @@ fn clicked_secondary(window_id: u64) -> WindowEvent {
         y: 1,
         action: PointerAction::Pressed(PointerButtonCode::Secondary),
         modifiers: Modifiers::default(),
+        at_ns: 0,
     }
 }
 
@@ -485,6 +490,7 @@ fn a_collapsed_run_of_samples_carries_the_newest_modifiers() {
         y: 4,
         action: PointerAction::Moved,
         modifiers: shift,
+        at_ns: 0,
     };
     let mut held = HoldBack::new();
     let _ = hold(&mut held, moved(WINDOW, 1));
@@ -496,6 +502,24 @@ fn a_collapsed_run_of_samples_carries_the_newest_modifiers() {
     let _ = hold(&mut held, with_shift(1));
     let _ = hold(&mut held, moved(WINDOW, 2));
     assert_eq!(drain_events(&mut held), vec![moved(WINDOW, 2)]);
+}
+
+/// A folded sample is timed by the newest: a stroke an app paints by time
+/// would otherwise read the newer position as reached at the older instant.
+#[test]
+fn a_collapsed_run_of_samples_carries_the_newest_time() {
+    let at = |x: u32, at_ns: u64| WindowEvent::Pointer {
+        window_id: WINDOW,
+        x,
+        y: 4,
+        action: PointerAction::Moved,
+        modifiers: Modifiers::default(),
+        at_ns,
+    };
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, at(1, 10));
+    let _ = hold(&mut held, at(2, 20));
+    assert_eq!(drain_events(&mut held), vec![at(2, 20)]);
 }
 
 /// A press between two samples breaks the run: an occurrence the app must

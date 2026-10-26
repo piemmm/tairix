@@ -1587,6 +1587,13 @@ fn exercise_usb_urb(bytes: &[u8]) {
     // transferred count or a fail-closed errno; the contract is that it never
     // panics for an arbitrary input.
     let _ = tairix_abi::usb_urb::decode_completion(bytes);
+    if let Ok(report) = tairix_abi::usb_urb::ReportCompletion::decode(bytes) {
+        let mut out = [0u8; tairix_abi::usb_urb::REPORT_COMPLETION_LEN];
+        let n = report
+            .encode(&mut out)
+            .expect("a decoded report re-encodes");
+        assert_eq!(&out[..n], bytes);
+    }
 }
 
 /// Drive the block-service transport decoders on `bytes`.

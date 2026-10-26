@@ -20,13 +20,13 @@ use core::num::NonZeroU32;
 
 use super::{
     control_permitted, drive_urb, frame_completion, on_own_endpoint, read_configuration,
-    ConfigurationError, Deadline, IsoSlotDone, IsoStreamShape, UrbCall, UrbClient, UrbEngine,
-    UrbLink, UrbScope, CTRL_DATA_LEN,
+    ConfigurationError, Deadline, IsoSlotDone, IsoStreamShape, UrbCall, UrbClient, UrbDone,
+    UrbEngine, UrbLink, UrbScope, CTRL_DATA_LEN,
 };
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::usb_urb::{
-    IsoGrant, IsoLayout, IsoStartParams, UrbRequest, UsbDirection, UsbRequest, UsbSpeed,
-    UsbTransferType, URB_COMPLETION_LEN, USB_REQUEST_MAX_LEN,
+    IsoGrant, IsoLayout, IsoStartParams, ReportCompletion, UrbRequest, UsbDirection, UsbRequest,
+    UsbSpeed, UsbTransferType, URB_COMPLETION_LEN, USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_inline::BitSet256;
@@ -104,6 +104,9 @@ const BULK_IN_ENDPOINT: u8 = 1;
 const BULK_OUT_ENDPOINT: u8 = 2;
 const INTERRUPT_ENDPOINT: u8 = 3;
 
+/// The instant the test doubles say an interrupt-IN report was captured at.
+const REPORT_CAPTURED_NS: u64 = 0x5EED_0000_0042;
+
 /// Device Context Indices of the mock interface's three endpoints.
 const MOCK_ENDPOINTS: u32 = 1 << 3 | 1 << 4 | 1 << 7;
 
@@ -178,7 +181,7 @@ impl UrbEngine for MockEngine {
         endpoint: u8,
         request: usize,
         data: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
+    ) -> Result<Option<ReportCompletion>, DriverError> {
         if endpoint != INTERRUPT_ENDPOINT {
             return Err(DriverError::OutOfRange);
         }
@@ -190,7 +193,10 @@ impl UrbEngine for MockEngine {
         let report = self.reports.remove(0);
         let n = report.len().min(data.len());
         data[..n].copy_from_slice(&report[..n]);
-        Ok(Some(n))
+        Ok(Some(ReportCompletion {
+            transferred: u32::try_from(n).map_err(|_| DriverError::LengthOutOfRange)?,
+            captured_ns: REPORT_CAPTURED_NS,
+        }))
     }
 
     fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
@@ -339,7 +345,7 @@ impl UrbCall for DirectCall {
 /// by the fail-closed tests, which assert on the in-band errno.
 fn serve_one(urb: &UrbRequest, buffer_len: usize, engine: &mut MockEngine) -> Result<u32, Errno> {
     let mut buffer = vec![0u8; buffer_len];
-    let mut reply = [0u8; URB_COMPLETION_LEN];
+    let mut reply = [0u8; USB_REPLY_MAX_LEN];
     let result = match drive_urb(urb, &mut buffer, engine) {
         Ok(Some(transferred)) => Ok(transferred),
         Ok(None) => Err(Errno::WouldBlock),
@@ -384,11 +390,17 @@ fn interrupt_in_round_trips_and_then_reports_would_block() {
         buffer: buffer.clone(),
     });
 
-    // The first poll delivers the queued report.
-    let transferred = client
+    // The first poll delivers the queued report, and when it was captured.
+    let delivered = client
         .interrupt_in(INTERRUPT_ENDPOINT, 8, None)
         .expect("interrupt-IN completes");
-    assert_eq!(transferred, 8);
+    assert_eq!(
+        delivered,
+        ReportCompletion {
+            transferred: 8,
+            captured_ns: REPORT_CAPTURED_NS
+        }
+    );
     assert_eq!(&buffer.borrow()[..8], &report[..]);
 
     // With nothing pending, a non-blocking poll fails closed with the
@@ -649,7 +661,7 @@ fn control_out_data_stage_delivers_the_shared_buffers_bytes() {
     let mut data = [0u8; 12];
     data[0] = 0x28;
     let outcome = drive_urb(&request, &mut data, &mut engine).expect("served");
-    assert_eq!(outcome, Some(12));
+    assert_eq!(outcome, Some(UrbDone::Moved(12)));
     assert_eq!(engine.control_out_transfers.len(), 1);
     let (seen_setup, seen_data) = &engine.control_out_transfers[0];
     assert_eq!(seen_setup, &setup);
@@ -818,7 +830,15 @@ impl UrbCall for ScriptedCall {
         } else {
             self.replies.remove(0)
         };
-        frame_completion(reply, result)
+        // As the HCD frames them: an interrupt transfer delivers a report.
+        let done = result.map(|transferred| match urb.transfer_type {
+            UsbTransferType::Interrupt => UrbDone::Report(ReportCompletion {
+                transferred,
+                captured_ns: REPORT_CAPTURED_NS,
+            }),
+            UsbTransferType::Control | UsbTransferType::Bulk => UrbDone::Moved(transferred),
+        });
+        frame_completion(reply, done)
     }
 }
 
@@ -883,7 +903,10 @@ fn a_link_takes_a_report_longer_than_it_asked_for_but_never_truncates_one() {
     let mut room = [0u8; 32];
     assert_eq!(
         link.interrupt_in(INTERRUPT_ENDPOINT, 8, &mut room, None),
-        Ok(20)
+        Ok(ReportCompletion {
+            transferred: 20,
+            captured_ns: REPORT_CAPTURED_NS
+        })
     );
     assert_eq!(room[..20], [5; 20]);
     assert!(sent.borrow().iter().all(|urb| urb.length == 8));

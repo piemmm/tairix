@@ -62,7 +62,7 @@ use tairix_wm::{
 };
 
 use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
-use crate::shell::SettleWork;
+use crate::shell::{SettleWork, Timed};
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
@@ -2206,7 +2206,9 @@ fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_seat() {
 /// An in-memory [`InputSource`]: a queue of events, optionally faulting once
 /// the queue is drained, standing in for the kernel's input channel.
 pub(crate) struct MemoryInput {
-    events: Vec<InputEvent>,
+    /// Each event, and when its device reported it; `None` reads as the
+    /// instant it is polled.
+    events: Vec<(InputEvent, Option<u64>)>,
     next: usize,
     fault: Option<Errno>,
 }
@@ -2214,7 +2216,7 @@ pub(crate) struct MemoryInput {
 impl MemoryInput {
     pub(crate) fn new(events: &[InputEvent]) -> Self {
         Self {
-            events: events.to_vec(),
+            events: events.iter().map(|&event| (event, None)).collect(),
             next: 0,
             fault: None,
         }
@@ -2222,9 +2224,20 @@ impl MemoryInput {
 
     pub(crate) fn faulting(events: &[InputEvent], fault: Errno) -> Self {
         Self {
-            events: events.to_vec(),
-            next: 0,
             fault: Some(fault),
+            ..Self::new(events)
+        }
+    }
+
+    /// Events each reported at the instant beside it.
+    pub(crate) fn timed(events: &[(InputEvent, u64)]) -> Self {
+        Self {
+            events: events
+                .iter()
+                .map(|&(event, at_ns)| (event, Some(at_ns)))
+                .collect(),
+            next: 0,
+            fault: None,
         }
     }
 
@@ -2242,7 +2255,10 @@ fn pump_once<S: InputSource + ?Sized>(
 ) -> Result<(Vec<ShellOutcome>, Stopped), Errno> {
     let mut outcomes = Vec::new();
     let stopped = shell.pump(source, comp, 0, &mut outcomes)?;
-    Ok((outcomes, stopped))
+    Ok((
+        outcomes.into_iter().map(|timed| timed.value).collect(),
+        stopped,
+    ))
 }
 
 /// Every outcome `events` produce, drained batch after batch as the serve loop
@@ -2265,10 +2281,13 @@ fn pump_to_empty(
 }
 
 impl InputSource for MemoryInput {
-    fn poll(&mut self, _now_ns: u64) -> Result<Option<InputEvent>, Errno> {
-        if let Some(event) = self.events.get(self.next).copied() {
+    fn poll(&mut self, now_ns: u64) -> Result<Option<Timed<InputEvent>>, Errno> {
+        if let Some((value, at_ns)) = self.events.get(self.next).copied() {
             self.next += 1;
-            return Ok(Some(event));
+            return Ok(Some(Timed {
+                value,
+                at_ns: at_ns.unwrap_or(now_ns),
+            }));
         }
         match self.fault.take() {
             Some(errno) => Err(errno),
@@ -2734,6 +2753,91 @@ fn pump_coalesces_adjacent_pointer_motions_over_one_window() {
     assert_eq!(shell.router().pointer(), Point::new(253, 253));
 }
 
+#[test]
+fn pump_times_a_folded_motion_run_by_its_newest_sample() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    let mut outcomes = Vec::new();
+    shell
+        .pump(
+            &mut MemoryInput::timed(&[(moved(251, 251), 10), (moved(252, 252), 20)]),
+            &mut comp,
+            90,
+            &mut outcomes,
+        )
+        .expect("source does not fault");
+    assert_eq!(
+        outcomes,
+        [Timed {
+            value: ShellOutcome::WindowManager(InputResponse::ClientPointerMoved {
+                window,
+                local: Point::new(52, 52),
+            }),
+            at_ns: 20,
+        }],
+        "the sample a fold delivers is the newest, and so is its time"
+    );
+}
+
+/// A point on `window`'s title bar that grips the window rather than pressing
+/// one of its commands.
+fn title_bar_grip(comp: &Compositor, window: WindowId) -> Point {
+    let bounds = comp.window(window).expect("live").bounds();
+    (bounds.top()..bounds.bottom())
+        .flat_map(|y| (bounds.left()..bounds.right()).map(move |x| Point::new(x, y)))
+        .find(|&at| comp.frame_hit(window, at) == Some(tairix_controls::FurniturePart::TitleBar))
+        .expect("a decorated window has a title bar")
+}
+
+/// What the second of two clicks on a title bar comes to when its device
+/// reported it `gap_ns` after the first, both drained by one wake a second
+/// after that.
+fn second_title_press(gap_ns: u64) -> ShellOutcome {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let grip = title_bar_grip(&comp, window);
+    let mut source = MemoryInput::timed(&[
+        (moved(grip.x, grip.y), 0),
+        (PRIMARY_PRESS, 0),
+        (PRIMARY_RELEASE, 1),
+        (PRIMARY_PRESS, gap_ns),
+    ]);
+    let wake_ns = gap_ns + 1_000_000_000;
+    let mut outcomes = Vec::new();
+    while source.remaining() > 0 {
+        shell
+            .pump(&mut source, &mut comp, wake_ns, &mut outcomes)
+            .expect("an in-memory source does not fault");
+    }
+    outcomes.pop().expect("the press is routed").value
+}
+
+#[test]
+fn title_bar_clicks_drained_together_pair_by_when_their_device_reported_them() {
+    let interval_ns = compositor().double_click().saturating_total_nanos();
+    assert!(
+        matches!(
+            second_title_press(interval_ns / 2),
+            ShellOutcome::WindowManager(InputResponse::WindowControl {
+                control: WindowControlKind::SizeToggle,
+                ..
+            })
+        ),
+        "presses within the interval pair"
+    );
+    assert!(
+        matches!(
+            second_title_press(interval_ns + 1),
+            ShellOutcome::WindowManager(InputResponse::FurniturePressed { .. })
+        ),
+        "two clicks the user made apart are two clicks, however late they are drained"
+    );
+}
+
 /// The desktop state a drain leaves, as one value two drains can be
 /// compared on: where the pointer is, what holds focus, which surfaces are
 /// placed, and the whole taskbar model behind them (hover, highlight, open
@@ -3021,7 +3125,10 @@ fn pump_replaces_what_its_buffer_held() {
     shell.handle(moved(250, 250), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
     // An outcome nothing folds into, so a batch appended to it would show.
-    let mut outcomes = vec![ShellOutcome::Ignored];
+    let mut outcomes = vec![Timed {
+        value: ShellOutcome::Ignored,
+        at_ns: 0,
+    }];
     let stopped = shell
         .pump(
             &mut MemoryInput::new(&[moved(251, 251)]),
@@ -3033,12 +3140,13 @@ fn pump_replaces_what_its_buffer_held() {
     assert_eq!(stopped, Stopped::Empty);
     assert_eq!(
         outcomes,
-        [ShellOutcome::WindowManager(
-            InputResponse::ClientPointerMoved {
+        [Timed {
+            value: ShellOutcome::WindowManager(InputResponse::ClientPointerMoved {
                 window,
                 local: Point::new(51, 51),
-            }
-        )]
+            }),
+            at_ns: 0,
+        }]
     );
 }
 
@@ -15357,6 +15465,7 @@ fn only_the_window_the_user_is_working_in_reaches_the_clipboard() {
         y: 1,
         action: PointerAction::Pressed(tairix_abi::input::PointerButtonCode::Primary),
         modifiers: tairix_abi::input::Modifiers::default(),
+        at_ns: 0,
     });
     assert_eq!(
         answers(&mut windows, &mut shell, &mut comp),
@@ -15369,6 +15478,7 @@ fn only_the_window_the_user_is_working_in_reaches_the_clipboard() {
         y: 2,
         action: PointerAction::Moved,
         modifiers: tairix_abi::input::Modifiers::default(),
+        at_ns: 0,
     });
     assert_eq!(
         answers(&mut windows, &mut shell, &mut comp),

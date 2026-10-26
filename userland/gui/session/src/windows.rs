@@ -4929,6 +4929,7 @@ mod tests {
             y: 1,
             action,
             modifiers: tairix_abi::input::Modifiers::default(),
+            at_ns: 0,
         }
     }
 

@@ -26,7 +26,7 @@ use super::{
     Outcome, Own, PaletteEdit, Pending, Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY,
     GO_TO_LAYER, RENAME_ENTRY, SPRITE_SIZE,
 };
-use crate::brush::{Path, Tip};
+use crate::brush::{Path, Spray, Tip};
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
 use crate::dialog::{Answer, Form, Purpose, SaveChoices};
@@ -65,24 +65,27 @@ const NO_ROOM_TO_SELECT: &str = "There is not enough memory to select that";
 const KEPT_UNCHANGED: &str = "This sprite cannot be edited; it is kept, and saved back unchanged";
 
 impl View {
-    /// Feed one pointer event; where it moves the picture under an open
-    /// adjustment, what that shows is asked again.
+    /// Feed one pointer event, which its device reported at `at_ns`; where it
+    /// moves the picture under an open adjustment, what that shows is asked
+    /// again.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
+        at_ns: u64,
         layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         let before = self.basis();
-        let outcome = self.pointer_event(event, layout, scale, theme, damage);
+        let outcome = self.pointer_event(event, at_ns, layout, scale, theme, damage);
         self.follow_picture(before, outcome, layout, damage)
     }
 
     fn pointer_event(
         &mut self,
         event: &InputEvent,
+        at_ns: u64,
         layout: &Layout,
         scale: Scale,
         theme: &Theme,
@@ -92,6 +95,7 @@ impl View {
             InputEvent::PointerMoved { to } => {
                 let marker = self.clone_offset.and_then(|_| self.clone_marker(layout));
                 self.pointer = *to;
+                self.pointer_ns = at_ns;
                 self.hovered(layout, damage);
                 if marker.is_some() {
                     self.damage_marker(marker, layout, damage);
@@ -1122,9 +1126,10 @@ impl View {
         self.gesture = Some(Gesture::Stroke {
             stroke: Box::new(stroke),
             path: Path::new(at),
+            spray: (self.tool == Tool::Airbrush).then(|| Spray::new(self.pointer_ns)),
         });
         self.lay(
-            |stroke, canvas, path, tip, aa| {
+            |stroke, canvas, path, _, tip, aa| {
                 if let Some(tip) = tip {
                     tip.dab(stroke, canvas, path.last(), aa)
                 } else {
@@ -1149,14 +1154,15 @@ impl View {
     }
 
     /// Lay more of the stroke under way through `paint`, handed the stroke,
-    /// the picture, its path, the tip and whether edges are smoothed, then
-    /// report what it changed.
+    /// the picture, its path, an airbrush's clock, the tip and whether edges
+    /// are smoothed, then report what it changed.
     fn lay(
         &mut self,
         paint: impl FnOnce(
             &mut Stroke,
             &mut Canvas,
             &mut Path,
+            Option<&mut Spray>,
             Option<Tip>,
             bool,
         ) -> Result<(), OutOfMemory>,
@@ -1165,13 +1171,18 @@ impl View {
     ) {
         let kind = self.kind();
         let (tip, aa) = (self.tip(kind), self.smooth(kind));
-        let Some(Gesture::Stroke { stroke, path }) = &mut self.gesture else {
+        let Some(Gesture::Stroke {
+            stroke,
+            path,
+            spray,
+        }) = &mut self.gesture
+        else {
             return;
         };
         let Some(canvas) = self.document.canvas_mut() else {
             return;
         };
-        let written = paint(stroke, canvas, path, tip, aa);
+        let written = paint(stroke, canvas, path, spray.as_mut(), tip, aa);
         let bounds = stroke.take_damage();
         self.damage_picture(bounds, layout, damage);
         if written.is_err() {
@@ -1179,13 +1190,20 @@ impl View {
         }
     }
 
-    /// Carry the stroke under way on to `to`: dabs a spacing apart, or a
-    /// pencil's every pixel.
-    fn stroke_to(&mut self, to: Fx, layout: &Layout, damage: &mut Region) {
+    /// Carry the stroke under way on to `to`, reported there at `at_ns`: dabs
+    /// a spacing apart and an airbrush's for the time it took, or a pencil's
+    /// every pixel.
+    fn stroke_to(&mut self, to: Fx, at_ns: u64, layout: &Layout, damage: &mut Region) {
         self.lay(
-            |stroke, canvas, path, tip, aa| {
+            |stroke, canvas, path, spray, tip, aa| {
                 if let Some(tip) = tip {
-                    return path.to(to, tip.step(), |at| tip.dab(stroke, canvas, at, aa));
+                    let sprayed = spray.map_or(Ok(()), |spray| {
+                        spray.reported(path.last(), to, at_ns, |at, passes| {
+                            tip.dabs(stroke, canvas, at, aa, passes)
+                        })
+                    });
+                    let spaced = path.to(to, tip.step(), |at| tip.dab(stroke, canvas, at, aa));
+                    return sprayed.and(spaced);
                 }
                 let from = path.move_to(to);
                 let mut outcome = Ok(());
@@ -1201,12 +1219,15 @@ impl View {
         );
     }
 
-    /// Lay one more dab where the airbrush is held: paint building up the
-    /// longer it stays.
-    pub(crate) fn airbrush(&mut self, layout: &Layout, damage: &mut Region) {
+    /// Lay what a held airbrush has sprayed while the pointer, unreported
+    /// by `now_ns`, was held still: paint building up the longer it stays.
+    pub(crate) fn airbrush(&mut self, now_ns: u64, layout: &Layout, damage: &mut Region) {
         self.lay(
-            |stroke, canvas, path, tip, aa| {
-                tip.map_or(Ok(()), |tip| tip.dab(stroke, canvas, path.last(), aa))
+            |stroke, canvas, path, spray, tip, aa| match (spray, tip) {
+                (Some(spray), Some(tip)) => spray.held(path.last(), now_ns, |at, passes| {
+                    tip.dabs(stroke, canvas, at, aa, passes)
+                }),
+                _ => Ok(()),
             },
             layout,
             damage,
@@ -1217,7 +1238,7 @@ impl View {
     fn drag(&mut self, layout: &Layout, scale: Scale, damage: &mut Region) {
         let at = self.at(layout);
         match self.gesture {
-            Some(Gesture::Stroke { .. }) => self.stroke_to(at, layout, damage),
+            Some(Gesture::Stroke { .. }) => self.stroke_to(at, self.pointer_ns, layout, damage),
             Some(Gesture::Shape { .. }) => {
                 let before = self.preview_bounds();
                 if let Some(Gesture::Shape { to, .. }) = &mut self.gesture {
@@ -2109,7 +2130,6 @@ impl View {
             return;
         }
         self.dragging = None;
-        self.airbrush_due = None;
         match self.gesture.take() {
             Some(Gesture::Stroke { stroke, .. }) => {
                 self.document.record_tiles(stroke.finish());
@@ -2141,7 +2161,6 @@ impl View {
     fn cancel_gesture(&mut self, layout: &Layout, damage: &mut Region) {
         let preview = self.preview_bounds();
         self.dragging = None;
-        self.airbrush_due = None;
         match self.gesture.take() {
             Some(Gesture::Stroke { stroke, .. }) => {
                 if let Some(canvas) = self.document.canvas_mut() {

@@ -18,8 +18,8 @@ use super::{
 use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::usb_urb::{
-    decode_completion, IsoGrant, UrbRequest, UsbDirection, UsbSpeed, UsbTransferType,
-    USB_CONTROL_TIMEOUT_MAX_MS,
+    decode_completion, IsoGrant, ReportCompletion, UrbRequest, UsbDirection, UsbSpeed,
+    UsbTransferType, USB_CONTROL_TIMEOUT_MAX_MS,
 };
 use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, ProcId, PROC_ID_LEN};
 use tairix_inline::BitSet256;
@@ -54,6 +54,9 @@ struct MockEngine {
 
 /// The mock interface's bulk-IN endpoint number.
 const BULK_IN_ENDPOINT: u8 = 2;
+
+/// The instant the mock engine says each report was captured at.
+const CAPTURED_NS: u64 = 0xCA97_0000_0001;
 
 impl MockEngine {
     fn new() -> Self {
@@ -129,7 +132,7 @@ impl UrbEngine for MockEngine {
         _endpoint: u8,
         _request: usize,
         data: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
+    ) -> Result<Option<ReportCompletion>, DriverError> {
         self.interrupt_calls += 1;
         if let Some(err) = self.interrupt_fault.take() {
             return Err(err);
@@ -140,7 +143,10 @@ impl UrbEngine for MockEngine {
         let report = self.reports.remove(0);
         let n = report.len().min(data.len());
         data[..n].copy_from_slice(&report[..n]);
-        Ok(Some(n))
+        Ok(Some(ReportCompletion {
+            transferred: u32::try_from(n).map_err(|_| DriverError::LengthOutOfRange)?,
+            captured_ns: CAPTURED_NS,
+        }))
     }
 
     fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
@@ -212,7 +218,14 @@ fn an_interrupt_in_is_held_until_a_controller_event_completes_it() {
     match outcome {
         UrbOutcome::Reply(reply) => {
             assert_eq!(reply.ticket, 0x11);
-            assert_eq!(decode_completion(&reply.bytes[..reply.len]), Ok(8));
+            assert_eq!(
+                ReportCompletion::decode(&reply.bytes[..reply.len]),
+                Ok(ReportCompletion {
+                    transferred: 8,
+                    captured_ns: CAPTURED_NS
+                }),
+                "the report says when it was captured"
+            );
         }
         other => panic!("expected a Reply, got {other:?}"),
     }

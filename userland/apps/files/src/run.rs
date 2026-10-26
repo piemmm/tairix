@@ -3563,11 +3563,16 @@ mod program {
             // Stepped before the event is routed, so the press that arms a
             // rename is not taken for the press that lets it go.
             let to = state.pointer.unwrap_or(Point::new(0, 0));
+            // The wait runs from the release on the clock presses are paired by.
+            let at_ns = match *event {
+                WindowEvent::Pointer { at_ns, .. } => at_ns,
+                _ => tairix_rt::clock_get(),
+            };
             state.overlays.rename_arm = state.overlays.rename_arm.and_then(|arm| {
                 arm.step(
                     PressInput::of(event),
                     to,
-                    tairix_rt::clock_get(),
+                    at_ns,
                     double_click,
                     desktop.scale(),
                 )
@@ -7665,6 +7670,7 @@ mod program {
             y,
             action,
             modifiers,
+            at_ns,
             ..
         } = event
         else {
@@ -7742,7 +7748,7 @@ mod program {
                 acts,
                 canvas,
                 viewport,
-                (point, *modifiers, keyboard_held),
+                (point, *modifiers, keyboard_held, *at_ns),
                 damage,
             ),
             None => (Repaint::Nothing, false),
@@ -8885,15 +8891,15 @@ mod program {
     /// tools sit on the toolbar band, which spans the whole window
     /// (`canvas.window()`).
     ///
-    /// `press` is where it landed, the modifiers held, and whether the window
-    /// held the keyboard before it.
+    /// `press` is where it landed, the modifiers held, whether the window
+    /// held the keyboard before it, and when its device reported it.
     fn apply_primary_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         acts: &mut Acts<'_>,
         canvas: Canvas<'_>,
         viewport: Rect,
-        (point, modifiers, keyboard_held): (Point, AbiModifiers, bool),
+        (point, modifiers, keyboard_held, at_ns): (Point, AbiModifiers, bool, u64),
         damage: &mut Region,
     ) -> (Repaint, bool) {
         let toolbar = canvas.chrome.toolbar;
@@ -8947,7 +8953,7 @@ mod program {
         overlays.sweep = None;
         match gesture::primary_press(
             &mut overlays.double_click,
-            tairix_rt::clock_get(),
+            at_ns,
             place,
             keys,
             in_selection,
@@ -9707,13 +9713,19 @@ mod program {
             WindowEvent::Scrolled { dx, dy, .. } => {
                 open_with_scroll_wheel(chooser, scale, theme, viewport, (*dx, *dy), damage)
             }
-            WindowEvent::Pointer { x, y, action, .. } => apply_chooser_pointer(
+            WindowEvent::Pointer {
+                x,
+                y,
+                action,
+                at_ns,
+                ..
+            } => apply_chooser_pointer(
                 overlays,
                 launcher,
                 client,
                 canvas,
                 double_click,
-                (*x, *y, *action),
+                (*x, *y, *action, *at_ns),
                 damage,
             ),
             _ => false,
@@ -9732,10 +9744,10 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         canvas: Canvas<'_>,
         double_click: Duration64,
-        pointer: (u32, u32, PointerAction),
+        pointer: (u32, u32, PointerAction, u64),
         damage: &mut Region,
     ) -> bool {
-        let (x, y, action) = pointer;
+        let (x, y, action, at_ns) = pointer;
         let scale = canvas.scale;
         let theme = canvas.theme();
         let Some(overlay) = overlays.open_with.as_mut() else {
@@ -9787,12 +9799,10 @@ mod program {
         // The pairing is the same shared tracker the listing behind it uses,
         // so a double-click means one thing.
         let subject = u64::try_from(index).unwrap_or(u64::MAX);
-        if overlay.clicks.register(
-            tairix_rt::clock_get(),
-            subject,
-            PointerButton::Primary,
-            double_click,
-        ) == ClickKind::Double
+        if overlay
+            .clicks
+            .register(at_ns, subject, PointerButton::Primary, double_click)
+            == ClickKind::Double
         {
             launch_open_with(overlays, launcher, client);
             return false;

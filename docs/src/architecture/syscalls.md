@@ -484,10 +484,11 @@ registry routes it by who holds the seat — a held seat's record is queued
 on its bounded per-seat pointer channel, an unowned seat's record is
 consumed and discarded (the text console has no pointer consumer; the
 driver never learns, and never chooses, the destination). The seat owner
-drains the channel with `pointer_read`, gated on `CAP_INPUT_READ` **and**
-owner-gated against the live seat lease exactly like `keyboard_read` — a
-non-owner (even one holding the capability) is refused with
-`SeatNotOwner`/`SeatRevoked`, so no other session can observe the pointer
+drains the channel with `pointer_read`, one `TimedPointer` (the record and
+when it happened: the stated device time, else its arrival) per call, gated on
+`CAP_INPUT_READ` **and** owner-gated against the live seat lease exactly like
+`keyboard_read` — a non-owner (even one holding the capability) is refused
+with `SeatNotOwner`/`SeatRevoked`, so no other session can observe the pointer
 stream. Both are unaudited per event like the other high-volume stream
 calls; the first delivered event of each input kind emits that kind's
 one-shot `INPUT_DELIVERED` liveness witness (`kind=key` / `kind=pointer`,

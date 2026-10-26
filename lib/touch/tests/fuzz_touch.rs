@@ -266,7 +266,15 @@ fn run(rng: &mut Prng, devices: u16, seen: &mut Seen) {
         recogniser.feed(&frame, &mut out);
         if rng.below(4) == 0 {
             let at = advance(rng, now);
-            recogniser.expire(at, &mut out);
+            let stated = recogniser.deadline_ns();
+            recogniser.expire(at, &mut |gesture, fell_ns| {
+                assert!(fell_ns <= at, "a deadline fell at {fell_ns}, after {at}");
+                assert!(
+                    stated.is_some_and(|stated| fell_ns >= stated),
+                    "a gesture timed at {fell_ns}, before any deadline stated ({stated:?})"
+                );
+                out(gesture);
+            });
             if let Some(deadline) = recogniser.deadline_ns() {
                 assert!(
                     deadline > at,

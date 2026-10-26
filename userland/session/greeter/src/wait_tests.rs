@@ -99,6 +99,18 @@ fn the_display_sleeps_thirty_minutes_after_the_last_input() {
     assert_eq!(idle.timeout(ENERGY_SAVING_AFTER_NS), 10 * NANOS_PER_SEC);
 }
 
+#[test]
+fn an_older_input_does_not_bring_the_sleep_forward() {
+    let mut idle = Idle::new(0);
+    idle.input(10 * NANOS_PER_SEC);
+    idle.input(9 * NANOS_PER_SEC);
+    assert_eq!(
+        idle.timeout(10 * NANOS_PER_SEC),
+        ENERGY_SAVING_AFTER_NS,
+        "a pointer report timed before the key already read"
+    );
+}
+
 /// A clock that cannot run as far as the deadline still has one: the sum
 /// saturates rather than wrapping to a deadline already past.
 #[test]

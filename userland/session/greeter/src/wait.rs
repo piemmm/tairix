@@ -34,9 +34,11 @@ impl Idle {
         Self { since_ns: now_ns }
     }
 
-    /// Input arrived at `now_ns`, so the wait starts again.
-    pub fn input(&mut self, now_ns: u64) {
-        self.since_ns = now_ns;
+    /// Input happened at `at_ns`, so the wait starts again from the latest
+    /// input seen: a pointer report is timed by its device, and so can be
+    /// older than a key read since.
+    pub fn input(&mut self, at_ns: u64) {
+        self.since_ns = self.since_ns.max(at_ns);
     }
 
     /// Nanoseconds from `now_ns` until the display is owed its sleep; zero

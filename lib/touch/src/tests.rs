@@ -98,9 +98,18 @@ impl Sim {
     }
 
     fn expire(&mut self, at_ms: u64) -> Vec<Gesture> {
+        self.expire_timed(at_ms)
+            .into_iter()
+            .map(|(gesture, _)| gesture)
+            .collect()
+    }
+
+    /// What expiring at `at_ms` hands on, each with the instant it fell.
+    fn expire_timed(&mut self, at_ms: u64) -> Vec<(Gesture, u64)> {
         let mut out = Vec::new();
-        self.recogniser
-            .expire(at_ms * MS, &mut |gesture| out.push(gesture));
+        self.recogniser.expire(at_ms * MS, &mut |gesture, fell_ns| {
+            out.push((gesture, fell_ns));
+        });
         out
     }
 
@@ -189,6 +198,19 @@ fn a_tap_clicks_and_holds_its_press_for_a_drag_that_never_comes() {
     assert_eq!(pad.expire(229), []);
     assert_eq!(pad.expire(230), [Gesture::Released(PRIMARY)]);
     assert_eq!(pad.recogniser.deadline_ns(), None);
+}
+
+/// A gesture a deadline ends happened at the deadline, however late the wake
+/// that acts on it.
+#[test]
+fn a_gesture_a_deadline_ends_is_timed_by_the_deadline() {
+    let mut pad = Sim::pad(TouchSettings::DEFAULT);
+    assert_eq!(pad.at(0, &[finger(1, 100, 100)]), []);
+    assert_eq!(pad.at(50, &[]), [Gesture::Pressed(PRIMARY)]);
+    assert_eq!(
+        pad.expire_timed(900),
+        [(Gesture::Released(PRIMARY), 230 * MS)]
+    );
 }
 
 #[test]

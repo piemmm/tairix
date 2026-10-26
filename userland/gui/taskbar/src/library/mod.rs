@@ -1422,9 +1422,10 @@ impl LibraryPopup {
     }
 
     /// Rebuild what is shown from the catalog, the shelf, and the query,
-    /// keeping the keyboard on the program it was on.
+    /// keeping the keyboard and a press on the programs they were on.
     fn rebuild(&mut self) {
         let kept = self.current.and_then(|at| self.key_of(at));
+        let pressed = self.pressed.and_then(|at| self.key_of(at));
         self.searching = self.search.has_query();
         if self.searching {
             let hits = search::search(&self.index, self.search.text(), &self.shelf.weights);
@@ -1456,8 +1457,9 @@ impl LibraryPopup {
         if self.hover.is_some_and(|at| self.item(at).is_none()) {
             self.hover = None;
         }
-        // A press is keyed to a place, and what sits there may have changed.
-        self.pressed = None;
+        // Kept on its program, not its place: the release still opens only
+        // what lies under it, and a refresh landing mid-click loses nothing.
+        self.pressed = pressed.and_then(|key| self.find(&key));
         self.touch();
     }
 

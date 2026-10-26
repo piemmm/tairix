@@ -276,7 +276,7 @@ mouse, touch pad and touch screen application on the interface is then served:
 each report is a blocking interrupt-IN URB the host controller answers when
 the device reports, so the driver parks between reports, and each record goes
 to the boot seat through `key_inject`, `pointer_inject` or `touch_inject`, a
-pointer record stating when its report arrived. An
+pointer record stating when the host controller captured its report. An
 interface that goes, or faults four times running, is let go of first — every
 key, button and contact it held released — and the driver exits; a re-plug
 autoloads a fresh instance on a fresh node. The live report path is a metal

@@ -30,6 +30,7 @@ use tairix_window::docapp::{
 use tairix_window::document::{Access, SavedDocument};
 
 use crate::adjust::AdjustPane;
+use crate::brush::Spray;
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Tile};
 use crate::colour::{Ink, BLACK, WHITE};
 use crate::dialog::{Form, Purpose};
@@ -55,9 +56,6 @@ use crate::viewport::{Viewport, ACTUAL, ZOOMS};
 
 /// The application's name, as window titles end.
 pub const APP_TITLE: &str = "Paint";
-
-/// How often a held airbrush lays another dab.
-pub const AIRBRUSH_INTERVAL_NS: u64 = 25_000_000;
 
 /// A new sprite's size to start.
 const SPRITE_SIZE: (u32, u32) = (32, 32);
@@ -723,10 +721,12 @@ pub struct Preview {
 /// A drag in progress on the canvas.
 #[derive(Debug)]
 enum Gesture {
-    /// Paint laid down as the pointer moves along `path`.
+    /// Paint laid down as the pointer moves along `path`, and for an
+    /// airbrush as it is held (`spray`).
     Stroke {
         stroke: alloc::boxed::Box<Stroke>,
         path: crate::brush::Path,
+        spray: Option<Spray>,
     },
     /// A shape following the pointer, put down when it lets go.
     Shape { from: Fx, to: Fx, secondary: bool },
@@ -960,6 +960,8 @@ pub struct View {
     /// What *New picture* offers to start.
     new_picture: (NewPicture, SaveFormat),
     pointer: Point,
+    /// When the pointer was reported where it is, by its device.
+    pointer_ns: u64,
     modifiers: Modifiers,
     /// What a Ctrl-wheel turn has left short of a whole zoom rung.
     zoom_carry: i64,
@@ -972,7 +974,6 @@ pub struct View {
     save_as: Option<SaveFormat>,
     pending: Option<Pending>,
     next_job: u64,
-    airbrush_due: Option<u64>,
     repeat_due: Option<u64>,
     /// The picture pixel under the pointer, which the status band states.
     hover: Option<(u32, u32)>,
@@ -1147,7 +1148,7 @@ impl DocumentView for View {
                 }
                 Outcome::none()
             }
-            _ => self.on_pointer(input, layout, scale, theme, damage),
+            _ => self.on_pointer(input, now_ns, layout, scale, theme, damage),
         }
     }
 
@@ -1323,6 +1324,7 @@ impl View {
             open_fitted: false,
             new_picture: (NewPicture::DEFAULT, SaveFormat::Png),
             pointer: Point::new(-1, -1),
+            pointer_ns: 0,
             modifiers: Modifiers::default(),
             zoom_carry: 0,
             pinch: None,
@@ -1331,7 +1333,6 @@ impl View {
             save_as: None,
             pending: None,
             next_job: 1,
-            airbrush_due: None,
             repeat_due: None,
             hover: None,
         };
@@ -2008,9 +2009,17 @@ impl View {
     /// When the window next needs waking, if it does.
     #[must_use]
     pub fn deadline_ns(&self) -> Option<u64> {
-        match (self.airbrush_due, self.repeat_due) {
+        match (self.spray().map(Spray::due_ns), self.repeat_due) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (due, None) | (None, due) => due,
+        }
+    }
+
+    /// The held airbrush's own clock, while it is held.
+    fn spray(&self) -> Option<&Spray> {
+        match &self.gesture {
+            Some(Gesture::Stroke { spray, .. }) => spray.as_ref(),
+            _ => None,
         }
     }
 
@@ -2028,13 +2037,6 @@ impl View {
         .into_iter()
         .flatten()
         .min();
-        let airbrushing =
-            matches!(self.gesture, Some(Gesture::Stroke { .. })) && self.tool == Tool::Airbrush;
-        self.airbrush_due = match (airbrushing, self.airbrush_due) {
-            (true, None) => Some(now_ns.saturating_add(AIRBRUSH_INTERVAL_NS)),
-            (true, armed) => armed,
-            (false, _) => None,
-        };
     }
 
     /// Do what has fallen due by `now_ns`: another dab of a held airbrush,
@@ -2047,9 +2049,8 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) {
-        if self.airbrush_due.is_some_and(|due| due <= now_ns) {
-            self.airbrush_due = Some(now_ns.saturating_add(AIRBRUSH_INTERVAL_NS));
-            self.airbrush(layout, damage);
+        if self.spray().is_some_and(|spray| spray.due_ns() <= now_ns) {
+            self.airbrush(now_ns, layout, damage);
         }
         self.tool_box
             .repeat(now_ns, layout.tools(), scale, theme, damage);

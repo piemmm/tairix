@@ -932,6 +932,30 @@ fn a_click_opens_a_program_and_a_press_slid_off_it_does_not() {
 }
 
 #[test]
+fn a_refresh_landing_mid_click_keeps_the_press_on_its_program() {
+    // Opening the launcher asks for a rescan, which on a busy machine lands
+    // between a press and its release.
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let chess = picture_of(&bar, at(0, 1));
+    press_at(&mut input, &mut bar, chess.x, chess.y);
+    bar.set_library_facts(BTreeMap::from([(id("chess"), identity("Chess"))]));
+    assert_eq!(bar.library().pressed(), Some(at(0, 1)));
+    assert_eq!(
+        release(&mut input, &mut bar),
+        TaskbarResponse::LibraryLaunch { entry: id("chess") }
+    );
+
+    // One that moves the program from under the press opens nothing.
+    open_library(&mut input, &mut bar);
+    press_at(&mut input, &mut bar, chess.x, chess.y);
+    bar.set_library_shelf(shelf(&["write"], &[]));
+    assert_eq!(release(&mut input, &mut bar), TaskbarResponse::Ignored);
+    assert!(bar.library().is_open());
+}
+
+#[test]
 fn a_press_beyond_the_panel_dismisses_and_on_its_ground_does_not() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();

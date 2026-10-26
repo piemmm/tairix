@@ -20,7 +20,7 @@ use super::device::{
     SPEED_FULL, SPEED_HIGH, SPEED_LOW, SPEED_SUPER,
 };
 use super::ring::{EventRingCursor, ProducerRing};
-use super::transport::{drive_urb, UrbEngine, UrbScope};
+use super::transport::{drive_urb, UrbDone, UrbEngine, UrbScope};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
 use super::*;
 use tairix_abi::driver::DmaReach;
@@ -5643,7 +5643,8 @@ impl TestHost {
         self.host.controller_faulted()
     }
 
-    /// A report poll, after the service step routed what was posted.
+    /// A report poll, after the service step routed what was posted,
+    /// answering the report's length.
     fn next_report(
         &mut self,
         index: usize,
@@ -5651,7 +5652,10 @@ impl TestHost {
         buf: &mut [u8],
     ) -> Result<Option<usize>, DriverError> {
         self.settle();
-        self.core_mut().next_report(index, request, buf)
+        Ok(self
+            .core_mut()
+            .next_report(index, request, buf)?
+            .map(|report| report.transferred as usize))
     }
 
     /// A bulk reap as the HCD drives one: after each service step, until a
@@ -5685,7 +5689,7 @@ impl TestHost {
         index: usize,
         urb: &UrbRequest,
         shm: &mut [u8],
-    ) -> Result<Option<u32>, Errno> {
+    ) -> Result<Option<UrbDone>, Errno> {
         for _ in 0..SETTLE_STEPS {
             let driven = drive_urb(urb, shm, &mut self.host.engine_for(index));
             if driven != Ok(None) {
@@ -6973,6 +6977,39 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
 }
 
 #[test]
+fn a_report_carries_the_instant_its_service_step_captured_it() {
+    // A class driver kept from running reads its reports late and together;
+    // each still says when the controller captured it, so how far apart the
+    // device sent them survives the backlog.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.bring_up().expect("the keyboard enumerates");
+    arm_report_request(&mut device);
+    let mut captured = alloc::vec::Vec::new();
+    for key in [0x04, 0x05] {
+        device.advance_us(40_000);
+        device
+            .host_mut()
+            .model_mut()
+            .pending_reports
+            .push_back(alloc::vec![0x00, 0x00, key, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        device.host_mut().model_mut().process_int_ring();
+        captured.push(device.now_ns);
+        device.serve();
+    }
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    for at in captured {
+        let report = device
+            .core_mut()
+            .next_report(0, BOOT_REPORT_LEN, &mut buf)
+            .expect("a report drains")
+            .expect("a report is buffered");
+        assert_eq!(report.transferred as usize, BOOT_REPORT_LEN);
+        assert_eq!(report.captured_ns, at);
+    }
+}
+
+#[test]
 fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
     // A keyboard wired straight to a root-hub port (no intervening hub):
     // the orchestration enumerates the first connected port and, because
@@ -7254,7 +7291,10 @@ fn serve_control(
         setup,
         timeout_ms: core::num::NonZeroU32::new(1_000),
     };
-    device.drive(index, &urb, shared)
+    Ok(device.drive(index, &urb, shared)?.map(|done| match done {
+        UrbDone::Moved(transferred) => transferred,
+        UrbDone::Report(report) => report.transferred,
+    }))
 }
 
 /// A keyboard's Report Descriptor, as the mock serves it.

@@ -86,7 +86,7 @@ use tairix_abi::driver::filesystem::NodeKind;
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
-use tairix_abi::input::{KeyInput, PointerInput, POINTER_EDGE_UNTIMED};
+use tairix_abi::input::{KeyInput, PointerInput, TimedPointer, POINTER_EDGE_UNTIMED};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
@@ -8135,6 +8135,7 @@ where
             caller.process().0,
             at_ns,
             crate::seat::CLICK_DEBOUNCE.window_ns(),
+            now_ns,
         )?;
         // The pointer analogue of `key_inject`'s liveness witness: the
         // first delivered pointer record proves an (autoloaded) pointer
@@ -8156,7 +8157,7 @@ where
         // non-null (`UserPtr`). A record is fixed-width: a `len` that
         // cannot hold one fails closed, the kernel never writes a partial
         // record.
-        if len < PointerInput::WIRE_LEN {
+        if len < TimedPointer::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
         // Drain one record into a stack buffer first. `read_pointer`
@@ -8167,7 +8168,7 @@ where
         // (a valid short read the caller loops on) or one whole record's
         // `WIRE_LEN`. A pointer record carries no typed content, so no
         // zeroisation is needed on the staging buffer.
-        let mut record_bytes = [0u8; PointerInput::WIRE_LEN];
+        let mut record_bytes = [0u8; TimedPointer::WIRE_LEN];
         let read = self
             .seat_registry
             .read_pointer(seat, seat_owner(caller), &mut record_bytes)?;
@@ -28892,13 +28893,13 @@ mod tests {
             Err(Errno::BufferTooSmall)
         );
         assert_eq!(
-            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN - 1),
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, TimedPointer::WIRE_LEN - 1),
             Err(Errno::BufferTooSmall)
         );
         // An unowned seat's channel cannot be drained, even by a
         // `CAP_INPUT_READ` holder: the drain is owner-gated.
         assert_eq!(
-            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, TimedPointer::WIRE_LEN),
             Err(Errno::SeatNotOwner)
         );
         // A record injected while the seat is unowned is consumed and
@@ -28927,22 +28928,25 @@ mod tests {
             Ok(PointerInput::WIRE_LEN as u64)
         );
         assert_eq!(
-            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
-            Ok(PointerInput::WIRE_LEN as u64)
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, TimedPointer::WIRE_LEN),
+            Ok(TimedPointer::WIRE_LEN as u64)
         );
         // The record round-tripped intact through the caller's buffer.
         let read_back = h
             .with_caller_aspace(&ctx, |space, physmap| {
-                let mut buf = [0u8; PointerInput::WIRE_LEN];
+                let mut buf = [0u8; TimedPointer::WIRE_LEN];
                 copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
                 buf
             })
             .expect("caller has a registered space");
-        assert_eq!(PointerInput::from_bytes(&read_back), Ok(record));
+        assert_eq!(
+            TimedPointer::from_bytes(&read_back).map(|timed| timed.input),
+            Ok(record)
+        );
         // The channel is now drained: the discarded pre-ownership record
         // never surfaced.
         assert_eq!(
-            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, PointerInput::WIRE_LEN),
+            h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, TimedPointer::WIRE_LEN),
             Ok(0)
         );
     }
@@ -29066,7 +29070,8 @@ mod tests {
     /// never a later one than the call's own, and none for
     /// `POINTER_EDGE_UNTIMED`: a press stated past the clock lands inside the
     /// window of the release before it and is dropped as chatter with the
-    /// release closing it, and an untimed press is delivered however close.
+    /// release closing it, and an untimed press is delivered however close,
+    /// timed by its arrival.
     #[test]
     fn pointer_inject_judges_a_button_edge_by_its_stated_device_time() {
         use tairix_abi::input::PointerButtonCode;
@@ -29120,17 +29125,32 @@ mod tests {
             );
         }
         let mut delivered = alloc::vec::Vec::new();
-        while h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, len) == Ok(len as u64) {
+        let read = TimedPointer::WIRE_LEN;
+        while h.pointer_read(&ctx, SEAT_PRIMARY, 0x1000, read) == Ok(read as u64) {
             let bytes = h
                 .with_caller_aspace(&ctx, |space, physmap| {
-                    let mut buf = [0u8; PointerInput::WIRE_LEN];
+                    let mut buf = [0u8; TimedPointer::WIRE_LEN];
                     copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
                     buf
                 })
                 .expect("caller has a registered space");
-            delivered.push(PointerInput::from_bytes(&bytes).expect("decodes"));
+            delivered.push(TimedPointer::from_bytes(&bytes).expect("decodes"));
         }
-        assert_eq!(delivered, [release, press]);
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|timed| timed.input)
+                .collect::<alloc::vec::Vec<_>>(),
+            [release, press]
+        );
+        assert_eq!(
+            delivered[0].at_ns, NOW_NS,
+            "the device time it was stated with"
+        );
+        assert!(
+            delivered[1].at_ns > NOW_NS,
+            "an untimed press is timed by its arrival"
+        );
     }
 
     /// A touch handler over a fresh seat registry, its caller (task 2) given an
