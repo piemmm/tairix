@@ -57,8 +57,8 @@ use tairix_theme::{
 };
 use tairix_wm::{
     chrome_cache, cursor_cache, frost_cache, ChromeEpoch, Color, Compositor, Corners, FrostEpoch,
-    FrostedBackdrop, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton, PointerCatch,
-    Rect, Scale, Surface, WindowActivationState, WindowChrome, WindowControlKind, WindowId,
+    FrostField, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton, PointerCatch, Rect,
+    Scale, Surface, WindowActivationState, WindowChrome, WindowControlKind, WindowId,
 };
 
 use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
@@ -237,8 +237,7 @@ pub(crate) fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, Chrome
 
 /// The frosted-backdrop cache every compositor under test is built with, on
 /// the same terms as its furniture cache.
-pub(crate) fn test_frost_cache(
-) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
+pub(crate) fn test_frost_cache() -> ReclaimCache<WindowId, FrostField, FrostEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     frost_cache(
         TEST_SEAT,

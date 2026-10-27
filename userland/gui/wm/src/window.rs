@@ -111,20 +111,16 @@ impl Participation {
 }
 
 /// What the compositor settled about a window's backdrop for the frame in
-/// flight, and whether that backdrop has changed since the window was last
-/// composed.
+/// flight.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct Backdrop {
     /// Composed over a frost of its backdrop rather than straight over the
     /// layers beneath it.
     frosted: bool,
-    /// The frost is kept between frames — the part of the answer the
-    /// compositor rations, since stacked windows all want a frost of the same
+    /// The blur is kept between frames — the part of the answer the
+    /// compositor rations, since stacked windows all want a blur of the same
     /// pixels.
     retained: bool,
-    /// Something beneath the window's rectangle has changed since it was last
-    /// composed, which changes every pixel its frost spreads that change to.
-    changed: bool,
 }
 
 /// A window: a [`Surface`] placed at a screen [`Point`] with a
@@ -493,22 +489,16 @@ impl Window {
         self.opacity
     }
 
-    /// Whether this window's own pixels leave what is composed beneath its
-    /// rectangle showing through it as a *field*, so the window is worth
-    /// retaining that backdrop for — a candidate for retention, never a claim
-    /// on it: the compositor rations how many candidates a frame serves.
-    ///
-    /// Two things do it: a backdrop blur, which reads the backdrop to blur it,
-    /// and a whole-window opacity below full, which admits it everywhere. Both
-    /// make every frame that touches the window recompose the entire stack
-    /// beneath it, which is what retaining pays for.
+    /// Whether this window's look depends on what is composed beneath its
+    /// rectangle as a whole rather than pixel by pixel: a backdrop blur, which
+    /// blurs it, or a whole-window opacity below full, which shows it
+    /// everywhere. A display engine is then given what lies beneath with the
+    /// window — its frost, or its footprint flattened — not the window alone.
     ///
     /// Deliberately *not* here: an antialiased corner, whose backdrop is a few
     /// pixels of arc, and a client that paints alpha into its own content,
-    /// which cannot be known without reading every pixel of it. Both still
-    /// composite correctly — they simply blend the layers below rather than
-    /// copying a retained picture of them, which is what a window that reads
-    /// only a sliver of its backdrop should do.
+    /// which cannot be known without reading every pixel of it. Both are
+    /// blended pixel by pixel, in software or by the engine.
     #[must_use]
     pub const fn reads_backdrop(&self) -> bool {
         self.blur_radius > 0 || self.opacity < u8::MAX
@@ -523,19 +513,16 @@ impl Window {
     }
 
     /// Whether the compositor composes this window over a frost of its
-    /// backdrop: always for a visible blurred window, and for a visible plainly
-    /// translucent one only while its backdrop is
-    /// [retained](Self::is_retained), since composing it over an unretained one
-    /// is exactly blending it straight through.
+    /// backdrop: every visible blurred window on screen is.
     pub(crate) const fn is_frosted(&self) -> bool {
         self.backdrop.frosted
     }
 
-    /// Whether the compositor keeps this window's frost between frames.
+    /// Whether the compositor keeps this window's blur between frames.
     ///
-    /// Retention is rationed, because stacked windows all want a frost of the
-    /// same pixels; a blur is not. A blurred window refused retention is
-    /// frosted all the same, recomputing what each frame needs of its frost.
+    /// Retention is rationed, because stacked windows all want a blur of the
+    /// same pixels; a frost is not. A blurred window refused retention is
+    /// frosted all the same, blurring what each frame needs of its frost.
     pub(crate) const fn is_retained(&self) -> bool {
         self.backdrop.retained
     }
@@ -548,18 +535,6 @@ impl Window {
         self.backdrop.frosted = frosted;
         self.backdrop.retained = retained;
         withdrawn
-    }
-
-    /// Whether anything beneath this window's rectangle has changed since it
-    /// was last composed.
-    pub(crate) const fn backdrop_changed(&self) -> bool {
-        self.backdrop.changed
-    }
-
-    /// Record whether anything beneath this window's rectangle has changed
-    /// since it was last composed.
-    pub(crate) const fn set_backdrop_changed(&mut self, changed: bool) {
-        self.backdrop.changed = changed;
     }
 
     /// Corner style.

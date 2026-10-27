@@ -647,11 +647,10 @@ that fails without it. Both are asserted by painting the same recipe both ways
 and comparing every pixel.
 
 Stage D's invariants are untouched: `repaint_window` marks through
-`mark_layer`, so a scoped chrome repaint drops the frosts of the windows
+`mark_layer`, so a scoped chrome repaint stales the frosts of the windows
 stacked *above* it exactly as a whole-surface one did, and the bar's own
-retained frost is reused rather than recomputed (`compose_plan` promotes only a
-blurred window whose frost must be rebuilt, so a repaint inside one costs its
-own rectangles).
+retained field is laid rather than blurred again, so a repaint inside one costs
+its own rectangles.
 
 **A refused present keeps what the surface owes.** The presenter holds the
 account and takes it per present, putting back whatever it could not draw, so a
@@ -790,13 +789,13 @@ widely is the defect this closes:
 
 - `mark(rect)` — a change not confined to a single layer: the root fill, the
   desktop layer, the density or theme every window is drawn with, and
-  restacking. Drops the frost of every window whose bounds it reaches.
+  restacking. Stales every frost it reaches, within the blur's radius of it.
 - `mark_layer(id, rect)` — a change confined to one window's own layer (content,
-  position, size, shape, furniture). Drops the frosts of windows stacked
+  position, size, shape, furniture). Stales the frosts of windows stacked
   *above* that one only: a frosted window is blended over a blur of the layers
   **below** it, so nothing at or above its own layer is part of its frost.
 - `mark_overlay(rect)` — a change no frost can read: the cursor, composed after
-  every window. Drops nothing, and is still a composite: the cursor is blended
+  every window. Stales nothing, and is still a composite: the cursor is blended
   into the back buffer like any other layer.
 - `mark_scanout(rect)` — the composed pixels are current and only the scan-out
   bytes encoded from them are stale. The screen reveal is the whole of this
@@ -807,44 +806,44 @@ widely is the defect this closes:
   frost — after subtracting whatever the composite pass already encoded, so no
   pixel is encoded twice.
 
-`compose_plan` promotes only a blurred window whose frost must be **recomputed**;
-recomputing one drops any overlapping frost above it, because a blur spreads the
-change far past the rectangle that caused it.
+A frost reads the windows beneath it composed without their frosts
+(`plans/GPU.md` GD8), so no frost recomputed reaches another, and what a change
+marks of a frost is the blur's reach of it, never the window's whole rectangle.
 
-### D.2 The frosted backdrop is retained
-`userland/gui/wm/src/frost.rs`: `FrostedBackdrop` (the rectangle's frosted
-pixels plus the rectangle, physical radius and window shape they are a function
-of) in a `ReclaimCache` keyed by `WindowId`, built by `frost_cache` from
-`lib/reclaim`'s shared `stacked_ui_cache` policy. A frost is a *whole window's*
-rectangle, so unlike furniture a stack of overlapping ones can want more than
-the ceiling holds; the ceiling is a bound on what the desktop may retain, not a
-claim that no more can be wanted, and D.13 is how a frame chooses which of them
-to retain.
+### D.2 The blur is retained as a field
+`userland/gui/wm/src/frost.rs`: `FrostField` — the blur over a screen rectangle
+holding the window's, unmixed, the part of it that is stale, and the physical
+radius — in a `ReclaimCache` keyed by `WindowId`, built by `frost_cache` from
+`lib/reclaim`'s shared `stacked_ui_cache` policy. A field is a *whole window's*
+rectangle or more, so unlike furniture a stack of overlapping ones can want
+more than the ceiling holds; the ceiling is a bound on what the desktop may
+retain, not a claim that no more can be wanted, and D.13 is how a frame chooses
+which of them to retain.
 
-- The rectangle recorded is the window's **whole** one, not the on-screen part:
-  a window pushed off an edge is frosted from the row and column the screen
-  begins at while its shape is read from its own top-left, so two positions that
-  clip alike are still two different frosts.
+- **What it is a function of.** The windows beneath, composed without their
+  frosts, and the radius: not where the window lies, its shape, or any other
+  frost (`plans/GPU.md` GD8). The frost is laid from it — copied where the shape
+  covers fully, mixed at the corners — so a move, a resize or a shape change
+  inside the field blurs nothing.
 - **Epoch: `(scale, screen extent)`, deliberately not the theme.** A palette
-  change repaints the layers below and marks them, which drops the frosts that
-  read them. Both epoch components are already caught per entry, so the epoch is
-  not what keeps a stale frost off the screen — it is what stops a superseded one
-  staying *charged*. `set_backdrop_blur(_, 0)` releases the entry outright.
-- **One counted lookup per frosted window per frame.** The plan and the
-  composite both need to know whether a frost may be reused, so the answer is
-  taken once (`frost_plan`) and remembered: two lookups could disagree,
-  leaving a window blurred over a rectangle whose lower layers the frame never
-  composed. The lookup goes through `ReclaimCache::find`, so a reuse records a
-  **hit** and refreshes recency, and an entry whose geometry no longer matches is
-  released before the lookup so the miss is counted once. `find` never enforces
-  the pressure band — the frame enforces it once, before the pass — so no lookup
-  can evict an entry an earlier one promised the same pass. The session
-  registers this ledger with the process cache report, so the hit ratio is what
-  `sysmon`'s reclaim page renders.
-- **The cache is read-only for a whole composite pass** and written at the end
-  (`retain_pending_frost`, through `ReclaimCache::retain`, which counts no
-  lookup): admitting one mid-pass could evict an entry the pass had already
-  decided to reuse.
+  change repaints the layers below and marks them, which stales the fields that
+  read them. The epoch is what stops a superseded field staying *charged*.
+  `set_backdrop_blur(_, 0)` releases the entry outright.
+- **Fitted once per frame, before the pass, for every frost the frame shows.**
+  `prepare_fields` shifts a field in place across its margin, regrows one around
+  a resized window keeping what it held, or makes one, so the pass writes fields
+  only in place (`ReclaimCache::renew`) and no admission mid-pass can evict a
+  field the pass is using. That fitting is the frost's one counted lookup a
+  frame (`ReclaimCache::find`), so a field every frame shows records a hit and
+  stays recent; `find` never enforces the pressure band — the frame enforces it
+  once, before the pass. A frost the frame does not show — untouched, or
+  touched only beneath the interiors of frosts above — is neither looked up nor
+  given a field. The session registers this ledger with the process cache
+  report, so the hit ratio is what `sysmon`'s reclaim page renders.
+- **The stale region is held to a budget** (`FROST_BANDS` rectangles): past it
+  it grows to its bounding box, which costs a blur and never a wrong pixel. Its
+  heap is charged as a fixed allowance in every field's payload, so the charge
+  stays fixed while the region changes and `renew` can hold it to that.
 
 ### D.3 Cheaper, bit-identical blur arithmetic
 The divisor is constant for a whole pass (replicated edges keep it at
@@ -861,11 +860,13 @@ The blur is asserted byte-identical to a **naive `O(area·radius)` reference** i
 the test file over a spread of shapes and radii (1×N, N×1, radius 0, radius
 wider than the region); the reciprocal's exactness condition is checked for every
 count in range, that the cutoff is where it breaks, and against a written-out
-divide oracle over every reachable sum at desktop radii. The frost cache is
-proven by composing one scene three ways — reusing frosts, blurring afresh, and
+divide oracle over every reachable sum at desktop radii; a blur written into a
+field and mixed back is the one-pass frost to the bit. The frost cache is proven
+by composing one scene three ways — reusing fields, blurring afresh, and
 retaining nothing — byte-identical in the scan-out frame *and* the back buffer
-across ~30 mutations, plus the counter assertions for each funnel, the ceiling
-and mild-pressure trim, and teardown. Docs: `lib/raster/README.md`, the `Reciprocal`
+across ~30 mutations, a frost is held pixel for pixel to a naive reference of
+its definition before and after a drag, and the counter assertions cover each
+funnel, the ceiling and mild-pressure trim, and teardown. Docs: `lib/raster/README.md`, the `Reciprocal`
 and `blur_span` rustdoc, `userland/gui/wm/README.md`, `frost.rs`'s module docs,
 `docs/src/desktop/wm.md` (*Retained backdrops*), and `plans/SMARTRAM.md`.
 
@@ -921,76 +922,45 @@ invalidates a cache entry of its own.
   the compositor's, at the point the frame is mutated — and the resize grabber it
   drives as a gesture engine reports into a sink behind `ResizeGrab::gesture`.
 
-### D.8 A frosted window that moves keeps the frost the move cannot reach
-A moved window's backdrop does not move, so the retained frost is still exactly
-right — in *screen* coordinates — wherever neither difference between the two
-positions applies. Only two exist, and both are confined to a border: the blur
-**replicates** at its rectangle's edges (a pixel less than `radius_px` inside
-either position averaged a different sample set), and the shape **weights** the
-mix at a window-local coordinate (a pixel within a corner's reach was mixed at a
-different coverage).
+### D.8 A frosted window that moves blurs only what its field lacks
+A moved window's backdrop does not move, and its field is a function of that
+backdrop alone, so wherever the window lies inside the field its frost is laid
+without a blur. A window's first move gives its field a margin of the blur's
+radius about its rectangle (`FrostField::wanted`); a move past it shifts the
+field in place (`FrostField::shift_to`), keeping what it holds, and only the
+slab entered is blurred — at most what a sample's border blur cost before the
+field existed, once per margin crossed. A field far larger than its window is
+regrown around it, keeping what it held (`FrostField::regrown`). The ring is
+blurred a slab at a time, because a band costs its lines' priming as well as
+its area. Measured against the border-per-sample design on the Switchboard drag,
+`plans/GPU.md` §7.1.
 
-`FrostedBackdrop::reuse` therefore answers `FrostPlan::{Whole, Core(rect),
-Blur}`, where the core is the shared rectangle taken in by the larger of the two
-reaches. A differing radius keeps nothing; a resize and a corner change are
-**not** special cases, because the coverage argument holds for them word for
-word — which is why `reuse` compares no shapes for equality. An entry is
-released only when nothing can be kept from it. A frost the frame recomputed any
-part of is captured whole, so the next frame compares against where the window is
-*now* — otherwise the core would erode a sample at a time.
+`Surface::blur_from` is the raster half: the blur of bands of the screen,
+unmixed, into a surface placed anywhere over the plane, and `Surface::mix_from`
+the shape-weighted mix of it back; together they write exactly what
+`Surface::frost_from` writes in one pass. Two invariants a future change must
+keep:
 
-The capture goes back into the pixels already retained
-(`FrostedBackdrop::recapture` through `ReclaimCache::renew`), because a move
-leaves the rectangle the same size and so the retained buffer is already the
-right shape. Building a fresh one per sample is correct but frees a screen-scale
-buffer and requests an identical one on the frame path, which a heap holding no
-retention turns into a page of map, unmap and cross-CPU TLB shootdown per
-kilobyte. `renew` requires the payload's charged size to be unchanged and treats
-a resize as a refusal, so the ledger cannot drift; a resize or an edge clip that
-changes the extent is captured afresh. The gate is the charge itself: a drag adds
-no cache insertions (`dragging_a_frosted_window_reuses_its_retained_buffer`).
-
-`Surface::frost_from` is the raster half: frost given bands of a rectangle — here
-the border around a kept block — writing exactly what the whole-rectangle frost
-writes there. `blur_span` produces the outputs of a line, not all of them, so
-`box_blur` and the partial path share one sliding window, and `frost_region` is
-`frost_from` with the surface as its whole backdrop, so a border and a whole
-cannot round, replicate, weight, or dither differently. Two invariants a future
-change must keep:
-
-- **Every band's horizontal pass is taken before any band is mixed back.** A
-  band's neighbourhood reaches into the bands beside it, and what it must read
-  there is the backdrop, not the frost of it.
+- **Every band's horizontal pass is taken before any band is laid.** A band's
+  neighbourhood reaches into the bands beside it, and what it must read there
+  is the backdrop, not the blur of it.
 - **`blur_span` confines its source to the line before walking it.** The walk
   reads a clamped edge by letting a strided iterator run out, which breaks the
   moment several bands share one max-sized scratch — a band then reads a
   neighbour's pixels as its replicated edge.
 
-**The layers a frost covers are no longer composed** (`compose_plane`,
-`frost_spared`): a frost is copied over whatever is beneath it, so composing that
-stack first is work the copy throws away. A frame composes below a frost only
-outside what the frost will write — nothing under one reused whole, and only the
-ring the border blur *reads* under one reused in part — as the disjoint
-rectangles `Region::subtract` gives, never the box around them. `frost_spared`
-and `frost_segment` both consult the cache with only a composite in between, so a
-missing frost composes the plane and blurs in full.
+**The layers a frost covers are not composed.** A frost writes its interior —
+where the shape covers fully — over whatever is beneath it, so a frame composes
+below a frosted window only at its corners and past its edges, as the disjoint
+rectangles `Region::subtract` gives. Where a blur is needed its backdrop is
+composed into the frost plane, unfrosted, over the blur's reach.
 
-### D.9 Any window that reads its backdrop retains one
-A frost is a cache of the composed plane, and a *plainly translucent* window had
-none, so every pointer sample of its drag re-blended the whole stack beneath it.
-A second cache for the unblurred plane was **not** needed and would have been
-duplication (§2.2): **a blur of radius zero leaves the composed layers exactly as
-it found them**, so the retained entry already *is* the composed backdrop and the
-whole retention path applies unchanged. All that was missing was admission — one
-predicate, `Window::reads_backdrop` (a blur, or a whole-window opacity below
-full), replacing the `blur_radius() == 0` gates in `compose_plan` and
-`recompose_rect`. `blur_px` is gated on `radius > 0`, so a radius-zero frost is
-not reported as blur work.
-
-Deliberately excluded, because their backdrop is not a field: an antialiased
-corner (a few pixels of arc) and a client painting alpha into its own content
-(unknowable without reading every pixel). Both still composite correctly through
-the blend path.
+### D.9 A window translucent as a whole with no blur retains nothing
+A blur of radius zero is the backdrop as composed, which a frost's backdrop no
+longer is (GD8), so a window with a whole-window opacity and no blur composes
+through the blend path every frame. Nothing in the desktop draws one: the
+library popup that fades is frosted too, and an application cannot set a
+window-wide opacity. On a layer engine such a window is flattened.
 
 ### D.10 A window and the menu it owns are one thing to restack
 `Window` carries `parent: Option<WindowId>` — the window it is a *transient* of.
@@ -1071,8 +1041,8 @@ crossings used to mark a large translucent window in full and drop its frost.
 ---
 
 ### D.13 Retention is rationed, front to back; a blur never is
-A frost is a whole window's rectangle and stacked frosted windows all read the
-same pixels, so `n` of them want `n` screenfuls of retention against a budget
+A field is a whole window's rectangle or more and stacked frosted windows all
+read the same pixels, so `n` of them want `n` screenfuls of retention against a budget
 that may hold far fewer. Granting retention one window at a time — "does one
 more fit?" — answers *yes* for every window in such a stack, so each frame
 would blur one, evict another and re-blur it the next.
@@ -1088,11 +1058,10 @@ at, which can be the one frost the ration then keeps; the session's
   against the live band's ceiling, rather than one entry against what is charged.
 - **The ceiling is spent a tier at a time** (`FrostTier`), front to back within
   each: blurred desktop chrome (`!Window::is_app_presented` — the taskbar, a
-  session dialog, the lock screen), then blurred application windows, then
-  everything unblurred. Chrome is permanently on screen, yet deliberately not
-  pinned topmost, so weighed in one sweep it kept its retention only while the
-  applications left a bar-sized slice over. An unblurred window stays last: its
-  retention only saves recomposing the stack beneath it.
+  session dialog, the lock screen), then blurred application windows. Chrome is
+  permanently on screen, yet deliberately not pinned topmost, so weighed in one
+  sweep it kept its retention only while the applications left a bar-sized
+  slice over.
 - The ceiling is the machine's share of its memory, never below one screenful
   (`tairix_reclaim::stacked_ui_cache`, fed the session's `memory_total`); mild
   and moderate pressure take it back to one screenful, severe to the shared
@@ -1101,28 +1070,17 @@ at, which can be the one frost the ration then keeps; the session's
 
 **Frosting is not rationed.** Every visible blurred window is frosted
 (`Window::is_frosted`) every frame it shows: the cache is an accelerator, never
-a condition of drawing the blur. A plainly translucent window is frosted only
-while retained, since composing it over an unkept frost of radius zero is
-blending it straight through. Neither answer changes a pixel, so a change of
+a condition of drawing the blur. Neither answer changes a pixel, so a change of
 the ration's mind marks nothing; a window that loses retention gives its entry
 back at once.
 
-**An unretained frost is recomputed where the frame needs it**
-(`FrostPlan::Local`). Its backdrop unchanged, the frost on screen is still right
-outside the damage, so only the damaged part the frosts above leave seen
-(`seen_through`) is blurred. The backdrop it reads past the damage's edge is not
-in the back buffer — that holds finished pixels there — so the layers beneath are
-composed into the frost plane over that ring (`compose_below`). That needs every
-frost beneath it within its rectangle to be copied whole from the cache, so the
-ring never needs a frost of its own; where one is not, the window is promoted
-whole instead, which reads no ring, and drops no frost above it, since its
-pixels come out as they were. A changed backdrop is recomputed whole, as a
-retained frost's is. The plan asks nothing of a window touched only where frosts
-above it are copied whole (`recomposed_and_seen`): those replace everything
-beneath them, and nothing beneath one can have changed without dropping it. The
-composite leaves the same window's frost out wherever it composes it hidden,
-whatever its plan (`seen_through`), and both ask the frosts above front first,
-so one hidden by another costs no lookup.
+**An unretained frost is blurred where it is drawn.** Its frost on screen is
+right wherever the frame leaves it alone, because a change beneath marks
+exactly what it stales, so only the part of the damage the frosts above leave
+seen (`seen_through`) is blurred: its backdrop composed into the frost plane,
+unfrosted, over the blur's reach, then mixed into the back buffer. A frost
+hidden beneath the interiors of frosts above is left out — they read nothing
+beneath them — and the frame asks nothing of it.
 
 **What it costs, asserted.** With nothing retained at all, the D.4 sweep composes
 every one of its mutations to the same bytes as the retaining compositor. On
@@ -1130,8 +1088,8 @@ the cascade, a cell repainted in the front window blurs **0** px and recomposes
 under 4 000. With the Switchboard dragged over a Settings window pressure would
 not retain, every frame equals the one a machine retaining both draws and
 recomposes exactly as many pixels, and a cursor sample over the unretained glass
-blurs at most 64 px. A change beneath a deep stack of unretained glass
-recomputes, whole, every frost above it that it reaches.
+blurs at most 64 px. A change beneath a deep stack of unretained glass blurs
+every pane above it again over the reach of the change.
 
 ### D.14 A frost's working memory is reserved
 A frost grown on demand is one a machine short of memory refuses, so nothing a
@@ -1142,11 +1100,13 @@ the compositor cannot reserve them for is refused like one it cannot allocate a
 back buffer for. A runner the scratch could not be reserved for spreads a frost
 across fewer participants; it never fails one.
 
-`Surface::frost_from` reads the backdrop from the destination within the part it
-holds (`Frosting::held` — the damaged rectangle) and from the plane elsewhere,
-writes the horizontal pass into the plane, and runs the vertical pass in strips
-of a quarter of the reserved height, each column piece carrying its running sums
-from strip to strip. Nothing it holds grows with a frost's area. Against the
+A frost reads its backdrop from the destination within the part it holds
+(`Frosting::held`; the compositor's hold none, its backdrops being composed into
+the plane) and from the plane elsewhere, writes the horizontal pass into the
+plane, and runs the vertical pass in strips of a quarter of the reserved height,
+each column piece carrying its running sums from strip to strip. Nothing it
+holds grows with a frost's area, whether it is mixed into the destination
+(`Surface::frost_from`) or written into a field (`Surface::blur_from`). Against the
 whole-area intermediates it replaced, measured on the host (`opt-level = 3`, 8
 persistent workers, Core Ultra 7 165H, minimum of 41–81 runs): 7.8 ns/px
 serially against 10.2–12.8, and 1.43–1.51 against 1.50–1.62 at 1920×1080 on 8

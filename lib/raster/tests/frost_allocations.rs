@@ -11,7 +11,7 @@ use core::ops::Range;
 
 use tairix_fuzzseed::meter::{metered, Metered};
 use tairix_parallel::{JobRunner, Reversed, SERIAL};
-use tairix_raster::{BlurScratch, Frosting, Pixel, Surface};
+use tairix_raster::{BlurScratch, Blurring, Frosting, Pixel, Surface};
 
 #[global_allocator]
 static ALLOCATOR: Metered = Metered;
@@ -76,10 +76,12 @@ fn a_frost_from_a_reserved_scratch_allocates_nothing() {
         let frost = |dest: &mut Surface, plane: &mut Surface, scratch: &mut BlurScratch| {
             for bands in &shapes {
                 let frosting = Frosting {
-                    rect: RECT,
+                    blur: Blurring {
+                        rect: RECT,
+                        bands,
+                        radius: 9,
+                    },
                     held: (0..0, 0..0),
-                    bands,
-                    radius: 9,
                 };
                 assert!(dest.frost_from(plane, &frosting, scratch, runner, |_, _| 230));
             }

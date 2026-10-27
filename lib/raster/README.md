@@ -238,8 +238,9 @@ This crate owns:
   squared length one below a perfect square the estimates cycle and never
   agree, so an unlucky graph reading spun its process forever.
 - `box_blur` / `box_blur_coverage` / `Surface::frost_region` /
-  `Surface::frost_from` / `BlurScratch` — the single separable box blur and
-  the one frosted glass built on it.
+  `Surface::frost_from` / `Surface::blur_from` / `Surface::mix_from` /
+  `BlurScratch` — the single separable box blur and the one frosted glass built
+  on it.
   `box_blur_coverage` is the same window over one byte of coverage instead of a
   pixel's four channels, for a soft shape drawn in one colour; it is proved to
   be exactly the alpha the pixel blur computes. `soften_coverage` is the one
@@ -263,18 +264,24 @@ This crate owns:
   because the login screen frosts behind a selected account tile, and nothing
   in `lib/*` may depend on the window manager.
 
-  `frost_from` is the same frost over **bands** of a rectangle (a `Frosting`),
-  reading the backdrop from the destination within the part it holds and from
-  a caller's *plane* everywhere else — `frost_region` is `frost_from` with the
-  surface as its whole backdrop. Each band is written exactly as the whole
-  frost writes it — proved by differential sweeps over random bands, kept
-  blocks, radii and coverages — because samples replicate at the *rectangle's*
-  edges and coverage is read at its own coordinates, so a band is never a
-  smaller frost of a smaller rectangle. Every band's horizontal pass is taken
-  before any is mixed back, because a band's neighbourhood reaches into the
-  bands beside it and what it must read there is the backdrop. The backdrop is
-  read only within `radius` of the bands, which is what lets the compositor
-  compose just a ring of it past a damaged rectangle. The horizontal pass is
+  `frost_from` is the same frost over **bands** of a rectangle (a `Frosting`:
+  the `Blurring` — rectangle, bands, radius — and the part of it the
+  destination holds), reading the backdrop from the destination within that
+  part and from a caller's *plane* everywhere else, and asking the coverage at
+  the destination's own coordinates — `frost_region` is `frost_from` with the
+  surface as its whole backdrop. `blur_from` writes the same bands' blur,
+  unmixed, into a separate surface placed anywhere over the plane, past its
+  edges or not, and `mix_from` mixes such a blur back at a coverage; together
+  they write what `frost_from` writes in one pass, to the bit, which is how the
+  compositor keeps a window's blur in a field and lays its frost from it
+  wherever the window moves. Each band is written exactly as the whole blur
+  writes it — proved by differential sweeps over random bands, kept blocks,
+  radii and coverages — because samples replicate at the *rectangle's* edges,
+  so a band is never a smaller blur of a smaller rectangle. Every band's
+  horizontal pass is taken before any is laid, because a band's neighbourhood
+  reaches into the bands beside it and what it must read there is the
+  backdrop. The backdrop is read only within `radius` of the bands, which is
+  what lets the compositor compose just that reach of it. The horizontal pass is
   written into the plane and the vertical pass runs a strip of rows at a time,
   each column piece carrying its running sums from strip to strip and the
   strips keeping to the rows the bands cover, so nothing in `BlurScratch` grows

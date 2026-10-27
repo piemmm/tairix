@@ -31,85 +31,45 @@ router**:
   The footprint (`shadow_footprint`) replaces the bounds for damage, for which
   windows a dirty rectangle considers, and for the rectangle a layer spans;
   the bounds keep hit-testing, layout, furniture, frost and content.
-- Backdrop blur: a window can ask for the already-composited
-  content behind its rectangle to be frosted before its own translucent
-  pixels blend over it. Composition is back-to-front, so the back buffer
-  already holds that backdrop: the compositor composes the layers below
-  the window, blurs the back buffer inside that window's rectangle only,
-  and resumes composing from the window itself. The effect is
-  `lib/raster`'s shared frost — `Surface::frost_from` here, and the in-place
-  `Surface::frost_region` built on it that the taskbar, every popup it opens
-  and the login screen's selected account tile draw through — so the desktop
-  has one frosted glass. It blurs
-  the rectangle's own pixels with a separable box blur carrying running
-  sums (cost proportional to the rectangle's area whatever the radius, over
-  premultiplied channels including alpha, with samples past an edge
-  replicating it, so the effect
-  can neither pull a neighbour's pixels in nor write outside the rectangle
-  and a uniform backdrop comes out unchanged), and mixes the blurred result
-  back weighted by the window's own rounded-corner coverage, so a rounded
-  window's frosting fades across exactly the arc its pixels do. The radius
-  is a desktop length in logical pixels resolved through the output's
-  `Scale`. A frost's working memory — the frost plane its backdrop is read
-  from beyond the damage and a `tairix_raster::BlurScratch` — is reserved with
-  the back buffer for the output and the installed runner, so no frost
-  allocates on the frame path or is refused for memory. Because those
-  pixels are a function of the whole backdrop beneath them, damage touching a
-  visible frosted window whose frost must be **recomputed** promotes that
-  window's full bounds into one recompose rectangle, iterated until nothing
-  grows; and a frosted window on a hardware layer is baked flattened — the
-  software composite of its footprint over everything beneath it —
-  because a layer is blended from its own pixels and cannot sample what
-  lies behind it.
-- Retained backdrops (`frost`): a **translucent or backdrop-blurred** window
-  is composed over the picture beneath its rectangle, so every frame that
-  touches it otherwise recomposes that whole stack. That backdrop is a
-  function of the layers
-  beneath it, the window's whole rectangle, its physical radius and the
-  window's shape — and of *nothing at or above its own layer*. So it is kept in
-  a `ReclaimCache` (`frost_cache`, `lib/reclaim`'s shared desktop policy,
-  ceilinged at the machine's share of its memory and never below one
-  screenful — a frost is a whole window's rectangle and a window beneath
-  translucent glass still shows, so overlapping ones want a frost each; a stack
-  deeper than the ceiling is what the ration below bounds) and a window's own
-  repaint copies it back instead of
-  composing that stack again. A blur of radius zero leaves the composed layers
-  exactly as it found them, so an unblurred translucent window retains its
-  backdrop through the very same path (`Window::reads_backdrop`) rather than a
-  second cache: a `64×24` repaint inside a frosted terminal cost **17.4 ms** and now
-  costs **26 µs**, and its damage stays the rectangle it marked rather than
-  growing to the window. The last three inputs are recorded in the entry and
-  consulted on every lookup, so a change fails closed to whatever it cannot
-  have left intact: a different radius keeps nothing, while a window that has
-  **moved, resized or changed shape keeps its core** — in screen coordinates
-  the retained pixels are still exactly right wherever neither the blur's
-  replication nor the shape's corners reach, so only the border is blurred
-  again (`Surface::frost_from` over the border's bands). Dragging a frosted, translucent
-  terminal costs **9.30 ns/px** a sample where it cost **15.30**, and dragging
-  a translucent unblurred one **6.95** where it cost **19.89** — it was the
-  slowest window on the desktop to drag and is now cheaper than a frosted one.
-  A backdrop is snapshotted with `Surface::overwrite`, a row copy rather than a
-  composite onto a blank surface. The rectangle
-  recorded is the whole window's, because one pushed off a screen edge is
-  frosted from the row and column the screen begins at while its shape is read
-  from its own top-left. The layers beneath
-  are answered by dropping the entry whenever damage is marked *below* the
-  window — which is what `mark`, `mark_layer` and `mark_overlay` distinguish,
-  and why a cursor sample, a fade step, the window's own content, and a window
-  dragged across it from above all keep it. How much of a frost may be reused is
-  asked of the cache **once per frame** and remembered, so a reuse is recorded
-  as a hit and refreshes the entry's recency, and the plan and the composite
-  can never read different answers; the lookup (`ReclaimCache::find`) never
-  enforces the pressure band, which the frame enforces once before the pass, so
-  no lookup can evict a frost an earlier one promised it. The layers a frost writes over are not
-  composed at all — composing them first is work the copy throws away — so a
-  frame composes below a frost only outside what it will write: nothing under
-  one reused whole, and only the ring the border blur reads under one reused in
-  part. The cache is read-only for the whole of a
-  composite pass and written at the end of it (`ReclaimCache::retain`, which
-  counts no second lookup), so admitting one frost cannot evict another the
-  same pass had already decided to reuse. A frost is a blurred image of the
-  user's desktop, so a released entry is wiped, not merely dropped.
+- Backdrop blur: a window can ask for what lies behind its rectangle to be
+  frosted before its own translucent pixels blend over it. A frost is the
+  windows beneath composed as though none were frosted, box-blurred with
+  samples taken past the window's edges and replicated only at the screen's,
+  and mixed back at the window's rounded-corner coverage — so the blur at a
+  screen pixel depends on the windows beneath and the radius alone, never on
+  where the window lies or on any other frost. The effect is `lib/raster`'s
+  shared frost — `Surface::blur_from`, `Surface::mix_from` and
+  `Surface::frost_from` here, and the in-place `Surface::frost_region` the
+  taskbar, every popup it opens and the login screen's selected account tile
+  draw through — so the desktop has one frosted glass: a separable box blur
+  carrying running sums, over premultiplied channels including alpha. The
+  radius is a desktop length in logical pixels resolved through the output's
+  `Scale`. A frost's working memory — the frost plane its backdrop is composed
+  into and a `tairix_raster::BlurScratch` — is reserved with the back buffer for
+  the output and the installed runner, so no frost allocates on the frame path
+  or is refused for memory. On a layered present a frosted window's frost is
+  composed onto a layer of its own beneath its pixels, which the engine blends.
+- Retained backdrops (`frost`): a frosted window's frost is laid from its
+  **field** (`FrostField`), the blur over a screen rectangle holding the
+  window's, unmixed, with the part of it that is stale — copied where the shape
+  covers fully and mixed at the corners, with nothing else beneath the glass
+  composed. The pointer moving inside a frosted terminal, a window dragged
+  across one, its own repaint, and the frosted window dragged inside its field
+  blur nothing. A change beneath stales the field, and marks the frost on
+  screen, within the blur's radius of the change and nothing of any other
+  frost. A window's first move gives its field a margin of the blur's radius
+  about its rectangle, and a move past it shifts the field in place and blurs
+  only the slab entered: the Switchboard-shaped drag blurs on 7 of 60 samples,
+  5 356 px a sample on average, where every sample blurred 125 924 before.
+  Fields live in a `ReclaimCache` (`frost_cache`, `lib/reclaim`'s shared
+  desktop policy, ceilinged at the machine's share of its memory and never
+  below one screenful) and are wiped on release, because a field is a blurred
+  image of the user's desktop. A field is fitted before the pass — shifted,
+  regrown keeping what it held, or made — so the pass writes fields only in
+  place and no admission can evict one it is using; that fitting is a frost's
+  one counted lookup a frame, and a frost the frame does not show is neither
+  looked up nor given a field. A window translucent as a whole with no blur
+  retains nothing and composes through the blend path.
 - Retention is rationed, front to back (`Compositor::grant_backdrops`); a blur
   never is. Stacked frosted windows all read the same pixels, so `n` of them
   want `n` frosts of them against a ceiling that may not hold them all, and
@@ -118,26 +78,24 @@ router**:
   ceiling from the **front** of the stack and stops (`ReclaimCache::holds`):
   what the budget reaches is retained (`Window::is_retained`). Every visible
   blurred window is frosted regardless (`Window::is_frosted`): one refused
-  retention recomputes only what each frame needs of its frost — within the
-  damage, where the frosts above leave it seen, its backdrop past the damage's
-  edge composed into the frost plane — so pressure costs work, never the look,
+  retention is blurred where the frame draws it — within the damage, where the
+  frosts above leave it seen, its backdrop composed into the frost plane over
+  the blur's reach — so pressure costs work, never the look,
   and no change of the ration's mind changes a pixel or marks damage. A
   repainted cell in a sixteen-deep cascade blurs **nothing**, and a cursor
   sample over unretained glass blurs only the cursor's pixels. The ceiling is spent
   a **tier** at a time rather than in one sweep (`FrostTier`): blurred desktop
   chrome (`!Window::is_app_presented` — the taskbar, a session dialog, the lock
-  screen), then blurred application windows, then everything unblurred. Chrome
+  screen), then blurred application windows. Chrome
   is permanently on screen and wants a band-sized slice, yet it is an ordinary
   window deliberately not pinned topmost, so weighed among the applications it
   lost its retention to any pile of translucent windows over it.
 - Damage tracking (`tairix_geometry::Region`): only changed pixels are
   recomposited, and the region's rectangles are pairwise disjoint, so no
   pixel is composited or presented twice and two far-apart updates stay two
-  small rectangles. A backdrop-blurred window whose frost must be retaken
-  whole — to be retained, or because its backdrop changed — is promoted to its
-  whole rectangle (and subtracted from the rest of the damage) because its
-  pixels read the whole backdrop beneath it; an unretained one with an unchanged
-  backdrop is recomputed within the damage alone.
+  small rectangles. A change beneath a backdrop-blurred window marks its frost
+  within the blur's radius of the change and no further, since a frost reads
+  its whole neighbourhood from the frost plane and a part of it cannot seam.
   `Compositor::composite` returns the `Region` it actually
   recomposited (screen-clipped), and `has_damage` answers exactly what
   the next present would send — that composite's region, or a frame the

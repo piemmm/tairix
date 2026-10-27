@@ -921,12 +921,19 @@ fn a_dragged_frosted_window_composes_its_frost_and_never_its_pixels() {
         split.blended_px,
         flattened.blended_px
     );
-    assert!(split.blur_px > 0, "the frost's border is derived again");
+    assert!(split.blur_px > 0, "the first move blurs its field's margin");
+    assert!(c.move_window(glass, Point::new(8, 5)));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        c.frame_stats().blur_px,
+        0,
+        "a move inside the field blurs nothing"
+    );
     assert_close(
         &engine.screen,
         &software(output, BLUE, |c| {
             let glass = frosted(c);
-            c.move_window(glass, Point::new(7, 4));
+            c.move_window(glass, Point::new(8, 5));
         }),
         1,
     );
@@ -1018,6 +1025,43 @@ fn a_change_beneath_a_frosted_window_reaches_its_frost() {
         &software(output, BLUE, |c| {
             let under = build(c);
             repaint(c, under);
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_window_moving_beside_a_frost_layer_reaches_its_frost() {
+    // A frost samples past its window's edges, so a window on a layer of its
+    // own that comes within the blur's radius of a frost — without touching
+    // its rectangle — changes that frost all the same.
+    let output = mode(40, 20);
+    let build = |c: &mut Compositor| {
+        c.add_window(Point::ORIGIN, opaque(40, 20, GREEN));
+        let mover = c.add_window(Point::new(2, 6), opaque(4, 4, RED));
+        let glass = c.add_window(Point::new(14, 4), glass(16, 10));
+        assert!(c.set_backdrop_blur(glass, 3));
+        mover
+    };
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let mover = build(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    let (frost_before, _) = frost_and_pixels(&engine);
+
+    assert!(c.move_window(mover, Point::new(10, 6)));
+    c.present(&mut engine).expect("presents");
+    let (frost, _) = frost_and_pixels(&engine);
+    assert_ne!(
+        frost.buffer, frost_before.buffer,
+        "the frost reads the window beside it"
+    );
+    assert!(c.frame_stats().blur_px > 0);
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let mover = build(c);
+            c.move_window(mover, Point::new(10, 6));
         }),
         1,
     );

@@ -1130,20 +1130,23 @@ weaker policy:
   against 26 µs once the frost is copied instead. Its epoch is
   `(scale, screen extent)` and carries no theme: a palette change repaints
   the layers below and marks them damaged, which drops the frosts that read
-  them. The rectangle, physical radius and window shape are recorded per
-  entry and compared on every lookup, so geometry, radius, scale and corner
-  changes fail closed to a recompute; damage marked *below* a window is what
-  drops it, which is why a cursor sample, a fade step and the window's own
-  content all keep it. A frost is a *whole window's* rectangle, so unlike
+  them. What it keeps is the blur itself, unmixed, over a screen rectangle
+  holding the window's — a field, valid wherever the window moves inside it —
+  and the part of it that is stale: damage marked *below* a window stales the
+  field within the blur's radius of it, which is why a cursor sample, a fade
+  step, the window's own content and its drag inside the field all keep it,
+  and a radius or scale change replaces it (`plans/GPU.md` GD8). A field is a
+  *whole window's* rectangle or more, so unlike
   furniture a stack of overlapping ones can want several times the screenful
   the ceiling allows — the compositor weighs the whole set it is choosing
   against the live ceiling (`ReclaimCache::holds`) and retains the stack's
   frosts from the front until the budget runs out, so it never over-commits and
   never rebuilds all of them every frame. A window it refuses is frosted all the
   same, recomputing what each frame needs of its frost: what pressure takes is
-  retention, never the blur (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). The pass
-  looks entries up through `ReclaimCache::find`, which never enforces the band,
-  having enforced it once before the pass.
+  retention, never the blur (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). The frame
+  looks each frost it shows up once, before the pass, through
+  `ReclaimCache::find`, which never enforces the band, having enforced it once
+  first.
 - **The font service's glyph rasters, on both sides.** The service's own
   rasterised coverage and the client-side memoisation of what it fetched
   are `ReclaimCache`es too, built from the single

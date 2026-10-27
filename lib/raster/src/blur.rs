@@ -410,12 +410,16 @@ impl Surface {
         let _ = scratch.reserve(width, height, 1, runner);
         let whole = (columns.clone(), rows.clone());
         let frosting = Frosting {
-            rect: (x, y, w, h),
+            blur: Blurring {
+                rect: (x, y, w, h),
+                bands: core::slice::from_ref(&whole),
+                radius,
+            },
             held: whole.clone(),
-            bands: core::slice::from_ref(&whole),
-            radius,
         };
         let origin = (columns.start, rows.start);
+        let coverage =
+            |column: u32, row: u32| coverage(column.saturating_sub(x), row.saturating_sub(y));
         let _ = self.frost_through((&mut plane, origin), &frosting, scratch, runner, &coverage);
         scratch.plane = Some(plane);
     }
@@ -425,14 +429,14 @@ impl Surface {
     /// `plane` — addressed in this surface's coordinates — elsewhere, and report
     /// whether it was written.
     ///
-    /// Each band is written exactly as [`frost_region`](Self::frost_region)
-    /// writes it frosting the whole rectangle: samples replicate at the
-    /// rectangle's edges and coverage is read at its own coordinates, so bands
-    /// side by side meet without a seam. Nothing outside the bands is written,
-    /// and the backdrop is read only within `radius` of them; this surface must
-    /// hold it over the bands themselves, which a partial coverage mixes over.
-    /// The horizontal pass is written into `plane`, so what the plane holds
-    /// there afterwards is unspecified.
+    /// Each band is written exactly as the whole rectangle's frost writes it,
+    /// samples replicating at the rectangle's edges, so bands side by side meet
+    /// without a seam. `coverage` is asked at this surface's own coordinates.
+    /// Nothing outside the bands is written, and the backdrop is read only
+    /// within `radius` of them; this surface must hold it over the bands
+    /// themselves, which a partial coverage mixes over. The horizontal pass is
+    /// written into `plane`, so what the plane holds there afterwards is
+    /// unspecified.
     ///
     /// A scratch [reserved](BlurScratch::reserve) for the rectangle is used as
     /// it stands. `false` is a frost the scratch could not be grown for, and
@@ -449,6 +453,127 @@ impl Surface {
         self.frost_through((plane, (0, 0)), frosting, scratch, runner, &coverage)
     }
 
+    /// Write the blur `blurring` describes, unmixed, into this surface, whose
+    /// top-left lies at `at` of `plane` — past its top or left edge or not —
+    /// reading the backdrop from `plane` alone, and report whether it was
+    /// written.
+    ///
+    /// The bands and the rectangle are `plane`'s coordinates, and each band
+    /// receives exactly what [`frost_from`](Self::frost_from) mixes in at full
+    /// coverage, so a blur retained here and mixed back later
+    /// ([`mix_from`](Self::mix_from)) is the frost written in one pass. What
+    /// of a band this surface does not reach is left out. The horizontal pass
+    /// is written into `plane`, as `frost_from` writes it.
+    ///
+    /// A radius of `0` copies the backdrop. `false` is a blur the scratch could
+    /// not be grown for, and leaves this surface untouched.
+    pub fn blur_from(
+        &mut self,
+        at: (i32, i32),
+        plane: &mut Self,
+        blurring: &Blurring<'_>,
+        scratch: &mut BlurScratch,
+        runner: &dyn JobRunner,
+    ) -> bool {
+        let Blurring {
+            rect: (x, y, w, h),
+            bands,
+            radius,
+        } = *blurring;
+        let Some(admitted) = plane.admitted(x, y, w, h) else {
+            return true;
+        };
+        let at = Offset { x: at.0, y: at.1 };
+        let reach = at.reach(self);
+        if radius == 0 {
+            for (cols, rows) in bands {
+                let cols = clamp(&clamp(cols, &reach.0), &admitted.0);
+                let rows = clamp(&clamp(rows, &reach.1), &admitted.1);
+                self.copy_rows_from(plane, at, &cols, &rows);
+            }
+            return true;
+        }
+        let frost = Frost::new(admitted, &(0..0, 0..0), radius);
+        let Some(work) = frost.prepare(bands, &reach, scratch) else {
+            return false;
+        };
+        if work.bands.is_empty() {
+            return true;
+        }
+        frost.run(
+            self,
+            &Lay::<fn(u32, u32) -> u8>::Field(at),
+            (plane, (0, 0)),
+            work,
+            runner,
+        )
+    }
+
+    /// Mix `source`, whose top-left lies at `at` of this surface — past its top
+    /// or left edge or not — over `[x, x+w) × [y, y+h)` at each pixel's
+    /// `coverage`, asked at this surface's coordinates: `255` takes the source
+    /// pixel, `0` keeps this surface's, and the values between are the weighted
+    /// mix, rounded at the surface's ordered dither.
+    ///
+    /// This is a frost's shape-weighted mix taken from a blur retained by
+    /// [`blur_from`](Self::blur_from), so the two together write what
+    /// [`frost_from`](Self::frost_from) writes. Pixels of the rectangle the
+    /// source does not reach, or the clip window does not admit, are left as
+    /// they are.
+    pub fn mix_from(
+        &mut self,
+        source: &Self,
+        at: (i32, i32),
+        (x, y, w, h): (u32, u32, u32, u32),
+        coverage: impl Fn(u32, u32) -> u8,
+    ) {
+        let at = Offset { x: at.0, y: at.1 };
+        let (reach_cols, reach_rows) = at.reach(source);
+        let cols = clamp(&(x..x.saturating_add(w)), &reach_cols);
+        let rows = clamp(&(y..y.saturating_add(h)), &reach_rows);
+        let Ok(wide) = u32::try_from(cols.len()) else {
+            return;
+        };
+        for row in rows {
+            let Some((first, dst)) = self.row_span_mut(row, cols.start, wide) else {
+                continue;
+            };
+            let source_at = at.column_in(first).zip(at.row_in(row));
+            let Some((column, source_row)) = source_at else {
+                continue;
+            };
+            let wide = u32::try_from(dst.len()).unwrap_or(u32::MAX);
+            let Some((_, src)) = source.row_span(source_row, column, wide) else {
+                continue;
+            };
+            mix_covered(dst, src, (first, row), &coverage);
+        }
+    }
+
+    /// Copy `cols` × `rows` of `plane` into this surface, whose top-left lies
+    /// at `at` of it.
+    fn copy_rows_from(&mut self, plane: &Self, at: Offset, cols: &Range<u32>, rows: &Range<u32>) {
+        let Ok(wide) = u32::try_from(cols.len()) else {
+            return;
+        };
+        for row in rows.clone() {
+            let Some((first, src)) = plane.row_span(row, cols.start, wide) else {
+                continue;
+            };
+            let Some((column, field_row)) = at.column_in(first).zip(at.row_in(row)) else {
+                continue;
+            };
+            let wide = u32::try_from(src.len()).unwrap_or(u32::MAX);
+            let Some((_, dst)) = self.row_span_mut(field_row, column, wide) else {
+                continue;
+            };
+            let len = dst.len().min(src.len());
+            if let (Some(dst), Some(src)) = (dst.get_mut(..len), src.get(..len)) {
+                dst.copy_from_slice(src);
+            }
+        }
+    }
+
     /// [`frost_from`](Self::frost_from) reading what this surface does not
     /// hold from `plane`, whose top-left sits at the given point of this
     /// surface.
@@ -461,10 +586,13 @@ impl Surface {
         coverage: &(impl Fn(u32, u32) -> u8 + Sync),
     ) -> bool {
         let Frosting {
-            rect: (x, y, w, h),
+            blur:
+                Blurring {
+                    rect: (x, y, w, h),
+                    bands,
+                    radius,
+                },
             ref held,
-            bands,
-            radius,
         } = *frosting;
         if radius == 0 {
             return true;
@@ -472,72 +600,147 @@ impl Surface {
         let Some(admitted) = self.admitted(x, y, w, h) else {
             return true;
         };
-        let frost = Frost::new(x, y, admitted, held, radius);
-        let BlurScratch {
-            lines,
-            sums,
-            strip,
-            bands: written,
-            pieces,
-            ..
-        } = scratch;
-        written.clear();
-        let mut columns = 0usize;
-        for (cols, rows) in bands {
-            let Some(band) = frost.local(cols, rows) else {
-                continue;
-            };
-            if !fallible::reserve(written, 1) {
-                return false;
-            }
-            columns = columns.saturating_add(band.cols.len());
-            written.push(band);
-        }
-        if written.is_empty() {
+        let reach = admitted.clone();
+        let frost = Frost::new(admitted, held, radius);
+        let Some(work) = frost.prepare(bands, &reach, scratch) else {
+            return false;
+        };
+        if work.bands.is_empty() {
             return true;
         }
-        let width = frost.width();
-        if !(fallible::grow_to(lines, width, Pixel::TRANSPARENT)
-            && fallible::grow_to(sums, columns, PixelSum::default())
-            && fallible::grow_to(strip, width, Pixel::TRANSPARENT))
-        {
-            return false;
-        }
-        let work = Work {
-            lines,
-            sums,
-            strip,
-            pieces,
-        };
-        frost.run(self, (plane, origin), written, work, runner, coverage)
+        frost.run(self, &Lay::Mix(coverage), (plane, origin), work, runner)
     }
 }
 
-/// The frost a [`Surface::frost_from`] writes, in the destination's
-/// coordinates.
-pub struct Frosting<'a> {
-    /// The rectangle `(x, y, w, h)` the blur is a function of: samples
-    /// replicate at its edges and coverage is read from its top-left.
+/// Where one surface's top-left lies in the coordinates of another, which may
+/// be past that one's top or left edge.
+#[derive(Copy, Clone)]
+struct Offset {
+    x: i32,
+    y: i32,
+}
+
+impl Offset {
+    /// The column of this surface at column `x` of the other, or `None` where
+    /// that lies before this surface's left edge.
+    fn column_in(self, x: u32) -> Option<u32> {
+        u32::try_from(i64::from(x) - i64::from(self.x)).ok()
+    }
+
+    /// The row of this surface at row `y` of the other, or `None` where that
+    /// lies above this surface's top edge.
+    fn row_in(self, y: u32) -> Option<u32> {
+        u32::try_from(i64::from(y) - i64::from(self.y)).ok()
+    }
+
+    /// The column of the other surface at column `x` of this one.
+    fn column_of(self, x: u32) -> Option<u32> {
+        u32::try_from(i64::from(x) + i64::from(self.x)).ok()
+    }
+
+    /// The row of the other surface at row `y` of this one.
+    fn row_of(self, y: u32) -> Option<u32> {
+        u32::try_from(i64::from(y) + i64::from(self.y)).ok()
+    }
+
+    /// The columns and rows of the other surface `surface` covers.
+    fn reach(self, surface: &Surface) -> (Range<u32>, Range<u32>) {
+        let span = |at: i32, extent: u32| {
+            let start = u32::try_from(at.max(0)).unwrap_or(0);
+            let end = u32::try_from((i64::from(at) + i64::from(extent)).max(0)).unwrap_or(u32::MAX);
+            start..end.max(start)
+        };
+        (
+            span(self.x, surface.width()),
+            span(self.y, surface.height()),
+        )
+    }
+}
+
+/// `range` confined to `within`, empty where they do not meet.
+fn clamp(range: &Range<u32>, within: &Range<u32>) -> Range<u32> {
+    let start = range.start.clamp(within.start, within.end);
+    start..range.end.clamp(start, within.end)
+}
+
+/// Mix `averaged` over `dst` pixel for pixel, `dst[0]` lying at column `x` of
+/// row `y`: each at its own coverage, rounding at the row's ordered dither.
+fn mix_covered(
+    dst: &mut [Pixel],
+    averaged: &[Pixel],
+    (x, y): (u32, u32),
+    coverage: &impl Fn(u32, u32) -> u8,
+) {
+    let dither = DitherRow::at(y);
+    for ((dst, &src), column) in dst.iter_mut().zip(averaged).zip(x..) {
+        *dst = mix(*dst, src, coverage(column, y), dither.bias(column));
+    }
+}
+
+/// The blur a [`Surface::blur_from`] writes, or the blur under a
+/// [`Frosting`], in the coordinates of the surface it reads.
+pub struct Blurring<'a> {
+    /// The rectangle `(x, y, w, h)` the blur is a function of: samples past its
+    /// edges replicate them.
     pub rect: (u32, u32, u32, u32),
-    /// The columns and rows of the rectangle where the destination already
-    /// holds the backdrop; the plane holds it everywhere else the frost reads.
-    pub held: (Range<u32>, Range<u32>),
     /// The parts of the rectangle written, which must not overlap.
     pub bands: &'a [(Range<u32>, Range<u32>)],
     /// How far the blur spreads, in pixels.
     pub radius: u32,
 }
 
-/// The rectangle a frost is a function of: the destination columns and rows
-/// it admits, the origin its shape coverage is read from, and the blur it
-/// spreads by.
+/// The frost a [`Surface::frost_from`] writes, in the destination's
+/// coordinates.
+pub struct Frosting<'a> {
+    /// What is blurred, and where.
+    pub blur: Blurring<'a>,
+    /// The columns and rows of the rectangle where the destination already
+    /// holds the backdrop; the plane holds it everywhere else the frost reads.
+    pub held: (Range<u32>, Range<u32>),
+}
+
+/// Where a frost's averages go once a strip of them is taken.
+enum Lay<'c, C> {
+    /// Mixed over the destination at each pixel's coverage, asked at the
+    /// destination's coordinates. The destination also holds the backdrop
+    /// within the frost's held part.
+    Mix(&'c C),
+    /// Written as they are into a surface whose top-left lies at this point
+    /// of the backdrop's coordinates.
+    Field(Offset),
+}
+
+impl<C: Fn(u32, u32) -> u8> Lay<'_, C> {
+    /// Where the target's top-left lies in the backdrop's coordinates.
+    const fn at(&self) -> Offset {
+        match self {
+            Self::Mix(_) => Offset { x: 0, y: 0 },
+            Self::Field(at) => *at,
+        }
+    }
+
+    /// Lay `averaged` into `dst`, whose first pixel lies at `(x, y)` of the
+    /// backdrop's coordinates.
+    fn span(&self, dst: &mut [Pixel], averaged: &[Pixel], (x, y): (u32, u32)) {
+        match self {
+            Self::Mix(coverage) => mix_covered(dst, averaged, (x, y), coverage),
+            Self::Field(_) => {
+                let len = dst.len().min(averaged.len());
+                if let (Some(dst), Some(averaged)) = (dst.get_mut(..len), averaged.get(..len)) {
+                    dst.copy_from_slice(averaged);
+                }
+            }
+        }
+    }
+}
+
+/// The rectangle a frost is a function of: the columns and rows of it the
+/// destination admits, and the blur it spreads by.
 ///
-/// Replication and coverage are read from *this* rectangle whichever band of
-/// it a call writes, which is what makes frosting a border equal frosting the
-/// whole and keeping the middle.
+/// Replication is read from *this* rectangle whichever band of it a call
+/// writes, which is what makes frosting a border equal frosting the whole and
+/// keeping the middle.
 struct Frost {
-    x: u32,
-    y: u32,
     columns: Range<u32>,
     rows: Range<u32>,
     /// Where the destination holds the backdrop, in the rectangle's own
@@ -575,8 +778,9 @@ struct Piece {
 /// of the plane's own top-left.
 type Plane<'a> = (&'a mut Surface, (u32, u32));
 
-/// The scratch buffers one frost works in.
+/// The bands one frost writes and the scratch buffers it works in.
 struct Work<'a> {
+    bands: &'a [Band],
     lines: &'a mut [Pixel],
     sums: &'a mut [PixelSum],
     strip: &'a mut [Pixel],
@@ -594,16 +798,12 @@ struct Averaging<'a> {
 
 impl Frost {
     fn new(
-        x: u32,
-        y: u32,
         (columns, rows): (Range<u32>, Range<u32>),
         held: &(Range<u32>, Range<u32>),
         radius: u32,
     ) -> Self {
         let radius = usize::try_from(radius).unwrap_or(usize::MAX);
         let mut frost = Self {
-            x,
-            y,
             columns,
             rows,
             held: Band {
@@ -631,16 +831,57 @@ impl Frost {
     /// rectangle, or `None` where they land outside it.
     fn local(&self, cols: &Range<u32>, rows: &Range<u32>) -> Option<Band> {
         let confine = |asked: &Range<u32>, within: &Range<u32>| {
-            let start = asked.start.clamp(within.start, within.end);
-            let end = asked.end.clamp(start, within.end);
+            let kept = clamp(asked, within);
             let offset = |at: u32| usize::try_from(at.saturating_sub(within.start)).unwrap_or(0);
-            offset(start)..offset(end)
+            offset(kept.start)..offset(kept.end)
         };
         let band = Band {
             cols: confine(cols, &self.columns),
             rows: confine(rows, &self.rows),
         };
         (!band.is_empty()).then_some(band)
+    }
+
+    /// The bands of `bands` inside `within` this frost writes, and the scratch
+    /// grown to write them, or `None` where it could not be grown.
+    fn prepare<'s>(
+        &self,
+        bands: &[(Range<u32>, Range<u32>)],
+        within: &(Range<u32>, Range<u32>),
+        scratch: &'s mut BlurScratch,
+    ) -> Option<Work<'s>> {
+        let BlurScratch {
+            lines,
+            sums,
+            strip,
+            bands: written,
+            pieces,
+            ..
+        } = scratch;
+        written.clear();
+        let mut columns = 0usize;
+        for (cols, rows) in bands {
+            let Some(band) = self.local(&clamp(cols, &within.0), &clamp(rows, &within.1)) else {
+                continue;
+            };
+            if !fallible::reserve(written, 1) {
+                return None;
+            }
+            columns = columns.saturating_add(band.cols.len());
+            written.push(band);
+        }
+        let width = self.width();
+        let grown = written.is_empty()
+            || (fallible::grow_to(lines, width, Pixel::TRANSPARENT)
+                && fallible::grow_to(sums, columns, PixelSum::default())
+                && fallible::grow_to(strip, width, Pixel::TRANSPARENT));
+        grown.then_some(Work {
+            bands: written,
+            lines,
+            sums,
+            strip,
+            pieces,
+        })
     }
 
     /// The columns averaging `cols` horizontally reads: `radius` beyond them on
@@ -672,33 +913,35 @@ impl Frost {
             .saturating_add(u32::try_from(column).unwrap_or(u32::MAX))
     }
 
-    /// Frost `bands` of `dest` from the backdrop `dest` and `plane` hold
-    /// between them, reporting whether the scratch could hold the frost.
+    /// Blur `work`'s bands from the backdrop `plane` holds — and, for a frost
+    /// mixed back, the destination within its held part — laying each into
+    /// `target` as `lay` says, and report whether the scratch could hold the
+    /// blur.
     ///
     /// The horizontal pass is written into the plane, which keeps the scratch
     /// free of anything the size of the rectangle. The vertical pass runs a
     /// strip at a time, each piece sliding a running sum per column down its
-    /// band, primed once; a strip is mixed into `dest` once all of it is
-    /// written, because its pieces are split by column and its mix by row.
-    fn run(
+    /// band, primed once; a strip is laid into the target once all of it is
+    /// written, because its pieces are split by column and its laying by row.
+    fn run<C: Fn(u32, u32) -> u8 + Sync>(
         &self,
-        dest: &mut Surface,
+        target: &mut Surface,
+        lay: &Lay<'_, C>,
         (plane, origin): Plane<'_>,
-        bands: &[Band],
         work: Work<'_>,
         runner: &dyn JobRunner,
-        coverage: &(impl Fn(u32, u32) -> u8 + Sync),
     ) -> bool {
         let width = self.width();
-        if bands.is_empty() {
-            return true;
-        }
         let Work {
+            bands,
             lines,
             sums,
             strip,
             pieces,
         } = work;
+        if bands.is_empty() {
+            return true;
+        }
         if width == 0 || lines.len() < width || strip.len() < width {
             return false;
         }
@@ -706,7 +949,8 @@ impl Frost {
             frost: self,
             origin,
         };
-        read.blur_lines(plane, bands, lines, runner, dest);
+        let held = matches!(lay, Lay::Mix(_)).then_some(&*target);
+        read.blur_lines(plane, bands, lines, runner, held);
         let Some(columns) = divide(bands, pieces, runner) else {
             return false;
         };
@@ -717,7 +961,7 @@ impl Frost {
         let per = strip.len() / width;
         let mut start = 0;
         // Strips keep to the runs of rows the pieces cover: rows between
-        // distant bands hold nothing to average or mix.
+        // distant bands hold nothing to average or lay.
         let spans = pieces.iter().map(|piece| piece.rows.clone());
         while let Some(run) = covered_run(&spans, start) {
             start = run.start;
@@ -729,23 +973,23 @@ impl Frost {
             }
             if strip_need(pieces, &(start..end)) <= strip.len() {
                 read.average_strip(plane, pieces, sums, strip, &(start..end), runner);
-                self.mix_strip(dest, pieces, strip, &(start..end), runner, coverage);
+                self.lay_strip(target, lay, pieces, strip, &(start..end), runner);
             }
             start = end;
         }
         true
     }
 
-    /// Mix every piece's averages for `rows` back over `dest`, split into
-    /// bands of whole destination rows across `runner`.
-    fn mix_strip(
+    /// Lay every piece's averages for `rows` into `target`, split into bands
+    /// of whole target rows across `runner`.
+    fn lay_strip<C: Fn(u32, u32) -> u8 + Sync>(
         &self,
-        dest: &mut Surface,
+        target: &mut Surface,
+        lay: &Lay<'_, C>,
         pieces: &[Piece],
         strip: &[Pixel],
         rows: &Range<usize>,
         runner: &dyn JobRunner,
-        coverage: &(impl Fn(u32, u32) -> u8 + Sync),
     ) {
         let count = tairix_parallel::bands(
             runner,
@@ -753,30 +997,37 @@ impl Frost {
             MIN_PARALLEL_FROST_PX.div_ceil(self.width().max(1)),
         );
         let per = band_rows(rows.len(), count);
-        let bands = dest.row_bands_mut(self.row(rows.start)..self.row(rows.end), per);
+        let at = lay.at();
+        let target_row = |row: u32| at.row_in(row).unwrap_or(0);
+        let bands = target.row_bands_mut(
+            target_row(self.row(rows.start))..target_row(self.row(rows.end)),
+            per,
+        );
         tairix_parallel::for_each_drawn(runner, bands, &|mut band| {
-            self.mix_rows(&mut band, pieces, strip, rows, coverage);
+            self.lay_rows(&mut band, lay, pieces, strip, rows);
         });
     }
 
-    /// Mix back, over the destination rows `band` owns, what every piece
-    /// covering them averaged there in the strip over `rows` — each pixel
-    /// weighted by its own `coverage` and rounded at the surface's ordered
-    /// dither.
+    /// Lay, over the target rows `band` owns, what every piece covering them
+    /// averaged there in the strip over `rows`.
     ///
     /// The blocks lie in the strip in piece order, each a piece's columns wide
     /// and as tall as the rows of the strip it covers, which is how
     /// [`average_strip`](PlaneRead::average_strip) laid them out.
-    fn mix_rows(
+    fn lay_rows<C: Fn(u32, u32) -> u8>(
         &self,
         band: &mut RowBand<'_>,
+        lay: &Lay<'_, C>,
         pieces: &[Piece],
         strip: &[Pixel],
         rows: &Range<usize>,
-        coverage: &impl Fn(u32, u32) -> u8,
     ) {
+        let at = lay.at();
         for row in band.rows() {
-            let Some(local) = row
+            let Some(backdrop_row) = at.row_of(row) else {
+                continue;
+            };
+            let Some(local) = backdrop_row
                 .checked_sub(self.rows.start)
                 .and_then(|local| usize::try_from(local).ok())
             else {
@@ -787,42 +1038,29 @@ impl Frost {
                 let covered = overlap(&piece.rows, rows);
                 let width = piece.cols.len();
                 if covered.contains(&local) {
-                    let at = offset.saturating_add((local - covered.start).saturating_mul(width));
-                    if let Some(averaged) = strip.get(at..at.saturating_add(width)) {
-                        self.mix_span(band, row, piece, averaged, coverage);
+                    let block =
+                        offset.saturating_add((local - covered.start).saturating_mul(width));
+                    let asked = self.column(piece.cols.start);
+                    let spans = strip
+                        .get(block..block.saturating_add(width))
+                        .zip(at.column_in(asked));
+                    if let Some((averaged, column)) = spans {
+                        let wide = u32::try_from(width).unwrap_or(u32::MAX);
+                        let laid = band.row_span_mut(row, column, wide);
+                        let placed =
+                            laid.and_then(|(first, dst)| Some((at.column_of(first)?, first, dst)));
+                        if let Some((backdrop_column, first, dst)) = placed {
+                            // A clip window that cut the span's leading columns
+                            // advances the averages by as much.
+                            let skip =
+                                usize::try_from(first.saturating_sub(column)).unwrap_or(usize::MAX);
+                            let averaged = averaged.get(skip..).unwrap_or_default();
+                            lay.span(dst, averaged, (backdrop_column, backdrop_row));
+                        }
                     }
                 }
                 offset = offset.saturating_add(width.saturating_mul(covered.len()));
             }
-        }
-    }
-
-    /// Mix one piece's averages for destination row `row` over that row of
-    /// `band`.
-    fn mix_span(
-        &self,
-        band: &mut RowBand<'_>,
-        row: u32,
-        piece: &Piece,
-        averaged: &[Pixel],
-        coverage: &impl Fn(u32, u32) -> u8,
-    ) {
-        let asked = self.column(piece.cols.start);
-        let wide = u32::try_from(piece.cols.len()).unwrap_or(u32::MAX);
-        let Some((first, target)) = band.row_span_mut(row, asked, wide) else {
-            return;
-        };
-        // A clip window that cut the span's leading columns advances the
-        // averages by as much, so the two stay aligned.
-        let skip = usize::try_from(first.saturating_sub(asked)).unwrap_or(usize::MAX);
-        let (ly, dither) = (row.saturating_sub(self.y), DitherRow::at(row));
-        for (((dst, &src), lx), column) in target
-            .iter_mut()
-            .zip(averaged.get(skip..).unwrap_or_default())
-            .zip(first.saturating_sub(self.x)..)
-            .zip(first..)
-        {
-            *dst = mix(*dst, src, coverage(lx, ly), dither.bias(column));
         }
     }
 }
@@ -859,7 +1097,7 @@ impl PlaneRead<'_> {
         bands: &[Band],
         lines: &mut [Pixel],
         runner: &dyn JobRunner,
-        dest: &Surface,
+        held_by: Option<&Surface>,
     ) {
         let width = self.frost.width().max(1);
         let reads = bands.iter().map(|band| self.frost.pass_rows(band));
@@ -875,7 +1113,7 @@ impl PlaneRead<'_> {
                 )
                 .zip(lines.chunks_exact_mut(width));
             tairix_parallel::for_each_drawn(runner, work, &|(mut band, line)| {
-                self.blur_band_lines(&mut band, line, bands, dest);
+                self.blur_band_lines(&mut band, line, bands, held_by);
             });
             start = run.end;
         }
@@ -884,17 +1122,17 @@ impl PlaneRead<'_> {
     /// The horizontal pass over the plane rows `rows` owns, a row at a time:
     /// each band's averages written into the plane over the band's columns.
     ///
-    /// A row the destination holds the whole of what its averages read is
-    /// averaged straight from the destination. Any other row's backdrop is
-    /// gathered into `line` first — the plane's own, with what the destination
-    /// holds laid over it — since its averages are written into the very row of
-    /// the plane they read.
+    /// A row the destination `held_by` holds the whole of what its averages
+    /// read is averaged straight from it. Any other row's backdrop is gathered
+    /// into `line` first — the plane's own, with what the destination holds laid
+    /// over it — since its averages are written into the very row of the plane
+    /// they read.
     fn blur_band_lines(
         &self,
         rows: &mut RowBand<'_>,
         line: &mut [Pixel],
         bands: &[Band],
-        dest: &Surface,
+        held_by: Option<&Surface>,
     ) {
         let frost = self.frost;
         let width = frost.width();
@@ -923,12 +1161,10 @@ impl PlaneRead<'_> {
             if start != first || target.len() != width {
                 continue;
             }
-            let held = if frost.held.rows.contains(&local) {
-                overlap(&frost.held.cols, &read)
-            } else {
-                0..0
-            };
-            let source = if held == read {
+            let held = held_by
+                .filter(|_| frost.held.rows.contains(&local))
+                .map(|dest| (dest, overlap(&frost.held.cols, &read)));
+            let source = if let Some((dest, _)) = held.as_ref().filter(|(_, held)| *held == read) {
                 match dest.row_span(frost.row(local), frost.column(0), span) {
                     Some((at, row)) if at == frost.column(0) && row.len() == width => row,
                     _ => continue,
@@ -940,7 +1176,7 @@ impl PlaneRead<'_> {
                     continue;
                 };
                 gathered.copy_from_slice(backdrop);
-                if !held.is_empty() {
+                if let Some((dest, held)) = held.filter(|(_, held)| !held.is_empty()) {
                     let wide = u32::try_from(held.len()).unwrap_or(u32::MAX);
                     let (Some(gathered), Some((_, backdrop))) = (
                         line.get_mut(held.clone()),

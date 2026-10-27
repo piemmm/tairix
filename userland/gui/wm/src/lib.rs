@@ -90,7 +90,7 @@ pub use chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 pub use color::{Color, Pixel};
 pub use compositor::{output_reach, Compositor, PointerTarget, Presentation};
 pub use corner::Corners;
-pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
+pub use frost::{frost_cache, FrostEpoch, FrostField};
 pub use geometry::{Point, Rect, Region, Scale};
 pub use input::{
     Abandoned, ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key,

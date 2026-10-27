@@ -72,8 +72,8 @@ pub use artwork::{
     for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
 pub use blur::{
-    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Frosting, ShadowCast,
-    SOFTEN_PASSES,
+    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Blurring, Frosting,
+    ShadowCast, SOFTEN_PASSES,
 };
 pub use color::{
     blend_solid_span, blend_span, cover_span, div255, div255_biased, leading_opaque,

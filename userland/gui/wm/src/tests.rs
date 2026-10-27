@@ -22,7 +22,7 @@ use tairix_reclaim::{CachedBytes, PressureBand, PressureGauge, ReclaimCache, Rep
 use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
 
 use crate::chrome::{chrome_cache, ChromeEpoch, WindowChrome};
-use crate::frost::{frost_cache, FrostEpoch, FrostedBackdrop};
+use crate::frost::{frost_cache, FrostEpoch, FrostField};
 use crate::select::{cursor_cache, CursorEpoch};
 
 use crate::{
@@ -3170,47 +3170,43 @@ fn a_change_behind_a_blurred_window_repaints_all_of_it() {
 }
 
 #[test]
-fn a_frosted_window_repaints_whole_however_little_is_damaged() {
+fn a_change_beneath_a_frosted_window_repaints_only_its_reach() {
     let (mut c, block) = frosted_block(6, false);
-    // A single presented pixel behind the frosting: the damage widens to
-    // the frosted window's whole rectangle, so every row of it is
-    // recomposited and the result matches a from-scratch composite.
+    // A single presented pixel behind the frosting changes the frost only
+    // within the blur's radius of it, so that much of the window is
+    // recomposited, and the result matches a from-scratch composite.
     assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
     let repainted = composite_checked(&mut c);
-    for y in 0..8 {
-        assert!(
-            repainted.contains(Point::new(4, y)) && repainted.contains(Point::new(11, y)),
-            "row {y} of the frosted window was recomposited end to end"
-        );
-    }
+    assert_eq!(repainted.rects(), &[Rect::new(4, 1, 7, 7)]);
 
     let (fresh, _) = frosted_block(6, true);
     assert_eq!(
         c.frame(),
         fresh.frame(),
-        "one damaged pixel refrosts the window exactly as a full composite"
+        "one damaged pixel refrosts its reach exactly as a full composite"
     );
 }
 
 #[test]
 fn damage_beside_a_frosted_window_is_not_swallowed_by_it() {
     let (mut c, block) = frosted_block(6, false);
-    // The block sits under the frosted window, so its repaint promotes the
-    // window whole; the taskbar-like strip in the far corner is unrelated.
+    // The block sits under the frosted window, so its repaint recomposes the
+    // frost within the blur's reach of it; the taskbar-like strip in the far
+    // corner is unrelated.
     let strip = c.add_window(Point::new(14, 6), opaque(2, 2, GREEN));
     assert!(!composite_checked(&mut c).is_empty());
     assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
     assert!(c.move_window(strip, Point::new(14, 4)));
 
     let repainted = composite_checked(&mut c);
-    for y in 0..8 {
-        assert!(
-            repainted.contains(Point::new(4, y)) && repainted.contains(Point::new(11, y)),
-            "row {y} of the frosted window was recomposited end to end"
-        );
+    for column in 11..14 {
+        for y in 0..8 {
+            assert!(
+                !repainted.contains(Point::new(column, y)),
+                "({column}, {y}) lies between the two changes"
+            );
+        }
     }
-    // Growing the strip's damage to reach the frosted window would have
-    // recomposited the columns between them too.
     let touched: u32 = repainted
         .rects()
         .iter()
@@ -3218,26 +3214,31 @@ fn damage_beside_a_frosted_window_is_not_swallowed_by_it() {
         .sum::<u32>();
     assert_eq!(
         touched,
-        8 * 8 + 2 * 2 + 2 * 2,
-        "only the window and the strip's two positions were recomposed"
+        7 * 7 + 2 * 2 + 2 * 2,
+        "only the change's reach in the frost and the strip's two positions were recomposed"
     );
 }
 
 #[test]
-fn two_overlapping_frosted_windows_recompose_as_one_rectangle() {
-    let mut c = new_compositor(mode(20, 10), BLUE).expect("compositor");
-    let block = c.add_window(Point::ORIGIN, opaque(3, 10, RED));
-    let left = c.add_window(Point::ORIGIN, clear(8, 10));
-    let right = c.add_window(Point::new(6, 0), clear(8, 10));
-    assert!(c.set_backdrop_blur(left, 2));
-    assert!(c.set_backdrop_blur(right, 2));
-    c.composite();
+fn a_change_beneath_overlapping_frosts_recomposes_its_reach_in_each() {
+    // Neither frost reads the other — each blurs the windows beneath it as
+    // though none were frosted — so a change beneath both recomposes the
+    // blur's reach of it in each and no more, and the overlap cannot seam.
+    let mut both = BothWays::new(mode(20, 10));
+    let block = both.both(|c| c.add_window(Point::new(5, 0), opaque(4, 10, RED)));
+    let left = both.both(|c| c.add_window(Point::ORIGIN, clear(8, 10)));
+    let right = both.both(|c| c.add_window(Point::new(6, 0), clear(8, 10)));
+    both.both(|c| c.set_backdrop_blur(left, 2));
+    both.both(|c| c.set_backdrop_blur(right, 2));
+    both.settle("two overlapping frosts");
 
-    // Each frosted window reads what the other wrote, so damage touching
-    // either must recompose both at once or the overlap seams.
-    assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
-    let repainted = composite_checked(&mut c);
-    assert_eq!(repainted.rects(), &[Rect::new(0, 0, 14, 10)]);
+    both.both(|c| present_content(c, block, paint_dot));
+    let repainted = both.reusing.composite();
+    assert_eq!(repainted.rects(), &[Rect::new(4, 2, 5, 5)]);
+    let (blurring, unretained) = (both.blurring.composite(), both.unretained.composite());
+    assert_eq!(repainted, blurring);
+    assert_eq!(repainted, unretained);
+    both.settle("the change composed");
 }
 
 #[test]
@@ -7087,7 +7088,7 @@ fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch, Buil
 
 /// The frosted-backdrop cache the shipping desktop policy builds, at normal
 /// pressure and sized from a 1080p output.
-fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
+fn test_frost_cache() -> ReclaimCache<WindowId, FrostField, FrostEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     screenful_frost_cache(TEST_FB_BYTES, &NORMAL_PRESSURE)
 }
@@ -7097,7 +7098,7 @@ fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, Bui
 fn screenful_frost_cache(
     fb_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
-) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
+) -> ReclaimCache<WindowId, FrostField, FrostEpoch, BuildFastHash> {
     frost_cache(TEST_SEAT, fb_bytes, 0, pressure, &TEST_SINK)
 }
 
@@ -8292,20 +8293,19 @@ fn every_change_around_a_frosted_window_composes_the_frame_a_fresh_blur_would() 
     both.settle("the last frost removed");
 }
 
-/// Dragging a frosted window retakes its backdrop into the buffer it already
-/// holds, rather than allocating a fresh one every pointer sample.
+/// Dragging a frosted window keeps its blur in the buffer it already holds.
 ///
-/// A move leaves the rectangle the same size, so the retained pixels are
-/// exactly the right shape to be rewritten in place. Building a new frost and
-/// offering it to the cache instead is correct but frees a screen-scale buffer
-/// and asks for an identical one per sample — on a real display, megabytes of
+/// The first step gives the field its margin, which is one new buffer; every
+/// step after it moves inside the margin or shifts the field across it, in
+/// place. Building a new field per sample instead would free a screen-scale
+/// buffer and ask for an identical one — on a real display, megabytes of
 /// allocator traffic on the frame path, and with it a page's worth of map,
 /// unmap and cross-CPU TLB shootdown per kilobyte.
 ///
 /// A charge is what makes that observable: admitting a value charges the
-/// ledger, renewing one in place does not. So the drag below must add no
-/// insertions at all, while `BothWays` holds the pixels to what a fresh blur
-/// would have written.
+/// ledger, renewing one in place does not. So the drag below adds one
+/// insertion and no more, while `BothWays` holds the pixels to what a fresh
+/// blur would have written.
 #[test]
 fn dragging_a_frosted_window_reuses_its_retained_buffer() {
     let mut both = BothWays::new(mode(40, 24));
@@ -8313,21 +8313,26 @@ fn dragging_a_frosted_window_reuses_its_retained_buffer() {
     let glass = both.both(|c| c.add_window(Point::new(6, 4), clear(20, 14)));
     both.both(|c| c.set_backdrop_blur(glass, 3));
     both.settle("the first frost");
-    assert!(
-        both.reusing.frost_resident(glass),
-        "its backdrop is retained"
+    assert!(both.reusing.frost_resident(glass), "its blur is retained");
+    let insertions = both.reusing.frost_cache_stats().insertions();
+    both.both(|c| c.move_window(glass, Point::new(7, 5)));
+    both.settle("the first step of the drag");
+    assert_eq!(
+        both.reusing.frost_cache_stats().insertions(),
+        insertions + 1,
+        "the first step gives the field its margin"
     );
 
     let (bytes, insertions) = (
         both.reusing.frost_cache_bytes(),
         both.reusing.frost_cache_stats().insertions(),
     );
-    for step in 1..=6 {
+    for step in 2..=12 {
         both.both(|c| c.move_window(glass, Point::new(6 + step, 4 + step)));
         both.settle("a drag step");
         assert!(
             both.reusing.frost_resident(glass),
-            "step {step}: the frost must survive its own move"
+            "step {step}: the field must survive its own window's move"
         );
         assert_eq!(
             both.reusing.frost_cache_stats().insertions(),
@@ -8337,7 +8342,7 @@ fn dragging_a_frosted_window_reuses_its_retained_buffer() {
         assert_eq!(
             both.reusing.frost_cache_bytes(),
             bytes,
-            "step {step}: the retained rectangle is the same size throughout"
+            "step {step}: the field is the same size throughout"
         );
     }
 }
@@ -8392,15 +8397,15 @@ fn a_window_dragged_across_a_frosted_one_never_costs_a_re_blur() {
 }
 
 #[test]
-fn dragging_a_frosted_window_blurs_only_the_border_the_move_uncovers() {
+fn dragging_a_frosted_window_inside_its_field_blurs_nothing() {
     // The interaction this cache was least good at: the frosted window itself
-    // being dragged. Its rectangle moves, so the frost taken for the old one no
-    // longer describes it — but the layers *beneath* it did not move, so every
-    // pixel far enough inside both rectangles that neither the blur's
-    // replication nor the shape's corners can reach it is still exactly right.
-    // Only the border is blurred again.
+    // being dragged. Its blur is a function of the layers beneath, which did
+    // not move, so the field taken where it lay is still exactly right where
+    // it lies now: the drag blurs once to give the field its margin, nothing
+    // while it moves inside that, and a slab each time it crosses it.
     const SIDE: (u32, u32) = (200, 140);
     const RADIUS: u16 = 4;
+    let margin = u32::from(RADIUS);
     let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
     c.add_window(Point::ORIGIN, opaque(320, 240, GREEN));
     let glass = c.add_window(Point::new(40, 40), clear(SIDE.0, SIDE.1));
@@ -8413,33 +8418,38 @@ fn dragging_a_frosted_window_blurs_only_the_border_the_move_uncovers() {
         "the first frame has nothing to keep"
     );
 
-    // A pointer sample's worth of movement, several times over, so the steady
-    // state of a drag is what is measured and not just its first step.
-    for step in 1..=5 {
-        assert!(c.move_window(glass, Point::new(40 + step * 3, 40 + step * 3)));
+    let step = |c: &mut Compositor, at: i32| {
+        assert!(c.move_window(glass, Point::new(at, at)));
         assert!(
             c.frost_resident(glass),
-            "moving a window changes nothing beneath it, so its frost survives"
+            "moving a window changes nothing beneath it, so its field survives"
         );
-        composite_checked(&mut c);
-        let blurred = c.frame_stats().blur_px;
-        assert!(blurred > 0, "the border it uncovered must be blurred");
-        assert!(
-            blurred * 5 < whole,
-            "step {step} blurred {blurred} of {whole} pixels; the border of a \
-             three-pixel move is a small fraction of the window"
-        );
+        composite_checked(c);
+        c.frame_stats().blur_px
+    };
+    let ring = u64::from((SIDE.0 + 2 * margin) * (SIDE.1 + 2 * margin)) - whole;
+    assert_eq!(
+        step(&mut c, 43),
+        ring,
+        "the first move blurs the margin once"
+    );
+    for at in [45, 46, 47] {
+        assert_eq!(step(&mut c, at), 0, "a move to {at} stays inside the field");
     }
+    let slab = step(&mut c, 48);
+    assert!(
+        slab > 0 && slab * 5 < whole,
+        "crossing the margin blurred {slab} of {whole} pixels; only the slab entered"
+    );
 
-    // A jump far enough to leave no shared core at all falls back to blurring
-    // the whole rectangle rather than producing a seam.
+    // A jump clear of the field keeps nothing of it, and blurs only what of
+    // the new field is on screen.
     assert!(c.move_window(glass, Point::new(300, 220)));
     composite_checked(&mut c);
     assert_eq!(
         c.frame_stats().blur_px,
-        20 * 20,
-        "a window jumped clear of itself keeps nothing, and only its \
-         on-screen part is frosted"
+        u64::from(20 + margin) * u64::from(20 + margin),
+        "a window jumped clear of its field blurs only the field's part on screen"
     );
 }
 
@@ -8553,91 +8563,26 @@ fn every_change_around_a_translucent_window_composes_the_frame_a_fresh_one_would
     both.settle("the last one removed");
 }
 
-/// Apply `act` to two compositors, requiring both to take it, so the pair
-/// stays in the same state and their frame counters stay comparable.
-fn apply_to_both(a: &mut Compositor, b: &mut Compositor, act: impl Fn(&mut Compositor) -> bool) {
-    assert!(act(a) && act(b), "both stacks take the act");
-}
-
 #[test]
-fn dragging_a_translucent_window_keeps_the_backdrop_it_already_composed() {
-    // The complaint this closes: a translucent window was the *slowest* thing
-    // to drag, because every pointer sample recomposed the whole stack beneath
-    // it. Moving it disturbs nothing below, so all of the backdrop the two
-    // positions share is still exactly right and only the sliver the move
-    // uncovers has to be composed.
-    // Two compositors given identical scenes and identical moves, one keeping
-    // its backdrops and one composing every frame from the root fill up, so
-    // the counters below are the same frame's work measured two ways rather
-    // than two different frames compared.
-    let mut kept = new_compositor(mode(320, 240), BLUE).expect("compositor");
-    let mut fresh = new_compositor(mode(320, 240), BLUE).expect("compositor");
-    fresh.set_frost_reuse(false);
-    let whole = u64::from(200 * 140_u32);
-    apply_to_both(&mut kept, &mut fresh, |c| {
-        c.add_window(Point::ORIGIN, opaque(320, 240, GREEN));
-        // Translucent, so the layer beneath the dragged window has to be
-        // blended rather than copied by the opaque-run path — which is what
-        // makes it something a retained backdrop can spare.
-        let mid = c.add_window(Point::new(20, 20), opaque(260, 190, RED));
-        c.set_opacity(mid, 200)
-    });
-    let glass = kept.add_window(Point::new(40, 40), opaque(200, 140, BLUE));
-    assert_eq!(
-        fresh.add_window(Point::new(40, 40), opaque(200, 140, BLUE)),
-        glass,
-        "ids are handed out in order, so the two stacks stay identical"
-    );
-    apply_to_both(&mut kept, &mut fresh, |c| c.set_opacity(glass, 160));
-    composite_checked(&mut kept);
-    composite_checked(&mut fresh);
-    assert!(kept.frost_resident(glass), "its backdrop is retained");
-
+fn a_window_translucent_as_a_whole_retains_nothing() {
+    // A blur of radius zero is the backdrop as composed, which a frost's
+    // backdrop no longer is, so a window translucent without a blur retains
+    // nothing and composes through the blend path; every frame is the one a
+    // compositor keeping nothing draws.
+    let mut both = BothWays::new(mode(80, 60));
+    both.both(|c| c.add_window(Point::ORIGIN, opaque(80, 60, GREEN)));
+    let mid = both.both(|c| c.add_window(Point::new(5, 5), opaque(60, 45, RED)));
+    both.both(|c| c.set_opacity(mid, 200));
+    let glass = both.both(|c| c.add_window(Point::new(10, 10), opaque(40, 28, BLUE)));
+    both.both(|c| c.set_opacity(glass, 160));
+    both.settle("a translucent window over a translucent one");
+    assert!(!both.reusing.frost_resident(glass));
     for step in 1..=5 {
-        apply_to_both(&mut kept, &mut fresh, |c| {
-            c.move_window(glass, Point::new(40 + step * 3, 40 + step * 3))
-        });
-        composite_checked(&mut kept);
-        composite_checked(&mut fresh);
-        let (with, without) = (kept.frame_stats(), fresh.frame_stats());
-        assert_eq!(
-            (with.blur_px, without.blur_px),
-            (0, 0),
-            "step {step}: nothing in this scene is blurred"
-        );
-        // Keeping the backdrop also keeps the damaged rectangle down to what
-        // the move actually disturbed: a window that must recompose its
-        // backdrop is promoted to its whole bounds first, so the stack beneath
-        // it is resolved over more of the screen as well as more deeply.
-        assert!(
-            with.damaged_px < without.damaged_px,
-            "step {step} damaged {} pixels keeping the backdrop and {} without",
-            with.damaged_px,
-            without.damaged_px
-        );
-        // Its own pixels still blend over the whole rectangle; what the kept
-        // backdrop spares is resolving the layers under it at all — neither
-        // blended nor copied.
-        let resolved = |s: crate::FrameStats| s.blended_px + s.opaque_px;
-        assert!(
-            resolved(with) < whole * 5 / 4,
-            "step {step} resolved {} layer contributions over a {whole}-pixel \
-             window; a kept backdrop leaves the window itself and the sliver \
-             the move uncovered",
-            resolved(with)
-        );
-        assert!(
-            resolved(without) > resolved(with) * 2,
-            "step {step} resolved {} contributions with the backdrop kept \
-             against {} without it; keeping it must spare the stack beneath",
-            resolved(with),
-            resolved(without)
-        );
+        both.both(|c| c.move_window(glass, Point::new(10 + step * 3, 10 + step * 3)));
+        both.settle("a step of its drag");
+        assert!(!both.reusing.frost_resident(glass));
+        assert_eq!(both.reusing.frost_cache_len(), 0);
     }
-
-    // Both took the same route to the same screen: the saving is work not
-    // done, never a different picture.
-    assert_eq!(kept.frame(), fresh.frame(), "the two screens are identical");
 }
 
 #[test]
@@ -8703,15 +8648,15 @@ fn each_frame_asks_about_a_frost_once_and_records_what_it_got() {
     composite_checked(&mut c);
     assert_eq!(
         counts(&c),
-        (1, 2),
-        "a recompute is one miss, not one for the plan and one for retaining it"
+        (2, 1),
+        "a change beneath stales the field where it reaches; the field is still found"
     );
 
     assert_eq!(present_content(&mut c, away, paint_dot), Some(true));
     composite_checked(&mut c);
     assert_eq!(
         counts(&c),
-        (1, 2),
+        (2, 1),
         "a frame that never reaches the frost asks nothing about it"
     );
 }
@@ -8736,29 +8681,165 @@ fn a_frosted_window_s_own_repaint_costs_no_blur_and_no_widening() {
     assert_eq!(stats.damaged_px, 1);
 }
 
-#[test]
-fn a_change_beneath_a_frosted_window_re_frosts_the_whole_of_it() {
-    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
-    let under = c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
-    // The frost covers the pixel `paint_dot` changes, so the change really is
-    // one its blur reads: a frost samples only inside its own rectangle.
-    let glass = c.add_window(Point::ORIGIN, clear(20, 14));
-    assert!(c.set_backdrop_blur(glass, 3));
-    composite_checked(&mut c);
-    assert!(c.frost_resident(glass));
+/// A box blur of `pixels`, `width` × `height`, written the obvious way: each
+/// pass averages the samples within `radius`, an index past the screen's edge
+/// clamped to it, rounding half up — the definition the frost is held to.
+fn naive_screen_blur(
+    pixels: &[Pixel],
+    width: usize,
+    height: usize,
+    radius: usize,
+) -> alloc::vec::Vec<Pixel> {
+    let count = u32::try_from(2 * radius + 1).expect("a test radius fits");
+    let mean = |sum: u32| u8::try_from((sum + count / 2) / count).expect("a mean of bytes");
+    let pass = |field: &[Pixel], horizontal: bool| -> alloc::vec::Vec<Pixel> {
+        let mut out = field.to_vec();
+        for y in 0..height {
+            for x in 0..width {
+                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+                for step in 0..=2 * radius {
+                    let along = if horizontal { x } else { y };
+                    let limit = if horizontal { width } else { height } - 1;
+                    let at = (along + step).saturating_sub(radius).min(limit);
+                    let pixel = if horizontal {
+                        field[y * width + at]
+                    } else {
+                        field[at * width + x]
+                    };
+                    r += u32::from(pixel.r);
+                    g += u32::from(pixel.g);
+                    b += u32::from(pixel.b);
+                    a += u32::from(pixel.a);
+                }
+                out[y * width + x] = Pixel {
+                    r: mean(r),
+                    g: mean(g),
+                    b: mean(b),
+                    a: mean(a),
+                };
+            }
+        }
+        out
+    };
+    pass(&pass(pixels, true), false)
+}
 
-    assert_eq!(present_content(&mut c, under, paint_dot), Some(true));
+/// A frost is its definition, pixel for pixel, however it was reached: the
+/// windows beneath composed as though none were frosted, box-blurred with
+/// samples taken past the window's edges and replicated only at the screen's,
+/// and mixed back by the window's shape over what is beneath its corners.
+#[test]
+fn a_frost_is_the_blur_of_the_unfrosted_backdrop_sampled_past_its_edges() {
+    const RADIUS: u16 = 3;
+    const SIDE: (u32, u32) = (48, 32);
+    let output = mode(SIDE.0, SIDE.1);
+    let corners = Corners::Rounded { radius: 6 };
+    // Stripes and a frosted pane beneath, so both a texture and a frost lie
+    // under the top window's edges and corners.
+    let backdrop = |c: &mut Compositor, lower_blur: u16| {
+        for x in (0..48).step_by(5) {
+            c.add_window(Point::new(x, 0), opaque(2, 32, RED));
+        }
+        let pane = Surface::filled(20, 14, Color::rgba(20, 24, 30, 0xA0).premultiply())
+            .expect("surface allocates");
+        let lower = c.add_window(Point::new(2, 14), pane);
+        assert!(c.set_backdrop_blur(lower, lower_blur));
+    };
+    let composed = |lower_blur: u16| {
+        let mut c = new_compositor(output, BLUE).expect("compositor");
+        backdrop(&mut c, lower_blur);
+        c.composite();
+        c.back_buffer().pixels().to_vec()
+    };
+    let beneath = composed(RADIUS);
+    let blurred = naive_screen_blur(
+        &composed(0),
+        SIDE.0 as usize,
+        SIDE.1 as usize,
+        usize::from(RADIUS),
+    );
+    let frost_at = |window: Rect, x: u32, y: u32| {
+        let at = (y * SIDE.0 + x) as usize;
+        if !window.contains(Point::new(x.cast_signed(), y.cast_signed())) {
+            return beneath[at];
+        }
+        let lx = x - window.left().cast_unsigned();
+        let ly = y - window.top().cast_unsigned();
+        let weight = corners.coverage(lx, ly, window.width, window.height);
+        let bias = tairix_raster::DitherRow::at(y).bias(x);
+        let channel = |from: u8, to: u8| match weight {
+            255 => to,
+            0 => from,
+            _ => tairix_raster::div255_biased(
+                u32::from(from) * u32::from(255 - weight) + u32::from(to) * u32::from(weight),
+                bias,
+            ),
+        };
+        let (from, to) = (beneath[at], blurred[at]);
+        Pixel {
+            r: channel(from.r, to.r),
+            g: channel(from.g, to.g),
+            b: channel(from.b, to.b),
+            a: channel(from.a, to.a),
+        }
+    };
+    let held_to = |both: &BothWays, window: Rect| {
+        let shown = both.reusing.back_buffer().pixels();
+        for y in 0..SIDE.1 {
+            for x in 0..SIDE.0 {
+                let at = (y * SIDE.0 + x) as usize;
+                assert_eq!(
+                    shown[at],
+                    frost_at(window, x, y),
+                    "({x}, {y}) under {window:?}"
+                );
+            }
+        }
+    };
+
+    let mut both = BothWays::new(output);
+    let top = both.both(|c| {
+        backdrop(c, RADIUS);
+        c.add_window(Point::new(9, 6), clear(26, 18))
+    });
+    both.both(|c| c.set_corners(top, corners));
+    both.both(|c| c.set_backdrop_blur(top, RADIUS));
+    both.settle("a rounded frost over stripes and another frost");
+    held_to(&both, Rect::new(9, 6, 26, 18));
+
+    // Dragged: inside its field, across its margin, and nearly clear of it.
+    for at in [Point::new(10, 7), Point::new(13, 9), Point::new(21, 4)] {
+        both.both(|c| c.move_window(top, at));
+        both.settle("the frost dragged");
+        held_to(&both, Rect::new(at.x, at.y, 26, 18));
+    }
+}
+
+#[test]
+fn a_change_beneath_a_frosted_window_re_frosts_only_its_reach() {
+    let mut both = BothWays::new(mode(40, 24));
+    let under = both.both(|c| c.add_window(Point::ORIGIN, opaque(40, 24, GREEN)));
+    let glass = both.both(|c| c.add_window(Point::ORIGIN, clear(20, 14)));
+    both.both(|c| c.set_backdrop_blur(glass, 3));
+    both.settle("the first frost");
+
+    both.both(|c| present_content(c, under, paint_dot));
     assert!(
-        !c.frost_resident(glass),
-        "a present below the frost must drop it"
+        both.reusing.frost_resident(glass),
+        "a change beneath stales a field; it does not drop it"
     );
-    composite_checked(&mut c);
+    assert!(!both.reusing.frost_holds(glass, Rect::new(1, 4, 1, 1)));
+    assert!(
+        both.reusing.frost_holds(glass, Rect::new(5, 0, 15, 14)),
+        "past the blur's reach of the change the field is still current"
+    );
+    both.settle("a pixel beneath the frost");
     assert_eq!(
-        c.frame_stats().blur_px,
-        20 * 14,
-        "the whole window is frosted again, not the presented pixel"
+        both.reusing.frame_stats().blur_px,
+        5 * 7,
+        "the blur's reach of the presented pixel is frosted again, not the window"
     );
-    assert!(c.frost_resident(glass), "and retained for the next frame");
+    assert!(both.reusing.frost_holds(glass, Rect::new(0, 0, 20, 14)));
 }
 
 #[test]
@@ -8806,49 +8887,44 @@ fn raising_the_topmost_frosted_window_keeps_its_backdrop() {
 }
 
 #[test]
-fn raising_a_covered_frosted_window_re_frosts_it() {
-    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
-    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
-    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
-    c.add_window(Point::new(10, 6), opaque(8, 8, RED));
-    assert!(c.set_backdrop_blur(glass, 3));
-    composite_checked(&mut c);
-    assert!(c.frost_resident(glass));
+fn raising_a_covered_frosted_window_re_frosts_where_it_crossed() {
+    let mut both = BothWays::new(mode(40, 24));
+    both.both(|c| c.add_window(Point::ORIGIN, opaque(40, 24, GREEN)));
+    let glass = both.both(|c| c.add_window(Point::new(6, 4), clear(20, 14)));
+    both.both(|c| c.add_window(Point::new(10, 6), opaque(8, 8, RED)));
+    both.both(|c| c.set_backdrop_blur(glass, 3));
+    both.settle("a frost beneath an opaque window");
 
-    // Raising it puts a window that was above it below: the backdrop it
-    // blurred is a different one now.
-    assert!(c.raise(glass));
-    assert!(!c.frost_resident(glass));
-    composite_checked(&mut c);
-    assert_eq!(c.frame_stats().blur_px, 20 * 14);
+    // Raising it puts the window that was above it beneath it: its backdrop
+    // changed where the two cross, out to the blur's reach.
+    both.both(|c| c.raise(glass));
+    assert!(both.reusing.frost_resident(glass));
+    assert!(!both.reusing.frost_holds(glass, Rect::new(10, 6, 8, 8)));
+    both.settle("the frost raised over it");
+    assert_eq!(both.reusing.frame_stats().blur_px, 14 * 13);
 }
 
 #[test]
-fn re_frosting_one_window_drops_the_frost_stacked_above_it() {
-    // The lower frost's *visible* pixels change across the whole of it when it
-    // is recomputed, because a blur spreads the change far past the rectangle
-    // that caused it — so the frost above reads different bytes even where the
-    // damage never reached it.
-    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
-    let under = c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
-    let lower = c.add_window(Point::new(0, 2), clear(24, 20));
-    let upper = c.add_window(Point::new(20, 2), clear(18, 20));
-    assert!(c.set_backdrop_blur(lower, 3));
-    assert!(c.set_backdrop_blur(upper, 3));
-    composite_checked(&mut c);
-    assert!(c.frost_resident(lower) && c.frost_resident(upper));
+fn re_frosting_one_window_leaves_the_frost_above_it_alone() {
+    // A frost reads the windows beneath it as though none were frosted, so the
+    // lower frost blurred again changes nothing the upper one reads.
+    let mut both = BothWays::new(mode(40, 24));
+    let under = both.both(|c| c.add_window(Point::ORIGIN, opaque(40, 24, GREEN)));
+    let lower = both.both(|c| c.add_window(Point::new(0, 2), clear(24, 20)));
+    let upper = both.both(|c| c.add_window(Point::new(20, 2), clear(18, 20)));
+    both.both(|c| c.set_backdrop_blur(lower, 3));
+    both.both(|c| c.set_backdrop_blur(upper, 3));
+    both.settle("two frosts side by side");
 
-    // A pixel inside the lower frost's rectangle and well clear of the upper
-    // one's, so only the spreading blur can reach the window above.
-    assert_eq!(present_content(&mut c, under, paint_dot), Some(true));
-    assert!(!c.frost_resident(lower));
-    let repainted = composite_checked(&mut c);
-    assert_eq!(
-        repainted.rects(),
-        &[Rect::new(0, 2, 38, 20)],
-        "both frosts recompose as one rectangle"
-    );
-    assert!(c.frost_resident(lower) && c.frost_resident(upper));
+    // A pixel inside the lower frost's rectangle and well clear of the upper's.
+    both.both(|c| present_content(c, under, paint_dot));
+    assert!(both.reusing.frost_holds(upper, Rect::new(20, 2, 18, 20)));
+    let repainted = both.reusing.composite();
+    assert_eq!(repainted.rects(), &[Rect::new(0, 2, 5, 6)]);
+    assert_eq!(both.reusing.frame_stats().blur_px, 5 * 6);
+    assert!(both.reusing.frost_holds(upper, Rect::new(20, 2, 18, 20)));
+    let _ = (both.blurring.composite(), both.unretained.composite());
+    both.settle("the lower frost blurred again");
 }
 
 #[test]
@@ -11731,7 +11807,7 @@ fn restacking_windows_that_meet_only_by_shadow_repaints_where_they_meet() {
 }
 
 #[test]
-fn a_shadow_changing_beneath_a_frosted_window_retakes_its_frost() {
+fn a_shadow_changing_beneath_a_frosted_window_stales_its_frost_there() {
     let mut c = shadow_compositor();
     let low = caster(&mut c, Rect::new(20, 20, 60, 30), Corners::Square);
     // Clear of the caster's rectangle, inside the shadow it casts below it.
@@ -11740,12 +11816,16 @@ fn a_shadow_changing_beneath_a_frosted_window_retakes_its_frost() {
     assert!(c.set_backdrop_blur(glass, 3));
     c.composite();
     assert!(c.frost_resident(glass), "the frost is retained");
+    assert!(c.frost_holds(glass, Rect::new(20, 56, 80, 40)));
 
     assert!(c.move_window(low, Point::new(30, 20)));
+    assert!(c.frost_resident(glass));
     assert!(
-        !c.frost_resident(glass),
+        !c.frost_holds(glass, Rect::new(20, 56, 80, 1)),
         "the shadow the frost blurred moved beneath it"
     );
+    c.composite();
+    assert!(c.frost_holds(glass, Rect::new(20, 56, 80, 40)));
 }
 
 #[test]

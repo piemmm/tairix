@@ -1514,8 +1514,8 @@ retained buffer (`Compositor::repaint_window`) rather than a freshly rendered
 surface, so the compositor marks the rectangles that were painted instead of
 the window's whole bounds — the same treatment `present_menu_chain` gives a
 menu plate. That is the difference between a 40 × 40 slot taking the pointer's
-wash costing its own 1600 pixels and costing the bar's 40 560, over a frosted
-backdrop that must then be re-blurred. The renderer re-derives its whole recipe
+wash costing its own 1600 pixels and costing the bar's 40 560, each composed
+over its frost again. The renderer re-derives its whole recipe
 under each rectangle as a clip (`tairix_controls::damage::paint_parts`), so a
 scoped repaint lands exactly the pixels a whole paint would have laid there and
 there is no second "paint just this control" recipe to disagree with the first;

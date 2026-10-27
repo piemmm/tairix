@@ -477,10 +477,10 @@ impl Compositor {
                 )
             });
         let footprint = placed.map(|(footprint, _)| footprint);
-        let mut zones: ArrayVec<Rect, MAX_ACCEL_LAYERS> = ArrayVec::new();
+        let mut flattened: ArrayVec<Rect, MAX_ACCEL_LAYERS> = ArrayVec::new();
         for above in stack.layers.iter().skip(at.saturating_add(1)) {
-            if above.role().is_some_and(Role::is_composite) {
-                let _ = zones.try_push(above.at);
+            if above.role() == Some(Role::Flattened) {
+                let _ = flattened.try_push(above.at);
             }
         }
         let frost = stack
@@ -500,31 +500,34 @@ impl Compositor {
                 layer.at.origin = footprint.origin;
             }
         }
+        // Every frost above reads this window's pixels, whatever layer it
+        // rides, and a flattened footprint above composes them in.
         let from = self.index_of(id).map_or(0, |index| index.saturating_add(1));
         if let Change::Region(region) = change {
             let mut hit = core::mem::take(&mut self.routed);
-            for zone in zones {
+            for &rect in region.rects() {
+                self.stale_frosts_from(rect, from);
+            }
+            for zone in flattened {
                 hit.clone_from(region);
                 hit.clip(zone);
-                self.mark_region_from(&hit, from);
+                self.damage.add_region(&hit);
             }
             self.routed = hit;
             return true;
         }
-        for zone in zones {
-            for rect in footprints {
-                let hit = rect.intersection(&zone);
-                if !hit.is_empty() {
-                    self.mark_from(hit, from);
-                }
+        for rect in footprints {
+            self.stale_frosts_from(rect, from);
+            for zone in &flattened {
+                self.damage.add(rect.intersection(zone));
             }
         }
-        // A frost is a function of where its window lies, so a move or a whole
-        // change composes it again where it lay and where it lies now.
+        // The frost's layer moves with its window, laid again where it lies
+        // and leaving the base beneath where it lay.
         if let (Some(was), Some((_, now)), Change::Moved | Change::Whole) = (frost, placed, change)
         {
-            self.mark_from(was, from);
-            self.mark_from(now, from);
+            self.damage.add(was);
+            self.damage.add(now);
         }
         true
     }
@@ -939,7 +942,7 @@ impl Compositor {
     /// A window that reads no backdrop is alone over nothing, its translucency
     /// the engine's to blend whether or not that blend dithers (`plans/GPU.md`
     /// GD3). A frosted one is its own pixels over its frost where two layers
-    /// remain, so a move re-derives only the frost's border; a window
+    /// remain, so a move lays its frost again from its field; a window
     /// translucent as a whole, or a frosted one given a single layer, is
     /// composited with what lies beneath it.
     fn laid(window: &Window, reach: u32, screen: Rect, left: usize) -> ArrayVec<(Role, Rect), 2> {

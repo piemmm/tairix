@@ -1,134 +1,101 @@
 //! The frosted backdrop of a backdrop-blurred window, and the bounded,
-//! pressure-governed cache that retains it between frames.
+//! pressure-governed cache that retains its blur between frames.
 //!
-//! # Why it is retained
+//! # What a frost is
 //!
-//! A frosted window's pixels are blended over a blur of *everything beneath
-//! its rectangle*, so the compositor composes the layers below it, blurs that
-//! rectangle of the back buffer, and resumes from the window itself. The blur
-//! is two separable passes over the whole rectangle whatever the frame
-//! actually changed, which made the dominant interaction — the pointer moving
-//! inside a frosted terminal — cost a full-window frost per sample: measured
-//! at 17.4 ms for a 64×24 repaint, against 0.9 µs for the same repaint over an
-//! opaque stack.
+//! A frosted window's pixels are blended over its frost: the windows beneath
+//! it composed as though none of them were frosted, box-blurred with samples
+//! taken past the window's edges as far as the screen's own, and mixed back by
+//! the window's shape — the blur wherever the shape covers, the backdrop
+//! outside its corners. The blur at a screen pixel is therefore a function of
+//! the windows beneath and the radius alone: not of where the window lies, not
+//! of its shape, and not of any other window's frost.
 //!
-//! Nothing about that blur changes when the window's own content changes.
-//! Retaining it turns the dominant case into a row copy.
+//! # What is retained
 //!
-//! # What makes a retained one invalid
+//! The blur itself, before the mix: a [`FrostField`] over a screen rectangle
+//! holding the window's, and the part of it that is stale. A frost is laid
+//! from the field — copied where the shape covers fully, mixed at the corners
+//! over what was composed beneath them — so a window moving inside its field,
+//! or changing its shape, blurs nothing. A change beneath stales the field
+//! within the radius of the change, and only that much is blurred again.
 //!
-//! A frost is a function of exactly four things: the composed pixels beneath
-//! it, the window's own rectangle, the physical blur radius, and the window
-//! shape the mix is weighted by. The last three are recorded in the entry and
-//! compared on every lookup, so a geometry, radius, scale, or corner change
-//! fails closed to a recompute even if the compositor forgot to say so.
-//!
-//! The rectangle recorded is the window's *whole* one, not the part of it that
-//! is on screen. A window pushed off an edge is frosted from the row and
-//! column the screen begins at while its shape is still read from its own
-//! top-left, so two positions that clip to the same on-screen rectangle can
-//! weight the same pixels by different parts of the shape.
-//!
-//! The first cannot be self-checked without reading the pixels it would have
-//! saved, so the compositor drops the entry when it marks damage that changes
-//! them: damage below the window, or a change to the window's own stacking.
-//! Damage from the window's own content, or from anything stacked above it,
-//! changes nothing it reads.
-//!
-//! # Why a moved window keeps most of it
-//!
-//! Moving a window does not disturb the layers beneath it, so a frost taken
-//! before the move is still exactly right — in *screen* coordinates — wherever
-//! neither difference between the two positions can reach: the blur replicates
-//! at its rectangle's edges, and the shape weights the mix by a window-local
-//! coordinate. Both differences are confined to a border, so the pixels
-//! `FrostedBackdrop::reuse` hands back as a core are bit-for-bit what
-//! a fresh blur would write and only the border has to be blurred again
-//! (`Surface::frost_from` over the border's bands). Without that, every sample of a drag paid
-//! a full-window blur *and* a full-window composite of the layers under it, for
-//! a picture that had moved a few pixels.
-//!
-//! A move does not resize, so the retaken frost also goes straight back into
-//! the pixels already retained (`FrostedBackdrop::recapture`): a sample costs
-//! the row copy alone, rather than freeing a screen-scale buffer and asking for
-//! an identical one as well.
+//! A window's first move gives its field a margin of the blur's radius about
+//! its rectangle, and a move past it shifts the field, keeping what it still
+//! holds, so a drag blurs a slab each time it crosses the margin rather than
+//! its border every sample.
 
 use core::mem::size_of;
+use core::ops::Range;
+
+use alloc::vec::Vec;
 
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
+use tairix_parallel::JobRunner;
+use tairix_raster::{BlurScratch, Blurring};
 use tairix_reclaim::{stacked_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
 
 use crate::color::Pixel;
-use crate::geometry::Rect;
+use crate::geometry::{Rect, Region};
 use crate::surface::{self, Surface};
 use crate::window::{WindowId, WindowShape};
 
-/// What a frame must do about one backdrop-blurred window's frost.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum FrostPlan {
-    /// Copy the whole retained frost: the window is exactly where it was, so
-    /// nothing is blurred at all.
-    Whole,
-    /// Copy this screen rectangle of the retained frost and blur the border
-    /// around it, because the window has moved, resized, or changed shape and
-    /// only that border can differ.
-    Core(Rect),
-    /// Blur the whole rectangle: nothing retained applies to it.
-    Blur,
-    /// Blur only the part of the rectangle the frame recomposes. The window's
-    /// frost is not retained, but nothing beneath it has changed, so the frost
-    /// on screen is still right everywhere the frame leaves alone.
-    Local,
+/// The most separate rectangles one frost blurs or is seen through at once:
+/// the slabs a shifted field enters, or the parts of a damaged rectangle the
+/// frosts above leave seen. More are taken as the rectangle bounding them.
+pub(crate) const FROST_BANDS: usize = 8;
+
+/// How far a moved window's field reaches past its rectangle on every side:
+/// the blur's radius. The ring a drag's first move blurs is then about the
+/// border every sample blurred when a frost replicated at its window's edges,
+/// and a slab entered later costs no more.
+const fn margin(radius_px: u32) -> u32 {
+    radius_px
 }
 
-/// How far into its own rectangle a shape's corners weight the mix by less
-/// than full coverage: the corner radius the shape actually rounds by, or `0`
-/// for a square window, whose every pixel is fully covered.
-fn corner_reach(shape: Option<WindowShape>) -> u32 {
-    shape.map_or(0, WindowShape::corner_reach)
-}
-
-/// Worst-case per-entry bookkeeping the cache charges on top of the frosted
-/// pixels: the LRU/index tick and charged-size fields (`u64` + `usize`), this
+/// Worst-case per-entry bookkeeping the cache charges on top of a field's
+/// payload: the LRU/index tick and charged-size fields (`u64` + `usize`), this
 /// cache's small share of its two `BTreeMap`s' node overhead, and the
-/// rectangle, radius, shape, and [`Surface`] header a [`FrostedBackdrop`]
-/// holds inline. The [`WindowId`] key is one `u64`, already covered here.
+/// [`FrostField`] header held inline. The [`WindowId`] key is one `u64`,
+/// already covered here.
 const ENTRY_METADATA_BYTES: usize = 128;
 
-/// The epoch a retained [`FrostedBackdrop`] is valid for: this output's scale
-/// (in percent) paired with the screen extent frosts were clipped to.
+/// What a field's stale region may hold on the heap: its two rectangle
+/// buffers, each as long as combining a budget's worth of rectangles with one
+/// more can briefly make it. Charged as part of every field, so the charge
+/// stays fixed while the region changes.
+const STALE_HEAP_BYTES: usize = 2 * (4 * (FROST_BANDS + 2)).next_power_of_two() * size_of::<Rect>();
+
+/// The epoch a retained [`FrostField`] is valid for: this output's scale (in
+/// percent) paired with the screen extent fields are blurred within.
 ///
-/// Both are already caught per entry — the scale through the physical radius,
-/// the screen through the clipped rectangle — so the epoch is not what keeps a
-/// stale frost off the screen. It is what stops a superseded one *staying
-/// charged*: a density or mode change invalidates every window's frost at
-/// once, and releasing them together gives the budget back to the frosts that
-/// are still live instead of squeezing them until each stale entry is next
-/// looked up.
+/// The scale is caught per entry through the physical radius, so the epoch is
+/// not what keeps a stale blur off the screen. It is what stops a superseded
+/// one *staying charged*: a density or mode change invalidates every window's
+/// field at once, and releasing them together gives the budget back to the
+/// fields that are still live.
 ///
 /// The theme is deliberately absent, unlike [`ChromeEpoch`](crate::ChromeEpoch).
-/// Furniture is *painted* from the palette; a frost only blurs whatever the
-/// layers below it composed, and a palette change repaints those layers and
-/// marks them damaged, which drops the frosts that read them.
+/// A palette change repaints the layers beneath and marks them, which stales
+/// the fields that read them.
 pub type FrostEpoch = (u32, u32, u32);
 
 /// Build the one [`ReclaimCache`] a [`Compositor`](crate::Compositor) retains
-/// frosted backdrops in, classified through the shared desktop cache policy
+/// frost fields in, classified through the shared desktop cache policy
 /// (`tairix_reclaim::stacked_ui_cache`).
 ///
 /// `seat` is the seat the output belongs to, `fb_bytes` the real output's
 /// backing byte size, and `memory_bytes` the machine's physical memory (`0`
-/// where it cannot be read). A frost is a whole window's rectangle, and a
-/// window beneath a translucent one still shows through it, so overlapping
-/// frosted windows want a frost each over the same pixels: the ceiling is the
-/// machine's share of its memory, never below one screenful, and pressure takes
-/// it back to one screenful and then to the reserve. A stack deeper than that
-/// is retained from the front until the ceiling runs out, and the rest recompute
-/// what each frame needs of their frosts rather than all being rebuilt and
-/// evicted every frame (`Compositor::grant_backdrops`). `pressure` and `sink` are the
-/// process's live pressure gauge and audit sink. The embedder — the only party
-/// that knows all of these — calls this once and hands the result to
+/// where it cannot be read). A field is a whole window's rectangle or more,
+/// and overlapping frosted windows want a field each over the same pixels, so
+/// the ceiling is the machine's share of its memory, never below one
+/// screenful, and pressure takes it back to one screenful and then to the
+/// reserve. A stack deeper than that is retained from the front until the
+/// ceiling runs out, and the rest blur what each frame needs of their frosts
+/// (`Compositor::grant_backdrops`). `pressure` and `sink` are the process's
+/// live pressure gauge and audit sink. The embedder — the only party that
+/// knows all of these — calls this once and hands the result to
 /// [`Compositor::new`](crate::Compositor::new).
 #[must_use]
 pub fn frost_cache(
@@ -137,7 +104,7 @@ pub fn frost_cache(
     memory_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
+) -> ReclaimCache<WindowId, FrostField, FrostEpoch, BuildFastHash> {
     stacked_ui_cache(
         "wm.frost",
         seat,
@@ -152,183 +119,305 @@ pub fn frost_cache(
     )
 }
 
-/// The bytes a frost of `rect` charges the cache: its pixels alone, which is
-/// what a [`FrostedBackdrop`] owns and therefore what the cache weighs.
+/// The bytes a field over `rect` charges the cache: its pixels and its stale
+/// region's allowance, which is what a [`FrostField`] owns and therefore what
+/// the cache weighs.
 ///
-/// Read before any frost is built, so a frame can choose which windows to
-/// frost against what the budget will actually hold.
-pub(crate) fn frost_bytes(rect: Rect) -> usize {
+/// Read before any field is built, so a frame can choose which windows retain
+/// one against what the budget will actually hold.
+pub(crate) fn field_bytes(rect: Rect) -> usize {
     let area = usize::try_from(rect.width)
         .ok()
         .zip(usize::try_from(rect.height).ok())
         .and_then(|(w, h)| w.checked_mul(h));
     area.and_then(|area| area.checked_mul(size_of::<Pixel>()))
+        .and_then(|pixels| pixels.checked_add(STALE_HEAP_BYTES))
         .unwrap_or(usize::MAX)
 }
 
-/// One window's frosted backdrop: the blurred, shape-weighted pixels the
-/// window's own content is blended over, and the three facts they are a
-/// function of besides the layers beneath them.
+/// Whether `outer` holds every pixel of `inner`.
+fn holds_rect(outer: Rect, inner: Rect) -> bool {
+    inner.is_empty() || outer.intersection(&inner) == inner
+}
+
+/// The disjoint parts of `rect` outside `cut`: at most a band above, one below,
+/// and the two sides between.
+fn outside(rect: Rect, cut: Rect) -> [Rect; 4] {
+    let cut = rect.intersection(&cut);
+    if cut.is_empty() {
+        return [rect, Rect::EMPTY, Rect::EMPTY, Rect::EMPTY];
+    }
+    let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+    [
+        Rect::new(
+            rect.left(),
+            rect.top(),
+            rect.width,
+            span(rect.top(), cut.top()),
+        ),
+        Rect::new(
+            rect.left(),
+            cut.bottom(),
+            rect.width,
+            span(cut.bottom(), rect.bottom()),
+        ),
+        Rect::new(
+            rect.left(),
+            cut.top(),
+            span(rect.left(), cut.left()),
+            cut.height,
+        ),
+        Rect::new(
+            cut.right(),
+            cut.top(),
+            span(cut.right(), rect.right()),
+            cut.height,
+        ),
+    ]
+}
+
+/// One window's retained blur: the blurred backdrop, unmixed, over a screen
+/// rectangle holding the window's, and the part of it that is stale.
 ///
-/// This is an opaque cache payload. Nothing outside the window manager reads
-/// its pixels, so it exposes no accessors beyond the [`CachedBytes`] contract
-/// the cache holding it requires.
-pub struct FrostedBackdrop {
-    /// The whole rectangle of the window these pixels frost, on screen or
-    /// not — what the blur is a function of.
-    bounds: Rect,
-    /// The part of `bounds` that is on screen, which is what `pixels` covers.
+/// An opaque cache payload. Nothing outside the window manager reads its
+/// pixels, so it exposes no accessors beyond the [`CachedBytes`] contract the
+/// cache holding it requires.
+pub struct FrostField {
+    /// The screen rectangle the field covers, on screen or not.
     rect: Rect,
-    /// The physical radius they were blurred by — the logical radius through
-    /// the output's scale, so a density change reads as a different frost.
+    /// The physical radius the pixels are blurred by.
     radius_px: u32,
-    /// The shape the blurred copy was mixed back in through, or `None` for a
-    /// square window that took the whole rectangle.
-    shape: Option<WindowShape>,
-    /// The frosted pixels, `rect`-sized, premultiplied, in row-major order.
+    /// The part of `rect` whose pixels are not the current blur. Held to a
+    /// budget, so it grows to its bounding box rather than without limit:
+    /// staling more than changed costs a blur, never a wrong pixel.
+    stale: Region,
+    /// The blurred pixels, `rect`-sized, premultiplied, in row-major order.
     pixels: Surface,
 }
 
-impl CachedBytes for FrostedBackdrop {
-    /// The retained heap size of the frosted pixels — the only heap this
-    /// payload owns.
+impl CachedBytes for FrostField {
+    /// The retained heap size of the blurred pixels, and the allowance for
+    /// the stale region's.
     fn payload_bytes(&self) -> usize {
-        self.pixels.payload_bytes()
+        self.pixels.payload_bytes().saturating_add(STALE_HEAP_BYTES)
     }
 
-    /// Overwrite the frosted pixels, so a released entry leaves no readable
+    /// Overwrite the blurred pixels, so a released entry leaves no readable
     /// image of the user's desktop behind in reusable heap.
     fn wipe(&mut self) {
         self.pixels.wipe();
     }
 }
 
-impl FrostedBackdrop {
-    /// Take a copy of the frost `back` now holds where the window at `bounds`
-    /// reaches `screen`, or `None` when that is nothing or a buffer that size
-    /// cannot be allocated — in which case the caller keeps the frame it
-    /// already composed and simply retains nothing.
+impl FrostField {
+    /// The rectangle the field of a window at `window` blurred by `radius_px`
+    /// covers, given the rectangle `held` of the field it has now.
     ///
-    /// The clipping is done here rather than by the caller so the recorded
-    /// rectangle and the pixels it names are derived together and cannot
-    /// disagree.
-    ///
-    /// The copy is [`Surface::overwrite`], the shared blit walk laying rows
-    /// down whole rather than compositing them: a snapshot replaces what it
-    /// lands on by definition, and at a screenful a frame that is the
-    /// difference between a row copy and reading and blending every pixel.
-    pub(crate) fn capture(
-        back: &Surface,
-        bounds: Rect,
-        screen: Rect,
-        radius_px: u32,
-        shape: Option<WindowShape>,
-    ) -> Option<Self> {
-        let rect = bounds.intersection(&screen);
-        if rect.is_empty() {
-            return None;
+    /// A field holding the window, and reaching no further than twice the
+    /// margin past it, stays where it is. A window with no field yet is given
+    /// one over its own rectangle alone; once it leaves that, its field is the
+    /// margin about wherever it then lies.
+    pub(crate) fn wanted(held: Option<Rect>, window: Rect, radius_px: u32) -> Rect {
+        let margin = margin(radius_px);
+        match held {
+            Some(held)
+                if holds_rect(held, window)
+                    && holds_rect(window.outset(margin.saturating_mul(2)), held) =>
+            {
+                held
+            }
+            Some(_) => window.outset(margin),
+            None => window,
         }
-        let mut pixels = Surface::new(rect.width, rect.height)?;
-        pixels.overwrite(-rect.left(), -rect.top(), back);
+    }
+
+    /// A field over `rect` blurred by `radius_px` holding nothing current yet,
+    /// or `None` where its pixels cannot be had.
+    pub(crate) fn new(rect: Rect, radius_px: u32) -> Option<Self> {
+        let pixels = Surface::new(rect.width, rect.height)?;
+        let mut stale = Region::with_budget(FROST_BANDS);
+        stale.add(rect);
         Some(Self {
-            bounds,
             rect,
             radius_px,
-            shape,
+            stale,
             pixels,
         })
     }
 
-    /// Retake this frost from `back` where the window at `bounds` reaches
-    /// `screen`, reusing the pixels already allocated, reporting whether it
-    /// could.
+    /// A field over `rect` holding what this one holds current there, or
+    /// `None` where its pixels cannot be had.
     ///
-    /// A move does not resize, so the dominant case — a window dragged across
-    /// its own backdrop — reaches a buffer of exactly the size it needs, and a
-    /// drag's per-sample cost becomes the row copy alone. Allocating a fresh
-    /// one instead frees a screen-scale buffer and asks for an identical one on
-    /// every pointer sample, which is a megabyte-scale allocator round trip on
-    /// the frame path.
+    /// The blur at a screen pixel does not depend on the field it is kept in,
+    /// so a field grown or shrunk around a window keeps what the old one held
+    /// rather than blurring it again.
+    pub(crate) fn regrown(&self, rect: Rect) -> Option<Self> {
+        let mut grown = Self::new(rect, self.radius_px)?;
+        let shared = self.rect.intersection(&rect);
+        grown.copy_from(self, shared);
+        grown.stale.subtract(shared);
+        for &stale in self.stale.rects() {
+            grown.stale(stale);
+        }
+        Some(grown)
+    }
+
+    /// Move this field to `rect`, the size it already is, keeping what it holds
+    /// current there; `false`, changing nothing, for a `rect` of another size.
     ///
-    /// Refused when the clipped rectangle's extent differs — a resize, or a
-    /// move that clips differently at a screen edge — because these pixels are
-    /// then the wrong shape and the cache's charge would no longer describe
-    /// them. The caller falls back to [`capture`](Self::capture).
-    pub(crate) fn recapture(
-        &mut self,
-        back: &Surface,
-        bounds: Rect,
-        screen: Rect,
-        radius_px: u32,
-        shape: Option<WindowShape>,
-    ) -> bool {
-        let rect = bounds.intersection(&screen);
-        if rect.width != self.rect.width || rect.height != self.rect.height {
+    /// The pixels are moved within the buffer already retained, so a drag that
+    /// crosses its margin frees and requests nothing.
+    pub(crate) fn shift_to(&mut self, rect: Rect) -> bool {
+        if (rect.width, rect.height) != (self.rect.width, self.rect.height) {
             return false;
         }
-        self.pixels.overwrite(-rect.left(), -rect.top(), back);
-        self.bounds = bounds;
+        let shared = self.rect.intersection(&rect);
+        let source = |at: Rect| {
+            (
+                u32::try_from(shared.left().saturating_sub(at.left())).unwrap_or(0),
+                u32::try_from(shared.top().saturating_sub(at.top())).unwrap_or(0),
+            )
+        };
+        let (from, to) = (source(self.rect), source(rect));
+        let width = self.pixels.width();
+        move_block(
+            self.pixels.pixels_mut(),
+            width,
+            (from, to),
+            (shared.width, shared.height),
+        );
+        self.stale.clip(shared);
+        for entered in outside(rect, shared) {
+            self.stale.add(entered);
+        }
         self.rect = rect;
-        self.radius_px = radius_px;
-        self.shape = shape;
         true
     }
 
-    /// How much of this frost a window now occupying `bounds` on `screen`,
-    /// blurred by `radius_px` and shaped by `shape`, may keep — given the
-    /// layers beneath it are unchanged, which is the cache's own contract.
-    ///
-    /// A blur radius that differs keeps nothing: every pixel is a different
-    /// average. Otherwise the geometry decides, and only two things about it
-    /// matter, because the backdrop the blur reads has not changed:
-    ///
-    /// - the blur **replicates** at its rectangle's edges, so a pixel less
-    ///   than `radius_px` inside either position's on-screen rectangle averaged
-    ///   a different set of samples;
-    /// - the shape **weights** the mix at a window-local coordinate, so a pixel
-    ///   within a corner's reach of either position's own rectangle was mixed
-    ///   at a different coverage.
-    ///
-    /// Both are confined to a border, so what survives is the shared rectangle
-    /// taken in by the larger of the two reaches — and the coverage argument
-    /// holds for a resize or a corner change as much as a move, which is why
-    /// none of them is a special case here. A pixel that deep inside is
-    /// bit-for-bit what a fresh blur would write.
-    pub(crate) fn reuse(
-        &self,
-        bounds: Rect,
-        screen: Rect,
-        radius_px: u32,
-        shape: Option<WindowShape>,
-    ) -> FrostPlan {
-        if self.radius_px != radius_px {
-            return FrostPlan::Blur;
-        }
-        if self.bounds == bounds && self.shape == shape {
-            return FrostPlan::Whole;
-        }
-        let shared = self.rect.intersection(&bounds.intersection(&screen));
-        let reach = radius_px
-            .max(corner_reach(self.shape))
-            .max(corner_reach(shape));
-        let core = shared.inset(reach);
-        if core.is_empty() {
-            return FrostPlan::Blur;
-        }
-        FrostPlan::Core(core)
+    /// The screen rectangle the field covers.
+    pub(crate) const fn rect(&self) -> Rect {
+        self.rect
     }
 
-    /// Write the part of this frost that lies inside `area` back into `back`,
-    /// replacing whatever is there.
+    /// The physical radius the field is blurred by.
+    pub(crate) const fn radius_px(&self) -> u32 {
+        self.radius_px
+    }
+
+    /// Stale whatever of `area` the field covers.
+    pub(crate) fn stale(&mut self, area: Rect) {
+        self.stale.add(area.intersection(&self.rect));
+    }
+
+    /// Whether the field holds the current blur at every pixel of `area`.
+    pub(crate) fn holds(&self, area: Rect) -> bool {
+        holds_rect(self.rect, area) && !self.stale.intersects(area)
+    }
+
+    /// The bounding box of what of the field on `screen` is stale.
+    pub(crate) fn stale_on(&self, screen: Rect) -> Rect {
+        self.stale.bounds().intersection(&screen)
+    }
+
+    /// The stale parts of the field on `screen`, as the spans of the screen's
+    /// surface they cover, in `spans`.
+    pub(crate) fn stale_spans(&self, screen: Rect, spans: &mut Vec<(Range<u32>, Range<u32>)>) {
+        spans.clear();
+        for &stale in self.stale.rects() {
+            if let Some(span) = surface_span(stale.intersection(&screen)) {
+                spans.push(span);
+            }
+        }
+    }
+
+    /// Blur `spans` of the field from the backdrop `plane` holds around them,
+    /// spread over `screen`, and record them current, reporting whether the
+    /// scratch could hold the blur.
+    pub(crate) fn refresh(
+        &mut self,
+        plane: &mut Surface,
+        screen: Rect,
+        spans: &[(Range<u32>, Range<u32>)],
+        scratch: &mut BlurScratch,
+        runner: &dyn JobRunner,
+    ) -> bool {
+        let blurring = Blurring {
+            rect: (0, 0, screen.width, screen.height),
+            bands: spans,
+            radius: self.radius_px,
+        };
+        let at = (self.rect.left(), self.rect.top());
+        if !self.pixels.blur_from(at, plane, &blurring, scratch, runner) {
+            return false;
+        }
+        for (cols, rows) in spans {
+            self.stale.subtract(span_rect(cols, rows));
+        }
+        true
+    }
+
+    /// Lay the frost of a window at `bounds` shaped by `shape` into `back`
+    /// over `area`: the blur copied wherever the shape covers fully, and mixed
+    /// at the shape's coverage over what `back` holds within its corners.
     ///
-    /// This is what the blur would have written, so it is a plain copy and not
-    /// a blend. Every pixel of `area` intersected with this frost's rectangle
-    /// is written, which is what lets the caller skip composing the layers
-    /// below there at all: the back buffer covers the whole screen and carries
-    /// no clip while a frame is composed, so the row span cannot be refused.
-    /// The guard is kept so the copy stays a total function rather than to
-    /// leave a row for the layers below to show through.
-    pub(crate) fn restore(&self, back: &mut Surface, area: Rect) {
+    /// The caller has asked [`holds`](Self::holds) first; a pixel the field
+    /// does not cover is left as it is.
+    pub(crate) fn lay(
+        &self,
+        back: &mut Surface,
+        area: Rect,
+        bounds: Rect,
+        shape: Option<WindowShape>,
+    ) {
+        let area = area.intersection(&bounds);
+        let Some(shape) = shape.filter(|shape| shape.corner_reach() > 0) else {
+            self.copy_into(back, area);
+            return;
+        };
+        let reach = shape.corner_reach();
+        let inner = |offset: u32, extent: u32| extent.saturating_sub(offset.saturating_mul(2));
+        let (left, top) = (bounds.left(), bounds.top());
+        let (right, bottom) = (
+            bounds.right().saturating_sub_unsigned(reach),
+            bounds.bottom().saturating_sub_unsigned(reach),
+        );
+        let middle = Rect::new(
+            left.saturating_add_unsigned(reach),
+            top,
+            inner(reach, bounds.width),
+            bounds.height,
+        );
+        let side = |x: i32| {
+            Rect::new(
+                x,
+                top.saturating_add_unsigned(reach),
+                reach,
+                inner(reach, bounds.height),
+            )
+        };
+        for copied in [middle, side(left), side(right)] {
+            self.copy_into(back, area.intersection(&copied));
+        }
+        let coverage = |x: u32, y: u32| {
+            let local = |at: u32, from: i32| u32::try_from(i64::from(at) - i64::from(from));
+            match (local(x, left), local(y, top)) {
+                (Ok(lx), Ok(ly)) => shape.coverage(lx, ly),
+                _ => 0,
+            }
+        };
+        let at = (self.rect.left(), self.rect.top());
+        for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+            let corner = area.intersection(&Rect::new(x, y, reach, reach));
+            if let Some((cols, rows)) = surface_span(corner) {
+                let extent = (cols.start, rows.start, corner.width, corner.height);
+                back.mix_from(&self.pixels, at, extent, coverage);
+            }
+        }
+    }
+
+    /// Copy the part of the field inside `area` into `back`, replacing whatever
+    /// is there: inside the shape's full coverage, the frost is the blur.
+    fn copy_into(&self, back: &mut Surface, area: Rect) {
         let target = area.intersection(&self.rect);
         let (Ok(left), Ok(top)) = (u32::try_from(target.left()), u32::try_from(target.top()))
         else {
@@ -358,4 +447,98 @@ impl FrostedBackdrop {
             }
         }
     }
+
+    /// Copy what `other` holds within `shared`, a part of both fields, into
+    /// this one.
+    fn copy_from(&mut self, other: &Self, shared: Rect) {
+        let offset = |of: Rect| {
+            (
+                u32::try_from(shared.left().saturating_sub(of.left())).unwrap_or(0),
+                u32::try_from(shared.top().saturating_sub(of.top())).unwrap_or(0),
+            )
+        };
+        let (from, to) = (offset(other.rect), offset(self.rect));
+        for row in 0..shared.height {
+            let source = surface::row(&other.pixels, from.1.saturating_add(row));
+            let Some((start, destination)) =
+                self.pixels
+                    .row_span_mut(to.1.saturating_add(row), to.0, shared.width)
+            else {
+                continue;
+            };
+            let lead = usize::try_from(from.0.saturating_add(start.saturating_sub(to.0)))
+                .unwrap_or(usize::MAX);
+            let Some(source) = source.get(lead..) else {
+                continue;
+            };
+            let len = destination.len().min(source.len());
+            if let (Some(destination), Some(source)) =
+                (destination.get_mut(..len), source.get(..len))
+            {
+                destination.copy_from_slice(source);
+            }
+        }
+    }
+}
+
+/// Move the `w` × `h` block of `pixels`, rows `width` long, from `from` to `to`,
+/// rows taken in the order that reads each before anything is written over it.
+fn move_block(
+    pixels: &mut [Pixel],
+    width: u32,
+    (from, to): ((u32, u32), (u32, u32)),
+    (w, h): (u32, u32),
+) {
+    let at = |(x, y): (u32, u32), row: u32| {
+        let line = u64::from(y.saturating_add(row)) * u64::from(width);
+        usize::try_from(line.saturating_add(u64::from(x))).ok()
+    };
+    let Ok(len) = usize::try_from(w) else {
+        return;
+    };
+    let mut step = |row: u32| {
+        if let (Some(source), Some(target)) = (at(from, row), at(to, row)) {
+            let fits = source
+                .checked_add(len)
+                .is_some_and(|end| end <= pixels.len())
+                && target
+                    .checked_add(len)
+                    .is_some_and(|end| end <= pixels.len());
+            if fits {
+                pixels.copy_within(source..source + len, target);
+            }
+        }
+    };
+    if to.1 <= from.1 {
+        (0..h).for_each(&mut step);
+    } else {
+        (0..h).rev().for_each(&mut step);
+    }
+}
+
+/// `rect`, on screen, as the column and row ranges a surface is addressed in,
+/// or `None` for an empty rectangle or one reaching above or left of the
+/// screen.
+pub(crate) fn surface_span(rect: Rect) -> Option<(Range<u32>, Range<u32>)> {
+    if rect.is_empty() {
+        return None;
+    }
+    let (Ok(left), Ok(top)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+        return None;
+    };
+    Some((
+        left..left.saturating_add(rect.width),
+        top..top.saturating_add(rect.height),
+    ))
+}
+
+/// The screen rectangle a surface's `cols` × `rows` cover.
+pub(crate) fn span_rect(cols: &Range<u32>, rows: &Range<u32>) -> Rect {
+    let at = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+    Rect::new(
+        at(cols.start),
+        at(rows.start),
+        cols.end.saturating_sub(cols.start),
+        rows.end.saturating_sub(rows.start),
+    )
 }

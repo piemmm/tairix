@@ -37,7 +37,7 @@ use tairix_icon::IconKind;
 use tairix_inline::ArrayVec;
 use tairix_input::{InputEvent, Key};
 use tairix_parallel::JobRunner;
-use tairix_raster::{resample_reach, BlurScratch, Frosting, ResampleScratch};
+use tairix_raster::{resample_reach, BlurScratch, Blurring, Frosting, ResampleScratch};
 use tairix_reclaim::{
     screenful_ui_budget, stacked_ui_budget, CacheAccounting, PressureBand, PressureGauge,
     ReclaimCache, Served,
@@ -48,7 +48,7 @@ use tairix_util::fallible;
 use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
-use crate::frost::{frost_bytes, FrostEpoch, FrostPlan, FrostedBackdrop};
+use crate::frost::{field_bytes, span_rect, surface_span, FrostEpoch, FrostField, FROST_BANDS};
 use crate::geometry::{Point, Rect, Region, Scale};
 use crate::pointer::{Ghost, Halo, PointerOverlay, Sprite, SpriteRun, MAX_OWED, MAX_SPRITES};
 use crate::shadow::ShadowKit;
@@ -85,40 +85,32 @@ type ChromeFallback = Vec<(WindowId, WindowChrome)>;
 /// repaint of a few rows pays exactly what it did before a pool existed.
 const MIN_PARALLEL_BAND_PX: usize = 16_384;
 
-/// Which tier of the backdrop ration a window is weighed in
+/// Which tier of the frost ration a window is weighed in
 /// ([`Compositor::grant_backdrops`]).
 ///
 /// The ration is spent front to back, so a tier is the one thing that can put
-/// a window ahead of the ones in front of it. Both tiers below the first exist
-/// because being nearer the front does not by itself make a window's retained
-/// frost worth more:
-///
-/// * Desktop chrome is permanently on screen, wants a band-sized slice, and is
-///   deliberately not stacked topmost — so weighed among the applications it
-///   would lose its retention to any pile of translucent windows over it.
-/// * Retaining a blurred window's frost saves blurring as well as recomposing
-///   the stack beneath it, where an unblurred window's saves only the
-///   recomposing, so an unblurred window is served last whatever its depth.
+/// a window ahead of the ones in front of it. Desktop chrome is permanently on
+/// screen, wants a band-sized slice, and is deliberately not stacked topmost —
+/// so weighed among the applications it would lose its retention to any pile
+/// of frosted windows over it.
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum FrostTier {
     /// A blurred window the embedder paints itself.
     Chrome,
     /// A blurred window whose pixels a client presents.
     App,
-    /// A window with no blur, wanting only a retention.
-    Sheer,
 }
 
 impl FrostTier {
     /// The order the ration is spent in.
-    const ORDER: [Self; 3] = [Self::Chrome, Self::App, Self::Sheer];
+    const ORDER: [Self; 2] = [Self::Chrome, Self::App];
 
     /// The tier `window` is weighed in.
     fn of(window: &Window) -> Self {
-        match (window.blur_radius() > 0, window.is_app_presented()) {
-            (false, _) => Self::Sheer,
-            (true, false) => Self::Chrome,
-            (true, true) => Self::App,
+        if window.is_app_presented() {
+            Self::App
+        } else {
+            Self::Chrome
         }
     }
 }
@@ -204,11 +196,11 @@ pub struct Compositor {
     /// Every decorated window's rendered furniture, bounded by one
     /// screenful and released under memory pressure (see [`crate::chrome`]).
     chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
-    /// Every backdrop-blurred window's frosted backdrop, bounded and
-    /// released on the same terms (see [`crate::frost`]). A window's own
-    /// repaint therefore costs a row copy instead of two blur passes over
-    /// the whole of it.
-    frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash>,
+    /// Every backdrop-blurred window's retained blur, bounded and released on
+    /// the same terms (see [`crate::frost`]). A window's own repaint, its
+    /// move inside its field, and a change of its shape therefore cost a row
+    /// copy instead of two blur passes.
+    frost: ReclaimCache<WindowId, FrostField, FrostEpoch, BuildFastHash>,
     /// The kernel and corner tiles every shadow on this output is drawn from
     /// (see [`crate::shadow`]), rebuilt with the scale or the theme.
     shadow: ShadowKit,
@@ -246,43 +238,25 @@ pub struct Compositor {
     /// reserved with the back buffer, so a frost never waits on, or is
     /// refused, an allocation the size of the window it frosts.
     ///
-    /// It holds nothing between frosts. Where the frame is composing, a frost
-    /// reads its backdrop from the back buffer in place; past the damage the
-    /// back buffer holds finished pixels, so the layers below are composed into
-    /// this instead, and the horizontal pass of every frost is written here.
+    /// It holds nothing between frosts. A frost composes the windows beneath
+    /// it into this, unfrosted, over the reach of what it blurs, and writes
+    /// its horizontal pass here.
     frost_plane: Surface,
     /// The rest of a frost's working memory, reserved for this output and the
     /// installed runner, so no frost grows it on the frame path.
     blur_scratch: BlurScratch,
-    /// The bands a frost writes and the part of its backdrop to compose, held
+    /// The bands a frost writes and the backdrop it composes for them, held
     /// here and cleared per use so a frost reuses their buffers.
     frost_bands: Region,
-    frost_ring: Region,
-    /// The bands of `frost_bands` as the column and row ranges a frost takes.
+    frost_backdrop: Region,
+    /// The bands a frost blurs as the column and row ranges a blur takes.
     frost_spans: Vec<(Range<u32>, Range<u32>)>,
-    /// The windows beneath a local frost that its ring reaches, held for
-    /// reuse like the regions above.
-    ring_hits: Vec<usize>,
-    /// Frosts the composite in flight computed, held until its pass is over
-    /// and then handed to [`frost`](Self::frost).
-    ///
-    /// Admitting one mid-pass could evict an entry the pass had already
-    /// decided to reuse; that reuse would become a recompute, and it would
-    /// blur a rectangle whose lower layers the frame never composed. The
-    /// cache is therefore read-only for the whole pass and written once at
-    /// the end of it.
-    pending_frost: Vec<(WindowId, FrostedBackdrop)>,
-    /// What the frame in flight decided about each window's retained frost,
-    /// by z-index: `None` until it has been asked, then whether the frame
-    /// may copy the retained one, and how much of it.
-    ///
-    /// The plan's fixed-point sweep and the composite that follows it both
-    /// need the answer, and asking twice would both cost a second lookup and
-    /// risk the two reading differently. Reset at the head of each
-    /// [`recompose_damage`](Self::recompose_damage), before anything can read
-    /// it, so an index can never carry a decision taken about a window that
-    /// has since moved or gone.
-    frost_decision: Vec<Option<FrostPlan>>,
+    /// The windows beneath a frost its backdrop reaches, held for reuse like
+    /// the regions above.
+    backdrop_hits: Vec<usize>,
+    /// Where the frame's frosts may compose their backdrops beyond the damage,
+    /// gathered before the pass so the furniture there is resident.
+    backdrop_reach: Vec<Rect>,
     /// Where each composite's per-pixel work is run
     /// ([`set_job_runner`](Self::set_job_runner)). The calling thread alone until
     /// an embedder hands over a worker pool.
@@ -383,12 +357,6 @@ impl FastPaths {
 fn scanout_frame(mode: &DisplayMode) -> Option<Vec<u8>> {
     fallible::filled(scanout_len(mode)?, 0u8)
 }
-
-/// The most separate rectangles one frost writes: the four bands of a
-/// border, or the parts of a damaged rectangle a frost is seen through. More
-/// are frosted as the rectangle bounding them, which writes nothing the
-/// frosts above do not cover again.
-const FROST_BANDS: usize = 8;
 
 /// A frost's whole working memory for `mode` spread across `runner`: the plane
 /// it reads its backdrop from and the scratch it runs in, or `None` when the
@@ -499,7 +467,7 @@ impl Compositor {
         mode: DisplayMode,
         theme: Theme,
         chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
-        frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash>,
+        frost: ReclaimCache<WindowId, FrostField, FrostEpoch, BuildFastHash>,
         pressure: &'static (dyn PressureGauge + 'static),
     ) -> Option<Self> {
         let order = ChannelOrder::for_format(mode.format)?;
@@ -536,11 +504,10 @@ impl Compositor {
             frost_plane,
             blur_scratch,
             frost_bands: Region::with_budget(FROST_BANDS),
-            frost_ring: Region::new(),
+            frost_backdrop: Region::new(),
             frost_spans: Vec::new(),
-            ring_hits: Vec::new(),
-            pending_frost: Vec::new(),
-            frost_decision: Vec::new(),
+            backdrop_hits: Vec::new(),
+            backdrop_reach: Vec::new(),
             runner: &tairix_parallel::SERIAL,
             damage: Region::new(),
             scanout: Region::new(),
@@ -735,11 +702,9 @@ impl Compositor {
     /// A frosted window's pixels are blended over a blur of the layers
     /// **below** it, so anything one window draws belongs to the frost of
     /// every window stacked above it, and to neither its own nor any below.
-    /// That is what leaves the two dominant interactions — the pointer moving
-    /// inside a frosted terminal, and a window dragged across one — costing
-    /// no re-blur at all. The window's *own* frost is not spared by this: if
-    /// it moved or resized, its rectangle no longer matches the retained one,
-    /// which a lookup checks for itself and refuses.
+    /// That is what leaves the dominant interactions — the pointer moving
+    /// inside a frosted terminal, a window dragged across one, and a frosted
+    /// window dragged inside its field — costing no re-blur at all.
     ///
     /// A window that is no longer in the stack cannot be placed in it, so an
     /// unknown `id` marks conservatively.
@@ -794,21 +759,22 @@ impl Compositor {
         self.scanout.add(rect);
     }
 
-    /// Mark `rect` and invalidate the retained frost of every window from
-    /// z-index `from` upwards whose bounds it reaches.
+    /// Mark `rect`, and the frost of every window from z-index `from` upwards
+    /// that a change there reaches.
     ///
-    /// Windows below `from` are not consulted at all, and a window whose
-    /// bounds the rectangle misses cannot have read a changed pixel: a frost
-    /// replicates its rectangle's edges rather than sampling past them.
+    /// Windows below `from` are not consulted at all: a frost reads only the
+    /// windows beneath it.
     fn mark_from(&mut self, rect: Rect, from: usize) {
         self.damage.add(rect);
-        self.invalidate_frosts_from(rect, from);
+        self.stale_frosts_from(rect, from);
     }
 
     /// [`mark_from`](Self::mark_from) for every pixel of `region`.
     fn mark_region_from(&mut self, region: &Region, from: usize) {
         self.damage.add_region(region);
-        self.invalidate_frosts_reached(from, |bounds| region.intersects(bounds));
+        for &rect in region.rects() {
+            self.stale_frosts_from(rect, from);
+        }
     }
 
     /// Where the window `id` names sits in the stack, back to front.
@@ -816,45 +782,38 @@ impl Compositor {
         self.windows.iter().position(|window| window.id() == id)
     }
 
-    /// Record that the backdrop of every window from z-index `from` upwards
-    /// whose bounds `rect` reaches has changed, dropping its retained frost.
+    /// Record that the windows beneath every blurred window from z-index
+    /// `from` upwards changed within `rect`: its frost on screen is marked,
+    /// and its retained blur staled, within the blur's radius of the change.
     ///
-    /// Separate from [`mark_from`](Self::mark_from) because the composite pass
-    /// widens its own plan and must invalidate without marking: its damage has
-    /// already been taken, and adding to the next frame's would leave the
-    /// desktop repainting for ever.
-    ///
-    /// A frame already told it may copy such a frost, or blur only where it
-    /// composes, is told otherwise here rather than asking the cache a second
-    /// time: the frost on screen is no longer right anywhere the change spreads
-    /// to. Rewriting the decision is also what keeps the plan and the cache in
-    /// step. A decision not yet taken is left alone, so the lookup that finds
-    /// the entry gone still counts its miss.
-    fn invalidate_frosts_from(&mut self, rect: Rect, from: usize) {
+    /// A frost reads the windows beneath it as though none were frosted, so
+    /// one frost recomputed changes no other: nothing here spreads further.
+    fn stale_frosts_from(&mut self, rect: Rect, from: usize) {
         if rect.is_empty() {
             return;
         }
-        self.invalidate_frosts_reached(from, |bounds| !bounds.intersection(&rect).is_empty());
-    }
-
-    /// [`invalidate_frosts_from`](Self::invalidate_frosts_from) for every
-    /// window from `from` up whose bounds a change `reaches`.
-    fn invalidate_frosts_reached(&mut self, from: usize, reaches: impl Fn(Rect) -> bool) {
+        let screen = self.screen_rect();
+        let epoch = self.frost_epoch();
         for index in from..self.windows.len() {
-            let Some(window) = self.windows.get_mut(index) else {
+            let Some(window) = self.windows.get(index) else {
                 continue;
             };
-            if !reaches(window.bounds()) {
+            if window.blur_radius() == 0 {
                 continue;
             }
-            window.set_backdrop_changed(true);
-            let id = window.id();
-            self.frost.invalidate(&id);
-            if let Some(decision @ Some(FrostPlan::Whole | FrostPlan::Core(_) | FrostPlan::Local)) =
-                self.frost_decision.get_mut(index)
-            {
-                *decision = Some(FrostPlan::Blur);
+            let reach = rect.outset(self.blur_radius_px(window));
+            let reached = reach.intersection(&window.bounds());
+            if reached.is_empty() {
+                continue;
             }
+            let (id, visible) = (window.id(), window.is_visible());
+            if visible {
+                self.damage.add(reached.intersection(&screen));
+            }
+            let _ = self.frost.renew(&epoch, &id, |field| {
+                field.stale(reach);
+                true
+            });
         }
     }
 
@@ -1054,99 +1013,42 @@ impl Compositor {
         self.chrome.teardown();
     }
 
-    /// The generation every retained [`FrostedBackdrop`] is valid for: this
-    /// output's scale and the screen extent frosts were clipped to.
+    /// The generation every retained [`FrostField`] is valid for: this
+    /// output's scale and the screen extent fields are blurred within.
     fn frost_epoch(&self) -> FrostEpoch {
         (self.scale.percent(), self.screen.0, self.screen.1)
     }
 
     /// The physical radius `window`'s backdrop is blurred by: its logical
     /// radius through this output's scale, resolved here alone so the blur,
-    /// the cache lookup, and a retained entry's own check cannot disagree.
+    /// the staling of its field and the field's own radius cannot disagree.
     fn blur_radius_px(&self, window: &Window) -> u32 {
         self.scale.scale_length(u32::from(window.blur_radius()))
     }
 
-    /// What the frame in flight will do about the frost of the window at
-    /// z-index `index`.
-    ///
-    /// Decided once per frame and remembered, because the plan and the
-    /// composite after it both act on the answer and two lookups could
-    /// disagree: a window the plan did not widen for would then be blurred over
-    /// lower layers the frame never composed.
-    ///
-    /// For a retained window this is the frame's one counted lookup of its
-    /// frost, and the recency it touches is what keeps a frost every frame
-    /// reuses ahead of one nothing has looked at when the band evicts. An
-    /// unretained window's asks the cache nothing.
-    fn frost_plan(&mut self, index: usize) -> FrostPlan {
-        if let Some(Some(decided)) = self.frost_decision.get(index).copied() {
-            return decided;
-        }
-        let decided = self.ask_frost(index);
-        if let Some(slot) = self.frost_decision.get_mut(index) {
-            *slot = Some(decided);
-        }
-        decided
-    }
-
-    /// Ask the cache how much of the frost the window at z-index `index` needs
-    /// it still holds, counting the lookup — or, for a window whose frost is
-    /// not retained, whether the frost on screen is still right outside what
-    /// the frame recomposes.
-    ///
-    /// A retained entry nothing can be kept from is released *before* the
-    /// lookup rather than rejected after it, so the frame counts one honest
-    /// miss and the superseded pixels stop being charged at once instead of
-    /// waiting to be evicted. The lookup never evicts anything else: the band
-    /// was enforced before the pass began, so no entry an earlier answer
-    /// promised the pass can be taken from under it.
-    fn ask_frost(&mut self, index: usize) -> FrostPlan {
-        let screen = self.screen_rect();
-        let Some(window) = self.windows.get(index) else {
-            return FrostPlan::Blur;
-        };
-        if !window.is_retained() {
-            return if window.backdrop_changed() {
-                FrostPlan::Blur
-            } else {
-                FrostPlan::Local
-            };
-        }
-        #[cfg(test)]
-        if !self.fast_paths.frost_reuse {
-            return FrostPlan::Blur;
-        }
-        let (id, shape) = (window.id(), window.shape());
-        let bounds = window.bounds();
-        let radius_px = self.blur_radius_px(window);
-        let epoch = self.frost_epoch();
-        let kept = self
+    /// The rectangle the field of `window` covers this frame, given the one
+    /// it has now, and the bytes a field that size charges.
+    fn wanted_field(&self, window: &Window) -> Rect {
+        let radius = self.blur_radius_px(window);
+        let held = self
             .frost
-            .peek(&epoch, &id)
-            .map(|retained| retained.reuse(bounds, screen, radius_px, shape));
-        if kept == Some(FrostPlan::Blur) {
-            self.frost.invalidate(&id);
-        }
-        match self.frost.find(&epoch, &id) {
-            Some(_) => kept.unwrap_or(FrostPlan::Blur),
-            None => FrostPlan::Blur,
-        }
+            .peek(&self.frost_epoch(), &window.id())
+            .filter(|field| field.radius_px() == radius)
+            .map(FrostField::rect);
+        FrostField::wanted(held, window.bounds(), radius)
     }
 
     /// Settle which windows this frame frosts and which of them keep their
-    /// frost, giving back the bytes of the ones that do not.
+    /// blur, giving back the bytes of the ones that do not.
     ///
     /// Every visible blurred window is frosted: the cache is an accelerator,
     /// never a condition of drawing a blur. What is rationed is retention.
-    /// Stacked windows all want a frost of the same pixels, and granting each in
-    /// turn — "does one more fit?" — blurs, evicts and re-blurs them all every
-    /// frame, so the live ceiling is spent from the **front** and stops, a
-    /// [tier](FrostTier) at a time so desktop chrome is served before the
-    /// applications in front of it. A translucent window without a blur is
-    /// frosted only while retained, since composing it over an unkept frost of
-    /// radius zero is blending it straight through; so no answer changes a
-    /// pixel, and none marks damage.
+    /// Stacked windows all want a field over the same pixels, and granting
+    /// each in turn — "does one more fit?" — blurs, evicts and re-blurs them
+    /// all every frame, so the live ceiling is spent from the **front** and
+    /// stops, a [tier](FrostTier) at a time so desktop chrome is served before
+    /// the applications in front of it. No answer changes a pixel, so none
+    /// marks damage.
     fn grant_backdrops(&mut self) {
         let screen = self.screen_rect();
         let (mut granted, mut payload) = (0usize, 0usize);
@@ -1160,24 +1062,25 @@ impl Compositor {
                 if FrostTier::of(window) != tier {
                     continue;
                 }
-                let rect = window.bounds().intersection(&screen);
-                let wanted = payload.saturating_add(frost_bytes(rect));
-                let reads = window.is_visible() && window.reads_backdrop() && !rect.is_empty();
-                let retained = reads && self.frost.holds(granted.saturating_add(1), wanted);
-                if retained {
+                let blurs = window.is_visible()
+                    && window.blur_radius() > 0
+                    && !window.bounds().intersection(&screen).is_empty();
+                let wanted = blurs
+                    .then(|| payload.saturating_add(field_bytes(self.wanted_field(window))))
+                    .filter(|&wanted| self.frost.holds(granted.saturating_add(1), wanted));
+                if let Some(wanted) = wanted {
                     (granted, payload) = (granted.saturating_add(1), wanted);
                 }
-                let frosted = reads && (window.blur_radius() > 0 || retained);
-                self.settle_backdrop(index, frosted, retained);
+                self.settle_backdrop(index, blurs, wanted.is_some());
             }
         }
     }
 
     /// Record what this frame settled about the backdrop of the window at
-    /// z-index `index`, releasing a retained frost the ration withdrew.
+    /// z-index `index`, releasing a retained blur the ration withdrew.
     ///
     /// A window that has stopped retaining is never looked up again, so
-    /// nothing else would notice its frost had become dead weight; giving the
+    /// nothing else would notice its field had become dead weight; giving the
     /// bytes back here is also what leaves them to the windows still retained.
     fn settle_backdrop(&mut self, index: usize, frosted: bool, retained: bool) {
         let Some(window) = self.windows.get_mut(index) else {
@@ -1187,6 +1090,106 @@ impl Compositor {
             let id = window.id();
             self.frost.invalidate(&id);
         }
+    }
+
+    /// Give every retained window whose frost `plan` shows a field over the
+    /// rectangle it wants this frame, keeping what its field already holds —
+    /// shifted in place across a margin, regrown around a resized window, or
+    /// made afresh where it had none — and gather where those fields will
+    /// compose their backdrops.
+    ///
+    /// Taken before the pass, once the ration is settled, so the pass only
+    /// ever writes into a field in place and no admission can evict one it
+    /// is using. This is the one counted lookup of a frost the frame shows; a
+    /// frost the frame does not show — untouched, or touched only where the
+    /// frosts above replace it — costs none, and is given no field until it
+    /// does.
+    fn prepare_fields(&mut self, plan: &[Rect]) {
+        let screen = self.screen_rect();
+        let epoch = self.frost_epoch();
+        let mut reach = core::mem::take(&mut self.backdrop_reach);
+        reach.clear();
+        for index in 0..self.windows.len() {
+            let retained = self
+                .windows
+                .get(index)
+                .is_some_and(|window| window.is_frosted() && window.is_retained());
+            if !retained || !self.shown_in(index, plan) {
+                continue;
+            }
+            let Some(window) = self.windows.get(index) else {
+                continue;
+            };
+            let (id, bounds, radius) = (window.id(), window.bounds(), self.blur_radius_px(window));
+            let found = self
+                .frost
+                .find(&epoch, &id)
+                .filter(|field| field.radius_px() == radius)
+                .map(|field| (field.rect(), field.stale_on(screen)));
+            let held = found.map(|(rect, _)| rect);
+            let wanted = FrostField::wanted(held, bounds, radius);
+            let stale = match found {
+                Some((rect, stale)) if rect == wanted => stale,
+                _ => {
+                    self.fit_field(id, radius, held, wanted);
+                    self.frost
+                        .peek(&epoch, &id)
+                        .map_or(Rect::EMPTY, |field| field.stale_on(screen))
+                }
+            };
+            if !stale.is_empty() {
+                reach.push(reach_around(stale, radius));
+            }
+        }
+        self.backdrop_reach = reach;
+    }
+
+    /// Bring the field the window `id` names, `held` where one is, to
+    /// `wanted`, keeping whatever of it is current.
+    fn fit_field(&mut self, id: WindowId, radius: u32, held: Option<Rect>, wanted: Rect) {
+        let epoch = self.frost_epoch();
+        let shifts =
+            held.is_some_and(|held| (held.width, held.height) == (wanted.width, wanted.height));
+        if shifts
+            && self
+                .frost
+                .renew(&epoch, &id, |field| field.shift_to(wanted))
+        {
+            return;
+        }
+        let fitted = match self.frost.peek(&epoch, &id) {
+            Some(field) if field.radius_px() == radius => field.regrown(wanted),
+            _ => FrostField::new(wanted, radius),
+        };
+        match fitted {
+            Some(field) => self.frost.retain(&epoch, id, field),
+            None => self.frost.invalidate(&id),
+        }
+    }
+
+    /// Whether any of the window at `index` on screen inside `plan` shows past
+    /// the frosts stacked above it.
+    fn shown_in(&mut self, index: usize, plan: &[Rect]) -> bool {
+        let screen = self.screen_rect();
+        let Some(bounds) = self
+            .windows
+            .get(index)
+            .map(|window| window.bounds().intersection(&screen))
+        else {
+            return false;
+        };
+        let mut seen = core::mem::take(&mut self.frost_bands);
+        seen.clear();
+        for &dirty in plan {
+            seen.add(dirty.intersection(&bounds));
+        }
+        self.hide_beneath_frosts(
+            &mut seen,
+            (index.saturating_add(1)..self.windows.len()).rev(),
+        );
+        let shown = !seen.is_empty();
+        self.frost_bands = seen;
+        shown
     }
 
     /// Frosted backdrops currently retained, one entry per backdrop-blurred
@@ -1203,7 +1206,16 @@ impl Compositor {
         self.frost_retained(id)
     }
 
-    /// Bytes the frost cache currently has charged: retained frosted pixels
+    /// Whether the window named by `id` keeps a field holding the current blur
+    /// over every pixel of `area`.
+    #[cfg(test)]
+    pub(crate) fn frost_holds(&self, id: WindowId, area: Rect) -> bool {
+        self.frost
+            .peek(&self.frost_epoch(), &id)
+            .is_some_and(|field| field.holds(area))
+    }
+
+    /// Bytes the frost cache currently has charged: retained blurred pixels
     /// plus its own per-entry bookkeeping.
     #[must_use]
     pub fn frost_cache_bytes(&self) -> usize {
@@ -3564,10 +3576,8 @@ impl Compositor {
             self.mark_overlay(rect);
         }
 
-        self.frost_decision.clear();
-        self.frost_decision.resize(self.windows.len(), None);
-        // Once, before any lookup, so none the pass makes can evict a frost an
-        // earlier one promised it.
+        // Once, before the pass, so no admission the pass makes can evict a
+        // field it is writing.
         let _ = self.ration_frost();
         let mut damage = core::mem::take(&mut self.damage);
         // Clipping once here is what lets the walk below trust every
@@ -3575,11 +3585,12 @@ impl Compositor {
         // nothing, which is what `has_damage` promises.
         damage.clip(screen);
         let mut plan = core::mem::take(&mut self.plan);
-        self.compose_plan(&mut damage, screen, &mut plan);
-        // Handed back emptied, so the next frame's marks reuse its storage;
-        // planning marks nothing, so nothing is lost.
+        plan.clear();
+        plan.extend_from_slice(damage.rects());
+        // Handed back emptied, so the next frame's marks reuse its storage.
         damage.clear();
         self.damage = damage;
+        self.prepare_fields(&plan);
         self.ensure_shadow_tiles();
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
@@ -3591,14 +3602,17 @@ impl Compositor {
         // window covered by two damaged rectangles is rendered once, and
         // that its recency records one composite rather than one per
         // rectangle.
-        // A frost recomposed within the damage reads its backdrop past the
-        // damage's edge, so the furniture of whatever lies within that reach is
-        // wanted as well.
+        // A frost reads its backdrop past the damage's edge, and a stale field
+        // past the window's, so the furniture of whatever lies within that
+        // reach is wanted as well.
         let frost_reach = self.frost_reach();
+        let backdrops = core::mem::take(&mut self.backdrop_reach);
         let fallback = self.ensure_chrome(|window| {
             plan.iter()
                 .any(|&dirty| covers(window, reach_around(dirty, frost_reach)))
+                || backdrops.iter().any(|&reach| covers(window, reach))
         });
+        self.backdrop_reach = backdrops;
         let mut hits = core::mem::take(&mut self.hits);
         let mut rest = core::mem::take(&mut self.zone_rest);
         let (split, zones) = self.layer_depths();
@@ -3627,10 +3641,6 @@ impl Compositor {
         self.zone_rest = rest;
         self.plan = plan;
         self.hits = hits;
-        self.retain_pending_frost();
-        for window in &mut self.windows {
-            window.set_backdrop_changed(false);
-        }
         if self.scaled_in_hardware() {
             self.scanout.clear();
         } else if self.scaled.is_some() {
@@ -3763,185 +3773,35 @@ impl Compositor {
         self.scanout = scanout;
     }
 
-    /// Hand the frosts this composite computed to the cache, now that the pass
-    /// which might have reused a retained one is over.
+    /// Take out of `seen` what the frosts of the windows `above` replace
+    /// without reading: each one's interior, where its shape covers fully.
     ///
-    /// Admitting one mid-pass could evict an entry [`compose_plan`] had
-    /// already decided to reuse. That reuse would then find nothing and blur
-    /// again — over a rectangle the frame composed the lower layers of only
-    /// where the damage happened to fall, because a window planned as reusable
-    /// is deliberately *not* widened to its whole bounds. Keeping the cache
-    /// read-only for the whole pass is what makes the plan's decision hold.
-    ///
-    /// [`compose_plan`]: Self::compose_plan
-    fn retain_pending_frost(&mut self) {
-        if self.pending_frost.is_empty() {
-            return;
-        }
-        let epoch = self.frost_epoch();
-        let Self {
-            frost,
-            pending_frost,
-            ..
-        } = self;
-        for (id, captured) in pending_frost.drain(..) {
-            // Offered rather than looked up: this frame has already counted
-            // the lookup that found nothing, and a budget or pressure refusal
-            // is not a failure — the frame is composed, and the next one
-            // blurs again.
-            frost.retain(&epoch, id, captured);
-        }
-    }
-
-    /// The rectangles this composite will recompose: every frosted window whose
-    /// frost must be retaken whole, then whatever damage is left.
-    ///
-    /// A frost retaken from a strip of damage alone would spread a
-    /// neighbourhood clipped to the strip and seam, so a window whose frost
-    /// must be retaken whole — to be retained, or because its backdrop changed —
-    /// is promoted into one rectangle *removed* from `damage`, keeping the two
-    /// disjoint; overlapping ones merge, since each reads what the other wrote.
-    /// A frost copied from the cache is not promoted, and nor is an unretained
-    /// one over an unchanged backdrop: it is still right outside the damage, so
-    /// it is recomputed within it, reading its backdrop past the damage's edge
-    /// from the frost plane ([`compose_below`](Self::compose_below)). That needs
-    /// every frost beneath it within its rectangle to be copied, so the ring
-    /// needs no frost of its own; where one is not, the window is promoted.
-    ///
-    /// A frost retaken because its backdrop changed changes the window's
-    /// pixels across the whole of it, so the frosts above it that overlap are
-    /// dropped for the next pass to promote; one retaken only because it was not
-    /// retained comes out as it was and drops nothing. Each pass that grows
-    /// claims one more window for good, so `windows.len()` passes reach the
-    /// fixed point. Every rectangle written to `plan` lies on screen.
-    fn compose_plan(&mut self, damage: &mut Region, screen: Rect, plan: &mut Vec<Rect>) {
-        plan.clear();
-        for _ in 0..self.windows.len() {
-            let mut grown = false;
-            for index in 0..self.windows.len() {
-                let Some(window) = self.windows.get(index) else {
-                    continue;
-                };
-                if !window.is_visible() || !window.is_frosted() {
-                    continue;
-                }
-                let bounds = window.bounds().intersection(&screen);
-                if bounds.is_empty()
-                    || plan
-                        .iter()
-                        .any(|claimed| claimed.intersection(&bounds) == bounds)
-                {
-                    continue;
-                }
-                // Whether the cache still holds this window's frost is asked
-                // only of a window the frame is going to show, so an untouched
-                // one — or one touched only where frosts above it replace
-                // everything beneath them — costs no lookup and counts as
-                // neither. A frost that survives only in part is promoted like
-                // one that must be blurred outright: its border is blurred, and a
-                // border blurred over a strip of damage would spread a
-                // neighbourhood clipped to that strip.
-                if !self.recomposed_and_seen(index, bounds, damage, plan) {
-                    continue;
-                }
-                let spreads = match self.frost_plan(index) {
-                    FrostPlan::Whole => continue,
-                    FrostPlan::Local if self.backdrop_composable(index, bounds) => continue,
-                    FrostPlan::Local => {
-                        if let Some(decision) = self.frost_decision.get_mut(index) {
-                            *decision = Some(FrostPlan::Blur);
-                        }
-                        false
-                    }
-                    FrostPlan::Core(_) => true,
-                    FrostPlan::Blur => self
-                        .windows
-                        .get(index)
-                        .is_some_and(Window::backdrop_changed),
-                };
-                let claimed = claim(plan, bounds);
-                damage.subtract(claimed);
-                if spreads {
-                    self.invalidate_frosts_from(claimed, index.saturating_add(1));
-                }
-                grown = true;
-            }
-            if !grown {
-                break;
-            }
-        }
-        plan.extend_from_slice(damage.rects());
-    }
-
-    /// Whether the frame recomposes any of the window at `index`'s on-screen
-    /// `bounds` — `damage`, or a rectangle already `claimed` — that shows past
-    /// the frosts stacked above it.
-    fn recomposed_and_seen(
-        &mut self,
-        index: usize,
-        bounds: Rect,
-        damage: &Region,
-        claimed: &[Rect],
-    ) -> bool {
-        let mut seen = core::mem::take(&mut self.frost_ring);
-        seen.clear();
-        for &rect in damage.rects().iter().chain(claimed) {
-            seen.add(rect.intersection(&bounds));
-        }
-        self.hide_beneath_frosts(
-            &mut seen,
-            (index.saturating_add(1)..self.windows.len()).rev(),
-        );
-        let shown = !seen.is_empty();
-        self.frost_ring = seen;
-        shown
-    }
-
-    /// Take out of `seen` what the frosts of the windows `above` write over
-    /// without reading: one copied whole, or the core of one kept as it moved.
-    ///
-    /// `above` runs front first, so a frost hidden by one in front of it is
-    /// never looked up. Nothing beneath such a frost can have changed — a
-    /// change there would have dropped it — so what it hides is never a change
-    /// that spreads past its edge.
-    fn hide_beneath_frosts(&mut self, seen: &mut Region, above: impl Iterator<Item = usize>) {
+    /// A frost reads the windows beneath it as composed without their frosts,
+    /// so whatever of one beneath it covers is never shown and never read.
+    /// `above` runs front first, so the walk stops once nothing is left seen.
+    fn hide_beneath_frosts(&self, seen: &mut Region, above: impl Iterator<Item = usize>) {
+        let screen = self.screen_rect();
         for upper in above {
             if seen.is_empty() {
                 break;
             }
-            let hides = self
-                .windows
-                .get(upper)
-                .is_some_and(|over| over.is_frosted() && seen.intersects(over.bounds()));
-            if hides {
-                let plan = self.frost_plan(upper);
-                seen.subtract(self.frost_spared(upper, plan));
+            let Some(over) = self.windows.get(upper) else {
+                continue;
+            };
+            if over.is_frosted() && seen.intersects(over.bounds()) {
+                for interior in frost_interior(over) {
+                    seen.subtract(interior.intersection(&screen));
+                }
             }
         }
     }
 
-    /// Whether every frost beneath the window at z-index `index` that its
-    /// on-screen `bounds` reach is one this frame copies whole from the cache
-    /// — what lets the backdrop a local frost reads past the damage be
-    /// composed from the layers and the retained frosts alone.
-    fn backdrop_composable(&mut self, index: usize, bounds: Rect) -> bool {
-        (0..index).all(|below| {
-            let beneath = self.windows.get(below).is_some_and(|window| {
-                window.is_visible()
-                    && window.is_frosted()
-                    && !window.bounds().intersection(&bounds).is_empty()
-            });
-            !beneath || self.frost_plan(below) == FrostPlan::Whole
-        })
-    }
-
     /// How far past the damage a frame may compose a frost's backdrop, in
-    /// physical pixels: the farthest any frost that is not retained spreads,
-    /// since only such a frost is recomputed within the damage alone.
+    /// physical pixels: the farthest any frosted window spreads.
     fn frost_reach(&self) -> u32 {
         self.windows
             .iter()
-            .filter(|window| window.is_frosted() && !window.is_retained())
+            .filter(|window| window.is_frosted())
             .map(|window| self.blur_radius_px(window))
             .max()
             .unwrap_or(0)
@@ -4275,10 +4135,9 @@ impl Compositor {
     /// intermediate stages cost no wasted encoding.
     ///
     /// The layers below a frost are composed only where the frost will not
-    /// write over them ([`frost_spared`](Self::frost_spared)). A retained frost
-    /// is copied on top of whatever is there, so composing the stack underneath
-    /// it first is work the copy throws away — for a frosted terminal being
-    /// dragged, a whole window's worth of blending per pointer sample.
+    /// write over them: its corners and what lies past its edges. A frost's
+    /// interior replaces whatever is there, so composing the stack underneath
+    /// it first is work the frost throws away.
     ///
     /// `frost_of`, when it names the top of `hits`, stops the composition at
     /// that window's frost: what its frost layer shows beneath its own pixels.
@@ -4300,34 +4159,32 @@ impl Compositor {
             };
             // A frosted window this rectangle reaches only through its shadow
             // composes as a plain layer: its frost covers its own bounds, which
-            // this rectangle does not, and blurring there would reach past the
-            // damage.
-            let frosts_here = self.windows.get(index).is_some_and(|window| {
+            // this rectangle does not.
+            let frosted = self.windows.get(index).filter(|window| {
                 window.is_frosted() && !window.bounds().intersection(&area).is_empty()
             });
+            let Some(interior) = frosted.map(frost_interior) else {
+                continue;
+            };
             // A frost hidden here by the frosts above it is left out, and its
-            // window composes as a plain layer beneath them: the plan did not
-            // widen for it, so a frost of its whole rectangle would read and
-            // write past what the frame recomposes.
-            if !frosts_here
-                || !self.seen_through(
-                    index,
-                    area,
-                    hits.get(split.saturating_add(1)..).unwrap_or_default(),
-                )
-            {
+            // window composes as a plain layer beneath them: what they hide is
+            // never shown, and they read nothing beneath them.
+            if !self.seen_through(
+                index,
+                area,
+                hits.get(split.saturating_add(1)..).unwrap_or_default(),
+            ) {
                 continue;
             }
-            let plan = self.frost_plan(index);
             self.compose_plane(
                 area,
-                self.frost_spared(index, plan),
+                interior,
                 under,
                 hits.get(start..split),
                 fallback,
                 Target::Back,
             );
-            self.frost_segment(index, plan, area, base, fallback);
+            self.frost_segment(index, base, fallback);
             start = split;
             under = None;
         }
@@ -4362,22 +4219,23 @@ impl Compositor {
     /// frost above them is about to write over.
     ///
     /// The remainder is composed as the disjoint rectangles it is, never as the
-    /// box around them: for a window whose frost survives in full that
-    /// remainder is usually nothing at all, and for one whose border has to be
-    /// blurred it is the ring the border reads from. Both are strictly less than
-    /// the rectangle, and neither is a different composite — the same
+    /// box around them: beneath a frosted window that is the ring outside its
+    /// interior — its corners and what lies past its edges. The same
     /// [`compose_span`](Self::compose_span) writes the same pixels, over fewer
     /// columns.
     fn compose_plane(
         &mut self,
         area: Rect,
-        spared: Rect,
+        spared: [Rect; 2],
         under: Option<Pixel>,
         span: Option<&[usize]>,
         fallback: &ChromeFallback,
         target: Target,
     ) {
-        if spared.is_empty() {
+        if spared
+            .iter()
+            .all(|rect| rect.intersection(&area).is_empty())
+        {
             self.compose_span(area, under, span, fallback, Pass::Compose, target);
             return;
         }
@@ -4386,142 +4244,131 @@ impl Compositor {
         let mut uncovered = core::mem::take(&mut self.uncovered);
         uncovered.clear();
         uncovered.add(area);
-        uncovered.subtract(spared);
+        for rect in spared {
+            uncovered.subtract(rect);
+        }
         for rect in uncovered.rects() {
             self.compose_span(*rect, under, span, fallback, Pass::Compose, target);
         }
         self.uncovered = uncovered;
     }
 
-    /// The part of the window at z-index `index` its frost will write over
-    /// without reading, so the layers below need not be composed there.
-    ///
-    /// A whole retained frost is copied over its entire rectangle, so all of it
-    /// is spared. A frost kept only in its core has its border blurred, and that
-    /// blur *reads* the backdrop up to `radius` inside the core, so only the
-    /// core taken in by the radius is spared. A frost being blurred outright
-    /// reads the whole rectangle and spares nothing.
-    ///
-    /// Nothing is spared for a frost the cache no longer holds, which the plan
-    /// says cannot happen — every path that drops an entry rewrites the plan —
-    /// but asking here and copying in [`frost_segment`](Self::frost_segment)
-    /// with only a composite in between is what makes the pair agree by
-    /// construction rather than by that argument.
-    fn frost_spared(&self, index: usize, plan: FrostPlan) -> Rect {
-        let Some(window) = self.windows.get(index) else {
-            return Rect::EMPTY;
-        };
-        match plan {
-            FrostPlan::Whole if self.frost_retained(window.id()) => {
-                window.bounds().intersection(&self.screen_rect())
-            }
-            FrostPlan::Core(core) => core.inset(self.blur_radius_px(window)),
-            FrostPlan::Whole | FrostPlan::Blur | FrostPlan::Local => Rect::EMPTY,
-        }
-    }
-
-    /// Whether the cache holds a frost for the window `id` names at the current
-    /// epoch, without counting a lookup or touching its recency.
+    /// Whether the cache holds a field for the window `id` names at the
+    /// current epoch, without counting a lookup or touching its recency.
+    #[cfg(test)]
     fn frost_retained(&self, id: WindowId) -> bool {
         self.frost.peek(&self.frost_epoch(), &id).is_some()
     }
 
-    /// Copy `keep` of the retained frost of the window `id` names into
-    /// `target`, reporting whether there was one to copy.
-    fn restore_frost(&mut self, id: WindowId, keep: Rect, target: Target) -> bool {
+    /// Put the frost of the window at `index` into the back buffer over the
+    /// bands [`seen_through`](Self::seen_through) left in `frost_bands`: laid
+    /// from its retained field, which is blurred first wherever it is stale, or
+    /// blurred where it is drawn.
+    fn frost_segment(&mut self, index: usize, base: Pixel, fallback: &ChromeFallback) {
+        if self.lay_retained(index, base, fallback) {
+            return;
+        }
+        if !self.frost_seen(index, base, fallback) {
+            // The scratch is reserved for every frost this output draws, so
+            // this is never reached; were it, the window shows its backdrop
+            // unblurred rather than whatever its interior last held.
+            self.compose_bands_beneath(index, base, fallback);
+        }
+    }
+
+    /// Lay the retained field of the window at `index` over `frost_bands`,
+    /// blurring first whatever of it on screen is stale; `false`, laying
+    /// nothing, where the window keeps no field covering them. Its lookup was
+    /// counted when the frame prepared it.
+    fn lay_retained(&mut self, index: usize, base: Pixel, fallback: &ChromeFallback) -> bool {
+        #[cfg(test)]
+        if !self.fast_paths.frost_reuse {
+            return false;
+        }
+        let screen = self.screen_rect();
         let epoch = self.frost_epoch();
-        let Self {
-            frost,
-            back,
-            frost_plane,
-            ..
-        } = self;
-        let Some(retained) = frost.peek(&epoch, &id) else {
+        let Some(window) = self
+            .windows
+            .get(index)
+            .filter(|window| window.is_retained())
+        else {
             return false;
         };
-        retained.restore(target.surface(back, frost_plane), keep);
+        let (id, shape, bounds) = (window.id(), window.shape(), window.bounds());
+        let radius = self.blur_radius_px(window);
+        let Self {
+            frost,
+            frost_bands,
+            frost_spans,
+            ..
+        } = self;
+        let Some(field) = frost
+            .peek(&epoch, &id)
+            .filter(|field| field.radius_px() == radius)
+        else {
+            return false;
+        };
+        if !frost_bands
+            .rects()
+            .iter()
+            .all(|&band| field.rect().intersection(&band) == band)
+        {
+            return false;
+        }
+        let stale = frost_bands.rects().iter().any(|&band| !field.holds(band));
+        if stale {
+            field.stale_spans(screen, frost_spans);
+            if !self.refresh_field(index, base, fallback) {
+                return false;
+            }
+        }
+        let Self {
+            frost,
+            frost_bands,
+            back,
+            ..
+        } = self;
+        let Some(field) = frost.peek(&epoch, &id) else {
+            return false;
+        };
+        for &band in frost_bands.rects() {
+            field.lay(back, band, bounds, shape);
+        }
         true
     }
 
-    /// Put the frosted backdrop of the window at `index` into the back buffer
-    /// where `area` reaches it: copied, its border blurred around a kept core,
-    /// blurred whole, or — [`Local`](FrostPlan::Local) — blurred over the bands
-    /// [`seen_through`](Self::seen_through) left in `frost_bands`.
-    ///
-    /// A retained window's frost that the frame recomputed is captured whole,
-    /// so the next frame compares against where the window is *now*; an
-    /// unretained window's never is.
-    fn frost_segment(
-        &mut self,
-        index: usize,
-        plan: FrostPlan,
-        area: Rect,
-        base: Pixel,
-        fallback: &ChromeFallback,
-    ) {
+    /// Blur the spans `frost_spans` holds of the retained field of the window
+    /// at `index`, their backdrop composed into the frost plane first,
+    /// reporting whether the field took them.
+    fn refresh_field(&mut self, index: usize, base: Pixel, fallback: &ChromeFallback) -> bool {
         let screen = self.screen_rect();
-        let Some(window) = self.windows.get(index) else {
-            return;
-        };
-        let (id, shape, bounds) = (window.id(), window.shape(), window.bounds());
-        let retained = window.is_retained();
-        let radius_px = self.blur_radius_px(window);
-        let rect = bounds.intersection(&screen);
-        let frosted = match plan {
-            FrostPlan::Whole => {
-                if self.restore_frost(id, area, Target::Back) {
-                    return;
-                }
-                // Unreachable while no lookup in a pass can evict, and right
-                // anyway: nothing was spared for a frost that is not there, so
-                // its backdrop was composed wherever this rectangle reaches.
-                self.set_bands(area.intersection(&rect), Rect::EMPTY);
-                self.frost_bands(index, area, base, fallback);
-                return;
-            }
-            FrostPlan::Core(core) => {
-                self.set_bands(rect, core);
-                let frosted = self.frost_bands(index, area, base, fallback);
-                self.restore_frost(id, core, Target::Back);
-                frosted
-            }
-            FrostPlan::Blur => {
-                self.set_bands(rect, Rect::EMPTY);
-                self.frost_bands(index, area, base, fallback)
-            }
-            FrostPlan::Local => {
-                self.frost_bands(index, area, base, fallback);
-                return;
-            }
-        };
-        if !(frosted && retained) {
-            return;
-        }
-        // Retaken into the buffer already retained wherever it is the right
-        // size, which a move always leaves it: a drag would otherwise free and
-        // re-request a screen-scale buffer on every pointer sample.
         let epoch = self.frost_epoch();
-        let Self { frost, back, .. } = self;
-        if frost.renew(&epoch, &id, |retained| {
-            retained.recapture(back, bounds, screen, radius_px, shape)
-        }) {
-            return;
+        let Some(window) = self.windows.get(index) else {
+            return false;
+        };
+        let (id, radius) = (window.id(), self.blur_radius_px(window));
+        let mut backdrop = core::mem::take(&mut self.frost_backdrop);
+        backdrop.clear();
+        let mut blurred = 0u64;
+        for (cols, rows) in &self.frost_spans {
+            let span = span_rect(cols, rows);
+            blurred = blurred.saturating_add(area_px(span.width, span.height));
+            backdrop.add(reach_around(span, radius).intersection(&screen));
         }
-        // Nothing is lost when the copy cannot be taken: the frame is already
-        // frosted, and the next one blurs again.
-        if let Some(captured) =
-            FrostedBackdrop::capture(&self.back, bounds, screen, radius_px, shape)
-        {
-            self.pending_frost.push((id, captured));
-        }
-    }
-
-    /// Hold in `frost_bands` the part of `rect` outside `keep`: the whole of
-    /// it, or the border bands around a kept core.
-    fn set_bands(&mut self, rect: Rect, keep: Rect) {
-        self.frost_bands.clear();
-        self.frost_bands.add(rect);
-        self.frost_bands.subtract(keep);
+        self.compose_backdrop(index, &backdrop, base, fallback, Target::Plane);
+        self.frost_backdrop = backdrop;
+        self.stats.add_blur(blurred);
+        let runner = self.runner;
+        let Self {
+            frost,
+            frost_plane,
+            blur_scratch,
+            frost_spans,
+            ..
+        } = self;
+        frost.renew(&epoch, &id, |field| {
+            field.refresh(frost_plane, screen, frost_spans, blur_scratch, runner)
+        })
     }
 
     /// Fill `frost_bands` with the part of the window at `index` inside `area`
@@ -4541,144 +4388,93 @@ impl Compositor {
         any
     }
 
-    /// Frost the bands `frost_bands` holds of the window at `index`,
-    /// reporting whether the frost was written.
-    ///
-    /// The frost reads its backdrop `radius` around each band, as far as the
-    /// window's rectangle reaches. Inside `area` that backdrop is in the back
-    /// buffer — the layers below were just composed there — and is read in
-    /// place; beyond it the back buffer holds finished pixels, so the layers
-    /// below are composed into the frost plane there instead
-    /// ([`compose_below`](Self::compose_below)).
-    fn frost_bands(
-        &mut self,
-        index: usize,
-        area: Rect,
-        base: Pixel,
-        fallback: &ChromeFallback,
-    ) -> bool {
+    /// Frost `frost_bands` of the window at `index` where it is drawn: its
+    /// backdrop composed into the frost plane over the blur's reach, blurred,
+    /// and mixed into the back buffer at its shape's coverage, reporting
+    /// whether the frost was written.
+    fn frost_seen(&mut self, index: usize, base: Pixel, fallback: &ChromeFallback) -> bool {
         let screen = self.screen_rect();
         let Some(window) = self.windows.get(index) else {
             return false;
         };
         let (bounds, shape) = (window.bounds(), window.shape());
-        let rect = bounds.intersection(&screen);
         let radius = self.blur_radius_px(window);
-        let mut beyond = core::mem::take(&mut self.frost_ring);
-        beyond.clear();
+        let mut backdrop = core::mem::take(&mut self.frost_backdrop);
+        backdrop.clear();
+        self.frost_spans.clear();
+        let mut blurred = 0u64;
         for &band in self.frost_bands.rects() {
-            beyond.add(reach_around(band, radius).intersection(&rect));
+            if let Some(span) = surface_span(band) {
+                blurred = blurred.saturating_add(area_px(band.width, band.height));
+                backdrop.add(reach_around(band, radius).intersection(&screen));
+                self.frost_spans.push(span);
+            }
         }
-        beyond.subtract(area);
-        for &ring in beyond.rects() {
-            self.compose_below(index, ring, base, fallback);
-        }
-        self.frost_ring = beyond;
-
+        self.compose_backdrop(index, &backdrop, base, fallback, Target::Plane);
+        self.frost_backdrop = backdrop;
+        self.stats.add_blur(blurred);
         let runner = self.runner;
         let Self {
             back,
             frost_plane,
             blur_scratch,
-            frost_bands,
             frost_spans,
-            stats,
             ..
         } = self;
-        frost_spans.clear();
-        let mut frosted_px = 0u64;
-        for &band in frost_bands.rects() {
-            if let Some(span) = surface_span(band) {
-                frosted_px = frosted_px.saturating_add(area_px(band.width, band.height));
-                frost_spans.push(span);
-            }
-        }
-        // A window that retains its backdrop without a blur reaches here with
-        // radius zero, and the frost leaves the composed layers as they were,
-        // so counting its pixels would report blur work that never happened.
-        if radius > 0 {
-            stats.add_blur(frosted_px);
-        }
-        let (Some((columns, rows)), Some(held)) =
-            (surface_span(rect), surface_span(area.intersection(&rect)))
-        else {
-            return false;
-        };
         let frosting = Frosting {
-            rect: (columns.start, rows.start, rect.width, rect.height),
-            held,
-            bands: frost_spans,
-            radius,
+            blur: Blurring {
+                rect: (0, 0, screen.width, screen.height),
+                bands: frost_spans,
+                radius,
+            },
+            held: (0..0, 0..0),
         };
-        // The frosted rectangle's top-left in the window's own coordinates: a
-        // window that starts off screen is frosted from the row and column the
-        // screen begins at, and its shape is still read from its own top-left.
-        let shape_x = u32::try_from(rect.left().saturating_sub(bounds.left())).unwrap_or(0);
-        let shape_y = u32::try_from(rect.top().saturating_sub(bounds.top())).unwrap_or(0);
-        back.frost_from(frost_plane, &frosting, blur_scratch, runner, |lx, ly| {
-            shape.map_or(255, |shape| {
-                shape.coverage(shape_x.saturating_add(lx), shape_y.saturating_add(ly))
-            })
+        back.frost_from(frost_plane, &frosting, blur_scratch, runner, |x, y| {
+            shape_coverage(shape, bounds, x, y)
         })
     }
 
-    /// Compose every layer beneath the window at z-index `index` over `area`
-    /// into the frost plane: the backdrop a local frost reads beyond the
-    /// damage, where the back buffer holds finished pixels.
-    ///
-    /// The plan let the window frost locally only because every frost beneath
-    /// it that its rectangle reaches is retained whole, so each of those is
-    /// copied in rather than computed, and no ring of a ring is ever needed.
-    fn compose_below(&mut self, index: usize, area: Rect, base: Pixel, fallback: &ChromeFallback) {
-        let screen = self.screen_rect();
+    /// Compose every window beneath the one at `index` over `frost_bands` into
+    /// the back buffer, unblurred: what a frost the scratch could not hold
+    /// leaves its window over.
+    fn compose_bands_beneath(&mut self, index: usize, base: Pixel, fallback: &ChromeFallback) {
+        let bands = core::mem::take(&mut self.frost_bands);
+        self.compose_backdrop(index, &bands, base, fallback, Target::Back);
+        self.frost_bands = bands;
+    }
+
+    /// Compose every window beneath the one at z-index `index` over `region`
+    /// into `target`, none of them frosted: the backdrop a frost blurs.
+    fn compose_backdrop(
+        &mut self,
+        index: usize,
+        region: &Region,
+        base: Pixel,
+        fallback: &ChromeFallback,
+        target: Target,
+    ) {
         let reach = self.shadow.reach();
-        let mut hits = core::mem::take(&mut self.ring_hits);
-        hits.clear();
-        hits.extend(
-            self.windows
-                .iter()
-                .take(index)
-                .enumerate()
-                .filter(|(_, window)| casts_into(window, area, reach))
-                .map(|(below, _)| below),
-        );
-        let (mut start, mut under) = (0, Some(base));
-        for split in 0..hits.len() {
-            let Some(window) = hits.get(split).and_then(|&below| self.windows.get(below)) else {
-                continue;
-            };
-            let id = window.id();
-            let spared = window.bounds().intersection(&screen);
-            // A frost beneath that is not retained whole cannot be here — the
-            // plan promoted this window instead — so one would be composed as
-            // the plain layer it also is.
-            if !window.is_frosted()
-                || spared.intersection(&area).is_empty()
-                || !self.frost_retained(id)
-            {
-                continue;
-            }
-            self.compose_plane(
-                area,
-                spared,
-                under,
-                hits.get(start..split),
-                fallback,
-                Target::Plane,
+        let mut hits = core::mem::take(&mut self.backdrop_hits);
+        for &area in region.rects() {
+            hits.clear();
+            hits.extend(
+                self.windows
+                    .iter()
+                    .take(index)
+                    .enumerate()
+                    .filter(|(_, window)| casts_into(window, area, reach))
+                    .map(|(below, _)| below),
             );
-            self.restore_frost(id, area, Target::Plane);
-            start = split;
-            under = None;
+            self.compose_span(
+                area,
+                Some(base),
+                Some(hits.as_slice()),
+                fallback,
+                Pass::Compose,
+                target,
+            );
         }
-        self.compose_span(
-            area,
-            under,
-            hits.get(start..),
-            fallback,
-            Pass::Compose,
-            Target::Plane,
-        );
-        self.ring_hits = hits;
+        self.backdrop_hits = hits;
     }
 
     /// Compose the layers `span` names over screen rectangle `area` into
@@ -4894,6 +4690,40 @@ impl Compositor {
 }
 
 /// `rect` grown by `by` pixels on every side.
+/// What of `window`'s on-screen rectangle its frost covers fully, and so
+/// writes over whatever is beneath without reading it: its rectangle less the
+/// corners its shape rounds, as the two bands crossing there.
+fn frost_interior(window: &Window) -> [Rect; 2] {
+    let bounds = window.bounds();
+    let reach = window.shape().map_or(0, WindowShape::corner_reach);
+    let inner = |extent: u32| extent.saturating_sub(reach.saturating_mul(2));
+    [
+        Rect::new(
+            bounds.left().saturating_add_unsigned(reach),
+            bounds.top(),
+            inner(bounds.width),
+            bounds.height,
+        ),
+        Rect::new(
+            bounds.left(),
+            bounds.top().saturating_add_unsigned(reach),
+            bounds.width,
+            inner(bounds.height),
+        ),
+    ]
+}
+
+/// The coverage of `shape`, the shape of a window at `bounds`, at screen
+/// pixel `(x, y)`: full for a window with no shape.
+fn shape_coverage(shape: Option<WindowShape>, bounds: Rect, x: u32, y: u32) -> u8 {
+    let local = |at: u32, from: i32| u32::try_from(i64::from(at) - i64::from(from));
+    match (shape, local(x, bounds.left()), local(y, bounds.top())) {
+        (None, _, _) => u8::MAX,
+        (Some(shape), Ok(lx), Ok(ly)) => shape.coverage(lx, ly),
+        _ => 0,
+    }
+}
+
 fn reach_around(rect: Rect, by: u32) -> Rect {
     let grow = by.saturating_mul(2);
     Rect::new(
@@ -4902,19 +4732,6 @@ fn reach_around(rect: Rect, by: u32) -> Rect {
         rect.width.saturating_add(grow),
         rect.height.saturating_add(grow),
     )
-}
-
-/// `rect`, on screen, as the column and row ranges a surface is addressed
-/// in, or `None` for a rectangle reaching above or left of the screen.
-fn surface_span(rect: Rect) -> Option<(Range<u32>, Range<u32>)> {
-    let (left, top) = (
-        u32::try_from(rect.left()).ok()?,
-        u32::try_from(rect.top()).ok()?,
-    );
-    Some((
-        left..left.saturating_add(rect.width),
-        top..top.saturating_add(rect.height),
-    ))
 }
 
 /// One screen row's resolved layers, bottom to top.
@@ -5541,31 +5358,6 @@ fn caster_radius(window: &Window) -> Option<u32> {
         .shape()
         .map(WindowShape::corner_reach)
         .filter(|radius| *radius > 0)
-}
-
-/// Claim `rect` in a compose plan, merging it with every rectangle it
-/// overlaps, and return what was claimed.
-///
-/// The plan's rectangles must stay mutually disjoint — a pixel composited by
-/// two of them would be blended twice — and each must stay whole, because a
-/// blurred window is only seamless when its entire rectangle is recomposed at
-/// once. Merging overlaps into their union is the one shape that keeps both.
-fn claim(plan: &mut Vec<Rect>, mut rect: Rect) -> Rect {
-    let mut index = 0;
-    while let Some(claimed) = plan.get(index) {
-        if claimed.intersection(&rect).is_empty() {
-            index += 1;
-            continue;
-        }
-        rect = rect.union(claimed);
-        // Order carries no meaning: each rectangle is composited on its own.
-        // Restart, because the grown rectangle may now reach one that was
-        // already passed over.
-        plan.swap_remove(index);
-        index = 0;
-    }
-    plan.push(rect);
-    rect
 }
 
 /// A cumulative cache counter's growth across one composite pass, as this
