@@ -26,7 +26,7 @@ and keeps LLMNR and NetBIOS permanently out (§1 below).
 | Z8 | The catalogue query surface: storage-class filter over `_smb._tcp` instances, WS-Discovery computers (Z10) and hosts the user names, per-source fairness, the endpoint a choice carries | done |
 | Z9 | The `files.app` Network view over the existing renderer, opened by a *Network* menu row above *Settings…*; its names drawn through the §6.6 display-safety policy | done |
 | Z10 | WS-Discovery: the `lib/net::wsd` engine (SOAP-over-UDP Probe/ProbeMatches/Hello/Bye/Resolve, the WS-Transfer `pub:Computer` reading), the 3702 sockets and metadata fetch in the `discoveryd` front, the decode in its sandboxed worker, the discovery-v1 computers query | done |
-| Z11 | The discovered-share mount into `Storage:` with §6.3's forced flags, and the QEMU vertical that mounts a discovered share | blocked: awaits the SMB client and `smbfs` (`plans/SMB.md` SMB5, SMB9) |
+| Z11 | The discovered-share mount into `Storage:` with §6.3's forced flags, and the QEMU vertical that mounts a discovered share | blocked: awaits `smbfs` (`plans/SMB.md` SMB9) |
 
 ## 0. Scope and decisions (binding)
 

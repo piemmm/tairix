@@ -32,7 +32,7 @@ pub enum NegState {
 }
 
 impl NegState {
-    const fn code(self) -> i64 {
+    pub(crate) const fn code(self) -> i64 {
         match self {
             Self::AcceptCompleted => 0,
             Self::AcceptIncomplete => 1,
@@ -48,16 +48,6 @@ impl NegState {
             2 => Some(Self::Reject),
             3 => Some(Self::RequestMic),
             _ => None,
-        }
-    }
-}
-
-impl From<DerError> for SmbError {
-    fn from(err: DerError) -> Self {
-        match err {
-            DerError::OutOfMemory => Self::OutOfMemory,
-            DerError::TooLong | DerError::TooDeep => Self::TooLarge,
-            _ => Self::Malformed,
         }
     }
 }

@@ -138,6 +138,8 @@ pub enum Received {
     Response {
         /// The request it answers.
         ticket: Ticket,
+        /// The response's header, as the connection checked it.
+        header: Header,
         /// The response.
         message: Message,
         /// Whether it arrived sealed.
@@ -162,7 +164,7 @@ struct Pending {
 
 /// What one received message turned out to be.
 enum Arrival {
-    Response(Ticket),
+    Response(Ticket, Header),
     Break,
     Interim,
 }
@@ -508,10 +510,11 @@ impl Connection {
                     let message = message()?;
                     self.push(Received::Break { message })?;
                 }
-                Arrival::Response(ticket) => {
+                Arrival::Response(ticket, header) => {
                     let message = message()?;
                     self.push(Received::Response {
                         ticket,
+                        header,
                         message,
                         sealed: sealed_by.is_some(),
                     })?;
@@ -570,7 +573,13 @@ impl Connection {
             return Ok(Arrival::Interim);
         }
         self.pending.remove(&header.message_id);
-        Ok(Arrival::Response(Ticket(header.message_id)))
+        // With nothing outstanding no later response can grant a credit, so
+        // a server that leaves none has wedged the connection (MS-SMB2
+        // §3.3.1.2 forbids it).
+        if self.credits == 0 && self.pending.is_empty() {
+            return Err(SmbError::Protocol);
+        }
+        Ok(Arrival::Response(Ticket(header.message_id), header))
     }
 
     fn push(&mut self, received: Received) -> Result<(), SmbError> {

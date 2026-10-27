@@ -1,6 +1,6 @@
 [package]
 name = "tairix-smb"
-description = "TAIRiX SMB 3 protocol engine: the SMB2/3 message codec in both directions, dialect 3.0–3.1.1 negotiation with pre-auth integrity and validate-negotiate, credits and message ids, signing (AES-CMAC, AES-GMAC) and the mandatory encryption transform (AES-CCM, AES-GCM), compounding, and the client connection core the sandboxed smbfs worker runs. Pure: no I/O, clock or randomness. no_std + alloc, forbids unsafe, bounded and fail-closed on every byte a server sends."
+description = "TAIRiX SMB 3 protocol engine: the SMB2/3 message codec in both directions, dialect 3.0–3.1.1 negotiation with pre-auth integrity and validate-negotiate, credits and message ids, signing (AES-CMAC, AES-GMAC) and the mandatory encryption transform (AES-CCM, AES-GCM), compounding, SPNEGO and NTLMv2 authentication, and the client the sandboxed smbfs worker runs: one principal's connection, its session and its trees. Pure: no I/O, clock or randomness. no_std + alloc, forbids unsafe, bounded and fail-closed on every byte a server sends."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,22 +11,35 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The scripted SMB 3 server the client's tests and the fuzz harness drive it
+# against. Never enabled in a TAIRiX build.
+test-support = []
+
 [dependencies]
 # Every primitive SMB 3 fixes: the SP 800-108 key derivation, AES-CMAC and
-# AES-GMAC signing, AES-CCM and AES-GCM encryption, and SHA-512 for the
-# pre-auth integrity hash. This crate names no cryptographic dependency.
+# AES-GMAC signing, AES-CCM and AES-GCM encryption, SHA-512 for the pre-auth
+# integrity hash, and NTLMv2's constructions. This crate names no
+# cryptographic dependency.
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }
+# The one DER codec SPNEGO's tokens are read and written with.
+tairix-der = { path = "../der", version = "=0.0.0" }
 # `Time64`, which every SMB FILETIME is read into and written from.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The table of outstanding requests, keyed by the message ids this client
 # assigns, whose insertion fails rather than aborts when memory runs out.
 tairix-collections = { path = "../collections", version = "=0.0.0" }
 tairix-hash = { path = "../hash", version = "=0.0.0" }
-# The volatile wipe for session keys and the session key they derive from,
-# on drop.
+# The bounded vector a tree's compound is assembled in, so sending allocates
+# nothing beyond the frame.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The volatile wipe for session keys, NTLM's keys and the password they
+# derive from, on drop.
 zeroize = { version = "1.8.1", default-features = false }
 
 [dev-dependencies]
+# The crate itself with its scripted server, for the fuzz harness.
+tairix-smb = { path = ".", version = "=0.0.0", features = ["test-support"] }
 # The in-tree fuzz harness draws its inputs through the shared seed/budget
 # seam: one place picks the per-run seed, logs it at the start of the test,
 # and bounds the smoke/soak loop. Test scaffolding only; never in a TAIRiX

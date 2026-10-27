@@ -24,7 +24,7 @@ change (§2.13).
 | SMB2 | `lib/crypto` foreign-protocol constructions: the NTLMv2 functions over MD4/HMAC-MD5, AES-CMAC, AES-GMAC, AES-CCM, the SP 800-108 counter KDF, HMAC-SHA384, and the Kerberos AES-CTS/PBKDF2-HMAC-SHA1 set | done |
 | SMB3 | `lib/der`: the bounded, fail-closed DER codec SPNEGO and Kerberos share | done |
 | SMB4 | `lib/smb` transport: the SMB2/3 codec, 3.0–3.1.1 negotiation, pre-auth integrity and validate-negotiate, credits, signing, mandatory encryption, compounding; fuzzed | done |
-| SMB5 | `lib/smb` authentication: SPNEGO with mechListMIC, NTLMv2 (target info, MIC, SPN), the session-setup and tree-connect state machine (`client`), Kerberos through `lib/krb5` | blocked: the `client` state machine awaits the user's direction; `ntlm.rs` and `spnego.rs` are drafted but not yet declared in `lib.rs`, so uncompiled and untested |
+| SMB5 | `lib/smb` authentication: SPNEGO with mechListMIC, NTLMv2 (target info, MIC, SPN), and the `client` — the session-setup, re-authentication and tree-connect state machine its mechanisms plug into; Kerberos joins it in KERBEROS K4 | done |
 | SMB6 | `lib/smb` file operations: create/close/read/write/flush, directory enumeration, query/set info, leases, change notify, durable handles and reconnect | planned |
 | SMB7 | `lib/smb` share enumeration: DCE/RPC bind and NDR `NetrShareEnum` over `IPC$` | planned |
 | SMB8 | `netshare-v1`, the client protocol to `smbfs`, and the `lib/netshare` client `files.app` and the commands share | planned |
@@ -171,15 +171,24 @@ Authentication (SMB5):
 
 - `ntlm` — NTLMSSP NEGOTIATE/CHALLENGE/AUTHENTICATE, NTLMv2 with the
   server's target info, `MsvAvTimestamp`, the MIC, `MsvAvTargetName =
-  cifs/<host>`, the message signature mechListMIC needs.
-- `spnego` — RFC 4178 negTokenInit/Resp over `lib/der`; Kerberos and NTLM
-  mechanisms; mechListMIC.
-- `client` — the session-setup and tree-connect state machine over SPNEGO:
+  cifs/<host>`, the message signature mechListMIC needs. The user name is
+  upper-cased as Windows and Samba do it (simple mapping, one UTF-16 unit for
+  one); the password-derived key is wiped once the response is made.
+- `spnego` — RFC 4178 negTokenInit/Resp over `lib/der`, one mechanism
+  offered; mechListMIC.
+- `client` — one principal's connection and its one session, over SPNEGO:
   it chains the pre-auth hash over exactly the messages it covers, derives
   the keys once, checks the final response's signature before installing
   them, never re-derives on re-authentication (so no nonce sequence restarts
   under a session's key), and for 3.0 and 3.0.2 holds every tree until
-  validate-negotiate has passed once.
+  validate-negotiate has passed once, failing closed on a mismatch or an
+  error answer. A server refusing an authentication is an event and the
+  connection stays usable for another attempt; anything else wrong ends it.
+  `Mechanism` is the seam: NTLM now, Kerberos with KERBEROS K4. `send` puts
+  requests on a handed-out tree, the seam SMB6 and SMB7 build on.
+- `peer` (the `test-support` feature) — the scripted server the client's
+  tests and fuzz harness drive it against, verifying what a real server
+  would.
 
 File operations (SMB6) and share enumeration (SMB7):
 
@@ -347,4 +356,6 @@ presented for confirmation, never followed silently.
 
 **SMB12 — test peers.** A host-side SMB 3 server over a directory and a KDC,
 both first-party Rust under `tests/smbpeer/`, used by the engine tests and run
-by `cargo xtask` beside QEMU for the vertical.
+by `cargo xtask` beside QEMU for the vertical. The server grows from
+`lib/smb`'s scripted `peer` rather than beside it, so the protocol's server
+side is written once.

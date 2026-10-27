@@ -27,6 +27,10 @@
 //! - [`frame`] — the Direct TCP framing and compounds.
 //! - [`connection`] — the client connection core: credits, message ids,
 //!   sealing on the way out, opening and matching on the way in.
+//! - [`ntlm`] — NTLMv2, the initiator.
+//! - [`spnego`] — the negotiation SMB carries its authentication tokens in.
+//! - [`client`] — one principal's connection: negotiation, the session's
+//!   authentication, and its trees.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -34,17 +38,23 @@
 
 extern crate alloc;
 
+pub mod client;
 pub mod connection;
 pub mod crypt;
 pub mod frame;
 pub mod header;
 pub mod ioctl;
 pub mod negotiate;
+pub mod ntlm;
 pub mod session;
 pub mod simple;
+pub mod spnego;
 pub mod status;
 pub mod tree;
 pub mod wire;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod peer;
 
 #[cfg(test)]
 mod vectors;
@@ -52,6 +62,7 @@ mod vectors;
 use core::fmt;
 
 use status::NtStatus;
+use tairix_der::DerError;
 
 /// Which end of a connection an engine is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -80,6 +91,9 @@ pub enum Refusal {
     /// The server's validate-negotiate answer disagrees with what was
     /// negotiated: a downgrade.
     Downgrade,
+    /// A 3.0 or 3.0.2 server answered validate-negotiate with an error, so
+    /// the negotiation cannot be shown untampered.
+    Validation,
     /// The server offers no authentication mechanism this client holds a
     /// credential for.
     Mechanism,
@@ -127,6 +141,7 @@ impl fmt::Display for SmbError {
                 Refusal::Guest => "smb: server offered only a guest session",
                 Refusal::Integrity => "smb: server chose an unoffered integrity algorithm",
                 Refusal::Downgrade => "smb: negotiation was tampered with",
+                Refusal::Validation => "smb: server would not confirm the negotiation",
                 Refusal::Mechanism => "smb: server offers no usable authentication mechanism",
                 Refusal::Ntlm => "smb: server refused NTLMv2's protections",
             }),
@@ -136,6 +151,16 @@ impl fmt::Display for SmbError {
             Self::TooLarge => f.write_str("smb: message too large"),
             Self::NoCredit => f.write_str("smb: no credit to send with"),
             Self::TimeOutOfRange => f.write_str("smb: time outside what FILETIME carries"),
+        }
+    }
+}
+
+impl From<DerError> for SmbError {
+    fn from(err: DerError) -> Self {
+        match err {
+            DerError::OutOfMemory => Self::OutOfMemory,
+            DerError::TooLong | DerError::TooDeep => Self::TooLarge,
+            _ => Self::Malformed,
         }
     }
 }

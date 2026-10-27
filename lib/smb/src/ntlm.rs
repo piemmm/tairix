@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
-use tairix_crypto::{
+use tairix_crypto::ntlm::{
     ntlm_checksum, ntlm_checksum_verify, ntlm_hmac, ntlm_signing_key, ntowfv2, NtlmDirection,
     NtlmKey,
 };
@@ -27,14 +27,14 @@ pub const OID: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0
 /// The length of an NTLMSSP message signature: version, checksum, sequence.
 pub const SIGNATURE_LEN: usize = 16;
 
-const SIGNATURE: [u8; 8] = *b"NTLMSSP\0";
+pub(crate) const SIGNATURE: [u8; 8] = *b"NTLMSSP\0";
 
-const NEGOTIATE: u32 = 1;
-const CHALLENGE: u32 = 2;
-const AUTHENTICATE: u32 = 3;
+pub(crate) const NEGOTIATE: u32 = 1;
+pub(crate) const CHALLENGE: u32 = 2;
+pub(crate) const AUTHENTICATE: u32 = 3;
 
 /// `NegotiateFlags` (MS-NLMP §2.2.2.5).
-mod flag {
+pub(crate) mod flag {
     pub const UNICODE: u32 = 0x0000_0001;
     pub const REQUEST_TARGET: u32 = 0x0000_0004;
     pub const SIGN: u32 = 0x0000_0010;
@@ -46,16 +46,19 @@ mod flag {
     pub const KEY_128: u32 = 0x2000_0000;
 }
 
-/// What this client asks for.
-const OFFERED: u32 = flag::UNICODE
+/// What the `NEGOTIATE_MESSAGE` asks for.
+const NEGOTIATE_FLAGS: u32 = flag::UNICODE
     | flag::REQUEST_TARGET
     | flag::SIGN
     | flag::NTLM
     | flag::ALWAYS_SIGN
     | flag::EXTENDED_SESSION_SECURITY
-    | flag::TARGET_INFO
     | flag::VERSION
     | flag::KEY_128;
+
+/// What the `AUTHENTICATE_MESSAGE` echoes of the server's agreement: what was
+/// asked for, and the target information only a server announces.
+const ACCEPTED: u32 = NEGOTIATE_FLAGS | flag::TARGET_INFO;
 
 /// What a server must agree to: NTLMv2 needs its target information, and its
 /// signatures extended session security.
@@ -71,7 +74,7 @@ const REQUIRED: u32 = flag::UNICODE
 const VERSION: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0x0f];
 
 /// `AV_PAIR` ids (MS-NLMP §2.2.2.1).
-mod av {
+pub(crate) mod av {
     pub const EOL: u16 = 0x0000;
     pub const FLAGS: u16 = 0x0006;
     pub const TIMESTAMP: u16 = 0x0007;
@@ -80,7 +83,7 @@ mod av {
 }
 
 /// `MsvAvFlags`: the AUTHENTICATE message carries a MIC.
-const AV_FLAG_MIC: u32 = 0x0000_0002;
+pub(crate) const AV_FLAG_MIC: u32 = 0x0000_0002;
 
 /// The most target information a server may send, and the most UTF-16 a
 /// name may take: bounds on a stranger's bytes and on what a sixteen-bit
@@ -89,7 +92,7 @@ const MAX_TARGET_INFO: usize = 4096;
 const MAX_NAME_BYTES: usize = 512;
 
 /// Where an AUTHENTICATE message's MIC lies, and where its payload starts.
-const MIC: core::ops::Range<usize> = 72..88;
+pub(crate) const MIC: core::ops::Range<usize> = 72..88;
 const AUTHENTICATE_FIXED: usize = 88;
 
 /// What NTLMv2 authenticates with: the account, and the key its password
@@ -131,7 +134,7 @@ impl NtlmCredential {
         let user = bounded_name(user)?;
         let domain = bounded_name(domain)?;
         let mut identity = Encoder::new();
-        for c in upper_simple(&user) {
+        for c in user.chars().map(upper_simple) {
             let mut units = [0u16; 2];
             for unit in c.encode_utf16(&mut units) {
                 identity.u16(*unit);
@@ -160,6 +163,12 @@ impl NtlmCredential {
     pub fn domain(&self) -> &str {
         &self.domain
     }
+
+    /// The NTOWFv2 key, which the test server verifies a response with.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) const fn response_key(&self) -> &NtlmKey {
+        &self.response_key
+    }
 }
 
 /// `text` as UTF-16LE in a buffer reserved whole before it is written, so a
@@ -186,17 +195,31 @@ fn bounded_name(name: &str) -> Result<String, SmbError> {
     Ok(out)
 }
 
-/// `text` upper-cased a character at a time, as NTOWFv2's `Uppercase`: a
-/// character whose capital is more than one character stays as it is, as the
-/// server's one-to-one case table keeps it.
-fn upper_simple(text: &str) -> impl Iterator<Item = char> + '_ {
-    text.chars().map(|c| {
-        let mut upper = c.to_uppercase();
-        match (upper.next(), upper.next()) {
-            (Some(single), None) => single,
-            _ => c,
-        }
-    })
+/// `c` upper-cased as NTOWFv2's `Uppercase` is by Windows and Samba: Unicode's
+/// simple mapping over UTF-16 units, so a character outside the Basic
+/// Multilingual Plane, or one with no one-character capital, stays as it is.
+fn upper_simple(c: char) -> char {
+    if u32::from(c) > 0xffff {
+        return c;
+    }
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) => single,
+        _ => iota_subscript_capital(c).unwrap_or(c),
+    }
+}
+
+/// The simple capital of a Greek small letter with iota subscript, whose
+/// full uppercase is two letters: in the UCD these are the only characters
+/// whose simple mapping a one-character full mapping does not give.
+fn iota_subscript_capital(c: char) -> Option<char> {
+    let code = u32::from(c);
+    let capital = match code {
+        0x1f80..=0x1f87 | 0x1f90..=0x1f97 | 0x1fa0..=0x1fa7 => code + 8,
+        0x1fb3 | 0x1fc3 | 0x1ff3 => code + 9,
+        _ => return None,
+    };
+    char::from_u32(capital)
 }
 
 /// What the host's random and clock contribute to one exchange.
@@ -274,7 +297,10 @@ impl<'a> Challenge<'a> {
 }
 
 /// The `(len, max len, offset)` field next in `r`, as the bytes it names.
-fn payload_field<'a>(message: &'a [u8], r: &mut Reader<'_>) -> Result<&'a [u8], SmbError> {
+pub(crate) fn payload_field<'a>(
+    message: &'a [u8],
+    r: &mut Reader<'_>,
+) -> Result<&'a [u8], SmbError> {
     let len = usize::from(r.u16()?);
     r.skip(2)?;
     let offset = usize::try_from(r.u32()?).map_err(|_| SmbError::Malformed)?;
@@ -282,7 +308,7 @@ fn payload_field<'a>(message: &'a [u8], r: &mut Reader<'_>) -> Result<&'a [u8], 
 }
 
 /// The `AV_PAIR`s of `target_info`, which `MsvAvEOL` must end.
-fn av_pairs(target_info: &[u8]) -> Result<Vec<(u16, &[u8])>, SmbError> {
+pub(crate) fn av_pairs(target_info: &[u8]) -> Result<Vec<(u16, &[u8])>, SmbError> {
     let mut pairs = Vec::new();
     let mut r = Reader::new(target_info);
     loop {
@@ -324,6 +350,7 @@ pub struct NtlmInitiator {
     target_name: String,
     inputs: NtlmInputs,
     negotiate: Vec<u8>,
+    answered: bool,
     keys: Option<Keys>,
 }
 
@@ -356,6 +383,7 @@ impl NtlmInitiator {
             target_name: bounded_name(target_name)?,
             inputs,
             negotiate: Vec::new(),
+            answered: false,
             keys: None,
         })
     }
@@ -372,7 +400,7 @@ impl NtlmInitiator {
         let mut enc = Encoder::new();
         enc.bytes(&SIGNATURE);
         enc.u32(NEGOTIATE);
-        enc.u32(OFFERED);
+        enc.u32(NEGOTIATE_FLAGS);
         enc.zeros(16);
         enc.bytes(&VERSION);
         self.negotiate = enc.finish()?;
@@ -380,7 +408,8 @@ impl NtlmInitiator {
     }
 
     /// Answer the server's `CHALLENGE_MESSAGE` with the
-    /// `AUTHENTICATE_MESSAGE`, which completes the exchange.
+    /// `AUTHENTICATE_MESSAGE`, which completes the exchange. The
+    /// password-derived key is wiped once the response is made.
     ///
     /// # Errors
     ///
@@ -390,7 +419,7 @@ impl NtlmInitiator {
     /// [`SmbError::TimeOutOfRange`] when the server sent no time and the
     /// host's cannot be carried.
     pub fn authenticate(&mut self, challenge_message: &[u8]) -> Result<Vec<u8>, SmbError> {
-        if self.negotiate.is_empty() || self.keys.is_some() {
+        if self.negotiate.is_empty() || self.answered {
             return Err(SmbError::Protocol);
         }
         let challenge = Challenge::decode(challenge_message)?;
@@ -402,14 +431,17 @@ impl NtlmInitiator {
             None => filetime_floor(self.inputs.now)?.to_le_bytes(),
         };
         let target_info = self.target_info(&challenge)?;
-        let (response, mut session) = ntlmv2_response(
+        self.answered = true;
+        let response = ntlmv2_response(
             &self.credential.response_key,
-            &challenge.server_challenge,
-            &time,
-            &self.inputs.client_challenge,
+            challenge.server_challenge,
+            time,
+            self.inputs.client_challenge,
             &target_info,
-        )?;
-        let message = self.authenticate_message(challenge.flags & OFFERED, &response);
+        );
+        self.credential.response_key.zeroize();
+        let (response, mut session) = response?;
+        let message = self.authenticate_message(challenge.flags & ACCEPTED, &response);
         let keys = Keys {
             session,
             client_signing: ntlm_signing_key(&session, NtlmDirection::ClientToServer),
@@ -419,7 +451,7 @@ impl NtlmInitiator {
         };
         session.zeroize();
         let mut message = message?;
-        let mic = ntlm_hmac(&keys.session, &[&self.negotiate, challenge_message, &message]);
+        let mic = message_integrity(&keys.session, &self.negotiate, challenge_message, &message)?;
         message[MIC].copy_from_slice(&mic);
         self.keys = Some(keys);
         Ok(message)
@@ -547,28 +579,45 @@ impl NtlmInitiator {
     }
 }
 
+/// The MIC (MS-NLMP §3.1.5.1.2): HMAC-MD5 under the exported session key over
+/// the three messages, the `AUTHENTICATE_MESSAGE`'s own MIC field read as
+/// zeros.
+pub(crate) fn message_integrity(
+    session_key: &NtlmKey,
+    negotiate: &[u8],
+    challenge: &[u8],
+    authenticate: &[u8],
+) -> Result<NtlmKey, SmbError> {
+    let head = authenticate.get(..MIC.start).ok_or(SmbError::Malformed)?;
+    let tail = authenticate.get(MIC.end..).ok_or(SmbError::Malformed)?;
+    Ok(ntlm_hmac(
+        session_key,
+        &[negotiate, challenge, head, &[0; MIC.end - MIC.start], tail],
+    ))
+}
+
 /// The NTLMv2 response (MS-NLMP §3.3.2) and the session base key it yields:
 /// `NTProofStr ‖ temp`, where `temp` carries the time, the client challenge
 /// and `target_info`, and the proof is keyed by the response key over the
 /// server's challenge and `temp`.
 fn ntlmv2_response(
     response_key: &NtlmKey,
-    server_challenge: &[u8; 8],
-    time: &[u8; 8],
-    client_challenge: &[u8; 8],
+    server_challenge: [u8; 8],
+    time: [u8; 8],
+    client_challenge: [u8; 8],
     target_info: &[u8],
 ) -> Result<(Vec<u8>, NtlmKey), SmbError> {
     let mut response = Encoder::new();
     response.zeros(16);
     response.bytes(&[1, 1]);
     response.zeros(6);
-    response.bytes(time);
-    response.bytes(client_challenge);
+    response.bytes(&time);
+    response.bytes(&client_challenge);
     response.zeros(4);
     response.bytes(target_info);
     response.zeros(4);
     let mut response = response.finish()?;
-    let proof = ntlm_hmac(response_key, &[server_challenge, &response[16..]]);
+    let proof = ntlm_hmac(response_key, &[&server_challenge, &response[16..]]);
     response[..16].copy_from_slice(&proof);
     Ok((response, ntlm_hmac(response_key, &[&proof])))
 }

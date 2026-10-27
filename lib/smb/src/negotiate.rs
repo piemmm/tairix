@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::header::{structure, HEADER_LEN};
+use crate::ioctl::{IoctlRequest, IS_FSCTL, NO_FILE};
 use crate::wire::{buffer_at, from_utf16le, owned, utf16le, utf16le_len, Encoder, Guid, Reader};
 use crate::{Refusal, SmbError};
 
@@ -743,6 +744,23 @@ fn choose_311(contexts: &[NegotiateContext]) -> Result<(Cipher, SigningAlgorithm
 /// The `FSCTL_VALIDATE_NEGOTIATE_INFO` control code.
 pub const FSCTL_VALIDATE_NEGOTIATE_INFO: u32 = 0x0014_0204;
 
+/// The `FSCTL_VALIDATE_NEGOTIATE_INFO` request restating `request`, taking
+/// one answer back.
+///
+/// # Errors
+///
+/// As [`validate_negotiate_input`].
+pub fn validate_negotiate_request(request: &NegotiateRequest) -> Result<IoctlRequest, SmbError> {
+    Ok(IoctlRequest {
+        ctl_code: FSCTL_VALIDATE_NEGOTIATE_INFO,
+        file_id: NO_FILE,
+        input: validate_negotiate_input(request)?,
+        max_output_response: u32::try_from(VALIDATE_NEGOTIATE_OUTPUT_LEN)
+            .map_err(|_| SmbError::TooLarge)?,
+        flags: IS_FSCTL,
+    })
+}
+
 /// A validate-negotiate request's input (MS-SMB2 §2.2.31.4): the negotiation as the
 /// client sent it.
 ///
@@ -762,26 +780,29 @@ pub fn validate_negotiate_input(request: &NegotiateRequest) -> Result<Vec<u8>, S
     enc.finish()
 }
 
+/// The length of a validate-negotiate response's output.
+pub const VALIDATE_NEGOTIATE_OUTPUT_LEN: usize = 24;
+
 /// Check a validate-negotiate response's output against what was
 /// negotiated, field by field.
 ///
 /// # Errors
 ///
 /// [`SmbError::Refused`] with [`Refusal::Downgrade`] on any disagreement,
-/// [`SmbError::Malformed`] for a short output.
-pub fn check_validate_negotiate(
-    output: &[u8],
-    response: &NegotiateResponse,
-) -> Result<(), SmbError> {
+/// [`SmbError::Malformed`] for an output that is not exactly one answer.
+pub fn check_validate_negotiate(output: &[u8], negotiated: &Negotiated) -> Result<(), SmbError> {
+    if output.len() != VALIDATE_NEGOTIATE_OUTPUT_LEN {
+        return Err(SmbError::Malformed);
+    }
     let mut r = Reader::new(output);
     let capabilities = r.u32()?;
     let guid = r.guid()?;
     let security_mode = r.u16()?;
     let dialect = r.u16()?;
-    if capabilities == response.capabilities.bits()
-        && guid == response.server_guid
-        && security_mode == response.security_mode.bits()
-        && dialect == response.dialect
+    if capabilities == negotiated.capabilities.bits()
+        && guid == negotiated.server_guid
+        && security_mode == negotiated.security_mode.bits()
+        && dialect == negotiated.dialect.code()
     {
         Ok(())
     } else {
@@ -791,8 +812,10 @@ pub fn check_validate_negotiate(
 
 /// A validate-negotiate response's output, as a server answers one.
 #[must_use]
-pub fn validate_negotiate_output(response: &NegotiateResponse) -> [u8; 24] {
-    let mut out = [0u8; 24];
+pub fn validate_negotiate_output(
+    response: &NegotiateResponse,
+) -> [u8; VALIDATE_NEGOTIATE_OUTPUT_LEN] {
+    let mut out = [0u8; VALIDATE_NEGOTIATE_OUTPUT_LEN];
     out[..4].copy_from_slice(&response.capabilities.bits().to_le_bytes());
     out[4..20].copy_from_slice(&response.server_guid);
     out[20..22].copy_from_slice(&response.security_mode.bits().to_le_bytes());

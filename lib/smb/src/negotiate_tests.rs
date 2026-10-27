@@ -256,17 +256,28 @@ fn validate_negotiate_restates_the_request_and_checks_the_answer() {
     assert_eq!(input.len(), 24 + 2 * 3);
 
     let response = response_30(0x0302, Capabilities::ENCRYPTION);
+    let negotiated = offer(Dialect::Smb300).accept(&response).expect("accepted");
     let output = validate_negotiate_output(&response);
-    assert_eq!(check_validate_negotiate(&output, &response), Ok(()));
-    let mut downgraded = output;
-    downgraded[22] = 0x00;
+    assert_eq!(check_validate_negotiate(&output, &negotiated), Ok(()));
+    for at in [0, 4, 19, 20, 22] {
+        let mut changed = output;
+        changed[at] ^= 0x01;
+        assert_eq!(
+            check_validate_negotiate(&changed, &negotiated),
+            Err(SmbError::Refused(Refusal::Downgrade)),
+            "byte {at}"
+        );
+    }
     assert_eq!(
-        check_validate_negotiate(&downgraded, &response),
-        Err(SmbError::Refused(Refusal::Downgrade))
-    );
-    assert_eq!(
-        check_validate_negotiate(&output[..23], &response),
+        check_validate_negotiate(&output[..23], &negotiated),
         Err(SmbError::Malformed)
+    );
+    let mut long = output.to_vec();
+    long.push(0);
+    assert_eq!(
+        check_validate_negotiate(&long, &negotiated),
+        Err(SmbError::Malformed),
+        "an answer with more after it"
     );
 }
 
