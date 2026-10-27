@@ -639,6 +639,7 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
             max_height_px: 0,
             per_layer_opacity: false,
             hw_scaling: false,
+            band_free_blend: false,
         })
     }
 

@@ -219,6 +219,7 @@ fn graphics_device() -> DisplayStats {
                 max_height_px: 1_080,
                 per_layer_opacity: true,
                 hw_scaling: false,
+                band_free_blend: false,
             }),
             cursor: None,
         },
@@ -1618,6 +1619,10 @@ fn the_graphics_pane_publishes_the_devices_own_capability_and_memory() {
     assert_eq!(
         fact(graphics, "Per-layer opacity"),
         &Reading::measured("yes")
+    );
+    assert_eq!(
+        fact(graphics, "Band-free blending"),
+        &Reading::measured("no")
     );
     assert_eq!(
         fact(graphics, "Scan-out"),

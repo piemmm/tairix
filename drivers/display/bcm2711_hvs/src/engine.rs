@@ -1508,13 +1508,15 @@ where
 {
     fn accel_caps(&self) -> AccelCaps {
         // A stack slot holds every layer's plane and the pointer's, and each
-        // plane's fields bound its sides.
+        // plane's fields bound its sides. Its blend is wider than 8 bits and
+        // every channel dithers it, as blendcheck shows on a Pi 4 panel.
         AccelCaps {
             max_layers: u32::try_from(MAX_ACCEL_LAYERS).unwrap_or(u32::MAX),
             max_width_px: SIDE_MAX,
             max_height_px: SIDE_MAX,
             per_layer_opacity: true,
             hw_scaling: true,
+            band_free_blend: true,
         }
     }
 

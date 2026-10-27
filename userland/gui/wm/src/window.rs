@@ -243,10 +243,9 @@ pub struct Window {
     /// How high a decorated window's shadow stands, easing as the family in
     /// front changes.
     lift: Lift,
-    /// The parts of the content, in its own pixels, known to hold a partially
-    /// transparent pixel, while the compositor keeps track; a display's layer
-    /// engine would blend those over what is beneath without the dither.
-    partial: Option<Region>,
+    /// Boxes, in the content's own pixels, holding every pixel short of
+    /// opaque, while the compositor keeps track.
+    transparent: Option<Region>,
 }
 
 /// The whole of `content`, in its own pixels.
@@ -254,29 +253,35 @@ fn content_rect(content: &Surface) -> Rect {
     Rect::new(0, 0, content.width(), content.height())
 }
 
-/// Add to `partial` the box around every partially transparent pixel of
-/// `content` within `area`.
-fn note_partial(content: &Surface, area: Rect, partial: &mut Region) {
+const fn is_transparent(pixel: Pixel) -> bool {
+    pixel.a != u8::MAX
+}
+
+/// Add to `transparent` the box around every pixel of `content` within
+/// `area` short of opaque.
+///
+/// Each row is searched from both ends, so only an opaque one is read
+/// through.
+fn note_transparent(content: &Surface, area: Rect, transparent: &mut Region) {
     let Some((left, top)) = area.surface_origin() else {
         return;
     };
     let mut found: Option<Rect> = None;
     for y in top..top.saturating_add(area.height) {
-        let Some((x, pixels)) = content.row_span(y, left, area.width) else {
-            continue;
-        };
-        let mut columns = pixels
-            .iter()
-            .enumerate()
-            .filter(|(_, pixel)| pixel.a != 0 && pixel.a != u8::MAX)
-            .map(|(at, _)| at);
-        let Some(first) = columns.next() else {
-            continue;
-        };
-        let last = columns.next_back().unwrap_or(first);
-        let (Ok(from), Ok(to), Ok(row)) =
-            (u32::try_from(first), u32::try_from(last), i32::try_from(y))
+        let (Some((x, pixels)), Ok(row)) =
+            (content.row_span(y, left, area.width), i32::try_from(y))
         else {
+            continue;
+        };
+        let Some(first) = pixels.iter().copied().position(is_transparent) else {
+            continue;
+        };
+        let last = pixels
+            .iter()
+            .copied()
+            .rposition(is_transparent)
+            .unwrap_or(first);
+        let (Ok(from), Ok(to)) = (u32::try_from(first), u32::try_from(last)) else {
             continue;
         };
         let run = Rect::new(
@@ -288,7 +293,7 @@ fn note_partial(content: &Surface, area: Rect, partial: &mut Region) {
         found = Some(found.map_or(run, |box_| box_.union(&run)));
     }
     if let Some(found) = found {
-        partial.add(found);
+        transparent.add(found);
     }
 }
 
@@ -408,7 +413,7 @@ impl Window {
             max_client: (0, 0),
             casts: false,
             lift: Lift::at(Elevation::LIFTED),
-            partial: None,
+            transparent: None,
         }
     }
 
@@ -859,43 +864,45 @@ impl Window {
     pub(crate) fn take_content_wiped(&mut self) -> Option<Surface> {
         let mut surface = self.content.take()?;
         surface.wipe();
-        if let Some(partial) = &mut self.partial {
-            partial.clear();
+        if let Some(transparent) = &mut self.transparent {
+            transparent.clear();
         }
         Some(surface)
     }
 
-    /// Keep track of which parts of the content are partially transparent.
-    pub(crate) fn track_partial(&mut self) {
-        if self.partial.is_some() {
+    /// Keep track of where the content is not opaque.
+    pub(crate) fn track_transparency(&mut self) {
+        if self.transparent.is_some() {
             return;
         }
-        let mut partial = Region::new();
+        let mut transparent = Region::new();
         if let Some(content) = &self.content {
-            note_partial(content, content_rect(content), &mut partial);
+            note_transparent(content, content_rect(content), &mut transparent);
         }
-        self.partial = Some(partial);
+        self.transparent = Some(transparent);
     }
 
-    /// Stop keeping track of the content's transparency.
-    pub(crate) fn forget_partial(&mut self) {
-        self.partial = None;
+    /// Stop keeping track of where the content is not opaque.
+    pub(crate) fn forget_transparency(&mut self) {
+        self.transparent = None;
     }
 
-    /// Whether a content pixel is partially transparent, or `None` while
-    /// that is not tracked.
-    pub(crate) fn has_partial(&self) -> Option<bool> {
-        self.partial.as_ref().map(|partial| !partial.is_empty())
+    /// Whether every content pixel is opaque, or `None` while that is not
+    /// tracked. A window with no content yet is not.
+    pub(crate) fn is_opaque(&self) -> Option<bool> {
+        self.transparent
+            .as_ref()
+            .map(|transparent| self.content.is_some() && transparent.is_empty())
     }
 
     /// The content pixels within `local`, in the content's own pixels, were
     /// rewritten.
     pub(crate) fn content_changed(&mut self, local: Rect) {
-        let (Some(partial), Some(content)) = (&mut self.partial, &self.content) else {
+        let (Some(transparent), Some(content)) = (&mut self.transparent, &self.content) else {
             return;
         };
-        partial.subtract(local);
-        note_partial(content, local, partial);
+        transparent.subtract(local);
+        note_transparent(content, local, transparent);
     }
 
     /// Give the content pixels back to the machine, returning the bytes
@@ -944,9 +951,12 @@ impl Window {
         }
         // Allocated before the held buffer is given up, so a refusal leaves
         // the window showing what it was showing. A fresh buffer is wholly
-        // transparent, which partial tracking reads as clear.
+        // transparent until it is painted.
         let fresh = Surface::new(width, height)?;
         self.take_content_wiped();
+        if let Some(transparent) = &mut self.transparent {
+            transparent.add(content_rect(&fresh));
+        }
         self.content = Some(fresh);
         self.content.as_mut().map(|content| (content, true))
     }
@@ -1378,9 +1388,9 @@ impl Window {
     /// the window's client size (a replacement may be a different shape).
     pub(crate) fn replace_surface(&mut self, surface: Surface) {
         self.client_size = (surface.width(), surface.height());
-        if let Some(partial) = &mut self.partial {
-            partial.clear();
-            note_partial(&surface, content_rect(&surface), partial);
+        if let Some(transparent) = &mut self.transparent {
+            transparent.clear();
+            note_transparent(&surface, content_rect(&surface), transparent);
         }
         self.content = Some(surface);
     }
@@ -2444,3 +2454,7 @@ impl RowCut {
 fn combine(a: u8, b: u8) -> u8 {
     div255(u32::from(a) * u32::from(b))
 }
+
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod tests;

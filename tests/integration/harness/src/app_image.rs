@@ -1497,6 +1497,7 @@ mod tests {
         "audioctl",
         "audiod",
         "basename",
+        "blendcheck",
         "cat",
         "chmod",
         "chown",

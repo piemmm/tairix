@@ -49,6 +49,21 @@ pub(crate) mod hvs {
     pub const DISPECTRL_DSP2_MUX: u32 = 1 << 31;
     pub const DISPDITHER: usize = 0x14;
     pub const DISPDITHER_DSP5_MUX_SHIFT: u32 = 30;
+    /// Channel `channel`'s dither: `mode` in its low two bits and the depth
+    /// it dithers to in the three above, five bits every eighth from bit 0
+    /// (Raspberry Pi forums, topic 324770).
+    pub const fn dispdither(channel: usize, depth: u32, mode: u32) -> u32 {
+        (((depth & 7) << 2) | (mode & 3)) << (8 * channel)
+    }
+    pub const fn dispdither_mask(channel: usize) -> u32 {
+        dispdither(channel, 7, 3)
+    }
+    /// The dither depth of the 24-bit pixels the valves carry
+    /// (`pv::CONTROL_FORMAT_24`).
+    pub const DITHER_DEPTH_24: u32 = 0;
+    /// Carry each pixel's rounding error along its line, with a ±½ LSB noise
+    /// restarted every frame.
+    pub const DITHER_ERROR_AND_NOISE: u32 = 3;
     pub const DISPEOLN: usize = 0x18;
     pub const DISPEOLN_DSP4_MUX_SHIFT: u32 = 30;
     /// The output mux value that feeds an output from no channel.

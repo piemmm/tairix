@@ -272,6 +272,7 @@ members = [
     "userland/shell/servicectl",
     "userland/apps/applib",
     "userland/apps/basename",
+    "userland/apps/blendcheck",
     "userland/apps/cat",
     "userland/apps/chmod",
     "userland/apps/chown",

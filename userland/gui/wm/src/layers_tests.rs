@@ -19,6 +19,7 @@ use crate::surface::Surface;
 use crate::tests::{
     decorated, mode, new_compositor, opaque, solid_cursor, MockDisplay, SETTLED_NS,
 };
+use crate::window::Window;
 use crate::{Compositor, Presentation, WindowFrame, WindowId, WindowSizeState};
 
 use super::Source;
@@ -68,6 +69,8 @@ struct MockEngine {
     frame: Vec<u8>,
     screen: Vec<u8>,
     stacks: Vec<(bool, Vec<AccelLayer>)>,
+    /// The base's damage the last layered present carried.
+    base_damage: Vec<DamageRect>,
     frames: usize,
     refusal: Option<DriverError>,
     /// Most layers over the base it composites at once.
@@ -93,6 +96,7 @@ const CAPS: AccelCaps = AccelCaps {
     max_height_px: 1024,
     per_layer_opacity: false,
     hw_scaling: false,
+    band_free_blend: false,
 };
 
 impl MockEngine {
@@ -109,6 +113,7 @@ impl MockEngine {
             frame: vec![0; len],
             screen: vec![0; len],
             stacks: Vec::new(),
+            base_damage: Vec::new(),
             frames: 0,
             refusal: None,
             deepest: usize::MAX,
@@ -138,6 +143,20 @@ impl MockEngine {
 
     fn buffer(&self, id: BufferId) -> Option<&Buffer> {
         self.buffers.iter().find(|buffer| buffer.id == id)
+    }
+
+    /// The base's damage the last layered present carried, as a region.
+    fn base_region(&self) -> Region {
+        let mut region = Region::new();
+        for rect in &self.base_damage {
+            region.add(Rect::new(
+                rect.x.cast_signed(),
+                rect.y.cast_signed(),
+                rect.width_px,
+                rect.height_px,
+            ));
+        }
+        region
     }
 
     /// The last stack, without the base.
@@ -289,8 +308,10 @@ impl LayerPresenter for MockEngine {
                 .expect("a buffer the engine allocated");
             layer.validate(&self.caps, buffer.width, buffer.height)?;
         }
+        self.base_damage.clear();
         match base {
             Some(base) => {
+                self.base_damage.extend_from_slice(base.damage);
                 self.take(base.damage, base.frame);
                 self.screen = self.frame.clone();
             }
@@ -642,6 +663,154 @@ fn a_free_window_moving_under_a_flattened_one_rebakes_it_where_it_passes() {
     );
 }
 
+/// The screen rectangle `layer` is shown at.
+fn shown_at(layer: &AccelLayer) -> Rect {
+    Rect::new(
+        layer.dst_x,
+        layer.dst_y,
+        layer.dst_width_px,
+        layer.dst_height_px,
+    )
+}
+
+#[test]
+fn a_dragged_flattened_window_hands_over_only_the_base_it_uncovered() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let [.., top] = three(&mut c);
+    assert!(c.set_opacity(top, 160));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+
+    assert!(c.move_window(top, Point::new(16, 9)));
+    c.present(&mut engine).expect("presents");
+
+    let mut uncovered = Region::new();
+    uncovered.add(Rect::new(14, 8, 10, 10));
+    uncovered.subtract(Rect::new(16, 9, 10, 10));
+    assert_eq!(
+        shown_at(engine.layers().last().expect("the flattened layer")),
+        Rect::new(16, 9, 10, 10)
+    );
+    assert_eq!(
+        engine.base_region(),
+        uncovered,
+        "the base the window left, and none of what its layer covers"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let [.., top] = three(c);
+            c.set_opacity(top, 160);
+            c.move_window(top, Point::new(16, 9));
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_frosted_window_dragged_off_where_it_lay_leaves_no_base_stale() {
+    let output = mode(32, 20);
+    let build = |c: &mut Compositor| {
+        c.add_window(Point::ORIGIN, opaque(14, 14, RED));
+        let glass = c.add_window(Point::new(4, 2), clear(12, 8));
+        assert!(c.set_backdrop_blur(glass, 2));
+        glass
+    };
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = build(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+
+    for to in [
+        Point::new(6, 3),
+        Point::new(18, 10),
+        Point::new(19, 11),
+        Point::new(3, 1),
+    ] {
+        assert!(c.move_window(glass, to));
+        c.present(&mut engine).expect("presents");
+        let covered = shown_at(engine.layers().last().expect("the frost's layer"));
+        assert!(
+            !engine.base_region().intersects(covered),
+            "at {to:?} the base named pixels its frost's layer covers"
+        );
+        assert_close(
+            &engine.screen,
+            &software(output, BLUE, |c| {
+                let glass = build(c);
+                c.move_window(glass, to);
+            }),
+            1,
+        );
+    }
+}
+
+#[test]
+fn a_change_beneath_a_flattened_window_reaches_its_layer_and_not_the_base() {
+    let output = mode(32, 24);
+    let repaint = |c: &mut Compositor, id: WindowId| {
+        let mut area = Region::new();
+        area.add(Rect::new(8, 4, 2, 6));
+        assert!(c.repaint_window(id, (10, 10), &area, |surface, rects| {
+            for rect in rects {
+                surface.fill_rect(
+                    rect.left().cast_unsigned(),
+                    rect.top().cast_unsigned(),
+                    rect.width,
+                    rect.height,
+                    Color::rgb(9, 9, 9),
+                );
+            }
+        }));
+    };
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let [_, middle, top] = three(&mut c);
+    assert!(c.set_opacity(top, 160));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+
+    repaint(&mut c, middle);
+    c.present(&mut engine).expect("presents");
+
+    assert!(
+        engine.base_region().is_empty(),
+        "every pixel the repaint reached is under the flattened layer"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let [_, middle, top] = three(c);
+            c.set_opacity(top, 160);
+            repaint(c, middle);
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_flattened_window_closed_shows_the_base_it_covered() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let [.., top] = three(&mut c);
+    assert!(c.set_opacity(top, 160));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert!(c.move_window(top, Point::new(15, 9)));
+    c.present(&mut engine).expect("presents");
+
+    assert!(c.remove(top));
+    c.present(&mut engine).expect("presents");
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let [.., top] = three(c);
+            c.remove(top);
+        }),
+        0,
+    );
+}
+
 /// A fully transparent surface, which frosted shows nothing but its frost.
 fn clear(w: u32, h: u32) -> Surface {
     Surface::filled(w, h, Pixel::TRANSPARENT).expect("surface allocates")
@@ -702,18 +871,46 @@ fn a_flattened_footprint_crossing_a_frosted_base_window_joins_the_base() {
 }
 
 #[test]
-fn partially_transparent_content_is_flattened_until_it_is_painted_opaque() {
+fn partially_transparent_content_rides_a_free_layer_where_the_engine_bands() {
     let output = mode(32, 24);
+    let build = |c: &mut Compositor| {
+        let veil =
+            Surface::filled(8, 8, Color::rgba(255, 0, 0, 128).premultiply()).expect("surface");
+        c.add_window(Point::new(4, 4), veil)
+    };
     let mut c = new_compositor(output, BLUE).expect("compositor");
-    let veil = Surface::filled(8, 8, Color::rgba(255, 0, 0, 128).premultiply()).expect("surface");
-    let id = c.add_window(Point::new(4, 4), veil);
+    let id = build(&mut c);
     let mut engine = MockEngine::new(output);
+    assert!(!engine.caps.band_free_blend);
     c.present(&mut engine).expect("presents");
-    let flattened = *engine.layers().last().expect("its layer");
+    let free = *engine.layers().last().expect("its layer");
     assert_eq!(
-        layer_pixel(&engine, &flattened, 0, 0)[3],
-        255,
-        "composited opaque"
+        layer_pixel(&engine, &free, 0, 0)[3],
+        128,
+        "the content as it is, for the engine to blend"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            build(c);
+        }),
+        1,
+    );
+
+    assert!(c.move_window(id, Point::new(10, 10)));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        c.frame_stats().damaged_px,
+        0,
+        "a free layer moves without a composite"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let id = build(c);
+            c.move_window(id, Point::new(10, 10));
+        }),
+        1,
     );
 
     let mut area = Region::new();
@@ -722,16 +919,48 @@ fn partially_transparent_content_is_flattened_until_it_is_painted_opaque() {
         surface.fill_rect(0, 0, 8, 8, RED);
     }));
     c.present(&mut engine).expect("presents");
-    let free = *engine.layers().last().expect("its layer");
-    assert_ne!(free.buffer, flattened.buffer, "a free layer of its own");
-    assert_eq!(c.frame_stats().damaged_px, 64, "the base under it, once");
-    assert!(c.move_window(id, Point::new(10, 10)));
-    c.present(&mut engine).expect("presents");
+    let repainted = *engine.layers().last().expect("its layer");
+    assert_eq!(layer_pixel(&engine, &repainted, 0, 0)[3], 255);
     assert_eq!(
         c.frame_stats().damaged_px,
         0,
-        "a free layer moves without a composite"
+        "painted opaque, it keeps its free layer and the base is untouched"
     );
+}
+
+/// What an engine states of its blend is shown to the user and decides no
+/// layer: the same scene is laid out and baked alike either way.
+#[test]
+fn what_an_engine_states_of_its_blend_decides_no_layer() {
+    let output = mode(32, 24);
+    let build = |c: &mut Compositor| {
+        c.add_window(Point::ORIGIN, opaque(12, 12, RED));
+        let glass = c.add_window(Point::new(4, 2), clear(16, 8));
+        assert!(c.set_backdrop_blur(glass, 2));
+        let veil =
+            Surface::filled(8, 8, Color::rgba(0, 255, 0, 96).premultiply()).expect("surface");
+        c.add_window(Point::new(22, 14), veil);
+    };
+    let present = |band_free_blend: bool| {
+        let mut c = new_compositor(output, BLUE).expect("compositor");
+        build(&mut c);
+        let mut engine = MockEngine::new(output);
+        engine.caps.band_free_blend = band_free_blend;
+        c.present(&mut engine).expect("presents");
+        let alphas: Vec<u8> = engine
+            .layers()
+            .iter()
+            .map(|layer| layer_pixel(&engine, layer, 0, 0)[3])
+            .collect();
+        (engine.layers().to_vec(), alphas, engine.screen.clone())
+    };
+    let banded = present(false);
+    assert_eq!(
+        banded.1,
+        [255, 255, 96],
+        "opaque, frosted flattened, the veil free"
+    );
+    assert_eq!(present(true), banded);
 }
 
 #[test]
@@ -1074,6 +1303,108 @@ fn a_translucent_fullscreen_window_is_not_promoted() {
     assert_eq!(c.presentation(), Some(Presentation::Layered));
     let (based, _) = engine.stacks.last().expect("a stack");
     assert!(based, "what lies behind shows through it");
+}
+
+/// An opaque red output-sized surface with a fully transparent square in it.
+fn holed(output: DisplayMode) -> Surface {
+    let mut surface = opaque(output.width_px, output.height_px, RED);
+    for y in 10..14 {
+        let (_, row) = surface.row_span_mut(y, 10, 4).expect("a row of the hole");
+        row.fill(Pixel::TRANSPARENT);
+    }
+    surface
+}
+
+#[test]
+fn a_fullscreen_window_with_a_clear_pixel_is_not_promoted() {
+    let output = mode(80, 60);
+    let build = |c: &mut Compositor, id: WindowId| {
+        c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+            .expect("fullscreen");
+        assert!(c.set_surface(id, holed(output)));
+    };
+    let (mut c, id) = fullscreenable(output);
+    build(&mut c, id);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        c.presentation(),
+        Some(Presentation::Layered),
+        "nothing laid beneath would show the engine's black through the hole"
+    );
+    let (mut expected, expected_id) = fullscreenable(output);
+    build(&mut expected, expected_id);
+    let mut display = MockDisplay::new(output);
+    expected.present(&mut display).expect("presents");
+    assert_close(&engine.screen, expected.frame(), 0);
+}
+
+#[test]
+fn a_fresh_fullscreen_frame_is_promoted_once_it_covers_every_pixel() {
+    let output = mode(80, 60);
+    let (mut c, id) = fullscreenable(output);
+    assert!(c.set_surface(id, opaque(40, 30, RED)));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    assert!(
+        !c.keeps_content(id, (80, 60)),
+        "the frame at the new size is a fresh buffer"
+    );
+    let paint = |c: &mut Compositor, area: Rect| {
+        c.present_window_content(id, 80, 60, |surface, changed| {
+            surface.fill_rect(
+                area.left().cast_unsigned(),
+                area.top().cast_unsigned(),
+                area.width,
+                area.height,
+                RED,
+            );
+            changed.add(area);
+        })
+        .expect("a present at the new size");
+    };
+
+    paint(&mut c, Rect::new(0, 0, 40, 60));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        c.presentation(),
+        Some(Presentation::Layered),
+        "half of the new frame is still clear"
+    );
+    paint(&mut c, Rect::new(40, 0, 40, 60));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
+}
+
+/// Only a fullscreen window, the one kind promotion can take, has its content
+/// read for opacity, and only while it is fullscreen.
+#[test]
+fn only_a_fullscreen_window_is_read_for_opacity() {
+    let output = mode(80, 60);
+    let (mut c, id) = fullscreenable(output);
+    let plain = c.add_window(Point::new(4, 4), opaque(10, 10, GREEN));
+    let read = |c: &Compositor, id: WindowId| {
+        c.windows
+            .iter()
+            .find(|window| window.id() == id)
+            .and_then(Window::is_opaque)
+    };
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert_eq!((read(&c, id), read(&c, plain)), (None, None));
+
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    c.present(&mut engine).expect("presents");
+    assert_eq!(read(&c, plain), None);
+    assert!(read(&c, id).is_some(), "the fullscreen window is read");
+
+    c.set_window_size_state(id, WindowSizeState::Restored, c.screen_rect())
+        .expect("restored");
+    c.present(&mut engine).expect("presents");
+    assert_eq!(read(&c, id), None, "and forgotten once it is not");
 }
 
 #[test]

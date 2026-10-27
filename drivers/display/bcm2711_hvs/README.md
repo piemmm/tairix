@@ -60,6 +60,13 @@ its scan-out reads memory through, and the `ConsoleHost` fact.
   by its own premultiplied alpha, scaled by a constant opacity. An output
   coming up that cannot show the stack shows black until the presenter's
   next stack, which is built for it with the others.
+- **Its blend is band-free.** The HVS blends wider than the 8 bits a channel
+  its outputs carry, and each channel it starts dithers that to them: the
+  rounding error carried along the line, with a ±½ LSB noise restarted every
+  frame (its `DISPDITHER` register). The dither is set while the channel is stopped,
+  since one changed under a running channel has lost the picture, so its caps
+  state `band_free_blend`; `blendcheck` shows its blend matching the desktop's
+  dithered one on a Pi 4 panel (`plans/GPU.md` GD3).
 - **The pointer moves without a present.** A pointer image is copied into
   one of the engine's own, and the pointer's position, size and pointer
   words are rewritten in the lists the channels read, a changed size

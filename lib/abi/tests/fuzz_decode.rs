@@ -2691,6 +2691,7 @@ fn display_caps() -> (AccelCaps, CursorCaps) {
             max_height_px: 4096,
             per_layer_opacity: true,
             hw_scaling: true,
+            band_free_blend: true,
         },
         CursorCaps {
             max_width_px: 64,

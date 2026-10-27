@@ -68,6 +68,7 @@ const CAPS: AccelCaps = AccelCaps {
     max_height_px: 64,
     per_layer_opacity: false,
     hw_scaling: false,
+    band_free_blend: false,
 };
 
 const CURSOR: CursorCaps = CursorCaps {

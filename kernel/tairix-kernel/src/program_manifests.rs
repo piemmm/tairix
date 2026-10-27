@@ -1286,6 +1286,16 @@ mod tests {
         CapabilityId::FS_ACCESS,
     ];
 
+    // `blendcheck` (plans/GPU.md GD3) holds the seat while its pattern is up:
+    // the graphical class, plus its report and its own Help/ documents.
+    const BLENDCHECK_REQUEST: &[CapabilityId] = &[
+        CapabilityId::DISPLAY,
+        CapabilityId::INPUT_READ,
+        CapabilityId::SHM,
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+    ];
+
     // The device-inventory listing tools `lspci` and `lsusb`
     // (plans/DEVICES.md DEVICE1): the pure-tool request plus
     // `CAP_SYSINFO_HW` for the `HARDWARE_TREE` query they render. Not
@@ -1658,6 +1668,7 @@ mod tests {
         ("audioctl", ProgramKind::Command, AUDIOCTL_TOOL_REQUEST),
         ("audiod", ProgramKind::Service, AUDIOD_MANIFEST),
         ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("blendcheck", ProgramKind::Command, BLENDCHECK_REQUEST),
         ("cat", ProgramKind::Command, CAT_MANIFEST),
         ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("chown", ProgramKind::Command, CHOWN_TOOL_REQUEST),

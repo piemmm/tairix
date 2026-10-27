@@ -189,7 +189,8 @@ impl<R: RegisterBlock> Hvs<R> {
     }
 
     /// Start `channel` compositing `width` by `height`, black behind its
-    /// planes, at the next frame start its pixel valve gives.
+    /// planes and dithered to the valves' 24 bits, at the next frame start its
+    /// pixel valve gives.
     pub fn start(
         &self,
         channel: usize,
@@ -198,13 +199,19 @@ impl<R: RegisterBlock> Hvs<R> {
         interlaced: bool,
     ) -> Result<(), DriverError> {
         let size = (1 << reg::DISPCTRLX_SIZE_BITS) - 1;
-        if width == 0 || height == 0 || width > size || height > size {
+        if channel >= reg::CHANNELS || width == 0 || height == 0 || width > size || height > size {
             return Err(DriverError::OutOfRange);
         }
         let control = reg::dispctrlx(channel);
         self.regs.write32(control, 0)?;
         self.regs.write32(control, reg::DISPCTRLX_RESET)?;
         self.regs.write32(control, 0)?;
+        // Changed under a running channel, the dither has lost the picture.
+        self.modify(
+            reg::DISPDITHER,
+            reg::dispdither_mask(channel),
+            reg::dispdither(channel, reg::DITHER_DEPTH_24, reg::DITHER_ERROR_AND_NOISE),
+        )?;
         self.regs.write32(
             control,
             reg::DISPCTRLX_ENABLE

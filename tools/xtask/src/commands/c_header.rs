@@ -2834,6 +2834,7 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   uint32_t max_height_px;\n\
          \x20   uint8_t per_layer_opacity;\n\
          \x20   uint8_t hw_scaling;\n\
+         \x20   uint8_t band_free_blend;\n\
          } tairix_accel_caps_t;\n\n",
     "/* The pointer image size a display's cursor plane shows. */\n\
          typedef struct tairix_cursor_caps {\n\

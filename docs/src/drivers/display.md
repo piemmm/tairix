@@ -102,7 +102,7 @@ A driver whose hardware composites a stack of planes also implements
 
 | Method           | Purpose |
 |------------------|---------|
-| `accel_caps`     | `AccelCaps { max_layers, max_width_px, max_height_px, per_layer_opacity, hw_scaling }` |
+| `accel_caps`     | `AccelCaps { max_layers, max_width_px, max_height_px, per_layer_opacity, hw_scaling, band_free_blend }` |
 | `present_layers` | show a bottom-first `AccelLayer` stack, as `present` answers |
 
 An `AccelLayer` names a buffer the driver allocated: the part of it shown
@@ -112,6 +112,15 @@ size (`src`'s unless `hw_scaling`), and a constant `opacity` (`255` unless
 its buffer's extent. A stack the engine cannot take is refused whole; the
 compositor then presents the frame in software instead, never a partial
 hardware frame.
+
+`band_free_blend` states whether a translucent layer the engine blends
+reaches the panel without banding — blended deeper than 8 bits a channel and
+then dithered or carried that deep — as the desktop's own dithered blend
+does. It is a fact shown to the user (the Switchboard, `sysinfo`), not a gate:
+the compositor hands every engine a window's translucent content on a free
+layer (`plans/GPU.md` decision 10). A driver states it only where `blendcheck`
+(`userland/apps/blendcheck`) shows its blend matching the dithered one on the
+real panel, as the HVS's does on a Pi 4 with its output dither on.
 
 ### The cursor plane
 
@@ -490,6 +499,10 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   surface scaled to its mode with its aspect kept — the polyphase filter
   enlarging or shrinking by up to a third, the trapezoidal one shrinking
   further, through the Mitchell–Netravali kernel in display-list memory.
+- **Its blend is band-free.** The HVS blends wider than 8 bits a channel, and
+  each channel is dithered to the outputs' 24 bits — the rounding error
+  carried along the line, with a ±½ LSB noise restarted every frame — set
+  while the channel is stopped, so its caps state `band_free_blend`.
 - **Presents write no pixel.** The engine carves every buffer its presenter
   fills in memory the HVS reaches, under the node's DMA window, and the
   display service grants it. A present writes each running channel a list

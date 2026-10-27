@@ -237,6 +237,7 @@ typedef struct tairix_accel_caps {
     uint32_t max_height_px;
     uint8_t per_layer_opacity;
     uint8_t hw_scaling;
+    uint8_t band_free_blend;
 } tairix_accel_caps_t;
 
 /* The pointer image size a display's cursor plane shows. */

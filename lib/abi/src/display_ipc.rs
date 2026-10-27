@@ -978,9 +978,17 @@ const PLANES_PER_LAYER_OPACITY: u32 = 1 << 1;
 const PLANES_HW_SCALING: u32 = 1 << 2;
 /// Set when a planes reply carries a cursor plane.
 const PLANES_CURSOR: u32 = 1 << 3;
+/// Set when the compositor blends a translucent layer without banding.
+const PLANES_BAND_FREE_BLEND: u32 = 1 << 4;
 /// Every flag this ABI defines.
-const PLANES_KNOWN: u32 =
-    PLANES_ACCEL | PLANES_PER_LAYER_OPACITY | PLANES_HW_SCALING | PLANES_CURSOR;
+const PLANES_KNOWN: u32 = PLANES_ACCEL
+    | PLANES_PER_LAYER_OPACITY
+    | PLANES_HW_SCALING
+    | PLANES_CURSOR
+    | PLANES_BAND_FREE_BLEND;
+/// The flags that describe the compositor, and so need [`PLANES_ACCEL`].
+const PLANES_ACCEL_ONLY: u32 =
+    PLANES_PER_LAYER_OPACITY | PLANES_HW_SCALING | PLANES_BAND_FREE_BLEND;
 
 /// Reply length, in bytes, of a `QueryPlanes`: the status word, the flags
 /// (4), the compositor's limits (12) and the cursor plane's (8), each block
@@ -1001,6 +1009,9 @@ pub fn encode_planes_reply(result: Result<Planes, Errno>) -> [u8; DISPLAY_PLANES
                 }
                 if caps.hw_scaling {
                     flags |= PLANES_HW_SCALING;
+                }
+                if caps.band_free_blend {
+                    flags |= PLANES_BAND_FREE_BLEND;
                 }
                 put_u32(&mut out, 8, caps.max_layers);
                 put_u32(&mut out, 12, caps.max_width_px);
@@ -1046,6 +1057,7 @@ pub fn decode_planes_reply(bytes: &[u8]) -> Result<Planes, Errno> {
             max_height_px: read_u32(bytes, 16),
             per_layer_opacity: flags & PLANES_PER_LAYER_OPACITY != 0,
             hw_scaling: flags & PLANES_HW_SCALING != 0,
+            band_free_blend: flags & PLANES_BAND_FREE_BLEND != 0,
         };
         let layers_fit = usize::try_from(caps.max_layers)
             .is_ok_and(|layers| (1..=MAX_ACCEL_LAYERS).contains(&layers));
@@ -1054,9 +1066,7 @@ pub fn decode_planes_reply(bytes: &[u8]) -> Result<Planes, Errno> {
         }
         Some(caps)
     } else {
-        if flags & (PLANES_PER_LAYER_OPACITY | PLANES_HW_SCALING) != 0
-            || block(8, 3).any(|w| w != 0)
-        {
+        if flags & PLANES_ACCEL_ONLY != 0 || block(8, 3).any(|w| w != 0) {
             return Err(Errno::LengthOutOfRange);
         }
         None
@@ -1174,13 +1184,20 @@ const STATS_FLAG_OUTPUT: u16 = 1 << 2;
 const STATS_FLAG_HW_SCALING: u16 = 1 << 3;
 /// Set when the device has a cursor plane.
 const STATS_FLAG_CURSOR: u16 = 1 << 4;
+/// Set when the compositor blends a translucent layer without banding.
+const STATS_FLAG_BAND_FREE_BLEND: u16 = 1 << 5;
 /// Every flag bit this ABI defines; any other set bit fails the decode
 /// closed rather than being ignored.
 const STATS_FLAGS_KNOWN: u16 = STATS_FLAG_ACCELERATED
     | STATS_FLAG_PER_LAYER_OPACITY
     | STATS_FLAG_OUTPUT
     | STATS_FLAG_HW_SCALING
-    | STATS_FLAG_CURSOR;
+    | STATS_FLAG_CURSOR
+    | STATS_FLAG_BAND_FREE_BLEND;
+/// The flags that describe the compositor, and so need
+/// [`STATS_FLAG_ACCELERATED`].
+const STATS_FLAGS_ACCEL_ONLY: u16 =
+    STATS_FLAG_PER_LAYER_OPACITY | STATS_FLAG_HW_SCALING | STATS_FLAG_BAND_FREE_BLEND;
 
 impl DisplayStats {
     /// Encoded size on the wire, and the size of one packed
@@ -1214,6 +1231,9 @@ impl DisplayStats {
             }
             if caps.hw_scaling {
                 flags |= STATS_FLAG_HW_SCALING;
+            }
+            if caps.band_free_blend {
+                flags |= STATS_FLAG_BAND_FREE_BLEND;
             }
             put_u32(&mut out, Self::ACCEL_AT, caps.max_layers);
             put_u32(&mut out, Self::ACCEL_AT + 4, caps.max_width_px);
@@ -1288,12 +1308,13 @@ impl DisplayStats {
                 max_height_px,
                 per_layer_opacity: flags & STATS_FLAG_PER_LAYER_OPACITY != 0,
                 hw_scaling: flags & STATS_FLAG_HW_SCALING != 0,
+                band_free_blend: flags & STATS_FLAG_BAND_FREE_BLEND != 0,
             })
         } else {
             if max_layers != 0
                 || max_width_px != 0
                 || max_height_px != 0
-                || flags & (STATS_FLAG_PER_LAYER_OPACITY | STATS_FLAG_HW_SCALING) != 0
+                || flags & STATS_FLAGS_ACCEL_ONLY != 0
             {
                 return Err(Errno::LengthOutOfRange);
             }

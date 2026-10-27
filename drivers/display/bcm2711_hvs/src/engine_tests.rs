@@ -142,6 +142,70 @@ fn shown(rig: &Rig, engine: &mut Hvs, channel: usize) -> Option<u32> {
     rig.model.scanned(channel).filter(|&bus| bus != CONSOLE.bus)
 }
 
+/// The band-free blend the engine states is a channel's dither: set while the
+/// channel is stopped, the other channels' fields and the HDMI1 mux in the
+/// same register left as they were.
+#[test]
+fn a_started_channel_dithers_to_the_valves_depth_set_while_it_is_stopped() {
+    let rig = Rig::new();
+    let others = hvs::dispdither(1, 1, 2) | hvs::dispdither(2, 3, 1);
+    rig.model.set(None, hvs::DISPDITHER, others);
+    let engine = rig.open().expect("opened");
+    assert!(engine.accel_caps().band_free_blend);
+    let dithered = hvs::dispdither(0, hvs::DITHER_DEPTH_24, hvs::DITHER_ERROR_AND_NOISE);
+    let register = rig.model.read(None, hvs::DISPDITHER);
+    assert_eq!(register & hvs::dispdither_mask(0), dithered);
+    assert_eq!(
+        register & !hvs::dispdither_mask(0),
+        others | hvs::MUX_DISABLED << hvs::DISPDITHER_DSP5_MUX_SHIFT,
+        "the channels it did not start keep their fields, HDMI1 its mux"
+    );
+
+    let writes = rig.model.writes();
+    let set = writes
+        .iter()
+        .position(|&(block, offset, value)| {
+            block.is_none()
+                && offset == hvs::DISPDITHER
+                && value & hvs::dispdither_mask(0) == dithered
+        })
+        .expect("channel 0's dither set");
+    let control = |(block, offset, _): &(Option<usize>, usize, u32)| {
+        block.is_none() && *offset == hvs::dispctrlx(0)
+    };
+    let before = writes[..set].iter().rfind(|write| control(write));
+    assert_eq!(
+        before.map(|&(_, _, value)| value),
+        Some(0),
+        "the channel is stopped when its dither changes"
+    );
+    let after = writes[set..].iter().find(|write| control(write));
+    assert!(after.is_some_and(|&(_, _, value)| value & hvs::DISPCTRLX_ENABLE != 0));
+}
+
+/// A channel start the HVS cannot program is refused before a register is
+/// written: an unknown channel, or a size its fields cannot hold.
+#[test]
+fn a_channel_start_out_of_range_is_refused_writing_nothing() {
+    let model = Model::new();
+    let scaler = crate::hvs::Hvs::new(model.hvs()).expect("the HVS window");
+    let past = 1 << hvs::DISPCTRLX_SIZE_BITS;
+    for (channel, width, height) in [
+        (hvs::CHANNELS, 640, 480),
+        (0, 0, 480),
+        (0, 640, 0),
+        (0, past, 480),
+        (0, 640, past),
+    ] {
+        assert_eq!(
+            scaler.start(channel, width, height, false),
+            Err(DriverError::OutOfRange),
+            "channel {channel}, {width} by {height}"
+        );
+    }
+    assert_eq!(model.write_count(), 0);
+}
+
 #[test]
 fn a_running_firmware_pipe_comes_down_in_order_before_the_engine_sets_its_mode() {
     let rig = Rig {

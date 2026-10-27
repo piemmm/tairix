@@ -145,6 +145,18 @@ impl DeviceBuffer for RtDeviceBuffer {
     }
 }
 
+/// The production [`DisplayTransport`]: one synchronous `ipc_call` to the
+/// reserved display endpoint per request. The display service re-checks the
+/// caller's live seat lease kernel-side on every request, so the transport
+/// carries no claimed authority.
+pub struct RtDisplayTransport;
+
+impl DisplayTransport for RtDisplayTransport {
+    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+        tairix_rt::ipc_call(DISPLAY_ENDPOINT, request, reply).map_err(Errno::from_syscall)
+    }
+}
+
 /// Why a presenter could not take a display's frames.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FramesRefused {

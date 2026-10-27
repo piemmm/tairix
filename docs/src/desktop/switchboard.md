@@ -614,8 +614,8 @@ than a nought that would read as an idle frame.
 
 **The device's own readings come from the display service that drives it**
 (`GPU_DEVICE_STATS`, gated with the hardware tree it details). Its
-compositor's layer limits and per-layer opacity fill the compositing-path
-block; its scan-out mode, its interval utilisation, and the memory it owns
+compositor's layer limits, per-layer opacity, scaling and whether it blends
+translucency band-free fill the compositing-path block; its scan-out mode, its interval utilisation, and the memory it owns
 fill the device block. Utilisation is a delta over the sample's own interval,
 never the service lifetime's average, so a first sample states no share; a
 device with no memory of its own says so in words, because that is a different

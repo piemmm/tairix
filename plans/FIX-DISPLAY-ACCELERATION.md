@@ -89,11 +89,12 @@ asks (§15.7).
 - **One raster/blend path** (§2.2). The software composite stays `lib/raster`;
   a baked or flattened layer is that same composite written into a layer
   buffer.
-- **The engine is never handed a blend that would band**
-  (`plans/FIX-DESKTOP-SPEEDUP.md` B.5). A window-wide translucency or a
-  backdrop blur is flattened: composited in software, with the backdrop
-  beneath it and the ordered dither, into an opaque layer. Only a layer's own
-  antialiased edge is blended by the engine.
+- **What reads the backdrop is flattened; the rest the engine blends**
+  (`plans/GPU.md` decision 10). A window-wide translucency or a backdrop blur
+  is composited in software, with the backdrop beneath it and the
+  `plans/FIX-DESKTOP-SPEEDUP.md` B.5 dither, into an opaque layer. A window's
+  own translucent content rides a free layer on every engine, blended by the
+  engine, dithered where its driver can dither (`plans/GPU.md` GD3).
 - **Fail closed, lease first, no ambient authority** (§5.4). Every request
   that acts for a seat checks the caller's live lease before any state;
   buffers belong to the configuration that allocated them and die with it; a
@@ -360,13 +361,15 @@ calls `move_to`.
   window below the first hardware-layer window, composited in software), then
   one layer per window above it, then the pointer if it is not on the cursor
   plane. The split moves up when the stack exceeds `max_layers`.
-- **Flattened layers**: a frosted or translucent window's layer is the
-  software composite of its footprint over everything beneath it, opaque, so
-  the engine blends nothing that could band. It is re-baked where anything
-  beneath it changes.
+- **Flattened layers**: a frosted or window-wide translucent window's layer
+  is the software composite of its footprint over everything beneath it,
+  opaque, since what it shows is made from what lies beneath. It is re-baked
+  where anything beneath it changes.
 - **A layered present consumes the damage it carried** into a software-stale
   region outside `has_damage`, which the software path drains when it next
-  composites; an undamaged scene presents nothing.
+  composites; an undamaged scene presents nothing. The base presents only what
+  it shows: a flattened footprint is opaque, so the base's damage beneath one
+  is never copied into the display's frame (`plans/GPU.md` GD1).
 - A window that cannot be given buffers, or the lowest window of a stack the
   engine cannot composite at once, joins the base with everything beneath it
   and the frame is planned again in the same present, the layers above kept;

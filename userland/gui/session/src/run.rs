@@ -77,7 +77,6 @@ mod program {
     use alloc::collections::BTreeMap;
     use alloc::vec::Vec;
 
-    use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::driver::display::{DisplayMode, OutputMode};
     use tairix_abi::elevate::{
@@ -193,7 +192,7 @@ mod program {
         ScreensaverPreview, ScreensaverServe,
     };
     use tairix_display::{
-        DisplayClient, DisplayTransport, FramesRefused, Presenter, RtDisplay, RtShmMapper,
+        DisplayClient, FramesRefused, Presenter, RtDisplay, RtDisplayTransport, RtShmMapper,
         SwitchedOff,
     };
     use tairix_greeter::AccountTile;
@@ -635,18 +634,6 @@ mod program {
 
     /// The name this program states its refusals under.
     const APP_NAME: &str = "desktop";
-
-    /// The production [`DisplayTransport`]: one synchronous `ipc_call` to
-    /// the reserved display endpoint per request. The display service
-    /// re-checks the caller's live seat lease kernel-side on every request,
-    /// so the transport carries no claimed authority.
-    struct RtDisplayTransport;
-
-    impl DisplayTransport for RtDisplayTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(DISPLAY_ENDPOINT, request, reply).map_err(Errno::from_syscall)
-        }
-    }
 
     /// The production pointer [`SeatEventReader`]: the seat-addressed
     /// `pointer_read` drain of the boot seat's pointer channel, owner-gated

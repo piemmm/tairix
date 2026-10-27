@@ -1,0 +1,44 @@
+[package]
+name = "tairix-blendcheck"
+description = "TAIRiX `blendcheck` CLI: show the display engine's blend of translucency beside the desktop's own (`plans/GPU.md` GD3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, as `tairix-clear`'s is: host tooling
+# builds only the pure pattern library, so the host test build never pulls the
+# runtime's `_start` / `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "tairix-display/rt"]
+
+[[bin]]
+name = "tairix-blendcheck-run"
+path = "src/run.rs"
+
+[dependencies]
+# The display mode, the layer a present carries, and the engine's caps.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The scan-out byte order and the presenter a display is driven through.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
+# The desktop's own blend and dither, so the software panes are the
+# compositor's arithmetic rather than a copy of it.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# The one help engine and its own-bundle short help.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# GNU `getopt_long`'s reading of the command line, and fallible allocation.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

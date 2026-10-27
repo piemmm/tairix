@@ -637,6 +637,7 @@ fn caps() -> AccelCaps {
         max_height_px: 1080,
         per_layer_opacity: true,
         hw_scaling: true,
+        band_free_blend: true,
     }
 }
 
@@ -660,6 +661,7 @@ fn planes_replies_round_trip_every_shape() {
             accel: Some(AccelCaps {
                 per_layer_opacity: false,
                 hw_scaling: false,
+                band_free_blend: false,
                 ..caps()
             }),
             cursor: None,
@@ -687,7 +689,7 @@ fn a_planes_reply_decode_fails_closed() {
         Err(Errno::BufferTooSmall)
     );
     let mut unknown = good;
-    unknown[4] |= 1 << 4;
+    unknown[4] |= 1 << 5;
     assert_eq!(decode_planes_reply(&unknown), Err(Errno::BadMagic));
     for (at, value) in [
         (8usize, 0u32),
@@ -710,6 +712,21 @@ fn a_planes_reply_decode_fails_closed() {
         Err(Errno::LengthOutOfRange),
         "limits beside flags saying there is nothing"
     );
+    let none = Planes {
+        accel: None,
+        cursor: None,
+    };
+    let bare = encode_planes_reply(Ok(none));
+    assert_eq!(decode_planes_reply(&bare), Ok(none));
+    for orphan in [1u8 << 1, 1 << 2, 1 << 4] {
+        let mut stray = bare;
+        stray[4] |= orphan;
+        assert_eq!(
+            decode_planes_reply(&stray),
+            Err(Errno::LengthOutOfRange),
+            "the compositor's flag {orphan:#x} with no compositor"
+        );
+    }
 }
 
 #[test]
@@ -800,7 +817,7 @@ fn stats_reply_decode_fails_closed() {
     bad_status[0] = 1;
     assert_eq!(decode_stats_reply(&bad_status), Err(Errno::OutOfRange));
     let mut unknown_flag = good;
-    unknown_flag[flags] |= 1 << 5;
+    unknown_flag[flags] |= 1 << 6;
     assert_eq!(decode_stats_reply(&unknown_flag), Err(Errno::BadMagic));
     for dirty in [STATS_BODY_AT + 65, STATS_BODY_AT + 71] {
         let mut broken = good;
@@ -843,4 +860,19 @@ fn stats_reply_decode_fails_closed() {
         decode_stats_reply(&stray_mode),
         Err(Errno::LengthOutOfRange)
     );
+    let unaccelerated = DisplayStats {
+        device: DisplayDeviceReport::SOFTWARE,
+        ..accelerated_stats()
+    };
+    let software = encode_stats_reply(Ok(unaccelerated));
+    assert_eq!(decode_stats_reply(&software), Ok(unaccelerated));
+    for orphan in [1u8 << 1, 1 << 3, 1 << 5] {
+        let mut stray = software;
+        stray[flags] |= orphan;
+        assert_eq!(
+            decode_stats_reply(&stray),
+            Err(Errno::LengthOutOfRange),
+            "the compositor's flag {orphan:#x} with no compositor"
+        );
+    }
 }

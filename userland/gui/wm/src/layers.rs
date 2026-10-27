@@ -6,20 +6,22 @@
 //! it one layer per window, each in two buffers the display allocated. Each
 //! layer is one of two kinds:
 //!
-//! * **Free** — an opaque window with no frost and no partially transparent
-//!   content, baked alone over nothing: content, furniture, corner coverage
-//!   and shadow. The engine blends only its edges and its shadow, and moving
-//!   it is a new destination, not a composite.
-//! * **Flattened** — any other window, baked as the software composite of its
-//!   footprint over everything beneath it, opaque, so the engine is never
-//!   handed a translucent field it would band without the dither. It is
-//!   re-baked wherever anything beneath it changes.
+//! * **Free** — a window with no frost and no window-wide opacity, baked alone
+//!   over nothing: content, furniture, corner coverage and shadow. The engine
+//!   blends whatever of it is not opaque, and moving it is a new destination,
+//!   not a composite.
+//! * **Flattened** — a frosted or window-wide translucent window, baked as the
+//!   software composite of its footprint over everything beneath it, opaque,
+//!   since what it shows is made from what lies beneath. It is re-baked
+//!   wherever anything beneath it changes.
 //!
 //! The back buffer holds at each pixel the composite the frame or layer
 //! showing it needs: every window below the lowest layer, or within a
 //! flattened footprint every window up to that one. Flattened footprints never
 //! overlap and never cross a frosted window of the base, so no composite is
-//! cut through a frost.
+//! cut through a frost. The base's damage excludes every flattened footprint,
+//! which hides it, so the display is never handed pixels it cannot show; a
+//! footprint that moves off them, or a layer given back, marks them first.
 //!
 //! A layer's two buffers alternate: the engine shows one while what changed is
 //! baked into the other, so it never reads a buffer being written. A frame
@@ -339,6 +341,8 @@ pub(super) struct Stack {
     shape: Shape,
     /// Damage the base owes while a promoted window covers it.
     hidden: Region,
+    /// What of a frame's composed region the base shows, held for its buffer.
+    shown: Region,
     /// A row a free layer is composed through before it is encoded.
     scratch: Vec<Pixel>,
     /// The layers' other vector, which each reconcile builds the next stack
@@ -353,9 +357,25 @@ impl Stack {
             split,
             shape: Shape::Based,
             hidden: Region::new(),
+            shown: Region::new(),
             scratch: Vec::new(),
             spare: Vec::new(),
         }
+    }
+
+    /// `composed` less every flattened layer's rectangle: a flattened layer is
+    /// opaque across all of it, so the base beneath can never be seen there.
+    /// A free layer hides nothing, since its content may be fully transparent
+    /// anywhere.
+    fn shown_of(&mut self, composed: &Region) -> &Region {
+        let Self { layers, shown, .. } = self;
+        shown.clone_from(composed);
+        for layer in layers.iter() {
+            if layer.role() == Some(Role::Flattened) {
+                shown.subtract(layer.at);
+            }
+        }
+        shown
     }
 
     /// Whether `engine` holds every buffer, which a display since replaced
@@ -616,9 +636,6 @@ impl Compositor {
         let caps = engine.caps();
         let pointer_layer =
             self.pointer.route() == PointerRoute::Layer && self.pointer.sprite_bounds().is_some();
-        for window in &mut self.windows {
-            window.track_partial();
-        }
         for _ in 0..=MAX_ACCEL_LAYERS {
             let Some(plan) = self.plan_layers(&caps, pointer_layer) else {
                 break;
@@ -704,10 +721,16 @@ impl Compositor {
         }
         let whole = [DamageRect::full(&self.mode)];
         let mut list = [whole[0]; MAX_DAMAGE_RECTS];
-        let damage = if plan.shape == Shape::Based && !composed.is_empty() {
-            damage_list(&composed, &self.mode, &mut list).unwrap_or(&whole)
-        } else {
-            &[]
+        let damage = match (plan.shape, self.layers.as_mut()) {
+            (Shape::Based, Some(stack)) => {
+                let shown = stack.shown_of(&composed);
+                if shown.is_empty() {
+                    &[][..]
+                } else {
+                    damage_list(shown, &self.mode, &mut list).unwrap_or(&whole)
+                }
+            }
+            _ => &[],
         };
         let base = (plan.shape == Shape::Based).then_some(Base {
             frame: &self.frame,
@@ -768,7 +791,7 @@ impl Compositor {
         let screen = self.screen_rect();
         if let Some(cover) = self.fullscreen_cover() {
             let footprint = cover.footprint(reach);
-            if Self::role_of(cover) == Role::Free && fits(footprint) && !refused(cover, footprint) {
+            if Self::promotable(cover) && fits(footprint) && !refused(cover, footprint) {
                 let mut windows = ArrayVec::new();
                 let _ = windows.try_push((cover.id(), Role::Free, footprint));
                 return Some(Plan {
@@ -828,13 +851,22 @@ impl Compositor {
         })
     }
 
-    /// How `window`'s layer would be baked.
+    /// How `window`'s layer would be baked: flattened only where what it
+    /// shows is made from what lies beneath it. A free layer's translucency
+    /// goes to the engine whether or not its blend dithers (`plans/GPU.md`
+    /// GD3).
     fn role_of(window: &Window) -> Role {
-        if !window.reads_backdrop() && window.has_partial() == Some(false) {
-            Role::Free
-        } else {
+        if window.reads_backdrop() {
             Role::Flattened
+        } else {
+            Role::Free
         }
+    }
+
+    /// Whether `window` may be the one layer of a promoted present, which has
+    /// nothing beneath it: only where every pixel it shows is opaque.
+    fn promotable(window: &Window) -> bool {
+        !window.reads_backdrop() && window.is_opaque() == Some(true)
     }
 
     /// Bring the stack to `plan`, damaging the base wherever a window joined

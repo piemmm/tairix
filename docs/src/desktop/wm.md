@@ -277,30 +277,40 @@ A layered present shows a **base** — the output frame, holding the desktop
 and every window below the lowest layer, composited in software as ever —
 and above it one layer per window, each in two buffers the display allocated:
 
-- **Free** — an opaque window with no frost and no partially transparent
-  content, baked alone over nothing: content, furniture, corner coverage and
-  shadow. The engine blends only its edges and its shadow, and moving the
-  window is a new destination, not a composite.
-- **Flattened** — any other window, baked as the software composite of its
-  footprint over everything beneath it, opaque, so the engine is never handed
-  a translucent field it would band without the dither. It is re-baked
-  wherever anything beneath it changes. Flattened footprints never overlap
-  and never cross a frosted window of the base.
+- **Free** — a window with no frost and no window-wide opacity, baked alone
+  over nothing — content, furniture, corner coverage and shadow. The engine
+  blends whatever of it is not opaque, without the desktop's dither unless
+  its caps state `band_free_blend` (`plans/GPU.md` decision 10), and moving
+  it is a new destination, not a composite.
+- **Flattened** — a frosted or window-wide translucent window, baked as the
+  software composite of its footprint over everything beneath it, opaque,
+  since what it shows is made from what lies beneath. It is re-baked wherever
+  anything beneath it changes. Flattened footprints never overlap and never
+  cross a frosted window of the base.
 
 The back buffer holds at each pixel the composite the frame or layer showing
-it needs. A layer's buffers alternate: the engine shows one while what changed
+it needs. The base presents only what it shows: its damage less every
+flattened footprint, which is opaque and hides it, so a dragged frosted window
+copies into the display's frame the strip it uncovered rather than its whole
+footprint. What a footprint left stale beneath it is composed again before it
+can show, because a footprint that moves, a window that joins the base and
+layers given back each mark where they lay. A layer's buffers alternate: the engine shows one while what changed
 is baked into the other, so it never reads a buffer being written, and
 `Presenter::ready` holds a frame while a present is queued. Each buffer
 catches up on what changed while the other was shown, including what no client
 reports: a shadow easing between its levels, a frame's activation, and a new
 theme or scale. A frame with nothing new presents nothing.
 
-A **fullscreen window that covers the output** with a free layer is promoted
-to the one layer the scene is: no base is presented, and the base's damage is
-kept for when it shows again. `Compositor::fullscreen_cover` reads every
-condition from the compositor's own state — visible, fullscreen, exactly the
-output, wholly opaque, unshaped, and holding presented pixels for all of it —
-since a window is resized before its app presents at the new extent. A
+A **fullscreen window that covers the output** is promoted to the one layer
+the scene is: no base is presented, and the base's damage is kept for when it
+shows again. `Compositor::fullscreen_cover` reads every condition from the
+compositor's own state — visible, fullscreen, exactly the output, wholly
+opaque, unshaped, and holding presented pixels for all of it — since a window
+is resized before its app presents at the new extent. Promotion further needs
+every content pixel opaque: with nothing laid beneath, a fully transparent
+pixel would show the engine's black where the frame shows the desktop, so a
+frame at a new size is held back until what the client presented covers it.
+Only a fullscreen window's content is read for that, as it changes. A
 desktop composed smaller than its output is presented as one desktop-sized
 layer the engine scales onto it.
 

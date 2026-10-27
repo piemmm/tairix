@@ -1126,6 +1126,13 @@ pub struct AccelCaps {
     /// Whether a layer's destination may differ in size from its source:
     /// the hardware scales it.
     pub hw_scaling: bool,
+    /// Whether a translucent layer the hardware blends reaches the panel
+    /// without banding: blended deeper than 8 bits a channel, then dithered
+    /// or carried that deep to the panel. Without it a smooth gradient
+    /// beneath translucency steps into plateaus. A statement of fact, shown
+    /// to the user: a compositor hands the hardware translucent layers
+    /// either way.
+    pub band_free_blend: bool,
 }
 
 /// One layer of an [`AcceleratedDisplay::present_layers`]: the part `src` of
@@ -1541,6 +1548,7 @@ mod tests {
         max_height_px: 64,
         per_layer_opacity: false,
         hw_scaling: false,
+        band_free_blend: false,
     };
 
     fn layer(src: DamageRect) -> AccelLayer {

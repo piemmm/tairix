@@ -4121,11 +4121,13 @@ impl Compositor {
         if !presenter.ready() {
             return Ok(());
         }
-        if presenter.layers().is_none() {
-            // Nothing here ever takes a layer, so nothing needs to know which
-            // content is translucent.
-            for window in &mut self.windows {
-                window.forget_partial();
+        // Only a promoted window, which is fullscreen, must be known opaque.
+        let tracks = presenter.layers().is_some();
+        for window in &mut self.windows {
+            if tracks && window.size_state().is_fullscreen() {
+                window.track_transparency();
+            } else {
+                window.forget_transparency();
             }
         }
         self.drop_layers_of_another(presenter);

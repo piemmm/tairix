@@ -945,6 +945,27 @@ anyone but an elevated administrator is refused with its reason (fail closed,
 nothing applied). Exit status: `0` success, `1` a read, change or output
 failure or a usage error (unknown key / out-of-set value included).
 
+## `blendcheck` — the display engine's blend beside the desktop's own (`userland/apps/blendcheck`)
+
+`tairix-blendcheck` takes the seat's display and shows a grey ramp under
+three panes of dark glass: blended by the desktop with its ordered dither,
+blended by the desktop rounded to nearest (what banding looks like), and
+handed to the display engine as a layer of its own. It prints what the
+engine's driver states as `AccelCaps::band_free_blend` beside the pattern,
+which is the metal comparison a driver's claim is judged by
+(`plans/GPU.md` GD3). A key or a pointer button ends it, and every exit after
+the lease releases the seat to the text console.
+
+It runs only where no session holds the display, and refuses with that reason
+otherwise; a display with no hardware layers is refused too, since every blend
+on it is the desktop's own. The two desktop panes are `lib/raster`'s
+`blend_span` under `DitherRow::at` and `DitherRow::NEAREST`, so the pattern is
+the compositor's arithmetic and not a copy of it, and `cargo test -p
+tairix-blendcheck` holds each pane to the per-pixel operators. Manifest:
+`CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM`, `CAP_CONSOLE_WRITE` and
+`CAP_FS_ACCESS`, all within the session baseline. Exit status: `0` shown and
+dismissed, `1` refused or lost, or a usage error.
+
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
 
 `tairix-clear` writes the byte sequence that moves the cursor home and

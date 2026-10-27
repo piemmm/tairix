@@ -1,0 +1,20 @@
+# Signed-AppInfo manifest source for the `blendcheck` command app
+# (plans/GPU.md GD3). It holds the seat for as long as its pattern is up, so
+# it asks for exactly what owning a seat takes, all within the session
+# baseline:
+#
+#   CAP_DISPLAY        the seat's display lease and its configuration.
+#   CAP_INPUT_READ     draining the owned seat's keyboard, pointer and touch
+#                      channels, so the key that ends the check is heard.
+#   CAP_SHM            mapping the frames and the layer buffer the display
+#                      driver grants.
+#   CAP_CONSOLE_WRITE  what it reports, and why it stopped.
+#   CAP_FS_ACCESS      the short help read from its own Help/ tree.
+id = "os.tairix.blendcheck"
+name = "blendcheck"
+title = "Blend check"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "blendcheck.png"

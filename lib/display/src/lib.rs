@@ -56,7 +56,8 @@ pub use region::{FrameRegion, ShmMapper};
 #[cfg(feature = "rt")]
 pub use rt::{
     establish_display, FramesRefused, RtBufferMapper, RtBufferMemory, RtDeviceBuffer,
-    RtDeviceMemory, RtDisplay, RtMapping, RtSharedBuffer, RtShmMapper, RtShmRegion,
+    RtDeviceMemory, RtDisplay, RtDisplayTransport, RtMapping, RtSharedBuffer, RtShmMapper,
+    RtShmRegion,
 };
 pub use scanout::{damage_list, scanout_len, sub_screen_damage, ChannelOrder};
 // The runner contract and the calling-thread runner a window-frame conversion

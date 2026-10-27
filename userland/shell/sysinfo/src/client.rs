@@ -1450,6 +1450,7 @@ mod tests {
                         max_height_px: 1080,
                         per_layer_opacity: true,
                         hw_scaling: false,
+                        band_free_blend: false,
                     }),
                     cursor: None,
                 },

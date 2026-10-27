@@ -49,7 +49,6 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
-    use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::display::{DamageRect, DisplayMode, OutputMode, RefreshRate};
     use tairix_abi::input::{KeyInput, TimedPointer};
     use tairix_abi::seat::ReleaseSurface;
@@ -62,7 +61,7 @@ mod program {
     use tairix_abi::NoticeTopic;
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_display::{
-        establish_display, DisplayClient, DisplayTransport, FramesRefused, Presenter, RtDisplay,
+        establish_display, DisplayClient, FramesRefused, Presenter, RtDisplay, RtDisplayTransport,
         SwitchedOff,
     };
     use tairix_geometry::Scale;
@@ -155,18 +154,6 @@ mod program {
                 }],
             },
         );
-    }
-
-    /// The production [`DisplayTransport`]: one synchronous `ipc_call` to the
-    /// reserved display endpoint. The service re-checks this task's live seat
-    /// lease kernel-side on every request, so the transport carries no claimed
-    /// authority.
-    struct RtDisplayTransport;
-
-    impl DisplayTransport for RtDisplayTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(DISPLAY_ENDPOINT, request, reply).map_err(Errno::from_syscall)
-        }
     }
 
     /// The production [`SessionTransport`]: one synchronous `ipc_call` to the

@@ -294,12 +294,12 @@ Compositor-local: no ABI change, no app change.
     divide is the same arithmetic with its rounding point named, and every
     unbiased operator delegates to it. Cost falls only on pixels that were
     already blending; the B.1 copy path pays nothing.
-  - **The hardware path keeps the guarantee by not taking work it cannot do.**
-    No layer stack can express a per-pixel dither, so
-    `Compositor::has_translucent_window` sends a window-wide translucency
-    through software exactly as a backdrop blur does, and a baked layer
-    (resolved through `Window::row`) reads the dither at the pixel's *screen* position
-    (`plans/FIX-DISPLAY-ACCELERATION.md` A.3).
+  - **The guarantee is the software path's.** A window's translucent content
+    on a free layer is blended by the display engine, dithered only where its
+    driver can dither (`plans/GPU.md` decision 10, GD3); a window-wide opacity
+    or a backdrop blur is flattened into an opaque layer composited here. A
+    baked layer (resolved through `Window::row`) reads the dither at the
+    pixel's *screen* position (`plans/FIX-DISPLAY-ACCELERATION.md` D).
 - **B.6 A segment is composed a layer at a time, not a pixel at a time.** The
   columns between two copyable runs are one **segment**, composed across its
   whole width as the base fill, the desktop row, each window row back to front,

@@ -197,6 +197,10 @@ fn path_facts(
                 "Hardware scaling",
                 if caps.hw_scaling { "yes" } else { "no" },
             ));
+            facts.push(ReadingFact::text(
+                "Band-free blending",
+                if caps.band_free_blend { "yes" } else { "no" },
+            ));
         }
         Some(None) => facts.push(ReadingFact::text(
             "Accelerated layers",

@@ -1192,6 +1192,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-blendcheck"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-display",
+ "tairix-help",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-blkclient"
 version = "0.0.0"
 dependencies = [

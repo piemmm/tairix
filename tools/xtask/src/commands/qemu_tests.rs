@@ -1077,9 +1077,10 @@ const TRIAL_CONCLUDED_MARKER: &str = tairix_desktop_session::TRIAL_CONCLUDED_MES
 /// Its own declaration reply says only that the session accepted the
 /// declaration, which is not yet a drawn slot to hit.
 ///
-/// A vertical counts occurrences: the strip seats the autostarted file manager
-/// first, so the launched application's slot is the
-/// [`APPBAR_LAUNCHED_SLOT`]-th after it.
+/// A vertical counts occurrences: the strip seats applications in the order
+/// they arrive, and a launch waits on the autostarted file manager's slot
+/// ([`PointerPen::open_library_beside_manager`]), so the launched application's
+/// slot is the [`APPBAR_LAUNCHED_SLOT`]-th after it.
 const APPBAR_SLOT_MARKER: &str = tairix_desktop_session::APP_BAR_SLOT_SHOWN_MESSAGE;
 
 /// Serial marker a vertical gates a click on a *program-library row* on: the
@@ -14134,10 +14135,10 @@ const MAX_BARE_APP_SLOT_SHARE: f64 = 0.0;
 /// The strip index the icon-bar vertical's launched application occupies.
 ///
 /// One, not zero: the file manager is a core desktop component the session
-/// autostarts at bring-up, and it holds the leading slot for the life of the
-/// session, so anything launched afterwards lands beside it. Reading slot
-/// zero would drive and measure the file manager instead of the application
-/// under test.
+/// autostarts at bring-up, and once its slot is on screen it holds the leading
+/// slot for the life of the session, so anything launched after that lands
+/// beside it. Reading slot zero would drive and measure the file manager
+/// instead of the application under test.
 const APPBAR_LAUNCHED_SLOT: usize = 1;
 
 /// The strip index the autostarted file manager occupies: the leading slot it
@@ -14751,6 +14752,26 @@ impl PointerPen {
             occurrences,
             tairix_qemu::PointerAction::Click(button),
         );
+    }
+
+    /// Open the program library for a launch whose slot the script then names
+    /// by its index. The strip seats applications in the order they arrive and
+    /// the autostarted file manager's bring-up is unordered against the reveal,
+    /// so the click waits on the manager's own slot: launched before it, the
+    /// application would take the leading slot instead.
+    fn open_library_beside_manager(
+        &mut self,
+        library_button: tairix_geometry::Point,
+    ) -> Result<(), String> {
+        let seated = u32::try_from(APPBAR_LAUNCHED_SLOT)
+            .map_err(|_| "the launched application's slot index is out of range")?;
+        self.click(
+            APPBAR_SLOT_MARKER,
+            seated,
+            tairix_qemu::MouseButton::Primary,
+            library_button,
+        );
+        Ok(())
     }
 
     /// Press `button` at `from`, carry the pointer to `to` in one move and let
@@ -16606,10 +16627,13 @@ fn resized_desktop_covered(
 ///
 /// - The desktop's own reveal witness opens the script, so nothing is injected
 ///   before there is a bar to hit.
+/// - The launch waits on the autostarted file manager's own slot
+///   ([`PointerPen::open_library_beside_manager`]), so the fixture's slot is
+///   the one beside it.
 /// - The launch's folder and picture wait on the popup's own
 ///   [`LIBRARY_SHOWN_MARKER`], so they are on screen before they are pressed.
 /// - A settling sweep waits on the session's own [`APPBAR_SLOT_MARKER`],
-///   counted: the autostarted file manager's slot is announced first, so the
+///   counted: the manager's slot was announced before the launch, so the
 ///   fixture's is the next, and it declares its slot only once its first
 ///   sample is on the log. The sweep keeps the launch out of the window: the
 ///   runner sends one move a poll tick, so it lasts some 0.8 s, and the
@@ -16671,7 +16695,7 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let sampled = tairix_test_framestats::SAMPLE_MESSAGE;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
-    pen.click(revealed, 1, MouseButton::Primary, library_button);
+    pen.open_library_beside_manager(library_button)?;
     launch.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // The launch took the settling sample. Sweep once to settle, then open the
     // window with a click on the fixture's slot.
@@ -17377,8 +17401,9 @@ fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// row is what makes the session mint the delegation the guest is waiting for.
 ///
 /// The slot click is gated on the session's own [`APPBAR_SLOT_MARKER`],
-/// counted: the autostarted file manager's slot is announced first, so the
-/// viewer's is the next one. Nothing earlier is honest — the viewer opens no
+/// counted: the launch waits on the autostarted file manager's slot
+/// ([`PointerPen::open_library_beside_manager`]), so the viewer's is the next
+/// one. Nothing earlier is honest — the viewer opens no
 /// window, so there is no window witness to wait for.
 fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_qemu::MouseButton;
@@ -17401,7 +17426,7 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
-    pen.click(revealed, 1, MouseButton::Primary, library_button);
+    pen.open_library_beside_manager(library_button)?;
     entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // The viewer is resident: its slot is drawn and clickable before it owns
     // any window, and the click is what makes it open one and ask to pick.
@@ -17559,7 +17584,7 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let rest = pointer_rest();
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
-    pen.click(revealed, 1, MouseButton::Primary, library_button);
+    pen.open_library_beside_manager(library_button)?;
     entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // Off the bar and clear of the window before the frame the dump reads.
     pen.aim(LIBRARY_SHOWN_MARKER, 1, rest);
@@ -17822,7 +17847,7 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let rest = pointer_rest();
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
-    pen.click(ready, 1, MouseButton::Primary, library_button);
+    pen.open_library_beside_manager(library_button)?;
     entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     // Off the bar before the frame that measures it. A dump taken with the
     // pointer left on the picture it just clicked reads the cursor wherever
@@ -19793,18 +19818,19 @@ mod tests {
         qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext, screendump_path,
         screensaver_pointer_script, settings_pointer_script, sidecar_path, touch_pointer_script,
         Expect, FsDisk, NetPeerMode, PrimePlan, QemuTest, TypedStep, AARCH64_TARGET,
-        APPBAR_SETTLED_MARKER, AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL,
-        AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
-        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
-        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES,
-        LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL, LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER,
-        MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE, OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL,
-        RISCV64_TARGET, SCRIPTED_LIFECYCLE, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
-        STARTUP_PLAYED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
-        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
-        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
-        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
-        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
+        APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER, AUDIOCUE_LINE,
+        AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
+        AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
+        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
+        KEYBOARD_ONLY_ARMED_OCCURRENCES, LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL,
+        LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER, MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE,
+        OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
+        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, STARTUP_PLAYED_MARKER,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
+        VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -21121,6 +21147,33 @@ mod tests {
         assert!(steps
             .iter()
             .all(|step| matches!(step.action, tairix_qemu::PointerAction::Tap { .. })));
+    }
+
+    /// A script that names the launched application's slot by its index opens
+    /// the library only once the autostarted file manager's slot is on screen:
+    /// the strip seats applications as they arrive, and a guest bringing the
+    /// manager up late gave a hover run the fixture's slot at index zero.
+    #[test]
+    fn a_launch_whose_slot_is_named_by_index_waits_for_the_managers_slot() {
+        let scripts = [
+            ("desktop-hover", desktop_hover_pointer_script()),
+            ("filepick", filepick_pointer_script()),
+            ("netmap", netmap_pointer_script()),
+            ("appbar", appbar_pointer_script()),
+        ];
+        for (name, steps) in scripts {
+            let steps = steps.expect("the script builds");
+            let launch = steps
+                .iter()
+                .find(|step| matches!(step.action, tairix_qemu::PointerAction::Click(_)))
+                .expect("the script clicks");
+            assert_eq!(launch.ready_marker, APPBAR_SLOT_MARKER, "{name}");
+            assert_eq!(
+                usize::try_from(launch.ready_occurrences).ok(),
+                Some(APPBAR_LAUNCHED_SLOT),
+                "{name}: the launch waits on every slot ahead of its own"
+            );
+        }
     }
 
     /// The SVG-text vertical types the fixture's own command word and waits

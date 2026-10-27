@@ -3,7 +3,8 @@
 Binding under `AGENTS.md`. This plan owns how TAIRiX reaches a graphics
 processor for **render and compute** work: the device-neutral seam its
 consumers write against, the memory/submission/synchronisation model beneath
-it, the per-device backends, and presentation. The shader toolchain — the IR,
+it, the per-device backends, presentation, and where the desktop's own 2D work
+runs — the CPU, the display engine's planes or a GPU (§7). The shader toolchain — the IR,
 its validator, the build-time builder, and the untrusted-input compiler — is
 large enough and different enough in character to be its own plan
 (`plans/SHADER.md`); this plan consumes it and does not restate it.
@@ -37,11 +38,19 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | planned |
 | GP9 | `drivers/display/v3d`: the Raspberry Pi VideoCore VI backend | planned |
 | GP10 | The application-facing GPU library and its generated C surface — what a ported game links | planned |
+| GD1 | The base presents only what it shows: nothing a flattened layer covers is copied into the display's frame | done |
+| GD3 | Band-free blending as an engine capability: `AccelCaps` states it, every translucent window that reads no backdrop rides a free layer, the metal comparison, and the HVS's output dither | done |
+| GD4 | A frosted window as two planes, its frost and its own pixels | planned |
+| GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | planned |
+| GD5 | The screen fade as a lone layer's opacity | planned |
+| GD6 | The desktop's frost, dithered blend, copy, fill and encode in GP4's pinned set, bit-identical to `lib/raster` | blocked: GP4 |
+| GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3 |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
 whole-project gate — before the next begins. Several items additionally wait on
 `plans/SHADER.md`; that plan's ledger carries the mapping in its own `Blocks`
-column and is the single place it is recorded.
+column and is the single place it is recorded. The GD items (§7) are a track of
+their own beside GP2–GP10, joining it only where a row says it is blocked.
 
 ### Milestones
 
@@ -56,6 +65,7 @@ proceed past a milestone whose criterion is unmet.
 | **MG3 — untrusted shaders** | GP8 | A shader module supplied at run time by an unprivileged process is compiled in a sandbox, admitted, executed, and cannot read another context's memory; a malicious module is refused or contained, and the fuzz corpus is clean. |
 | **MG4 — native silicon** | GP9 | The Pi's V3D executes the pinned set from TAIRiX-generated ISA, conformant against the software reference. |
 | **MG5 — a ported game runs** | GP10 | A third-party application, built against the published surface and linking no TAIRiX source, renders and presents. |
+| **MD — the display engine carries the desktop** | GD1–GD5 | A frosted window's drag copies into display memory only what its layer needs and the strip it uncovered; every translucent window that reads no backdrop moves as a layer; what the HVS states of its blend is what its metal comparison showed. |
 
 MG2 is the milestone that proves or kills the strategy: it is the first point at
 which arbitrary shader code runs on a real GPU, and it is reachable **without
@@ -129,6 +139,13 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    presenting it goes through the one existing display path and the compositor
    (§17.3, §2.2). A game does not seize the framebuffer, and neither does the
    compositor get a private channel to the device.
+10. **An engine's blend is accepted where it bands.** A window whose content is
+    translucent rides a free layer on every layer engine, whether or not its
+    blend dithers: an undithered 8-bit blend steps a smooth gradient the
+    software path would dither, and a drag that costs nothing is worth the
+    plateaus. Where the engine can dither, its driver turns that on, as the
+    Pi 4's HVS does; what it states of its blend is what the metal comparison
+    showed (GD3).
 
 ## 0a. The security position, stated honestly
 
@@ -335,7 +352,133 @@ keeps this one API rather than two.
 - The headless build (§17.3) is unaffected: nothing here is required to boot,
   log in, or run a text session.
 
-## 7. Refused by name
+## 7. GD — the desktop's 2D work
+
+Where a desktop frame's pixel work runs: on the CPU (`lib/raster`, the
+reference and the fallback on every target), on the display engine's planes
+(`plans/FIX-DISPLAY-ACCELERATION.md`), or on a GPU through `lib/gpu`. The order
+is binding, as `plans/FIX-DESKTOP-SPEEDUP.md`'s is: stop moving bytes nothing
+shows; then let the display engine blend what it can blend without changing the
+picture; then compute what remains on a GPU where one exists. Every item evolves
+the layer seam or the compositor in place.
+
+### 7.1 Where a frosted window's drag goes
+
+A Switchboard-shaped window — 928 × 560, the frosted ground's 43 px blur,
+rounded and casting — dragged 6 px a sample over a wallpaper and an opaque
+window at 1920 × 1080, measured on the host through the real compositor:
+
+| per frame | |
+|---|---|
+| work | 543 914 px damaged, 587 334 blended, 125 924 blurred |
+| one core, SSE2 | 1.74 ms composited, 1.86 ms layered |
+| the same window with no blur | 0.87 ms |
+| base copied into the display's frame, layered | 543 867 px, 537 680 of them under the window's own opaque layer |
+
+An opaque window rides a free layer and moves for nothing: a new destination.
+A frosted one is flattened, so each sample re-blends its whole footprint over a
+frost whose border is re-blurred, encodes that into its layer, and copies the
+base beneath it into the display's frame — on the Pi 4 uncached memory, and
+again on the next sample once the double-buffered frame catches up. The layer
+therefore costs more than the composited frame it replaced; GD1 and GD2 remove
+the difference.
+
+### 7.2 What each engine can take
+
+- **The Pi 4's HVS** places, crops, scales and blends planes as it scans out,
+  writing no memory. It cannot blur. It blends wider than 8 bits a channel and
+  has an output dither, `SCALER_DISPDITHER` at 0x14: per channel, five bits
+  every eighth from bit 0, the mode in bits 1:0 (1 carries the rounding error
+  along the line, 2 adds a ±½ LSB triangular noise restarted each frame, 3
+  both) and the output's depth in bits 4:2 (0 RGB888, 1 RGB666, 2 RGB565, 3
+  RGB555, 5 36-bit, 7 30-bit), as a Raspberry Pi engineer described it
+  (Raspberry Pi forums, topic 324770). Undithered, its blend steps a smooth
+  gradient into the plateaus `plans/FIX-DESKTOP-SPEEDUP.md` B.5 removed;
+  dithered to RGB888 with mode 3 it matches the desktop's own, as `blendcheck`
+  shows on a Pi 4 panel.
+- **The Pi 4's V3D 4.2** is programmable, reached through GP2–GP4 and GP9. Its
+  published peak — 8 QPUs × 4 lanes × 500 MHz — issues fewer integer operations
+  than the four A72 cores' NEON units, 4 × 8 16-bit lanes × 1.5 GHz, so for the
+  desktop's integer blend and box blur it offloads the CPU rather than outruns
+  it.
+- **The BCM2711's DMA4 engines** copy rectangles in 2D mode (BCM2711 ARM
+  Peripherals, chapter 4) at no better bandwidth than a core: an offload, worth
+  measuring only once GD1 and GD2 leave a copy worth moving.
+- **Other display engines** — Intel's universal planes, AMD's DCN planes,
+  NVIDIA's window channels — are layer engines of the same shape, each a
+  `drivers/display` leaf stating its own `AccelCaps`, band-free blending
+  included. Their 3D and compute engines are many times the CPU and are where
+  GD6 pays; their copy engines are GD7's.
+
+### 7.3 The items
+
+**GD1 — the base presents only what it shows.** A flattened layer is opaque
+across its whole rectangle, so the base beneath it cannot be seen: a layered
+present names as the base's damage the composed region less every flattened
+layer's rectangle, and the display copies only that. The back buffer still
+holds the full composite, which is what the layer is baked from. A free layer
+hides nothing, because its content may hold fully transparent pixels. The base
+pixels left stale beneath a layer are composed again before they can show: a
+layer that moves, joins the base or is given back marks where it lay.
+
+**GD2 — the composite writes where the engine reads.** A flattened footprint is
+written into its layer's buffer by the pass that composes it, rather than into
+the heap frame and then encoded again from the back buffer; only what that
+buffer missed while the other was shown is encoded from the back buffer. The
+base is composed into the display's own back frame (`Presenter::present_drawn`)
+with what that frame missed encoded from the back buffer, so the heap frame
+survives only for a presenter with no frame of its own. Both halves keep the
+back buffer as the one source every frost and catch-up reads.
+
+**GD3 — the engine states whether its blend bands.** `AccelCaps` states whether
+the engine's blend of a translucent layer reaches the panel deeper than 8 bits
+a channel or dithered — what the software path's per-pixel dither guarantees.
+The compositor hands the engine translucency either way (§0 decision 10): a
+window whose content is partially or wholly transparent but which reads no
+backdrop rides a free layer, its content blended by the engine; a frosted
+window stays flattened until GD4. A window-wide opacity stays flattened
+everywhere: the one surface that carries one, the library popup's fade, is
+frosted too. The statement is reported — the Switchboard's graphics facts,
+`sysinfo`, `blendcheck` — and never claims more than the metal showed.
+- **The metal comparison** is `blendcheck` (`userland/apps/blendcheck`), run
+  from a text session. One screen, one grey ramp, three panes of dark glass:
+  the production dithered blend, the same blend undithered (what banding looks
+  like), and the engine blending the same glass as a layer of its own, with
+  what the driver states printed beside it.
+- **The HVS dithers its blend.** Each channel the engine starts has its dither
+  set to RGB888 with mode 3 while the channel is stopped, never under a running
+  one, which has been seen to lose the picture; the other channels' fields and
+  HDMI1's mux in the same register are left alone. Undithered, the HVS's pane
+  matched the undithered one; dithered, it matches the dithered one, so the HVS
+  states band-free blending.
+
+**GD4 — a frosted window as two planes.** Its frost — the blurred backdrop
+under its shape's coverage — and its own pixels on a free layer above it. A move
+re-derives only the frost's border, the core kept where it lies
+(`plans/FIX-DESKTOP-SPEEDUP.md` D.8), and the window's blend over its frost is
+the engine's, banded where the engine bands (§0 decision 10).
+
+**GD5 — the screen fade as a lone layer's opacity.** A stack of one layer — the
+base alone, or a promoted window — fades through its per-layer opacity over the
+engine's black background, so a fade step presents no pixel where today it
+re-encodes the screen and, on the Pi 4, copies it into uncached memory twice.
+The software reveal is not dithered (`Pixel::dimmed`), so the engine's is no
+worse; the pointer fades with it because a fade already takes the pointer into
+the frame. A multi-layer stack still flattens into the base first.
+
+**GD6 — the desktop's passes on a GPU.** The box blur's passes with their exact
+`Reciprocal`, the dithered premultiplied *over*, copy, fill and the channel-order
+encode join GP4's pinned set, held bit-identical to `lib/raster` — integer
+arithmetic leaves no tolerance to state. A frosted window then renders its frost
+and its flattened layer on whatever backend the device has, and on the CPU where
+it has none.
+
+**GD7 — copy engines.** The rectangle copies and fills between device-visible
+images that remain after GD1 and GD2 go to the device's copy engine — the
+BCM2711's DMA4 2D mode, NVIDIA's copy engine, AMD's SDMA, Intel's blitter — as
+`lib/gpu`'s transfer queue.
+
+## 8. Refused by name
 
 - **OpenGL, OpenGL ES, or a GL-shaped compatibility layer**, for §0b.
 - **Implementing Vulkan or WebGPU *conformantly* as a specification**, or
@@ -354,7 +497,7 @@ keeps this one API rather than two.
 - **A hand-picked constant as a device capacity** (§24.1), or widening a
   validation bound to admit an oversize module (§24.4).
 
-## 8. Charter amendments this work requires
+## 9. Charter amendments this work requires
 
 Each needs sign-off before the item that depends on it; none is assumed.
 
@@ -375,8 +518,21 @@ Each needs sign-off before the item that depends on it; none is assumed.
 3. **§3 map entries** for `lib/gpu`'s changed description and for
    `plans/SHADER.md`'s crates. Prose within a section; no gate implication.
 
-## 9. Verification
+## 10. Verification
 
+- **GD1**: a frosted window dragged over a layered stack presents as the base's
+  damage only what no flattened layer covers, counted on a mock engine; the
+  engine's screen equals the software composite of the same scene after the
+  window has crossed, left, and been given back its layer.
+- **GD3**: the capability crosses the wire and is refused where malformed; a
+  translucent window rides a free layer whatever the engine states, and the
+  engine's screen then matches the software composite within one level; a
+  frosted window stays flattened. The HVS sets a channel's dither only while
+  the channel is stopped, and leaves the other fields of its register as it
+  found them.
+- **GD5**: a fade presents no pixel after its first step on an engine with
+  per-layer opacity, and each step's screen matches the software reveal within
+  one level.
 - **GP1**: binds by discovery-match under `devmgr` on aarch64 `virt`, riscv64
   `virt` and x86_64 q35; resource create/transfer/flush/flip; flip completion
   parks on the interrupt; the display seam drives it end to end.
@@ -412,11 +568,13 @@ Each needs sign-off before the item that depends on it; none is assumed.
   from discovered memory; a small machine with a large working set degrades in
   performance, never in correctness, and never panics.
 
-## 10. Open decisions
+## 11. Open decisions
 
 1. **GP9's value.** A first-party V3D back end is large, and how much of the
    desktop and the game are GPU-bound on that board is a measurement from GP5,
-   not a preference.
+   not a preference. The ledger order stands: §7.2's peak figures say the V3D
+   offloads the Pi 4's desktop rather than speeding it, so the board's desktop
+   speed is the GD track's.
 2. **What GP10 actually publishes.** A Vulkan-shaped C surface generated from
    Rust definitions (§9) is the obvious answer and is enormous; a smaller
    TAIRiX-native surface is tractable but is a porting burden on every game. The

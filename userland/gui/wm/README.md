@@ -188,15 +188,14 @@ router**:
   that meet cannot seam; its mean is plain nearest rounding, so nothing
   lightens or darkens and no pixel moves by more than one level. Opaque
   runs are copied, not blended, so the fast path pays nothing for it.
-- **Translucency stays in software.** A hardware layer is blended by the
-  engine in the scan-out's own 8 bits with a fixed rounding, which is
-  exactly what bands a picture under a translucent field, and no layer
-  stack can express a per-pixel dither. A window translucent as a whole is
-  therefore baked flattened onto its layer, opaque over what lies beneath
-  it, as a frosted one is, and the layered path stands aside during a
-  reveal (below). A window's own
-  anti-aliased corner is not this case: partial coverage on a few edge
-  pixels has no gradient to band. Where the compositor *bakes* a window into
+- **Translucent content is the engine's to blend.** No layer stack can
+  express a per-pixel dither, so an engine blending in the scan-out's own 8
+  bits bands a picture under a translucent field; the desktop accepts that for
+  the drag a free layer buys (`plans/GPU.md` decision 10), and the engine's
+  caps say whether it bands (`band_free_blend`). A window translucent as a
+  whole, or frosted, reads what lies beneath it, so it is baked flattened onto
+  its layer, opaque. The layered path stands aside during a reveal (below), and
+  the base never presents what a flattened layer covers. Where the compositor *bakes* a window into
   a layer — over its footprint, so its shadow is baked with it, each row
   resolved once through `Window::row` and `Window::shadow_row` — it reads the
   dither at the pixel's
