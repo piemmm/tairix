@@ -80,7 +80,8 @@ struct Overlap<'a> {
     dst: &'a mut [Pixel],
     /// How far into the run the overlap starts.
     taken: usize,
-    /// The screen column the overlap starts at.
+    /// The screen column the overlap starts at, as the dither reads it: one
+    /// left of the screen wraps, keeping its phase.
     column: u32,
     /// How many columns overlap.
     len: usize,
@@ -99,7 +100,7 @@ fn overlap(dst: &mut [Pixel], dst_x: i32, src_x: i32, cols: usize) -> Option<Ove
         usize::try_from(until - from),
         usize::try_from(from - dst_x),
         usize::try_from(from - src_x),
-        u32::try_from(from),
+        i32::try_from(from).map(i32::cast_unsigned),
     ) else {
         return None;
     };
@@ -128,4 +129,55 @@ pub(crate) fn row(surface: &Surface, y: u32) -> &[Pixel] {
         return &[];
     };
     surface.pixels().get(start..end).unwrap_or(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blend_run, fill_run, DitherRow, Pixel};
+
+    /// A run is laid alike wherever it lies on its row but for the dither,
+    /// which repeats every eight columns, so one starting left of the screen —
+    /// as a layer of a window past the screen's edge is baked — is laid as the
+    /// same run sixteen columns further on.
+    #[test]
+    fn a_run_left_of_the_screen_is_laid_as_one_on_it() {
+        let under = Pixel {
+            r: 40,
+            g: 60,
+            b: 80,
+            a: 255,
+        };
+        let source: [Pixel; 12] = core::array::from_fn(|at| Pixel {
+            r: u8::try_from(at * 10).expect("a level"),
+            g: 90,
+            b: 40,
+            a: 160,
+        });
+        let plate = Pixel {
+            r: 30,
+            g: 30,
+            b: 60,
+            a: 180,
+        };
+        let dither = DitherRow::at(5);
+        let on = |x: i32| x + 16;
+        for (dst_x, src_x) in [(-20, -14), (-6, -9), (-3, -3), (-6, 2), (0, -5)] {
+            let (mut left, mut right) = ([under; 16], [under; 16]);
+            let laid = blend_run(&mut left, dst_x, &source, src_x, 200, dither);
+            assert_eq!(
+                laid,
+                blend_run(&mut right, on(dst_x), &source, on(src_x), 200, dither)
+            );
+            assert!(laid > 0, "a run at {src_x} reaches a row at {dst_x}");
+            assert_eq!(left, right, "a run at {src_x} over a row at {dst_x}");
+            let (mut left, mut right) = ([under; 16], [under; 16]);
+            let laid = fill_run(&mut left, dst_x, plate, src_x, 9, 200, dither);
+            assert_eq!(
+                laid,
+                fill_run(&mut right, on(dst_x), plate, on(src_x), 9, 200, dither)
+            );
+            assert!(laid > 0, "a fill at {src_x} reaches a row at {dst_x}");
+            assert_eq!(left, right, "a fill at {src_x} over a row at {dst_x}");
+        }
+    }
 }

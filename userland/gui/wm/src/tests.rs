@@ -7,7 +7,7 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::DriverError;
-use tairix_display::Presenter;
+use tairix_display::{DrawInPlace, Presenter};
 
 use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
@@ -127,6 +127,10 @@ pub(crate) struct MockDisplay {
     /// scattered it is, so this is what separates one call naming two
     /// rectangles from a call per rectangle.
     rect_presents: usize,
+    /// The display's own frames, where it holds frames to draw into.
+    drawn: Option<DrawnFrames>,
+    /// Times it was asked to draw a frame in place, whether it could or not.
+    drawn_asks: usize,
 }
 
 impl MockDisplay {
@@ -138,7 +142,122 @@ impl MockDisplay {
             full_presents: 0,
             regions: alloc::vec::Vec::new(),
             rect_presents: 0,
+            drawn: None,
+            drawn_asks: 0,
         }
+    }
+
+    /// A display holding frames of its own, which a compositor draws into.
+    pub(crate) fn drawn(mode: DisplayMode) -> Self {
+        Self {
+            drawn: Some(DrawnFrames::new(mode)),
+            ..Self::new(mode)
+        }
+    }
+}
+
+/// A display's own two frames, drawn in place as a remote display's are: the
+/// back frame is handed over with what it missed while the other was shown,
+/// at a stride padded past the mode's, so a frame drawn at the mode's stride
+/// shows.
+pub(crate) struct DrawnFrames {
+    mode: DisplayMode,
+    stride: u32,
+    frames: [alloc::vec::Vec<u8>; 2],
+    stale: [Region; 2],
+    back: usize,
+    shown: Option<usize>,
+    /// Whether the display refuses a frame once it is drawn.
+    pub(crate) refuse: bool,
+    /// Frames drawn, shown or refused.
+    pub(crate) draws: usize,
+}
+
+impl DrawnFrames {
+    pub(crate) fn new(mode: DisplayMode) -> Self {
+        let stride = mode.stride_bytes + 12;
+        let len = (stride * mode.height_px) as usize;
+        let whole = Region::from(Rect::new(0, 0, mode.width_px, mode.height_px));
+        Self {
+            mode,
+            stride,
+            frames: [alloc::vec![0x5A; len], alloc::vec![0x5A; len]],
+            stale: [whole.clone(), whole],
+            back: 0,
+            shown: None,
+            refuse: false,
+            draws: 0,
+        }
+    }
+
+    /// Draw the back frame for a present of which `damage` changed and show
+    /// it, as a remote display presents a frame drawn in place: nothing new is
+    /// nothing drawn.
+    pub(crate) fn present(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        if self.changed(damage).is_empty() {
+            return Ok(());
+        }
+        self.show(damage, draw)
+    }
+
+    /// Draw the back frame for a layered present's base of which `damage`
+    /// changed and show it, as a remote display does: nothing new names the
+    /// frame on screen again, and the first is drawn whole.
+    pub(crate) fn base(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        if self.changed(damage).is_empty() && self.shown.is_some() {
+            return Ok(());
+        }
+        self.show(damage, draw)
+    }
+
+    fn changed(&self, damage: &Region) -> Region {
+        let mut changed = damage.clone();
+        changed.clip(Rect::new(0, 0, self.mode.width_px, self.mode.height_px));
+        changed
+    }
+
+    fn show(&mut self, damage: &Region, draw: &mut DrawInPlace<'_>) -> Result<(), DriverError> {
+        let changed = self.changed(damage);
+        let mut refresh = core::mem::take(&mut self.stale[self.back]);
+        refresh.add_region(&changed);
+        refresh.clip(Rect::new(0, 0, self.mode.width_px, self.mode.height_px));
+        self.draws += 1;
+        if let Err(refused) = draw(&mut self.frames[self.back], self.stride, &refresh) {
+            self.stale[self.back] = refresh;
+            return Err(refused);
+        }
+        let other = 1 - self.back;
+        self.stale[other].add_region(&changed);
+        if self.refuse {
+            return Err(DriverError::DeviceFault);
+        }
+        self.shown = Some(self.back);
+        self.back = other;
+        Ok(())
+    }
+
+    /// The frame on screen, laid out as the mode is.
+    pub(crate) fn screen(&self) -> alloc::vec::Vec<u8> {
+        let (row, stride) = (
+            (self.mode.width_px * 4) as usize,
+            self.mode.stride_bytes as usize,
+        );
+        let mut screen = alloc::vec![0; stride * self.mode.height_px as usize];
+        if let Some(shown) = self.shown {
+            for (y, line) in screen.chunks_exact_mut(stride).enumerate() {
+                let from = y * self.stride as usize;
+                line[..row].copy_from_slice(&self.frames[shown][from..from + row]);
+            }
+        }
+        screen
     }
 }
 
@@ -163,6 +282,21 @@ impl Presenter for MockDisplay {
             self.regions.extend_from_slice(damage);
             self.rect_presents += 1;
         }
+        Ok(())
+    }
+
+    fn present_drawn(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        self.drawn_asks += 1;
+        let Some(frames) = self.drawn.as_mut() else {
+            return Err(DriverError::Unsupported);
+        };
+        frames.refuse = self.fail;
+        frames.present(damage, draw)?;
+        self.last = frames.screen();
         Ok(())
     }
 
@@ -3072,6 +3206,35 @@ fn a_blurred_window_spreads_the_backdrop_behind_it() {
 }
 
 #[test]
+fn an_unretained_frost_whose_blur_scales_to_nothing_shows_its_backdrop() {
+    // A blur of one logical pixel is none at half scale: the frost is then the
+    // backdrop itself, and the composite leaves the window's interior to it.
+    let half = Scale::from_percent(50).expect("valid scale");
+    let mut plain = new_compositor(mode(12, 8), BLUE).expect("compositor");
+    let mut frosted = new_compositor(mode(12, 8), BLUE).expect("compositor");
+    let mut beneath = [WindowId(0); 2];
+    for (c, under) in [&mut plain, &mut frosted].into_iter().zip(&mut beneath) {
+        assert!(c.set_scale(half));
+        *under = c.add_window(Point::ORIGIN, opaque(6, 8, RED));
+    }
+    plain.add_window(Point::new(2, 2), clear(8, 4));
+    let glass = frosted.add_window(Point::new(2, 2), clear(8, 4));
+    assert!(frosted.set_backdrop_blur(glass, 1));
+    frosted.set_frost_reuse(false);
+    for step in 0..3 {
+        for (c, under) in [&mut plain, &mut frosted].into_iter().zip(beneath) {
+            assert!(c.move_window(under, Point::new(step * 3, 0)));
+            c.composite();
+        }
+        assert_eq!(
+            frosted.frame(),
+            plain.frame(),
+            "step {step}: the glass shows its backdrop, not what was composed before"
+        );
+    }
+}
+
+#[test]
 fn a_zero_radius_blur_is_a_no_op() {
     let mut unset = new_compositor(mode(12, 6), BLUE).expect("compositor");
     unset.add_window(Point::ORIGIN, opaque(6, 6, RED));
@@ -3133,18 +3296,18 @@ fn paint_dot(content: &mut Surface) -> (bool, Rect) {
 }
 
 /// A 16×8 screen with a three-column opaque block at `x` behind a
-/// transparent blurred window covering columns 4..12, composited from
-/// scratch. The block is narrower than the blur's reach, so where it sits
-/// changes the frosted pixels right across the window.
+/// transparent window covering columns 4..12 blurred by `radius`, composited
+/// from scratch. The block is narrower than the frost's reach, so where it sits
+/// changes the frosted pixels around it.
 ///
 /// `dot` paints [`paint_dot`] into the block *before* that first
 /// whole-screen composite, so a caller can compare an incremental repaint
 /// against a from-scratch one of the very same scene.
-fn frosted_block(x: i32, dot: bool) -> (Compositor, WindowId) {
+fn frosted_block(x: i32, dot: bool, radius: u16) -> (Compositor, WindowId) {
     let mut c = new_compositor(mode(16, 8), BLUE).expect("compositor");
     let block = c.add_window(Point::new(x, 0), opaque(3, 8, RED));
     let glass = c.add_window(Point::new(4, 0), clear(8, 8));
-    assert!(c.set_backdrop_blur(glass, 3));
+    assert!(c.set_backdrop_blur(glass, radius));
     if dot {
         assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
     }
@@ -3154,14 +3317,14 @@ fn frosted_block(x: i32, dot: bool) -> (Compositor, WindowId) {
 
 #[test]
 fn a_change_behind_a_blurred_window_repaints_all_of_it() {
-    let (mut moved, block) = frosted_block(2, false);
+    let (mut moved, block) = frosted_block(2, false, 3);
     // The move damages only the block's old and new rectangles — a strip
     // narrower than the frosted window — so the frame can only match a
     // from-scratch composite if the whole window was refrosted.
     assert!(moved.move_window(block, Point::new(6, 0)));
     assert!(!composite_checked(&mut moved).is_empty());
 
-    let (fresh, _) = frosted_block(6, false);
+    let (fresh, _) = frosted_block(6, false, 3);
     assert_eq!(
         moved.frame(),
         fresh.frame(),
@@ -3171,15 +3334,15 @@ fn a_change_behind_a_blurred_window_repaints_all_of_it() {
 
 #[test]
 fn a_change_beneath_a_frosted_window_repaints_only_its_reach() {
-    let (mut c, block) = frosted_block(6, false);
+    let (mut c, block) = frosted_block(6, false, 1);
     // A single presented pixel behind the frosting changes the frost only
-    // within the blur's radius of it, so that much of the window is
-    // recomposited, and the result matches a from-scratch composite.
+    // within its reach of it — two pixels at radius one — so that much of the
+    // window is recomposited, and the result matches a from-scratch composite.
     assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
     let repainted = composite_checked(&mut c);
-    assert_eq!(repainted.rects(), &[Rect::new(4, 1, 7, 7)]);
+    assert_eq!(repainted.rects(), &[Rect::new(5, 2, 5, 5)]);
 
-    let (fresh, _) = frosted_block(6, true);
+    let (fresh, _) = frosted_block(6, true, 1);
     assert_eq!(
         c.frame(),
         fresh.frame(),
@@ -3189,9 +3352,9 @@ fn a_change_beneath_a_frosted_window_repaints_only_its_reach() {
 
 #[test]
 fn damage_beside_a_frosted_window_is_not_swallowed_by_it() {
-    let (mut c, block) = frosted_block(6, false);
+    let (mut c, block) = frosted_block(6, false, 1);
     // The block sits under the frosted window, so its repaint recomposes the
-    // frost within the blur's reach of it; the taskbar-like strip in the far
+    // frost within the frost's reach of it; the taskbar-like strip in the far
     // corner is unrelated.
     let strip = c.add_window(Point::new(14, 6), opaque(2, 2, GREEN));
     assert!(!composite_checked(&mut c).is_empty());
@@ -3214,7 +3377,7 @@ fn damage_beside_a_frosted_window_is_not_swallowed_by_it() {
         .sum::<u32>();
     assert_eq!(
         touched,
-        7 * 7 + 2 * 2 + 2 * 2,
+        5 * 5 + 2 * 2 + 2 * 2,
         "only the change's reach in the frost and the strip's two positions were recomposed"
     );
 }
@@ -3223,13 +3386,13 @@ fn damage_beside_a_frosted_window_is_not_swallowed_by_it() {
 fn a_change_beneath_overlapping_frosts_recomposes_its_reach_in_each() {
     // Neither frost reads the other — each blurs the windows beneath it as
     // though none were frosted — so a change beneath both recomposes the
-    // blur's reach of it in each and no more, and the overlap cannot seam.
+    // frost's reach of it in each and no more, and the overlap cannot seam.
     let mut both = BothWays::new(mode(20, 10));
     let block = both.both(|c| c.add_window(Point::new(5, 0), opaque(4, 10, RED)));
     let left = both.both(|c| c.add_window(Point::ORIGIN, clear(8, 10)));
     let right = both.both(|c| c.add_window(Point::new(6, 0), clear(8, 10)));
-    both.both(|c| c.set_backdrop_blur(left, 2));
-    both.both(|c| c.set_backdrop_blur(right, 2));
+    both.both(|c| c.set_backdrop_blur(left, 1));
+    both.both(|c| c.set_backdrop_blur(right, 1));
     both.settle("two overlapping frosts");
 
     both.both(|c| present_content(c, block, paint_dot));
@@ -3282,6 +3445,52 @@ fn a_rounded_frosted_window_leaves_its_corners_alone() {
     );
     let [r, _, b, _] = frame_pixel(&frosted, 10, 10);
     assert!(r > 0 && b > 0, "the covered centre is frosted");
+}
+
+#[test]
+fn a_frost_interior_and_its_corners_partition_the_window() {
+    // A frost is laid from its field piece by piece, so pieces that overlap
+    // copy the window's middle twice a frame.
+    for (w, h) in [(240, 150), (41, 17), (17, 41), (2, 2), (1, 1), (300, 9)] {
+        for radius in [0, 1, 7, 16, 400] {
+            let mut window = crate::Window::new(WindowId(1), Point::new(-5, 3), opaque(w, h, RED));
+            window.set_corners(Corners::Rounded { radius });
+            let (bounds, shape) = (window.bounds(), window.shape());
+            let interior = crate::frost::interior(bounds, shape);
+            let pieces: alloc::vec::Vec<Rect> = interior
+                .into_iter()
+                .chain(crate::frost::corners(bounds, shape))
+                .filter(|piece| !piece.is_empty())
+                .collect();
+            for (at, piece) in pieces.iter().enumerate() {
+                assert_eq!(piece.intersection(&bounds), *piece, "{w}x{h} r{radius}");
+                for other in &pieces[at + 1..] {
+                    assert!(
+                        piece.intersection(other).is_empty(),
+                        "{w}x{h} r{radius}: {piece:?} overlaps {other:?}"
+                    );
+                }
+            }
+            let area: u64 = pieces
+                .iter()
+                .map(|piece| u64::from(piece.width) * u64::from(piece.height))
+                .sum();
+            assert_eq!(area, u64::from(w) * u64::from(h), "{w}x{h} r{radius}");
+            let Some(shape) = shape else {
+                continue;
+            };
+            let local = |at: i32, from: i32| u32::try_from(at - from).expect("inside");
+            for piece in interior {
+                for y in piece.top()..piece.bottom() {
+                    for x in piece.left()..piece.right() {
+                        let (lx, ly) = (local(x, bounds.left()), local(y, bounds.top()));
+                        let covered = shape.coverage(lx, ly);
+                        assert_eq!(covered, 255, "{w}x{h} r{radius} ({lx}, {ly})");
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -8161,7 +8370,7 @@ impl BothWays {
 
 /// A compositor whose frost cache holds nothing at any band, so every frost it
 /// draws is one the ration refused.
-fn unbudgeted_compositor(mode: DisplayMode) -> Compositor {
+pub(crate) fn unbudgeted_compositor(mode: DisplayMode) -> Compositor {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut compositor = Compositor::new(
         mode,
@@ -8681,53 +8890,11 @@ fn a_frosted_window_s_own_repaint_costs_no_blur_and_no_widening() {
     assert_eq!(stats.damaged_px, 1);
 }
 
-/// A box blur of `pixels`, `width` × `height`, written the obvious way: each
-/// pass averages the samples within `radius`, an index past the screen's edge
-/// clamped to it, rounding half up — the definition the frost is held to.
-fn naive_screen_blur(
-    pixels: &[Pixel],
-    width: usize,
-    height: usize,
-    radius: usize,
-) -> alloc::vec::Vec<Pixel> {
-    let count = u32::try_from(2 * radius + 1).expect("a test radius fits");
-    let mean = |sum: u32| u8::try_from((sum + count / 2) / count).expect("a mean of bytes");
-    let pass = |field: &[Pixel], horizontal: bool| -> alloc::vec::Vec<Pixel> {
-        let mut out = field.to_vec();
-        for y in 0..height {
-            for x in 0..width {
-                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
-                for step in 0..=2 * radius {
-                    let along = if horizontal { x } else { y };
-                    let limit = if horizontal { width } else { height } - 1;
-                    let at = (along + step).saturating_sub(radius).min(limit);
-                    let pixel = if horizontal {
-                        field[y * width + at]
-                    } else {
-                        field[at * width + x]
-                    };
-                    r += u32::from(pixel.r);
-                    g += u32::from(pixel.g);
-                    b += u32::from(pixel.b);
-                    a += u32::from(pixel.a);
-                }
-                out[y * width + x] = Pixel {
-                    r: mean(r),
-                    g: mean(g),
-                    b: mean(b),
-                    a: mean(a),
-                };
-            }
-        }
-        out
-    };
-    pass(&pass(pixels, true), false)
-}
-
 /// A frost is its definition, pixel for pixel, however it was reached: the
-/// windows beneath composed as though none were frosted, box-blurred with
-/// samples taken past the window's edges and replicated only at the screen's,
-/// and mixed back by the window's shape over what is beneath its corners.
+/// windows beneath composed as though none were frosted, blurred at half
+/// resolution on cells anchored at the screen's top-left with samples taken
+/// past the window's edges and replicated only at the screen's, and mixed back
+/// by the window's shape over what is beneath its corners.
 #[test]
 fn a_frost_is_the_blur_of_the_unfrosted_backdrop_sampled_past_its_edges() {
     const RADIUS: u16 = 3;
@@ -8752,11 +8919,11 @@ fn a_frost_is_the_blur_of_the_unfrosted_backdrop_sampled_past_its_edges() {
         c.back_buffer().pixels().to_vec()
     };
     let beneath = composed(RADIUS);
-    let blurred = naive_screen_blur(
+    let blurred = tairix_raster::halved_reference(
         &composed(0),
         SIDE.0 as usize,
         SIDE.1 as usize,
-        usize::from(RADIUS),
+        u32::from(RADIUS),
     );
     let frost_at = |window: Rect, x: u32, y: u32| {
         let at = (y * SIDE.0 + x) as usize;
@@ -8828,16 +8995,18 @@ fn a_change_beneath_a_frosted_window_re_frosts_only_its_reach() {
         both.reusing.frost_resident(glass),
         "a change beneath stales a field; it does not drop it"
     );
+    // At radius three a frost reaches four pixels.
     assert!(!both.reusing.frost_holds(glass, Rect::new(1, 4, 1, 1)));
+    assert!(!both.reusing.frost_holds(glass, Rect::new(5, 8, 1, 1)));
     assert!(
-        both.reusing.frost_holds(glass, Rect::new(5, 0, 15, 14)),
-        "past the blur's reach of the change the field is still current"
+        both.reusing.frost_holds(glass, Rect::new(6, 0, 14, 14)),
+        "past the frost's reach of the change the field is still current"
     );
     both.settle("a pixel beneath the frost");
     assert_eq!(
         both.reusing.frame_stats().blur_px,
-        5 * 7,
-        "the blur's reach of the presented pixel is frosted again, not the window"
+        6 * 9,
+        "the frost's reach of the presented pixel is frosted again, not the window"
     );
     assert!(both.reusing.frost_holds(glass, Rect::new(0, 0, 20, 14)));
 }
@@ -8896,12 +9065,12 @@ fn raising_a_covered_frosted_window_re_frosts_where_it_crossed() {
     both.settle("a frost beneath an opaque window");
 
     // Raising it puts the window that was above it beneath it: its backdrop
-    // changed where the two cross, out to the blur's reach.
+    // changed where the two cross, out to the frost's reach of four pixels.
     both.both(|c| c.raise(glass));
     assert!(both.reusing.frost_resident(glass));
     assert!(!both.reusing.frost_holds(glass, Rect::new(10, 6, 8, 8)));
     both.settle("the frost raised over it");
-    assert_eq!(both.reusing.frame_stats().blur_px, 14 * 13);
+    assert_eq!(both.reusing.frame_stats().blur_px, 16 * 14);
 }
 
 #[test]
@@ -8920,11 +9089,207 @@ fn re_frosting_one_window_leaves_the_frost_above_it_alone() {
     both.both(|c| present_content(c, under, paint_dot));
     assert!(both.reusing.frost_holds(upper, Rect::new(20, 2, 18, 20)));
     let repainted = both.reusing.composite();
-    assert_eq!(repainted.rects(), &[Rect::new(0, 2, 5, 6)]);
-    assert_eq!(both.reusing.frame_stats().blur_px, 5 * 6);
+    assert_eq!(repainted.rects(), &[Rect::new(0, 2, 6, 7)]);
+    assert_eq!(both.reusing.frame_stats().blur_px, 6 * 7);
     assert!(both.reusing.frost_holds(upper, Rect::new(20, 2, 18, 20)));
     let _ = (both.blurring.composite(), both.unretained.composite());
     both.settle("the lower frost blurred again");
+}
+
+/// A frost whose blur scales to no radius is its backdrop, however it is
+/// reached: a frost blurred where it was drawn once wrote nothing at radius
+/// zero, so its window's interior showed whatever was last composed there.
+#[test]
+fn a_frost_scaled_to_no_radius_is_its_backdrop_however_it_is_reached() {
+    let output = mode(24, 16);
+    let half = Scale::from_percent(50).expect("scale");
+    let stripes = |c: &mut Compositor| {
+        for x in (0..24).step_by(3) {
+            c.add_window(Point::new(x, 0), opaque(1, 16, RED));
+        }
+    };
+    let mut both = BothWays::new(output);
+    assert!(both.both(|c| c.set_scale(half)));
+    let glass = both.both(|c| {
+        stripes(c);
+        c.add_window(Point::new(4, 3), clear(14, 9))
+    });
+    assert!(both.both(|c| c.set_backdrop_blur(glass, 1)));
+    both.settle("a frost of no physical radius");
+    assert!(both.both(|c| c.move_window(glass, Point::new(7, 5))));
+    both.settle("the frost moved");
+
+    let mut bare = new_compositor(output, BLUE).expect("compositor");
+    assert!(bare.set_scale(half));
+    stripes(&mut bare);
+    bare.composite();
+    assert_eq!(
+        both.unretained.back_buffer().pixels(),
+        bare.back_buffer().pixels(),
+        "clear glass that blurs nothing shows exactly what lies beneath it"
+    );
+}
+
+/// One scene composed for a display drawing in place and for one sent the
+/// compositor's own frame, the step `act` applied to both and both presented.
+struct DrawnAndSent {
+    drawn: Compositor,
+    sent: Compositor,
+    to_draw: MockDisplay,
+    to_send: MockDisplay,
+}
+
+impl DrawnAndSent {
+    fn new(output: DisplayMode) -> Self {
+        Self {
+            drawn: new_compositor(output, BLUE).expect("compositor"),
+            sent: new_compositor(output, BLUE).expect("compositor"),
+            to_draw: MockDisplay::drawn(output),
+            to_send: MockDisplay::new(output),
+        }
+    }
+
+    /// Apply `act` to both, present both, and require the two screens to
+    /// match.
+    fn step<T: core::fmt::Debug + PartialEq>(
+        &mut self,
+        act: impl Fn(&mut Compositor) -> T,
+        step: &str,
+    ) -> T {
+        let done = act(&mut self.drawn);
+        assert_eq!(done, act(&mut self.sent), "the scenes took different paths");
+        self.drawn
+            .present(&mut self.to_draw)
+            .expect("drawn in place");
+        self.sent.present(&mut self.to_send).expect("sent");
+        assert_eq!(
+            self.to_draw.last, self.to_send.last,
+            "the screens differ after {step}"
+        );
+        done
+    }
+}
+
+/// A frame drawn straight into the display's own memory shows what the same
+/// frame composed into the compositor's own and sent does, at every step of a
+/// scene with a frost, a pointer, a fade, a repaint and a removal, and the
+/// display drawn into is never sent a frame.
+#[test]
+fn a_frame_drawn_in_place_shows_what_a_sent_one_does() {
+    let mut both = DrawnAndSent::new(mode(40, 28));
+    let [under, glass] = both.step(
+        |c| {
+            let under = c.add_window(Point::new(2, 3), opaque(18, 14, RED));
+            let glass = c.add_window(Point::new(12, 8), clear(20, 14));
+            assert!(c.set_corners(glass, Corners::Rounded { radius: 5 }));
+            assert!(c.set_backdrop_blur(glass, 3));
+            c.set_cursor(solid_cursor(6, WHITE), Point::new(30, 4));
+            [under, glass]
+        },
+        "the first frame",
+    );
+    both.step(
+        |c| c.move_window(glass, Point::new(15, 10)),
+        "the frost moved",
+    );
+    both.step(
+        |c| c.move_cursor(Point::new(16, 12)),
+        "the pointer over the frost",
+    );
+    both.step(|c| c.set_reveal(128), "a fade step");
+    both.step(|c| c.set_reveal(u8::MAX), "the fade undone");
+    both.step(
+        |c| present_content(c, under, paint_dot),
+        "a repaint beneath the frost",
+    );
+    both.step(|c| c.remove(under), "the window beneath removed");
+    both.step(Compositor::owe_output, "the whole output owed");
+    let sent = both.to_draw.full_presents + both.to_draw.rect_presents;
+    assert_eq!(sent, 0, "a display drawn into is sent no frame");
+    assert!(both
+        .to_draw
+        .drawn
+        .as_ref()
+        .is_some_and(|frames| frames.draws >= 8));
+}
+
+/// A frame drawn in place that the display then refuses stays owed, and the
+/// next frame draws it again.
+#[test]
+fn a_refused_frame_drawn_in_place_is_drawn_again() {
+    let mut both = DrawnAndSent::new(mode(24, 16));
+    let id = both.step(
+        |c| c.add_window(Point::new(3, 2), opaque(8, 6, RED)),
+        "the first frame",
+    );
+    both.to_draw.fail = true;
+    assert!(both.drawn.move_window(id, Point::new(10, 7)));
+    assert_eq!(
+        both.drawn.present(&mut both.to_draw),
+        Err(DriverError::DeviceFault)
+    );
+    assert!(both.drawn.has_damage(), "the refused frame is owed");
+    both.to_draw.fail = false;
+    assert!(both.sent.move_window(id, Point::new(10, 7)));
+    both.step(|_| (), "the owed frame drawn again");
+}
+
+/// A desktop composed smaller than its output is resampled and drawn into the
+/// display's own frame exactly as into the compositor's.
+#[test]
+fn a_desktop_smaller_than_its_output_is_drawn_in_place_as_it_is_sent() {
+    let mut both = DrawnAndSent::new(mode(32, 24));
+    let id = both.step(
+        |c| {
+            assert!(c.set_desktop_size(20, 15));
+            c.add_window(Point::new(2, 2), opaque(7, 5, RED))
+        },
+        "the first scaled frame",
+    );
+    both.step(
+        |c| c.move_window(id, Point::new(9, 6)),
+        "a move on the smaller desktop",
+    );
+    both.step(|c| c.set_reveal(90), "a fade on the smaller desktop");
+}
+
+/// A compositor that drew its frames into one display's memory and is then
+/// handed a display with no frame of its own sends that one the whole output
+/// as it stands.
+#[test]
+fn a_display_without_frames_after_one_drawn_into_is_sent_the_whole_frame() {
+    let output = mode(24, 16);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let id = c.add_window(Point::new(3, 2), opaque(8, 6, RED));
+    let mut first = MockDisplay::drawn(output);
+    c.present(&mut first).expect("drawn");
+    assert!(c.move_window(id, Point::new(9, 7)));
+    c.present(&mut first).expect("drawn");
+    c.owe_output();
+    let mut second = MockDisplay::new(output);
+    c.present(&mut second).expect("sent");
+    let mut fresh = new_compositor(output, BLUE).expect("compositor");
+    fresh.add_window(Point::new(9, 7), opaque(8, 6, RED));
+    fresh.composite();
+    assert_eq!(second.last, fresh.frame());
+}
+
+/// A display with no frame of its own is asked to draw in place once rather
+/// than every frame, and again only once a new sink arrives.
+#[test]
+fn a_display_that_cannot_draw_in_place_is_asked_once() {
+    let output = mode(16, 12);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let id = c.add_window(Point::new(1, 1), opaque(4, 4, RED));
+    let mut display = MockDisplay::new(output);
+    for x in 1..4 {
+        assert!(c.move_window(id, Point::new(x * 2, 1)));
+        c.present(&mut display).expect("sent");
+    }
+    assert_eq!(display.drawn_asks, 1);
+    c.owe_output();
+    c.present(&mut display).expect("sent");
+    assert_eq!(display.drawn_asks, 2, "a new sink is asked again");
 }
 
 #[test]

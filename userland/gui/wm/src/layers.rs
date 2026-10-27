@@ -9,22 +9,24 @@
 //! * **Free** — a window baked alone over nothing: content, furniture, corner
 //!   coverage and shadow. The engine blends whatever of it is not opaque, and
 //!   moving it is a new destination, not a composite.
-//! * **Frost** — beneath a frosted window's free layer, the software composite
-//!   of everything beneath its rectangle with its frost applied, opaque: what
-//!   its own pixels are blended over. It is re-baked wherever the frost
-//!   changes, which a move confines to its border.
+//! * **Frost** — beneath a frosted window's free layer, opaque, what its own
+//!   pixels are blended over: its retained field, the blur over a rectangle
+//!   larger than the window, with the window's shape mixed at its corners, of
+//!   which the engine shows the window's rectangle. It is baked from the field,
+//!   so a move inside the field re-bakes only the corners.
 //! * **Flattened** — a window translucent as a whole, baked as the software
 //!   composite of its footprint over everything beneath it, the window
 //!   included, opaque. It is re-baked wherever anything beneath it changes.
 //!
 //! The back buffer holds at each pixel the composite the frame or layer
 //! showing it needs: every window below the lowest layer, within a flattened
-//! footprint every window up to that one, and within a frost's rectangle every
-//! window below its own and that window's frost. These composite zones never
-//! overlap and never cross a frosted window of the base, so no composite is
-//! cut through a frost. The base's damage excludes every zone, which hides
-//! it, so the display is never handed pixels it cannot show; a zone that moves
-//! off them, or a layer given back, marks them first.
+//! footprint every window up to that one, and at a frost's corners every window
+//! below its own and that window's frost. These composite zones never overlap
+//! and never cross a frosted window of the base, so no composite is cut
+//! through a frost. The base's damage excludes every zone, which hides it, so
+//! the display is never handed pixels it cannot show and no zone is encoded
+//! into the frame; a zone that moves off them, or a layer given back, marks
+//! them first.
 //!
 //! A layer's two buffers alternate: the engine shows one while what changed is
 //! baked into the other, so it never reads a buffer being written. A frame
@@ -41,11 +43,12 @@ use tairix_inline::ArrayVec;
 use tairix_parallel::JobRunner;
 
 use super::{
-    compose_row, encode_segment, resolve_chrome, Compositor, Presentation, RowLayers, RowRound,
-    RowTargets, MIN_PARALLEL_BAND_PX,
+    compose_row, encode_segment, resolve_chrome, Compositor, Planned, Presentation, RowLayers,
+    RowRound, RowTargets, Scanout, ShownBy, MIN_PARALLEL_BAND_PX,
 };
 use crate::chrome::WindowChrome;
 use crate::color::{DitherRow, Pixel};
+use crate::frost::{self, FrostField};
 use crate::geometry::{Point, Rect, Region};
 use crate::pointer::{PointerRoute, Sprite, SpriteRun, MAX_OWED, MAX_SPRITES};
 use crate::shadow::ShadowKit;
@@ -155,6 +158,10 @@ pub(super) struct Refusals {
     pointer: Option<(u32, u32)>,
     /// The size the engine could not give the scaled desktop's layer.
     desktop: Option<(u32, u32)>,
+    /// The display holds no frame of its own to draw a frame into: one is
+    /// composed into the compositor's own and handed over instead, until a
+    /// new sink arrives.
+    pub(super) drawn: bool,
 }
 
 impl Refusals {
@@ -166,6 +173,7 @@ impl Refusals {
         frost: None,
         pointer: None,
         desktop: None,
+        drawn: false,
     };
 }
 
@@ -174,6 +182,12 @@ struct Layer {
     source: Source,
     /// Where the layer's pixels lie on screen.
     at: Rect,
+    /// What of `at` the engine shows: all of it, but for a frost layer, which
+    /// holds its window's whole field and shows the window's rectangle of it.
+    shows: Rect,
+    /// The corners a frost layer's buffers hold its window's shape mixed at,
+    /// in screen coordinates.
+    corners: [Rect; 4],
     /// Its buffers' size: a window's own, or what the pointer's is cut from.
     capacity: (u32, u32),
     held: [Held; 2],
@@ -188,12 +202,12 @@ struct Layer {
 }
 
 impl Layer {
-    /// A layer of `source` at `at`, both buffers of `capacity` taken from
-    /// `engine`.
+    /// A layer of `source` at `at` showing `shows` of it, both buffers of
+    /// `capacity` taken from `engine`.
     fn new(
         engine: &mut dyn LayerPresenter,
         source: Source,
-        at: Rect,
+        (at, shows): (Rect, Rect),
         capacity: (u32, u32),
     ) -> Result<Self, DriverError> {
         let (width, height) = capacity;
@@ -209,6 +223,8 @@ impl Layer {
         Ok(Self {
             source,
             at,
+            shows,
+            corners: [Rect::EMPTY; 4],
             capacity,
             held: [all_stale(first), all_stale(second)],
             shown: None,
@@ -320,20 +336,22 @@ impl Layer {
     /// layer is scaled onto.
     fn as_accel(&self, output: (u32, u32)) -> Option<AccelLayer> {
         let held = self.held.get(self.current()?)?;
+        let shows = self.shows.intersection(&self.at);
         let (dst_width_px, dst_height_px) = match self.source {
             Source::Desktop => output,
-            Source::Window(..) | Source::Pointer => (self.at.width, self.at.height),
+            Source::Window(..) | Source::Pointer => (shows.width, shows.height),
         };
+        let offset = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).ok();
         Some(AccelLayer {
             buffer: held.id,
             src: DamageRect {
-                x: 0,
-                y: 0,
-                width_px: self.at.width,
-                height_px: self.at.height,
+                x: offset(self.at.left(), shows.left())?,
+                y: offset(self.at.top(), shows.top())?,
+                width_px: shows.width,
+                height_px: shows.height,
             },
-            dst_x: self.at.left(),
-            dst_y: self.at.top(),
+            dst_x: shows.left(),
+            dst_y: shows.top(),
             dst_width_px,
             dst_height_px,
             opacity: u8::MAX,
@@ -348,14 +366,34 @@ impl Layer {
     }
 }
 
+/// A window's layer in a plan: how it is baked, what of the screen it shows,
+/// and the rectangle its buffers hold — the same, but for a frost layer, which
+/// holds its window's whole field.
+#[derive(Copy, Clone)]
+struct Laid {
+    role: Role,
+    shows: Rect,
+    holds: Rect,
+}
+
+impl Laid {
+    /// A layer holding exactly what it shows.
+    const fn showing(role: Role, rect: Rect) -> Self {
+        Self {
+            role,
+            shows: rect,
+            holds: rect,
+        }
+    }
+}
+
 /// Which windows a present puts on layers, and what lies beneath them.
 struct Plan {
     /// The z-index of the lowest window on a layer, below which every window
     /// is the base's.
     split: usize,
-    /// The windows on layers, bottom to top, each with how it is baked and
-    /// where.
-    windows: ArrayVec<(WindowId, Role, Rect), MAX_ACCEL_LAYERS>,
+    /// The windows on layers, bottom to top, each with how it is laid.
+    windows: ArrayVec<(WindowId, Laid), MAX_ACCEL_LAYERS>,
     shape: Shape,
 }
 
@@ -399,7 +437,7 @@ impl Stack {
         shown.clone_from(composed);
         for layer in layers.iter() {
             if layer.role().is_some_and(Role::is_composite) {
-                shown.subtract(layer.at);
+                shown.subtract(layer.shows);
             }
         }
         shown
@@ -480,14 +518,14 @@ impl Compositor {
         let mut flattened: ArrayVec<Rect, MAX_ACCEL_LAYERS> = ArrayVec::new();
         for above in stack.layers.iter().skip(at.saturating_add(1)) {
             if above.role() == Some(Role::Flattened) {
-                let _ = flattened.try_push(above.at);
+                let _ = flattened.try_push(above.shows);
             }
         }
         let frost = stack
             .layers
             .iter()
             .find(|layer| layer.source == Source::Window(id, Role::Frost))
-            .map(|layer| layer.at);
+            .map(|layer| layer.shows);
         if let Some(layer) = stack.layers.get_mut(at) {
             match change {
                 Change::Pixels(rect) => layer.dirty(rect),
@@ -522,8 +560,8 @@ impl Compositor {
                 self.damage.add(rect.intersection(zone));
             }
         }
-        // The frost's layer moves with its window, laid again where it lies
-        // and leaving the base beneath where it lay.
+        // The frost's layer shows where its window now lies, its corners
+        // composed there, and leaves the base beneath where it lay.
         if let (Some(was), Some((_, now)), Change::Moved | Change::Whole) = (frost, placed, change)
         {
             self.damage.add(was);
@@ -569,7 +607,7 @@ impl Compositor {
 
     /// The depth each pixel is composited to this frame: below `.0` on the
     /// base, and each composite zone's own depth within it.
-    pub(super) fn layer_depths(&self) -> (usize, ArrayVec<(Rect, Depth), MAX_ACCEL_LAYERS>) {
+    pub(super) fn layer_depths(&self) -> (usize, ArrayVec<(Rect, Depth, usize), MAX_ACCEL_LAYERS>) {
         let mut zones = ArrayVec::new();
         let Some(stack) = self
             .layers
@@ -578,7 +616,7 @@ impl Compositor {
         else {
             return (usize::MAX, zones);
         };
-        for layer in &stack.layers {
+        for (at, layer) in stack.layers.iter().enumerate() {
             let Source::Window(id, role) = layer.source else {
                 continue;
             };
@@ -590,7 +628,7 @@ impl Compositor {
                 Role::Flattened => Depth::Below(index.saturating_add(1)),
                 Role::Frost => Depth::Frost(index),
             };
-            let _ = zones.try_push((layer.at, depth));
+            let _ = zones.try_push((layer.shows, depth, at));
         }
         (stack.split, zones)
     }
@@ -634,7 +672,7 @@ impl Compositor {
     /// where the layer lay, and where its window now lies, which a resize
     /// the layer never followed may have moved.
     fn mark_left(&mut self, layer: &Layer, screen: Rect) {
-        self.damage.add(layer.at.intersection(&screen));
+        self.damage.add(layer.shows.intersection(&screen));
         if let Some(id) = layer.window() {
             let reach = self.shadow.reach();
             if let Some(window) = self.windows.iter().find(|window| window.id() == id) {
@@ -697,6 +735,12 @@ impl Compositor {
             let Some(plan) = self.plan_layers(&caps, pointer_layer) else {
                 break;
             };
+            // A frost layer is baked from its field, so a window whose field
+            // cannot be had where the plan lays it is flattened instead.
+            if let Some(refused) = self.fit_frost_fields(&plan) {
+                self.refused.frost = Some(refused);
+                continue;
+            }
             if !self.reconcile(engine, &caps, &plan, pointer_layer) {
                 break;
             }
@@ -738,9 +782,9 @@ impl Compositor {
             .find_map(|layer| Some((layer.window()?, layer.at)))
     }
 
-    /// Bake what this frame changed into the layers `plan` was reconciled to
-    /// and present them, over the base where the plan has one. A refused
-    /// present leaves what it composited owed to the next.
+    /// Compose what this frame changed, bake it into the layers `plan` was
+    /// reconciled to and present them, over the base where the plan has one.
+    /// A refused present leaves what it composited owed to the next.
     ///
     /// # Errors
     ///
@@ -752,64 +796,236 @@ impl Compositor {
         engine: &mut dyn LayerPresenter,
         plan: &Plan,
     ) -> Result<(), DriverError> {
-        let mut composed = core::mem::take(&mut self.composed);
-        composed.clear();
-        if plan.shape == Shape::Promoted {
+        let mut encoded = core::mem::take(&mut self.composed);
+        encoded.clear();
+        let planned = if plan.shape == Shape::Promoted {
             self.hide_base_damage();
+            None
         } else {
-            self.recompose_damage(&mut composed);
-            let mut owed = core::mem::take(&mut self.undelivered);
-            owed.clip(self.output_rect());
-            composed.add_region(&owed);
-            owed.clear();
-            self.undelivered = owed;
-        }
-        self.bake_composited(engine, &composed);
-        self.bake_free(engine);
-        self.bake_pointer(engine);
-        let output = (self.mode.width_px, self.mode.height_px);
-        let mut layers: ArrayVec<AccelLayer, MAX_ACCEL_LAYERS> = ArrayVec::new();
-        for layer in self.layers.iter().flat_map(|stack| &stack.layers) {
-            let Some(accel) = layer.as_accel(output) else {
-                self.undelivered = composed;
-                return Err(DriverError::OutOfMemory);
-            };
-            let _ = layers.try_push(accel);
-        }
-        let whole = [DamageRect::full(&self.mode)];
-        let mut list = [whole[0]; MAX_DAMAGE_RECTS];
-        let damage = match (plan.shape, self.layers.as_mut()) {
-            (Shape::Based, Some(stack)) => {
-                let shown = stack.shown_of(&composed);
-                if shown.is_empty() {
-                    &[][..]
-                } else {
-                    damage_list(shown, &self.mode, &mut list).unwrap_or(&whole)
-                }
-            }
-            _ => &[],
+            Some(self.plan_composite(&mut encoded))
         };
-        let base = (plan.shape == Shape::Based).then_some(Base {
-            frame: &self.frame,
-            damage,
+        let mut changed = core::mem::take(&mut self.undelivered);
+        changed.clip(self.output_rect());
+        // What was owed is in the back buffer already; what the plan composes
+        // reaches a flattened layer as it is composed.
+        self.dirty_flattened(&changed);
+        changed.add_region(&encoded);
+        if let Some(planned) = &planned {
+            self.compose_zones(planned, Some(&mut *engine));
+            // Beneath no base, the desktop's layer is baked from the back
+            // buffer, which must hold the whole plan first.
+            if plan.shape != Shape::Based {
+                self.compose_heap(planned);
+            }
+        }
+        let shown = self.bake_and_show(engine, plan, planned.as_ref(), (&encoded, &changed));
+        self.composed = encoded;
+        if shown.is_ok() {
+            changed.clear();
+        }
+        self.undelivered = changed;
+        shown
+    }
+
+    /// Bake every layer's changed pixels and show the stack, over the base
+    /// `planned` plans where the plan has one.
+    fn bake_and_show(
+        &mut self,
+        engine: &mut dyn LayerPresenter,
+        plan: &Plan,
+        planned: Option<&Planned>,
+        (encoded, changed): (&Region, &Region),
+    ) -> Result<(), DriverError> {
+        let based = planned.filter(|_| plan.shape == Shape::Based);
+        let layers = self.bake_composited(engine, changed).and_then(|()| {
+            self.bake_free(engine);
+            self.bake_pointer(engine);
+            self.accel_layers()
         });
+        let layers = match layers {
+            Ok(layers) => layers,
+            Err(err) => {
+                // Composed all the same, for the frame that carries the scene
+                // instead.
+                if let Some(planned) = based {
+                    self.compose_frame(planned, None);
+                }
+                return Err(err);
+            }
+        };
         self.stats.bump_present();
-        if let Err(err) = engine.present_layers(base, &layers) {
-            self.undelivered = composed;
-            return Err(err);
+        match based {
+            Some(planned) => self.present_based(engine, planned, (encoded, changed), &layers)?,
+            None => engine.present_layers(None, &layers)?,
         }
         self.stats
-            .set_layers(layers.len().saturating_add(usize::from(base.is_some())));
+            .set_layers(layers.len().saturating_add(usize::from(based.is_some())));
         for layer in self.layers.iter_mut().flat_map(|stack| &mut stack.layers) {
             layer.presented();
         }
-        composed.clear();
-        self.composed = composed;
         self.presented = Some(match (plan.shape, plan.windows.last()) {
-            (Shape::Promoted, Some(&(id, _, _))) => Presentation::Promoted(id),
+            (Shape::Promoted, Some(&(id, _))) => Presentation::Promoted(id),
             _ => Presentation::Layered,
         });
         Ok(())
+    }
+
+    /// The layers as the engine is to show them, or
+    /// [`DriverError::OutOfMemory`] where one has no buffer baked, which would
+    /// leave its window out of the frame.
+    fn accel_layers(&self) -> Result<ArrayVec<AccelLayer, MAX_ACCEL_LAYERS>, DriverError> {
+        let output = (self.mode.width_px, self.mode.height_px);
+        let mut layers = ArrayVec::new();
+        for layer in self.layers.iter().flat_map(|stack| &stack.layers) {
+            let accel = layer.as_accel(output).ok_or(DriverError::OutOfMemory)?;
+            let _ = layers.try_push(accel);
+        }
+        Ok(layers)
+    }
+
+    /// Show `layers` over the base `planned` plans, of which `changed` changed
+    /// and its composite encodes `encoded`: drawn straight into the display's
+    /// own back frame where it holds one, and otherwise composed into the
+    /// compositor's own frame and handed over. Whatever the engine does, the
+    /// base is composed.
+    fn present_based(
+        &mut self,
+        engine: &mut dyn LayerPresenter,
+        planned: &Planned,
+        (encoded, changed): (&Region, &Region),
+        layers: &[AccelLayer],
+    ) -> Result<(), DriverError> {
+        let mut shown = self.layers.as_mut().map_or_else(Region::new, |stack| {
+            stack.shown_of(changed);
+            core::mem::take(&mut stack.shown)
+        });
+        let result = self.draw_base(engine, planned, (encoded, &shown), layers);
+        shown.clear();
+        if let Some(stack) = self.layers.as_mut() {
+            stack.shown = shown;
+        }
+        result
+    }
+
+    /// Show `layers` over the base `planned` plans, of which `shown` is what
+    /// the base shows of what changed: drawn into the display's own back
+    /// frame unless it holds none, and otherwise composed into the
+    /// compositor's own frame and handed over.
+    fn draw_base(
+        &mut self,
+        engine: &mut dyn LayerPresenter,
+        planned: &Planned,
+        (encoded, shown): (&Region, &Region),
+        layers: &[AccelLayer],
+    ) -> Result<(), DriverError> {
+        if !self.refused.drawn {
+            let mut handed = false;
+            let drawn = {
+                let mut lay = |bytes: &mut [u8], stride: u32, refresh: &Region| {
+                    handed = true;
+                    self.draw_frame(planned, encoded, (bytes, stride, refresh));
+                    Ok(())
+                };
+                let base = Base::Drawn {
+                    damage: shown,
+                    draw: &mut lay,
+                };
+                engine.present_layers(Some(base), layers)
+            };
+            match (drawn, handed) {
+                (result, true) => {
+                    self.heap_behind = true;
+                    return result;
+                }
+                (Err(DriverError::Unsupported), false) => self.refused.drawn = true,
+                (result, false) => {
+                    self.compose_frame(planned, None);
+                    return result;
+                }
+            }
+        }
+        self.compose_heap(planned);
+        let whole = [DamageRect::full(&self.mode)];
+        let mut list = [whole[0]; MAX_DAMAGE_RECTS];
+        let damage = if shown.is_empty() {
+            &[][..]
+        } else {
+            damage_list(shown, &self.mode, &mut list).unwrap_or(&whole)
+        };
+        let base = Base::Frame {
+            frame: &self.frame,
+            damage,
+        };
+        engine.present_layers(Some(base), layers)
+    }
+
+    /// Compose `piece` of the composite layer at `layer` in the stack to
+    /// `depth`. A flattened layer's piece is staled in both its buffers and
+    /// encoded straight into the one it shows next, which `engine` holds; a
+    /// frost layer's is left in the back buffer, which its corners are baked
+    /// from.
+    pub(super) fn compose_zone_piece(
+        &mut self,
+        (piece, depth, layer): (Rect, Depth, usize),
+        planned: &Planned,
+        hits: &mut Vec<usize>,
+        engine: Option<&mut (dyn LayerPresenter + '_)>,
+    ) {
+        let shown_by = ShownBy::Layer(depth);
+        let laid = match depth {
+            Depth::Below(_) => self
+                .layers
+                .as_mut()
+                .and_then(|stack| stack.layers.get_mut(layer))
+                .and_then(|laid| {
+                    laid.dirty(piece);
+                    let target = laid.target()?;
+                    Some((target, laid.held.get(target)?.id, laid.at))
+                }),
+            Depth::Frost(_) => None,
+        };
+        let held = match (laid, engine) {
+            (Some((target, id, at)), Some(engine)) => {
+                engine.pixels(id).map(|pixels| (target, at, pixels))
+            }
+            _ => None,
+        };
+        let Some((target, at, (bytes, stride))) = held else {
+            self.recompose_piece(piece, shown_by, planned, hits, None);
+            return;
+        };
+        let mut scanout = Scanout {
+            bytes,
+            stride: usize::try_from(stride).unwrap_or(usize::MAX),
+            origin: at.origin,
+            reveal: u8::MAX,
+        };
+        self.recompose_piece(piece, shown_by, planned, hits, Some(&mut scanout));
+        let local = Rect::new(
+            piece.left().saturating_sub(at.left()),
+            piece.top().saturating_sub(at.top()),
+            piece.width,
+            piece.height,
+        );
+        let held = self
+            .layers
+            .as_mut()
+            .and_then(|stack| stack.layers.get_mut(layer))
+            .and_then(|laid| laid.held.get_mut(target));
+        if let Some(held) = held {
+            held.stale.subtract(local);
+        }
+    }
+
+    /// Stale what of `region` each flattened layer holds, for its bake to
+    /// encode from the back buffer.
+    fn dirty_flattened(&mut self, region: &Region) {
+        let Self { layers, routed, .. } = self;
+        for layer in layers.iter_mut().flat_map(|stack| &mut stack.layers) {
+            if layer.role() == Some(Role::Flattened) {
+                layer.dirty_region(region, routed);
+            }
+        }
     }
 
     /// Which windows this frame puts on layers, or `None` when the scene is
@@ -850,7 +1066,7 @@ impl Compositor {
             let footprint = cover.footprint(reach);
             if Self::promotable(cover) && fits(footprint) && !refused(cover, footprint) {
                 let mut windows = ArrayVec::new();
-                let _ = windows.try_push((cover.id(), Role::Free, footprint));
+                let _ = windows.try_push((cover.id(), Laid::showing(Role::Free, footprint)));
                 return Some(Plan {
                     split: self.index_of(cover.id())?,
                     windows,
@@ -858,45 +1074,47 @@ impl Compositor {
                 });
             }
         }
-        let mut chosen: ArrayVec<(usize, Role, Rect), MAX_ACCEL_LAYERS> = ArrayVec::new();
+        let mut chosen: ArrayVec<(usize, Laid), MAX_ACCEL_LAYERS> = ArrayVec::new();
         'windows: for (index, window) in self.windows.iter().enumerate().rev() {
             if !window.is_visible() {
                 continue;
             }
             let left = room.saturating_sub(chosen.len());
-            let mut laid = Self::laid(window, reach, screen, left);
-            // Planes the display could not give buffers leave the window
-            // flattened, as one layer.
-            let frost_refused =
-                |at: Rect| self.refused.frost == Some((window.id(), (at.width, at.height)));
+            let mut laid = self.laid(window, (reach, screen), left);
+            // Planes the display could not give buffers, or a field larger than
+            // a layer may be, leave the window flattened, as one layer.
+            let frost_refused = self.refused.frost.is_some()
+                && self.refused.frost == self.frost_refusal(window.id());
             if laid.len() > 1
-                && laid.iter().any(|&(role, at)| {
-                    refused(window, at) || (role == Role::Frost && frost_refused(at))
+                && laid.iter().any(|laid| {
+                    refused(window, laid.holds)
+                        || (laid.role == Role::Frost && (frost_refused || !fits(laid.holds)))
                 })
             {
-                laid = Self::laid(window, reach, screen, 1);
+                laid = self.laid(window, (reach, screen), 1);
             }
             if laid.len() > left {
                 break;
             }
-            for &(role, at) in &laid {
-                let overlaps_zone = role.is_composite()
-                    && chosen.iter().any(|&(_, other_role, other)| {
-                        other_role.is_composite() && !other.intersection(&at).is_empty()
+            for laid in &laid {
+                let overlaps_zone = laid.role.is_composite()
+                    && chosen.iter().any(|(_, other)| {
+                        other.role.is_composite()
+                            && !other.shows.intersection(&laid.shows).is_empty()
                     });
-                if !fits(at) || overlaps_zone || refused(window, at) {
+                if !fits(laid.holds) || overlaps_zone || refused(window, laid.holds) {
                     break 'windows;
                 }
             }
-            for (role, at) in laid {
-                let _ = chosen.try_push((index, role, at));
+            for laid in laid {
+                let _ = chosen.try_push((index, laid));
             }
         }
         self.trim_crossings(&mut chosen, screen);
-        let split = chosen.last().map(|&(index, _, _)| index)?;
+        let split = chosen.last().map(|&(index, _)| index)?;
         let mut windows = ArrayVec::new();
-        for &(index, role, at) in chosen.iter().rev() {
-            let _ = windows.try_push((self.windows.get(index)?.id(), role, at));
+        for &(index, laid) in chosen.iter().rev() {
+            let _ = windows.try_push((self.windows.get(index)?.id(), laid));
         }
         Some(Plan {
             split,
@@ -909,18 +1127,14 @@ impl Compositor {
     /// blurred window of the base, and everything beneath it: that blur's
     /// composite would otherwise be cut through. A window's layers go
     /// together, so its pixels never go on a layer without their frost.
-    fn trim_crossings(
-        &self,
-        chosen: &mut ArrayVec<(usize, Role, Rect), MAX_ACCEL_LAYERS>,
-        screen: Rect,
-    ) {
+    fn trim_crossings(&self, chosen: &mut ArrayVec<(usize, Laid), MAX_ACCEL_LAYERS>, screen: Rect) {
         while let Some(crossing) = {
-            let split = chosen.last().map_or(0, |&(index, _, _)| index);
-            chosen.iter().position(|&(_, role, at)| {
-                role.is_composite()
+            let split = chosen.last().map_or(0, |&(index, _)| index);
+            chosen.iter().position(|(_, laid)| {
+                laid.role.is_composite()
                     && self.windows.iter().take(split).any(|below| {
                         let blurred = below.bounds().intersection(&screen);
-                        let inside = blurred.intersection(&at);
+                        let inside = blurred.intersection(&laid.shows);
                         below.is_visible()
                             && below.blur_radius() > 0
                             && !inside.is_empty()
@@ -928,37 +1142,50 @@ impl Compositor {
                     })
             })
         } {
-            let window = chosen.get(crossing).map(|&(index, _, _)| index);
+            let window = chosen.get(crossing).map(|&(index, _)| index);
             let first = chosen
                 .iter()
-                .position(|&(index, _, _)| Some(index) == window)
+                .position(|&(index, _)| Some(index) == window)
                 .unwrap_or(crossing);
             chosen.truncate(first);
         }
     }
 
-    /// The layers `window` would be laid on, top first, where `left` remain.
+    /// The layers `window` would be laid on, top first, where `left` remain;
+    /// `reach` is the shadow's and `screen` the output's rectangle.
     ///
     /// A window that reads no backdrop is alone over nothing, its translucency
     /// the engine's to blend whether or not that blend dithers (`plans/GPU.md`
-    /// GD3). A frosted one is its own pixels over its frost where two layers
-    /// remain, so a move lays its frost again from its field; a window
-    /// translucent as a whole, or a frosted one given a single layer, is
-    /// composited with what lies beneath it.
-    fn laid(window: &Window, reach: u32, screen: Rect, left: usize) -> ArrayVec<(Role, Rect), 2> {
+    /// GD3). A frosted one whose blur is retained is its own pixels over its
+    /// frost where two layers remain, the frost's buffers holding its whole
+    /// field, so a move inside the field rewrites only its corners (GD9); a
+    /// window translucent as a whole, a frosted one given a single layer, and
+    /// one whose blur is not retained are composited with what lies beneath.
+    fn laid(
+        &self,
+        window: &Window,
+        (reach, screen): (u32, Rect),
+        left: usize,
+    ) -> ArrayVec<Laid, 2> {
         let footprint = window.footprint(reach);
+        let shows = window.bounds().intersection(&screen);
+        let whole = window.opacity() == u8::MAX;
         let mut laid = ArrayVec::new();
-        if !window.reads_backdrop() {
-            let _ = laid.try_push((Role::Free, footprint));
-        } else if window.opacity() == u8::MAX && left >= 2 {
-            let _ = laid.try_push((Role::Free, footprint));
-            // Wholly off screen, it has no frost to show.
-            let rect = window.bounds().intersection(&screen);
-            if !rect.is_empty() {
-                let _ = laid.try_push((Role::Frost, rect));
-            }
+        // Wholly off screen, a frosted window has no frost to show.
+        if !window.reads_backdrop() || (whole && shows.is_empty()) {
+            let _ = laid.try_push(Laid::showing(Role::Free, footprint));
+        } else if whole && window.is_retained() && left >= 2 {
+            let _ = laid.try_push(Laid::showing(Role::Free, footprint));
+            let _ = laid.try_push(Laid {
+                role: Role::Frost,
+                shows,
+                holds: self.wanted_field(window),
+            });
         } else {
-            let _ = laid.try_push((Role::Flattened, footprint.intersection(&screen)));
+            let _ = laid.try_push(Laid::showing(
+                Role::Flattened,
+                footprint.intersection(&screen),
+            ));
         }
         laid
     }
@@ -994,24 +1221,33 @@ impl Compositor {
         let pointer = pointer_layer
             .then(|| self.pointer.sprite_bounds())
             .flatten()
-            .and_then(|bounds| Some((Source::Pointer, bounds, pointer_capacity(bounds, caps)?)));
+            .and_then(|bounds| {
+                let capacity = pointer_capacity(bounds, caps)?;
+                Some((Source::Pointer, Laid::showing(Role::Free, bounds), capacity))
+            });
         let desktop = (plan.shape == Shape::Desktop).then(|| {
             let at = self.screen_rect();
-            (Source::Desktop, at, (at.width, at.height))
+            (
+                Source::Desktop,
+                Laid::showing(Role::Free, at),
+                (at.width, at.height),
+            )
         });
-        let windows = plan
-            .windows
-            .iter()
-            .rev()
-            .map(|&(id, role, at)| (Source::Window(id, role), at, (at.width, at.height)));
+        let windows = plan.windows.iter().rev().map(|&(id, laid)| {
+            let capacity = (laid.holds.width, laid.holds.height);
+            (Source::Window(id, laid.role), laid, capacity)
+        });
         let mut placed = false;
         let mut whole = kept
             .try_reserve(plan.windows.len().saturating_add(1))
             .is_ok();
-        for (source, at, capacity) in pointer.into_iter().chain(desktop).chain(windows) {
+        for (source, laid, capacity) in pointer.into_iter().chain(desktop).chain(windows) {
             if !whole {
                 break;
             }
+            let Laid {
+                holds: at, shows, ..
+            } = laid;
             let held = stack
                 .layers
                 .iter()
@@ -1024,12 +1260,13 @@ impl Compositor {
                     layer.dirty_all();
                 }
                 layer.at = at;
+                layer.shows = shows;
                 layer
-            } else if let Ok(layer) = Layer::new(engine, source, at, capacity) {
+            } else if let Ok(layer) = Layer::new(engine, source, (at, shows), capacity) {
                 if let Source::Window(..) = source {
                     // The window leaves the base, or its footprint starts to
                     // be composited to another depth.
-                    self.damage.add(at.intersection(&screen));
+                    self.damage.add(shows.intersection(&screen));
                 }
                 layer
             } else {
@@ -1043,12 +1280,7 @@ impl Compositor {
                         .iter()
                         .any(|layer| matches!(layer.source, Source::Window(..) | Source::Desktop));
                 }
-                match source {
-                    Source::Window(id, Role::Frost) => self.refused.frost = Some((id, capacity)),
-                    Source::Window(id, _) => self.refused.window = Some((id, capacity)),
-                    Source::Pointer => self.refused.pointer = Some(capacity),
-                    Source::Desktop => self.refused.desktop = Some(capacity),
-                }
+                self.refuse(source, capacity);
                 // A window refused buffers takes everything beneath it into
                 // the base; anything else leaves no stack to show.
                 whole =
@@ -1089,6 +1321,26 @@ impl Compositor {
         true
     }
 
+    /// Remember that the engine could not give `source` buffers of
+    /// `capacity`, so it is not asked again until what is asked for changes.
+    fn refuse(&mut self, source: Source, capacity: (u32, u32)) {
+        match source {
+            Source::Window(id, Role::Frost) => self.refused.frost = self.frost_refusal(id),
+            Source::Window(id, _) => self.refused.window = Some((id, capacity)),
+            Source::Pointer => self.refused.pointer = Some(capacity),
+            Source::Desktop => self.refused.desktop = Some(capacity),
+        }
+    }
+
+    /// The refusal of a frost layer to the window `id`, kept until the
+    /// window's rectangle changes size: its field's, which a move can change,
+    /// would have it asked again every time.
+    fn frost_refusal(&self, id: WindowId) -> Option<(WindowId, (u32, u32))> {
+        let window = self.windows.iter().find(|window| window.id() == id)?;
+        let bounds = window.bounds();
+        Some((id, (bounds.width, bounds.height)))
+    }
+
     /// Hold the base's damage while a promoted window covers it, so a frame
     /// nothing can see composites nothing and the desktop settles.
     fn hide_base_damage(&mut self) {
@@ -1117,39 +1369,111 @@ impl Compositor {
         self.scanout = rescan;
     }
 
-    /// Encode what this frame composited into the layers baked from the back
-    /// buffer — every composite layer, and the desktop's — with whatever each
-    /// buffer to be shown still lacks.
-    fn bake_composited(&mut self, engine: &mut dyn LayerPresenter, composed: &Region) {
+    /// Bake every composite layer's changed pixels: a flattened footprint and
+    /// the scaled desktop from the back buffer `composed` was composed into,
+    /// and a frost layer from its window's field, its corners from the back
+    /// buffer.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`] where a frost layer's field is no longer
+    /// retained, which leaves nothing to bake it from: the frame carries the
+    /// scene instead.
+    fn bake_composited(
+        &mut self,
+        engine: &mut dyn LayerPresenter,
+        composed: &Region,
+    ) -> Result<(), DriverError> {
+        let epoch = self.frost_epoch();
         let Self {
             layers,
             back,
             order,
             runner,
             routed,
+            frost,
+            windows,
             ..
         } = self;
         for layer in layers.iter_mut().flat_map(|stack| &mut stack.layers) {
-            if !matches!(layer.source, Source::Window(_, role) if role.is_composite())
-                && layer.source != Source::Desktop
-            {
-                continue;
+            match layer.source {
+                Source::Window(id, Role::Frost) => {
+                    let Some(window) = windows.iter().find(|window| window.id() == id) else {
+                        continue;
+                    };
+                    let field = frost
+                        .peek(&epoch, &id)
+                        .filter(|field| field.rect() == layer.at)
+                        .ok_or(DriverError::OutOfMemory)?;
+                    bake_frost(
+                        layer,
+                        window,
+                        field,
+                        back,
+                        composed,
+                        engine,
+                        (*order, *runner),
+                    );
+                }
+                Source::Desktop => {
+                    layer.dirty_region(composed, routed);
+                    bake_stale(layer, back, engine, (*order, *runner));
+                }
+                // Staled, and its composed pixels encoded, as its zone was
+                // composed.
+                Source::Window(_, Role::Flattened) => {
+                    bake_stale(layer, back, engine, (*order, *runner));
+                }
+                Source::Window(_, Role::Free) | Source::Pointer => {}
             }
-            layer.dirty_region(composed, routed);
-            let Some(target) = layer.target() else {
-                continue;
-            };
-            let Some((bytes, stride)) = engine.pixels(layer.held[target].id) else {
-                continue;
-            };
-            let at = layer.at;
-            let held = &mut layer.held[target];
-            for &local in held.stale.rects() {
-                encode_from(back, at, local, (bytes, stride), *order, *runner);
-            }
-            held.stale.clear();
-            layer.staged = Some(target);
         }
+        Ok(())
+    }
+
+    /// Stale what a frost layer of the window `id` holds of `rect`, which its
+    /// field has just blurred again.
+    pub(super) fn dirty_frost_layer(&mut self, id: WindowId, rect: Rect) {
+        for layer in self.layers.iter_mut().flat_map(|stack| &mut stack.layers) {
+            if layer.source == Source::Window(id, Role::Frost) {
+                layer.dirty(rect);
+            }
+        }
+    }
+
+    /// Bring the field of every window `plan` lays on a frost layer to the
+    /// rectangle the layer holds, answering the first window, and the size,
+    /// whose field could not be had there.
+    fn fit_frost_fields(&mut self, plan: &Plan) -> Option<(WindowId, (u32, u32))> {
+        let epoch = self.frost_epoch();
+        for &(id, laid) in &plan.windows {
+            if laid.role != Role::Frost {
+                continue;
+            }
+            let Some(radius) = self
+                .windows
+                .iter()
+                .find(|window| window.id() == id)
+                .map(|window| self.blur_radius_px(window))
+            else {
+                continue;
+            };
+            let held = self
+                .frost
+                .peek(&epoch, &id)
+                .filter(|field| field.radius_px() == radius)
+                .map(FrostField::rect);
+            if held != Some(laid.holds) {
+                self.fit_field(id, radius, held, laid.holds);
+            }
+            let fitted = self
+                .frost
+                .peek(&epoch, &id)
+                .is_some_and(|field| field.radius_px() == radius && field.rect() == laid.holds);
+            if !fitted {
+                return self.frost_refusal(id);
+            }
+        }
+        None
     }
 
     /// Bake every free layer's changed pixels from its window alone.
@@ -1383,23 +1707,57 @@ fn encode_cursor(image: &Surface, order: ChannelOrder, bytes: &mut Vec<u8>) -> O
     Some(stride)
 }
 
-/// Encode the back buffer's pixels under the `local` part of a layer at `at`
-/// into the layer's `bytes`, banded across `runner`.
-fn encode_from(
+/// Encode what the buffer `layer` shows next lacks from the back buffer
+/// `back`, and stage it.
+fn bake_stale(
+    layer: &mut Layer,
     back: &Surface,
+    engine: &mut dyn LayerPresenter,
+    (order, runner): (ChannelOrder, &dyn JobRunner),
+) {
+    let Some(target) = layer.target() else {
+        return;
+    };
+    let Some((bytes, stride)) = engine.pixels(layer.held[target].id) else {
+        return;
+    };
+    let at = layer.at;
+    let held = &mut layer.held[target];
+    for &local in held.stale.rects() {
+        encode_from(
+            (back, Point::ORIGIN),
+            at,
+            local,
+            (&mut *bytes, stride),
+            order,
+            runner,
+        );
+    }
+    held.stale.clear();
+    layer.staged = Some(target);
+}
+
+/// Encode the `local` part of a layer at `at` into its `bytes`, read from
+/// `source`, whose top-left lies at `origin` on screen.
+fn encode_from(
+    (source, origin): (&Surface, Point),
     at: Rect,
     local: Rect,
     (bytes, stride): (&mut [u8], u32),
     order: ChannelOrder,
     runner: &dyn JobRunner,
 ) {
-    let screen = Rect::new(
-        at.left().saturating_add(local.left()),
-        at.top().saturating_add(local.top()),
+    let read = Rect::new(
+        at.left()
+            .saturating_add(local.left())
+            .saturating_sub(origin.x),
+        at.top()
+            .saturating_add(local.top())
+            .saturating_sub(origin.y),
         local.width,
         local.height,
     );
-    let (Some((lx, ly)), Some((sx, sy))) = (local.surface_origin(), screen.surface_origin()) else {
+    let (Some((lx, ly)), Some((sx, sy))) = (local.surface_origin(), read.surface_origin()) else {
         return;
     };
     let (stride, rows, cols) = (stride as usize, local.height as usize, local.width as usize);
@@ -1427,7 +1785,7 @@ fn encode_from(
                 break;
             }
             let (Some((_, pixels)), Some(dst)) = (
-                back.row_span(sy.saturating_add(y), sx, local.width),
+                source.row_span(sy.saturating_add(y), sx, local.width),
                 row.get_mut(first_byte..first_byte + row_bytes),
             ) else {
                 continue;
@@ -1435,6 +1793,82 @@ fn encode_from(
             encode_segment(dst, pixels, order, u8::MAX);
         }
     });
+}
+
+/// Bake what a frost `layer` of `window` lacks into the buffer it shows next:
+/// the field everywhere, then the corners over it from the back buffer, where
+/// the frame mixed the window's shape over what lies beneath them.
+///
+/// The corners the layer holds follow the window: where they left and where
+/// they arrived are staled, and so is what `composed` changed beneath them.
+fn bake_frost(
+    layer: &mut Layer,
+    window: &Window,
+    field: &FrostField,
+    back: &Surface,
+    composed: &Region,
+    engine: &mut dyn LayerPresenter,
+    (order, runner): (ChannelOrder, &dyn JobRunner),
+) {
+    let corners = frost::corners(window.bounds(), window.shape())
+        .map(|corner| corner.intersection(&layer.shows));
+    if layer.corners != corners {
+        for corner in layer.corners.into_iter().chain(corners) {
+            layer.dirty(corner);
+        }
+        layer.corners = corners;
+    }
+    for &rect in composed.rects() {
+        for corner in corners {
+            layer.dirty(rect.intersection(&corner));
+        }
+    }
+    let Some(target) = layer.target() else {
+        return;
+    };
+    let Some((bytes, stride)) = engine.pixels(layer.held[target].id) else {
+        return;
+    };
+    let at = layer.at;
+    let held = &mut layer.held[target];
+    for &local in held.stale.rects() {
+        encode_from(
+            (field.pixels(), at.origin),
+            at,
+            local,
+            (&mut *bytes, stride),
+            order,
+            runner,
+        );
+        let screen = Rect::new(
+            at.left().saturating_add(local.left()),
+            at.top().saturating_add(local.top()),
+            local.width,
+            local.height,
+        );
+        for corner in corners {
+            let piece = screen.intersection(&corner);
+            if piece.is_empty() {
+                continue;
+            }
+            let mixed = Rect::new(
+                piece.left().saturating_sub(at.left()),
+                piece.top().saturating_sub(at.top()),
+                piece.width,
+                piece.height,
+            );
+            encode_from(
+                (back, Point::ORIGIN),
+                at,
+                mixed,
+                (&mut *bytes, stride),
+                order,
+                runner,
+            );
+        }
+    }
+    held.stale.clear();
+    layer.staged = Some(target);
 }
 
 /// Compose `window` alone over nothing for the `local` part of its layer at

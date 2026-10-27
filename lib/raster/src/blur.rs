@@ -1,10 +1,10 @@
 //! The shared separable box blur.
 //!
-//! One definition serves every frosted surface: the compositor's backdrop
-//! blur (a window's rectangle frosted before its own translucent pixels
-//! blend over it) and a control's own soft highlight. A horizontal pass then
-//! a vertical one, each carrying a running sum, so the cost is the region's
-//! area rather than its area times the radius.
+//! One definition serves every frosted surface: a control's own soft
+//! highlight, and the cells of the half-resolution blur a window's backdrop is
+//! frosted with ([`Surface::frost_halved_from`]). A horizontal pass then a
+//! vertical one, each carrying a running sum, so the cost is the region's area
+//! rather than its area times the radius.
 //!
 //! Every channel — alpha included — is averaged. Averaging premultiplied
 //! channels is the correct operation on premultiplied data: the result is
@@ -28,14 +28,21 @@ use crate::color::{mix, Pixel};
 use crate::dither::DitherRow;
 use crate::surface::{band_rows, RowBand, Surface};
 
+#[path = "halved.rs"]
+mod halved;
+
+pub use halved::halved_reach;
+#[cfg(any(test, feature = "test-util"))]
+pub use halved::halved_reference;
+
 /// Blur `region` in place: a dense, row-major, premultiplied
 /// `width`×`height` block of pixels, blurred by a separable box blur of
 /// `radius` physical pixels using `aux` as the intermediate buffer.
 ///
 /// `aux` is supplied by the caller — so a blur costs no allocation on the
 /// frame path. A caller frosting a rectangle of a surface takes
-/// [`Surface::frost_region`] or [`Surface::frost_from`] instead, which own the
-/// shape-weighted mix back into it.
+/// [`Surface::frost_region`] or [`Surface::frost_halved_from`] instead, which
+/// own the shape-weighted mix back into it.
 ///
 /// Nothing is blurred, and `region` is left exactly as it was, when the
 /// radius is `0` (the effect is disabled), when either dimension is `0`, or
@@ -246,11 +253,13 @@ const STRIP_FRACTION: u32 = 4;
 /// None of it grows with a frost's area: a horizontal-pass line per
 /// participant, a running vertical sum per output column, the strip vertical
 /// averages wait in before they are mixed back — a fraction of the
-/// rectangle's height — and the band and piece lists. [`Surface::frost_from`]
-/// reads its backdrop from a plane its caller holds, so a caller that
-/// [reserves](Self::reserve) the scratch once frosts every frame without
-/// allocating and is never refused. [`Surface::frost_region`] frosts in place,
-/// so it also keeps here the copy of the backdrop it reads.
+/// rectangle's height — the band and piece lists, and for a half-resolution
+/// frost its plane of cells and the spread's lines.
+/// [`Surface::frost_halved_from`] and [`Surface::blur_halved_from`] read their
+/// backdrop from a plane their caller holds, so a caller that
+/// [reserves](Self::reserve_halved) the scratch once frosts every frame
+/// without allocating and is never refused. [`Surface::frost_region`] frosts
+/// in place, so it also keeps here the copy of the backdrop it reads.
 #[derive(Default)]
 pub struct BlurScratch {
     plane: Option<Surface>,
@@ -259,6 +268,12 @@ pub struct BlurScratch {
     strip: Vec<Pixel>,
     bands: Vec<Band>,
     pieces: Vec<Piece>,
+    /// A half-resolution blur's cells, and the cells each of its bands is
+    /// spread from.
+    reduced: Option<Surface>,
+    cells: Vec<(Range<u32>, Range<u32>)>,
+    /// A row of cells taken between two rows of them, per participant.
+    spread: Vec<u16>,
 }
 
 impl BlurScratch {
@@ -272,12 +287,17 @@ impl BlurScratch {
             strip: Vec::new(),
             bands: Vec::new(),
             pieces: Vec::new(),
+            reduced: None,
+            cells: Vec::new(),
+            spread: Vec::new(),
         }
     }
 
-    /// Reserve what a [`Surface::frost_from`] of up to `bands` bands of a
+    /// Reserve what a full-resolution blur of up to `bands` bands of a
     /// rectangle no wider than `width` and no taller than `height` needs when
-    /// `runner` spreads it, reporting whether it could.
+    /// `runner` spreads it, reporting whether it could: the in-place
+    /// [`Surface::frost_region`], and the cells of a half-resolution frost,
+    /// which [`reserve_halved`](Self::reserve_halved) reserves through this.
     ///
     /// A caller that frosts every frame reserves once, for its output, so no
     /// frost it runs grows the scratch on its frame path or finds it refused.
@@ -294,6 +314,7 @@ impl BlurScratch {
         let wide = usize::try_from(width).unwrap_or(usize::MAX);
         let strip_rows = usize::try_from(height.div_ceil(STRIP_FRACTION))
             .unwrap_or(usize::MAX)
+            .max(bands)
             .max(1);
         let pieces = tairix_parallel::bands(runner, usize::MAX, 1).saturating_mul(bands.max(1));
         let (Some(lines), Some(sums), Some(strip)) = (
@@ -316,12 +337,16 @@ impl BlurScratch {
     /// Volatile, like a reclaimed surface's wipe, so the stores are not
     /// optimised away for memory nothing reads again.
     pub fn wipe(&mut self) {
-        if let Some(plane) = self.plane.as_mut() {
+        for plane in [self.plane.as_mut(), self.reduced.as_mut()]
+            .into_iter()
+            .flatten()
+        {
             tairix_util::secret::wipe_with(plane.pixels_mut(), Pixel::TRANSPARENT);
         }
         tairix_util::secret::wipe_with(&mut self.lines, Pixel::TRANSPARENT);
         tairix_util::secret::wipe_with(&mut self.sums, PixelSum::default());
         tairix_util::secret::wipe_with(&mut self.strip, Pixel::TRANSPARENT);
+        tairix_util::secret::wipe_with(&mut self.spread, 0);
     }
 }
 
@@ -357,16 +382,17 @@ impl Surface {
     /// The frost is confined to what the surface bounds and the active clip
     /// window admit and reads only the pixels it may write: samples past
     /// that edge replicate it, so the effect can neither pull a neighbour's
-    /// pixels in nor mark a pixel outside. This is [`frost_from`] with the
-    /// surface itself as the whole backdrop and a plane held in `scratch`, so
-    /// the two cannot round, replicate, weight, or dither differently.
+    /// pixels in nor mark a pixel outside. Unlike a window's frost
+    /// ([`frost_halved_from`]) it is taken at full resolution: a control's
+    /// plate is small and drawn once a repaint, so halving it would change the
+    /// picture for nothing a frame pays.
     ///
     /// The surface is left exactly as it was, never partly frosted, when
     /// `radius` is `0` (the effect is disabled), when the rectangle is empty
     /// or lands nowhere the surface admits, or when the scratch could not be
     /// grown.
     ///
-    /// [`frost_from`]: Self::frost_from
+    /// [`frost_halved_from`]: Self::frost_halved_from
     #[expect(
         clippy::too_many_arguments,
         reason = "the rectangle is spelled as the four scalars every other \
@@ -409,65 +435,34 @@ impl Surface {
         // and strip height, never the frost.
         let _ = scratch.reserve(width, height, 1, runner);
         let whole = (columns.clone(), rows.clone());
-        let frosting = Frosting {
-            blur: Blurring {
-                rect: (x, y, w, h),
-                bands: core::slice::from_ref(&whole),
-                radius,
-            },
-            held: whole.clone(),
+        let blurring = Blurring {
+            rect: (x, y, w, h),
+            bands: core::slice::from_ref(&whole),
+            radius,
         };
         let origin = (columns.start, rows.start);
         let coverage =
             |column: u32, row: u32| coverage(column.saturating_sub(x), row.saturating_sub(y));
-        let _ = self.frost_through((&mut plane, origin), &frosting, scratch, runner, &coverage);
+        let _ = self.frost_in_place((&mut plane, origin), &blurring, scratch, runner, &coverage);
         scratch.plane = Some(plane);
     }
 
-    /// Write the frost `frosting` describes into this surface, reading the
-    /// backdrop from this surface within [`held`](Frosting::held) and from
-    /// `plane` — addressed in this surface's coordinates — elsewhere, and report
+    /// Write the full-resolution blur `blurring` describes, unmixed, into this
+    /// surface, whose top-left lies at `at` of `plane` — past its top or left
+    /// edge or not — reading the backdrop from `plane` alone, and report
     /// whether it was written.
     ///
-    /// Each band is written exactly as the whole rectangle's frost writes it,
-    /// samples replicating at the rectangle's edges, so bands side by side meet
-    /// without a seam. `coverage` is asked at this surface's own coordinates.
-    /// Nothing outside the bands is written, and the backdrop is read only
-    /// within `radius` of them; this surface must hold it over the bands
-    /// themselves, which a partial coverage mixes over. The horizontal pass is
-    /// written into `plane`, so what the plane holds there afterwards is
-    /// unspecified.
-    ///
-    /// A scratch [reserved](BlurScratch::reserve) for the rectangle is used as
-    /// it stands. `false` is a frost the scratch could not be grown for, and
-    /// leaves this surface untouched; a radius of `0`, or bands covering
-    /// nothing, frost nothing and answer `true`.
-    pub fn frost_from(
-        &mut self,
-        plane: &mut Self,
-        frosting: &Frosting<'_>,
-        scratch: &mut BlurScratch,
-        runner: &dyn JobRunner,
-        coverage: impl Fn(u32, u32) -> u8 + Sync,
-    ) -> bool {
-        self.frost_through((plane, (0, 0)), frosting, scratch, runner, &coverage)
-    }
-
-    /// Write the blur `blurring` describes, unmixed, into this surface, whose
-    /// top-left lies at `at` of `plane` — past its top or left edge or not —
-    /// reading the backdrop from `plane` alone, and report whether it was
-    /// written.
-    ///
-    /// The bands and the rectangle are `plane`'s coordinates, and each band
-    /// receives exactly what [`frost_from`](Self::frost_from) mixes in at full
-    /// coverage, so a blur retained here and mixed back later
-    /// ([`mix_from`](Self::mix_from)) is the frost written in one pass. What
-    /// of a band this surface does not reach is left out. The horizontal pass
-    /// is written into `plane`, as `frost_from` writes it.
+    /// The bands and the rectangle are `plane`'s coordinates, and each band is
+    /// written exactly as the whole rectangle's blur writes it, samples
+    /// replicating at the rectangle's edges, so bands side by side meet without
+    /// a seam. Bands may overlap: what two cover is written twice, the same
+    /// both times. What of a band this surface does not reach is left out. The
+    /// horizontal pass is written into `plane`, so what the plane holds there
+    /// afterwards is unspecified.
     ///
     /// A radius of `0` copies the backdrop. `false` is a blur the scratch could
     /// not be grown for, and leaves this surface untouched.
-    pub fn blur_from(
+    fn blur_from(
         &mut self,
         at: (i32, i32),
         plane: &mut Self,
@@ -485,28 +480,20 @@ impl Surface {
         };
         let at = Offset { x: at.0, y: at.1 };
         let reach = at.reach(self);
+        let lay = Lay::<fn(u32, u32) -> u8>::Field(at);
         if radius == 0 {
-            for (cols, rows) in bands {
-                let cols = clamp(&clamp(cols, &reach.0), &admitted.0);
-                let rows = clamp(&clamp(rows, &reach.1), &admitted.1);
-                self.copy_rows_from(plane, at, &cols, &rows);
-            }
+            let within = (clamp(&reach.0, &admitted.0), clamp(&reach.1, &admitted.1));
+            lay_unblurred(self, &lay, plane, confined(bands, &within));
             return true;
         }
-        let frost = Frost::new(admitted, &(0..0, 0..0), radius);
+        let frost = Frost::new(admitted, radius);
         let Some(work) = frost.prepare(bands, &reach, scratch) else {
             return false;
         };
         if work.bands.is_empty() {
             return true;
         }
-        frost.run(
-            self,
-            &Lay::<fn(u32, u32) -> u8>::Field(at),
-            (plane, (0, 0)),
-            work,
-            runner,
-        )
+        frost.run(self, &lay, (plane, (0, 0)), work, runner)
     }
 
     /// Mix `source`, whose top-left lies at `at` of this surface — past its top
@@ -516,10 +503,10 @@ impl Surface {
     /// mix, rounded at the surface's ordered dither.
     ///
     /// This is a frost's shape-weighted mix taken from a blur retained by
-    /// [`blur_from`](Self::blur_from), so the two together write what
-    /// [`frost_from`](Self::frost_from) writes. Pixels of the rectangle the
-    /// source does not reach, or the clip window does not admit, are left as
-    /// they are.
+    /// [`blur_halved_from`](Self::blur_halved_from), so the two together write
+    /// what [`frost_halved_from`](Self::frost_halved_from) writes. Pixels of
+    /// the rectangle the source does not reach, or the clip window does not
+    /// admit, are left as they are.
     pub fn mix_from(
         &mut self,
         source: &Self,
@@ -550,50 +537,22 @@ impl Surface {
         }
     }
 
-    /// Copy `cols` × `rows` of `plane` into this surface, whose top-left lies
-    /// at `at` of it.
-    fn copy_rows_from(&mut self, plane: &Self, at: Offset, cols: &Range<u32>, rows: &Range<u32>) {
-        let Ok(wide) = u32::try_from(cols.len()) else {
-            return;
-        };
-        for row in rows.clone() {
-            let Some((first, src)) = plane.row_span(row, cols.start, wide) else {
-                continue;
-            };
-            let Some((column, field_row)) = at.column_in(first).zip(at.row_in(row)) else {
-                continue;
-            };
-            let wide = u32::try_from(src.len()).unwrap_or(u32::MAX);
-            let Some((_, dst)) = self.row_span_mut(field_row, column, wide) else {
-                continue;
-            };
-            let len = dst.len().min(src.len());
-            if let (Some(dst), Some(src)) = (dst.get_mut(..len), src.get(..len)) {
-                dst.copy_from_slice(src);
-            }
-        }
-    }
-
-    /// [`frost_from`](Self::frost_from) reading what this surface does not
-    /// hold from `plane`, whose top-left sits at the given point of this
-    /// surface.
-    fn frost_through(
+    /// Frost `blurring`'s bands of this surface from the pixels it holds
+    /// itself, writing the horizontal pass into `plane`, whose top-left sits at
+    /// the given point of this surface, and report whether it was written.
+    fn frost_in_place(
         &mut self,
         (plane, origin): Plane<'_>,
-        frosting: &Frosting<'_>,
+        blurring: &Blurring<'_>,
         scratch: &mut BlurScratch,
         runner: &dyn JobRunner,
         coverage: &(impl Fn(u32, u32) -> u8 + Sync),
     ) -> bool {
-        let Frosting {
-            blur:
-                Blurring {
-                    rect: (x, y, w, h),
-                    bands,
-                    radius,
-                },
-            ref held,
-        } = *frosting;
+        let Blurring {
+            rect: (x, y, w, h),
+            bands,
+            radius,
+        } = *blurring;
         if radius == 0 {
             return true;
         }
@@ -601,7 +560,7 @@ impl Surface {
             return true;
         };
         let reach = admitted.clone();
-        let frost = Frost::new(admitted, held, radius);
+        let frost = Frost::new(admitted, radius);
         let Some(work) = frost.prepare(bands, &reach, scratch) else {
             return false;
         };
@@ -609,6 +568,52 @@ impl Surface {
             return true;
         }
         frost.run(self, &Lay::Mix(coverage), (plane, origin), work, runner)
+    }
+}
+
+/// The parts of `bands` inside `within`, leaving out those that cover nothing.
+fn confined<'a>(
+    bands: &'a [(Range<u32>, Range<u32>)],
+    within: &'a (Range<u32>, Range<u32>),
+) -> impl Iterator<Item = (Range<u32>, Range<u32>)> + Clone + Sync + 'a {
+    bands.iter().filter_map(move |(cols, rows)| {
+        let (cols, rows) = (clamp(cols, &within.0), clamp(rows, &within.1));
+        (!cols.is_empty() && !rows.is_empty()).then_some((cols, rows))
+    })
+}
+
+/// Lay the backdrop `plane` holds over `bands` into `target` as `lay` says,
+/// unblurred: the blur of radius `0`.
+fn lay_unblurred<C: Fn(u32, u32) -> u8>(
+    target: &mut Surface,
+    lay: &Lay<'_, C>,
+    plane: &Surface,
+    bands: impl Iterator<Item = (Range<u32>, Range<u32>)>,
+) {
+    let at = lay.at();
+    for (cols, rows) in bands {
+        let Ok(wide) = u32::try_from(cols.len()) else {
+            continue;
+        };
+        for row in rows {
+            let Some((first, src)) = plane.row_span(row, cols.start, wide) else {
+                continue;
+            };
+            let Some((column, target_row)) = at.column_in(first).zip(at.row_in(row)) else {
+                continue;
+            };
+            let wide = u32::try_from(src.len()).unwrap_or(u32::MAX);
+            let Some((start, dst)) = target.row_span_mut(target_row, column, wide) else {
+                continue;
+            };
+            // A clip window that cut the span's leading columns advances the
+            // backdrop by as much.
+            let skip = usize::try_from(start.saturating_sub(column)).unwrap_or(usize::MAX);
+            let (Some(src), Some(backdrop_column)) = (src.get(skip..), at.column_of(start)) else {
+                continue;
+            };
+            lay.span(dst, src, (backdrop_column, row));
+        }
     }
 }
 
@@ -677,8 +682,9 @@ fn mix_covered(
     }
 }
 
-/// The blur a [`Surface::blur_from`] writes, or the blur under a
-/// [`Frosting`], in the coordinates of the surface it reads.
+/// The blur a [`Surface::blur_halved_from`] writes or a
+/// [`Surface::frost_halved_from`] mixes back, in the coordinates of the
+/// surface it reads.
 pub struct Blurring<'a> {
     /// The rectangle `(x, y, w, h)` the blur is a function of: samples past its
     /// edges replicate them.
@@ -689,21 +695,11 @@ pub struct Blurring<'a> {
     pub radius: u32,
 }
 
-/// The frost a [`Surface::frost_from`] writes, in the destination's
-/// coordinates.
-pub struct Frosting<'a> {
-    /// What is blurred, and where.
-    pub blur: Blurring<'a>,
-    /// The columns and rows of the rectangle where the destination already
-    /// holds the backdrop; the plane holds it everywhere else the frost reads.
-    pub held: (Range<u32>, Range<u32>),
-}
-
-/// Where a frost's averages go once a strip of them is taken.
+/// Where a frost's averages go once they are taken.
 enum Lay<'c, C> {
     /// Mixed over the destination at each pixel's coverage, asked at the
-    /// destination's coordinates. The destination also holds the backdrop
-    /// within the frost's held part.
+    /// destination's coordinates. A [`Frost`] mixed back is taken in place,
+    /// reading its backdrop from the destination.
     Mix(&'c C),
     /// Written as they are into a surface whose top-left lies at this point
     /// of the backdrop's coordinates.
@@ -743,9 +739,6 @@ impl<C: Fn(u32, u32) -> u8> Lay<'_, C> {
 struct Frost {
     columns: Range<u32>,
     rows: Range<u32>,
-    /// Where the destination holds the backdrop, in the rectangle's own
-    /// columns and rows.
-    held: Band,
     radius: usize,
     recip: Reciprocal,
 }
@@ -797,26 +790,14 @@ struct Averaging<'a> {
 }
 
 impl Frost {
-    fn new(
-        (columns, rows): (Range<u32>, Range<u32>),
-        held: &(Range<u32>, Range<u32>),
-        radius: u32,
-    ) -> Self {
+    fn new((columns, rows): (Range<u32>, Range<u32>), radius: u32) -> Self {
         let radius = usize::try_from(radius).unwrap_or(usize::MAX);
-        let mut frost = Self {
+        Self {
             columns,
             rows,
-            held: Band {
-                cols: 0..0,
-                rows: 0..0,
-            },
             radius,
             recip: Reciprocal::new(radius.saturating_mul(2).saturating_add(1)),
-        };
-        if let Some(band) = frost.local(&held.0, &held.1) {
-            frost.held = band;
         }
-        frost
     }
 
     fn width(&self) -> usize {
@@ -871,10 +852,12 @@ impl Frost {
             written.push(band);
         }
         let width = self.width();
+        // A strip always holds a row of every band, which bands that overlap
+        // can need more than the rectangle's width for.
         let grown = written.is_empty()
             || (fallible::grow_to(lines, width, Pixel::TRANSPARENT)
                 && fallible::grow_to(sums, columns, PixelSum::default())
-                && fallible::grow_to(strip, width, Pixel::TRANSPARENT));
+                && fallible::grow_to(strip, columns.max(width), Pixel::TRANSPARENT));
         grown.then_some(Work {
             bands: written,
             lines,
@@ -913,10 +896,9 @@ impl Frost {
             .saturating_add(u32::try_from(column).unwrap_or(u32::MAX))
     }
 
-    /// Blur `work`'s bands from the backdrop `plane` holds — and, for a frost
-    /// mixed back, the destination within its held part — laying each into
-    /// `target` as `lay` says, and report whether the scratch could hold the
-    /// blur.
+    /// Blur `work`'s bands from the backdrop — the destination itself for a
+    /// frost mixed back, `plane` otherwise — laying each into `target` as `lay`
+    /// says, and report whether the scratch could hold the blur.
     ///
     /// The horizontal pass is written into the plane, which keeps the scratch
     /// free of anything the size of the rectangle. The vertical pass runs a
@@ -1122,11 +1104,10 @@ impl PlaneRead<'_> {
     /// The horizontal pass over the plane rows `rows` owns, a row at a time:
     /// each band's averages written into the plane over the band's columns.
     ///
-    /// A row the destination `held_by` holds the whole of what its averages
-    /// read is averaged straight from it. Any other row's backdrop is gathered
-    /// into `line` first — the plane's own, with what the destination holds laid
-    /// over it — since its averages are written into the very row of the plane
-    /// they read.
+    /// A frost in place averages each row straight from the destination
+    /// `held_by`. Otherwise a row's backdrop is gathered into `line` first,
+    /// since its averages are written into the very row of the plane they
+    /// read.
     fn blur_band_lines(
         &self,
         rows: &mut RowBand<'_>,
@@ -1161,10 +1142,7 @@ impl PlaneRead<'_> {
             if start != first || target.len() != width {
                 continue;
             }
-            let held = held_by
-                .filter(|_| frost.held.rows.contains(&local))
-                .map(|dest| (dest, overlap(&frost.held.cols, &read)));
-            let source = if let Some((dest, _)) = held.as_ref().filter(|(_, held)| *held == read) {
+            let source = if let Some(dest) = held_by {
                 match dest.row_span(frost.row(local), frost.column(0), span) {
                     Some((at, row)) if at == frost.column(0) && row.len() == width => row,
                     _ => continue,
@@ -1176,19 +1154,6 @@ impl PlaneRead<'_> {
                     continue;
                 };
                 gathered.copy_from_slice(backdrop);
-                if let Some((dest, held)) = held.filter(|(_, held)| !held.is_empty()) {
-                    let wide = u32::try_from(held.len()).unwrap_or(u32::MAX);
-                    let (Some(gathered), Some((_, backdrop))) = (
-                        line.get_mut(held.clone()),
-                        dest.row_span(frost.row(local), frost.column(held.start), wide),
-                    ) else {
-                        continue;
-                    };
-                    if gathered.len() != backdrop.len() {
-                        continue;
-                    }
-                    gathered.copy_from_slice(backdrop);
-                }
                 &*line
             };
             for band in reading() {

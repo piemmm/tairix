@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 use tairix_fuzzseed::Prng;
 
 use super::{
-    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Blurring, Frosting,
-    Reciprocal, ShadowCast, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
+    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Blurring, Reciprocal,
+    ShadowCast, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
 };
 use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
 use crate::dither::DitherRow;
@@ -814,7 +814,7 @@ fn frosted_bands_via(
     assert!(frost_from_plane(
         &mut surface,
         &mut plane,
-        &frosting(rect, NOTHING_HELD, bands, radius),
+        &blurring(rect, bands, radius),
         &mut BlurScratch::new(),
         runner,
         weight,
@@ -822,35 +822,43 @@ fn frosted_bands_via(
     surface
 }
 
-/// No part of the rectangle: every backdrop read comes from the plane.
-const NOTHING_HELD: (Range<u32>, Range<u32>) = (0..0, 0..0);
-
-fn frosting(
+fn blurring(
     rect: (u32, u32, u32, u32),
-    held: (Range<u32>, Range<u32>),
     bands: &[(Range<u32>, Range<u32>)],
     radius: u32,
-) -> Frosting<'_> {
-    Frosting {
-        blur: Blurring {
-            rect,
-            bands,
-            radius,
-        },
-        held,
+) -> Blurring<'_> {
+    Blurring {
+        rect,
+        bands,
+        radius,
     }
 }
 
-/// [`Surface::frost_from`] at a constant coverage.
+/// The full-resolution frost of `blurring`'s bands of `surface` at a constant
+/// coverage, its backdrop read from `plane`: the bands blurred into a field
+/// over the whole surface, then mixed back over each.
 fn frost_from_plane(
     surface: &mut Surface,
     plane: &mut Surface,
-    frosting: &Frosting<'_>,
+    blurring: &Blurring<'_>,
     scratch: &mut BlurScratch,
     runner: &dyn tairix_parallel::JobRunner,
     weight: u8,
 ) -> bool {
-    surface.frost_from(plane, frosting, scratch, runner, |_, _| weight)
+    let mut field = Surface::new(surface.width(), surface.height()).expect("a field allocates");
+    if !field.blur_from((0, 0), plane, blurring, scratch, runner) {
+        return false;
+    }
+    for (cols, rows) in blurring.bands {
+        let extent = (
+            cols.start,
+            rows.start,
+            cols.end - cols.start,
+            rows.end - rows.start,
+        );
+        surface.mix_from(&field, (0, 0), extent, |_, _| weight);
+    }
+    true
 }
 
 /// Frosting the border around a kept block, then putting back what the block
@@ -1283,7 +1291,7 @@ fn a_frost_reads_its_plane_only_around_its_bands() {
             assert!(frost_from_plane(
                 &mut poisoned,
                 &mut plane,
-                &frosting(rect, NOTHING_HELD, &bands, radius),
+                &blurring(rect, &bands, radius),
                 &mut BlurScratch::new(),
                 &tairix_parallel::SERIAL,
                 200,
@@ -1313,7 +1321,7 @@ fn the_rows_between_distant_bands_cost_no_dispatch() {
         assert!(frost_from_plane(
             &mut surface,
             &mut plane,
-            &frosting(rect, NOTHING_HELD, bands, 43),
+            &blurring(rect, bands, 43),
             &mut scratch,
             &runner,
             230,
@@ -1347,7 +1355,7 @@ fn distant_bands_are_split_as_each_would_be_alone() {
         assert!(frost_from_plane(
             &mut surface,
             &mut plane,
-            &frosting(rect, NOTHING_HELD, bands, 43),
+            &blurring(rect, bands, 43),
             &mut scratch,
             &runner,
             230,
@@ -1367,7 +1375,7 @@ fn distant_bands_are_split_as_each_would_be_alone() {
 /// misses would only wake a participant to find nothing to average.
 #[test]
 fn a_strip_hands_out_only_the_pieces_covering_it() {
-    let frost = super::Frost::new((0..460, 0..220), &NOTHING_HELD, 2);
+    let frost = super::Frost::new((0..460, 0..220), 2);
     let read = super::PlaneRead {
         frost: &frost,
         origin: (0, 0),
@@ -1412,7 +1420,7 @@ fn a_frost_mixed_back_over_many_strips_is_the_one_strip_frost() {
         assert!(frost_from_plane(
             &mut whole,
             &mut plane,
-            &frosting(rect, NOTHING_HELD, &bands, radius),
+            &blurring(rect, &bands, radius),
             &mut one_strip,
             &tairix_parallel::SERIAL,
             230,
@@ -1426,7 +1434,7 @@ fn a_frost_mixed_back_over_many_strips_is_the_one_strip_frost() {
                 assert!(frost_from_plane(
                     &mut surface,
                     &mut plane,
-                    &frosting(rect, NOTHING_HELD, &bands, radius),
+                    &blurring(rect, &bands, radius),
                     &mut scratch,
                     &runner,
                     230,
@@ -1470,7 +1478,7 @@ fn a_reserved_scratch_frosts_without_growing() {
         assert!(frost_from_plane(
             &mut surface,
             &mut plane,
-            &frosting(rect, NOTHING_HELD, &bands, 5),
+            &blurring(rect, &bands, 5),
             &mut scratch,
             &runner,
             255,
@@ -1548,60 +1556,45 @@ fn disjoint_bands_frost_exactly_what_the_whole_frost_writes_there() {
     }
 }
 
-/// Within `held` the backdrop is read from the destination and the plane is
-/// never read; outside it the plane is. A plane poisoned over the held part
-/// therefore frosts exactly as an honest one does — the compositor's case,
-/// where the back buffer holds the backdrop over the damage and only the ring
-/// beyond it is composed into the plane.
+/// Bands that overlap blur what each would alone, even from a fresh scratch
+/// whose strip is grown for the rectangle's width: the cell bands of a
+/// half-resolution frost share a cell or two at every seam, and a strip row
+/// they could not fit in was left unwritten.
 #[test]
-fn the_backdrop_is_read_from_the_destination_wherever_it_holds_it() {
-    const POISON: Pixel = Pixel {
-        r: 0,
-        g: 255,
-        b: 0,
-        a: 255,
-    };
-    let mut rng = Prng::new(0x4E1D_0FBA_C4D2_0911);
-    let rect = (2u32, 1, 22, 18);
-    let before = patterned(27, 22);
-    for radius in [1u32, 3, 7] {
-        for _ in 0..16 {
-            let keep = (span_within(&mut rng, rect.2), span_within(&mut rng, rect.3));
-            let held = (
-                rect.0 + keep.0.start..rect.0 + keep.0.end,
-                rect.1 + keep.1.start..rect.1 + keep.1.end,
-            );
-            let bands = border(
-                rect,
-                (keep.0.start + 1..keep.0.end, keep.1.start + 1..keep.1.end),
-            );
-            let honest = frosted_bands_via(
-                &tairix_parallel::Reversed::new(4),
-                before.clone(),
-                rect,
-                &bands,
-                radius,
-                150,
-            );
-            let mut plane = before.clone();
-            for y in held.1.clone() {
-                for x in held.0.clone() {
-                    plane.set(x, y, POISON);
-                }
+fn overlapping_bands_blur_what_each_would_alone() {
+    let before = patterned(25, 22);
+    let rect = (0u32, 0, 25, 22);
+    let bands = [
+        (0u32..20, 0u32..12),
+        (5u32..25, 4u32..22),
+        (0u32..25, 10u32..13),
+    ];
+    for radius in [1u32, 3, 6] {
+        let all = [(0u32..25, 0u32..22)];
+        let whole = field_blur(
+            &before,
+            (0, 0),
+            (25, 22),
+            &blurring(rect, &all, radius),
+            &tairix_parallel::SERIAL,
+        );
+        let field = field_blur(
+            &before,
+            (0, 0),
+            (25, 22),
+            &blurring(rect, &bands, radius),
+            &tairix_parallel::Reversed::new(3),
+        );
+        for y in 0..22u32 {
+            for x in 0..25u32 {
+                let inside = bands.iter().any(|(c, r)| c.contains(&x) && r.contains(&y));
+                let expected = if inside {
+                    whole.get(x, y)
+                } else {
+                    Some(MARKER)
+                };
+                assert_eq!(field.get(x, y), expected, "({x}, {y}) radius {radius}");
             }
-            let mut surface = before.clone();
-            assert!(frost_from_plane(
-                &mut surface,
-                &mut plane,
-                &frosting(rect, held.clone(), &bands, radius),
-                &mut BlurScratch::new(),
-                &tairix_parallel::Reversed::new(4),
-                150,
-            ));
-            assert_eq!(
-                surface, honest,
-                "radius {radius} held {held:?} read the plane where the destination holds it"
-            );
         }
     }
 }
@@ -1720,49 +1713,6 @@ fn a_field_blur_reads_its_neighbourhood_past_the_band() {
     }
 }
 
-/// A blur retained in a field and mixed back at a shape's coverage is the
-/// frost written in one pass, to the bit — the mix's weights, its dither, and
-/// the coverage asked at the destination's own coordinates all agree.
-#[test]
-fn a_field_mixed_back_is_the_frost_written_in_one_pass() {
-    let before = patterned(28, 22);
-    let rect = (0u32, 0, 28, 22);
-    let window = (6u32, 5, 15, 12);
-    let coverage = |x: u32, y: u32| {
-        let lx = x.saturating_sub(window.0);
-        let ly = y.saturating_sub(window.1);
-        round_rect_coverage(lx, ly, window.2, window.3, 5)
-    };
-    let band = (window.0..window.0 + window.2, window.1..window.1 + window.3);
-    for radius in [2u32, 7] {
-        let bands = [band.clone()];
-        let mut once = before.clone();
-        let mut plane = before.clone();
-        assert!(once.frost_from(
-            &mut plane,
-            &frosting(rect, NOTHING_HELD, &bands, radius),
-            &mut BlurScratch::new(),
-            &tairix_parallel::SERIAL,
-            coverage,
-        ));
-        let at = (signed(window.0), signed(window.1));
-        let field = field_blur(
-            &before,
-            at,
-            (window.2, window.3),
-            &Blurring {
-                rect,
-                bands: &bands,
-                radius,
-            },
-            &tairix_parallel::SERIAL,
-        );
-        let mut mixed = before.clone();
-        mixed.mix_from(&field, at, window, coverage);
-        assert_eq!(mixed.pixels(), once.pixels(), "radius {radius}");
-    }
-}
-
 /// A field placed past the plane's top-left edge holds the blur where it
 /// overlaps the plane, and leaves the rest alone.
 #[test]
@@ -1841,32 +1791,6 @@ fn a_field_takes_only_what_it_reaches() {
             }
         }
     }
-}
-
-/// A frost asks its shape about each pixel it mixes at the destination's own
-/// coordinates, not its rectangle's: the rectangle is what the blur replicates
-/// at, and a window's shape lies wherever the window does.
-#[test]
-fn a_frost_asks_its_coverage_at_the_destination_coordinates() {
-    let before = patterned(14, 12);
-    let bands = [(4u32..7, 3u32..5)];
-    let asked = Recorder::new();
-    let mut dest = before.clone();
-    let mut plane = before.clone();
-    assert!(dest.frost_from(
-        &mut plane,
-        &frosting((0, 0, 14, 12), NOTHING_HELD, &bands, 2),
-        &mut BlurScratch::new(),
-        &tairix_parallel::SERIAL,
-        |x, y| asked.record(x, y),
-    ));
-    let mut expected = Vec::new();
-    for y in 3..5 {
-        for x in 4..7 {
-            expected.push((x, y));
-        }
-    }
-    assert_eq!(asked.taken(), expected);
 }
 
 /// A mix keeps what the source does not reach and what a coverage of zero

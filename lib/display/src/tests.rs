@@ -1473,7 +1473,7 @@ fn a_layered_present_lays_the_output_frame_beneath_its_layers() {
         .expect("a layer");
     let mut frame = vec![0u8; FRAME_LEN];
     frame[0..4].fill(0x11);
-    let base = Base {
+    let base = Base::Frame {
         frame: &frame,
         damage: &[rect(0, 0, 1, 1)],
     };
@@ -1565,7 +1565,7 @@ fn a_layered_present_with_nothing_new_in_the_base_names_the_frame_on_screen() {
     let whole = [full()];
     let engine = remote.layers().expect("a compositor");
     for damage in [&whole[..], &[]] {
-        let base = Base {
+        let base = Base::Frame {
             frame: &frame,
             damage,
         };
@@ -1578,6 +1578,90 @@ fn a_layered_present_with_nothing_new_in_the_base_names_the_frame_on_screen() {
     assert_eq!(
         stacks[1][0].buffer, frames[0],
         "an unchanged frame is named again, never copied into another"
+    );
+}
+
+/// A base drawn in place beneath the layers is handed the back frame and what
+/// that frame owes, and the stack names the frame it was drawn into; a draw
+/// that refuses shows nothing and leaves its frame owed, and a base with
+/// nothing new names the frame on screen without drawing.
+#[test]
+fn a_layered_base_drawn_in_place_is_handed_what_the_back_frame_owes() {
+    let mut rig = Rig::new();
+    rig.display.accel = Some(CAPS);
+    let (rig, mut remote) = remote(rig);
+    let frames: Vec<BufferId> = rig
+        .borrow()
+        .display
+        .live
+        .iter()
+        .map(|held| held.id)
+        .collect();
+    let window = remote
+        .layers()
+        .expect("a compositor")
+        .alloc(2, 2)
+        .expect("a layer");
+    let (whole, corner) = (
+        Region::from(Rect::new(0, 0, 4, 3)),
+        Region::from(Rect::new(1, 1, 2, 1)),
+    );
+    let mut owed = Vec::new();
+    let refusing = core::cell::Cell::new(false);
+    {
+        let mut draw = |memory: &mut [u8], stride: u32, refresh: &Region| {
+            owed.push(refresh.rects().to_vec());
+            if refusing.get() {
+                return Err(DriverError::OutOfRange);
+            }
+            for rect in refresh.rects() {
+                for row in rect.top()..rect.bottom() {
+                    let at = usize::try_from(row).expect("on screen") * stride as usize
+                        + usize::try_from(rect.left()).expect("on screen") * 4;
+                    memory[at..at + rect.width as usize * 4].fill(0x5A);
+                }
+            }
+            Ok(())
+        };
+        let engine = remote.layers().expect("a compositor");
+        let stack = [layer(window, 2, 2)];
+        for damage in [&whole, &corner] {
+            let base = Base::Drawn {
+                damage,
+                draw: &mut draw,
+            };
+            engine.present_layers(Some(base), &stack).expect("shown");
+        }
+        refusing.set(true);
+        let base = Base::Drawn {
+            damage: &corner,
+            draw: &mut draw,
+        };
+        assert_eq!(
+            engine.present_layers(Some(base), &stack).err(),
+            Some(DriverError::OutOfRange)
+        );
+        refusing.set(false);
+        let nothing = Region::new();
+        let base = Base::Drawn {
+            damage: &nothing,
+            draw: &mut draw,
+        };
+        engine
+            .present_layers(Some(base), &stack)
+            .expect("named again");
+    }
+    assert_eq!(owed[0], whole.rects(), "the first frame is drawn whole");
+    assert_eq!(owed[1], whole.rects(), "frame 1 missed frame 0's");
+    assert_eq!(owed[2], corner.rects(), "frame 0 missed frame 1's");
+    assert_eq!(owed.len(), 3, "a base with nothing new is never drawn");
+    assert!(remote.frame(1).iter().all(|byte| *byte == 0x5A));
+    let stacks = rig.borrow().display.layers.clone();
+    let named: Vec<BufferId> = stacks.iter().map(|stack| stack[0].buffer).collect();
+    assert_eq!(
+        named,
+        [frames[0], frames[1], frames[1]],
+        "the refused frame is never shown, and the unchanged one named again"
     );
 }
 

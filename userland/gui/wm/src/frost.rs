@@ -4,10 +4,11 @@
 //! # What a frost is
 //!
 //! A frosted window's pixels are blended over its frost: the windows beneath
-//! it composed as though none of them were frosted, box-blurred with samples
-//! taken past the window's edges as far as the screen's own, and mixed back by
-//! the window's shape — the blur wherever the shape covers, the backdrop
-//! outside its corners. The blur at a screen pixel is therefore a function of
+//! it composed as though none of them were frosted, blurred at half resolution
+//! on cells anchored at the screen's top-left with samples taken past the
+//! window's edges as far as the screen's own, and mixed back by the window's
+//! shape — the blur wherever the shape covers, the backdrop outside its
+//! corners. The blur at a screen pixel is therefore a function of
 //! the windows beneath and the radius alone: not of where the window lies, not
 //! of its shape, and not of any other window's frost.
 //!
@@ -18,7 +19,8 @@
 //! from the field — copied where the shape covers fully, mixed at the corners
 //! over what was composed beneath them — so a window moving inside its field,
 //! or changing its shape, blurs nothing. A change beneath stales the field
-//! within the radius of the change, and only that much is blurred again.
+//! within the frost's reach of the change, and only that much is blurred
+//! again.
 //!
 //! A window's first move gives its field a margin of the blur's radius about
 //! its rectangle, and a move past it shifts the field, keeping what it still
@@ -330,9 +332,9 @@ impl FrostField {
         }
     }
 
-    /// Blur `spans` of the field from the backdrop `plane` holds around them,
-    /// spread over `screen`, and record them current, reporting whether the
-    /// scratch could hold the blur.
+    /// Blur `spans` of the field at half resolution from the backdrop `plane`
+    /// holds around them, its cells anchored at `screen`'s top-left, and record
+    /// them current, reporting whether the scratch could hold the blur.
     pub(crate) fn refresh(
         &mut self,
         plane: &mut Surface,
@@ -347,7 +349,10 @@ impl FrostField {
             radius: self.radius_px,
         };
         let at = (self.rect.left(), self.rect.top());
-        if !self.pixels.blur_from(at, plane, &blurring, scratch, runner) {
+        if !self
+            .pixels
+            .blur_halved_from(at, plane, &blurring, scratch, runner)
+        {
             return false;
         }
         for (cols, rows) in spans {
@@ -357,8 +362,9 @@ impl FrostField {
     }
 
     /// Lay the frost of a window at `bounds` shaped by `shape` into `back`
-    /// over `area`: the blur copied wherever the shape covers fully, and mixed
-    /// at the shape's coverage over what `back` holds within its corners.
+    /// over `area`: mixed at the shape's coverage over what `back` holds within
+    /// its corners, and, with `interior`, the blur copied wherever the shape
+    /// covers fully.
     ///
     /// The caller has asked [`holds`](Self::holds) first; a pixel the field
     /// does not cover is left as it is.
@@ -366,53 +372,38 @@ impl FrostField {
         &self,
         back: &mut Surface,
         area: Rect,
-        bounds: Rect,
-        shape: Option<WindowShape>,
+        (bounds, shape): (Rect, Option<WindowShape>),
+        interior: bool,
     ) {
         let area = area.intersection(&bounds);
-        let Some(shape) = shape.filter(|shape| shape.corner_reach() > 0) else {
-            self.copy_into(back, area);
+        if interior {
+            for copied in self::interior(bounds, shape) {
+                self.copy_into(back, area.intersection(&copied));
+            }
+        }
+        let Some(shape) = shape else {
             return;
         };
-        let reach = shape.corner_reach();
-        let inner = |offset: u32, extent: u32| extent.saturating_sub(offset.saturating_mul(2));
-        let (left, top) = (bounds.left(), bounds.top());
-        let (right, bottom) = (
-            bounds.right().saturating_sub_unsigned(reach),
-            bounds.bottom().saturating_sub_unsigned(reach),
-        );
-        let middle = Rect::new(
-            left.saturating_add_unsigned(reach),
-            top,
-            inner(reach, bounds.width),
-            bounds.height,
-        );
-        let side = |x: i32| {
-            Rect::new(
-                x,
-                top.saturating_add_unsigned(reach),
-                reach,
-                inner(reach, bounds.height),
-            )
-        };
-        for copied in [middle, side(left), side(right)] {
-            self.copy_into(back, area.intersection(&copied));
-        }
         let coverage = |x: u32, y: u32| {
             let local = |at: u32, from: i32| u32::try_from(i64::from(at) - i64::from(from));
-            match (local(x, left), local(y, top)) {
+            match (local(x, bounds.left()), local(y, bounds.top())) {
                 (Ok(lx), Ok(ly)) => shape.coverage(lx, ly),
                 _ => 0,
             }
         };
         let at = (self.rect.left(), self.rect.top());
-        for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
-            let corner = area.intersection(&Rect::new(x, y, reach, reach));
-            if let Some((cols, rows)) = surface_span(corner) {
-                let extent = (cols.start, rows.start, corner.width, corner.height);
+        for corner in corners(bounds, Some(shape)) {
+            let piece = area.intersection(&corner);
+            if let Some((cols, rows)) = surface_span(piece) {
+                let extent = (cols.start, rows.start, piece.width, piece.height);
                 back.mix_from(&self.pixels, at, extent, coverage);
             }
         }
+    }
+
+    /// The blurred pixels, the field's rectangle's own.
+    pub(crate) const fn pixels(&self) -> &Surface {
+        &self.pixels
     }
 
     /// Copy the part of the field inside `area` into `back`, replacing whatever
@@ -479,6 +470,54 @@ impl FrostField {
             }
         }
     }
+}
+
+/// The squares at the corners of a window at `bounds` where `shape` covers it
+/// by less than full: none for a window with no shape or square corners.
+pub(crate) fn corners(bounds: Rect, shape: Option<WindowShape>) -> [Rect; 4] {
+    let reach = shape.map_or(0, WindowShape::corner_reach);
+    if reach == 0 {
+        return [Rect::EMPTY; 4];
+    }
+    let right = bounds.right().saturating_sub_unsigned(reach);
+    let bottom = bounds.bottom().saturating_sub_unsigned(reach);
+    let square = |x: i32, y: i32| Rect::new(x, y, reach, reach);
+    [
+        square(bounds.left(), bounds.top()),
+        square(right, bounds.top()),
+        square(bounds.left(), bottom),
+        square(right, bottom),
+    ]
+}
+
+/// What of a window at `bounds` its shape covers fully: its rectangle less the
+/// corner squares, as the full-height middle and the sides between the
+/// corners. The pieces are disjoint, so a frost laid piece by piece copies no
+/// pixel twice.
+pub(crate) fn interior(bounds: Rect, shape: Option<WindowShape>) -> [Rect; 3] {
+    let reach = shape.map_or(0, WindowShape::corner_reach);
+    if reach == 0 {
+        return [bounds, Rect::EMPTY, Rect::EMPTY];
+    }
+    let inner = |extent: u32| extent.saturating_sub(reach.saturating_mul(2));
+    let side = |x: i32| {
+        Rect::new(
+            x,
+            bounds.top().saturating_add_unsigned(reach),
+            reach,
+            inner(bounds.height),
+        )
+    };
+    [
+        Rect::new(
+            bounds.left().saturating_add_unsigned(reach),
+            bounds.top(),
+            inner(bounds.width),
+            bounds.height,
+        ),
+        side(bounds.left()),
+        side(bounds.right().saturating_sub_unsigned(reach)),
+    ]
 }
 
 /// Move the `w` × `h` block of `pixels`, rows `width` long, from `from` to `to`,

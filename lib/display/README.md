@@ -102,7 +102,9 @@ and the client can never drift apart.
   hands that same back frame and region to a caller that draws into it
   itself — a picture covering the output reaching the display with no copy
   between — and presents it the same way, or, where the caller refuses,
-  shows nothing and leaves that frame owing the whole region.
+  shows nothing and leaves that frame owing the whole region. A layered
+  present's base is drawn the same way (`Base::Drawn`), beneath the layers,
+  and a base with nothing new names the frame on screen again.
 
 Every input is validated fail-closed on both halves; the error
 vocabulary crosses the wire as typed `Errno` status frames, converted

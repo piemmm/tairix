@@ -93,6 +93,9 @@ tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-
     "test-util",
 ] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The half-resolution blur spelled as its definition, which the frost tests
+# hold every way of reaching a frost to.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0", features = ["test-util"] }
 # The shared metered allocator the furniture render's largest request is
 # measured through.
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

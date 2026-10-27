@@ -42,8 +42,8 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD3 | Band-free blending as an engine capability: `AccelCaps` states it, every translucent window that reads no backdrop rides a free layer, the metal comparison, and the HVS's output dither | done |
 | GD4 | A frosted window as two planes, its frost and its own pixels | done |
 | GD8 | The frost is a function of what lies beneath it: sampled past the window's edges, retained as a field with a margin, so a drag inside it blurs nothing | done |
-| GD9 | A frost layer is its window's field, cropped by the engine: a drag writes display memory only at the corners | planned |
-| GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | planned |
+| GD9 | A frost layer is its window's field, cropped by the engine: a drag writes display memory only at the corners | done |
+| GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | done |
 | GD5 | The screen fade as a lone layer's opacity | planned |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode in GP4's pinned set, agreeing with `lib/raster` within a stated tolerance | blocked: GP4 |
 | GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3 |
@@ -379,21 +379,27 @@ the real compositor, one core, SSE2:
 
 | per sample | composited | layered |
 |---|---|---|
-| time, median | 0.63 ms | 0.31 ms |
-| time, mean | 0.75 ms | 0.40 ms |
+| time, median | 0.64 ms | 0.027 ms |
+| time, mean | 0.74 ms | 0.15 ms |
 | blurred, mean | 5 356 px | 5 356 px |
 | blurred, the drag's first move | 135 364 px | 135 364 px |
-| base copied into the display's frame | 543 867 px | 6 079 px |
+| encoded, into the display's own frame | 543 914 px | 6 126 px |
+| copied into the display's frame | 0 px | 0 px |
 
 Laid on the engine, the window's own pixels move as a free layer over its
 frost's layer (GD4), the engine blends the glass, and the base presents only
 the strip the frost uncovered (GD1). The frost is laid from its field (GD8): a
 sample inside the field blurs nothing, the first move blurs the field's margin
 — about the border every sample blurred while the frost replicated at its
-window's edges, 125 924 px — and 7 of the 60 samples blur at all. The same
-window unblurred is a free layer alone and a sample composites nothing. What a
-frosted sample still costs on the engine is the frost's rectangle laid from the
-field and encoded into its layer (GD9).
+window's edges, 125 924 px — and 7 of the 60 samples blur at all. On the engine
+the frost layer is the field itself, cropped (GD9): a sample inside the field
+writes the frost's corners into display memory and nothing else, and the mean
+is the samples that cross the margin, each rewriting the hidden frost buffer
+from the field. The frame and the base are composed straight into the
+display's own memory (GD2), so nothing is copied into it: sent from the
+compositor's own frame instead, the composited drag copies 543 867 px a sample
+and its median is 0.74 ms. The same window unblurred is a free layer alone and
+a sample composites nothing.
 
 ### 7.2 What each engine can take
 
@@ -435,13 +441,23 @@ pixels left stale beneath a layer are composed again before they can show: a
 layer that moves, joins the base or is given back marks where it lay.
 
 **GD2 — the composite writes where the engine reads.** A flattened footprint is
-written into its layer's buffer by the pass that composes it, rather than into
-the heap frame and then encoded again from the back buffer; only what that
-buffer missed while the other was shown is encoded from the back buffer. The
-base is composed into the display's own back frame (`Presenter::present_drawn`)
-with what that frame missed encoded from the back buffer, so the heap frame
-survives only for a presenter with no frame of its own. Both halves keep the
-back buffer as the one source every frost and catch-up reads.
+written into the buffer its layer shows next by the pass that composes it; only
+what that buffer missed while the other was shown is encoded from the back
+buffer. The base is composed into the display's own back frame —
+`Presenter::present_drawn` for a frame, `Base::Drawn` beneath layers — with
+what that frame missed encoded from the back buffer, so the compositor's own
+frame serves only a display with no frame of its own, which is remembered
+rather than asked every frame. Both halves keep the back buffer as the one
+source every frost and catch-up reads.
+- **A frame is planned before it is composed.** The plan names every output
+  pixel the frame encodes, which is what the display is handed to bring its
+  frame up to date with; the composite then runs into whichever frame the
+  display holds.
+- **Nothing a composite layer covers is drawn into the base**, the catch-up
+  included, since the base beneath it is never seen.
+- **A frame no display drew is composed into the back buffer alone** and owed,
+  so the next frame catches it up from there; the compositor's own frame,
+  left behind, is brought level whole before it is next sent.
 
 **GD3 — the engine states whether its blend bands.** `AccelCaps` states whether
 the engine's blend of a translucent layer reaches the panel deeper than 8 bits
@@ -499,31 +515,49 @@ frost is composed.
   priming per line for less travel, and one held only ahead of the motion
   thrashes on a pointer's jitter.
 - **A change beneath stales only its reach.** A change to the layers beneath
-  a frost stales the field and recomposes the frost within the blur's radius of
+  a frost stales the field and recomposes the frost within the frost's reach of
   it, and nothing of any other window's frost. Recomputing one frost no longer
   drops the frosts above it.
 - **An unretained frost is computed where it is drawn.** A window the ration
   leaves without a field is frosted where the frame recomposes it, its
-  backdrop composed into the frost plane over the blur's reach.
+  backdrop composed into the frost plane over the frost's reach.
+- **At half resolution.** The blur is taken on cells two pixels square,
+  anchored at the screen's top-left, blurred by half the radius and spread
+  back bilinearly (`plans/FIX-DESKTOP-SPEEDUP.md` D.5), so a frost reads, and a
+  change reaches into it, `2·⌊radius/2⌋ + 2` pixels. A field at the window
+  radius costs two fifths of the full-resolution blur it replaced, and a
+  margin slab a third to a half.
 - **What it changes.** The edge of a frost now shows the backdrop past the
   window rather than its own edge replicated; under the dark theme's glass
-  that differs by at most 9 levels, and only within the radius of the edge.
+  that differs by at most 9 levels, and only within the reach of the edge.
   Treating a frosted window beneath as unblurred differs by its blur's residue
   seen through two panes and blurred again — a few levels where any is visible.
-  A window translucent as a whole with no blur, which nothing in the desktop
+  Against the full-resolution blur, on photographs, the window radius keeps
+  98% of pixels within a level and is at most 12 off at the hardest edges; the
+  chrome radius, 7, keeps two thirds within a level and is at most 26 off. A
+  window translucent as a whole with no blur, which nothing in the desktop
   draws, retains nothing: a blur of radius zero is no longer the backdrop as
   composed, so it composes through the blend path.
-- **What remains for later.** Blurring the field at half resolution is
-  `plans/FIX-DESKTOP-SPEEDUP.md` D.5, which waits on its visual comparison.
 
 **GD9 — a frost layer is its window's field, cropped.** On a layer engine, a
-frost layer's buffers hold its window's field in screen order with the
-corners mixed where the window lies, and the layer shows the window's
-rectangle of it. A move inside the field then writes display memory only
-where the corners left and arrived, and the base only its uncovered strip; a
-shift past the margin rewrites the buffer the engine is not showing. The
-field's buffers are the size of the field rather than the window, which the
-ration charges.
+frost layer's buffers are the size of its window's field and hold it in
+screen order — the blur, and at the window's corners the shape's mix over what
+lies beneath them — and the engine shows the window's rectangle of it (a
+layer's source crop, which `AccelLayer` already carries).
+- **Baked from the field, not the frame.** Only the corners are composed in
+  the back buffer; everything else is encoded from the field. A frosted
+  window's own zone therefore lays its frost's corners alone, and no composite
+  zone is encoded into the heap frame, which the base never presents there.
+- **What a drag writes.** A move inside the field writes the corners it left
+  and arrived at, and the base the strip it uncovered. A shift of the field
+  past its margin moves the field's rectangle, which rewrites the buffer the
+  engine is not showing, from the field. Wherever the field is blurred again,
+  both buffers are written there.
+- **A frost layer needs a retained field.** The frame settles the ration before
+  it plans its layers and fits the field of every window it lays on a frost
+  layer before it bakes one; a frosted window the ration leaves without a
+  field, or whose field cannot be had, is flattened — the one layer of its
+  footprint over what lies beneath it — until its rectangle changes.
 
 **GD5 — the screen fade as a lone layer's opacity.** A stack of one layer — the
 base alone, or a promoted window — fades through its per-layer opacity over the
@@ -606,15 +640,26 @@ Each needs sign-off before the item that depends on it; none is assumed.
   window to the base; every screen matches the software composite within one
   level.
 - **GD8**: every frost equals a naive reference — the unfrosted composite
-  beneath, box-blurred with replication at the screen's edges and mixed at the
-  shape's coverage — whether its field was retained, shifted, staled or never
-  kept; a drag inside the field blurs no pixel and composes beneath the glass
-  only its corners; a drag past it blurs only the slab entered; a change beneath
+  beneath, blurred at half resolution with replication at the screen's edges
+  and mixed at the shape's coverage — whether its field was retained, shifted,
+  staled or never kept; a drag inside the field blurs no pixel and composes
+  beneath the glass only its corners; a drag past it blurs only the slab
+  entered; a change beneath
   recomposes only its reach and no other frost; the Switchboard-shaped drag of
   §7.1 is measured against GD4's.
 - **GD9**: a drag inside the field writes the frost layer only at the corners
-  it left and arrived at; a shift writes the hidden buffer; the engine's screen
-  matches the software composite within one level.
+  it left and arrived at and composes nothing but the corners and the
+  uncovered strip; a shift rewrites the hidden buffer; a change beneath reaches
+  the frost layer where the field is blurred again; an unretained frosted
+  window is flattened; no composite zone is encoded into the frame; the
+  engine's screen matches the software composite within one level throughout.
+- **GD2**: a frame drawn into a display's own memory shows what the same frame
+  sent from the compositor's does, through frosts, the pointer, a fade, a
+  refusal, a smaller desktop and a removal, and a base drawn beneath layers
+  what one copied in does; a display drawn into is sent no frame; a display
+  with no frame of its own is asked to draw once, and sent the whole output as
+  it stands; a flattened layer's composed pixels are in the buffer it shows
+  next before its bake; a base with nothing new draws and encodes nothing.
 - **GD5**: a fade presents no pixel after its first step on an engine with
   per-layer opacity, and each step's screen matches the software reveal within
   one level.

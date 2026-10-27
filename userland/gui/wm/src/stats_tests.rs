@@ -401,6 +401,37 @@ fn a_present_is_counted_in_the_epoch_it_published() {
 }
 
 #[test]
+fn frames_drawn_in_place_and_brought_level_still_satisfy_the_decoder() {
+    // A frame drawn into the display's own memory also catches up what that
+    // frame missed while the other was shown, and the compositor's own frame
+    // is brought level before it is next sent: upkeep, which encodes nothing
+    // the frame damaged, so neither may count as encoded.
+    let mut comp = compositor();
+    let id = add(&mut comp, 0, 0, 10, 8, Color::rgb(9, 9, 9));
+    let mut drawn = MockDisplay::drawn(mode(64, 48));
+    for step in 1..5i32 {
+        comp.move_window(id, Point::new(step * 6, step * 4));
+        comp.present(&mut drawn).expect("drawn in place");
+        let totals = comp.frame_totals();
+        assert_eq!(
+            decoded(totals),
+            Ok(totals),
+            "drawn frame {step}: {totals:?}"
+        );
+    }
+    comp.owe_output();
+    comp.move_window(id, Point::new(40, 30));
+    let mut sent = MockDisplay::new(mode(64, 48));
+    comp.present(&mut sent).expect("sent");
+    let totals = comp.frame_totals();
+    assert_eq!(
+        decoded(totals),
+        Ok(totals),
+        "sent once drawn frames left it behind: {totals:?}"
+    );
+}
+
+#[test]
 fn a_frame_of_every_kind_of_work_still_satisfies_the_decoder() {
     // The bounds the ABI decoder enforces are claims about what a composite
     // pass can produce, so the scene that exercises every counter — an

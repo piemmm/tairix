@@ -4,9 +4,10 @@
 //! colour arithmetic ([`color`]), its CPU pixel buffer ([`surface`]), and
 //! the separable box [`blur`] every frosted surface shares — reached as
 //! [`Surface::frost_region`], which frosts one rectangle in place for a
-//! control's selected tile, and [`Surface::frost_from`], which frosts bands of
-//! one from a backdrop split between the destination and a plane, for the
-//! compositor's window backdrop; both run in a reusable [`BlurScratch`].
+//! control's selected tile, and [`Surface::frost_halved_from`] and
+//! [`Surface::blur_halved_from`], which blur bands of a backdrop plane at half
+//! resolution for the compositor's window backdrop; all run in a reusable
+//! [`BlurScratch`].
 //! Both the compositing window manager (`userland/gui/wm`) and the
 //! taskbar (`userland/gui/taskbar`) draw pixels, but neither may depend
 //! on the other; the shared rasteriser therefore
@@ -71,8 +72,10 @@ pub use affine::Affine;
 pub use artwork::{
     for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use blur::halved_reference;
 pub use blur::{
-    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Blurring, Frosting,
+    box_blur, box_blur_coverage, cast_shadow, halved_reach, soften_coverage, BlurScratch, Blurring,
     ShadowCast, SOFTEN_PASSES,
 };
 pub use color::{

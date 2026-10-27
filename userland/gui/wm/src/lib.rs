@@ -21,11 +21,11 @@
 //! - **Backdrop blur**: a window may ask for the already-composited
 //!   content behind its rectangle to be blurred before its own translucent
 //!   pixels are blended over it, so a panel reads like frosted glass. The
-//!   effect is `lib/raster`'s shared
-//!   [`frost_from`](tairix_raster::Surface::frost_from), run in working memory
-//!   the compositor reserves with its back buffer, and the result is retained
-//!   between frames ([`frost`]) wherever the budget allows, so a window's own
-//!   repaint costs no re-blur at all.
+//!   effect is `lib/raster`'s shared half-resolution frost
+//!   ([`blur_halved_from`](tairix_raster::Surface::blur_halved_from)), run in
+//!   working memory the compositor reserves with its back buffer, and the
+//!   result is retained between frames ([`frost`]) wherever the budget allows,
+//!   so a window's own repaint costs no re-blur at all.
 //! - **Damage tracking** ([`Region`]): only changed pixels are
 //!   recomposited, and [`stats`] counts what each frame actually cost so a
 //!   redraw that repaints far more than it changed is measurable rather than

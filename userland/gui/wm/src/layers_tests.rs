@@ -10,14 +10,16 @@ use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageRect, DisplayMode, DisplayPower,
 };
 use tairix_abi::DriverError;
-use tairix_display::{Base, CursorPlane, LayerPresenter, Presenter};
+use tairix_display::{Base, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
 
 use crate::color::{Color, Pixel};
+use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region};
 use crate::pointer::{Ghost, Halo, HaloRing};
 use crate::surface::Surface;
 use crate::tests::{
-    decorated, mode, new_compositor, opaque, solid_cursor, MockDisplay, SETTLED_NS,
+    decorated, mode, new_compositor, opaque, solid_cursor, unbudgeted_compositor, DrawnFrames,
+    MockDisplay, SETTLED_NS,
 };
 use crate::window::Window;
 use crate::{Compositor, Presentation, WindowFrame, WindowId, WindowSizeState};
@@ -88,6 +90,8 @@ struct MockEngine {
     plane_asks: usize,
     /// How many frames had been shown when each move reached the plane.
     moved_after: Vec<usize>,
+    /// The display's own frames, where a base may be drawn into them.
+    drawn: Option<DrawnFrames>,
 }
 
 const CAPS: AccelCaps = AccelCaps {
@@ -125,7 +129,15 @@ impl MockEngine {
             plane_refuses: PlaneRefuses::Nothing,
             plane_asks: 0,
             moved_after: Vec::new(),
+            drawn: Some(DrawnFrames::new(mode)),
         }
+    }
+
+    /// An engine holding no frame of its own, whose base is copied in from the
+    /// compositor's.
+    fn without_frames(mut self) -> Self {
+        self.drawn = None;
+        self
     }
 
     /// Frames shown so far, composited or stacked.
@@ -227,6 +239,22 @@ impl Presenter for MockEngine {
         Ok(())
     }
 
+    fn present_drawn(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        let frames = self.drawn.as_mut().ok_or(DriverError::Unsupported)?;
+        let before = frames.draws;
+        frames.present(damage, draw)?;
+        if frames.draws > before {
+            self.frame = frames.screen();
+            self.screen = self.frame.clone();
+            self.frames += 1;
+        }
+        Ok(())
+    }
+
     fn set_power(&mut self, _power: DisplayPower) -> Result<(), DriverError> {
         Ok(())
     }
@@ -288,7 +316,7 @@ impl LayerPresenter for MockEngine {
 
     fn present_layers(
         &mut self,
-        base: Option<Base<'_>>,
+        base: Option<Base<'_, '_>>,
         layers: &[AccelLayer],
     ) -> Result<(), DriverError> {
         self.stacks_asked += 1;
@@ -309,10 +337,24 @@ impl LayerPresenter for MockEngine {
             layer.validate(&self.caps, buffer.width, buffer.height)?;
         }
         self.base_damage.clear();
+        let based = base.is_some();
         match base {
-            Some(base) => {
-                self.base_damage.extend_from_slice(base.damage);
-                self.take(base.damage, base.frame);
+            Some(Base::Frame { frame, damage }) => {
+                self.base_damage.extend_from_slice(damage);
+                self.take(damage, frame);
+                self.screen = self.frame.clone();
+            }
+            Some(Base::Drawn { damage, draw }) => {
+                let frames = self.drawn.as_mut().ok_or(DriverError::Unsupported)?;
+                frames.base(damage, draw)?;
+                self.base_damage
+                    .extend(damage.rects().iter().map(|rect| DamageRect {
+                        x: rect.left().cast_unsigned(),
+                        y: rect.top().cast_unsigned(),
+                        width_px: rect.width,
+                        height_px: rect.height,
+                    }));
+                self.frame = frames.screen();
                 self.screen = self.frame.clone();
             }
             None => {
@@ -325,7 +367,7 @@ impl LayerPresenter for MockEngine {
             self.lay(layer);
         }
         let mut stack = Vec::new();
-        if base.is_some() {
+        if based {
             stack.push(AccelLayer {
                 buffer: BufferId::new(u32::MAX).expect("a marker"),
                 src: DamageRect::full(&self.mode),
@@ -337,7 +379,7 @@ impl LayerPresenter for MockEngine {
             });
         }
         stack.extend_from_slice(layers);
-        self.stacks.push((base.is_some(), stack));
+        self.stacks.push((based, stack));
         Ok(())
     }
 }
@@ -461,7 +503,7 @@ fn the_top_windows_go_on_layers_over_a_base_holding_the_rest() {
     assert_eq!(c.presentation(), Some(Presentation::Layered));
     assert!(c.on_display(middle) && c.on_display(top));
     assert_eq!(
-        pixel(c.frame(), output, 7, 5),
+        pixel(&engine.frame, output, 7, 5),
         [255, 0, 0, 255],
         "the base holds the window below the layers, and not the one above it"
     );
@@ -630,6 +672,118 @@ fn a_translucent_window_is_flattened_over_what_lies_beneath_it() {
         }
     }
     assert_close(&engine.screen, &software(output, BLUE, build), 1);
+}
+
+/// A base drawn straight into the display's own frames shows what one composed
+/// into the compositor's own frame and copied in does, beneath a frost, a
+/// flattened window and a free one, through moves and a repaint.
+#[test]
+fn a_base_drawn_in_place_shows_what_a_copied_one_does() {
+    let output = mode(48, 28);
+    let build = |c: &mut Compositor| {
+        let glass = rounded_frost(c, Point::new(10, 6));
+        let veil = c.add_window(Point::new(30, 14), opaque(10, 8, RED));
+        assert!(c.set_opacity(veil, 160));
+        let top = c.add_window(Point::new(4, 18), opaque(6, 6, GREEN));
+        [glass, veil, top]
+    };
+    let mut drawn = new_compositor(output, BLUE).expect("compositor");
+    let mut copied = new_compositor(output, BLUE).expect("compositor");
+    let [glass, veil, top] = build(&mut drawn);
+    assert_eq!(build(&mut copied), [glass, veil, top]);
+    let mut in_place = MockEngine::new(output);
+    let mut copying = MockEngine::new(output).without_frames();
+    let steps: [&dyn Fn(&mut Compositor) -> bool; 5] = [
+        &|_| true,
+        &|c| c.move_window(glass, Point::new(14, 9)),
+        &|c| c.move_window(veil, Point::new(26, 12)),
+        &|c| c.set_background(GREEN),
+        &|c| c.move_window(top, Point::new(20, 2)),
+    ];
+    let mut bases = Vec::new();
+    for (at, step) in steps.iter().enumerate() {
+        assert!(step(&mut drawn) && step(&mut copied));
+        drawn.present(&mut in_place).expect("drawn in place");
+        copied.present(&mut copying).expect("copied in");
+        assert_eq!(drawn.presentation(), Some(Presentation::Layered));
+        assert_eq!(copied.presentation(), Some(Presentation::Layered));
+        assert_eq!(in_place.screen, copying.screen, "step {at}");
+        bases.push(in_place.drawn.as_ref().map_or(0, |frames| frames.draws));
+    }
+    assert_eq!(
+        bases,
+        [1, 2, 3, 4, 4],
+        "each base that changed drawn in place; a free window moving changes \
+         nothing the base shows"
+    );
+}
+
+/// A frame whose base has nothing new — a free window moving over it — draws
+/// no base and encodes nothing, however far the compositor's own frame has
+/// fallen behind the display's.
+#[test]
+fn a_frame_with_nothing_new_in_its_base_encodes_nothing() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let [.., top] = three(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("the first frame");
+    assert!(c.move_window(top, Point::new(16, 10)));
+    c.present(&mut engine).expect("the free window moved");
+    assert_eq!(c.presentation(), Some(Presentation::Layered));
+    let stats = c.frame_stats();
+    assert_eq!(stats.encoded_px, 0, "nothing was encoded: {stats:?}");
+    assert_eq!(
+        engine.drawn.as_ref().map_or(0, |frames| frames.draws),
+        1,
+        "the base on screen is named again"
+    );
+}
+
+/// A flattened layer's changed pixels are encoded into the buffer it shows
+/// next by the pass that composes them, so its bake has none of them left to
+/// encode from the back buffer.
+#[test]
+fn a_flattened_layer_is_encoded_by_the_pass_that_composes_it() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let [.., top] = three(&mut c);
+    assert!(c.set_opacity(top, 160));
+    let mut engine = MockEngine::new(output);
+    let paint = |c: &mut Compositor, colour: Color| {
+        c.present_window_content(top, 10, 10, |surface, changed| {
+            surface.set(1, 4, colour.premultiply());
+            changed.add(Rect::new(1, 4, 1, 1));
+        })
+    };
+    c.present(&mut engine).expect("the first frame");
+    // Both buffers are brought level, each then lacking only what changed
+    // while the other was shown.
+    assert_eq!(paint(&mut c, GREEN), Some(()));
+    c.present(&mut engine).expect("the other buffer baked");
+    assert_eq!(paint(&mut c, BLUE), Some(()));
+    let mut encoded = Region::new();
+    let planned = c.plan_composite(&mut encoded);
+    c.compose_zones(&planned, Some(&mut engine));
+    let layer = c
+        .layers
+        .as_ref()
+        .and_then(|stack| {
+            stack
+                .layers
+                .iter()
+                .find(|layer| layer.window() == Some(top))
+        })
+        .expect("the flattened layer");
+    let next = layer.target().expect("a buffer to show next");
+    assert!(
+        layer.held[next].stale.is_empty(),
+        "the composed pixel is already in the buffer shown next"
+    );
+    assert!(
+        layer.held[1 - next].stale.contains(Point::new(1, 4)),
+        "and owed to the buffer on screen"
+    );
 }
 
 #[test]
@@ -1030,11 +1184,318 @@ fn a_change_beneath_a_frosted_window_reaches_its_frost() {
     );
 }
 
+/// A rounded frosted window over stripes at `at`, the glass's id answered: its
+/// corners mix its shape over what lies beneath them, which is the part of a
+/// frost layer baked from the frame rather than the field.
+fn rounded_frost(c: &mut Compositor, at: Point) -> WindowId {
+    let mut stripes = Surface::filled(48, 28, GREEN.premultiply()).expect("surface");
+    for x in (0..48).step_by(4) {
+        stripes.fill_rect(x, 0, 2, 28, RED);
+    }
+    c.add_window(Point::ORIGIN, stripes);
+    let glass = c.add_window(at, glass(20, 12));
+    assert!(c.set_corners(glass, Corners::Rounded { radius: 4 }));
+    assert!(c.set_backdrop_blur(glass, 4));
+    glass
+}
+
+/// What a rounded glass's arc may differ by: its free layer is baked already
+/// weighted by its coverage, and the engine blends that without the dither,
+/// two roundings where the software composite takes one.
+const ARC_SLACK: u8 = 2;
+
+/// What `engine`'s buffers hold, buffer by buffer.
+fn snapshot(engine: &MockEngine) -> Vec<(BufferId, Vec<u8>)> {
+    engine
+        .buffers
+        .iter()
+        .map(|buffer| (buffer.id, buffer.bytes.clone()))
+        .collect()
+}
+
+/// The pixels, by buffer and buffer coordinate, that differ from `before`.
+fn written(engine: &MockEngine, before: &[(BufferId, Vec<u8>)]) -> Vec<(BufferId, u32, u32)> {
+    let mut written = Vec::new();
+    for (id, was) in before {
+        let Some(buffer) = engine.buffer(*id) else {
+            continue;
+        };
+        for (at, (now, then)) in buffer.bytes.chunks(4).zip(was.chunks(4)).enumerate() {
+            if now != then {
+                let at = u32::try_from(at).expect("a small buffer");
+                written.push((*id, at % buffer.width, at / buffer.width));
+            }
+        }
+    }
+    written
+}
+
+#[test]
+fn a_frost_layer_holds_its_field_and_shows_its_window_of_it() {
+    let output = mode(48, 28);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = rounded_frost(&mut c, Point::new(10, 6));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert!(c.move_window(glass, Point::new(11, 7)));
+    c.present(&mut engine).expect("presents");
+
+    let (frost, _) = frost_and_pixels(&engine);
+    let buffer = engine.buffer(frost.buffer).expect("the frost's buffer");
+    assert_eq!(
+        (buffer.width, buffer.height),
+        (20 + 2 * 4, 12 + 2 * 4),
+        "its buffers hold the field: the window and a margin of the blur's radius"
+    );
+    assert_eq!(shown_at(&frost), Rect::new(11, 7, 20, 12));
+    assert_eq!(
+        (
+            frost.src.x,
+            frost.src.y,
+            frost.src.width_px,
+            frost.src.height_px
+        ),
+        (4, 4, 20, 12),
+        "the engine shows the window's rectangle of it"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let glass = rounded_frost(c, Point::new(10, 6));
+            c.move_window(glass, Point::new(11, 7));
+        }),
+        ARC_SLACK,
+    );
+}
+
+#[test]
+fn a_drag_inside_the_field_writes_the_frost_layer_only_at_its_corners() {
+    let output = mode(48, 28);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = rounded_frost(&mut c, Point::new(10, 6));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    // The first move gives the field its margin, about the window at (11, 6);
+    // it and the move after it bake both of the new layer's buffers whole.
+    for x in [11, 12] {
+        assert!(c.move_window(glass, Point::new(x, 6)));
+        c.present(&mut engine).expect("presents");
+    }
+    let field_origin = Point::new(7, 2);
+    let corners = |x: i32| {
+        [(x, 6), (x + 16, 6), (x, 14), (x + 16, 14)]
+            .map(|(cx, cy)| Rect::new(cx - field_origin.x, cy - field_origin.y, 4, 4))
+    };
+    // One way only: a buffer that last held the window where it returns to is
+    // already right, and is rightly not written.
+    for (from, to) in [(12, 13), (13, 14), (14, 15)] {
+        let before = snapshot(&engine);
+        assert!(c.move_window(glass, Point::new(to, 6)));
+        c.present(&mut engine).expect("presents");
+        let stats = c.frame_stats();
+        assert_eq!(stats.blur_px, 0, "a move inside the field blurs nothing");
+        let changed = written(&engine, &before);
+        assert!(!changed.is_empty(), "the corners moved");
+        let (frost, _) = frost_and_pixels(&engine);
+        let reached: Vec<Rect> = [from - 1, from, to].into_iter().flat_map(corners).collect();
+        for &(id, x, y) in &changed {
+            assert_eq!(id, frost.buffer, "only the frost's buffer was written");
+            let point = Point::new(x.cast_signed(), y.cast_signed());
+            assert!(
+                reached.iter().any(|corner| corner.contains(point)),
+                "({x}, {y}) of the frost's buffer lies at no corner it left or reached"
+            );
+        }
+        assert!(
+            stats.encoded_px <= 2 * 12,
+            "the frame encoded {} pixels: the strip the move uncovered, and no zone",
+            stats.encoded_px
+        );
+        assert_close(
+            &engine.screen,
+            &software(output, BLUE, |c| {
+                let glass = rounded_frost(c, Point::new(10, 6));
+                c.move_window(glass, Point::new(11, 6));
+                c.move_window(glass, Point::new(to, 6));
+            }),
+            ARC_SLACK,
+        );
+    }
+}
+
+#[test]
+fn crossing_the_margin_rewrites_the_buffer_the_engine_is_not_showing() {
+    let output = mode(48, 28);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = rounded_frost(&mut c, Point::new(10, 6));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert!(c.move_window(glass, Point::new(11, 6)));
+    c.present(&mut engine).expect("presents");
+    let (shown, _) = frost_and_pixels(&engine);
+    let size = engine.buffer(shown.buffer).map(|b| (b.width, b.height));
+
+    assert!(c.move_window(glass, Point::new(16, 6)));
+    c.present(&mut engine).expect("presents");
+    let (frost, _) = frost_and_pixels(&engine);
+    assert_ne!(
+        frost.buffer, shown.buffer,
+        "the hidden buffer took the shifted field"
+    );
+    assert_eq!(
+        engine.buffer(frost.buffer).map(|b| (b.width, b.height)),
+        size,
+        "the field shifted in place, the size it was"
+    );
+    assert_eq!(
+        (frost.src.x, frost.src.y),
+        (4, 4),
+        "about the window where it lies"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let glass = rounded_frost(c, Point::new(10, 6));
+            c.move_window(glass, Point::new(16, 6));
+        }),
+        ARC_SLACK,
+    );
+}
+
+#[test]
+fn a_frosted_window_dragged_off_the_left_edge_and_back_keeps_every_column() {
+    // Its translucent pixels are repainted whole while it hangs past the
+    // screen's left edge and only at their right-hand end once back, so a
+    // buffer baked out there is the one every other repaint shows.
+    let output = mode(96, 64);
+    let build = |c: &mut Compositor| {
+        let mut stripes = Surface::filled(96, 64, GREEN.premultiply()).expect("surface");
+        for x in (0..96).step_by(6) {
+            stripes.fill_rect(x, 0, 3, 64, RED);
+        }
+        c.add_window(Point::ORIGIN, stripes);
+        let glass = c.add_window(Point::new(30, 20), glass(40, 24));
+        assert!(c.set_window_frame(glass, WindowFrame::new(decorated())));
+        assert!(c.set_corners(glass, Corners::Rounded { radius: 4 }));
+        assert!(c.set_casts_shadow(glass, true));
+        assert!(c.set_backdrop_blur(glass, 4));
+        glass
+    };
+    let repaint = |c: &mut Compositor, id: WindowId, area: Rect, shade: u8| {
+        let mut region = Region::new();
+        region.add(area);
+        assert!(c.repaint_window(id, (40, 24), &region, |surface, rects| {
+            for rect in rects {
+                surface.fill_rect(
+                    rect.left().cast_unsigned(),
+                    rect.top().cast_unsigned(),
+                    rect.width,
+                    rect.height,
+                    Color::rgba(shade, 200, 255 - shade, 0xC0),
+                );
+            }
+        }));
+    };
+    let mut layered = new_compositor(output, BLUE).expect("compositor");
+    let mut soft = new_compositor(output, BLUE).expect("compositor");
+    let glass = build(&mut layered);
+    assert_eq!(build(&mut soft), glass);
+    let mut engine = MockEngine::new(output);
+    let mut display = MockDisplay::new(output);
+    let mut step = 0u8;
+    let out: Vec<i32> = (-44..=30).rev().step_by(7).collect();
+    for round in 0..3 {
+        for &x in out.iter().chain(out.iter().rev()) {
+            step = step.wrapping_add(1);
+            let shade = step.wrapping_mul(37);
+            for c in [&mut layered, &mut soft] {
+                assert!(c.move_window(glass, Point::new(x, 20)));
+                if x < 0 && step.is_multiple_of(3) {
+                    repaint(c, glass, Rect::new(0, 0, 40, 24), shade);
+                } else if step.is_multiple_of(2) {
+                    repaint(c, glass, Rect::new(30, 2, 10, 20), shade);
+                }
+            }
+            layered.present(&mut engine).expect("layered");
+            soft.present(&mut display).expect("composited");
+            assert!(
+                engine.layers().len() >= 2,
+                "round {round} at x {x}: the glass rides its layers"
+            );
+            assert_close(&engine.screen, soft.frame(), ARC_SLACK);
+        }
+    }
+}
+
+#[test]
+fn a_frosted_window_without_a_retained_blur_is_flattened() {
+    let output = mode(24, 12);
+    let mut c = unbudgeted_compositor(output);
+    let glass = frosted(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    let bounds = c.window(glass).expect("glass").bounds();
+    let glass_layers: Vec<&AccelLayer> = engine
+        .layers()
+        .iter()
+        .filter(|layer| shown_at(layer) == bounds)
+        .collect();
+    assert_eq!(
+        glass_layers.len(),
+        1,
+        "one layer, its frost composited into it"
+    );
+    assert_eq!(
+        layer_pixel(&engine, glass_layers[0], 4, 4)[3],
+        255,
+        "flattened, so opaque"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            frosted(c);
+        }),
+        1,
+    );
+}
+
+#[test]
+fn no_composite_zone_is_encoded_into_the_frame() {
+    let output = mode(48, 28);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = rounded_frost(&mut c, Point::new(10, 6));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    let zone = c.window(glass).expect("glass").bounds();
+    let frame_within = |engine: &MockEngine| {
+        let mut bytes = Vec::new();
+        for y in zone.top()..zone.bottom() {
+            for x in zone.left()..zone.right() {
+                bytes.push(pixel(
+                    &engine.frame,
+                    output,
+                    x.cast_unsigned(),
+                    y.cast_unsigned(),
+                ));
+            }
+        }
+        bytes
+    };
+    let before = frame_within(&engine);
+    assert!(c.set_background(GREEN));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        frame_within(&engine),
+        before,
+        "the frame under a frost layer is the base's, which never shows it"
+    );
+}
+
 #[test]
 fn a_window_moving_beside_a_frost_layer_reaches_its_frost() {
     // A frost samples past its window's edges, so a window on a layer of its
-    // own that comes within the blur's radius of a frost — without touching
-    // its rectangle — changes that frost all the same.
+    // own that comes within the frost's reach of it — without touching its
+    // rectangle — changes that frost all the same.
     let output = mode(40, 20);
     let build = |c: &mut Compositor| {
         c.add_window(Point::ORIGIN, opaque(40, 20, GREEN));
@@ -1794,7 +2255,7 @@ fn a_reveal_presents_the_frame_and_gives_the_layers_back() {
     );
     assert_eq!(engine.frames, 1, "the dimmed frame was presented whole");
     assert_eq!(
-        pixel(c.frame(), output, 20, 14),
+        pixel(&engine.frame, output, 20, 14),
         [100, 100, 0, 255],
         "the window that had a layer is in the frame again, dimmed"
     );
@@ -1996,7 +2457,7 @@ fn the_desktop_layer_lies_in_the_base_beneath_the_window_layers() {
     c.present(&mut engine).expect("presents");
     assert_eq!(engine.layers().len(), 1, "the window over the base");
     assert_eq!(
-        pixel(c.frame(), output, 8, 8),
+        pixel(&engine.frame, output, 8, 8),
         [0, 255, 0, 255],
         "the desktop is the base's"
     );

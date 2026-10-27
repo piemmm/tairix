@@ -134,7 +134,7 @@ mod program {
         let shown = laid
             && engine
                 .present_layers(
-                    Some(Base {
+                    Some(Base::Frame {
                         frame: &pattern.frame,
                         damage: &[DamageRect::full(&output.mode)],
                     }),

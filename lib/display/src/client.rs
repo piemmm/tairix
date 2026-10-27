@@ -440,6 +440,24 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
         self.frames[back].id
     }
 
+    /// Hand the back frame to `draw` with what it lacks for a present of
+    /// which `changed` changed, and settle it once drawn, naming it. A refused
+    /// draw leaves all of that owed to it, and nothing owed to another frame.
+    fn draw_back(
+        &mut self,
+        changed: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<BufferId, DriverError> {
+        let refresh = self.refresh_back(changed);
+        let back = &mut self.frames[self.back];
+        if let Err(refused) = draw(back.memory.as_mut(), self.stride, &refresh) {
+            // What the draw left is unknown, so all of it stays owed.
+            back.stale = refresh;
+            return Err(refused);
+        }
+        Ok(self.settle_back(refresh, changed))
+    }
+
     /// The staged back frame went to the display, so the next is drawn into.
     fn rotate(&mut self, reply: PresentReply) {
         self.settle(reply);
@@ -590,16 +608,9 @@ impl<M: BufferMapper, T: DisplayTransport> Presenter for RemoteDisplay<M, T> {
             self.changed = changed;
             return Ok(());
         };
-        let refresh = self.refresh_back(&changed);
-        let back = &mut self.frames[self.back];
-        if let Err(refused) = draw(back.memory.as_mut(), self.stride, &refresh) {
-            // What the draw left is unknown, so all of it stays owed.
-            back.stale = refresh;
-            self.changed = changed;
-            return Err(refused);
-        }
-        let id = self.settle_back(refresh, &changed);
+        let drawn = self.draw_back(&changed, draw);
         self.changed = changed;
+        let id = drawn?;
         let reply = self
             .client
             .present(id, listed.rects())
@@ -688,7 +699,7 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
 
     fn present_layers(
         &mut self,
-        base: Option<Base<'_>>,
+        base: Option<Base<'_, '_>>,
         layers: &[AccelLayer],
     ) -> Result<(), DriverError> {
         if self.in_flight.is_some() {
@@ -705,15 +716,11 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
         // A base with nothing new is the frame on screen, named again; before
         // any was shown, a base is the whole frame.
         let whole = DamageRect::full(&self.mode);
-        let unchanged = self.shown.filter(|_| base.damage.is_empty());
-        let damage = if base.damage.is_empty() {
-            core::slice::from_ref(&whole)
-        } else {
-            base.damage
+        let fresh = match &base {
+            Base::Frame { damage, .. } => !damage.is_empty(),
+            Base::Drawn { damage, .. } => damage.intersects(self.surface),
         };
-        if unchanged.is_none() {
-            DamageRect::validate_list(damage, &self.mode)?;
-        }
+        let unchanged = self.shown.filter(|_| !fresh);
         let frame_at = unchanged.unwrap_or(self.back);
         let mut stack: ArrayVec<AccelLayer, MAX_ACCEL_LAYERS> = ArrayVec::new();
         let frame = AccelLayer {
@@ -731,7 +738,25 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
                 .map_err(|_| DriverError::LengthOutOfRange)?;
         }
         if unchanged.is_none() {
-            self.stage(base.frame, damage)?;
+            match base {
+                Base::Frame { frame, damage } => {
+                    let damage = if damage.is_empty() {
+                        core::slice::from_ref(&whole)
+                    } else {
+                        damage
+                    };
+                    DamageRect::validate_list(damage, &self.mode)?;
+                    self.stage(frame, damage)?;
+                }
+                Base::Drawn { damage, draw } => {
+                    let mut changed = core::mem::take(&mut self.changed);
+                    changed.clone_from(damage);
+                    changed.clip(self.surface);
+                    let drawn = self.draw_back(&changed, draw);
+                    self.changed = changed;
+                    drawn?;
+                }
+            }
         }
         let reply = self
             .client

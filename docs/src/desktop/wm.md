@@ -28,9 +28,10 @@ The compositor turns a stack of windows into one scan-out frame:
    copied rather than blended and pays nothing for it.
 3. Each composited pixel is scaled by the screen reveal (see
    [Screen reveal](#screen-reveal)) and encoded into a byte frame laid out
-   for the active `DisplayMode` (`Rgba8888` or `Bgra8888`).
-4. `Compositor::present` hands the changed part of that frame to a
-   `Display` driver.
+   for the active `DisplayMode` (`Rgba8888` or `Bgra8888`): the display's own
+   back frame, drawn in place, or the compositor's own for a display holding
+   none (see [Presenting only what changed](#presenting-only-what-changed)).
+4. `Compositor::present` shows it, naming the part that changed.
 
 A row, not a pixel, is the unit of work: for each dirty row the
 compositor resolves every covering layer's source row (`Window::row`, and a
@@ -282,12 +283,15 @@ and above it the windows' layers, each in two buffers the display allocated:
   without the desktop's dither unless its caps state `band_free_blend`
   (`plans/GPU.md` decision 10), and moving it is a new destination, not a
   composite.
-- **Frost** — beneath a frosted window's free layer, the software composite of
-  everything beneath its rectangle with its frost applied, opaque: what the
-  window's own pixels are blended over, by the engine. A move lays the frost
-  again from the window's retained field, blurring nothing inside it, and never
-  composites the window's own pixels. A frosted window given a single layer,
-  or one whose frost the display could not give buffers, is flattened
+- **Frost** — beneath a frosted window's free layer, opaque, what the window's
+  own pixels are blended over, by the engine: its retained field — the blur
+  over a rectangle a margin larger than the window — with the window's shape
+  mixed at its corners, of which the engine shows the window's rectangle as a
+  crop. It is baked from the field rather than the frame, so a move inside the
+  field writes only the corners it left and arrived at, and a shift of the
+  field past its margin rewrites the buffer the engine is not showing. A
+  frosted window given a single layer, one whose blur the ration does not
+  retain, and one whose frost the display could not give buffers are flattened
   instead; a window's layers are had together or not at all.
 - **Flattened** — a window translucent as a whole, baked as the software
   composite of its footprint over everything beneath it, the window
@@ -299,13 +303,18 @@ is cut through a frost. A zone that would joins the base with its whole
 window, so a frosted window's pixels are never shown without their frost.
 
 The back buffer holds at each pixel the composite the frame or layer showing
-it needs. The base presents only what it shows: its damage less every
-composite zone, which is opaque and hides it, so a dragged frosted window
-copies into the display's frame the strip it uncovered rather than its whole
-footprint. What a zone left stale beneath it is composed again before it can
-show, because a zone that moves, a window that joins the base and layers
-given back each mark where they lay. A layer's buffers alternate: the engine shows one while what changed
-is baked into the other, so it never reads a buffer being written, and
+it needs — within a frost's rectangle, only its corners. The base presents only
+what it shows: its damage less every composite zone, which is opaque and hides
+it, so a dragged frosted window draws into the display's frame the strip it
+uncovered rather than its whole footprint, and nothing of a zone is drawn into
+the base at all. The base is drawn straight into the display's own back frame
+(`Base::Drawn`), and a flattened footprint into the buffer its layer shows
+next, by the pass that composes them; each then takes from the back buffer
+only what it missed while the other buffer was shown. What a zone left stale
+beneath it is composed again before it can show, because a zone that moves, a
+window that joins the base and layers given back each mark where they lay. A
+layer's buffers alternate: the engine shows one while what changed is baked
+into the other, so it never reads a buffer being written, and
 `Presenter::ready` holds a frame while a present is queued. Each buffer
 catches up on what changed while the other was shown, including what no client
 reports: a shadow easing between its levels, a frame's activation, and a new
@@ -489,10 +498,11 @@ looks the same at every display density.
 A frost is defined by what lies beneath its window, never by where the window
 lies: the windows beneath composed as though none of them were frosted — a
 frosted window beneath contributes its pixels over what lies under it,
-unblurred — box-blurred with samples taken past the window's edges and
-replicated only at the screen's, and mixed back at the window's rounded-corner
-coverage, the single `Window::shape` its pixels are weighted by, so a rounded
-window's frosting fades across exactly the arc its own pixels fade across. The
+unblurred — blurred at half resolution with samples taken past the window's
+edges and replicated only at the screen's, and mixed back at the window's
+rounded-corner coverage, the single `Window::shape` its pixels are weighted
+by, so a rounded window's frosting fades across exactly the arc its own pixels
+fade across. The
 blur at a screen pixel is then a function of the windows beneath and the radius
 alone, which is what lets it be kept and laid again wherever the window moves
 (see [Retained backdrops](#retained-backdrops)), and no frost depends on
@@ -507,34 +517,49 @@ window's retained field, blurring first whatever of the field is stale, or, for
 a window the ration leaves without one, blurred where it is drawn. Either way a
 blur reads its backdrop from the **frost plane**, a screen of pixels reserved
 with the back buffer, into which the windows beneath are composed, unfrosted,
-over the blur's reach of what it blurs. The window itself and everything above
+over the frost's reach of what it blurs. The window itself and everything above
 it are composed after, and only the final segment encodes the scan-out frame.
 
 The effect is `lib/raster`'s shared frost — the one frosted glass the desktop
-has, which the login screen frosting a selected account tile draws through too
-(`Surface::frost_region`, in place). The compositor blurs bands of the screen
-from the plane, either into a retained field (`Surface::blur_from`), mixed back
-later at the shape's coverage (`Surface::mix_from`), or mixed straight into the
-back buffer (`Surface::frost_from`); `lib/raster` holds the two routes to the
-same pixels.
+has, whose box blur the login screen frosting a selected account tile draws
+through too (`Surface::frost_region`, in place, at full resolution). The
+compositor blurs bands of the screen from the plane, either into a retained
+field (`Surface::blur_halved_from`), mixed back later at the shape's coverage
+(`Surface::mix_from`), or mixed straight into the back buffer
+(`Surface::frost_halved_from`); `lib/raster` holds the two routes to the same
+pixels.
 
-The blur is a **separable box blur**: a horizontal pass then a vertical
-one, each carrying a running sum so the window slides by one add and one
-subtract per output. The cost is proportional to the rectangle's *area*
+The blur is taken at **half resolution**. The backdrop is averaged two by two
+into cells on a grid anchored at the screen's top-left, the cells are blurred
+by half the radius, and each pixel is spread back from the two cells nearest
+its centre along each axis, weighted three to one. A quarter of the area is
+blurred: on the host, with a screen-sized plane, a Switchboard-sized field at
+the window radius costs 1.32 ms where the full-resolution blur cost 3.30 ms, and
+the slab a drag's margin crossing blurs costs a third to a half as much. On
+photographs it keeps 98% of pixels within a level of the full-resolution blur at
+the window radius, and two thirds at the chrome radius, 7, whose hardest edges
+are up to 26 levels off. A frost reads its backdrop, and a change
+beneath reaches into it, within `halved_reach(radius)` = `2 × ⌊radius / 2⌋ + 2`
+of what it writes; a radius that scales to nothing is the backdrop itself.
+
+The cells are blurred by a **separable box blur**: a horizontal pass then a
+vertical one, each carrying a running sum so the window slides by one add and
+one subtract per output. The cost is proportional to the rectangle's *area*
 whatever the radius, never to area × radius. The horizontal pass is written into
-the frost plane, and the vertical one runs a strip of rows at a time, each
+a plane of cells, and the vertical one runs a strip of rows at a time, each
 column piece carrying its running sums from strip to strip, so nothing a frost
-works in grows with its area: the plane and a `tairix_raster::BlurScratch` of
-lines, sums and a strip are **reserved** with the back buffer for the output
-and the installed runner. A frost never allocates on the frame path, so a
-machine short of memory can never refuse one, and a mode the compositor cannot
-reserve them for is refused like one it cannot allocate a back buffer for.
+works in grows with its area: the frost plane and a `tairix_raster::BlurScratch`
+of the cell plane, lines, sums, a strip and the spread's lines are **reserved**
+with the back buffer for the output and the installed runner. A frost never
+allocates on the frame path, so a machine short of memory can never refuse one,
+and a mode the compositor cannot reserve them for is refused like one it cannot
+allocate a back buffer for.
 
 A band is written exactly as the whole screen's blur writes it, so bands side
 by side never seam. Every band's horizontal pass is taken before any band is
 laid, because a band's neighbourhood reaches into the bands beside it and what
 it must read there is the backdrop, not the blur of it. A band costs its lines'
-priming as well as its area — `2 × radius + 1` samples a line whatever its
+priming as well as its area — `2 × ⌊radius / 2⌋ + 1` cells a line whatever its
 width — which is why a field is blurred a whole slab at a time.
 
 Every channel is averaged, alpha included: on premultiplied data that is
@@ -756,8 +781,8 @@ saver's 128 rectangles into damage already holding hundreds so cost their
 count, not their product.
 
 A window with a backdrop blur widens what a change recomposes, but only by its
-blur's reach: a frost at a pixel averages the backdrop within the radius of it,
-so a change beneath marks the frost within that radius of the change — no more,
+frost's reach: a frost at a pixel reads the backdrop within that reach of it, so
+a change beneath marks the frost within that reach of the change — no more,
 because the blur reads its whole neighbourhood from the frost plane, so a strip
 of it is exactly what the whole frost writes there and cannot seam. Overlapping
 frosts each mark their own reach and read nothing of each other. See
@@ -969,15 +994,23 @@ number of bytes:
   wake that changed nothing costs neither a copy into a frame nor the
   driver's own. The first frame still shows: a new compositor marks the
   whole screen dirty.
-- **A frame is presented once, naming everything it changed.** One
-  `Presenter::present` carries the frame's disjoint dirty rectangles, or
-  the whole frame where damage covers the screen. The presenter copies
-  into the driver's frame it draws next only what that frame lacks, and
-  the driver moves only the damage on. The bytes moved are proportional
-  to what changed rather than to the box around it — a dirty taskbar
-  strip along the bottom edge plus a cursor near the top is two small
-  copies, not a near-full-screen one — and a scattered frame costs one
-  round trip, not one per rectangle.
+- **A frame is drawn where the display reads it.** It is planned first —
+  every output pixel it encodes — and the display hands over its own back
+  frame with what that frame lacks (`Presenter::present_drawn`): the plan
+  and what the frame missed while the other was shown, which is encoded from
+  the back buffer. Nothing is copied into the display afterwards. A display
+  holding no frame of its own is remembered as one until a new sink
+  arrives, and is sent the compositor's own frame (`Presenter::present`)
+  instead, brought level first wherever frames drawn elsewhere left it
+  behind. A frame no display drew is composed into the back buffer alone
+  and owed.
+- **A frame is presented once, naming everything it changed.** One present
+  carries the frame's disjoint dirty rectangles, or the whole frame where
+  damage covers the screen, and the driver moves only the damage on. The
+  bytes moved are proportional to what changed rather than to the box around
+  it — a dirty taskbar strip along the bottom edge plus a cursor near the top
+  is two small copies, not a near-full-screen one — and a scattered frame
+  costs one round trip, not one per rectangle.
 - **Covering the screen and spanning it are different questions.** Two
   far-apart corners have a bounding box the size of the screen while
   changing a few dozen pixels, so the whole-frame path is reserved for
@@ -1007,7 +1040,7 @@ composed beneath them; nothing else beneath the glass is composed.
 
 - **A change beneath stales only its reach.** A change to a window beneath a
   frost — its content, position or shadow, or a restack that puts it there —
-  stales the field, and marks the frost on screen, within the blur's radius of
+  stales the field, and marks the frost on screen, within the frost's reach of
   the change, and nothing of any other window's frost, since no frost reads
   another. A change confined to one window's own layer reaches only the frosts
   above it; a change not confined to a layer (the root fill, the desktop layer,
@@ -1149,7 +1182,7 @@ wrapped one would read as a suspiciously small frame.
 | `blended_px` | Layer contributions blended through *over*. Contributions, not screen positions: a pixel two windows both draw at is one damaged pixel and two blends, so this may legitimately exceed the damage — and that ratio is what says whether the frame paid for depth nobody can see. |
 | `opaque_px` | Pixels resolved by copying a fully opaque run of the front window's own pixels. Each cost no blend, and everything beneath it was skipped, which is why `blended_px` falls as this rises. |
 | `blur_px` | Pixels rewritten by a *recomputed* backdrop frost. A frost served from the retained one is copied rather than blurred and counts nothing here, so this is exactly the blur work the frame could not avoid — and zero is what a repaint inside a frosted window should read. |
-| `encoded_px` | Composed pixels converted to scan-out bytes. |
+| `encoded_px` | Damaged pixels converted to scan-out bytes. What a frame the display drew in missed while another was shown, caught up from the back buffer, is upkeep rather than the frame's work and is not counted, so this never exceeds the damage. |
 | `dirty_rects` | Dirty rectangles the frame redrew, whether by recomposing them or by encoding them afresh from the back buffer (a fade step). |
 | `present_calls` | Calls the frame made into the display driver to publish itself — the round trips of the section above. |
 | `chrome_hits` / `chrome_misses` | Window-furniture lookups served from the retained cache versus rendered again, whether the cache then kept them or refused. |

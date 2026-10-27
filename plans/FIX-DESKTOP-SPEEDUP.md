@@ -6,14 +6,14 @@
 | B | Blend no pixel nothing can see: opaque runs and occlusion, the dither, the segment composite, `encode_run` | done |
 | C | Repaint the control that changed: one region type, the control damage sink, hover routing, per-app damage, text drawn and measured once, one shell present per batch, the bar's per-control hover | done |
 | D | Blur costs what it changes: damage funnels, the retained frost, bit-identical blur arithmetic, family restack, desktop cells, rationed retention with every blur still drawn, reserved frost memory | done |
-| D.5 | Half-resolution blur | planned: approved once its visual comparison is produced and judged |
+| D.5 | Half-resolution blur: the compositor's frost blurred on cells two pixels square and spread back bilinearly | done |
 | E | One present per frame carrying a rectangle list, and one-shot frame pacing | done |
 | E.5 | Frames paced at the output's own refresh: the rate travels beside the mode, and the pacer, the session's animation clocks and every desktop application's are driven by it | done |
 | E.6 | The cursor plane moves with the frame while a gesture carries a window | done |
 | F.0 | Raster families select on the `ByPriority` capability axis | done |
 | F.1 | The loops made vectorisable before any intrinsic | done |
 | F.2 | Packed `lib/cpuops` candidates — SSE2 on x86_64, NEON on aarch64 — for the span blend, the box blur's sliding window and the row scan | done |
-| F.3 | The remaining candidate families, in order | blocked: `resample` (item 6) waits on decision 2; items 1–5 done |
+| F.3 | The remaining candidate families, in order | blocked: `resample` (item 6) waits on decision 1; items 1–5 done |
 | F.5 | Each family's self-verify vectors, differential fuzz and docs | done |
 | G | x86_64 hard-float kernel and user space, with per-task FP/SSE/AVX state | done |
 | G.2 | riscv64 vector state | blocked: whether to take it is a User decision |
@@ -789,7 +789,7 @@ widely is the defect this closes:
 
 - `mark(rect)` — a change not confined to a single layer: the root fill, the
   desktop layer, the density or theme every window is drawn with, and
-  restacking. Stales every frost it reaches, within the blur's radius of it.
+  restacking. Stales every frost it reaches, within the frost's reach of it.
 - `mark_layer(id, rect)` — a change confined to one window's own layer (content,
   position, size, shape, furniture). Stales the frosts of windows stacked
   *above* that one only: a frosted window is blended over a blur of the layers
@@ -870,10 +870,48 @@ funnel, the ceiling and mild-pressure trim, and teardown. Docs: `lib/raster/READ
 and `blur_span` rustdoc, `userland/gui/wm/README.md`, `frost.rs`'s module docs,
 `docs/src/desktop/wm.md` (*Retained backdrops*), and `plans/SMARTRAM.md`.
 
-### D.5 Decision (not silently taken)
-Blurring at half resolution and upsampling is ~4× less area but **changes the
-output**. It is therefore a rendering decision for the User, with a visual
-comparison, not an optimisation to slip in. Left out of D unless approved.
+### D.5 The frost is blurred at half resolution
+A window's frost — retained in its field or drawn where it lies — is blurred on
+**cells**: the backdrop averaged two by two on a grid anchored at the screen's
+top-left, box-blurred by `⌊radius/2⌋`, and each pixel spread back from the two
+cells nearest its centre along each axis, weighted three to one
+(`Surface::blur_halved_from`, `Surface::frost_halved_from`). The User approved
+the change of output on a visual comparison at the window radius. A control's
+in-place frost (`Surface::frost_region`) stays at full resolution: it is drawn
+once a repaint, not once a frame.
+
+- **The spread is a stencil.** Each cell is taken between its two rows and laid
+  into a slot for each pixel it covers, so every pixel is a quarter of the slot
+  before, half its own and a quarter of the slot after — the three-to-one
+  bilinear, bit for bit — over plain `u16` lanes stencilled into bytes. Built
+  as pixels the same arithmetic would not vectorise, and cost four times as
+  much.
+- **The reach is `2·⌊radius/2⌋ + 2`** (`halved_reach`): what a frost reads past
+  what it writes, and so what a change beneath stales of a field and marks of a
+  frost. A radius that scales to nothing is the backdrop itself, retained or
+  not.
+- **The cells of bands side by side overlap** by a cell or two at a seam, so
+  the banded blur beneath takes overlapping bands, its strip holding a row of
+  every band: a strip row it could not fit was left unwritten.
+- **What it costs.** On the host (Core Ultra 7 165H, one thread, a screen-sized
+  plane), against the full-resolution field blur it replaced: a
+  Switchboard-sized field at the window radius 3.30 ms → 1.32 ms, at the chrome
+  radius 2.99 → 1.24, the whole screen 12.3 → 4.8, and a margin slab
+  1014×43 0.575 → 0.195 and 43×560 0.218 → 0.113. A window-sized mixed frost
+  (`blur` bench, which fits in cache) is 2.9 ns/px against `frost_region`'s 3.2,
+  most of it the coverage mix both share.
+- **What it changes.** On photographs, the window radius keeps 98% of pixels
+  within a level of the full-resolution blur and is at most 12 off at the
+  hardest edges; the chrome radius, 7, keeps two thirds within a level and is
+  at most 26 off.
+
+Tests: `halved_tests` holds every shape, radius, band split, field placement,
+rectangle anchor and runner to `halved_reference`, the definition spelled
+plainly (behind `test-util`); bounds what a frost reads and what a change
+reaches by the reach; proves a frost mixed back is its field mixed back, a
+radius of zero the backdrop, and a reserved scratch never grown. The window
+manager's frost tests hold every way of reaching a frost to the same
+reference.
 
 ### D.6 The vertical pass is not width-sensitive — measured, refuted, closed
 The vertical pass walks columns with `stride = width`, which suggested a wide
@@ -935,11 +973,11 @@ blurred a slab at a time, because a band costs its lines' priming as well as
 its area. Measured against the border-per-sample design on the Switchboard drag,
 `plans/GPU.md` §7.1.
 
-`Surface::blur_from` is the raster half: the blur of bands of the screen,
-unmixed, into a surface placed anywhere over the plane, and `Surface::mix_from`
-the shape-weighted mix of it back; together they write exactly what
-`Surface::frost_from` writes in one pass. Two invariants a future change must
-keep:
+`Surface::blur_halved_from` is the raster half: the blur of bands of the
+screen, unmixed, into a surface placed anywhere over the plane, and
+`Surface::mix_from` the shape-weighted mix of it back; together they write
+exactly what `Surface::frost_halved_from` writes in one pass. Two invariants a
+future change must keep:
 
 - **Every band's horizontal pass is taken before any band is laid.** A band's
   neighbourhood reaches into the bands beside it, and what it must read there
@@ -1100,17 +1138,14 @@ the compositor cannot reserve them for is refused like one it cannot allocate a
 back buffer for. A runner the scratch could not be reserved for spreads a frost
 across fewer participants; it never fails one.
 
-A frost reads its backdrop from the destination within the part it holds
-(`Frosting::held`; the compositor's hold none, its backdrops being composed into
-the plane) and from the plane elsewhere, writes the horizontal pass into the
-plane, and runs the vertical pass in strips of a quarter of the reserved height,
-each column piece carrying its running sums from strip to strip. Nothing it
-holds grows with a frost's area, whether it is mixed into the destination
-(`Surface::frost_from`) or written into a field (`Surface::blur_from`). Against the
-whole-area intermediates it replaced, measured on the host (`opt-level = 3`, 8
-persistent workers, Core Ultra 7 165H, minimum of 41–81 runs): 7.8 ns/px
-serially against 10.2–12.8, and 1.43–1.51 against 1.50–1.62 at 1920×1080 on 8
-threads, the smaller rectangles within run-to-run noise of each other.
+A frost reads its backdrop from the plane, averages it into the scratch's
+plane of cells, writes the cells' horizontal pass there, and runs their vertical
+pass in strips of a quarter of the reserved height, each column piece carrying
+its running sums from strip to strip; the spread takes a line of lanes per
+participant. Nothing it holds grows with a frost's area, whether it is mixed
+into the destination (`Surface::frost_halved_from`) or written into a field
+(`Surface::blur_halved_from`), and `reserve_halved` sizes all of it once for the
+output and the runner.
 
 ## Stage E — One present per frame, and a frame deadline
 
@@ -1756,11 +1791,9 @@ A–E are expected to dominate F entirely.
 
 ## Decisions required (§15.7)
 
-1. **Half-resolution blur (D.5)** is approved, conditional on the visual
-   comparison being produced and judged first (invariant 2).
-2. **A narrower `resample` accumulator** would change the output (F.3 item 6),
+1. **A narrower `resample` accumulator** would change the output (F.3 item 6),
    so no `resample` candidate lands without a decision on it.
-3. **G.2 and G.3**: whether, and when, to take riscv64 vector state and aarch64
+2. **G.2 and G.3**: whether, and when, to take riscv64 vector state and aarch64
    SVE state.
 
 ---

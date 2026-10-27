@@ -138,8 +138,9 @@ A compositor names none of these traits. It presents through
 (`ready`), `present(frame, damage)`, `present_drawn(damage, draw)` for a
 caller that draws the frame in place, `set_power` — and, where the device has
 them, `LayerPresenter` (the caps, layer buffers it bakes into, and
-`present_layers` over the output frame as the bottom layer) and
-`CursorPlane`. `RemoteDisplay` implements all three over `DISPLAY_ENDPOINT`:
+`present_layers` over the output frame as the bottom layer — a frame copied
+in, `Base::Frame`, or one drawn in place, `Base::Drawn`) and `CursorPlane`.
+`RemoteDisplay` implements all three over `DISPLAY_ENDPOINT`:
 it maps the frames the driver granted at `Configure`, copies each present's
 damage into the frame the device does not read — or hands that frame to the
 caller's draw, showing nothing should it refuse — together with whatever that

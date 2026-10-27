@@ -33,22 +33,25 @@ router**:
   the bounds keep hit-testing, layout, furniture, frost and content.
 - Backdrop blur: a window can ask for what lies behind its rectangle to be
   frosted before its own translucent pixels blend over it. A frost is the
-  windows beneath composed as though none were frosted, box-blurred with
-  samples taken past the window's edges and replicated only at the screen's,
-  and mixed back at the window's rounded-corner coverage — so the blur at a
-  screen pixel depends on the windows beneath and the radius alone, never on
-  where the window lies or on any other frost. The effect is `lib/raster`'s
-  shared frost — `Surface::blur_from`, `Surface::mix_from` and
-  `Surface::frost_from` here, and the in-place `Surface::frost_region` the
-  taskbar, every popup it opens and the login screen's selected account tile
-  draw through — so the desktop has one frosted glass: a separable box blur
-  carrying running sums, over premultiplied channels including alpha. The
-  radius is a desktop length in logical pixels resolved through the output's
-  `Scale`. A frost's working memory — the frost plane its backdrop is composed
-  into and a `tairix_raster::BlurScratch` — is reserved with the back buffer for
-  the output and the installed runner, so no frost allocates on the frame path
-  or is refused for memory. On a layered present a frosted window's frost is
-  composed onto a layer of its own beneath its pixels, which the engine blends.
+  windows beneath composed as though none were frosted, blurred at half
+  resolution on cells anchored at the screen's top-left with samples taken
+  past the window's edges and replicated only at the screen's, and mixed back
+  at the window's rounded-corner coverage — so the blur at a screen pixel
+  depends on the windows beneath and the radius alone, never on where the
+  window lies or on any other frost. The effect is `lib/raster`'s shared frost
+  — `Surface::blur_halved_from`, `Surface::mix_from` and
+  `Surface::frost_halved_from` here, over the separable box blur carrying
+  running sums the in-place `Surface::frost_region` of a control's selected
+  tile is taken with at full resolution — so the desktop has one frosted
+  glass, over premultiplied channels including alpha. A frost reads what lies
+  beneath, and a change beneath reaches into it, within `halved_reach` of the
+  radius. The radius is a desktop length in logical pixels resolved through
+  the output's `Scale`. A frost's working memory — the frost plane its
+  backdrop is composed into and a `tairix_raster::BlurScratch` — is reserved
+  with the back buffer for the output and the installed runner, so no frost
+  allocates on the frame path or is refused for memory. On a layered present a
+  frosted window's frost is a
+  layer of its own beneath its pixels, which the engine blends.
 - Retained backdrops (`frost`): a frosted window's frost is laid from its
   **field** (`FrostField`), the blur over a screen rectangle holding the
   window's, unmixed, with the part of it that is stale — copied where the shape
@@ -56,7 +59,7 @@ router**:
   composed. The pointer moving inside a frosted terminal, a window dragged
   across one, its own repaint, and the frosted window dragged inside its field
   blur nothing. A change beneath stales the field, and marks the frost on
-  screen, within the blur's radius of the change and nothing of any other
+  screen, within the frost's reach of the change and nothing of any other
   frost. A window's first move gives its field a margin of the blur's radius
   about its rectangle, and a move past it shifts the field in place and blurs
   only the slab entered: the Switchboard-shaped drag blurs on 7 of 60 samples,
@@ -80,7 +83,7 @@ router**:
   blurred window is frosted regardless (`Window::is_frosted`): one refused
   retention is blurred where the frame draws it — within the damage, where the
   frosts above leave it seen, its backdrop composed into the frost plane over
-  the blur's reach — so pressure costs work, never the look,
+  the frost's reach — so pressure costs work, never the look,
   and no change of the ration's mind changes a pixel or marks damage. A
   repainted cell in a sixteen-deep cascade blurs **nothing**, and a cursor
   sample over unretained glass blurs only the cursor's pixels. The ceiling is spent
@@ -125,11 +128,16 @@ router**:
   `tairix_display::Presenter`. `present` composites and then moves only
   what changed: **no damage means no display call at all** (a wake that
   changed nothing costs neither a copy into a frame nor the driver's), and
-  a frame is **one** `Presenter::present` naming every disjoint dirty
-  rectangle it touched — up to `MAX_DAMAGE_RECTS`, past which the list
-  degrades to its bounding box. A frame publishes itself once however scattered it is, and
-  a bounding box that merely *spans* the screen (two far-apart corners do)
-  is not whole-screen damage: `tairix_display::damage_list` is the one
+  a frame is **one** present naming every disjoint dirty rectangle it
+  touched — up to `MAX_DAMAGE_RECTS`, past which the list degrades to its
+  bounding box. The frame is planned, then composed straight into the
+  display's own back frame (`Presenter::present_drawn`, and `Base::Drawn`
+  beneath layers), with what that frame missed encoded from the back
+  buffer, so nothing is copied into the display; only a display holding no
+  frame of its own is sent the compositor's own frame, and it is asked
+  once, not every frame. A frame publishes itself once however scattered it
+  is, and a bounding box that merely *spans* the screen (two far-apart corners
+  do) is not whole-screen damage: `tairix_display::damage_list` is the one
   place that tells those apart.
   Recomposition resolves each covering layer's source row, the back-buffer
   row, and the frame row once per row (`Window::row`), leaving a column a
@@ -151,11 +159,15 @@ router**:
   bits bands a picture under a translucent field; the desktop accepts that for
   the drag a free layer buys (`plans/GPU.md` decision 10), and the engine's
   caps say whether it bands (`band_free_blend`). A frosted window is its own
-  pixels on a free layer over its frost on a layer of its own, opaque, so a
-  move derives only the frost's border again and composites none of its
-  pixels; a window translucent as a whole is baked flattened onto its layer,
-  opaque. The layered path stands aside during a reveal (below), and the base
-  never presents what an opaque layer covers. Where the compositor *bakes* a window into
+  pixels on a free layer over its frost on a layer of its own, opaque: its
+  retained field, with its shape mixed at the corners, which the engine shows
+  the window's rectangle of, so a move inside the field writes only the
+  corners and composites none of its pixels; one whose blur is not retained,
+  and a window translucent as a whole, are baked flattened onto a layer,
+  opaque. The layered path stands aside during a reveal (below), and nothing
+  an opaque layer covers is drawn into the base. A flattened window's changed
+  pixels are encoded into the buffer its layer shows next by the pass that
+  composes them. Where the compositor *bakes* a window into
   a layer — over its footprint, so its shadow is baked with it, each row
   resolved once through `Window::row` and `Window::shadow_row` — it reads the
   dither at the pixel's

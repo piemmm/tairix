@@ -81,14 +81,26 @@ pub trait Presenter {
     }
 }
 
-/// The output frame beneath a layered present, as [`Presenter::present`]
-/// takes it.
-#[derive(Copy, Clone)]
-pub struct Base<'a> {
-    /// The frame, laid out as [`Presenter::mode`].
-    pub frame: &'a [u8],
-    /// What changed in it since the previous frame the display took.
-    pub damage: &'a [DamageRect],
+/// The output frame beneath a layered present, laid out as
+/// [`Presenter::mode`].
+pub enum Base<'a, 'd> {
+    /// A frame encoded elsewhere, as [`Presenter::present`] takes one.
+    Frame {
+        /// The frame.
+        frame: &'a [u8],
+        /// What changed in it since the previous frame the display took.
+        damage: &'a [DamageRect],
+    },
+    /// A frame drawn straight into the display's own memory, as
+    /// [`Presenter::present_drawn`] draws one: `draw` is handed it and the
+    /// region of it to bring up to date, `damage` and whatever that frame
+    /// missed since it was last shown.
+    Drawn {
+        /// What changed since the previous frame the display took.
+        damage: &'a Region,
+        /// What draws it.
+        draw: &'a mut DrawInPlace<'d>,
+    },
 }
 
 /// A display's hardware layer compositor: buffers a compositor bakes layers
@@ -121,8 +133,9 @@ pub trait LayerPresenter {
     fn pixels(&mut self, id: BufferId) -> Option<(&mut [u8], u32)>;
 
     /// Show `layers`, bottom-most first, over `base` where there is one: the
-    /// output frame [`Presenter::present`] would have shown, of which only
-    /// its damage changed, laid beneath them as the whole output.
+    /// output frame [`Presenter::present`] would have shown — or, drawn in
+    /// place, the one [`Presenter::present_drawn`] would — of which only its
+    /// damage changed, laid beneath them as the whole output.
     ///
     /// Each layer's buffer is read until the next present is
     /// [`ready`](Presenter::ready), so a compositor bakes a changed layer
@@ -133,11 +146,14 @@ pub trait LayerPresenter {
     /// As [`Presenter::present`]; [`DriverError::NotFound`] for a layer
     /// naming a buffer this presenter does not hold;
     /// [`DriverError::LengthOutOfRange`] or [`DriverError::Unsupported`] for a
-    /// stack the compositor refuses; or [`DriverError::OutOfRange`] for one it
-    /// cannot composite at once. A refused stack changes nothing on screen.
+    /// stack the compositor refuses; [`DriverError::OutOfRange`] for one it
+    /// cannot composite at once; [`DriverError::Unsupported`] for a drawn
+    /// base where it holds no frame of its own to draw into; or whatever a
+    /// drawn base's `draw` refuses with. A refused stack changes nothing on
+    /// screen.
     fn present_layers(
         &mut self,
-        base: Option<Base<'_>>,
+        base: Option<Base<'_, '_>>,
         layers: &[AccelLayer],
     ) -> Result<(), DriverError>;
 }

@@ -100,7 +100,8 @@
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
 //! - `bench`        — host microbenchmarks for the per-pixel desktop paths:
-//!   `Surface::blit`, rounded-rect fill, `box_blur`/`frost_region`,
+//!   `Surface::blit`, rounded-rect fill, `box_blur`/`frost_region`/
+//!   `frost_halved_from`,
 //!   `resample`, the scan-out channel encode, and the window manager's
 //!   whole-frame composite over a representative window stack. Reports ns/px
 //!   and ns/frame for a `--iters N` / `--rounds N` budget, one family at a

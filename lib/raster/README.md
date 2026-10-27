@@ -238,9 +238,9 @@ This crate owns:
   squared length one below a perfect square the estimates cycle and never
   agree, so an unlucky graph reading spun its process forever.
 - `box_blur` / `box_blur_coverage` / `Surface::frost_region` /
-  `Surface::frost_from` / `Surface::blur_from` / `Surface::mix_from` /
-  `BlurScratch` — the single separable box blur and the one frosted glass built
-  on it.
+  `Surface::blur_halved_from` / `Surface::frost_halved_from` /
+  `Surface::mix_from` / `halved_reach` / `BlurScratch` — the single separable
+  box blur and the one frosted glass built on it.
   `box_blur_coverage` is the same window over one byte of coverage instead of a
   pixel's four channels, for a soft shape drawn in one colour; it is proved to
   be exactly the alpha the pixel blur computes. `soften_coverage` is the one
@@ -252,44 +252,60 @@ This crate owns:
   the `colour <= alpha` invariant survives and no halo appears at a
   translucent edge; samples past an edge replicate it, which keeps the
   divisor constant and leaves a uniform field exactly unchanged.
-  `frost_region` is the effect itself: it blurs one rectangle of a surface and
-  mixes the result back weighted by a caller-supplied per-pixel coverage, so a
-  rounded shape fades from frosted to untouched across its own arc rather than
-  showing a square edge. Coverage is asked at coordinates relative to the
-  rectangle's *own* top-left, so a rectangle the surface edge or the active clip
-  window cuts short still reads its whole shape while the frost touches only
-  what the bounds and the clip admit. A zero radius, an empty or wholly
+  `frost_region` is the effect in place, at full resolution: it blurs one
+  rectangle of a surface and mixes the result back weighted by a
+  caller-supplied per-pixel coverage, so a rounded shape fades from frosted to
+  untouched across its own arc rather than showing a square edge. Coverage is
+  asked at coordinates relative to the rectangle's *own* top-left, so a
+  rectangle the surface edge or the active clip window cuts short still reads
+  its whole shape while the frost touches only what the bounds and the clip
+  admit. A zero radius, an empty or wholly
   off-surface rectangle, and a scratch that cannot be grown each leave the
   surface exactly as it was. It lives here rather than in the window manager
   because the login screen frosts behind a selected account tile, and nothing
   in `lib/*` may depend on the window manager.
 
-  `frost_from` is the same frost over **bands** of a rectangle (a `Frosting`:
-  the `Blurring` — rectangle, bands, radius — and the part of it the
-  destination holds), reading the backdrop from the destination within that
-  part and from a caller's *plane* everywhere else, and asking the coverage at
-  the destination's own coordinates — `frost_region` is `frost_from` with the
-  surface as its whole backdrop. `blur_from` writes the same bands' blur,
-  unmixed, into a separate surface placed anywhere over the plane, past its
-  edges or not, and `mix_from` mixes such a blur back at a coverage; together
-  they write what `frost_from` writes in one pass, to the bit, which is how the
-  compositor keeps a window's blur in a field and lays its frost from it
-  wherever the window moves. Each band is written exactly as the whole blur
-  writes it — proved by differential sweeps over random bands, kept blocks,
-  radii and coverages — because samples replicate at the *rectangle's* edges,
-  so a band is never a smaller blur of a smaller rectangle. Every band's
+  A window's frost is blurred at **half resolution** (`halved`): the backdrop
+  in a caller's *plane* is averaged two by two into cells on a grid anchored at
+  the blurred rectangle's top-left, the cells are box-blurred by half the
+  radius, and each pixel is spread back from the two cells nearest its centre
+  along each axis, weighted three to one — laid as a three-slot stencil over
+  the cells taken twice, so the spread runs in vector lanes. `blur_halved_from`
+  writes that blur over **bands** of the rectangle, unmixed, into a surface
+  placed anywhere over the plane, past its edges or not; `frost_halved_from`
+  mixes it straight into the destination at a coverage asked at the
+  destination's own coordinates; and `mix_from` mixes a retained blur back, so
+  the two routes write the same pixels to the bit, which is how the compositor
+  keeps a window's blur in a field and lays its frost from it wherever the
+  window moves. The blur at a pixel depends on the backdrop and the radius
+  alone, never on the bands it is written in: `halved_reference` spells the
+  definition out plainly (behind `test-util`), and the tests hold every band
+  shape, field placement, rectangle anchor and runner to it. A frost reads its
+  backdrop, and a change to the backdrop reaches into it, only within
+  `halved_reach(radius)` = `2·⌊radius/2⌋ + 2` of the bands, which is what lets
+  the compositor compose just that reach of it and stale no more of a field. A
+  radius of `0` is the backdrop itself, on either route. Against the
+  full-resolution blur it replaced, on a screen-sized plane on the host, a
+  Switchboard-sized field at the window radius costs 1.32 ms rather than 3.30
+  and a margin slab a third to a half as much.
+
+  Underneath, the cells are blurred by the full-resolution banded blur, which
+  writes each band exactly as the whole blur writes it — samples replicate at
+  the *rectangle's* edges, so a band is never a smaller blur of a smaller
+  rectangle — and takes bands that overlap, as the cells of bands side by side
+  do at their seams: a strip always holds a row of every band. Every band's
   horizontal pass is taken before any is laid, because a band's neighbourhood
   reaches into the bands beside it and what it must read there is the
-  backdrop. The backdrop is read only within `radius` of the bands, which is
-  what lets the compositor compose just that reach of it. The horizontal pass is
-  written into the plane and the vertical pass runs a strip of rows at a time,
-  each column piece carrying its running sums from strip to strip and the
-  strips keeping to the rows the bands cover, so nothing in `BlurScratch` grows
-  with a frost's area: `reserve` sizes it once for an output and a runner, and
-  a scratch reserved for fewer participants spreads a frost less widely rather
-  than refusing it. A parallel pass draws its pieces from the iterator that
-  splits them off (`tairix_parallel::for_each_drawn`), so a frost within the
-  reservation allocates nothing at all (`tests/frost_allocations.rs`). `wipe`
+  backdrop. The horizontal pass is written into the cell plane and the vertical
+  pass runs a strip of rows at a time, each column piece carrying its running
+  sums from strip to strip and the strips keeping to the rows the bands cover,
+  so nothing in `BlurScratch` grows with a frost's area: `reserve_halved` sizes
+  it once for an output and a runner — the cell plane, the spread's lines and
+  the cell blur's lines, sums and strip — and a scratch reserved for fewer
+  participants spreads a frost less widely rather than refusing it. A parallel
+  pass draws its pieces from the iterator that splits them off
+  (`tairix_parallel::for_each_drawn`), so a frost within the reservation
+  allocates nothing at all (`tests/frost_allocations.rs`). `wipe`
   overwrites what its last frosts left in it — a picture of what they
   frosted — and keeps the reservation.
 

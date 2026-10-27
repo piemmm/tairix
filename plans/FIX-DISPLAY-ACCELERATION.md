@@ -44,10 +44,11 @@ asks (§15.7).
    capability, no new shared-memory class. Apps keep their ordinary,
    app-owned window frames: the session's decode of a frame is the one copy,
    and the session's per-window copy stays the stable snapshot the compositor
-   reads. The one exception is a picture the session itself makes opaque and
-   that covers the output, a screensaver's: its one copy is laid straight into
-   a frame this driver allocated (`Presenter::present_drawn`), never the
-   other way about.
+   reads. A picture the session itself makes opaque and that covers the
+   output, a screensaver's, has its one copy laid straight into a frame this
+   driver allocated (`Presenter::present_drawn`), never the other way about,
+   and the compositor composes the desktop straight into one too
+   (`plans/GPU.md` GD2).
 2. **`gpu_virtio` is an honest 2D driver and reports no layer compositor.**
    virtio-gpu's scanouts are separate monitors, not overlay planes: a device
    has one primary plane per scanout and one cursor. Its zero-copy path is the
@@ -93,10 +94,10 @@ asks (§15.7).
   (`plans/GPU.md` decision 10). A window-wide translucency is composited in
   software, with the backdrop beneath it and the
   `plans/FIX-DESKTOP-SPEEDUP.md` B.5 dither, into an opaque layer; a backdrop
-  blur's frost is composited onto an opaque layer of its own beneath the
-  window's pixels (`plans/GPU.md` GD4). A window's own translucent content
-  rides a free layer on every engine, blended by the engine, dithered where
-  its driver can dither (`plans/GPU.md` GD3).
+  blur's frost is an opaque layer of its own beneath the window's pixels,
+  holding the window's retained field (`plans/GPU.md` GD4, GD9). A window's
+  own translucent content rides a free layer on every engine, blended by the
+  engine, dithered where its driver can dither (`plans/GPU.md` GD3).
 - **Fail closed, lease first, no ambient authority** (§5.4). Every request
   that acts for a seat checks the caller's live lease before any state;
   buffers belong to the configuration that allocated them and die with it; a
@@ -365,16 +366,18 @@ calls `move_to`.
   plane. The split moves up when the stack exceeds `max_layers`.
 - **Composite layers**: a window translucent as a whole is flattened — its
   layer is the software composite of its footprint over everything beneath
-  it, the window included, opaque. A frosted window's frost layer is the
-  composite of everything beneath its rectangle with its frost applied,
-  beneath the window's own free layer, so a move derives only the frost's
-  border again. Both are re-baked where anything beneath them changes, and
-  their zones never overlap.
+  it, the window included, opaque, and is re-baked where anything beneath it
+  changes. A frosted window's frost layer, beneath the window's own free layer,
+  holds its retained field with the window's shape mixed at its corners, and
+  the engine shows the window's rectangle of it, so a move inside the field
+  re-bakes only the corners (`plans/GPU.md` GD9). Their zones never overlap.
 - **A layered present consumes the damage it carried** into a software-stale
   region outside `has_damage`, which the software path drains when it next
   composites; an undamaged scene presents nothing. The base presents only what
   it shows: a flattened footprint is opaque, so the base's damage beneath one
-  is never copied into the display's frame (`plans/GPU.md` GD1).
+  is never drawn into the display's frame (`plans/GPU.md` GD1). The base and a
+  flattened footprint are composed straight into the buffers the engine reads
+  (`plans/GPU.md` GD2).
 - A window that cannot be given buffers, or the lowest window of a stack the
   engine cannot composite at once, joins the base with everything beneath it
   and the frame is planned again in the same present, the layers above kept;

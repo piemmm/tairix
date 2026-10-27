@@ -169,8 +169,8 @@ fn a_blended_row_lays_exactly_what_each_pixel_samples() {
     // the straight-edge profile across it, a column evaluated one at a time
     // near a corner, or a crossfade between the levels — it is the per-pixel
     // sample laid over what was there, bit for bit, for a tall window, a
-    // part-opaque one, and one too narrow for its ramps to see only their own
-    // edge.
+    // part-opaque one, one too narrow for its ramps to see only their own
+    // edge, and one past the screen's left edge, as a layer of one is baked.
     let kit = kit();
     let reach = i32::try_from(kit.reach()).expect("a small reach");
     let under: Pixel = Color::rgb(0x70, 0x90, 0xb0).premultiply();
@@ -180,6 +180,8 @@ fn a_blended_row_lays_exactly_what_each_pixel_samples() {
             (Rect::new(30, 12, 60, 80), 255),
             (Rect::new(30, 12, 60, 80), 140),
             (Rect::new(30, 12, 4, 80), 255),
+            (Rect::new(-40, 12, 60, 80), 255),
+            (Rect::new(-40, 12, 60, 80), 140),
         ] {
             let shape = shape_of(bounds, Corners::painted(6));
             for y in bounds.top()..bounds.bottom() + 2 * reach {

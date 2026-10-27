@@ -52,7 +52,9 @@ pub struct FrameStats {
     /// the retained one is copied rather than blurred and counts nothing here,
     /// so this is exactly the blur work the frame could not avoid.
     pub blur_px: u64,
-    /// Composed pixels converted to scan-out bytes.
+    /// Damaged pixels converted to scan-out bytes. What a frame the display
+    /// drew in missed while another was shown, caught up from the back
+    /// buffer, is upkeep rather than the frame's work and is not counted.
     pub encoded_px: u64,
     /// Dirty rectangles the frame redrew, whether by recomposing them or by
     /// encoding them afresh from the back buffer (a screen fade).

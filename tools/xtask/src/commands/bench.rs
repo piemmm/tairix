@@ -46,7 +46,7 @@ use tairix_geometry::Scale;
 use tairix_icon::IconKind;
 use tairix_log::DiscardSink;
 use tairix_parallel::JobRunner;
-use tairix_raster::{box_blur, BlurScratch, Color, Pixel, Rgba8Image, Surface};
+use tairix_raster::{box_blur, BlurScratch, Blurring, Color, Pixel, Rgba8Image, Surface};
 use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
 use tairix_theme::{TextRole, Theme};
 use tairix_wm::{chrome_cache, frost_cache, Compositor, Corners, Point, Rect, Region, WindowId};
@@ -331,7 +331,7 @@ static FAMILIES: &[Family] = &[
     },
     Family {
         name: "blur",
-        what: "box_blur and Surface::frost_region over several radii",
+        what: "box_blur, Surface::frost_region and Surface::frost_halved_from over several radii",
         measure: blur,
     },
     Family {
@@ -689,6 +689,80 @@ static BANDED: Banded = Banded(BAND_WIDTH);
 const SERIAL_RUNNER: &'static dyn JobRunner = &tairix_parallel::SERIAL;
 const BANDED_RUNNER: &'static dyn JobRunner = &BANDED;
 
+/// A window's frost, blurred at half resolution: against the full-resolution
+/// rows of [`blur`], what the cells save. A retained frost is blurred into its
+/// field unmixed and mixed when laid; one drawn where it lies is mixed as it is
+/// blurred.
+fn halved_frost_rows(
+    harness: &BenchHarness<'_>,
+    (width, height): (u32, u32),
+    backdrop: u16,
+) -> Result<Vec<Measurement>, String> {
+    /// The destination, and the plane its backdrop is read from. What a frost
+    /// leaves in the plane is working memory, and the blur's cost does not
+    /// depend on the values it reads, so no row restores it.
+    struct HalvedWarm {
+        dest: RefCell<Surface>,
+        plane: RefCell<Surface>,
+        scratch: RefCell<BlurScratch>,
+        width: u32,
+        height: u32,
+    }
+
+    fn run((radius, mixed): (u32, bool), warm: &HalvedWarm) -> Option<Pixel> {
+        let mut dest = warm.dest.borrow_mut();
+        let mut plane = warm.plane.borrow_mut();
+        let mut scratch = warm.scratch.borrow_mut();
+        let whole = [(0..warm.width, 0..warm.height)];
+        let blurring = Blurring {
+            rect: (0, 0, warm.width, warm.height),
+            bands: &whole,
+            radius,
+        };
+        let written = if mixed {
+            dest.frost_halved_from(
+                &mut plane,
+                &blurring,
+                &mut scratch,
+                SERIAL_RUNNER,
+                |_, _| u8::MAX,
+            )
+        } else {
+            dest.blur_halved_from((0, 0), &mut plane, &blurring, &mut scratch, SERIAL_RUNNER)
+        };
+        written.then(|| dest.get(0, 0)).flatten()
+    }
+
+    let mut scratch = BlurScratch::new();
+    if !scratch.reserve_halved(width, height, 1, SERIAL_RUNNER) {
+        return Err("bench: a halved frost's scratch could not be reserved".into());
+    }
+    let warm = HalvedWarm {
+        dest: RefCell::new(surface(width, height, Color::rgb(70, 90, 140))?),
+        plane: RefCell::new(surface(width, height, Color::rgb(70, 90, 140))?),
+        scratch: RefCell::new(scratch),
+        width,
+        height,
+    };
+    let pixels = u64::from(width) * u64::from(height);
+    let mut rows = Vec::new();
+    for radius in [4u32, 12, 24, u32::from(backdrop)] {
+        rows.push(Measurement::new(
+            format!("frost_halved_from {width}x{height} r{radius}"),
+            pixels,
+            harness.median_cycles((radius, true), run, &warm),
+        ));
+    }
+    for radius in [4u32, u32::from(backdrop)] {
+        rows.push(Measurement::new(
+            format!("blur_halved_from {width}x{height} r{radius}"),
+            pixels,
+            harness.median_cycles((radius, false), run, &warm),
+        ));
+    }
+    Ok(rows)
+}
+
 fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
     struct BoxWarm {
         region: RefCell<Vec<Pixel>>,
@@ -750,6 +824,7 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
         width,
         height,
     };
+    let backdrop = backdrop_radius();
 
     let mut rows = Vec::new();
     for radius in [4u32, 12, 24] {
@@ -759,7 +834,7 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             harness.median_cycles(radius as usize, run_box, &box_warm),
         ));
     }
-    for radius in [4u32, 12, 24] {
+    for radius in [4u32, 12, 24, u32::from(backdrop)] {
         rows.push(Measurement::new(
             format!("frost_region {width}x{height} r{radius}"),
             pixels,
@@ -776,12 +851,12 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             harness.median_cycles((radius, BANDED_RUNNER), run_frost, &frost_warm),
         ));
     }
+    rows.extend(halved_frost_rows(harness, (width, height), backdrop)?);
     // The vertical pass walks columns with `stride = width`, so its memory
     // traffic grows with the region's width while its per-pixel arithmetic does
     // not. Shapes of *identical* area separate the two: a slower wide row is the
     // striding, not the work. Two areas, because the effect can only appear once
     // the buffer outgrows cache: a window backdrop's and a screen's.
-    let backdrop = backdrop_radius();
     for (wide, tall) in [
         (2400u32, 96u32),
         (width, height),

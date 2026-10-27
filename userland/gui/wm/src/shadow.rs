@@ -959,8 +959,8 @@ fn clipped(
 }
 
 /// The part of `dst` — which starts at screen column `first_x` — in screen
-/// columns `from..until`, with the screen column it starts at, or `None` where
-/// they do not meet.
+/// columns `from..until`, with the screen column it starts at as the dither
+/// reads it (wrapped left of the screen), or `None` where they do not meet.
 fn middle(dst: &mut [Pixel], first_x: i32, from: i64, until: i64) -> Option<(&mut [Pixel], u32)> {
     let start = i64::from(first_x);
     let len = i64::try_from(dst.len()).ok()?;
@@ -969,7 +969,7 @@ fn middle(dst: &mut [Pixel], first_x: i32, from: i64, until: i64) -> Option<(&mu
     if lo >= hi {
         return None;
     }
-    let column = u32::try_from(start + lo).ok()?;
+    let column = i32::try_from(start + lo).ok()?.cast_unsigned();
     let span = dst.get_mut(usize::try_from(lo).ok()?..usize::try_from(hi).ok()?)?;
     Some((span, column))
 }

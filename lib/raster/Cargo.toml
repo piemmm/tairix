@@ -47,6 +47,9 @@ tairix-hash = { path = "../hash", version = "=0.0.0", optional = true }
 # The kernels' conformance digest (`accel::conformance_digest`), for the checks
 # that hold a target's candidates to it; nothing that draws needs it.
 conformance = ["dep:tairix-hash"]
+# The half-resolution blur spelled as its definition (`halved_reference`), for
+# the tests that hold a frost to it; nothing that draws needs it.
+test-util = []
 
 [build-dependencies]
 # The one reading of which vector unit the target carries, shared by every
