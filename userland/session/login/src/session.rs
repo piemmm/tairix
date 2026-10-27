@@ -21,6 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::secret::Secret;
 use tairix_abi::time::Duration64;
 use tairix_abi::{
     BootSession, Errno, ProcId, SpawnAttach, SpawnSession, DESKTOP_RUN_PATH, ENV_SHOWN_NAME,
@@ -51,7 +52,7 @@ pub struct Credentials<'a> {
     /// The offered account name.
     pub username: &'a str,
     /// The offered secret. Never logged.
-    pub password: &'a str,
+    pub password: Secret<'a>,
 }
 
 /// The identity `kernel/sec` resolves a successful authentication to.
@@ -440,7 +441,7 @@ pub trait Authenticator {
     /// **same** error whether `uid` owns no account or the password is
     /// wrong, so a caller cannot probe for which uids exist (fail closed,
     /// no information leak). Login does not inspect the cause.
-    fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno>;
+    fn authenticate_uid(&self, uid: u32, password: Secret<'_>) -> Result<AuthenticatedUser, Errno>;
 }
 
 /// Starts a session under an authenticated user's identity.

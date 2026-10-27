@@ -9,8 +9,7 @@ use alloc::vec::Vec;
 use super::{
     read_share_enum, read_share_enum_request, write_share_enum, write_share_enum_request, Bind,
     BindAck, Pdu, RequestFragment, ResponseFragment, Share, ShareKind, ShareList, ShareListing,
-    ShareRecord, Syntax, ACCEPTANCE, MAX_FRAGMENT, MAX_SHARES, NDR, SHARE_ENUM, SPECIAL, SRVSVC,
-    TEMPORARY,
+    ShareRecord, Syntax, ACCEPTANCE, MAX_FRAGMENT, NDR, SHARE_ENUM, SPECIAL, SRVSVC, TEMPORARY,
 };
 use crate::file::create::{CreateAction, CreateResponse, OplockLevel};
 use crate::file::io::{CloseResponse, ReadResponse, WriteResponse};
@@ -21,6 +20,7 @@ use crate::status::NtStatus;
 use crate::vectors;
 use crate::wire::Encoder;
 use crate::SmbError;
+use tairix_abi::netshare_ipc::{REMARK_MAX, SHARES_MAX};
 
 const PIPE_ID: [u8; 16] = [0x42; 16];
 
@@ -300,6 +300,33 @@ fn a_remark_that_does_not_decode_keeps_its_share() {
 }
 
 #[test]
+fn a_long_remark_is_cut_at_a_character_within_its_bound() {
+    let fits = "€".repeat(REMARK_MAX / 3) + "a";
+    let past = "€".repeat(REMARK_MAX / 3 + 1);
+    let paired = "a".repeat(REMARK_MAX - 2) + "\u{1f600}";
+    for (remark, kept) in [
+        (fits.as_str(), fits.as_str()),
+        (past.as_str(), &past[..REMARK_MAX - 1]),
+        (paired.as_str(), &paired[..REMARK_MAX - 2]),
+    ] {
+        let bytes = stub(|enc| {
+            write_share_enum(
+                enc,
+                &[ShareRecord {
+                    name: "share",
+                    share_type: 0,
+                    remark,
+                }],
+                0,
+            );
+        });
+        let list = read_share_enum(&bytes).expect("a listing");
+        assert_eq!(list.shares[0].remark, kept);
+        assert!(list.shares[0].remark.len() <= REMARK_MAX);
+    }
+}
+
+#[test]
 fn a_failed_call_is_its_status() {
     let bytes = stub(|enc| write_share_enum(enc, &records(&["share"]), 5));
     assert_eq!(read_share_enum(&bytes), Err(SmbError::Rpc(5)));
@@ -328,7 +355,7 @@ fn a_listing_out_of_shape_is_refused() {
     ] {
         assert_eq!(read_share_enum(&bytes), Err(SmbError::Malformed), "{what}");
     }
-    let names: Vec<String> = (0..=MAX_SHARES).map(|index| format!("s{index}")).collect();
+    let names: Vec<String> = (0..=SHARES_MAX).map(|index| format!("s{index}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let many = stub(|enc| write_share_enum(enc, &records(&names), 0));
     assert_eq!(read_share_enum(&many), Err(SmbError::TooLarge));

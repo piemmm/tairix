@@ -693,6 +693,7 @@ tairix/
 │   ├── net/             # Network protocol engine (wire protocols).
 │   ├── netchan/         # NIC device-channel driver side (netchan-v1 server).
 │   ├── netconfig/       # network.conf per-interface configuration store engine.
+│   ├── netshare/        # Network-share client (netshare-v1 to smbfs).
 │   ├── noise/           # Procedural noise: gradient, octave, ridged, cellular.
 │   ├── pagezero/        # Page/region zeroing.
 │   ├── parallel/        # Bounded data-parallel work engine (JobRunner + pool).

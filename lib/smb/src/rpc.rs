@@ -10,11 +10,14 @@
 //! listing that fails still closes the pipe it opened.
 //!
 //! Share names and remarks are a stranger's text: a name is kept only when a
-//! tree connect could name it ([`is_share_name`]), and both are for a
-//! display-safety policy to show, never to be shown raw.
+//! tree connect could name it ([`is_share_name`]), a remark is cut to
+//! [`REMARK_MAX`] bytes, and both are for a display-safety policy to show,
+//! never to be shown raw.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use tairix_abi::netshare_ipc::{is_share_name, REMARK_MAX, SHARES_MAX};
 
 use crate::file::create::{
     Access, CreateOptions, CreateRequest, CreateResponse, Disposition, ShareAccess,
@@ -27,7 +30,6 @@ use crate::file::{FileAttributes, FileId};
 use crate::header::{Command, Header};
 use crate::ioctl::{IoctlRequest, IoctlResponse, IS_FSCTL};
 use crate::status::NtStatus;
-use crate::tree::is_share_name;
 use crate::wire::{from_utf16le, utf16le, Encoder, Reader};
 use crate::SmbError;
 
@@ -41,9 +43,6 @@ pub const FSCTL_PIPE_TRANSCEIVE: u32 = 0x0011_c017;
 /// The largest fragment this client sends or receives: what Windows uses
 /// over a pipe.
 pub const MAX_FRAGMENT: usize = 4280;
-
-/// The most shares one listing holds.
-pub const MAX_SHARES: usize = 256;
 
 /// The most stub data one answer may carry, across all its fragments.
 pub const MAX_STUB: usize = 256 << 10;
@@ -643,8 +642,9 @@ pub struct Share {
     pub special: bool,
     /// Whether it lasts only until the server restarts.
     pub temporary: bool,
-    /// The server's description of it. A unit that does not decode is
-    /// U+FFFD: this is display text, and a bad unit costs it no share.
+    /// The server's description of it, at most [`REMARK_MAX`] bytes. A unit
+    /// that does not decode is U+FFFD: this is display text, and a bad unit
+    /// costs it no share.
     pub remark: String,
 }
 
@@ -705,7 +705,7 @@ pub fn write_share_enum(enc: &mut Encoder, records: &[ShareRecord<'_>], status: 
 /// # Errors
 ///
 /// [`SmbError::Rpc`] with the call's status when it failed;
-/// [`SmbError::TooLarge`] past [`MAX_SHARES`]; [`SmbError::Malformed`] for
+/// [`SmbError::TooLarge`] past [`SHARES_MAX`]; [`SmbError::Malformed`] for
 /// a stub that is not a level-1 answer; [`SmbError::OutOfMemory`].
 pub fn read_share_enum(stub: &[u8]) -> Result<ShareList, SmbError> {
     let mut ndr = Ndr::new(stub);
@@ -718,7 +718,7 @@ pub fn read_share_enum(stub: &[u8]) -> Result<ShareList, SmbError> {
     } else {
         (0, false)
     };
-    if count > MAX_SHARES {
+    if count > SHARES_MAX {
         return Err(SmbError::TooLarge);
     }
     if (count > 0) != array {
@@ -749,7 +749,7 @@ pub fn read_share_enum(stub: &[u8]) -> Result<ShareList, SmbError> {
                 kind: ShareKind::of(share_type),
                 special: share_type & SPECIAL != 0,
                 temporary: share_type & TEMPORARY != 0,
-                remark: remark.map_or(Ok(String::new()), lossy)?,
+                remark: remark.map_or(Ok(String::new()), remark_text)?,
             }),
             Err(SmbError::OutOfMemory) => return Err(SmbError::OutOfMemory),
             _ => list.omitted += 1,
@@ -770,16 +770,21 @@ pub fn read_share_enum(stub: &[u8]) -> Result<ShareList, SmbError> {
     Ok(list)
 }
 
-/// UTF-16LE `units` as text, each unit that does not decode a U+FFFD.
-fn lossy(units: &[u8]) -> Result<String, SmbError> {
+/// A remark's UTF-16LE `units` as text: each unit that does not decode a
+/// U+FFFD, and cut at the last character within [`REMARK_MAX`] bytes.
+fn remark_text(units: &[u8]) -> Result<String, SmbError> {
     let (units, _) = units.as_chunks::<2>();
     let mut text = String::new();
-    text.try_reserve(units.len() * 3)
+    text.try_reserve(REMARK_MAX.min(units.len() * 3))
         .map_err(|_| SmbError::OutOfMemory)?;
-    text.extend(
-        char::decode_utf16(units.iter().map(|unit| u16::from_le_bytes(*unit)))
-            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)),
-    );
+    for c in char::decode_utf16(units.iter().map(|unit| u16::from_le_bytes(*unit)))
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+    {
+        if text.len() + c.len_utf8() > REMARK_MAX {
+            break;
+        }
+        text.push(c);
+    }
     Ok(text)
 }
 

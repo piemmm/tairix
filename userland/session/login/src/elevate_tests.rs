@@ -18,6 +18,7 @@ use tairix_abi::elevate::{
     ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_ARGS, ELEVATE_MAX_OUTPUT,
     ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
 };
+use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{decode_account_page, SessionAccount, DESKTOP_BUNDLE};
 use tairix_abi::time::Duration64;
 use tairix_abi::{AppIdentity, CapabilityId, Errno, PublisherId, LOAD_UNVERIFIED};
@@ -253,17 +254,17 @@ impl Authenticator for FixedAuth {
         // Unknown accounts, wrong passwords, and locked accounts are one
         // indistinguishable refusal, exactly as the production
         // `UsersAuthenticator` behaves.
-        if credentials.username == "root" && credentials.password == "correct" {
+        if credentials.username == "root" && credentials.password.expose() == "correct" {
             Ok(Self::root())
         } else {
             Err(Errno::PermissionDenied)
         }
     }
 
-    fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
+    fn authenticate_uid(&self, uid: u32, password: Secret<'_>) -> Result<AuthenticatedUser, Errno> {
         // Mirrors `authenticate`: an unresolvable uid and a wrong
         // password on the real one are the identical refusal.
-        if uid == 0 && password == "correct" {
+        if uid == 0 && password.expose() == "correct" {
             Ok(Self::root())
         } else {
             Err(Errno::PermissionDenied)
@@ -360,7 +361,11 @@ impl Authenticator for CountingAuth {
         Err(Errno::PermissionDenied)
     }
 
-    fn authenticate_uid(&self, _uid: u32, _password: &str) -> Result<AuthenticatedUser, Errno> {
+    fn authenticate_uid(
+        &self,
+        _uid: u32,
+        _password: Secret<'_>,
+    ) -> Result<AuthenticatedUser, Errno> {
         self.attempts.set(self.attempts.get() + 1);
         Err(Errno::PermissionDenied)
     }
@@ -419,7 +424,7 @@ fn encoded_run_with(
     let mut buf = [0u8; ELEVATE_MAX_REQUEST];
     let len = ElevateRequest::Run {
         username,
-        password,
+        password: Secret::new(password),
         program,
         argv: ElevateArgv::new(args).expect("within bounds"),
     }
@@ -436,7 +441,7 @@ fn encoded_launch(
     let mut buf = [0u8; ELEVATE_MAX_REQUEST];
     let len = ElevateRequest::Launch {
         username,
-        password,
+        password: Secret::new(password),
         program,
     }
     .encode(&mut buf)
@@ -453,7 +458,7 @@ fn encoded_capture(
     let mut buf = [0u8; ELEVATE_MAX_REQUEST];
     let len = ElevateRequest::Capture {
         username,
-        password,
+        password: Secret::new(password),
         program,
         argv: ElevateArgv::new(args).expect("within bounds"),
     }
@@ -464,9 +469,11 @@ fn encoded_capture(
 
 fn encoded_verify(password: &str) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
     let mut buf = [0u8; ELEVATE_MAX_REQUEST];
-    let len = ElevateRequest::Verify { password }
-        .encode(&mut buf)
-        .expect("encodes");
+    let len = ElevateRequest::Verify {
+        password: Secret::new(password),
+    }
+    .encode(&mut buf)
+    .expect("encodes");
     (buf, len)
 }
 

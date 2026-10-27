@@ -20,7 +20,7 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 | FSS3 | The kernel `ServedFs` proxy: a `KernelFs` over the protocol with liveness-bounded, killable calls, window quarantine, hold calls settled rather than withdrawn, releases reaped by the volume's own operations, fail-closed reply validation, and the server-health overlay | done |
 | FSS4 | The volume block grant: `HwResourceKind::Volume` under `CAP_FS_SERVE`, the kernel's served-volume registry, and `volume_read` / `volume_write` / `volume_ctl` / `volume_serve` | done |
 | FSS5 | Removable volumes served from user space: the kernel-published volume node, the attach, serve, refusal, detach, unplug, server-loss and re-insert flows, the six driver bundles (ext4, FAT32, ADFS, ISO 9660, UDF, ARXFS), and the in-kernel removable path removed | done |
-| FSS6 | Network-served attachments for `plans/SMB.md` SMB9: `fsserve_offer` and attach by the named principal, the owner-bound private presentation, owner and server detach, `MOUNT_LIST`'s owner, and the concurrent uncached registry entry a multi-writer share needs | blocked: lands with SMB9, which waits on SMB8 |
+| FSS6 | Network-served attachments for `plans/SMB.md` SMB9: `fsserve_offer` and attach by the named principal, the owner-bound private presentation, owner and server detach, `MOUNT_LIST`'s owner, and the concurrent uncached registry entry a multi-writer share needs | blocked: lands with SMB9 |
 
 ## 0. Decisions (binding)
 
@@ -192,11 +192,14 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 - `fsserve_offer(endpoint, window, for_uid)` — `CAP_FS_SERVE` — registers an
   endpoint as attachable **by that one principal**, naming the server's
   medium class, declared limits and a 16-byte volume key. It mounts nothing.
-- The attach is called by the principal the offer names, so every authority
-  decision is made against the real caller: without `CAP_FS_MOUNT` the
-  presentation is private (owner the caller, its primary group, directories
-  `rwx------`, files `rw-------`); with it, shared through the removable
-  template or explicit. Flags are `noexec` plus what the caller narrows.
+- An offer is named by a `tairix_abi::fsserve::OfferId`, never zero and never
+  reused in a boot; `netshare-v1`'s `Mount` answers one.
+- The attach is called by the principal the offer names, with the target, the
+  presentation and the name, so every authority decision is made against the
+  real caller: without `CAP_FS_MOUNT` the presentation is private (owner the
+  caller, its primary group, directories `rwx------`, files `rw-------`); with
+  it, shared through the removable template or explicit. Flags are `noexec`
+  plus what the caller narrows.
 - A network volume's identity is derived by the kernel from the serving
   process's attested bundle identity and the offer's key, so a server can
   never claim a local volume's identity.

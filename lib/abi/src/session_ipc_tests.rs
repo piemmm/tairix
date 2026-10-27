@@ -15,6 +15,7 @@ use super::{
 };
 use crate::account::MAX_PASSWORD_LEN;
 use crate::ipc::{is_reserved_endpoint, is_seat_scoped_endpoint};
+use crate::secret::Secret;
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -151,7 +152,7 @@ fn a_zone_store_reply_fails_closed_on_every_malformation() {
 fn authenticate_request_round_trips() {
     let request = SessionRequest::Authenticate {
         username: "ada",
-        password: "byron",
+        password: Secret::new("byron"),
     };
     let mut buf = [0u8; SESSION_MAX_REQUEST];
     let len = request.encode(&mut buf).expect("encodes");
@@ -164,7 +165,7 @@ fn the_longest_legal_authenticate_fits_the_declared_request_bound() {
     let mut secret_bytes = [0u8; MAX_PASSWORD_LEN];
     let request = SessionRequest::Authenticate {
         username: filler(&mut user_bytes, SESSION_LOGIN_NAME_MAX),
-        password: filler(&mut secret_bytes, MAX_PASSWORD_LEN),
+        password: Secret::new(filler(&mut secret_bytes, MAX_PASSWORD_LEN)),
     };
     let mut buf = [0u8; SESSION_MAX_REQUEST];
     let len = request.encode(&mut buf).expect("encodes");
@@ -182,19 +183,19 @@ fn authenticate_refuses_empty_and_over_long_fields_both_ways() {
     for request in [
         SessionRequest::Authenticate {
             username: "",
-            password: "p",
+            password: Secret::new("p"),
         },
         SessionRequest::Authenticate {
             username: "u",
-            password: "",
+            password: Secret::new(""),
         },
         SessionRequest::Authenticate {
             username: long_user,
-            password: "p",
+            password: Secret::new("p"),
         },
         SessionRequest::Authenticate {
             username: "u",
-            password: long_secret,
+            password: Secret::new(long_secret),
         },
     ] {
         assert_eq!(request.encode(&mut buf), Err(Errno::LengthOutOfRange));
@@ -219,7 +220,7 @@ fn authenticate_refuses_empty_and_over_long_fields_both_ways() {
 fn request_decode_fails_closed_on_every_malformation() {
     let request = SessionRequest::Authenticate {
         username: "ada",
-        password: "byron",
+        password: Secret::new("byron"),
     };
     let mut buf = [0u8; SESSION_MAX_REQUEST];
     let len = request.encode(&mut buf).expect("encodes");
@@ -282,7 +283,7 @@ fn request_decode_fails_closed_on_every_malformation() {
 fn a_short_output_buffer_is_refused_rather_than_partly_written() {
     let request = SessionRequest::Authenticate {
         username: "ada",
-        password: "byron",
+        password: Secret::new("byron"),
     };
     let mut small = [0u8; 8];
     assert_eq!(request.encode(&mut small), Err(Errno::BufferTooSmall));

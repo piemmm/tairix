@@ -78,6 +78,7 @@
 
 use crate::le::{put_i32, put_i64, put_u32, read_i32, read_i64, read_u32, Reader, Writer};
 use crate::process::CONSOLE_INDEX_MAX;
+use crate::secret::Secret;
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -510,7 +511,7 @@ pub enum ElevateRequest<'a> {
         /// The target account to re-authenticate and run as.
         username: &'a str,
         /// The offered password for that account.
-        password: &'a str,
+        password: Secret<'a>,
         /// Absolute path of the program to spawn on success.
         program: &'a str,
         /// The arguments to hand it, [`ElevateArgv::NONE`] for none.
@@ -533,7 +534,7 @@ pub enum ElevateRequest<'a> {
         /// The target account to re-authenticate and run as.
         username: &'a str,
         /// The offered password for that account.
-        password: &'a str,
+        password: Secret<'a>,
         /// Absolute path of the program to spawn on success.
         program: &'a str,
         /// The arguments to hand it, [`ElevateArgv::NONE`] for none.
@@ -549,7 +550,7 @@ pub enum ElevateRequest<'a> {
     /// primitive a screen lock needs and nothing more.
     Verify {
         /// The offered password for the caller's own account.
-        password: &'a str,
+        password: Secret<'a>,
     },
     /// Re-authenticate `username` and, on success, start `program` as that
     /// account **without waiting for it**, answering its pid.
@@ -565,7 +566,7 @@ pub enum ElevateRequest<'a> {
         /// The target account to re-authenticate and run as.
         username: &'a str,
         /// The offered password for that account.
-        password: &'a str,
+        password: Secret<'a>,
         /// Absolute path of the program to start on success.
         program: &'a str,
     },
@@ -662,7 +663,7 @@ impl<'a> ElevateRequest<'a> {
                 argv,
             } => {
                 w.str(username)?;
-                w.str(password)?;
+                w.str(password.expose())?;
                 w.str(program)?;
                 w.u16(u16::try_from(argv.len()).map_err(|_| Errno::LengthOutOfRange)?)?;
                 for arg in argv {
@@ -675,10 +676,10 @@ impl<'a> ElevateRequest<'a> {
                 program,
             } => {
                 w.str(username)?;
-                w.str(password)?;
+                w.str(password.expose())?;
                 w.str(program)?;
             }
-            Self::Verify { password } => w.str(password)?,
+            Self::Verify { password } => w.str(password.expose())?,
             Self::Authorisers { program, offset } => {
                 w.str(program)?;
                 w.u32(offset)?;
@@ -717,7 +718,7 @@ impl<'a> ElevateRequest<'a> {
         let request = match r.u8()? {
             opcode @ (OPCODE_RUN | OPCODE_LAUNCH | OPCODE_CAPTURE) => {
                 let username = r.str()?;
-                let password = r.str()?;
+                let password = Secret::new(r.str()?);
                 let program = r.str()?;
                 if username.is_empty() || password.is_empty() || program.is_empty() {
                     return Err(Errno::LengthOutOfRange);
@@ -743,7 +744,7 @@ impl<'a> ElevateRequest<'a> {
                 }
             }
             OPCODE_VERIFY => {
-                let password = r.str()?;
+                let password = Secret::new(r.str()?);
                 if password.is_empty() {
                     return Err(Errno::LengthOutOfRange);
                 }
@@ -1065,6 +1066,7 @@ mod tests {
         ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST, ELEVATE_VERSION,
         ELEVATE_WORDS_BYTES,
     };
+    use crate::secret::Secret;
     use crate::session_ipc::{encode_account_page, SessionAccount, SESSION_MAX_REPLY};
     use crate::time::Duration64;
     use crate::{Errno, ORIGIN_CONSOLE_NONE};
@@ -1087,7 +1089,7 @@ mod tests {
     fn run_request_round_trips() {
         let req = ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/users.app/Run",
             argv: ElevateArgv::NONE,
         };
@@ -1100,7 +1102,7 @@ mod tests {
     fn launch_request_round_trips() {
         let req = ElevateRequest::Launch {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: crate::DATETIME_RUN_PATH,
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
@@ -1114,7 +1116,7 @@ mod tests {
         let mut launch_buf = [0u8; ELEVATE_MAX_REQUEST];
         let launch_len = ElevateRequest::Launch {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/x",
         }
         .encode(&mut launch_buf)
@@ -1123,7 +1125,7 @@ mod tests {
         // so the two opcodes never encode to the same bytes.
         let bare = ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/x",
             argv: ElevateArgv::NONE,
         }
@@ -1136,7 +1138,7 @@ mod tests {
         let args = ["os.loginType", "text"];
         let carried = ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/x",
             argv: ElevateArgv::new(&args).expect("within bounds"),
         }
@@ -1151,17 +1153,17 @@ mod tests {
         for req in [
             ElevateRequest::Launch {
                 username: "",
-                password: "p",
+                password: Secret::new("p"),
                 program: "/x",
             },
             ElevateRequest::Launch {
                 username: "u",
-                password: "",
+                password: Secret::new(""),
                 program: "/x",
             },
             ElevateRequest::Launch {
                 username: "u",
-                password: "p",
+                password: Secret::new("p"),
                 program: "",
             },
         ] {
@@ -1183,7 +1185,7 @@ mod tests {
     #[test]
     fn verify_request_round_trips() {
         let req = ElevateRequest::Verify {
-            password: "hunter2",
+            password: Secret::new("hunter2"),
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = req.encode(&mut buf).expect("encodes");
@@ -1196,19 +1198,19 @@ mod tests {
         for req in [
             ElevateRequest::Run {
                 username: "",
-                password: "p",
+                password: Secret::new("p"),
                 program: "/x",
                 argv: ElevateArgv::NONE,
             },
             ElevateRequest::Run {
                 username: "u",
-                password: "",
+                password: Secret::new(""),
                 program: "/x",
                 argv: ElevateArgv::NONE,
             },
             ElevateRequest::Run {
                 username: "u",
-                password: "p",
+                password: Secret::new("p"),
                 program: "",
                 argv: ElevateArgv::NONE,
             },
@@ -1235,7 +1237,10 @@ mod tests {
     fn verify_request_rejects_empty_password() {
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         assert_eq!(
-            ElevateRequest::Verify { password: "" }.encode(&mut buf),
+            ElevateRequest::Verify {
+                password: Secret::new("")
+            }
+            .encode(&mut buf),
             Err(Errno::LengthOutOfRange)
         );
         // A hand-built record with an empty password is refused at decode
@@ -1251,7 +1256,7 @@ mod tests {
     fn request_decode_fails_closed_on_malformations() {
         let req = ElevateRequest::Run {
             username: "root",
-            password: "pw",
+            password: Secret::new("pw"),
             program: "/System/Commands/ps.app/Run",
             argv: ElevateArgv::NONE,
         };
@@ -1300,7 +1305,7 @@ mod tests {
         let long = core::str::from_utf8(&long).expect("ascii");
         let req = ElevateRequest::Run {
             username: long,
-            password: "p",
+            password: Secret::new("p"),
             program: "/x",
             argv: ElevateArgv::NONE,
         };
@@ -1313,7 +1318,7 @@ mod tests {
         let args = ["os.loginType", "text"];
         let req = ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::new(&args).expect("within bounds"),
         };
@@ -1335,7 +1340,7 @@ mod tests {
         let args = ["time.servers", ""];
         let req = ElevateRequest::Run {
             username: "root",
-            password: "p",
+            password: Secret::new("p"),
             program: "/x",
             argv: ElevateArgv::new(&args).expect("within bounds"),
         };
@@ -1392,7 +1397,7 @@ mod tests {
         let args = ["key", "value"];
         let req = ElevateRequest::Run {
             username: "root",
-            password: "p",
+            password: Secret::new("p"),
             program: "/x",
             argv: ElevateArgv::new(&args).expect("within bounds"),
         };
@@ -1416,7 +1421,7 @@ mod tests {
         let program = [b'/'; 512];
         let req = ElevateRequest::Run {
             username: core::str::from_utf8(&account).expect("ascii"),
-            password: core::str::from_utf8(&secret).expect("ascii"),
+            password: Secret::new(core::str::from_utf8(&secret).expect("ascii")),
             program: core::str::from_utf8(&program).expect("ascii"),
             argv: ElevateArgv::new(&args).expect("within bounds"),
         };
@@ -1662,7 +1667,7 @@ mod tests {
     fn a_capture_request_round_trips_and_is_its_own_form() {
         let req = ElevateRequest::Capture {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::new(&["wan.ipv4.method"]).expect("within bounds"),
         };
@@ -1675,7 +1680,7 @@ mod tests {
         let mut run_buf = [0u8; ELEVATE_MAX_REQUEST];
         let run_len = ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::new(&["wan.ipv4.method"]).expect("within bounds"),
         }

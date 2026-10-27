@@ -1,6 +1,7 @@
 # `tairix-abi`
 
-Defines the frozen `abi-v1` interface between the kernel and user space.
+Defines the `abi-v1` interface between the kernel and user space, and the
+protocols programs speak to the system services.
 
 ## Scope
 
@@ -27,6 +28,10 @@ Defines the frozen `abi-v1` interface between the kernel and user space.
 * `ManifestHeader` — fixed-size prefix of the signed `rxe` manifest section,
   including the SHA-256 syscall-table fingerprint, the Ed25519 public key,
   and the signature.
+* `Secret` — a password a request carries (an elevation, a login, a network
+  share), borrowed from the buffer it crossed in. No `Debug` shows it, so a
+  request holding one can be formatted without the password reaching a
+  diagnostic.
 
 ## Wire format
 
@@ -37,15 +42,12 @@ fails the build.
 
 ## Compatibility
 
-The numeric values of every public constant are part of the contract.
-Existing values are never re-numbered or removed. New entries take the next
-free integer; a structural change ships as `abi-v2` and the old types move
-into a compatibility submodule rather than mutate in place
-(`AGENTS.md` §9).
+TAIRiX has shipped no release, so `abi-v1` is not frozen: a type, constant or
+frame that is wrong is changed in place, with every caller and the generated
+views (`include/`, the syscall table) in the same change. From the first
+release the numeric values of every public constant are part of the contract
+and new behaviour ships as `abi-v2`.
 
-## Stage boundary
-
-Stage 1 ships the *numbering* of syscalls in `lib/abi/src/syscall.rs`
-(singular). The cross-checked file `lib/abi/src/syscalls.rs` and its
-generated counterpart `kernel/syscall/src/table.rs` are introduced together
-in Stage 2 so `cargo xtask abi-check` always sees both halves.
+The syscall numbering is `lib/abi/src/syscall.rs`; `lib/abi/src/syscalls.rs`
+and the generated `kernel/syscall/src/table.rs` are cross-checked by
+`cargo xtask abi-check`.

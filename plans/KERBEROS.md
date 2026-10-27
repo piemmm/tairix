@@ -14,7 +14,7 @@ SMB3).
 | K1 | `lib/resolver` SRV lookups: KDC location through `_kerberos._tcp` / `_kerberos._udp`, ordered by priority and weight (RFC 2782) | planned |
 | K2 | `lib/krb5` messages and crypto: the RFC 4120 ASN.1 types over `lib/der`, the RFC 3961 profile for AES-CTS-HMAC-SHA1-96 (17, 18) and AES-SHA2 (19, 20), string-to-key, n-fold, key derivation; published vectors | planned |
 | K3 | `lib/krb5` exchanges: AS with PA-ENC-TIMESTAMP and ETYPE-INFO2, TGS with canonicalisation and cross-realm referrals, AP-REQ/AP-REP with subkeys, clock-skew correction, KDC transport (UDP, TCP on `KRB_ERR_RESPONSE_TOO_BIG`) | planned |
-| K4 | The GSS-API Kerberos mechanism (RFC 4121): the initial context token, the authenticator checksum and its flags, AP-REP verification, the session key a consumer derives from, and the mechanism wired into `lib/smb`'s client beside NTLM | planned |
+| K4 | The GSS-API Kerberos mechanism (RFC 4121): the initial context token, the authenticator checksum and its flags, AP-REP verification, the session key a consumer derives from, the mechanism wired into `lib/smb`'s client beside NTLM, and the Kerberos credential and `Forget` in `netshare-v1` | planned |
 
 ## 0. Decisions (binding)
 
@@ -63,4 +63,7 @@ authenticator subkey, else the ticket's (MS-KILE §3.1.1.2). It joins
 IETF's Kerberos OIDs as the server's hints name them, with its MIC token as
 the mechListMIC and the AP-REP read from the final `SESSION_SETUP` reply. The
 client's setup then admits a success at the first leg — NTLM's takes two — and
-takes the session id from that final response.
+takes the session id from that final response. `netshare-v1`
+(`lib/abi/src/netshare_ipc.rs`) gains the Kerberos credential beside NTLMv2's
+— a principal and its password, and the `sec=` choice — and `Forget`, which
+drops the caller's cached tickets.

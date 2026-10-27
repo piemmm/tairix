@@ -28,28 +28,8 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// small enough that the endpoint's by-ticket lookup stays a cheap scan.
 pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 
-/// Whether `id` is a **reserved well-known** call-endpoint id — a fixed
-/// rendezvous a system service publishes: the driver-store server
-/// ([`crate::driver_store::DRIVER_STORE_ENDPOINT`]), the log-ingress
-/// journal ([`crate::log_ingress::LOG_INGRESS_ENDPOINT`]), the firmware
-/// mailbox service ([`crate::mailbox_ipc::MAILBOX_ENDPOINT`]), the System
-/// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the audio
-/// mixer service ([`crate::audio::AUDIO_ENDPOINT`]), the seat
-/// manager ([`crate::seat::SEATMGR_ENDPOINT`]), the display service
-/// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), the desktop session's
-/// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]),
-/// notification service ([`crate::notify_ipc::NOTIFY_ENDPOINT`]),
-/// Switchboard tray-summary service
-/// ([`crate::switchboard_ipc::SWITCHBOARD_ENDPOINT`]), and pinboard-apply
-/// service ([`crate::pinboard_ipc::PINBOARD_ENDPOINT`]), the sandboxed font
-/// service ([`crate::font_ipc::FONT_ENDPOINT`]), the service
-/// manager's control surface
-/// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the machine
-/// settings service ([`crate::settings_ipc::SETTINGS_ENDPOINT`]), the cooling
-/// service ([`crate::thermal_ipc::THERMAL_ENDPOINT`]), the RAID array
-/// composer's member rendezvous
-/// ([`crate::raid_ipc::RAID_REGISTRY_ENDPOINT`]) and its administration and
-/// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the
+/// Whether `id` is a **reserved well-known** call-endpoint id: the fixed
+/// rendezvous each system service publishes, named in the body below, the
 /// per-console elevation supervisors
 /// ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
 /// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`), and every per-node block
@@ -81,6 +61,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::net_ipc::NETSTACK_ENDPOINT
         || id == crate::net::NETSTACK_SOCKET_ENDPOINT
         || id == crate::discovery_ipc::DISCOVERY_ENDPOINT
+        || id == crate::netshare_ipc::NETSHARE_ENDPOINT
         || id == crate::font_ipc::FONT_ENDPOINT
         || id == crate::service_control::SERVICE_CONTROL_ENDPOINT
         || id == crate::service_control::SERVICE_ENROL_ENDPOINT
@@ -518,6 +499,7 @@ mod tests {
         assert!(is_reserved_endpoint(
             crate::discovery_ipc::DISCOVERY_ENDPOINT
         ));
+        assert!(is_reserved_endpoint(crate::netshare_ipc::NETSHARE_ENDPOINT));
         assert!(is_reserved_endpoint(crate::sound_cue::SOUND_CUE_ENDPOINT));
         assert!(is_reserved_endpoint(crate::thermal_ipc::THERMAL_ENDPOINT));
         assert!(is_reserved_endpoint(

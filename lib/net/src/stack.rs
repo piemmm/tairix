@@ -41,7 +41,7 @@ use core::num::NonZeroU8;
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::driver::net_channel::RxFilterPolicy;
-use tairix_abi::net_ipc::{ipv4_network, ipv6_network};
+use tairix_abi::net_ipc::{ipv4_network, ipv6_network, is_unicast};
 use tairix_abi::time::Duration64;
 use tairix_hash::{FastHash, HashSeed};
 
@@ -1495,7 +1495,7 @@ impl Stack {
         let context = ErrorContext {
             invoking_is_icmp_error: false,
             dest_is_multicast: v4_dest_ambiguous(header.destination),
-            source_is_ambiguous: v4_source_ambiguous(header.source),
+            source_is_ambiguous: !is_unicast(header.source.into()),
             // IPv4 has no counterpart to IPv6's Packet-Too-Big carve-out, so
             // suppression about a broadcast or group destination is absolute.
             multicast_exception: false,
@@ -1525,7 +1525,7 @@ impl Stack {
         if let Some(echo) = IcmpEcho::parse(IcmpContext::V4, payload) {
             match echo.kind {
                 crate::icmp::EchoKind::Request => {
-                    if v4_source_ambiguous(header.source) {
+                    if !is_unicast(header.source.into()) {
                         self.counters.rx_dropped += 1;
                         return;
                     }
@@ -1647,8 +1647,7 @@ impl Stack {
                 let context = ErrorContext {
                     invoking_is_icmp_error: false,
                     dest_is_multicast,
-                    source_is_ambiguous: header.source.is_unspecified()
-                        || header.source.is_multicast(),
+                    source_is_ambiguous: !is_unicast(header.source.into()),
                     multicast_exception: code == crate::ipv6::PARAM_PROBLEM_OPTION,
                 };
                 self.emit_icmp_error_v6(
@@ -1787,7 +1786,7 @@ impl Stack {
         let context = ErrorContext {
             invoking_is_icmp_error: false,
             dest_is_multicast,
-            source_is_ambiguous: header.source.is_unspecified() || header.source.is_multicast(),
+            source_is_ambiguous: !is_unicast(header.source.into()),
             multicast_exception: false,
         };
         self.emit_icmp_error_v6(
@@ -1854,8 +1853,7 @@ impl Stack {
                         // divergence from RFC 4443's MAY).
                         if dest_is_multicast
                             || !self.iface.is_assigned(header.destination)
-                            || header.source.is_unspecified()
-                            || header.source.is_multicast()
+                            || !is_unicast(header.source.into())
                         {
                             self.counters.rx_dropped += 1;
                             return;
@@ -2860,11 +2858,11 @@ impl Stack {
             sequence: probe.sequence,
             payload: probe.payload,
         };
+        if !is_unicast(probe.dest) {
+            return Err(SendError::NotUnicast);
+        }
         match probe.dest {
             IpAddr::V4(dest) => {
-                if dest.is_multicast() || dest.is_broadcast() || dest.is_unspecified() {
-                    return Err(SendError::NotUnicast);
-                }
                 let Some((source, _)) = self.iface.ipv4() else {
                     return Err(SendError::NoSourceAddress);
                 };
@@ -2890,9 +2888,6 @@ impl Stack {
                 self.bufs.give(message);
             }
             IpAddr::V6(dest) => {
-                if dest.is_multicast() || dest.is_unspecified() {
-                    return Err(SendError::NotUnicast);
-                }
                 let source = self.source_for_v6(dest).ok_or(SendError::NoSourceAddress)?;
                 if self.next_hop_v6(dest, now).is_none() {
                     return Err(SendError::NoRoute);
@@ -3109,22 +3104,16 @@ impl Stack {
     /// connection this interface cannot carry.
     #[must_use]
     pub fn tcp_local_mss(&mut self, dest: IpAddr, now: Duration64) -> Option<u16> {
-        if !self.link_up {
+        if !self.link_up || !is_unicast(dest) {
             return None;
         }
         let (mtu, ip_header) = match dest {
             IpAddr::V4(d) => {
-                if d.is_broadcast() || d.is_unspecified() || d.is_multicast() {
-                    return None;
-                }
                 self.iface.ipv4()?;
                 self.next_hop_v4(d)?;
                 (self.link_mtu, IPV4_HEADER_LEN)
             }
             IpAddr::V6(d) => {
-                if d.is_unspecified() || d.is_multicast() {
-                    return None;
-                }
                 self.source_for_v6(d)?;
                 self.next_hop_v6(d, now)?;
                 (
@@ -3257,12 +3246,12 @@ impl Stack {
         if !self.link_up {
             return Err(SendError::LinkDown);
         }
+        if !is_unicast(dest) {
+            return Err(SendError::NotUnicast);
+        }
         let tcp_header_len = tcp::TCP_HEADER_LEN + meta.options.wire_len();
         match dest {
             IpAddr::V4(dest) => {
-                if dest.is_broadcast() || dest.is_unspecified() || dest.is_multicast() {
-                    return Err(SendError::NotUnicast);
-                }
                 let Some((source, _)) = self.iface.ipv4() else {
                     return Err(SendError::NoSourceAddress);
                 };
@@ -3308,9 +3297,6 @@ impl Stack {
                 self.bufs.give(segment);
             }
             IpAddr::V6(dest) => {
-                if dest.is_unspecified() || dest.is_multicast() {
-                    return Err(SendError::NotUnicast);
-                }
                 let source = self.source_for_v6(dest).ok_or(SendError::NoSourceAddress)?;
                 if self.next_hop_v6(dest, now).is_none() {
                     return Err(SendError::NoRoute);
@@ -4222,12 +4208,6 @@ fn ipv6_packet(header: &Ipv6Header, payload: &[u8]) -> Option<Vec<u8>> {
     let mut out = vec![0u8; IPV6_HEADER_LEN + payload.len()];
     write_ipv6_into(&mut out, header, payload)?;
     Some(out)
-}
-
-/// True when a v4 source cannot identify a single sender (RFC 1122
-/// §3.2.2: unspecified, multicast, or limited broadcast).
-fn v4_source_ambiguous(source: Ipv4Addr) -> bool {
-    source.is_unspecified() || source.is_multicast() || source.is_broadcast()
 }
 
 /// True when a v4 *destination* does not name a single node, so RFC 1122

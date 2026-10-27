@@ -7,6 +7,7 @@
 //! per-login prompt: the graphical desktop by default when a graphical
 //! session is available, otherwise the account's text shell.
 
+use tairix_abi::secret::Secret;
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -145,7 +146,10 @@ impl<'a> Login<'a> {
             return Ok(Attempt::Cooling(retry_after));
         }
         let password = self.read("password", password_buf, |v, buf| v.read_password(buf))?;
-        let credentials = Credentials { username, password };
+        let credentials = Credentials {
+            username,
+            password: Secret::new(password),
+        };
         let authenticated = self.cfg.authenticator.authenticate(&credentials);
         self.cfg.meter.charge(username, authenticated.is_ok());
         if let Ok(user) = authenticated {
@@ -455,6 +459,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::Cell;
     use core::cell::RefCell;
+    use tairix_abi::secret::Secret;
     use tairix_abi::time::Duration64;
     use tairix_abi::{CapabilityId, Errno};
     use tairix_caps::CapabilitySet;
@@ -605,7 +610,7 @@ mod tests {
     }
     impl Authenticator for FixedAuth {
         fn authenticate(&self, c: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
-            if c.username == self.username && c.password == self.password {
+            if c.username == self.username && c.password.expose() == self.password {
                 Ok(AuthenticatedUser {
                     username: c.username.to_string(),
                     shown_name: c.username.to_string(),
@@ -623,8 +628,12 @@ mod tests {
 
         // The `Login` state machine tested here never posts a `Verify`
         // request; this fixture only needs to satisfy the trait.
-        fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
-            if uid == 1000 && password == self.password {
+        fn authenticate_uid(
+            &self,
+            uid: u32,
+            password: Secret<'_>,
+        ) -> Result<AuthenticatedUser, Errno> {
+            if uid == 1000 && password.expose() == self.password {
                 Ok(AuthenticatedUser {
                     username: self.username.to_string(),
                     shown_name: self.username.to_string(),

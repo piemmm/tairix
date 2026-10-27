@@ -62,6 +62,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
+use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{SessionAccount, DESKTOP_BUNDLE};
 use tairix_abi::time::Duration64;
 use tairix_abi::{AppIdentity, Errno};
@@ -626,7 +627,7 @@ const fn launch_failed(err: Errno) -> Refusal {
 fn handle_verify(
     gate: &mut Gate<'_, '_>,
     uid: Option<u32>,
-    password: &str,
+    password: Secret<'_>,
 ) -> ElevateReply<'static> {
     let sink = gate.authority.sink;
     let Some(uid) = uid else {

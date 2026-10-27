@@ -117,6 +117,7 @@ members = [
     "lib/net",
     "lib/netchan",
     "lib/netconfig",
+    "lib/netshare",
     "lib/noise",
     "lib/pagezero",
     "lib/parallel",

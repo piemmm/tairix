@@ -7924,6 +7924,7 @@ mod tests {
     // The trap seam lives in `tairix-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
     use tairix_abi::elevate::ELEVATE_MAX_REPLY;
+    use tairix_abi::secret::Secret;
     use tairix_abi_trap::seam;
     use tairix_abi_trap::seam::{capture, refusal};
 
@@ -8364,7 +8365,9 @@ mod tests {
     #[test]
     fn the_elevation_request_buffer_is_erased_on_every_path() {
         const PASSWORD: &str = "correct horse battery staple";
-        let request = ElevateRequest::Verify { password: PASSWORD };
+        let request = ElevateRequest::Verify {
+            password: Secret::new(PASSWORD),
+        };
 
         // The broker answered. The exchange really did put the plaintext on
         // the stack, and the guard the caller wraps it in takes it away.

@@ -79,6 +79,7 @@ use tairix_abi::process::{
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::rlimit::ResourceLimit;
 use tairix_abi::seat::SeatAdminRequest;
+use tairix_abi::secret::Secret;
 use tairix_abi::service_control::{
     decode_enrol_reply as decode_service_enrol_reply,
     decode_notice_reply as decode_service_notice_reply,
@@ -152,6 +153,19 @@ use tairix_abi::{
 /// is overwhelmingly unlikely to match it, so the loader fails closed long
 /// before mapping anything; the point is that no input panics.
 const FUZZ_CFI_TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0u8; SYSCALL_TABLE_HASH_LEN];
+
+/// Hand `check` `frame` once with each of its bits flipped, restoring each
+/// after: the sweep that walks a well-formed frame's accept/reject boundary,
+/// which random bytes almost never reach.
+fn each_bit_flipped(frame: &mut [u8], mut check: impl FnMut(&[u8])) {
+    for byte in 0..frame.len() {
+        for bit in 0..8u32 {
+            frame[byte] ^= 1 << bit;
+            check(frame);
+            frame[byte] ^= 1 << bit;
+        }
+    }
+}
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -592,6 +606,34 @@ fn exercise_net_socket(bytes: &[u8]) {
     let _ = decode_socket_reply(bytes);
     let _ = decode_bind_reply(bytes);
     let _ = decode_send_reply(bytes);
+}
+
+/// Drive the `netshare-v1` decoders on `bytes` (one arm of [`exercise`]): the
+/// request the network-share service decodes from any program, and the reply
+/// a client decodes from the service. An accepted frame re-encodes to itself.
+fn exercise_netshare(bytes: &[u8]) {
+    use tairix_abi::netshare_ipc::{NetshareReply, NetshareRequest};
+    if let Ok(request) = NetshareRequest::decode(bytes) {
+        let mut buf = vec![0u8; bytes.len()];
+        let len = request
+            .encode(&mut buf)
+            .expect("an accepted netshare request must re-encode");
+        assert_eq!(&buf[..len], bytes, "an accepted request is canonical");
+    }
+    if let Ok(reply) = NetshareReply::decode(bytes) {
+        let mut buf = vec![0u8; bytes.len()];
+        let len = reply
+            .encode(&mut buf)
+            .expect("an accepted netshare reply must re-encode");
+        assert_eq!(&buf[..len], bytes, "an accepted reply is canonical");
+        match reply {
+            NetshareReply::Shares(shares) => {
+                assert_eq!(shares.shares.iter().count(), shares.shares.len());
+            }
+            NetshareReply::Mounts(mounts) => assert_eq!(mounts.iter().count(), mounts.len()),
+            _ => {}
+        }
+    }
 }
 
 /// Drive the link-local discovery decoders on `bytes` (one arm of
@@ -1276,6 +1318,7 @@ fn exercise(bytes: &[u8]) {
     exercise_net_socket(bytes);
     exercise_net_channel(bytes);
     exercise_discovery(bytes);
+    exercise_netshare(bytes);
     exercise_elevate(bytes);
     exercise_session_ipc(bytes);
     exercise_saver_ipc(bytes);
@@ -2108,13 +2151,7 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
         reserved: 0,
     }
     .to_le_bytes();
-    for byte in 0..base.len() {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(&base);
-            base[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(&mut base, exercise);
 }
 
 /// Every saver message and every host message, each bit of each flipped in
@@ -2182,13 +2219,7 @@ fn structured_saver_messages_with_corrupted_fields_never_panic() {
     }
     for mut base in seeds {
         exercise_saver_ipc(&base);
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise_saver_ipc(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise_saver_ipc);
     }
 }
 
@@ -2211,13 +2242,7 @@ fn structured_settings_frames_with_corrupted_fields_never_panic() {
     for seed in [change, read[..len].to_vec(), reply[..reply_len].to_vec()] {
         let mut base = seed;
         exercise_settings_ipc(&base);
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 
@@ -2302,14 +2327,146 @@ fn structured_discovery_inputs_with_corrupted_fields_never_panic() {
     );
     for mut seed in seeds {
         exercise(&seed);
-        for byte in 0..seed.len() {
-            for bit in 0..8u32 {
-                seed[byte] ^= 1 << bit;
-                exercise(&seed);
-                seed[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut seed, exercise);
     }
+}
+
+/// Every bit of every canonical `netshare-v1` frame, flipped: random bytes
+/// almost never carry the magic and version, so only a sweep from well-formed
+/// frames walks each field's accept/reject boundary.
+#[test]
+fn structured_netshare_inputs_with_corrupted_fields_never_panic() {
+    for mut seed in netshare_request_seeds()
+        .into_iter()
+        .chain(netshare_reply_seeds())
+    {
+        exercise(&seed);
+        each_bit_flipped(&mut seed, exercise);
+    }
+}
+
+const NETSHARE_SEED_PIN: tairix_abi::netshare_ipc::Pin = tairix_abi::netshare_ipc::Pin {
+    server_guid: *b"0123456789abcdef",
+    address: core::net::IpAddr::V4(core::net::Ipv4Addr::new(192, 0, 2, 7)),
+};
+
+/// One request of each kind, encoded: pinned, link-local, by offer, bare.
+fn netshare_request_seeds() -> Vec<Vec<u8>> {
+    use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use tairix_abi::fsserve::OfferId;
+    use tairix_abi::netshare_ipc::{
+        Connect, Credentials, DialectFloor, Endpoint, NetshareRequest, NETSHARE_MAX_REQUEST,
+        SMB_PORT,
+    };
+    let mut interface = [0u8; 16];
+    interface[..4].copy_from_slice(b"eth0");
+    let connect = Connect {
+        endpoint: Endpoint {
+            host: "nas.example",
+            address: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7))),
+            interface: None,
+            port: SMB_PORT,
+        },
+        pin: Some(NETSHARE_SEED_PIN),
+        floor: DialectFloor::Smb300,
+        credentials: Credentials {
+            user: "alice",
+            domain: "WORKGROUP",
+            password: Secret::new("hunter2"),
+        },
+    };
+    let link_local = Connect {
+        endpoint: Endpoint {
+            host: "office.local",
+            address: Some(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 7))),
+            interface: Some(interface),
+            port: 4450,
+        },
+        pin: None,
+        floor: DialectFloor::Smb311,
+        ..connect
+    };
+    [
+        NetshareRequest::Shares {
+            connect,
+            special: true,
+        },
+        NetshareRequest::Mount {
+            connect: link_local,
+            share: "Backups",
+            read_only: true,
+        },
+        NetshareRequest::Unmount {
+            offer: OfferId::new(7).expect("nonzero"),
+        },
+        NetshareRequest::Mounts,
+    ]
+    .iter()
+    .map(|request| {
+        let mut buf = vec![0u8; NETSHARE_MAX_REQUEST];
+        let len = request.encode(&mut buf).expect("encodes");
+        buf.truncate(len);
+        buf
+    })
+    .collect()
+}
+
+/// One reply of each kind, encoded, with a pin refusal and a reasoned one.
+fn netshare_reply_seeds() -> Vec<Vec<u8>> {
+    use tairix_abi::fsserve::OfferId;
+    use tairix_abi::netshare_ipc::{
+        MountEntry, MountState, NetshareError, NetshareReply, Op, Records, Rejection, ShareEntry,
+        Shares, NETSHARE_MAX_REPLY,
+    };
+    let pin = NETSHARE_SEED_PIN;
+    let offer = OfferId::new(7).expect("nonzero");
+    let shares = [
+        ShareEntry {
+            name: "share",
+            special: false,
+            remark: "The test share",
+        },
+        ShareEntry {
+            name: "C$",
+            special: true,
+            remark: "",
+        },
+    ];
+    let mounts = [MountEntry {
+        offer,
+        host: "nas.example",
+        share: "share",
+        read_only: false,
+        state: MountState::Reconnecting,
+    }];
+    [
+        NetshareReply::Shares(Shares {
+            pin,
+            hidden: 1,
+            unnamed: 2,
+            shares: Records::new(&shares),
+        }),
+        NetshareReply::Mounted { pin, offer },
+        NetshareReply::Unmounted,
+        NetshareReply::Mounts(Records::new(&mounts)),
+        NetshareReply::Refused {
+            op: Op::Mount,
+            error: NetshareError::PinMismatch(pin),
+        },
+        NetshareReply::Refused {
+            op: Op::Shares,
+            error: NetshareError::Rejected(Rejection::Locked),
+        },
+        NetshareReply::Unreadable,
+    ]
+    .iter()
+    .map(|reply| {
+        let mut buf = vec![0u8; NETSHARE_MAX_REPLY];
+        let len = reply.encode(&mut buf).expect("encodes");
+        buf.truncate(len);
+        buf
+    })
+    .collect()
 }
 
 #[test]
@@ -2335,13 +2492,7 @@ fn structured_cache_ledger_inputs_with_corrupted_fields_never_panic() {
     row.misses = 100;
 
     let mut base = row.to_le_bytes();
-    for byte in 0..base.len() {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(&base);
-            base[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(&mut base, exercise);
 }
 
 #[test]
@@ -2393,13 +2544,7 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
     .expect("a well-formed DirEntry encodes");
 
     for base in [stat.as_mut_slice(), dirent.as_mut_slice()] {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(base, exercise);
     }
 }
 
@@ -2414,13 +2559,7 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
     let written = encode_reply_ok(&payload, &mut frame).expect("a well-formed reply frame encodes");
     assert_eq!(written, frame.len());
 
-    for byte in 0..frame.len() {
-        for bit in 0..8u32 {
-            frame[byte] ^= 1 << bit;
-            exercise(&frame);
-            frame[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(&mut frame, exercise);
 }
 
 /// A captured task's output reply, seeded and bit-flipped: a random input
@@ -2431,13 +2570,7 @@ fn structured_authorised_output_replies_with_corrupted_fields_never_panic() {
     let mut frame = [0u8; WINDOW_AUTHORISED_OUTPUT_REPLY_MAX];
     let len = encode_authorised_output_reply(&mut frame, Ok(b"wan.ipv4.method dhcp\n"));
     let base = &mut frame[..len];
-    for byte in 0..base.len() {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(base);
-            base[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(base, exercise);
 }
 
 /// Every touch frame shape, seeded and bit-flipped a byte at a time: a
@@ -2484,15 +2617,11 @@ fn structured_touch_frames_with_corrupted_fields_never_panic() {
         let mut base = seed.stamped(u64::MAX, 1).to_le_bytes().to_vec();
         base.push(0);
         let len = TouchFrame::WIRE_LEN;
-        for byte in 0..len {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base[..len]);
-                exercise(&base[..len - 1]);
-                exercise(&base[..=len]);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base[..=len], |frame| {
+            exercise(&frame[..len]);
+            exercise(&frame[..len - 1]);
+            exercise(frame);
+        });
     }
 }
 
@@ -2514,41 +2643,41 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
     for seed in [
         ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::NONE,
         },
         ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::new(&one_change).expect("within bounds"),
         },
         ElevateRequest::Run {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::new(&widest).expect("within bounds"),
         },
         ElevateRequest::Capture {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::NONE,
         },
         ElevateRequest::Capture {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::new(&widest).expect("within bounds"),
         },
         ElevateRequest::Launch {
             username: "root",
-            password: "hunter2",
+            password: Secret::new("hunter2"),
             program: tairix_abi::DATETIME_RUN_PATH,
         },
         ElevateRequest::Verify {
-            password: "hunter2",
+            password: Secret::new("hunter2"),
         },
         ElevateRequest::Authorisers {
             program: tairix_abi::DATETIME_RUN_PATH,
@@ -2558,15 +2687,11 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
         let len = seed
             .encode(&mut base)
             .expect("the max frame holds any request");
-        for byte in 0..len {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base[..len]);
-                exercise(&base[..len - 1]);
-                exercise(&base[..=len]);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base[..=len], |frame| {
+            exercise(&frame[..len]);
+            exercise(&frame[..len - 1]);
+            exercise(frame);
+        });
     }
 }
 
@@ -2617,14 +2742,10 @@ fn structured_elevate_replies_with_corrupted_fields_never_panic() {
         let len = seed
             .encode(&mut base)
             .expect("the max frame holds any reply");
-        for byte in 0..len {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base[..len]);
-                exercise(&base[..len - 1]);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base[..len], |frame| {
+            exercise(frame);
+            exercise(&frame[..len - 1]);
+        });
     }
 }
 
@@ -2647,13 +2768,7 @@ fn structured_session_frames_with_corrupted_fields_never_panic() {
     encode_zone_store_reply(core::num::NonZeroU64::new(9), &mut reply).expect("encodes");
     frames.push(reply.to_vec());
     for mut frame in frames {
-        for byte in 0..frame.len() {
-            for bit in 0..8u32 {
-                frame[byte] ^= 1 << bit;
-                exercise(&frame);
-                frame[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut frame, exercise);
     }
 }
 
@@ -2669,13 +2784,7 @@ fn structured_display_frames_with_corrupted_fields_never_panic() {
     seeds.extend(display_reply_seeds());
     for mut seed in seeds {
         exercise(&seed);
-        for byte in 0..seed.len() {
-            for bit in 0..8u32 {
-                seed[byte] ^= 1 << bit;
-                exercise(&seed);
-                seed[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut seed, exercise);
     }
 }
 
@@ -2838,15 +2947,11 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
         let len = seed
             .encode(&mut base)
             .expect("the max frame holds any request");
-        for byte in 0..len {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base[..len]);
-                exercise(&base[..len - 1]);
-                exercise(&base[..=len]);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base[..=len], |frame| {
+            exercise(&frame[..len]);
+            exercise(&frame[..len - 1]);
+            exercise(frame);
+        });
     }
 }
 
@@ -3305,17 +3410,13 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
     let len = declare
         .encode(&mut base)
         .expect("the max frame holds any request");
-    for byte in 0..len {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(&base[..len]);
-            // A truncated and an over-long spelling of the same flipped
-            // frame must both fail closed rather than be read short.
-            exercise(&base[..len - 1]);
-            exercise(&base[..=len]);
-            base[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(&mut base[..=len], |frame| {
+        exercise(&frame[..len]);
+        // A truncated and an over-long spelling of the same flipped frame
+        // must both fail closed rather than be read short.
+        exercise(&frame[..len - 1]);
+        exercise(frame);
+    });
     let events = [
         WindowEvent::AppBarDefault.to_le_bytes(),
         WindowEvent::AppBarMenu {
@@ -3385,13 +3486,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         .to_le_bytes(),
     ];
     for mut base in events {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 
@@ -3418,13 +3513,7 @@ fn structured_cue_inputs_with_corrupted_fields_never_panic() {
             files,
         })]);
     for mut base in requests {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
     let answers = [
         Ok(CueOutcome::Played),
@@ -3433,13 +3522,7 @@ fn structured_cue_inputs_with_corrupted_fields_never_panic() {
     ]
     .map(encode_cue_reply);
     for mut base in answers {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 
@@ -3466,13 +3549,7 @@ fn structured_menu_outcome_inputs_with_corrupted_fields_never_panic() {
             outcome,
         }
         .to_le_bytes();
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 
@@ -3491,13 +3568,7 @@ fn structured_notify_inputs_with_corrupted_fields_never_panic() {
     .to_le_bytes();
     let clear = NotifyRequest::Clear { key: 9 }.to_le_bytes();
     for mut base in [raise, clear] {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 
@@ -3545,13 +3616,7 @@ fn structured_pinboard_inputs_with_corrupted_fields_never_panic() {
         themes[..themes_len].to_vec(),
     ];
     for mut base in frames {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 
@@ -3580,13 +3645,7 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
         },
     }
     .to_le_bytes();
-    for byte in 0..base.len() {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(&base);
-            base[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(&mut base, exercise);
 
     // The owner-directed operations reach a stranger's window, so walk their
     // boundary too: a flipped op, a flipped owner id, or a dirtied reserved
@@ -3595,13 +3654,7 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
         SwitchboardRequest::ActivateOwner { owner: 0x0102_0304 }.to_le_bytes(),
         SwitchboardRequest::RestartOwner { owner: 7 }.to_le_bytes(),
     ] {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 
@@ -3642,13 +3695,7 @@ fn structured_network_reports_with_corrupted_fields_never_panic() {
         interface(b"eth1", false, &[]),
     ]);
     let mut base = report.to_le_bytes();
-    for byte in 0..base.len() {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(&base);
-            base[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(&mut base, exercise);
     mutate_within_budget(
         "structured_network_reports_with_corrupted_fields_never_panic",
         &base,
@@ -3762,13 +3809,7 @@ fn structured_machine_reports_with_corrupted_fields_never_panic() {
         network: Some(MachineNetwork::new(2, &[interface]).expect("network")),
     }
     .to_le_bytes();
-    for byte in 0..base.len() {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(&base);
-            base[byte] ^= 1 << bit;
-        }
-    }
+    each_bit_flipped(&mut base, exercise);
     mutate_within_budget(
         "structured_machine_reports_with_corrupted_fields_never_panic",
         &base,
@@ -3810,13 +3851,7 @@ fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
     .to_le_bytes();
     let watch = SwitchboardCommand::WatchMachine { watch: true }.to_le_bytes();
     for mut base in [open, report, frame, power, watch] {
-        for byte in 0..base.len() {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base);
-                base[byte] ^= 1 << bit;
-            }
-        }
+        each_bit_flipped(&mut base, exercise);
     }
 }
 

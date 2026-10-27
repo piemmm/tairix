@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::Write as _;
 use core::num::NonZeroU64;
+use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{
     decode_account_page, decode_zone_store_reply, SessionAccount, SessionRequest, SessionVerdict,
     SESSION_ACCOUNTS_PER_PAGE, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
@@ -79,15 +80,15 @@ impl FixedAuth {
 
 impl Authenticator for FixedAuth {
     fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
-        if credentials.username == "ada" && credentials.password == SECRET {
+        if credentials.username == "ada" && credentials.password.expose() == SECRET {
             Ok(Self::ada())
         } else {
             Err(Errno::PermissionDenied)
         }
     }
 
-    fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
-        if uid == 1000 && password == SECRET {
+    fn authenticate_uid(&self, uid: u32, password: Secret<'_>) -> Result<AuthenticatedUser, Errno> {
+        if uid == 1000 && password.expose() == SECRET {
             Ok(Self::ada())
         } else {
             Err(Errno::PermissionDenied)
@@ -103,7 +104,11 @@ impl Authenticator for NoDatabase {
         Err(Errno::PermissionDenied)
     }
 
-    fn authenticate_uid(&self, _uid: u32, _password: &str) -> Result<AuthenticatedUser, Errno> {
+    fn authenticate_uid(
+        &self,
+        _uid: u32,
+        _password: Secret<'_>,
+    ) -> Result<AuthenticatedUser, Errno> {
         Err(Errno::PermissionDenied)
     }
 }
@@ -268,7 +273,10 @@ impl Harness {
 }
 
 fn authenticate<'a>(username: &'a str, password: &'a str) -> SessionRequest<'a> {
-    SessionRequest::Authenticate { username, password }
+    SessionRequest::Authenticate {
+        username,
+        password: Secret::new(password),
+    }
 }
 
 // --- Caller attestation -------------------------------------------------

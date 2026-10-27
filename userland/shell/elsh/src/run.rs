@@ -61,6 +61,7 @@ mod program {
     use tairix_abi::fs::{DirEntries, OpenFlags, FS_IO_MAX, READDIR_BATCH_MAX};
     use tairix_abi::net_ipc::if_name_str;
     use tairix_abi::origin::{CapabilitySummary, Origin};
+    use tairix_abi::secret::Secret;
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
     use tairix_abi::time::Time64;
     use tairix_abi::{CapabilityId, Errno, FileId, FileKind, InputMode, LimitKind, ResourceLimit};
@@ -1076,7 +1077,7 @@ mod program {
         ) -> Result<i32, Denied> {
             let request = ElevateRequest::Run {
                 username,
-                password,
+                password: Secret::new(password),
                 program,
                 // Past the protocol's bounds is refused here, before the
                 // secret is ever put on the wire.

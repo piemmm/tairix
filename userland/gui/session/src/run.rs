@@ -92,6 +92,7 @@ mod program {
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::secret::Secret;
     use tairix_abi::session_ipc::decode_account_page;
     use tairix_abi::session_ipc::{
         session_wake_endpoint, SessionRequest, SessionVerdict, SessionWake, SESSION_ENDPOINT,
@@ -1035,7 +1036,10 @@ mod program {
     /// request buffer on every return path.
     fn broker_answer(ticket: Ticket, password: &str) -> UnlockAnswer {
         let mut reply = [0u8; ELEVATE_MAX_REPLY];
-        match tairix_rt::elevate(&ElevateRequest::Verify { password }, &mut reply) {
+        let request = ElevateRequest::Verify {
+            password: Secret::new(password),
+        };
+        match tairix_rt::elevate(&request, &mut reply) {
             Ok(ElevateReply::Verified) => UnlockAnswer::of(ticket, Verdict::Verified),
             Ok(ElevateReply::Refused(_)) => UnlockAnswer::of(ticket, Verdict::Refused),
             // Nothing was checked: the password is refused, and the lock says
@@ -10769,7 +10773,7 @@ mod program {
         else {
             return Err(AuthoriseRefusal::Unreachable);
         };
-        let password = ask.password().ok_or(AuthoriseRefusal::Refused)?;
+        let password = Secret::new(ask.password().ok_or(AuthoriseRefusal::Refused)?);
         let program = request.program.as_str();
         let words: Vec<&str> = match &request.elevation {
             Elevation::Launch => Vec::new(),

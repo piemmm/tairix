@@ -118,9 +118,11 @@ write come out, and what happened arrives as `Event`s.
   that cannot confirm the negotiation is not trusted to have received it
   untampered. A validation owed when no credit is free goes once one frees.
 - **Trees.** `connect_tree` builds `\\<server>\<share>` from the name dialled,
-  taking a share name only as `tree::is_share_name` does — one to 80
-  characters, none a separator or a control character — and a refused share
-  is `Event::TreeRefused`. A session holds at most 64 trees.
+  taking a share name only as `netshare-v1` does
+  (`tairix_abi::netshare_ipc::is_share_name`) — one to 80 characters, none a
+  separator or a control character — and a refused share is
+  `Event::TreeRefused`. A session holds at most 64 trees, past the 32 mounts
+  a principal may hold.
 - **Requests.** `send` puts requests on a handed-out tree, sealed and
   compounded, filling in the session and tree; each answer is an
   `Event::Response`. The client's own commands — negotiate, session setup,
@@ -211,10 +213,11 @@ each answer before naming the next request:
 - The answer must come under the call's id and context, opened by one first
   fragment and closed by a last; a fault is `SmbError::Rpc` with its status,
   and so is a call that failed. The answer is at most 256 KiB in all and at
-  most 256 shares.
+  most the 256 shares a `netshare-v1` listing carries.
 - A share whose name no tree connect could take is left out and counted, so
   a surface can say some were not shown. A remark is display text: a unit
-  that does not decode is U+FFFD and costs it nothing.
+  that does not decode is U+FFFD and costs it nothing, and a remark past
+  1024 bytes is cut at its last character within them.
 - A listing that fails after opening the pipe still closes it.
 
 Both names and remarks are a stranger's text, for `lib/visible`'s policy to

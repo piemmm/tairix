@@ -39,7 +39,9 @@ impl Fixed {
     /// The secret the last request carried, if it decoded as one.
     fn offered_secret(&self) -> Option<String> {
         match SessionRequest::decode(&self.seen) {
-            Ok(SessionRequest::Authenticate { password, .. }) => Some(String::from(password)),
+            Ok(SessionRequest::Authenticate { password, .. }) => {
+                Some(String::from(password.expose()))
+            }
             _ => None,
         }
     }
@@ -180,8 +182,8 @@ fn the_account_and_the_secret_are_what_went_out() {
         sent,
         Ok(SessionRequest::Authenticate {
             username: "ann",
-            password: SECRET,
-        })
+            password,
+        }) if password.expose() == SECRET
     ));
     assert_eq!(
         verifier.courier().transport.offered_secret().as_deref(),

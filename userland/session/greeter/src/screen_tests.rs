@@ -144,7 +144,7 @@ impl SessionTransport for Authority {
         else {
             return Err(Errno::OutOfRange);
         };
-        if username == self.account && password == self.secret {
+        if username == self.account && password.expose() == self.secret {
             SessionVerdict::Accepted.encode(reply)
         } else {
             SessionVerdict::Refused {

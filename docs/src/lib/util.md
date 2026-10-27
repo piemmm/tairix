@@ -110,7 +110,8 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   stack are erased the same way; and `Wiped<N>` is a fixed-size buffer that
   wipes itself at the end of its scope, and `WipedBuf` its twin sized at run
   time, which never grows past the block it was made with, since a buffer
-  that moved to a larger block would leave a copy in the one it outgrew. A
+  that moved to a larger block would leave a copy in the one it outgrew.
+  Neither shows what it holds in `Debug`. A
   plain `fill(0)` before the bytes are freed or reused is a dead store the
   optimiser may delete outright, so every credential, key and secret buffer
   in the tree — the elevation client, prompt and broker, the greeter's and

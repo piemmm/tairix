@@ -277,7 +277,9 @@ in build scripts),
 `lib/xml` (the one fail-closed XML element scanner, read by the SVG decoder
 and OpenRaster's layer stack), `lib/der` (the one strict DER codec, which
 SPNEGO and Kerberos read and write through), `lib/smb` (the pure SMB 3
-protocol engine the sandboxed `smbfs` worker runs), `lib/unicode` (the
+protocol engine the sandboxed `smbfs` worker runs), `lib/netshare` (the one
+`netshare-v1` client `files.app` and the share commands reach `smbfs`
+through), `lib/unicode` (the
 Unicode character properties showing text from elsewhere needs — the hidden
 characters, the UTS #39 mark-sequence and restriction-level checks — from
 tables generated out of a pinned UCD snapshot), `lib/bytedev` (the one byte-addressed reader

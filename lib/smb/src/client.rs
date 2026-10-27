@@ -25,6 +25,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::netshare_ipc::{is_share_name, MOUNTS_MAX};
 use tairix_inline::ArrayVec;
 
 use crate::connection::{Body, Connection, Message, Outgoing, Received, Sent, Ticket};
@@ -43,12 +44,14 @@ use crate::session::{SessionFlags, SessionSetupRequest, SessionSetupResponse};
 use crate::simple::encode_empty;
 use crate::spnego::{self, NegState, Reply};
 use crate::status::NtStatus;
-use crate::tree::{is_share_name, TreeConnectRequest, TreeConnectResponse};
+use crate::tree::{TreeConnectRequest, TreeConnectResponse};
 use crate::{Refusal, Role, SmbError};
 
 /// The most trees a session holds, connected or connecting: past the mounts a
 /// principal may hold, with room for a share listing.
 pub const MAX_TREES: usize = 64;
+
+const _: () = assert!(MAX_TREES > MOUNTS_MAX);
 
 /// The tree id a compound's related requests carry, which no tree may take.
 const RELATED_TREE: u32 = 0xffff_ffff;

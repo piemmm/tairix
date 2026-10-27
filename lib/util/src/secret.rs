@@ -20,6 +20,7 @@
 //! heap buffer sized at run time.
 
 use alloc::vec::Vec;
+use core::fmt;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
@@ -101,7 +102,6 @@ pub fn wipe_with<T: Copy>(values: &mut [T], blank: T) {
 /// assert_eq!(&buf[..6], b"secret");
 /// // Dropping `buf` here overwrites all eight bytes.
 /// ```
-#[derive(Debug)]
 pub struct Wiped<const N: usize>([u8; N]);
 
 impl<const N: usize> Wiped<N> {
@@ -117,6 +117,13 @@ impl<const N: usize> Wiped<N> {
     /// never wrong.
     pub fn wipe(&mut self) {
         wipe(&mut self.0);
+    }
+}
+
+/// Shows none of what it holds.
+impl<const N: usize> fmt::Debug for Wiped<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Wiped(..)")
     }
 }
 
@@ -153,7 +160,6 @@ impl<const N: usize> Drop for Wiped<N> {
 /// larger block would leave what it held in the one it outgrew, past any
 /// wipe's reach. The whole block is erased, spare capacity too, since a
 /// vector handed in truncated still holds what it was truncated from.
-#[derive(Debug)]
 pub struct WipedBuf(Vec<u8>);
 
 impl WipedBuf {
@@ -194,6 +200,13 @@ impl WipedBuf {
     }
 }
 
+/// Shows none of what it holds, nor how much.
+impl fmt::Debug for WipedBuf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("WipedBuf(..)")
+    }
+}
+
 impl Deref for WipedBuf {
     type Target = [u8];
 
@@ -216,7 +229,18 @@ impl Drop for WipedBuf {
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+
     use super::{wipe, wipe_with, Wiped, WipedBuf};
+
+    #[test]
+    fn no_debug_shows_what_a_buffer_holds() {
+        let mut fixed = Wiped::<6>::new();
+        fixed.copy_from_slice(b"secret");
+        assert_eq!(format!("{fixed:?}"), "Wiped(..)");
+        let heap = WipedBuf::new(alloc::vec::Vec::from(*b"secret"));
+        assert_eq!(format!("{heap:?}"), "WipedBuf(..)");
+    }
 
     #[test]
     fn a_wiped_buffer_reads_as_its_bytes_until_it_is_erased() {

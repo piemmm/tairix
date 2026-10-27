@@ -11,6 +11,7 @@
 
 use alloc::string::String;
 
+use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{
     SessionRequest, SessionVerdict, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
 };
@@ -76,7 +77,7 @@ impl Check {
         let mut request = WipedBuf::with_capacity(SESSION_MAX_REQUEST).ok()?;
         let len = SessionRequest::Authenticate {
             username: account,
-            password: secret,
+            password: Secret::new(secret),
         }
         .encode(request.extend_zeroed(SESSION_MAX_REQUEST)?)
         .ok()?;

@@ -53,6 +53,7 @@ use crate::bounded_text::BoundedText;
 use core::num::NonZeroU64;
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64, Reader};
+use crate::secret::Secret;
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -186,7 +187,7 @@ pub enum SessionRequest<'a> {
         /// The account whose secret is offered.
         username: &'a str,
         /// The offered secret. Never logged, never echoed in a reply.
-        password: &'a str,
+        password: Secret<'a>,
     },
     /// Step the calling desktop session aside so the login screen can come
     /// back up, leaving it running in the background to be resumed.
@@ -223,7 +224,7 @@ impl<'a> SessionRequest<'a> {
             Self::Background | Self::ZoneStore => 0,
             Self::Authenticate { username, password } => {
                 check_field(username, SESSION_LOGIN_NAME_MAX)?;
-                check_field(password, MAX_PASSWORD_LEN)?;
+                check_field(password.expose(), MAX_PASSWORD_LEN)?;
                 2 + username.len() + 2 + password.len()
             }
         };
@@ -242,7 +243,7 @@ impl<'a> SessionRequest<'a> {
             Self::Authenticate { username, password } => {
                 out[6] = OPCODE_AUTHENTICATE;
                 let at = put_str(out, 8, username)?;
-                put_str(out, at, password)?;
+                put_str(out, at, password.expose())?;
             }
             Self::Background => out[6] = OPCODE_BACKGROUND,
             Self::ZoneStore => out[6] = OPCODE_ZONE_STORE,
@@ -276,7 +277,7 @@ impl<'a> SessionRequest<'a> {
             OPCODE_ACCOUNTS => Self::Accounts { offset: r.u32()? },
             OPCODE_AUTHENTICATE => {
                 let username = read_name(&mut r, SESSION_LOGIN_NAME_MAX)?;
-                let password = read_name(&mut r, MAX_PASSWORD_LEN)?;
+                let password = Secret::new(read_name(&mut r, MAX_PASSWORD_LEN)?);
                 Self::Authenticate { username, password }
             }
             OPCODE_BACKGROUND => Self::Background,

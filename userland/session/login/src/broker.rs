@@ -40,6 +40,7 @@
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
+use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{
     encode_account_page, encode_zone_store_reply, SessionAccount, SessionRequest, SessionVerdict,
     SESSION_ACCOUNTS_PER_PAGE, SESSION_DISPLAY_NAME_MAX, SESSION_LOGIN_NAME_MAX,
@@ -430,7 +431,7 @@ fn consistent(total: u32, offset: u32, page: &[SessionAccount]) -> (u32, &[Sessi
 #[allow(clippy::too_many_arguments)] // Mirrors the injected seams of the entry point above.
 fn adjudicate(
     username: &str,
-    password: &str,
+    password: Secret<'_>,
     authenticator: &dyn Authenticator,
     budget: &mut AttemptBudget,
     now: Duration64,

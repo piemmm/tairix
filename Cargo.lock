@@ -3809,6 +3809,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-netshare"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-rt",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-netstack"
 version = "0.0.0"
 dependencies = [

@@ -11,6 +11,7 @@
 
 use alloc::string::ToString;
 
+use tairix_abi::secret::Secret;
 use tairix_abi::Errno;
 use tairix_users::{Uid, UserRecord, UsersDb};
 
@@ -56,15 +57,18 @@ impl Authenticator for UsersAuthenticator<'_> {
     fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
         let record = self
             .db
-            .authenticate(credentials.username, credentials.password.as_bytes())
+            .authenticate(
+                credentials.username,
+                credentials.password.expose().as_bytes(),
+            )
             .map_err(|_| Errno::PermissionDenied)?;
         authenticated_user(record)
     }
 
-    fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
+    fn authenticate_uid(&self, uid: u32, password: Secret<'_>) -> Result<AuthenticatedUser, Errno> {
         let record = self
             .db
-            .authenticate_uid(Uid(uid), password.as_bytes())
+            .authenticate_uid(Uid(uid), password.expose().as_bytes())
             .map_err(|_| Errno::PermissionDenied)?;
         authenticated_user(record)
     }
@@ -84,7 +88,11 @@ impl Authenticator for DenyAll {
         Err(Errno::PermissionDenied)
     }
 
-    fn authenticate_uid(&self, _uid: u32, _password: &str) -> Result<AuthenticatedUser, Errno> {
+    fn authenticate_uid(
+        &self,
+        _uid: u32,
+        _password: Secret<'_>,
+    ) -> Result<AuthenticatedUser, Errno> {
         Err(Errno::PermissionDenied)
     }
 }
@@ -95,6 +103,7 @@ mod tests {
     use crate::session::{Authenticator, Credentials};
 
     use alloc::vec;
+    use tairix_abi::secret::Secret;
     use tairix_abi::{CapabilityId, Errno};
     use tairix_caps::CapabilitySet;
     use tairix_users::{
@@ -157,7 +166,10 @@ mod tests {
     }
 
     fn credentials<'a>(username: &'a str, password: &'a str) -> Credentials<'a> {
-        Credentials { username, password }
+        Credentials {
+            username,
+            password: Secret::new(password),
+        }
     }
 
     #[test]
@@ -199,7 +211,9 @@ mod tests {
     fn uid_authentication_yields_the_same_identity_as_the_username_path() {
         let db = db();
         let auth = UsersAuthenticator::new(&db);
-        let by_uid = auth.authenticate_uid(1000, "byron").expect("authenticates");
+        let by_uid = auth
+            .authenticate_uid(1000, Secret::new("byron"))
+            .expect("authenticates");
         let by_name = auth
             .authenticate(&credentials("ada", "byron"))
             .expect("authenticates");
@@ -217,7 +231,7 @@ mod tests {
             (10, ""),        // a no-login service account
         ] {
             assert_eq!(
-                auth.authenticate_uid(uid, password),
+                auth.authenticate_uid(uid, Secret::new(password)),
                 Err(Errno::PermissionDenied),
                 "uid {uid:?}/password {password:?}"
             );

@@ -113,6 +113,7 @@ mod tests {
 
     use alloc::vec;
     use core::cell::{Cell, RefCell};
+    use tairix_abi::secret::Secret;
     use tairix_caps::CapabilitySet;
     use tairix_users::{AccountState, Gid, Identity, Uid, UserRecord, UsersDb, MIN_ITERATIONS};
 
@@ -167,7 +168,7 @@ mod tests {
                 let accepted = authenticator
                     .authenticate(&Credentials {
                         username: "root",
-                        password: "root",
+                        password: Secret::new("root"),
                     })
                     .is_ok();
                 outcomes.borrow_mut().push(accepted);
@@ -196,7 +197,7 @@ mod tests {
                     authenticator
                         .authenticate(&Credentials {
                             username: "root",
-                            password: "root",
+                            password: Secret::new("root"),
                         })
                         .is_err(),
                 );
@@ -233,7 +234,7 @@ mod tests {
                 let accepted = authenticator
                     .authenticate(&Credentials {
                         username: "root",
-                        password: "root",
+                        password: Secret::new("root"),
                     })
                     .is_ok();
                 outcomes.borrow_mut().push(accepted);

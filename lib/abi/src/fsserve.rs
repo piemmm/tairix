@@ -14,6 +14,8 @@
 //! bounds. The driver refuses a request the kernel could not have sent
 //! ([`decode_request`]).
 
+use core::num::NonZeroU64;
+
 use crate::driver::filesystem::{
     AclModel, AllocationClass, DirEntry, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
     NodeSecurity, NodeTimes, SecurityAcl, SecuritySubject, Unpinned, VolumeStats, WriteRefusal,
@@ -60,6 +62,29 @@ pub const fn served_endpoint(serial: u32) -> u64 {
 #[must_use]
 pub const fn is_served_endpoint(id: u64) -> bool {
     id >= SERVED_ENDPOINT_BASE && id < SERVED_ENDPOINT_BASE + SERVED_ENDPOINT_SPAN
+}
+
+/// The kernel's name for a network volume a server has offered to one
+/// principal, which that principal attaches (`plans/FSSERVE.md` FSS6).
+/// Never zero, and never reused in a boot.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct OfferId(NonZeroU64);
+
+impl OfferId {
+    /// The offer `raw` names, or `None` for zero, which names none.
+    #[must_use]
+    pub const fn new(raw: u64) -> Option<Self> {
+        match NonZeroU64::new(raw) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+
+    /// Its raw value.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
 }
 
 /// Request header: version (2), operation (1), flags (1).

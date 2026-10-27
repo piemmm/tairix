@@ -54,6 +54,7 @@ use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tairix_abi::driver_store::SystemConfigFile;
+use tairix_abi::net_ipc::is_unicast;
 use tairix_util::conf::{setting_line, Located, ValueShape};
 
 /// The administrator's layer of the document.
@@ -1090,7 +1091,7 @@ fn parse_dns_servers(value: &str) -> Result<Vec<IpAddr>, ConfigError> {
             return Err(ConfigError::InvalidValue);
         }
         let addr: IpAddr = segment.parse().map_err(|_| ConfigError::InvalidValue)?;
-        if !is_unicast_resolver(addr) {
+        if !is_unicast(addr) {
             return Err(ConfigError::InvalidValue);
         }
         if servers.contains(&addr) {
@@ -1102,16 +1103,6 @@ fn parse_dns_servers(value: &str) -> Result<Vec<IpAddr>, ConfigError> {
         servers.push(addr);
     }
     Ok(servers)
-}
-
-/// Whether `addr` is a plausible recursive-resolver address: a unicast host
-/// address, not the unspecified address, a multicast group, or the IPv4
-/// limited broadcast. Loopback is permitted (a local resolver).
-fn is_unicast_resolver(addr: IpAddr) -> bool {
-    match addr {
-        IpAddr::V4(a) => !(a.is_unspecified() || a.is_multicast() || a.is_broadcast()),
-        IpAddr::V6(a) => !(a.is_unspecified() || a.is_multicast()),
-    }
 }
 
 /// Render a DNS-server list as its canonical `,`-joined spelling (each

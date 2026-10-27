@@ -11,6 +11,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::netshare_ipc::ACCOUNT_NAME_MAX;
 use tairix_abi::time::Time64;
 use tairix_crypto::ntlm::{
     ntlm_checksum, ntlm_checksum_verify, ntlm_hmac, ntlm_signing_key, ntowfv2, NtlmDirection,
@@ -90,6 +91,10 @@ pub(crate) const AV_FLAG_MIC: u32 = 0x0000_0002;
 /// field carries.
 const MAX_TARGET_INFO: usize = 4096;
 const MAX_NAME_BYTES: usize = 512;
+
+// A UTF-8 byte is at most two bytes of UTF-16, so every account name a
+// network-share request carries fits.
+const _: () = assert!(2 * ACCOUNT_NAME_MAX <= MAX_NAME_BYTES);
 
 /// Where an AUTHENTICATE message's MIC lies, and where its payload starts.
 pub(crate) const MIC: core::ops::Range<usize> = 72..88;

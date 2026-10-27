@@ -113,6 +113,16 @@ pub fn ip_from_parts(family: NetAddrFamily, addr: [u8; 16]) -> core::net::IpAddr
     }
 }
 
+/// Whether `address` names one node: not the unspecified address, a
+/// multicast group or the IPv4 limited broadcast. Loopback does.
+#[must_use]
+pub fn is_unicast(address: core::net::IpAddr) -> bool {
+    match address {
+        core::net::IpAddr::V4(a) => !(a.is_unspecified() || a.is_multicast() || a.is_broadcast()),
+        core::net::IpAddr::V6(a) => !(a.is_unspecified() || a.is_multicast()),
+    }
+}
+
 /// The network `addr` is on under a `prefix`-bit prefix: `addr` with every
 /// host bit cleared. A prefix of zero or wider than 32 bits names no network
 /// and yields the unspecified address.
@@ -1369,36 +1379,13 @@ impl NetInterfaceConfigMsg {
                 }
             }
         }
-        // A recursive resolver is a specific unicast host: the unspecified
-        // address, any multicast group, and the IPv4 limited broadcast are
-        // refused (loopback is allowed — a local resolver).
+        // Loopback stays allowed: a local resolver.
         for server in self.dns.as_slice() {
-            if !server_addr_is_unicast(server) {
+            if !is_unicast(ip_from_parts(server.family, server.addr)) {
                 return Err(Errno::OutOfRange);
             }
         }
         Ok(())
-    }
-}
-
-/// Whether a [`NetServerAddr`] names a plausible service host: a unicast
-/// address, not the unspecified address, a multicast group, or the IPv4
-/// limited broadcast. Loopback is permitted.
-fn server_addr_is_unicast(server: &NetServerAddr) -> bool {
-    match server.family {
-        NetAddrFamily::V4 => {
-            let a = core::net::Ipv4Addr::new(
-                server.addr[0],
-                server.addr[1],
-                server.addr[2],
-                server.addr[3],
-            );
-            !(a.is_unspecified() || a.is_multicast() || a.is_broadcast())
-        }
-        NetAddrFamily::V6 => {
-            let a = core::net::Ipv6Addr::from(server.addr);
-            !(a.is_unspecified() || a.is_multicast())
-        }
     }
 }
 
@@ -3158,6 +3145,29 @@ mod tests {
     #[test]
     fn magic_is_the_ascii_tag() {
         assert_eq!(NETSTACK_REQUEST_MAGIC, u32::from_le_bytes(*b"NST1"));
+    }
+
+    #[test]
+    fn unicast_is_one_node_loopback_included() {
+        use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        for one in [
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 255)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        ] {
+            assert!(is_unicast(one), "{one}");
+        }
+        for many in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::BROADCAST),
+            IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb)),
+        ] {
+            assert!(!is_unicast(many), "{many}");
+        }
     }
 
     #[test]

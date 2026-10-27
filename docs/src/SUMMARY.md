@@ -109,6 +109,7 @@
   - [`tairix-net`](./lib/net.md)
   - [`tairix-netchan`](./lib/netchan.md)
   - [`tairix-netconfig`](./lib/netconfig.md)
+  - [`tairix-netshare`](./lib/netshare.md)
   - [`tairix-noise`](./lib/noise.md)
   - [`tairix-parallel`](./lib/parallel.md)
   - [`tairix-path`](./lib/path.md)
@@ -267,6 +268,7 @@
 - [Standard Information Stream (`stdinfo`, fd 3)](./abi/stdinfo.md)
 - [Datagram socket ABI (`netsock-v1`)](./abi/net-sockets.md)
 - [Serving a filesystem (`fsserve-v1`)](./abi/fsserve.md)
+- [Network shares (`netshare-v1`)](./abi/netshare.md)
 - [C development header (`abi-v1`)](./abi/c-abi.md)
 - [Calling TAIRiX from C (worked example)](./abi/calling-from-c.md)
 

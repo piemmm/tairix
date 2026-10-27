@@ -86,6 +86,7 @@ mod program {
     };
     use tairix_abi::notice::NoticeTopic;
     use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::secret::Secret;
     use tairix_abi::session_ipc::{
         SessionWake, SESSION_ENDPOINT, SESSION_END_GRACE, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
         SESSION_WAKE_LEN,
@@ -1293,7 +1294,11 @@ mod program {
             outcome
         }
 
-        fn authenticate_uid(&self, uid: u32, password: &str) -> Result<AuthenticatedUser, Errno> {
+        fn authenticate_uid(
+            &self,
+            uid: u32,
+            password: Secret<'_>,
+        ) -> Result<AuthenticatedUser, Errno> {
             self.inner.authenticate_uid(uid, password)
         }
     }

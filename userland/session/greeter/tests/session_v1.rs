@@ -13,6 +13,7 @@
 //! and it is a **test-only** edge (a dev-dependency): at run time the two are
 //! separate processes that share nothing but the wire types in `lib/abi`.
 
+use tairix_abi::secret::Secret;
 use tairix_abi::session_ipc::{SessionAccount, SESSION_ACCOUNTS_PER_PAGE};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
@@ -104,7 +105,7 @@ struct OneAccount;
 
 impl Authenticator for OneAccount {
     fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
-        if credentials.username != ACCOUNT || credentials.password != SECRET {
+        if credentials.username != ACCOUNT || credentials.password.expose() != SECRET {
             return Err(Errno::PermissionDenied);
         }
         Ok(AuthenticatedUser {
@@ -119,7 +120,11 @@ impl Authenticator for OneAccount {
         })
     }
 
-    fn authenticate_uid(&self, _uid: u32, _password: &str) -> Result<AuthenticatedUser, Errno> {
+    fn authenticate_uid(
+        &self,
+        _uid: u32,
+        _password: Secret<'_>,
+    ) -> Result<AuthenticatedUser, Errno> {
         Err(Errno::PermissionDenied)
     }
 }

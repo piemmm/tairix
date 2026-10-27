@@ -27,7 +27,7 @@ change (§2.13).
 | SMB5 | `lib/smb` authentication: SPNEGO with mechListMIC, NTLMv2 (target info, MIC, SPN), and the `client` — the session-setup, re-authentication and tree-connect state machine its mechanisms plug into; Kerberos joins it in KERBEROS K4 | done |
 | SMB6 | `lib/smb` file operations: create/close/read/write/flush, directory enumeration, query/set info, leases, change notify, durable handles and reconnect | done |
 | SMB7 | `lib/smb` share enumeration: DCE/RPC bind and NDR `NetrShareEnum` over `IPC$` | done |
-| SMB8 | `netshare-v1`, the client protocol to `smbfs`, and the `lib/netshare` client `files.app` and the commands share | planned |
+| SMB8 | `netshare-v1`, the client protocol to `smbfs`, and the `lib/netshare` client `files.app` and the commands share | done |
 | SMB9 | `userland/net/smbfs`: the socket-owning front, the sandboxed engine workers, one served filesystem per mounted share, the caches, credentials and tickets, endpoint pinning, session-bound lifetime, audit | planned |
 | SMB10 | The commands: the `mount` bundle with `-t smb` (closes D1014 for network sources), `unmount` for served volumes, `smbtree` | planned |
 | SMB11 | DFS referrals: following a namespace link to the server that holds it | planned |
@@ -222,9 +222,11 @@ Share enumeration (SMB7):
   by `FSCTL_PIPE_TRANSCEIVE`, read on any further fragments, close — the pipe
   closed even when the listing fails. The bind must be accepted as offered,
   answers must carry the call's ids, fragments are at most 4280 bytes and an
-  answer at most 256 KiB and 256 shares. A share whose name no tree connect
-  takes (`tree::is_share_name`: one to 80 characters, no separator or control)
-  is left out and counted; a remark is display text, a bad unit U+FFFD.
+  answer at most 256 KiB and `netshare-v1`'s 256 shares. A share whose name no
+  tree connect takes (`netshare_ipc::is_share_name`: one to 80 characters, no
+  separator or control) is left out and counted; a remark is display text, a
+  bad unit U+FFFD, cut at its last character within `netshare-v1`'s 1024
+  bytes.
 
 Every module is held to Microsoft's published Windows traffic where it exists
 (`docs/src/lib/smb.md`) and fuzzed by `tests/fuzz_smb.rs`.
@@ -234,12 +236,23 @@ Every module is held to Microsoft's published Windows traffic where it exists
 A `service` bundle (`os.tairix.smbfs`) under `/System/Services/`, holding
 `CAP_NET` and `CAP_FS_SERVE` (FSSERVE §6) and nothing else.
 
-- **`netshare-v1` requests**: `Shares` (a host pin and credentials → the disk
-  shares, special `$` shares only when asked), `Mount` (pin, share,
-  credentials, presentation, name hint, optional target) → an *offer* the
-  requester attaches itself (FSSERVE §6), `Unmount`, `Mounts` (the caller's
-  own), `Forget` (drop the caller's cached tickets). The caller's identity and
-  login session come from the kernel-attested origin, never from the request.
+- **`netshare-v1`** (`lib/abi/src/netshare_ipc.rs`, client `lib/netshare`):
+  `Shares` (the endpoint, its pin when the credentials were remembered, the
+  dialect floor and the credentials → the pin proved and the disk shares,
+  special `$` shares only when asked), `Mount` (the same and the share,
+  read-only) → the pin and an *offer* the requester attaches itself (FSSERVE
+  §6), `Unmount`, `Mounts` (the caller's own). The presentation, the name and
+  the target belong to the kernel's attach call, which judges them against the
+  real caller; the Kerberos credential and `Forget` (drop the caller's cached
+  tickets) join with KERBEROS K4. The caller's identity and login session come
+  from the kernel-attested origin, never from the request. A request the
+  service cannot read is answered `Unreadable`.
+- **Admission.** The endpoint's send capability is `CAP_NET`, so the kernel
+  refuses a caller without network authority before `smbfs` reads a byte:
+  the service's work is network work and a request's names cross the wire (a
+  lookup, NTLM's user and domain), so a program that cannot reach the network
+  itself cannot probe a host or port, or carry data out, through it.
+  `files.app` already holds `CAP_NET`; `mount` and `smbtree` declare it.
 - **One served filesystem per mounted share** (`lib/fsserve`), its node
   handles keeping the driver traits' contract (FSSERVE §0): an id names one
   node for as long as it keeps its name, held across reconnects by a
@@ -368,8 +381,13 @@ tag-checked readers and a writer; fuzzed.
 
 **SMB4–SMB7 — the engine**, each with its tests and fuzz targets as §2 lists.
 
-**SMB8 — `netshare-v1`.** The ABI, its codec, the client, and the fuzz target
-`smbfs` decodes it with.
+**SMB8 — `netshare-v1`.** The ABI and its fail-closed, canonical codec
+(`netshare_ipc`, with `Op::max_reply` bounding each operation's reply and
+`fsserve::OfferId` naming an offer), the reserved endpoint, the share-name rule
+and listing bounds `lib/smb` takes from it, the `Secret` a password crosses
+as, the `lib/netshare` client (each request built in an erased buffer, each
+answer accepted only for its request, one wording per reason) and the decoders
+fuzzed in `lib/abi/tests/fuzz_decode.rs`.
 
 **SMB9 — `smbfs`.** As §3, over FSSERVE and SMB4–SMB8.
 

@@ -1,0 +1,28 @@
+[package]
+name = "tairix-netshare"
+description = "TAIRiX network-share client: the `netshare-v1` requests a program makes of `smbfs` — an endpoint's shares, a mount and its withdrawal, the caller's own mounts — over an injected transport, each request built in a buffer erased once its call returns (`plans/SMB.md` SMB8)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The production transport is an optional build feature that pulls the
+# freestanding userland runtime; the pure client and its host tests never do.
+[features]
+program = ["dep:tairix-rt"]
+
+[dependencies]
+# The one wire definition of the protocol.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The buffer a request, and the password in it, is built in: erased when the
+# call returns.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+# For the `program` feature only: the IPC call.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
