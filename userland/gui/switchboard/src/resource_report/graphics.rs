@@ -25,12 +25,20 @@ use crate::view::resources::{
     ResourceControl, ResourceDevice, Trace,
 };
 
+/// The graphics device's busy share over the last interval, and the shares
+/// before it, oldest first.
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Utilisation<'a> {
+    pub share: Option<u16>,
+    pub history: &'a [u16],
+}
+
 /// The display path's rail entry and pane.
 pub(super) fn device(
     sample: &Sample,
     frame: Option<FrameReport>,
     stats: Option<&DisplayStats>,
-    busy_permille: Option<u16>,
+    utilisation: Utilisation<'_>,
     history: &[u16],
 ) -> ResourceDevice {
     // The rail states the frame's *damage* — what changed on screen — where
@@ -49,7 +57,7 @@ pub(super) fn device(
         ),
         trend: Trace::single(PressureKind::Gpu.signal_role(), history.to_vec()),
         hero: hero(frame, history),
-        blocks: blocks(sample, frame, stats, busy_permille),
+        blocks: blocks(sample, frame, stats, utilisation),
         banner: None,
         actions: actions(),
     }
@@ -110,9 +118,9 @@ fn blocks(
     sample: &Sample,
     frame: Option<FrameReport>,
     stats: Option<&DisplayStats>,
-    busy_permille: Option<u16>,
+    utilisation: Utilisation<'_>,
 ) -> Vec<PaneBlock> {
-    alloc::vec![
+    let mut blocks = alloc::vec![
         PaneBlock::half("FRAME WORK — COUNTS ONLY", frame_block(frame)),
         PaneBlock::half(
             "COMPOSITING PATH",
@@ -120,9 +128,41 @@ fn blocks(
         ),
         PaneBlock::full(
             "GRAPHICS DEVICE",
-            device_block(sample, stats, busy_permille)
+            device_block(sample, stats, utilisation.share)
         ),
-    ]
+    ];
+    if let Some(stats) = stats {
+        blocks.push(PaneBlock::full(
+            "DEVICE UTILISATION",
+            utilisation_body(stats, utilisation.history),
+        ));
+    }
+    blocks
+}
+
+/// What the device's busy time counts: its compositor's load, where its
+/// driver accounts one, or the time its present calls spent.
+const fn measure(stats: &DisplayStats) -> &'static str {
+    if stats.engine_load {
+        "compositing load"
+    } else {
+        "time presenting"
+    }
+}
+
+/// The device's measured interval shares drawn across the block.
+fn utilisation_body(stats: &DisplayStats, history: &[u16]) -> BlockBody {
+    if history.is_empty() {
+        // A share needs two samples, so the first draws nothing yet.
+        return BlockBody::Absence(absence_statement(
+            "the device's utilisation",
+            Unmeasured::Unavailable,
+        ));
+    }
+    BlockBody::Trend {
+        caption: format!("100% full scale · {}", measure(stats)),
+        trace: Trace::single(PressureKind::Gpu.signal_role(), history.to_vec()),
+    }
 }
 
 /// What the last frame actually did.
@@ -289,6 +329,7 @@ fn device_block(
             Some(permille) => ReadingFact::text("Device utilisation", percent(permille)),
             None => ReadingFact::absent("Device utilisation", Unmeasured::Unavailable),
         });
+        facts.push(ReadingFact::text("Measured as", measure(stats)));
         facts.push(ReadingFact::text("Video memory", memory_line(stats)));
     } else {
         facts.push(ReadingFact::absent("Scan-out", absence));

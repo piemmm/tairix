@@ -3,25 +3,28 @@
 //!
 //! A layered present shows a *base* — the frame, holding the desktop and every
 //! window below the lowest layer, composited in software as ever — and above
-//! it one layer per window, each in two buffers the display allocated. Each
-//! layer is one of two kinds:
+//! it the windows' layers, each in two buffers the display allocated. A layer
+//! is one of three kinds:
 //!
-//! * **Free** — a window with no frost and no window-wide opacity, baked alone
-//!   over nothing: content, furniture, corner coverage and shadow. The engine
-//!   blends whatever of it is not opaque, and moving it is a new destination,
-//!   not a composite.
-//! * **Flattened** — a frosted or window-wide translucent window, baked as the
-//!   software composite of its footprint over everything beneath it, opaque,
-//!   since what it shows is made from what lies beneath. It is re-baked
-//!   wherever anything beneath it changes.
+//! * **Free** — a window baked alone over nothing: content, furniture, corner
+//!   coverage and shadow. The engine blends whatever of it is not opaque, and
+//!   moving it is a new destination, not a composite.
+//! * **Frost** — beneath a frosted window's free layer, the software composite
+//!   of everything beneath its rectangle with its frost applied, opaque: what
+//!   its own pixels are blended over. It is re-baked wherever the frost
+//!   changes, which a move confines to its border.
+//! * **Flattened** — a window translucent as a whole, baked as the software
+//!   composite of its footprint over everything beneath it, the window
+//!   included, opaque. It is re-baked wherever anything beneath it changes.
 //!
 //! The back buffer holds at each pixel the composite the frame or layer
-//! showing it needs: every window below the lowest layer, or within a
-//! flattened footprint every window up to that one. Flattened footprints never
+//! showing it needs: every window below the lowest layer, within a flattened
+//! footprint every window up to that one, and within a frost's rectangle every
+//! window below its own and that window's frost. These composite zones never
 //! overlap and never cross a frosted window of the base, so no composite is
-//! cut through a frost. The base's damage excludes every flattened footprint,
-//! which hides it, so the display is never handed pixels it cannot show; a
-//! footprint that moves off them, or a layer given back, marks them first.
+//! cut through a frost. The base's damage excludes every zone, which hides
+//! it, so the display is never handed pixels it cannot show; a zone that moves
+//! off them, or a layer given back, marks them first.
 //!
 //! A layer's two buffers alternate: the engine shows one while what changed is
 //! baked into the other, so it never reads a buffer being written. A frame
@@ -56,6 +59,26 @@ enum Role {
     Free,
     /// Everything beneath the window and the window, composited and opaque.
     Flattened,
+    /// Everything beneath the window's rectangle with its frost applied,
+    /// opaque, beneath the window's own free layer.
+    Frost,
+}
+
+impl Role {
+    /// Whether the layer is baked from the back buffer's composite, which is
+    /// opaque across it, rather than from its window alone.
+    const fn is_composite(self) -> bool {
+        matches!(self, Self::Flattened | Self::Frost)
+    }
+}
+
+/// How deep the frame composites a part of the screen.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum Depth {
+    /// Every window below this z-index.
+    Below(usize),
+    /// Every window below this z-index, and that window's frost.
+    Frost(usize),
 }
 
 /// What a layer shows.
@@ -125,6 +148,9 @@ pub(super) struct Refusals {
     /// The window, at the size, the engine could not give a layer: its
     /// buffers, or room in a stack it composites at once.
     window: Option<(WindowId, (u32, u32))>,
+    /// The frosted window, at its rectangle's size, the engine could not give
+    /// its frost's buffers: it is flattened instead.
+    frost: Option<(WindowId, (u32, u32))>,
     /// The buffers the engine could not give the pointer's layer.
     pointer: Option<(u32, u32)>,
     /// The size the engine could not give the scaled desktop's layer.
@@ -137,6 +163,7 @@ impl Refusals {
         stack: false,
         plane: None,
         window: None,
+        frost: None,
         pointer: None,
         desktop: None,
     };
@@ -363,7 +390,7 @@ impl Stack {
         }
     }
 
-    /// `composed` less every flattened layer's rectangle: a flattened layer is
+    /// `composed` less every composite layer's rectangle: a composite layer is
     /// opaque across all of it, so the base beneath can never be seen there.
     /// A free layer hides nothing, since its content may be fully transparent
     /// anywhere.
@@ -371,7 +398,7 @@ impl Stack {
         let Self { layers, shown, .. } = self;
         shown.clone_from(composed);
         for layer in layers.iter() {
-            if layer.role() == Some(Role::Flattened) {
+            if layer.role().is_some_and(Role::is_composite) {
                 shown.subtract(layer.at);
             }
         }
@@ -418,14 +445,16 @@ pub(super) enum Change<'a> {
 
 impl Compositor {
     /// Take a change to window `id` as its free layer's own, damaging only the
-    /// flattened footprints above it, which composite it. Answers whether `id`
-    /// has a free layer; any other window's change is the caller's to mark.
+    /// composite zones above it, which read it, and its own frost where a move
+    /// or a whole change shifts it. Answers whether `id` has a free layer; any
+    /// other window's change is the caller's to mark.
     pub(super) fn route_to_layer(
         &mut self,
         id: WindowId,
         change: Change<'_>,
         footprints: [Rect; 2],
     ) -> bool {
+        let screen = self.screen_rect();
         let Some(stack) = self.layers.as_mut() else {
             return false;
         };
@@ -437,17 +466,28 @@ impl Compositor {
             return false;
         };
         let reach = self.shadow.reach();
-        let footprint = self
+        let placed = self
             .windows
             .iter()
             .find(|window| window.id() == id)
-            .map(|window| window.footprint(reach));
+            .map(|window| {
+                (
+                    window.footprint(reach),
+                    window.bounds().intersection(&screen),
+                )
+            });
+        let footprint = placed.map(|(footprint, _)| footprint);
         let mut zones: ArrayVec<Rect, MAX_ACCEL_LAYERS> = ArrayVec::new();
         for above in stack.layers.iter().skip(at.saturating_add(1)) {
-            if above.role() == Some(Role::Flattened) {
+            if above.role().is_some_and(Role::is_composite) {
                 let _ = zones.try_push(above.at);
             }
         }
+        let frost = stack
+            .layers
+            .iter()
+            .find(|layer| layer.source == Source::Window(id, Role::Frost))
+            .map(|layer| layer.at);
         if let Some(layer) = stack.layers.get_mut(at) {
             match change {
                 Change::Pixels(rect) => layer.dirty(rect),
@@ -478,6 +518,13 @@ impl Compositor {
                     self.mark_from(hit, from);
                 }
             }
+        }
+        // A frost is a function of where its window lies, so a move or a whole
+        // change composes it again where it lay and where it lies now.
+        if let (Some(was), Some((_, now)), Change::Moved | Change::Whole) = (frost, placed, change)
+        {
+            self.mark_from(was, from);
+            self.mark_from(now, from);
         }
         true
     }
@@ -518,8 +565,8 @@ impl Compositor {
     }
 
     /// The depth each pixel is composited to this frame: below `.0` on the
-    /// base, and below each flattened footprint's own depth within it.
-    pub(super) fn layer_depths(&self) -> (usize, ArrayVec<(Rect, usize), MAX_ACCEL_LAYERS>) {
+    /// base, and each composite zone's own depth within it.
+    pub(super) fn layer_depths(&self) -> (usize, ArrayVec<(Rect, Depth), MAX_ACCEL_LAYERS>) {
         let mut zones = ArrayVec::new();
         let Some(stack) = self
             .layers
@@ -529,11 +576,18 @@ impl Compositor {
             return (usize::MAX, zones);
         };
         for layer in &stack.layers {
-            if let Source::Window(id, Role::Flattened) = layer.source {
-                if let Some(index) = self.index_of(id) {
-                    let _ = zones.try_push((layer.at, index.saturating_add(1)));
-                }
-            }
+            let Source::Window(id, role) = layer.source else {
+                continue;
+            };
+            let Some(index) = self.index_of(id) else {
+                continue;
+            };
+            let depth = match role {
+                Role::Free => continue,
+                Role::Flattened => Depth::Below(index.saturating_add(1)),
+                Role::Frost => Depth::Frost(index),
+            };
+            let _ = zones.try_push((layer.at, depth));
         }
         (stack.split, zones)
     }
@@ -802,43 +856,40 @@ impl Compositor {
             }
         }
         let mut chosen: ArrayVec<(usize, Role, Rect), MAX_ACCEL_LAYERS> = ArrayVec::new();
-        for (index, window) in self.windows.iter().enumerate().rev() {
+        'windows: for (index, window) in self.windows.iter().enumerate().rev() {
             if !window.is_visible() {
                 continue;
             }
-            let role = Self::role_of(window);
-            let at = match role {
-                Role::Free => window.footprint(reach),
-                Role::Flattened => window.footprint(reach).intersection(&screen),
-            };
-            let overlaps_flattened = role == Role::Flattened
-                && chosen.iter().any(|&(_, other_role, other)| {
-                    other_role == Role::Flattened && !other.intersection(&at).is_empty()
-                });
-            if chosen.len() == room || !fits(at) || overlaps_flattened || refused(window, at) {
+            let left = room.saturating_sub(chosen.len());
+            let mut laid = Self::laid(window, reach, screen, left);
+            // Planes the display could not give buffers leave the window
+            // flattened, as one layer.
+            let frost_refused =
+                |at: Rect| self.refused.frost == Some((window.id(), (at.width, at.height)));
+            if laid.len() > 1
+                && laid.iter().any(|&(role, at)| {
+                    refused(window, at) || (role == Role::Frost && frost_refused(at))
+                })
+            {
+                laid = Self::laid(window, reach, screen, 1);
+            }
+            if laid.len() > left {
                 break;
             }
-            let _ = chosen.try_push((index, role, at));
+            for &(role, at) in &laid {
+                let overlaps_zone = role.is_composite()
+                    && chosen.iter().any(|&(_, other_role, other)| {
+                        other_role.is_composite() && !other.intersection(&at).is_empty()
+                    });
+                if !fits(at) || overlaps_zone || refused(window, at) {
+                    break 'windows;
+                }
+            }
+            for (role, at) in laid {
+                let _ = chosen.try_push((index, role, at));
+            }
         }
-        // A flattened footprint crossing a blurred window of the base would
-        // cut that blur's composite, so it joins the base, and everything
-        // beneath it with it.
-        while let Some(crossing) = {
-            let split = chosen.last().map_or(0, |&(index, _, _)| index);
-            chosen.iter().position(|&(_, role, at)| {
-                role == Role::Flattened
-                    && self.windows.iter().take(split).any(|below| {
-                        let blurred = below.bounds().intersection(&screen);
-                        let inside = blurred.intersection(&at);
-                        below.is_visible()
-                            && below.blur_radius() > 0
-                            && !inside.is_empty()
-                            && inside != blurred
-                    })
-            })
-        } {
-            chosen.truncate(crossing);
-        }
+        self.trim_crossings(&mut chosen, screen);
         let split = chosen.last().map(|&(index, _, _)| index)?;
         let mut windows = ArrayVec::new();
         for &(index, role, at) in chosen.iter().rev() {
@@ -851,16 +902,62 @@ impl Compositor {
         })
     }
 
-    /// How `window`'s layer would be baked: flattened only where what it
-    /// shows is made from what lies beneath it. A free layer's translucency
-    /// goes to the engine whether or not its blend dithers (`plans/GPU.md`
-    /// GD3).
-    fn role_of(window: &Window) -> Role {
-        if window.reads_backdrop() {
-            Role::Flattened
-        } else {
-            Role::Free
+    /// Leave out of `chosen` every window whose composite zone crosses a
+    /// blurred window of the base, and everything beneath it: that blur's
+    /// composite would otherwise be cut through. A window's layers go
+    /// together, so its pixels never go on a layer without their frost.
+    fn trim_crossings(
+        &self,
+        chosen: &mut ArrayVec<(usize, Role, Rect), MAX_ACCEL_LAYERS>,
+        screen: Rect,
+    ) {
+        while let Some(crossing) = {
+            let split = chosen.last().map_or(0, |&(index, _, _)| index);
+            chosen.iter().position(|&(_, role, at)| {
+                role.is_composite()
+                    && self.windows.iter().take(split).any(|below| {
+                        let blurred = below.bounds().intersection(&screen);
+                        let inside = blurred.intersection(&at);
+                        below.is_visible()
+                            && below.blur_radius() > 0
+                            && !inside.is_empty()
+                            && inside != blurred
+                    })
+            })
+        } {
+            let window = chosen.get(crossing).map(|&(index, _, _)| index);
+            let first = chosen
+                .iter()
+                .position(|&(index, _, _)| Some(index) == window)
+                .unwrap_or(crossing);
+            chosen.truncate(first);
         }
+    }
+
+    /// The layers `window` would be laid on, top first, where `left` remain.
+    ///
+    /// A window that reads no backdrop is alone over nothing, its translucency
+    /// the engine's to blend whether or not that blend dithers (`plans/GPU.md`
+    /// GD3). A frosted one is its own pixels over its frost where two layers
+    /// remain, so a move re-derives only the frost's border; a window
+    /// translucent as a whole, or a frosted one given a single layer, is
+    /// composited with what lies beneath it.
+    fn laid(window: &Window, reach: u32, screen: Rect, left: usize) -> ArrayVec<(Role, Rect), 2> {
+        let footprint = window.footprint(reach);
+        let mut laid = ArrayVec::new();
+        if !window.reads_backdrop() {
+            let _ = laid.try_push((Role::Free, footprint));
+        } else if window.opacity() == u8::MAX && left >= 2 {
+            let _ = laid.try_push((Role::Free, footprint));
+            // Wholly off screen, it has no frost to show.
+            let rect = window.bounds().intersection(&screen);
+            if !rect.is_empty() {
+                let _ = laid.try_push((Role::Frost, rect));
+            }
+        } else {
+            let _ = laid.try_push((Role::Flattened, footprint.intersection(&screen)));
+        }
+        laid
     }
 
     /// Whether `window` may be the one layer of a promoted present, which has
@@ -919,7 +1016,7 @@ impl Compositor {
             let layer = if let Some(position) = held {
                 let mut layer = stack.layers.swap_remove(position);
                 if layer.at.origin != at.origin
-                    && matches!(source, Source::Window(_, Role::Flattened))
+                    && matches!(source, Source::Window(_, role) if role.is_composite())
                 {
                     layer.dirty_all();
                 }
@@ -933,7 +1030,18 @@ impl Compositor {
                 }
                 layer
             } else {
+                if let Source::Window(id, _) = source {
+                    // A window's layers are had together or not at all, so its
+                    // pixels never go on a layer without their frost.
+                    while let Some(at) = kept.iter().position(|layer| layer.window() == Some(id)) {
+                        stack.layers.push(kept.remove(at));
+                    }
+                    placed = kept
+                        .iter()
+                        .any(|layer| matches!(layer.source, Source::Window(..) | Source::Desktop));
+                }
                 match source {
+                    Source::Window(id, Role::Frost) => self.refused.frost = Some((id, capacity)),
                     Source::Window(id, _) => self.refused.window = Some((id, capacity)),
                     Source::Pointer => self.refused.pointer = Some(capacity),
                     Source::Desktop => self.refused.desktop = Some(capacity),
@@ -1007,7 +1115,7 @@ impl Compositor {
     }
 
     /// Encode what this frame composited into the layers baked from the back
-    /// buffer — every flattened layer, and the desktop's — with whatever each
+    /// buffer — every composite layer, and the desktop's — with whatever each
     /// buffer to be shown still lacks.
     fn bake_composited(&mut self, engine: &mut dyn LayerPresenter, composed: &Region) {
         let Self {
@@ -1019,10 +1127,9 @@ impl Compositor {
             ..
         } = self;
         for layer in layers.iter_mut().flat_map(|stack| &mut stack.layers) {
-            if !matches!(
-                layer.source,
-                Source::Window(_, Role::Flattened) | Source::Desktop
-            ) {
+            if !matches!(layer.source, Source::Window(_, role) if role.is_composite())
+                && layer.source != Source::Desktop
+            {
                 continue;
             }
             layer.dirty_region(composed, routed);

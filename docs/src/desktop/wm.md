@@ -275,26 +275,36 @@ presents its damage, so a hardware frame is never partial.
 
 A layered present shows a **base** — the output frame, holding the desktop
 and every window below the lowest layer, composited in software as ever —
-and above it one layer per window, each in two buffers the display allocated:
+and above it the windows' layers, each in two buffers the display allocated:
 
-- **Free** — a window with no frost and no window-wide opacity, baked alone
-  over nothing — content, furniture, corner coverage and shadow. The engine
-  blends whatever of it is not opaque, without the desktop's dither unless
-  its caps state `band_free_blend` (`plans/GPU.md` decision 10), and moving
-  it is a new destination, not a composite.
-- **Flattened** — a frosted or window-wide translucent window, baked as the
-  software composite of its footprint over everything beneath it, opaque,
-  since what it shows is made from what lies beneath. It is re-baked wherever
-  anything beneath it changes. Flattened footprints never overlap and never
-  cross a frosted window of the base.
+- **Free** — a window baked alone over nothing — content, furniture, corner
+  coverage and shadow. The engine blends whatever of it is not opaque,
+  without the desktop's dither unless its caps state `band_free_blend`
+  (`plans/GPU.md` decision 10), and moving it is a new destination, not a
+  composite.
+- **Frost** — beneath a frosted window's free layer, the software composite of
+  everything beneath its rectangle with its frost applied, opaque: what the
+  window's own pixels are blended over, by the engine. A move derives only
+  the frost's border again, the rest kept from the retained frost, and never
+  composites the window's own pixels. A frosted window given a single layer,
+  or one whose frost the display could not give buffers, is flattened
+  instead; a window's layers are had together or not at all.
+- **Flattened** — a window translucent as a whole, baked as the software
+  composite of its footprint over everything beneath it, the window
+  included, opaque. It is re-baked wherever anything beneath it changes.
+
+A flattened footprint and a frost's rectangle are *composite zones*: they
+never overlap, and never cross a frosted window of the base, so no composite
+is cut through a frost. A zone that would joins the base with its whole
+window, so a frosted window's pixels are never shown without their frost.
 
 The back buffer holds at each pixel the composite the frame or layer showing
 it needs. The base presents only what it shows: its damage less every
-flattened footprint, which is opaque and hides it, so a dragged frosted window
+composite zone, which is opaque and hides it, so a dragged frosted window
 copies into the display's frame the strip it uncovered rather than its whole
-footprint. What a footprint left stale beneath it is composed again before it
-can show, because a footprint that moves, a window that joins the base and
-layers given back each mark where they lay. A layer's buffers alternate: the engine shows one while what changed
+footprint. What a zone left stale beneath it is composed again before it can
+show, because a zone that moves, a window that joins the base and layers
+given back each mark where they lay. A layer's buffers alternate: the engine shows one while what changed
 is baked into the other, so it never reads a buffer being written, and
 `Presenter::ready` holds a frame while a present is queued. Each buffer
 catches up on what changed while the other was shown, including what no client

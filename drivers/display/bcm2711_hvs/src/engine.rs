@@ -271,8 +271,21 @@ pub struct Engine<H, V, C: LinkCall, A: BufferMemory, D, L> {
     /// there.
     wait_dropped: bool,
     power: DisplayPower,
+    /// The engine's compositing load, integrated over the time it held.
+    occupancy: Occupancy,
     delay: D,
     log: L,
+}
+
+/// A compositing load held over time.
+#[derive(Copy, Clone, Debug, Default)]
+struct Occupancy {
+    /// Nanoseconds of the core clock's ceiling the loads so far took.
+    busy_ns: u64,
+    /// When the load in `hz` began to hold, once the engine was first driven.
+    since_us: Option<u64>,
+    /// The core clock the planes shown now take to composite.
+    hz: u64,
 }
 
 /// What the pipe a valve of `load` feeds carries when the core clock runs at
@@ -413,6 +426,7 @@ where
             watching: false,
             wait_dropped: false,
             power: DisplayPower::On,
+            occupancy: Occupancy::default(),
             delay: parts.delay,
             log,
         };
@@ -1041,13 +1055,11 @@ where
     /// channel still composites a stack it is to latch away from: lowering it
     /// earlier would starve the larger one.
     fn settle_floor(&mut self) {
+        self.account_load();
         if self.slots.iter().any(|slots| slots.waiting.is_some()) {
             return;
         }
-        let mut running = [None; OUTPUTS_MAX];
-        for (runs, pipe) in running.iter_mut().zip(&self.pipes) {
-            *runs = pipe.runs;
-        }
+        let running = self.running();
         let settled = self.needed_hz(&running[..self.pipes.len()]);
         self.floor(settled);
     }
@@ -1055,14 +1067,43 @@ where
     /// Raise the core clock to what the stack now composites, where that is
     /// more than it runs at; lowering waits for the outputs to settle.
     fn raise_floor(&mut self) {
-        let mut running = [None; OUTPUTS_MAX];
-        for (runs, pipe) in running.iter_mut().zip(&self.pipes) {
-            *runs = pipe.runs;
-        }
+        self.account_load();
+        let running = self.running();
         let needed = self.needed_hz(&running[..self.pipes.len()]);
         if needed > self.floor_hz {
             self.floor(needed);
         }
+    }
+
+    /// The timing each pipe runs, in pipe order.
+    fn running(&self) -> [Option<Timing>; OUTPUTS_MAX] {
+        let mut running = [None; OUTPUTS_MAX];
+        for (runs, pipe) in running.iter_mut().zip(&self.pipes) {
+            *runs = pipe.runs;
+        }
+        running
+    }
+
+    /// Add the compositing load that held until now to the engine's busy
+    /// time, and take on the load the running outputs' planes take from
+    /// here: their compositing as a share of the core clock's ceiling.
+    fn account_load(&mut self) {
+        let now_us = self.delay.now_us();
+        let running = self.running();
+        let next_hz = self
+            .composited_hz(&running[..self.pipes.len()])
+            .min(self.core_max_hz);
+        let ceiling = u128::from(self.core_max_hz.max(1));
+        let load = &mut self.occupancy;
+        if let Some(since_us) = load.since_us {
+            let held_ns = u128::from(now_us.saturating_sub(since_us)) * 1_000;
+            let busy = held_ns * u128::from(load.hz) / ceiling;
+            load.busy_ns = load
+                .busy_ns
+                .saturating_add(u64::try_from(busy).unwrap_or(u64::MAX));
+        }
+        load.since_us = Some(now_us);
+        load.hz = next_hz;
     }
 
     /// Bring pipe `at` up running `timing`.
@@ -1095,11 +1136,30 @@ where
     }
 
     /// The core clock the pipes running, or about to run, `timings` need:
-    /// the most any one output loads it, or the share of every plane's
-    /// pixels it composites.
+    /// the most any one output loads it, or what compositing its planes
+    /// takes.
     fn needed_hz(&self, timings: &[Option<Timing>]) -> u64 {
-        let surface = self.surface;
-        let (width, height) = surface.map_or((0, 0), |mode| (mode.width_px, mode.height_px));
+        let most = self
+            .pipes
+            .iter()
+            .zip(timings)
+            .filter_map(|(pipe, timing)| {
+                timing
+                    .as_ref()
+                    .map(|timing| output_load_hz(pipe.valve.kind().load, timing))
+            })
+            .max()
+            .unwrap_or(0);
+        most.max(self.composited_hz(timings))
+    }
+
+    /// The core clock compositing the planes the pipes running `timings` show
+    /// takes: every layer's pixels at each output's refresh, of which the core
+    /// composites three in five, or two in five when two outputs share it.
+    fn composited_hz(&self, timings: &[Option<Timing>]) -> u64 {
+        let (width, height) = self
+            .surface
+            .map_or((0, 0), |mode| (mode.width_px, mode.height_px));
         let surface_area = (u64::from(width) * u64::from(height)).max(1);
         // Every layer is composited, so the stack loads the core by its
         // layers' area, never less than the one plane the surface is.
@@ -1109,20 +1169,22 @@ where
             .map(|layer| u64::from(layer.dst.2) * u64::from(layer.dst.3))
             .sum::<u64>()
             .max(surface_area);
-        let mut most = 0;
         let mut pixels = 0;
         let mut running = 0;
-        for (pipe, timing) in self.pipes.iter().zip(timings) {
-            let Some(timing) = timing else { continue };
+        for timing in self
+            .pipes
+            .iter()
+            .zip(timings)
+            .filter_map(|(_, timing)| timing.as_ref())
+        {
             running += 1;
-            most = most.max(output_load_hz(pipe.valve.kind().load, timing));
             let (out_width, out_height) = timing.active_size();
             let place = Place::fit(width, height, out_width, out_height);
             let placed = u64::from(place.width) * u64::from(place.height);
             pixels += placed * stacked / surface_area * u64::from(timing.refresh_mhz()) / 1_000;
         }
         let share = if running > 1 { 40 } else { 60 };
-        most.max(pixels * share / 100)
+        pixels * share / 100
     }
 
     /// Hold the core clock at no less than `hz`, within what it can run at.
@@ -1375,6 +1437,11 @@ where
         2
     }
 
+    fn engine_busy_ns(&mut self) -> Option<u64> {
+        self.account_load();
+        Some(self.occupancy.busy_ns)
+    }
+
     fn abandon_queued(&mut self) {
         let mut withdrawn = false;
         for at in 0..self.pipes.len() {
@@ -1483,6 +1550,7 @@ where
                 }
             }
         }
+        self.account_load();
         // The buffers it leaves are given back once no list names them.
         let _ = self.watch_frames();
     }

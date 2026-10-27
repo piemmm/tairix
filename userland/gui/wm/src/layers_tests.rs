@@ -730,7 +730,8 @@ fn a_frosted_window_dragged_off_where_it_lay_leaves_no_base_stale() {
     ] {
         assert!(c.move_window(glass, to));
         c.present(&mut engine).expect("presents");
-        let covered = shown_at(engine.layers().last().expect("the frost's layer"));
+        let (frost, _) = frost_and_pixels(&engine);
+        let covered = shown_at(&frost);
         assert!(
             !engine.base_region().intersects(covered),
             "at {to:?} the base named pixels its frost's layer covers"
@@ -816,20 +817,323 @@ fn clear(w: u32, h: u32) -> Surface {
     Surface::filled(w, h, Pixel::TRANSPARENT).expect("surface allocates")
 }
 
+/// Dark glass, translucent across its whole surface, as a frosted panel is.
+fn glass(w: u32, h: u32) -> Surface {
+    Surface::filled(w, h, Color::rgba(20, 24, 30, 0xD0).premultiply()).expect("surface")
+}
+
+/// A frosted window over an opaque one, the glass's id answered.
+fn frosted(c: &mut Compositor) -> WindowId {
+    c.add_window(Point::ORIGIN, opaque(12, 12, RED));
+    let glass = c.add_window(Point::new(4, 2), glass(16, 8));
+    assert!(c.set_backdrop_blur(glass, 2));
+    glass
+}
+
+/// The frost layer and the free layer above it a frosted window is laid on,
+/// at the top of the last stack.
+fn frost_and_pixels(engine: &MockEngine) -> (AccelLayer, AccelLayer) {
+    let layers = engine.layers();
+    let [.., frost, pixels] = layers else {
+        panic!("a frosted window takes two layers: {layers:?}");
+    };
+    (*frost, *pixels)
+}
+
 #[test]
-fn a_frosted_window_is_flattened_with_its_frost() {
+fn a_frosted_window_is_its_frost_beneath_its_own_pixels() {
+    let output = mode(24, 12);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    frosted(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Layered));
+
+    let (frost, pixels) = frost_and_pixels(&engine);
+    assert_eq!(shown_at(&frost), Rect::new(4, 2, 16, 8));
+    assert_eq!(shown_at(&pixels), Rect::new(4, 2, 16, 8));
+    for y in 0..frost.src.height_px {
+        for x in 0..frost.src.width_px {
+            assert_eq!(
+                layer_pixel(&engine, &frost, x, y)[3],
+                255,
+                "a frost is opaque"
+            );
+            assert_eq!(
+                layer_pixel(&engine, &pixels, x, y)[3],
+                0xD0,
+                "the glass as it is, for the engine to blend over its frost"
+            );
+        }
+    }
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            frosted(c);
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_dragged_frosted_window_composes_its_frost_and_never_its_pixels() {
+    let output = mode(32, 20);
+    let drag = |engine: &mut MockEngine| {
+        let mut c = new_compositor(output, BLUE).expect("compositor");
+        let glass = frosted(&mut c);
+        c.present(engine).expect("presents");
+        assert!(c.move_window(glass, Point::new(7, 4)));
+        c.present(engine).expect("presents");
+        c.frame_stats()
+    };
+    let mut flat = MockEngine::new(output);
+    flat.caps.max_layers = 2;
+    let flattened = drag(&mut flat);
+    assert_eq!(
+        flat.layers().len(),
+        1,
+        "one layer, so the glass is flattened"
+    );
+
+    let mut engine = MockEngine::new(output);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = frosted(&mut c);
+    c.present(&mut engine).expect("presents");
+    let (frost_before, pixels_before) = frost_and_pixels(&engine);
+    assert!(c.move_window(glass, Point::new(7, 4)));
+    c.present(&mut engine).expect("presents");
+    let split = c.frame_stats();
+    let (frost, pixels) = frost_and_pixels(&engine);
+
+    assert_eq!(
+        pixels.buffer, pixels_before.buffer,
+        "its own pixels only moved"
+    );
+    assert_eq!(shown_at(&pixels), Rect::new(7, 4, 16, 8));
+    assert_ne!(
+        frost.buffer, frost_before.buffer,
+        "its frost was baked again"
+    );
+    assert_eq!(shown_at(&frost), Rect::new(7, 4, 16, 8));
+    assert!(
+        split.blended_px + 16 * 8 <= flattened.blended_px,
+        "the glass is blended by the engine, not composited: {} against {}",
+        split.blended_px,
+        flattened.blended_px
+    );
+    assert!(split.blur_px > 0, "the frost's border is derived again");
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let glass = frosted(c);
+            c.move_window(glass, Point::new(7, 4));
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_frosted_windows_own_change_reaches_its_pixels_and_not_its_frost() {
+    let output = mode(24, 12);
+    let repaint = |c: &mut Compositor, id: WindowId| {
+        let mut area = Region::new();
+        area.add(Rect::new(2, 2, 6, 3));
+        assert!(c.repaint_window(id, (16, 8), &area, |surface, rects| {
+            for rect in rects {
+                surface.fill_rect(
+                    rect.left().cast_unsigned(),
+                    rect.top().cast_unsigned(),
+                    rect.width,
+                    rect.height,
+                    Color::rgb(240, 240, 240),
+                );
+            }
+        }));
+    };
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = frosted(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    let (frost_before, _) = frost_and_pixels(&engine);
+
+    repaint(&mut c, glass);
+    c.present(&mut engine).expect("presents");
+    let (frost, _) = frost_and_pixels(&engine);
+    assert_eq!(c.frame_stats().damaged_px, 0, "nothing is composited");
+    assert_eq!(frost.buffer, frost_before.buffer, "its frost is as it was");
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let glass = frosted(c);
+            repaint(c, glass);
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_change_beneath_a_frosted_window_reaches_its_frost() {
     let output = mode(24, 12);
     let build = |c: &mut Compositor| {
-        c.add_window(Point::ORIGIN, opaque(12, 12, RED));
-        let glass = c.add_window(Point::new(4, 2), clear(16, 8));
+        let under = c.add_window(Point::ORIGIN, opaque(12, 12, RED));
+        let glass = c.add_window(Point::new(4, 2), glass(16, 8));
+        assert!(c.set_backdrop_blur(glass, 2));
+        under
+    };
+    let repaint = |c: &mut Compositor, id: WindowId| {
+        let mut area = Region::new();
+        area.add(Rect::new(6, 3, 4, 4));
+        assert!(c.repaint_window(id, (12, 12), &area, |surface, rects| {
+            for rect in rects {
+                surface.fill_rect(
+                    rect.left().cast_unsigned(),
+                    rect.top().cast_unsigned(),
+                    rect.width,
+                    rect.height,
+                    GREEN,
+                );
+            }
+        }));
+    };
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let under = build(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    let (frost_before, pixels_before) = frost_and_pixels(&engine);
+
+    repaint(&mut c, under);
+    c.present(&mut engine).expect("presents");
+    let (frost, pixels) = frost_and_pixels(&engine);
+    assert_ne!(
+        frost.buffer, frost_before.buffer,
+        "the frost reads what changed"
+    );
+    assert_eq!(
+        pixels.buffer, pixels_before.buffer,
+        "the glass's own pixels did not"
+    );
+    assert!(c.frame_stats().blur_px > 0);
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            let under = build(c);
+            repaint(c, under);
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_frosted_window_given_one_layer_is_flattened_with_its_frost() {
+    let output = mode(24, 12);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    frosted(&mut c);
+    let mut engine = MockEngine::new(output);
+    engine.caps.max_layers = 2;
+    c.present(&mut engine).expect("presents");
+    let layers = engine.layers();
+    assert_eq!(layers.len(), 1);
+    assert_eq!(
+        layer_pixel(&engine, &layers[0], 0, 0)[3],
+        255,
+        "composited opaque"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            frosted(c);
+        }),
+        1,
+    );
+}
+
+#[test]
+fn a_frosted_window_refused_its_frosts_buffers_is_flattened_and_stays_so() {
+    let output = mode(24, 12);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let glass = frosted(&mut c);
+    let mut engine = MockEngine::new(output);
+    engine.room = 2;
+    c.present(&mut engine).expect("presents");
+    assert!(
+        engine.stacks.is_empty(),
+        "its pixels were given buffers, its frost was not, so neither is shown"
+    );
+    assert_close(
+        &engine.screen,
+        &software(output, BLUE, |c| {
+            frosted(c);
+        }),
+        1,
+    );
+
+    for x in [5, 4, 5] {
+        assert!(c.move_window(glass, Point::new(x, 2)));
+        c.present(&mut engine).expect("presents");
+        let layers = engine.layers();
+        assert_eq!(
+            layers.len(),
+            1,
+            "flattened, its one layer, the window under it in the base"
+        );
+        assert_eq!(layer_pixel(&engine, &layers[0], 0, 0)[3], 255);
+        assert_close(
+            &engine.screen,
+            &software(output, BLUE, |c| {
+                let glass = frosted(c);
+                c.move_window(glass, Point::new(x, 2));
+            }),
+            1,
+        );
+    }
+    assert_eq!(
+        engine.allocs_asked,
+        2 + 1 + 2 + 1,
+        "after one refusal a frame asks for nothing it was refused"
+    );
+}
+
+#[test]
+fn a_frosted_window_off_screen_keeps_the_windows_beneath_it_on_layers() {
+    let output = mode(32, 20);
+    let build = |c: &mut Compositor| {
+        c.add_window(Point::new(2, 2), opaque(12, 12, RED));
+        let glass = c.add_window(Point::new(-40, 2), glass(16, 8));
         assert!(c.set_backdrop_blur(glass, 2));
     };
     let mut c = new_compositor(output, BLUE).expect("compositor");
     build(&mut c);
     let mut engine = MockEngine::new(output);
     c.present(&mut engine).expect("presents");
-    assert_eq!(c.presentation(), Some(Presentation::Layered));
+    let layers = engine.layers();
+    assert_eq!(
+        layers.len(),
+        2,
+        "the window beneath and the glass's own pixels"
+    );
+    assert_eq!(shown_at(&layers[0]), Rect::new(2, 2, 12, 12));
     assert_close(&engine.screen, &software(output, BLUE, build), 1);
+}
+
+#[test]
+fn a_frost_crossing_a_frosted_base_window_takes_its_whole_window_to_the_base() {
+    let output = mode(32, 24);
+    let build = |c: &mut Compositor| {
+        let below = c.add_window(Point::new(2, 2), glass(20, 12));
+        assert!(c.set_backdrop_blur(below, 2));
+        let above = c.add_window(Point::new(16, 8), glass(10, 10));
+        assert!(c.set_backdrop_blur(above, 2));
+    };
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    build(&mut c);
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert!(
+        engine.stacks.is_empty(),
+        "neither window's pixels go on a layer without their frost"
+    );
+    assert_eq!(c.presentation(), Some(Presentation::Composited));
+    assert_close(&engine.screen, &software(output, BLUE, build), 0);
 }
 
 #[test]
@@ -957,8 +1261,8 @@ fn what_an_engine_states_of_its_blend_decides_no_layer() {
     let banded = present(false);
     assert_eq!(
         banded.1,
-        [255, 255, 96],
-        "opaque, frosted flattened, the veil free"
+        [255, 255, 0, 96],
+        "opaque, the frosted window's frost and its clear pixels, the veil free"
     );
     assert_eq!(present(true), banded);
 }

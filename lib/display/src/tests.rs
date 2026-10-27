@@ -205,6 +205,8 @@ struct MockDisplay {
     memory: DisplayMemory,
     /// Queued presents the server gave up on.
     abandoned: usize,
+    /// The busy time the device's own compositor accounts, where it does.
+    engine_busy_ns: Option<u64>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -235,6 +237,7 @@ impl MockDisplay {
             cursor_ops: Vec::new(),
             memory: DisplayMemory::NONE,
             abandoned: 0,
+            engine_busy_ns: None,
         }
     }
 
@@ -266,6 +269,10 @@ impl Display for MockDisplay {
 
     fn memory(&self) -> DisplayMemory {
         self.memory
+    }
+
+    fn engine_busy_ns(&mut self) -> Option<u64> {
+        self.engine_busy_ns
     }
 
     fn frame_count(&self) -> u32 {
@@ -584,10 +591,39 @@ fn device_busy_time_counts_only_the_drivers_own_present() {
     rig.clock.advance(50_000);
     let read = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("read");
     assert_eq!(read.busy_ns, CLOCK_STEP_NS, "one bracketed present");
+    assert!(!read.engine_load);
     assert_eq!(read.seat_id, SEAT);
     assert!(
         read.idle_ns >= 50_000,
         "the window partitions into busy and idle"
+    );
+}
+
+#[test]
+fn a_device_accounting_its_compositors_load_reports_that_as_its_busy_time() {
+    let mut rig = Rig::new();
+    rig.seat.holds = Ok(true);
+    // Accounted since the driver opened, before anything was presented: the
+    // window opens at the first present, and the load is counted from there.
+    rig.display.engine_busy_ns = Some(5_000);
+    let frames = rig.frames();
+    assert_eq!(
+        rig.present(frames[0], &[full()]).map(|r| r.presented),
+        Ok(Presented::Shown)
+    );
+    rig.clock.advance(50_000);
+    rig.display.engine_busy_ns = Some(25_000);
+    let read = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("read");
+    assert!(read.engine_load);
+    assert_eq!(
+        read.busy_ns, 20_000,
+        "the compositor's load, not the present's time"
+    );
+    assert!(
+        read.idle_ns < 50_000 && read.busy_ns + read.idle_ns >= 50_000,
+        "the window partitions into that load and idle: {} + {}",
+        read.busy_ns,
+        read.idle_ns
     );
 }
 

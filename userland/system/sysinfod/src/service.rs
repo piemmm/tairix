@@ -1637,6 +1637,7 @@ mod tests {
                     seat_id: 1,
                     busy_ns: 250_000_000,
                     idle_ns: 9_750_000_000,
+                    engine_load: false,
                     device: DisplayDeviceReport {
                         mem_resident_bytes: 8 << 20,
                         mem_total_bytes: 256 << 20,
@@ -1661,6 +1662,7 @@ mod tests {
                     seat_id: 0,
                     busy_ns: 0,
                     idle_ns: 0,
+                    engine_load: false,
                     device: DisplayDeviceReport::SOFTWARE,
                     mode: Some(DisplayMode {
                         width_px: 800,

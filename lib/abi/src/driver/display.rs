@@ -1010,6 +1010,15 @@ pub trait Display {
         DisplayMemory::NONE
     }
 
+    /// Nanoseconds the device's own compositor has been busy, cumulative from
+    /// when it was first driven, where the driver accounts its load: a
+    /// scan-out compositor's share of its throughput the planes it shows
+    /// take, integrated over time. The default is [`None`], for a device
+    /// whose only work is what its present calls do.
+    fn engine_busy_ns(&mut self) -> Option<u64> {
+        None
+    }
+
     /// How many output-sized buffers a presenter rotates through: one where
     /// a present has finished with its buffer when it returns, more where the
     /// device reads a buffer while it is shown.

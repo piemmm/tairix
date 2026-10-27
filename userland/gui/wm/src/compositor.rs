@@ -62,7 +62,7 @@ use crate::window::{
 #[path = "layers.rs"]
 mod layers;
 
-use layers::Change;
+use layers::{Change, Depth};
 
 /// The furniture a composite pass built for itself because the cache would
 /// not retain it, kept alive for exactly that pass.
@@ -335,7 +335,7 @@ pub struct Compositor {
     plane: Option<layers::PlaneShown>,
     /// The pointer image as the cursor plane takes it, kept for reuse.
     plane_bytes: Vec<u8>,
-    /// What of a damaged rectangle lies outside every flattened layer, held
+    /// What of a damaged rectangle lies outside every composite zone, held
     /// for reuse.
     zone_rest: Region,
     /// Which of the composite's specialisations may serve this compositor.
@@ -3606,10 +3606,10 @@ impl Compositor {
             composited.add(area);
             self.stats.add_damaged(area_px(area.width, area.height));
             // Each part of the rectangle is composited to the depth the frame
-            // or the flattened layer showing it needs.
+            // or the composite layer showing it needs.
             rest.clear();
             rest.add(area);
-            let mut pieces: ArrayVec<(Rect, usize), { MAX_ACCEL_LAYERS + 1 }> = ArrayVec::new();
+            let mut pieces: ArrayVec<(Rect, Depth), { MAX_ACCEL_LAYERS + 1 }> = ArrayVec::new();
             for &(zone, depth) in &zones {
                 let inside = area.intersection(&zone);
                 if !inside.is_empty() {
@@ -3618,7 +3618,7 @@ impl Compositor {
                 }
             }
             for &piece in rest.rects() {
-                self.recompose_piece(piece, split, base, &mut hits, &fallback);
+                self.recompose_piece(piece, Depth::Below(split), base, &mut hits, &fallback);
             }
             for &(piece, depth) in &pieces {
                 self.recompose_piece(piece, depth, base, &mut hits, &fallback);
@@ -3640,15 +3640,19 @@ impl Compositor {
         }
     }
 
-    /// Recompose `piece` from the windows below z-index `depth`.
+    /// Recompose `piece` to `depth`.
     fn recompose_piece(
         &mut self,
         piece: Rect,
-        depth: usize,
+        depth: Depth,
         base: Pixel,
         hits: &mut Vec<usize>,
         fallback: &ChromeFallback,
     ) {
+        let (below, frost_of) = match depth {
+            Depth::Below(below) => (below, None),
+            Depth::Frost(index) => (index.saturating_add(1), Some(index)),
+        };
         let reach = self.shadow.reach();
         // Only a window whose footprint overlaps this rectangle can
         // contribute a pixel inside it; every other window's sample is
@@ -3656,12 +3660,12 @@ impl Compositor {
         // identical output) and turns the per-pixel window scan from "all
         // windows" into "the few that overlap".
         hits.clear();
-        for (index, window) in self.windows.iter().enumerate().take(depth) {
+        for (index, window) in self.windows.iter().enumerate().take(below) {
             if casts_into(window, piece, reach) {
                 hits.push(index);
             }
         }
-        self.recompose_rect(piece, base, hits, fallback);
+        self.recompose_rect(piece, base, hits, fallback, frost_of);
     }
 
     /// Re-encode the scan-out bytes of everything
@@ -4276,6 +4280,9 @@ impl Compositor {
     /// it first is work the copy throws away — for a frosted terminal being
     /// dragged, a whole window's worth of blending per pointer sample.
     ///
+    /// `frost_of`, when it names the top of `hits`, stops the composition at
+    /// that window's frost: what its frost layer shows beneath its own pixels.
+    ///
     /// [`compose_span`]: Self::compose_span
     fn recompose_rect(
         &mut self,
@@ -4283,6 +4290,7 @@ impl Compositor {
         base: Pixel,
         hits: &[usize],
         fallback: &ChromeFallback,
+        frost_of: Option<usize>,
     ) {
         let mut start = 0;
         let mut under = Some(base);
@@ -4323,10 +4331,14 @@ impl Compositor {
             start = split;
             under = None;
         }
+        let end = match hits.last() {
+            Some(&top) if frost_of == Some(top) => hits.len().saturating_sub(1),
+            _ => hits.len(),
+        };
         self.compose_span(
             area,
             under,
-            hits.get(start..),
+            hits.get(start..end),
             fallback,
             Pass::Finish,
             Target::Back,

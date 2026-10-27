@@ -633,6 +633,47 @@ fn a_stack_one_output_cannot_take_is_refused_before_either_is_written() {
     );
 }
 
+/// The engine's busy time is what compositing the planes it shows takes of
+/// the core clock's ceiling, held over time: the one plane the console is,
+/// then twice that for a stack of two whole layers.
+#[test]
+fn the_engines_busy_time_is_its_planes_share_of_the_core_held_over_time() {
+    let rig = Rig::new();
+    let mut engine = rig.open().expect("opened");
+    let mode = engine.output().expect("an output");
+    let refresh_mhz = u64::from(engine.refresh().expect("a rate").mhz());
+    // One plane's pixels at the output's rate, three in five of which the
+    // core composites.
+    let plane_hz =
+        u64::from(mode.width_px) * u64::from(mode.height_px) * refresh_mhz / 1_000 * 60 / 100;
+    // What `engine` accrues over a second at `hz`, against the core's
+    // ceiling, timed by the model's clock, which a read itself advances.
+    let accrued = |engine: &mut Hvs, hz: u64| {
+        let start = engine.engine_busy_ns().expect("the HVS accounts its load");
+        let from = rig.delay.now_us.get();
+        rig.delay.now_us.set(from + 1_000_000);
+        let busy = engine.engine_busy_ns().expect("its load") - start;
+        let held_ns = (rig.delay.now_us.get() - from) * 1_000;
+        (busy, held_ns * hz / CORE_4KP60)
+    };
+    let (console, expected) = accrued(&mut engine, plane_hz);
+    assert_eq!(console, expected, "the one plane the console is");
+
+    let base = filled(&rig, &mut engine, &mode, 1);
+    let over = filled(&rig, &mut engine, &mode, 2);
+    let whole = |id| layer(id, 0, 0, mode.width_px, mode.height_px);
+    assert_eq!(
+        engine.present_layers(&[whole(base.id), whole(over.id)]),
+        Ok(Presented::Queued)
+    );
+    let (stacked, expected) = accrued(&mut engine, 2 * plane_hz);
+    assert_eq!(
+        stacked, expected,
+        "two whole layers take twice the one's share"
+    );
+    assert!(stacked > console && stacked < 1_000_000_000);
+}
+
 #[test]
 fn the_core_clock_a_stack_needs_is_had_before_it_latches_and_kept_until_none_composites_it() {
     let rig = Rig::new();

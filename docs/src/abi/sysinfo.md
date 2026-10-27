@@ -358,8 +358,11 @@ kernel-wide operational state:
   the reading is `in_flight` against the ceiling its discovered
   `BlkDeviceClass` permits, never a global constant.
 - `GPU_DEVICE_STATS` — one packed `display_ipc::DisplayStats` per graphics
-  device a display service drives: the cumulative `busy_ns` / `idle_ns`
-  the service measured around its own present calls, the
+  device a display service drives: the cumulative `busy_ns` / `idle_ns` —
+  the device's own compositor's load where its driver accounts one
+  (`engine_load`: a scan-out compositor's share of its throughput the planes
+  it shows take, held over time), else the time the service measured around
+  its present calls — the
   `mem_resident_bytes` / `mem_total_bytes` the driver reports the device
   owns, the `AccelCaps` of its hardware compositor (or their absence,
   where it has none), and the `DisplayMode` it scans out. The record is

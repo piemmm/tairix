@@ -40,7 +40,7 @@ lie about.
 | **V3** | Memory pane — composition bar, the pressure banner with its recommended relief and refusal kinds, the bounded-cache reclaim ledger | V1, C2 | S4 | done |
 | **V4** | Storage pane — one entry per *device* (mounts grouped by serving block endpoint), its volumes and their mount points, capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | done |
 | **V5** | Interface pane — duplex rate trace from its own counters, the served window stated beside the figure, link, counters, stack | V1, C1 | S4 | done |
-| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | done |
+| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device and its utilisation graphed; self-report suppression preserved | V1, P1, Q3 | S4 | done |
 | **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4. Also brings the virtio-MMIO/PCI **accelerator probe** and the driver-store bundle: D1's classifiers put a real PCI or device-tree accelerator in the tree, but a virtio accelerator's type is only visible to a runtime slot probe, and the rail is that probe's only consumer | V1, P1, D1, Q4 | S4 | planned |
 | **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | done |
 | **V9** | Tasks amendments — Owner and Core columns | A1 | S4 | done |
@@ -1116,7 +1116,13 @@ record per graphics device a display service drives:
   Both are cumulative and partition the window since the device was first
   *driven* — opened inside the same bracket that measures `busy_ns`, so no
   request an unauthorised caller can send moves its epoch — and a reader takes
-  a two-sample delta, so a first sample yields no share.
+  a two-sample delta, so a first sample yields no share. `busy_ns` is the
+  device's own compositing load where its driver accounts one, flagged
+  `engine_load` — the HVS's planes, every layer's pixels at each output's
+  refresh, against its core clock's ceiling — and otherwise the time the
+  service spent inside the driver's present calls, which is all a firmware
+  framebuffer does and nothing a scan-out compositor's work shows in. The
+  Graphics pane graphs each interval's share and names which it counts.
 - `mem_resident_bytes`, `mem_total_bytes` — device memory, `0` total meaning
   the device has no memory of its own rather than none free.
 - the device's `AccelCaps` (`max_layers`, `max_width_px`, `max_height_px`,

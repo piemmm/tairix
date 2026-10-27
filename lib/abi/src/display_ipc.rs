@@ -1151,23 +1151,28 @@ impl DisplayEvent {
 /// [`DisplayRequest::QueryStats`] answers them.
 ///
 /// Composed of the types that already define its parts — the
-/// [`DisplayDeviceReport`] and the [`DisplayMode`] it scans out — plus the
-/// service-measured occupancy, so no field here is a second spelling of one
-/// defined elsewhere.
+/// [`DisplayDeviceReport`] and the [`DisplayMode`] it scans out — plus its
+/// occupancy, so no field here is a second spelling of one defined elsewhere.
 ///
 /// `busy_ns` and `idle_ns` partition the window since the device was first
 /// driven: the same busy/idle vocabulary the CPU reading uses. Both are
 /// cumulative and never reset, so a reader takes a two-sample delta over its
-/// own interval; a device nothing has presented to reports both as `0`.
+/// own interval; a device nothing has driven reports both as `0`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DisplayStats {
     /// The seat whose frames the device is currently configured for, or `0`
     /// when nothing is configured. A fact about the device, not a key.
     pub seat_id: u64,
-    /// Cumulative nanoseconds the device had a present in flight.
+    /// Cumulative nanoseconds the device was busy: its own compositor's load
+    /// where its driver accounts one ([`Self::engine_load`]), else the time a
+    /// present was in flight.
     pub busy_ns: u64,
-    /// Cumulative nanoseconds it did not, over the same window.
+    /// Cumulative nanoseconds it was not, over the same window.
     pub idle_ns: u64,
+    /// Whether `busy_ns` is the device's own compositor's load — the share
+    /// of its throughput the planes it shows take — rather than the time its
+    /// present calls spent.
+    pub engine_load: bool,
     /// What the device is.
     pub device: DisplayDeviceReport,
     /// The mode being scanned out, or [`None`] while there is no output.
@@ -1186,6 +1191,8 @@ const STATS_FLAG_HW_SCALING: u16 = 1 << 3;
 const STATS_FLAG_CURSOR: u16 = 1 << 4;
 /// Set when the compositor blends a translucent layer without banding.
 const STATS_FLAG_BAND_FREE_BLEND: u16 = 1 << 5;
+/// Set when the busy time is the device's own compositor's load.
+const STATS_FLAG_ENGINE_LOAD: u16 = 1 << 6;
 /// Every flag bit this ABI defines; any other set bit fails the decode
 /// closed rather than being ignored.
 const STATS_FLAGS_KNOWN: u16 = STATS_FLAG_ACCELERATED
@@ -1193,7 +1200,8 @@ const STATS_FLAGS_KNOWN: u16 = STATS_FLAG_ACCELERATED
     | STATS_FLAG_OUTPUT
     | STATS_FLAG_HW_SCALING
     | STATS_FLAG_CURSOR
-    | STATS_FLAG_BAND_FREE_BLEND;
+    | STATS_FLAG_BAND_FREE_BLEND
+    | STATS_FLAG_ENGINE_LOAD;
 /// The flags that describe the compositor, and so need
 /// [`STATS_FLAG_ACCELERATED`].
 const STATS_FLAGS_ACCEL_ONLY: u16 =
@@ -1250,6 +1258,9 @@ impl DisplayStats {
             flags |= STATS_FLAG_CURSOR;
             put_u32(&mut out, Self::CURSOR_AT, cursor.max_width_px);
             put_u32(&mut out, Self::CURSOR_AT + 4, cursor.max_height_px);
+        }
+        if self.engine_load {
+            flags |= STATS_FLAG_ENGINE_LOAD;
         }
         put_u16(&mut out, Self::FLAGS_AT, flags);
         put_u64(&mut out, 0, self.busy_ns);
@@ -1352,6 +1363,7 @@ impl DisplayStats {
             seat_id: read_u64(bytes, 32),
             busy_ns: read_u64(bytes, 0),
             idle_ns: read_u64(bytes, 8),
+            engine_load: flags & STATS_FLAG_ENGINE_LOAD != 0,
             device: DisplayDeviceReport {
                 mem_resident_bytes,
                 mem_total_bytes,

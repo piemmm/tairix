@@ -192,10 +192,12 @@ router**:
   express a per-pixel dither, so an engine blending in the scan-out's own 8
   bits bands a picture under a translucent field; the desktop accepts that for
   the drag a free layer buys (`plans/GPU.md` decision 10), and the engine's
-  caps say whether it bands (`band_free_blend`). A window translucent as a
-  whole, or frosted, reads what lies beneath it, so it is baked flattened onto
-  its layer, opaque. The layered path stands aside during a reveal (below), and
-  the base never presents what a flattened layer covers. Where the compositor *bakes* a window into
+  caps say whether it bands (`band_free_blend`). A frosted window is its own
+  pixels on a free layer over its frost on a layer of its own, opaque, so a
+  move derives only the frost's border again and composites none of its
+  pixels; a window translucent as a whole is baked flattened onto its layer,
+  opaque. The layered path stands aside during a reveal (below), and the base
+  never presents what an opaque layer covers. Where the compositor *bakes* a window into
   a layer — over its footprint, so its shadow is baked with it, each row
   resolved once through `Window::row` and `Window::shadow_row` — it reads the
   dither at the pixel's

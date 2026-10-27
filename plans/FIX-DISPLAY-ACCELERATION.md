@@ -89,12 +89,14 @@ asks (§15.7).
 - **One raster/blend path** (§2.2). The software composite stays `lib/raster`;
   a baked or flattened layer is that same composite written into a layer
   buffer.
-- **What reads the backdrop is flattened; the rest the engine blends**
-  (`plans/GPU.md` decision 10). A window-wide translucency or a backdrop blur
-  is composited in software, with the backdrop beneath it and the
-  `plans/FIX-DESKTOP-SPEEDUP.md` B.5 dither, into an opaque layer. A window's
-  own translucent content rides a free layer on every engine, blended by the
-  engine, dithered where its driver can dither (`plans/GPU.md` GD3).
+- **What reads the backdrop is composited; the rest the engine blends**
+  (`plans/GPU.md` decision 10). A window-wide translucency is composited in
+  software, with the backdrop beneath it and the
+  `plans/FIX-DESKTOP-SPEEDUP.md` B.5 dither, into an opaque layer; a backdrop
+  blur's frost is composited onto an opaque layer of its own beneath the
+  window's pixels (`plans/GPU.md` GD4). A window's own translucent content
+  rides a free layer on every engine, blended by the engine, dithered where
+  its driver can dither (`plans/GPU.md` GD3).
 - **Fail closed, lease first, no ambient authority** (§5.4). Every request
   that acts for a seat checks the caller's live lease before any state;
   buffers belong to the configuration that allocated them and die with it; a
@@ -361,10 +363,13 @@ calls `move_to`.
   window below the first hardware-layer window, composited in software), then
   one layer per window above it, then the pointer if it is not on the cursor
   plane. The split moves up when the stack exceeds `max_layers`.
-- **Flattened layers**: a frosted or window-wide translucent window's layer
-  is the software composite of its footprint over everything beneath it,
-  opaque, since what it shows is made from what lies beneath. It is re-baked
-  where anything beneath it changes.
+- **Composite layers**: a window translucent as a whole is flattened — its
+  layer is the software composite of its footprint over everything beneath
+  it, the window included, opaque. A frosted window's frost layer is the
+  composite of everything beneath its rectangle with its frost applied,
+  beneath the window's own free layer, so a move derives only the frost's
+  border again. Both are re-baked where anything beneath them changes, and
+  their zones never overlap.
 - **A layered present consumes the damage it carried** into a software-stale
   region outside `has_damage`, which the software path drains when it next
   composites; an undamaged scene presents nothing. The base presents only what

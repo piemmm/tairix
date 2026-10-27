@@ -450,6 +450,9 @@ struct DeviceTrack {
     gpu_busy_ns: Option<u64>,
     /// The share of the last interval the graphics device was busy.
     gpu_busy_permille: Option<u16>,
+    /// The graphics device's measured interval shares, each a permille,
+    /// oldest first.
+    gpu_busy_history: Vec<u16>,
     /// A volume's cumulative queue accumulators as of the last sample, which
     /// the mean depth deltas against.
     volume_queue: Option<BlkQueueCounters>,
@@ -597,6 +600,9 @@ impl DeviceMeters {
             // total is not a share.
             _ => None,
         };
+        if let Some(permille) = track.gpu_busy_permille {
+            push_bounded(&mut track.gpu_busy_history, permille);
+        }
         track.gpu_busy_ns = busy_ns;
         self.devices.insert(id, track);
     }
@@ -680,6 +686,14 @@ impl DeviceMeters {
         self.devices
             .get(&id)
             .map_or(&[], |track| track.damage_history.as_slice())
+    }
+
+    /// This graphics device's measured interval shares, oldest first.
+    #[must_use]
+    pub fn graphics_busy_history(&self, id: DeviceId) -> &[u16] {
+        self.devices
+            .get(&id)
+            .map_or(&[], |track| track.gpu_busy_history.as_slice())
     }
 }
 

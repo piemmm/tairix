@@ -38,9 +38,9 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | planned |
 | GP9 | `drivers/display/v3d`: the Raspberry Pi VideoCore VI backend | planned |
 | GP10 | The application-facing GPU library and its generated C surface — what a ported game links | planned |
-| GD1 | The base presents only what it shows: nothing a flattened layer covers is copied into the display's frame | done |
+| GD1 | The base presents only what it shows: nothing a composite layer covers is copied into the display's frame | done |
 | GD3 | Band-free blending as an engine capability: `AccelCaps` states it, every translucent window that reads no backdrop rides a free layer, the metal comparison, and the HVS's output dither | done |
-| GD4 | A frosted window as two planes, its frost and its own pixels | planned |
+| GD4 | A frosted window as two planes, its frost and its own pixels | done |
 | GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | planned |
 | GD5 | The screen fade as a lone layer's opacity | planned |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode in GP4's pinned set, bit-identical to `lib/raster` | blocked: GP4 |
@@ -366,22 +366,23 @@ the layer seam or the compositor in place.
 
 A Switchboard-shaped window — 928 × 560, the frosted ground's 43 px blur,
 rounded and casting — dragged 6 px a sample over a wallpaper and an opaque
-window at 1920 × 1080, measured on the host through the real compositor:
+window at 1920 × 1080, measured on the host through the real compositor, one
+core, SSE2:
 
-| per frame | |
-|---|---|
-| work | 543 914 px damaged, 587 334 blended, 125 924 blurred |
-| one core, SSE2 | 1.74 ms composited, 1.86 ms layered |
-| the same window with no blur | 0.87 ms |
-| base copied into the display's frame, layered | 543 867 px, 537 680 of them under the window's own opaque layer |
+| per sample | composited | layered |
+|---|---|---|
+| time | 1.74 ms | 1.35 ms |
+| blended | 587 334 px | 127 386 px |
+| blurred | 125 924 px | 125 924 px |
+| base copied into the display's frame | 543 867 px | 6 079 px |
 
-An opaque window rides a free layer and moves for nothing: a new destination.
-A frosted one is flattened, so each sample re-blends its whole footprint over a
-frost whose border is re-blurred, encodes that into its layer, and copies the
-base beneath it into the display's frame — on the Pi 4 uncached memory, and
-again on the next sample once the double-buffered frame catches up. The layer
-therefore costs more than the composited frame it replaced; GD1 and GD2 remove
-the difference.
+Laid on the engine, the window's own pixels move as a free layer over its
+frost's layer (GD4), the engine blends the glass, and the base presents only
+the strip the frost uncovered (GD1). The same window unblurred is a free layer
+alone and a sample composites nothing. What a frosted sample still costs is
+its frost: the blur replicates at the window's edges, so every pixel within
+its radius of either position is a different average and is blurred again,
+and the frost's rectangle is composed and encoded into its layer.
 
 ### 7.2 What each engine can take
 
@@ -412,10 +413,11 @@ the difference.
 
 ### 7.3 The items
 
-**GD1 — the base presents only what it shows.** A flattened layer is opaque
-across its whole rectangle, so the base beneath it cannot be seen: a layered
-present names as the base's damage the composed region less every flattened
-layer's rectangle, and the display copies only that. The back buffer still
+**GD1 — the base presents only what it shows.** A composite layer — a
+flattened one or a frost — is opaque across its whole rectangle, so the base
+beneath it cannot be seen: a layered present names as the base's damage the
+composed region less every composite layer's rectangle, and the display copies
+only that. The back buffer still
 holds the full composite, which is what the layer is baked from. A free layer
 hides nothing, because its content may hold fully transparent pixels. The base
 pixels left stale beneath a layer are composed again before they can show: a
@@ -435,8 +437,8 @@ the engine's blend of a translucent layer reaches the panel deeper than 8 bits
 a channel or dithered — what the software path's per-pixel dither guarantees.
 The compositor hands the engine translucency either way (§0 decision 10): a
 window whose content is partially or wholly transparent but which reads no
-backdrop rides a free layer, its content blended by the engine; a frosted
-window stays flattened until GD4. A window-wide opacity stays flattened
+backdrop rides a free layer, its content blended by the engine, a frosted
+window's over its frost (GD4). A window-wide opacity stays flattened
 everywhere: the one surface that carries one, the library popup's fade, is
 frosted too. The statement is reported — the Switchboard's graphics facts,
 `sysinfo`, `blendcheck` — and never claims more than the metal showed.
@@ -452,11 +454,22 @@ frosted too. The statement is reported — the Switchboard's graphics facts,
   matched the undithered one; dithered, it matches the dithered one, so the HVS
   states band-free blending.
 
-**GD4 — a frosted window as two planes.** Its frost — the blurred backdrop
-under its shape's coverage — and its own pixels on a free layer above it. A move
-re-derives only the frost's border, the core kept where it lies
-(`plans/FIX-DESKTOP-SPEEDUP.md` D.8), and the window's blend over its frost is
-the engine's, banded where the engine bands (§0 decision 10).
+**GD4 — a frosted window as two planes.** A frosted window at full opacity is
+its own pixels on a free layer above a frost layer: the composite of
+everything beneath its rectangle with its frost applied, opaque. The frost
+layer is a composite zone like a flattened footprint — its pixels are
+composed to `Depth::Frost`, stopping at the window's frost — so zones never
+overlap and a zone crossing a frosted window of the base takes its whole
+window to the base. A move recomposes the frost where it lay and where it
+lies, its border derived again and its core kept from the retained frost
+(`plans/FIX-DESKTOP-SPEEDUP.md` D.8); the window's pixels only move, and the
+engine blends them over the frost, banded where the engine bands (§0
+decision 10). A change of the window's own pixels re-bakes its free layer
+alone, and a change beneath it its frost alone. A frosted window given one
+layer, or refused its frost's buffers, is flattened — the refusal kept until
+its rectangle changes — and the two planes cost a second pair of buffers the
+size of its rectangle. A window's layers are had together or not at all, so its
+pixels never go on a layer without their frost.
 
 **GD5 — the screen fade as a lone layer's opacity.** A stack of one layer — the
 base alone, or a promoted window — fades through its per-layer opacity over the
@@ -526,10 +539,16 @@ Each needs sign-off before the item that depends on it; none is assumed.
   window has crossed, left, and been given back its layer.
 - **GD3**: the capability crosses the wire and is refused where malformed; a
   translucent window rides a free layer whatever the engine states, and the
-  engine's screen then matches the software composite within one level; a
-  frosted window stays flattened. The HVS sets a channel's dither only while
-  the channel is stopped, and leaves the other fields of its register as it
-  found them.
+  engine's screen then matches the software composite within one level. The
+  HVS sets a channel's dither only while the channel is stopped, and leaves
+  the other fields of its register as it found them.
+- **GD4**: a frosted window is an opaque frost layer beneath a free layer of
+  its own pixels; its drag bakes the frost again and only moves its pixels,
+  blending none of them in software; its own change reaches its pixels and not
+  its frost, a change beneath reaches its frost and not its pixels; given one
+  layer it is flattened; a frost crossing a frosted base window takes its whole
+  window to the base; every screen matches the software composite within one
+  level.
 - **GD5**: a fade presents no pixel after its first step on an engine with
   per-layer opacity, and each step's screen matches the software reveal within
   one level.

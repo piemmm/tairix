@@ -88,6 +88,11 @@ its scan-out reads memory through, and the `ConsoleHost` fact.
   what the running outputs need: raised before a channel can latch a larger
   stack, lowered only once none still composites one. A floor the clock
   refused is not asked again until another is needed.
+- **Its busy time is its compositing load.** The HVS composites at scan-out,
+  so no present call times its work. The engine accounts it instead: every
+  layer's pixels at each output's refresh, as the core clock composites them,
+  against the clock's ceiling, held for as long as the stack is shown. That is
+  the busy time `GPU_DEVICE_STATS` reports and the Switchboard graphs.
 
 ## Limitations
 

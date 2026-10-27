@@ -4,6 +4,7 @@
 //! itself resolved.
 
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{
@@ -210,6 +211,7 @@ fn graphics_device() -> DisplayStats {
         seat_id: 1,
         busy_ns: 250_000_000,
         idle_ns: 750_000_000,
+        engine_load: false,
         device: DisplayDeviceReport {
             mem_resident_bytes: 8 << 20,
             mem_total_bytes: 256 << 20,
@@ -979,6 +981,11 @@ fn the_graphics_utilisation_is_an_interval_share_and_breaks_on_a_gap() {
         fact(device(&report, DeviceId::Graphics), "Device utilisation"),
         &Reading::measured("25%")
     );
+    assert_eq!(
+        utilisation_trend(&report).0,
+        [250],
+        "the one interval measured"
+    );
 
     // The query does not answer, then answers a far larger total: the share
     // must be absent both times rather than deltaing over the gap.
@@ -997,6 +1004,64 @@ fn the_graphics_utilisation_is_an_interval_share_and_breaks_on_a_gap() {
         &Reading::Absent(Unmeasured::Unavailable),
         "the sample after an absent one is a first sample again"
     );
+    assert_eq!(
+        utilisation_trend(&report).0,
+        [250],
+        "an interval nobody measured adds no point"
+    );
+}
+
+/// The Graphics pane's utilisation trend: its samples and its caption.
+fn utilisation_trend(report: &ResourceReport) -> (Vec<u16>, String) {
+    device(report, DeviceId::Graphics)
+        .blocks
+        .iter()
+        .find(|block| block.title == "DEVICE UTILISATION")
+        .and_then(|block| match &block.body {
+            BlockBody::Trend {
+                trace: Trace::Single { samples, .. },
+                caption,
+            } => Some((samples.clone(), caption.clone())),
+            _ => None,
+        })
+        .expect("the pane graphs the device's utilisation")
+}
+
+#[test]
+fn the_graphics_utilisation_names_what_it_counts() {
+    let mut meters = RollingMeters::new();
+    let graphics = |busy_ns: u64, engine_load: bool| Sample {
+        hardware: Some(alloc::vec![HwNode::new(
+            1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Display
+        )]),
+        gpu_stats: Some(alloc::vec![DisplayStats {
+            busy_ns,
+            engine_load,
+            ..graphics_device()
+        }]),
+        elapsed_ns: Some(1_000_000_000),
+        ..permitted()
+    };
+    for (engine_load, measure) in [(true, "compositing load"), (false, "time presenting")] {
+        let _ = folded_report(
+            &graphics(0, engine_load),
+            &mut meters,
+            &SessionReport::HEALTHY,
+        );
+        let report = folded_report(
+            &graphics(140_000_000, engine_load),
+            &mut meters,
+            &SessionReport::HEALTHY,
+        );
+        let pane = device(&report, DeviceId::Graphics);
+        assert_eq!(fact(pane, "Device utilisation"), &Reading::measured("14%"));
+        assert_eq!(fact(pane, "Measured as"), &Reading::measured(measure));
+        let (samples, caption) = utilisation_trend(&report);
+        assert_eq!(samples.last(), Some(&140));
+        assert_eq!(caption, format!("100% full scale · {measure}"));
+    }
 }
 
 #[test]
@@ -1679,6 +1744,7 @@ fn a_device_with_no_memory_of_its_own_says_so_rather_than_reading_zero() {
             seat_id: 0,
             busy_ns: 0,
             idle_ns: 0,
+            engine_load: false,
             device: DisplayDeviceReport::SOFTWARE,
             mode: Some(DisplayMode {
                 width_px: 800,

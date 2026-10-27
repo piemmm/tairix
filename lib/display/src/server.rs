@@ -189,6 +189,9 @@ pub struct DisplayServer<C: MonotonicClock> {
     window_start_ns: Option<u64>,
     /// Cumulative nanoseconds spent inside the driver's present calls.
     busy_ns: u64,
+    /// The busy time the device's own compositor had accounted when the
+    /// window opened, which what it reports is counted from.
+    engine_origin_ns: Option<u64>,
     /// A presenter's frame has reached the device at least once.
     presented: bool,
     power: Power,
@@ -202,6 +205,7 @@ impl<C: MonotonicClock> DisplayServer<C> {
             configured: None,
             window_start_ns: None,
             busy_ns: 0,
+            engine_origin_ns: None,
             presented: false,
             power: Power::Unverified,
         }
@@ -441,16 +445,22 @@ impl<C: MonotonicClock> DisplayServer<C> {
         }
     }
 
-    /// The device's own statistics: the occupancy this engine measured, what
-    /// the device is, and the mode it scans out.
+    /// The device's own statistics: its occupancy — its compositor's load
+    /// where the driver accounts one, else the time this engine measured in
+    /// its present calls — what the device is, and the mode it scans out.
     fn device_stats(&self, display: &mut dyn Display) -> DisplayStats {
         let window_ns = self
             .window_start_ns
             .map_or(0, |start| self.clock.now_ns().saturating_sub(start));
+        let engine = display
+            .engine_busy_ns()
+            .map(|now| now.saturating_sub(self.engine_origin_ns.unwrap_or(now)));
+        let busy_ns = engine.unwrap_or(self.busy_ns);
         DisplayStats {
             seat_id: self.configured.as_ref().map_or(0, |c| c.seat_id),
-            busy_ns: self.busy_ns,
-            idle_ns: window_ns.saturating_sub(self.busy_ns),
+            busy_ns,
+            idle_ns: window_ns.saturating_sub(busy_ns),
+            engine_load: engine.is_some(),
             device: DisplayDeviceReport::of(display),
             mode: display.output(),
         }
@@ -622,6 +632,7 @@ impl<C: MonotonicClock> DisplayServer<C> {
             .map_err(DriverError::as_errno)?;
         let started_ns = self.clock.now_ns();
         let shown = display.present(buffer, damage.rects());
+        self.open_window(display);
         self.settle(lease, started_ns, shown)
     }
 
@@ -653,7 +664,16 @@ impl<C: MonotonicClock> DisplayServer<C> {
         }
         let started_ns = self.clock.now_ns();
         let shown = accel.present_layers(layers);
+        self.open_window(display);
         self.settle(lease, started_ns, shown)
+    }
+
+    /// Take the device compositor's busy time as the window opens, so what it
+    /// reports partitions the same window this engine's idle time does.
+    fn open_window(&mut self, display: &mut dyn Display) {
+        if self.window_start_ns.is_none() {
+            self.engine_origin_ns = display.engine_busy_ns();
+        }
     }
 
     /// Account the present that started at `started_ns`, and queue it for its

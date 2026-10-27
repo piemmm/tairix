@@ -82,7 +82,10 @@ pub fn build_resource_report(
         sample,
         session.frame,
         gpu,
-        meters.devices.graphics_busy(DeviceId::Graphics),
+        graphics::Utilisation {
+            share: meters.devices.graphics_busy(DeviceId::Graphics),
+            history: meters.devices.graphics_busy_history(DeviceId::Graphics),
+        },
         meters.devices.damage_history(DeviceId::Graphics),
     ));
     devices.push(audio::device(sample));

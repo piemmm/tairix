@@ -768,6 +768,7 @@ fn accelerated_stats() -> DisplayStats {
         seat_id: 3,
         busy_ns: 4_000_000,
         idle_ns: 96_000_000,
+        engine_load: true,
         device: DisplayDeviceReport {
             mem_resident_bytes: 8 << 20,
             mem_total_bytes: 256 << 20,
@@ -784,6 +785,7 @@ fn stats_reply_round_trips_every_device_shape() {
         seat_id: 0,
         busy_ns: 0,
         idle_ns: 0,
+        engine_load: false,
         device: DisplayDeviceReport::SOFTWARE,
         mode: Some(stats_mode()),
     };
@@ -817,7 +819,7 @@ fn stats_reply_decode_fails_closed() {
     bad_status[0] = 1;
     assert_eq!(decode_stats_reply(&bad_status), Err(Errno::OutOfRange));
     let mut unknown_flag = good;
-    unknown_flag[flags] |= 1 << 6;
+    unknown_flag[flags] |= 1 << 7;
     assert_eq!(decode_stats_reply(&unknown_flag), Err(Errno::BadMagic));
     for dirty in [STATS_BODY_AT + 65, STATS_BODY_AT + 71] {
         let mut broken = good;

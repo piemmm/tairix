@@ -2783,6 +2783,7 @@ fn display_reply_seeds() -> Vec<Vec<u8>> {
         seat_id: 1,
         busy_ns: 5,
         idle_ns: 9,
+        engine_load: true,
         device: DisplayDeviceReport {
             mem_resident_bytes: 1 << 20,
             mem_total_bytes: 1 << 24,

@@ -221,10 +221,11 @@ A lease is the wrong question about a device read — a monitor holds none
 and never will — so it is gated instead on the caller's kernel-attested
 `CAP_SYSINFO_HW` through `call_peer_origin`, the authority the hardware
 inventory it details is already read under. It answers the cumulative
-`busy_ns` / `idle_ns` the engine measured *around the driver's own present
-call* — which is also where the window they partition opens, so a refused
-present adds nothing to either and no request an unauthorised caller can send
-moves the epoch —
+`busy_ns` / `idle_ns` — the device's own compositing load where its driver
+accounts one (`Display::engine_busy_ns`, flagged `engine_load`), else what the
+engine measured *around the driver's own present call* — the window they
+partition opening at that present, so a refused present adds nothing and no
+request an unauthorised caller can send moves the epoch;
 what the device is (`DisplayDeviceReport`: its own memory, from
 `Display::memory`, and the caps of its layer compositor and cursor plane),
 and the mode being scanned out, or none while there is no output. A firmware
@@ -499,6 +500,12 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   surface scaled to its mode with its aspect kept — the polyphase filter
   enlarging or shrinking by up to a third, the trapezoidal one shrinking
   further, through the Mitchell–Netravali kernel in display-list memory.
+- **Its busy time is its compositing load** (`Display::engine_busy_ns`): every
+  layer's pixels at each output's refresh, as the core clock composites them,
+  against the clock's ceiling, held for as long as the stack is shown — the
+  same model that floors the core clock. The display service reports it in
+  place of the time its present calls took, which for a scan-out compositor
+  is next to nothing whatever it composites.
 - **Its blend is band-free.** The HVS blends wider than 8 bits a channel, and
   each channel is dithered to the outputs' 24 bits — the rounding error
   carried along the line, with a ±½ LSB noise restarted every frame — set

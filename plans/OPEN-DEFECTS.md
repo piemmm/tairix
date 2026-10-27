@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 535 open, 1009 closed, 1544 total.
+**closed**, and a partial fix stays **open**. 535 open, 1010 closed, 1545 total.
 
 ### Open (535)
 
@@ -564,7 +564,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1538 | `timed` picks up a time server a DHCP lease names only within its bounded ~17-minute configuration ladder, though the network stack's `Network` notice announces an address change; a lease that arrives later leaves the built-in fallback in use until the service restarts | **low**; noticed closing D1535; logged by the user's direction; replacing the ladder with the notice means revisiting TS-7's tiering and churn rules (`plans/TIMESYNC.md`). `userland/system/timed/src/run.rs` |
 | D1540 | two syscall paths allocate a kernel object with an infallible `Arc::new`, so a heap that cannot hold it aborts the kernel rather than failing the call `OutOfMemory`: `call_create`'s registration of the endpoint it built, and the spawn path's child-id cell | **medium**; noticed making the served-volume paths' allocations fallible (`Arc::try_new`), which those paths now are; not absorbed, because a regression test needs an allocation-failure seam the host test allocator (`kernel/core/src/test_alloc.rs`) does not offer. The spawn cell is of a piece with D122. `kernel/core/src/syscalls.rs` `call_create`, the spawn admission |
 
-### Closed (1009)
+### Closed (1010)
 
 | ID | Subject |
 |---|---|
@@ -1577,6 +1577,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1547 | Paint's airbrush laid a dab each 25 ms where the pointer was last reported, so a stroke its window was told of sparsely — a circle drawn on a busy desktop — piled the paint of every interval between two reports onto the first of them, a dark blob at each report of a stroke meant to be even — closed: the airbrush's own dabs are timed by the reports' device times and laid one report behind, where the pointer was at each instant (`brush::Spray`), at the point only once a silence longer than any report's transit shows it was held still; the dabs owed at one place are one weighted pass, so a stall costs no more than a wake (`an_airbrush_sweep_reported_sparsely_lays_no_blob_at_its_reports`, `a_moving_airbrush_lays_its_dabs_along_the_way_it_went`, `a_long_silence_before_a_move_was_the_airbrush_held_still`, `a_stalled_airbrush_lays_what_it_owes_as_one_pass`, `passes_laid_as_one_build_what_they_build_one_by_one`) |
 | D1548 | the desktop-hover, file-picker, netmap and icon-bar scripts opened the program library on the desktop's reveal and then named the launched program's slot by its index, though the strip seats programs as they arrive and the autostarted file manager's bring-up is unordered against the reveal: a guest bringing the manager up late seated the launched program first, the script clicked the manager, and the hover run idled to its runtime ceiling waiting on a sample nothing would take — closed: the launch waits on the manager's own slot (`PointerPen::open_library_beside_manager`; `a_launch_whose_slot_is_named_by_index_waits_for_the_managers_slot`) |
 | D1549 | a fullscreen window was promoted to the scene's one layer when its content held no partially transparent pixel, though a fully transparent one — or a fresh frame its client had not yet painted — shows the engine's black with nothing laid beneath, where the composited frame shows the desktop — closed: promotion needs every content pixel opaque, the content's clear pixels tracked beside its partial ones and a fresh frame counted clear until painted (`a_fullscreen_window_with_a_clear_pixel_is_not_promoted`, `a_fresh_fullscreen_frame_is_promoted_once_it_covers_every_pixel`) |
+| D1550 | a graphics device's utilisation was the time the display service spent inside its driver's present calls, so a scan-out compositor — the HVS, which composites every layer as it scans out — read near zero whatever it was handed, and the Switchboard showed it as a lone figure with no history; its page also still said no query publishes the device's busy time or memory — closed: a driver that accounts its compositor's load reports it (`Display::engine_busy_ns`; the HVS's planes against its core clock's ceiling, held over time), the display service serves that from the window's opening, flagged `engine_load`, and the Graphics pane graphs each interval's share and names what it counts (`the_engines_busy_time_is_its_planes_share_of_the_core_held_over_time`, `a_device_accounting_its_compositors_load_reports_that_as_its_busy_time`, `the_graphics_utilisation_names_what_it_counts`, `the_graphics_utilisation_is_an_interval_share_and_breaks_on_a_gap`) |
 
 ## Scope
 

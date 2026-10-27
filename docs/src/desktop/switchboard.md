@@ -616,10 +616,15 @@ than a nought that would read as an idle frame.
 (`GPU_DEVICE_STATS`, gated with the hardware tree it details). Its
 compositor's layer limits, per-layer opacity, scaling and whether it blends
 translucency band-free fill the compositing-path block; its scan-out mode, its interval utilisation, and the memory it owns
-fill the device block. Utilisation is a delta over the sample's own interval,
-never the service lifetime's average, so a first sample states no share; a
-device with no memory of its own says so in words, because that is a different
-statement from none being free. A **per-engine** breakdown still has no
+fill the device block, and the utilisation block graphs each interval's share
+against a full scale of the whole interval. Utilisation is a delta over the
+sample's own interval, never the service lifetime's average, so a first sample
+states no share, and an interval the service did not answer adds no point. The
+pane names what the share counts: the device's own compositing load where its
+driver accounts one — the HVS's planes against its core clock's ceiling, which
+rises with every layer the desktop hands it — else the time its present calls
+spent. A device with no memory of its own says so in words, because that is a
+different statement from none being free. A **per-engine** breakdown still has no
 producer — no display driver reports its engines separately — so that row
 carries the honest unmeasured mark rather than one device's occupancy dressed
 as an engine's.
@@ -721,10 +726,10 @@ the pointer.
   `Type` column on Tasks the day a registry lands, not as a section.
 - **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
   no service-enumeration query, so nothing claims to list them.
-- **A graphics device's engine utilisation and video memory** — the hardware
-  tree names the device, but no query publishes its per-engine busy time or
-  its memory, so those facts are marked. The pane leads with the compositor's
-  measured frame cost precisely so a machine with no GPU still reads usefully.
+- **A graphics device's per-engine split** — the device's busy share and its
+  memory are published, but no display driver reports its engines separately,
+  so that row is marked. The pane leads with the compositor's measured frame
+  cost precisely so a machine with no GPU still reads usefully.
 - **Per-task network bytes** — no per-process socket accounting exists
   anywhere in the system; attribution belongs to the network service, which
   owns the sockets. The interface pane states that in words.
