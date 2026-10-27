@@ -20,7 +20,7 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 | FSS3 | The kernel `ServedFs` proxy: a `KernelFs` over the protocol with liveness-bounded, killable calls, window quarantine, hold calls settled rather than withdrawn, releases reaped by the volume's own operations, fail-closed reply validation, and the server-health overlay | done |
 | FSS4 | The volume block grant: `HwResourceKind::Volume` under `CAP_FS_SERVE`, the kernel's served-volume registry, and `volume_read` / `volume_write` / `volume_ctl` / `volume_serve` | done |
 | FSS5 | Removable volumes served from user space: the kernel-published volume node, the attach, serve, refusal, detach, unplug, server-loss and re-insert flows, the six driver bundles (ext4, FAT32, ADFS, ISO 9660, UDF, ARXFS), and the in-kernel removable path removed | done |
-| FSS6 | Network-served attachments for `plans/SMB.md` SMB9: `fsserve_offer` and attach by the named principal, the owner-bound private presentation, owner and server detach, `MOUNT_LIST`'s owner, and the concurrent uncached registry entry a multi-writer share needs | blocked: lands with SMB9, which waits on SMB5 |
+| FSS6 | Network-served attachments for `plans/SMB.md` SMB9: `fsserve_offer` and attach by the named principal, the owner-bound private presentation, owner and server detach, `MOUNT_LIST`'s owner, and the concurrent uncached registry entry a multi-writer share needs | blocked: lands with SMB9, which waits on SMB6–SMB8 |
 
 ## 0. Decisions (binding)
 

@@ -608,7 +608,7 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-smb",
         test: "fuzz_smb",
         description:
-            "lib/smb decoders, framer and client connection core (hostile SMB 3 server bytes: never panics, accepted messages re-encode stably, a tampered sealed frame is never accepted)",
+            "lib/smb decoders, SPNEGO and NTLM tokens, framer, connection core and client (hostile SMB 3 server bytes: never panics, accepted messages re-encode stably, a tampered sealed frame is never accepted, a session is never keyed from a changed final response or 3.1.1 negotiation, a 3.0 downgrade never yields a tree)",
     },
     Target {
         package: "tairix-resref",

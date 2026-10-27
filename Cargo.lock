@@ -4547,8 +4547,11 @@ dependencies = [
  "tairix-abi",
  "tairix-collections",
  "tairix-crypto",
+ "tairix-der",
  "tairix-fuzzseed",
  "tairix-hash",
+ "tairix-inline",
+ "tairix-smb",
  "zeroize",
 ]
 

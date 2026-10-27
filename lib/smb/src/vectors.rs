@@ -2,11 +2,18 @@
 //! and servers and printed in two posts on the Microsoft Open Specifications
 //! blog: *Encryption in SMB 3.0: A protocol perspective* (2012) and *SMB 3.1.1
 //! Encryption in Windows 10* (2015). The hex is as published.
+//!
+//! Beside them, a QNAP TS-869 Pro (QTS 4.3.4, whose SMB server is Samba)
+//! answering this client on a LAN, captured byte for byte; nothing in it
+//! names the address it was reached at.
 
 use alloc::vec::Vec;
 
 use crate::header::HEADER_LEN;
-use crate::negotiate::{Cipher, Dialect};
+use crate::negotiate::{Cipher, Dialect, NegotiateResponse};
+use crate::peer::read_init;
+use crate::session::{SessionSetupRequest, SessionSetupResponse};
+use crate::spnego::Reply;
 use crate::wire::Encoder;
 
 /// `hex` as bytes.
@@ -30,6 +37,78 @@ pub fn reencoded(encode: impl FnOnce(&mut Encoder)) -> Vec<u8> {
     enc.zeros(HEADER_LEN);
     encode(&mut enc);
     enc.finish().expect("encodes")
+}
+
+/// The AES-128-GCM vector's authentication, unwrapped: each `SESSION_SETUP`
+/// security buffer and the NTLMSSP messages and mechListMICs inside them.
+pub struct WindowsNtlm {
+    /// The `NEGOTIATE` response's SPNEGO hints.
+    pub hints: Vec<u8>,
+    /// The client's first security buffer, and the server's answer to it.
+    pub init_buffer: Vec<u8>,
+    pub reply_buffer: Vec<u8>,
+    /// The client's second security buffer, and the server's last.
+    pub answer_buffer: Vec<u8>,
+    pub final_buffer: Vec<u8>,
+    pub negotiate: Vec<u8>,
+    pub challenge: Vec<u8>,
+    pub authenticate: Vec<u8>,
+    pub client_mic: Vec<u8>,
+}
+
+/// [`WindowsNtlm`], read out of [`SMB311_GCM_PREAUTH`].
+pub fn windows_ntlm() -> WindowsNtlm {
+    let legs = SMB311_GCM_PREAUTH;
+    let hints = NegotiateResponse::decode(&bytes(legs[1].0))
+        .expect("decodes")
+        .security_buffer;
+    let init_buffer = SessionSetupRequest::decode(&bytes(legs[2].0))
+        .expect("decodes")
+        .security_buffer;
+    let reply_buffer = SessionSetupResponse::decode(&bytes(legs[3].0))
+        .expect("decodes")
+        .security_buffer;
+    let answer_buffer = SessionSetupRequest::decode(&bytes(legs[4].0))
+        .expect("decodes")
+        .security_buffer;
+    let final_buffer = SessionSetupResponse::decode(&bytes(SMB311_GCM_FINAL_SETUP))
+        .expect("decodes")
+        .security_buffer;
+    let (_, negotiate) = read_init(&init_buffer).expect("a negTokenInit");
+    let reply = Reply::decode(&reply_buffer).expect("a negTokenResp");
+    let answer = Reply::decode(&answer_buffer).expect("a negTokenResp");
+    WindowsNtlm {
+        challenge: reply.token.expect("a challenge").to_vec(),
+        authenticate: answer.token.expect("an answer").to_vec(),
+        client_mic: answer.mic.expect("a MIC").to_vec(),
+        hints,
+        negotiate,
+        init_buffer,
+        reply_buffer,
+        answer_buffer,
+        final_buffer,
+    }
+}
+
+/// The QNAP's SPNEGO hints and its NTLM challenge, unwrapped.
+pub fn qts_tokens() -> (Vec<u8>, Vec<u8>) {
+    let hints = NegotiateResponse::decode(&bytes(QTS_NEGOTIATE_RESPONSE))
+        .expect("decodes")
+        .security_buffer;
+    let buffer = SessionSetupResponse::decode(&bytes(QTS_SETUP_RESPONSE))
+        .expect("decodes")
+        .security_buffer;
+    let challenge = Reply::decode(&buffer)
+        .expect("a negTokenResp")
+        .token
+        .expect("a challenge")
+        .to_vec();
+    (hints, challenge)
+}
+
+/// The session key both ends of [`SMB311_GCM`] derived from NTLM.
+pub fn windows_session_key() -> [u8; 16] {
+    array(SMB311_GCM.session_key)
 }
 
 /// One request and its response, each as sent and as sealed.
@@ -390,4 +469,31 @@ pub const SMB311_CCM_FINAL_SETUP: &str = concat!(
     "FFFE00000000000021000000001000003676196AEE8CA17E5D50A53642EF2BE4",
     "0900000048001D00A11B3019A0030A0100A3120410010000000F57444342A271",
     "7E00000000",
+);
+
+/// A QNAP NAS's `NEGOTIATE` response to this client: SMB 3.1.1 under
+/// AES-128-CCM, no signing context, and Samba's SPNEGO hints.
+pub const QTS_NEGOTIATE_RESPONSE: &str = concat!(
+    "FE534D4240000000000000000000010001000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "41000100110302006F6666696365000000000000000000000700000000008000",
+    "000080000000800094E435BBE265DD01000000000000000080004A00D0000000",
+    "604806062B0601050502A03E303CA00E300C060A2B06010401823702020AA32A",
+    "3028A0261B246E6F745F646566696E65645F696E5F5246433431373840706C65",
+    "6173655F69676E6F72650000000000000100260000000000010020000100917D",
+    "8405CC4E28FE50B3D980BDB91822D1A3686364862C94C18A1795DE8A9D310000",
+    "020004000000000001000100",
+);
+
+/// The same NAS's answer to this client's first `SESSION_SETUP` leg: its
+/// NTLM challenge inside SPNEGO.
+pub const QTS_SETUP_RESPONSE: &str = concat!(
+    "FE534D4240000100160000C00100010001000000000000000100000000000000",
+    "000000000000000071D719150000000000000000000000000000000000000000",
+    "090000004800A900A181A63081A3A0030A0101A10C060A2B0601040182370202",
+    "0AA2818D04818A4E544C4D53535000020000000C000C003800000015828A225F",
+    "03570AF7D17F1A00000000000000004600460044000000060100000000000F4F",
+    "004600460049004300450002000C004F004600460049004300450001000C004F",
+    "004600460049004300450004000200000003000C006F00660066006900630065",
+    "000700080066CD43BBE265DD0100000000",
 );

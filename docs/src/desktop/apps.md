@@ -1644,8 +1644,8 @@ holds moves, the loop asks for one collect at a time, and a pass that left
 work is asked again at `netbrowse::PACE_NS` on a one-shot deadline. A
 catalogue that cannot be read is stated and asked again only when the user
 refreshes. Opening an endpoint states that connecting to network shares is
-not available on this system (`plans/ZEROCONF.md` Z11 awaits the SMB client,
-`plans/SMB.md` SMB5, SMB9). The trusted picker composes no network view.
+not available on this system (`plans/ZEROCONF.md` Z11 awaits the `smbfs`
+service, `plans/SMB.md` SMB9). The trusted picker composes no network view.
 
 ### In-place rename
 

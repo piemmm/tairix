@@ -153,16 +153,56 @@ fn a_response_is_matched_and_grants_its_credits() {
     match conn.next_received() {
         Some(Received::Response {
             ticket,
+            header,
             message,
             sealed,
         }) => {
             assert_eq!(ticket, Ticket(1));
+            assert_eq!(header, Header::decode(&answer).expect("header"));
             assert_eq!(*message, answer[..]);
             assert!(!sealed);
         }
         other => panic!("{other:?}"),
     }
     assert_eq!(conn.outstanding(), 0);
+}
+
+#[test]
+fn a_server_leaving_no_credit_and_nothing_outstanding_ends_the_connection() {
+    let mut conn = negotiated(1);
+    conn.send(&[request(Command::Echo, 0)]).expect("sends");
+    let starved = response(Command::Echo, 1, 0, NtStatus::SUCCESS, SYNC);
+    assert_eq!(conn.receive(&framed(&starved)), Err(SmbError::Protocol));
+
+    let mut conn = negotiated(2);
+    conn.send(&[request(Command::Echo, 0)]).expect("sends");
+    conn.send(&[request(Command::Echo, 0)]).expect("sends");
+    conn.receive(&framed(&response(
+        Command::Echo,
+        1,
+        0,
+        NtStatus::SUCCESS,
+        SYNC,
+    )))
+    .expect("a request still outstanding can bring credits");
+    conn.receive(&framed(&response(
+        Command::Echo,
+        2,
+        1,
+        NtStatus::SUCCESS,
+        SYNC,
+    )))
+    .expect("and does");
+    assert_eq!(conn.credits(), 1);
+
+    let mut conn = Connection::new();
+    conn.send(&[request(Command::Negotiate, 0)]).expect("sends");
+    let none = response(Command::Negotiate, 0, 0, NtStatus::SUCCESS, SYNC);
+    assert_eq!(
+        conn.receive(&framed(&none)),
+        Err(SmbError::Protocol),
+        "a negotiation granting nothing"
+    );
 }
 
 #[test]
@@ -395,6 +435,7 @@ fn a_windows_servers_sealed_answer_is_accepted() {
             ticket,
             message,
             sealed,
+            ..
         }) => {
             assert_eq!(ticket, Ticket(5));
             assert_eq!(*message, bytes(session.write.response)[..]);
