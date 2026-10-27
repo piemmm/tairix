@@ -227,6 +227,16 @@ impl Encoder {
         self.out.extend_from_slice(bytes);
     }
 
+    /// Append a structure's variable part: `bytes`, or the one byte its
+    /// structure size counts when there are none.
+    pub fn buffer(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            self.u8(0);
+        } else {
+            self.bytes(bytes);
+        }
+    }
+
     /// Append `len` zero bytes.
     pub fn zeros(&mut self, len: usize) {
         if self.failed.is_some() {
@@ -326,6 +336,37 @@ pub fn filetime_floor(time: Time64) -> Result<u64, SmbError> {
         .and_then(|secs| secs.checked_mul(FILETIME_TICKS))
         .and_then(|ticks| ticks.checked_add(u64::from(time.subsec_nanos() / 100)))
         .ok_or(SmbError::TimeOutOfRange)
+}
+
+/// `time` as a FILETIME, exactly: an instant finer than FILETIME's 100
+/// nanoseconds is refused rather than rounded.
+///
+/// # Errors
+///
+/// [`SmbError::TimeOutOfRange`] as [`filetime_floor`], or for a time that
+/// would lose precision.
+pub fn filetime_exact(time: Time64) -> Result<u64, SmbError> {
+    if !time.subsec_nanos().is_multiple_of(100) {
+        return Err(SmbError::TimeOutOfRange);
+    }
+    filetime_floor(time)
+}
+
+/// The instant FILETIME `filetime` names. Every FILETIME is one `Time64`
+/// carries, so nothing is lost.
+///
+/// # Errors
+///
+/// None in practice: a FILETIME's seconds fit an `i64` many times over. The
+/// conversion is checked rather than assumed.
+pub fn time_of_filetime(filetime: u64) -> Result<Time64, SmbError> {
+    let secs = i64::try_from(filetime / FILETIME_TICKS)
+        .ok()
+        .and_then(|secs| secs.checked_sub(FILETIME_EPOCH_OFFSET))
+        .ok_or(SmbError::TimeOutOfRange)?;
+    let nanos =
+        u32::try_from(filetime % FILETIME_TICKS * 100).map_err(|_| SmbError::TimeOutOfRange)?;
+    Time64::new(secs, nanos).map_err(|_| SmbError::TimeOutOfRange)
 }
 
 /// `text` as UTF-16LE, the encoding SMB carries every name in.

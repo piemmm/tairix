@@ -99,55 +99,21 @@ impl Command {
     }
 }
 
-/// The header's flags (MS-SMB2 §2.2.1.2).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub struct Flags(u32);
-
-impl Flags {
-    /// The message is a response.
-    pub const SERVER_TO_REDIR: Self = Self(0x0000_0001);
-    /// The header names an asynchronous operation rather than a tree.
-    pub const ASYNC_COMMAND: Self = Self(0x0000_0002);
-    /// The message is a related operation within a compound.
-    pub const RELATED_OPERATIONS: Self = Self(0x0000_0004);
-    /// The message is signed.
-    pub const SIGNED: Self = Self(0x0000_0008);
-    /// The path is a DFS path.
-    pub const DFS_OPERATIONS: Self = Self(0x1000_0000);
-    /// The request replays one whose response was lost.
-    pub const REPLAY_OPERATION: Self = Self(0x2000_0000);
-
-    /// No flag set.
-    pub const NONE: Self = Self(0);
-
-    /// The flags of raw value `bits`.
-    #[must_use]
-    pub const fn from_bits(bits: u32) -> Self {
-        Self(bits)
-    }
-
-    /// The raw value.
-    #[must_use]
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-
-    /// Whether every flag of `other` is set.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    /// These flags with `other` set too.
-    #[must_use]
-    pub const fn with(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// These flags with `other` clear.
-    #[must_use]
-    pub const fn without(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
+flags! {
+    /// The header's flags (MS-SMB2 §2.2.1.2).
+    pub struct Flags(u32) {
+        /// The message is a response.
+        const SERVER_TO_REDIR = 0x0000_0001;
+        /// The header names an asynchronous operation rather than a tree.
+        const ASYNC_COMMAND = 0x0000_0002;
+        /// The message is a related operation within a compound.
+        const RELATED_OPERATIONS = 0x0000_0004;
+        /// The message is signed.
+        const SIGNED = 0x0000_0008;
+        /// The path is a DFS path.
+        const DFS_OPERATIONS = 0x1000_0000;
+        /// The request replays one whose response was lost.
+        const REPLAY_OPERATION = 0x2000_0000;
     }
 }
 

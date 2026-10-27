@@ -1,9 +1,10 @@
-//! A scripted SMB 3 server for host tests: one connection, one account, and
-//! whatever misbehaviour a test asks of it. It verifies what a real server
-//! would — the NTLMv2 proof, the MIC, the service name, the mechListMIC, the
-//! pre-auth hash through the keys it derives — so a client that passes it has
-//! been checked by a second, independent reading of the protocol. Test
-//! support, never in a TAIRiX build.
+//! A scripted SMB 3 server for host tests: one connection, one account, one
+//! disk share held in memory ([`Share`]), and whatever misbehaviour a test
+//! asks of it. It verifies what a real server would — the NTLMv2 proof, the
+//! MIC, the service name, the mechListMIC, the pre-auth hash through the keys
+//! it derives — so a client that passes it has been checked by a second,
+//! independent reading of the protocol. Test support, never in a TAIRiX
+//! build.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -16,9 +17,10 @@ use crate::crypt::{
     KeyInputs, PreauthHash, SessionKeys, Transform, NONCE_SEED_LEN, TRANSFORM_HEADER_LEN,
     TRANSFORM_PROTOCOL_ID,
 };
+use crate::file::NO_FILE;
 use crate::frame::{self, Framer};
-use crate::header::{Address, Command, Flags, Header, SIGNATURE_RANGE};
-use crate::ioctl::{IoctlRequest, IoctlResponse, NO_FILE};
+use crate::header::{Address, Command, Flags, Header, HEADER_LEN, SIGNATURE_RANGE};
+use crate::ioctl::{IoctlRequest, IoctlResponse};
 use crate::negotiate::{
     validate_negotiate_input, validate_negotiate_output, Capabilities, Cipher, Dialect,
     NegotiateContext, NegotiateRequest, NegotiateResponse, SecurityMode, SigningAlgorithm,
@@ -32,6 +34,13 @@ use crate::status::NtStatus;
 use crate::tree::{ShareType, TreeConnectRequest, TreeConnectResponse};
 use crate::wire::{from_utf16le, owned, utf16le, utf16le_len, Encoder, Guid, Reader};
 use crate::{Role, SmbError};
+
+mod pipe;
+mod share;
+
+use pipe::Pipes;
+pub use share::Share;
+use share::{Caller, Chain, Sent};
 
 /// The server's GUID.
 pub const SERVER_GUID: Guid = *b"tairix test peer";
@@ -55,6 +64,9 @@ const AV_NB_DOMAIN: u16 = 0x0002;
 
 /// The share-wide access a tree connect grants: everything.
 const MAXIMAL_ACCESS: u32 = 0x001f_01ff;
+
+/// What a message about no tree is addressed by.
+const NO_TREE: Address = Address::Sync { tree_id: 0 };
 
 /// Where a `CHALLENGE_MESSAGE`'s payload starts.
 const CHALLENGE_FIXED: usize = 56;
@@ -104,6 +116,12 @@ pub enum Fault {
     Starve,
     /// The first tree connect's response grants no credit.
     WithholdTreeCredit,
+    /// `srvsvc` refuses the bind.
+    RefuseBind,
+    /// `NetrShareEnum` answers `ERROR_ACCESS_DENIED`.
+    DenyShareEnum,
+    /// The share listing names a share no tree connect could take.
+    HostileShareName,
 }
 
 /// The server a test talks to.
@@ -130,6 +148,9 @@ pub struct PeerConfig {
     pub timestamp: Option<u64>,
     /// The credits each response grants.
     pub grant: u16,
+    /// How many shares beyond its own it lists, to make a listing span
+    /// fragments.
+    pub extra_shares: u16,
     /// Its misbehaviour.
     pub fault: Fault,
 }
@@ -149,6 +170,7 @@ impl PeerConfig {
             hints: Hints::Ntlm,
             timestamp: Some(134_051_616_000_000_000),
             grant: 32,
+            extra_shares: 0,
             fault: Fault::None,
         }
     }
@@ -193,10 +215,13 @@ pub struct Peer {
     challenges: u64,
     setup: Option<Setup>,
     session: Option<(u64, SessionKeys)>,
+    previous_session_ids: Vec<u64>,
     renewed: bool,
-    trees: Vec<u32>,
+    trees: Vec<(u32, ShareType)>,
     next_tree: u32,
     validations: usize,
+    share: Share,
+    pipes: Pipes,
 }
 
 impl core::fmt::Debug for Peer {
@@ -210,9 +235,16 @@ impl core::fmt::Debug for Peer {
 }
 
 impl Peer {
-    /// A server waiting for a client's `NEGOTIATE`.
+    /// A server waiting for a client's `NEGOTIATE`, its share empty.
     #[must_use]
-    pub const fn new(config: PeerConfig) -> Self {
+    pub fn new(config: PeerConfig) -> Self {
+        Self::with_share(config, Share::new())
+    }
+
+    /// A server waiting for a client's `NEGOTIATE` on a new connection to
+    /// `share`.
+    #[must_use]
+    pub const fn with_share(config: PeerConfig, share: Share) -> Self {
         Self {
             config,
             framer: Framer::new(),
@@ -222,11 +254,44 @@ impl Peer {
             challenges: 0,
             setup: None,
             session: None,
+            previous_session_ids: Vec::new(),
             renewed: false,
             trees: Vec::new(),
             next_tree: 0,
             validations: 0,
+            share,
+            pipes: Pipes::new(),
         }
+    }
+
+    /// Drop the connection, and keep the share: what only this connection
+    /// held closes, and the durable opens wait to be reclaimed.
+    ///
+    /// # Errors
+    ///
+    /// [`SmbError::OutOfMemory`].
+    pub fn disconnect(mut self) -> Result<Share, SmbError> {
+        self.share.detach()?;
+        Ok(self.share)
+    }
+
+    /// The share it serves.
+    #[must_use]
+    pub const fn share(&self) -> &Share {
+        &self.share
+    }
+
+    /// How many pipes are open on `IPC$`.
+    #[must_use]
+    pub fn open_pipes(&self) -> usize {
+        self.pipes.open_count()
+    }
+
+    /// The session each `SESSION_SETUP` leg said it replaces, zero for
+    /// none, in the order the legs arrived.
+    #[must_use]
+    pub fn previous_session_ids(&self) -> &[u64] {
+        &self.previous_session_ids
     }
 
     /// The bytes it has answered with, taken.
@@ -255,6 +320,7 @@ impl Peer {
     pub fn receive(&mut self, bytes: &[u8]) -> Result<(), SmbError> {
         self.framer.push(bytes)?;
         while let Some(frame) = self.framer.next_frame()? {
+            let mut chain = Chain::default();
             let (mut buf, at) = frame.into_parts();
             let sealed = buf.get(at..at + 4) == Some(&TRANSFORM_PROTOCOL_ID[..]);
             let start = if sealed {
@@ -269,13 +335,17 @@ impl Peer {
                 at
             };
             for range in frame::messages(&buf[start..])? {
-                self.request(&buf[start + range.start..start + range.end], sealed)?;
+                self.request(
+                    &buf[start + range.start..start + range.end],
+                    sealed,
+                    &mut chain,
+                )?;
             }
         }
         Ok(())
     }
 
-    fn request(&mut self, message: &[u8], sealed: bool) -> Result<(), SmbError> {
+    fn request(&mut self, message: &[u8], sealed: bool, chain: &mut Chain) -> Result<(), SmbError> {
         let header = Header::decode(message)?;
         if header.is_response() {
             return Err(SmbError::Protocol);
@@ -286,12 +356,12 @@ impl Peer {
             // A session that holds keys is served only sealed.
             _ if !sealed => Err(SmbError::Integrity),
             Command::TreeConnect => self.on_tree_connect(&header, message),
-            Command::Ioctl => self.on_ioctl(&header, message),
+            Command::Ioctl => self.on_ioctl(&header, message, chain),
             Command::TreeDisconnect => {
                 let Address::Sync { tree_id } = header.address else {
                     return Err(SmbError::Protocol);
                 };
-                self.trees.retain(|tree| *tree != tree_id);
+                self.trees.retain(|(tree, _)| *tree != tree_id);
                 self.answer(&header, NtStatus::SUCCESS, tree_id, true, encode_empty)
             }
             Command::Logoff => {
@@ -299,8 +369,10 @@ impl Peer {
                 self.session = None;
                 Ok(())
             }
-            Command::Cancel => Ok(()),
-            _ => self.on_tree_request(&header),
+            Command::Cancel | Command::OplockBreak => {
+                self.on_share_request(&header, message, chain)
+            }
+            _ => self.on_tree_request(&header, message, chain),
         }
     }
 
@@ -356,7 +428,9 @@ impl Peer {
             security_buffer: hints(self.config.hints)?,
             contexts,
         };
-        let answer = self.message(header, NtStatus::SUCCESS, 0, 0, |enc| response.encode(enc))?;
+        let answer = self.message(header, NtStatus::SUCCESS, 0, NO_TREE, |enc| {
+            response.encode(enc);
+        })?;
         if dialect == Dialect::Smb311 {
             preauth.update(&answer);
         }
@@ -373,6 +447,7 @@ impl Peer {
         sealed: bool,
     ) -> Result<(), SmbError> {
         let request = SessionSetupRequest::decode(message)?;
+        self.previous_session_ids.push(request.previous_session_id);
         let renewal = match (sealed, &self.session) {
             (true, Some((id, _))) if header.session_id == *id => true,
             (false, None) => false,
@@ -437,7 +512,7 @@ impl Peer {
             header,
             NtStatus::MORE_PROCESSING_REQUIRED,
             session_id,
-            0,
+            NO_TREE,
             |enc| response.encode(enc),
         )?;
         if use_preauth {
@@ -509,7 +584,7 @@ impl Peer {
             },
             security_buffer: token,
         };
-        let mut answer = self.message(header, NtStatus::SUCCESS, named, 0, |enc| {
+        let mut answer = self.message(header, NtStatus::SUCCESS, named, NO_TREE, |enc| {
             response.encode(enc);
         })?;
         if !guest && self.config.fault != Fault::UnsignedFinal {
@@ -631,7 +706,7 @@ impl Peer {
         };
         self.next_tree += 1;
         let tree_id = self.next_tree;
-        self.trees.push(tree_id);
+        self.trees.push((tree_id, share_type));
         self.answer(header, NtStatus::SUCCESS, tree_id, true, |enc| {
             TreeConnectResponse {
                 share_type,
@@ -643,13 +718,18 @@ impl Peer {
         })
     }
 
-    fn on_ioctl(&mut self, header: &Header, message: &[u8]) -> Result<(), SmbError> {
+    fn on_ioctl(
+        &mut self,
+        header: &Header,
+        message: &[u8],
+        chain: &mut Chain,
+    ) -> Result<(), SmbError> {
         let Address::Sync { tree_id } = header.address else {
             return Err(SmbError::Protocol);
         };
         let request = IoctlRequest::decode(message)?;
         if request.ctl_code != FSCTL_VALIDATE_NEGOTIATE_INFO {
-            return self.fail_request(header, NtStatus::NOT_SUPPORTED, tree_id, true);
+            return self.on_tree_request(header, message, chain);
         }
         self.validations += 1;
         let (sent, answered) = self.negotiated.as_ref().ok_or(SmbError::Protocol)?;
@@ -675,20 +755,86 @@ impl Peer {
         })
     }
 
-    fn on_tree_request(&mut self, header: &Header) -> Result<(), SmbError> {
+    fn on_tree_request(
+        &mut self,
+        header: &Header,
+        message: &[u8],
+        chain: &mut Chain,
+    ) -> Result<(), SmbError> {
         let Address::Sync { tree_id } = header.address else {
             return Err(SmbError::Protocol);
         };
-        if !self.trees.contains(&tree_id) {
+        let Some(&(_, share_type)) = self.trees.iter().find(|(tree, _)| *tree == tree_id) else {
             return self.fail_request(header, NtStatus::NETWORK_NAME_DELETED, tree_id, true);
-        }
+        };
         if self.config.fault == Fault::Expire && !self.renewed {
             return self.fail_request(header, NtStatus::NETWORK_SESSION_EXPIRED, tree_id, true);
         }
-        match header.command {
-            Command::Echo => self.answer(header, NtStatus::SUCCESS, tree_id, true, encode_empty),
+        match (header.command, share_type) {
+            (Command::Echo, _) => {
+                self.answer(header, NtStatus::SUCCESS, tree_id, true, encode_empty)
+            }
+            (_, ShareType::Disk) => self.on_share_request(header, message, chain),
+            (_, ShareType::Pipe) => {
+                let (status, body) = self.pipes.request(&self.config, header.command, message)?;
+                self.answer(header, status, tree_id, true, |enc| {
+                    enc.bytes(&body[HEADER_LEN..]);
+                })
+            }
             _ => self.fail_request(header, NtStatus::NOT_SUPPORTED, tree_id, true),
         }
+    }
+
+    /// Hand a request to the share, and send whatever it answers.
+    fn on_share_request(
+        &mut self,
+        header: &Header,
+        message: &[u8],
+        chain: &mut Chain,
+    ) -> Result<(), SmbError> {
+        let client_guid = self
+            .negotiated
+            .as_ref()
+            .map(|(request, _)| request.client_guid)
+            .ok_or(SmbError::Protocol)?;
+        let caller = Caller {
+            user: self.config.user,
+            client_guid,
+        };
+        self.share.request(caller, header, message, chain)?;
+        let session_id = self.session.as_ref().map_or(0, |(id, _)| *id);
+        for sent in self.share.take_sent() {
+            let answer = match sent {
+                Sent::Response {
+                    request,
+                    address,
+                    status,
+                    body,
+                } => self.message(&request, status, session_id, address, |enc| {
+                    enc.bytes(&body[HEADER_LEN..]);
+                })?,
+                Sent::Break(body) => {
+                    let mut enc = Encoder::new();
+                    Header {
+                        credit_charge: 0,
+                        status: NtStatus::SUCCESS,
+                        command: Command::OplockBreak,
+                        credits: 0,
+                        flags: Flags::SERVER_TO_REDIR,
+                        next_command: 0,
+                        message_id: u64::MAX,
+                        address: NO_TREE,
+                        session_id: 0,
+                        signature: [0; 16],
+                    }
+                    .encode(&mut enc);
+                    enc.bytes(&body[HEADER_LEN..]);
+                    enc.finish()?
+                }
+            };
+            self.queue(answer, true)?;
+        }
+        Ok(())
     }
 
     /// A `SESSION_SETUP` response carrying `token`.
@@ -704,7 +850,9 @@ impl Peer {
             session_flags: SessionFlags::default(),
             security_buffer: token,
         };
-        let answer = self.message(header, status, session_id, 0, |enc| response.encode(enc))?;
+        let answer = self.message(header, status, session_id, NO_TREE, |enc| {
+            response.encode(enc);
+        })?;
         self.queue(answer, sealed)
     }
 
@@ -717,13 +865,13 @@ impl Peer {
         sealed: bool,
     ) -> Result<(), SmbError> {
         let session_id = self.session.as_ref().map_or(0, |(id, _)| *id);
-        let answer = self.message(header, status, session_id, tree_id, |enc| {
-            ErrorResponse {
-                context_count: 0,
-                data: Vec::new(),
-            }
-            .encode(enc);
-        })?;
+        let answer = self.message(
+            header,
+            status,
+            session_id,
+            Address::Sync { tree_id },
+            empty_error,
+        )?;
         self.queue(answer, sealed)
     }
 
@@ -737,7 +885,7 @@ impl Peer {
         body: impl FnOnce(&mut Encoder),
     ) -> Result<(), SmbError> {
         let session_id = self.session.as_ref().map_or(0, |(id, _)| *id);
-        let answer = self.message(header, status, session_id, tree_id, body)?;
+        let answer = self.message(header, status, session_id, Address::Sync { tree_id }, body)?;
         self.queue(answer, sealed)
     }
 
@@ -746,7 +894,7 @@ impl Peer {
         request: &Header,
         status: NtStatus,
         session_id: u64,
-        tree_id: u32,
+        address: Address,
         body: impl FnOnce(&mut Encoder),
     ) -> Result<Vec<u8>, SmbError> {
         let withheld = self.config.fault == Fault::WithholdTreeCredit
@@ -766,7 +914,7 @@ impl Peer {
             flags: Flags::SERVER_TO_REDIR,
             next_command: 0,
             message_id: request.message_id,
-            address: Address::Sync { tree_id },
+            address,
             session_id,
             signature: [0; 16],
         }
@@ -790,6 +938,24 @@ impl Peer {
         self.out.extend_from_slice(&frame);
         Ok(())
     }
+}
+
+/// What `encode` writes behind a header-sized gap: a body whose offsets count
+/// from its message's start, to follow whatever header it is sent behind.
+pub(crate) fn behind_header(encode: impl FnOnce(&mut Encoder)) -> Result<Vec<u8>, SmbError> {
+    let mut enc = Encoder::new();
+    enc.zeros(HEADER_LEN);
+    encode(&mut enc);
+    enc.finish()
+}
+
+/// An error response's body with no error data.
+fn empty_error(enc: &mut Encoder) {
+    ErrorResponse {
+        context_count: 0,
+        data: Vec::new(),
+    }
+    .encode(enc);
 }
 
 /// What a standalone server's challenge agrees to: everything NTLMv2 needs.

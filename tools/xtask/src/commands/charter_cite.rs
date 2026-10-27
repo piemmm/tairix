@@ -184,6 +184,8 @@ const SOURCES: &[&str] = &[
     "UTS",
     // Microsoft's protocol documents: MS-SMB2, MS-ERREF and their siblings.
     "MS-",
+    // The Open Group's DCE 1.1 RPC specification, which MS-RPCE extends.
+    "C706",
     // NIST Special Publications: the randomness, entropy-source, and
     // statistical-test-suite standards the crypto and RNG crates cite by
     // section. `SP 800-22 §2.5` collides with a charter label, so without
@@ -807,6 +809,7 @@ mod tests {
             "//! Reference: NXP PCF8523 data sheet, §8 (register overview).",
             "//! Reference: Maxim DS3231 data sheet, §9 (register map).",
             "/// The Logical Screen Descriptor's fixed length (`GIF89a` §18).",
+            "/// NDR 2.0 (C706 §14).",
         ] {
             assert!(
                 reasons(body).is_empty(),

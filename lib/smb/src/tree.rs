@@ -9,6 +9,25 @@ use crate::SmbError;
 /// The fixed part of a `TREE_CONNECT` request's body.
 const REQUEST_FIXED: usize = 8;
 
+/// The longest share name, in characters (MS-SRVS §2.2.2.10's
+/// `NAMETYPE_SHARE`).
+pub const MAX_SHARE_NAME: usize = 80;
+
+/// Whether `name` is a share a tree connect can name: one to
+/// [`MAX_SHARE_NAME`] characters, none a path separator or a control
+/// character.
+#[must_use]
+pub fn is_share_name(name: &str) -> bool {
+    let mut count = 0;
+    for c in name.chars() {
+        if matches!(c, '\\' | '/') || c.is_control() {
+            return false;
+        }
+        count += 1;
+    }
+    (1..=MAX_SHARE_NAME).contains(&count)
+}
+
 /// The longest share path a request may carry: `\\server\share`, bounded by
 /// what one name component and a host may be.
 const MAX_PATH_BYTES: usize = 1024;

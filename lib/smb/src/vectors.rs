@@ -9,9 +9,8 @@
 
 use alloc::vec::Vec;
 
-use crate::header::HEADER_LEN;
 use crate::negotiate::{Cipher, Dialect, NegotiateResponse};
-use crate::peer::read_init;
+use crate::peer::{behind_header, read_init};
 use crate::session::{SessionSetupRequest, SessionSetupResponse};
 use crate::spnego::Reply;
 use crate::wire::Encoder;
@@ -30,13 +29,10 @@ pub fn array<const N: usize>(hex: &str) -> [u8; N] {
     bytes(hex).try_into().expect("the array's length")
 }
 
-/// What `encode` writes behind a stand-in header: a decoded message's body
-/// re-encoded, to hold against the bytes it was decoded from.
-pub fn reencoded(encode: impl FnOnce(&mut Encoder)) -> Vec<u8> {
-    let mut enc = Encoder::new();
-    enc.zeros(HEADER_LEN);
-    encode(&mut enc);
-    enc.finish().expect("encodes")
+/// What `encode` writes behind a stand-in header: a body as a whole message,
+/// for its decoder to read or to hold against the bytes it was decoded from.
+pub fn message(encode: impl FnOnce(&mut Encoder)) -> Vec<u8> {
+    behind_header(encode).expect("encodes")
 }
 
 /// The AES-128-GCM vector's authentication, unwrapped: each `SESSION_SETUP`

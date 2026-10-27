@@ -10,10 +10,8 @@ use super::{
     Cipher, Dialect, NegotiateContext, NegotiateRequest, NegotiateResponse, Offer, SecurityMode,
     SigningAlgorithm, SHA512,
 };
-use crate::header::{Address, Command, Flags, Header, HEADER_LEN};
-use crate::status::NtStatus;
+use crate::header::HEADER_LEN;
 use crate::vectors;
-use crate::wire::Encoder;
 use crate::{Refusal, SmbError};
 
 fn offer(floor: Dialect) -> Offer {
@@ -25,25 +23,6 @@ fn offer(floor: Dialect) -> Offer {
     }
 }
 
-fn message(body: impl FnOnce(&mut Encoder)) -> Vec<u8> {
-    let mut enc = Encoder::new();
-    Header {
-        credit_charge: 0,
-        status: NtStatus::SUCCESS,
-        command: Command::Negotiate,
-        credits: 1,
-        flags: Flags::NONE,
-        next_command: 0,
-        message_id: 0,
-        address: Address::Sync { tree_id: 0 },
-        session_id: 0,
-        signature: [0; 16],
-    }
-    .encode(&mut enc);
-    body(&mut enc);
-    enc.finish().expect("encodes")
-}
-
 #[test]
 fn a_request_offers_every_dialect_from_the_floor_with_its_contexts() {
     let request = offer(Dialect::Smb300).request();
@@ -52,7 +31,7 @@ fn a_request_offers_every_dialect_from_the_floor_with_its_contexts() {
         .security_mode
         .contains(SecurityMode::SIGNING_REQUIRED));
     assert!(request.capabilities.contains(Capabilities::ENCRYPTION));
-    let bytes = message(|enc| request.encode(enc));
+    let bytes = vectors::message(|enc| request.encode(enc));
     let context_offset = u32::from_le_bytes([bytes[92], bytes[93], bytes[94], bytes[95]]);
     assert_eq!(context_offset % 8, 0, "contexts are eight-byte aligned");
     assert_eq!(NegotiateRequest::decode(&bytes), Ok(request));
@@ -70,7 +49,7 @@ fn a_request_without_3_1_1_carries_no_contexts() {
         client_guid: [3; 16],
         contexts: Vec::new(),
     };
-    let bytes = message(|enc| request.encode(enc));
+    let bytes = vectors::message(|enc| request.encode(enc));
     assert_eq!(bytes.len(), HEADER_LEN + 36 + 4);
     assert_eq!(NegotiateRequest::decode(&bytes), Ok(request));
 }
@@ -112,7 +91,7 @@ fn chosen(cipher: u16, signing: Option<u16>) -> Vec<NegotiateContext> {
 #[test]
 fn a_response_round_trips_with_its_contexts() {
     let response = response_311(chosen(4, Some(2)));
-    let bytes = message(|enc| response.encode(enc));
+    let bytes = vectors::message(|enc| response.encode(enc));
     assert_eq!(NegotiateResponse::decode(&bytes), Ok(response));
 }
 
@@ -301,7 +280,7 @@ fn a_windows_negotiate_request_decodes_and_reencodes_byte_for_byte() {
         other => panic!("{other:?}"),
     }
     assert_eq!(
-        vectors::reencoded(|enc| request.encode(enc))[HEADER_LEN..],
+        vectors::message(|enc| request.encode(enc))[HEADER_LEN..],
         message[HEADER_LEN..]
     );
 }
@@ -321,7 +300,7 @@ fn a_windows_negotiate_response_decodes_reencodes_and_is_accepted() {
         (8 << 20, 8 << 20, 8 << 20)
     );
     assert_eq!(
-        vectors::reencoded(|enc| response.encode(enc))[HEADER_LEN..],
+        vectors::message(|enc| response.encode(enc))[HEADER_LEN..],
         message[HEADER_LEN..]
     );
 

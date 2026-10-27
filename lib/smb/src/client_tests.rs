@@ -25,9 +25,9 @@ use crate::vectors;
 use crate::wire::Encoder;
 use crate::{Refusal, SmbError};
 
-const SEED: [u8; NONCE_SEED_LEN] = [0x3c; NONCE_SEED_LEN];
+pub(super) const SEED: [u8; NONCE_SEED_LEN] = [0x3c; NONCE_SEED_LEN];
 
-fn offer(host: &str) -> Offer {
+pub(super) fn offer(host: &str) -> Offer {
     Offer {
         floor: Dialect::Smb300,
         client_guid: [0x11; 16],
@@ -36,7 +36,7 @@ fn offer(host: &str) -> Offer {
     }
 }
 
-fn ntlm(config: &PeerConfig, password: &str) -> Mechanism {
+pub(super) fn ntlm(config: &PeerConfig, password: &str) -> Mechanism {
     let credential = NtlmCredential::new(config.user, config.domain, password).expect("names fit");
     let mut target = String::from("cifs/");
     target.push_str(config.host);
@@ -75,17 +75,21 @@ fn pump_into(client: &mut Client, peer: &mut Peer, written: &mut Vec<u8>) -> Res
     }
 }
 
-fn pump(client: &mut Client, peer: &mut Peer) -> Result<(), SmbError> {
+pub(super) fn pump(client: &mut Client, peer: &mut Peer) -> Result<(), SmbError> {
     pump_into(client, peer, &mut Vec::new())
 }
 
-fn events(client: &mut Client) -> Vec<Event> {
+pub(super) fn events(client: &mut Client) -> Vec<Event> {
     core::iter::from_fn(|| client.next_event()).collect()
 }
 
 /// A client whose negotiation with `config`'s server has settled.
 fn negotiated(config: &PeerConfig) -> (Client, Peer) {
-    let mut peer = Peer::new(config.clone());
+    negotiated_with(Peer::new(config.clone()), config)
+}
+
+/// A client whose negotiation with `peer`, serving as `config`, has settled.
+fn negotiated_with(mut peer: Peer, config: &PeerConfig) -> (Client, Peer) {
     let mut client = Client::new(offer(config.host)).expect("encodes");
     pump(&mut client, &mut peer).expect("negotiates");
     assert_eq!(events(&mut client), [Event::Negotiated]);
@@ -94,9 +98,14 @@ fn negotiated(config: &PeerConfig) -> (Client, Peer) {
 
 /// A client with an established session on `config`'s server.
 fn established(config: &PeerConfig) -> (Client, Peer) {
-    let (mut client, mut peer) = negotiated(config);
+    established_with(Peer::new(config.clone()), config, None)
+}
+
+/// A client with an established session on `peer`, replacing `previous`.
+fn established_with(peer: Peer, config: &PeerConfig, previous: Option<u64>) -> (Client, Peer) {
+    let (mut client, mut peer) = negotiated_with(peer, config);
     client
-        .authenticate(ntlm(config, config.password), SEED)
+        .authenticate(ntlm(config, config.password), SEED, previous)
         .expect("starts");
     pump(&mut client, &mut peer).expect("sets up");
     let session_id = peer.session_id().expect("the server keyed a session");
@@ -105,8 +114,18 @@ fn established(config: &PeerConfig) -> (Client, Peer) {
 }
 
 /// A client with the disk share connected on `config`'s server.
-fn connected(config: &PeerConfig) -> (Client, Peer, Tree) {
-    let (mut client, mut peer) = established(config);
+pub(super) fn connected(config: &PeerConfig) -> (Client, Peer, Tree) {
+    connected_with(Peer::new(config.clone()), config, None)
+}
+
+/// A client with the disk share connected on `peer`, its session replacing
+/// `previous`.
+pub(super) fn connected_with(
+    peer: Peer,
+    config: &PeerConfig,
+    previous: Option<u64>,
+) -> (Client, Peer, Tree) {
+    let (mut client, mut peer) = established_with(peer, config, previous);
     let ticket = client.connect_tree(DISK_SHARE).expect("asks");
     pump(&mut client, &mut peer).expect("connects");
     match events(&mut client)[..] {
@@ -126,7 +145,7 @@ const ECHO: Request<'static> = Request {
 };
 
 /// The status of the response `event` carries for `ticket`.
-fn status_of(event: &Event, ticket: Ticket) -> NtStatus {
+pub(super) fn status_of(event: &Event, ticket: Ticket) -> NtStatus {
     match event {
         Event::Response {
             ticket: answered,
@@ -196,7 +215,7 @@ fn a_wrong_password_is_rejected_and_another_attempt_may_follow() {
     let config = PeerConfig::new(Dialect::Smb311);
     let (mut client, mut peer) = negotiated(&config);
     client
-        .authenticate(ntlm(&config, "Tr0ub4dor&3"), SEED)
+        .authenticate(ntlm(&config, "Tr0ub4dor&3"), SEED, None)
         .expect("starts");
     pump(&mut client, &mut peer).expect("a refusal is an answer");
     assert_eq!(
@@ -211,7 +230,7 @@ fn a_wrong_password_is_rejected_and_another_attempt_may_follow() {
     );
 
     client
-        .authenticate(ntlm(&config, config.password), SEED)
+        .authenticate(ntlm(&config, config.password), SEED, None)
         .expect("starts again");
     pump(&mut client, &mut peer).expect("sets up");
     let session_id = peer.session_id().expect("keyed");
@@ -237,7 +256,7 @@ fn an_unprotected_forged_or_mismatched_setup_ends_the_connection() {
             };
             let (mut client, mut peer) = negotiated(&config);
             client
-                .authenticate(ntlm(&config, config.password), SEED)
+                .authenticate(ntlm(&config, config.password), SEED, None)
                 .expect("starts");
             assert_eq!(
                 pump(&mut client, &mut peer),
@@ -280,7 +299,7 @@ fn a_server_offering_only_kerberos_is_refused_before_anything_is_sent() {
     };
     let (mut client, _peer) = negotiated(&config);
     assert_eq!(
-        client.authenticate(ntlm(&config, config.password), SEED),
+        client.authenticate(ntlm(&config, config.password), SEED, None),
         Err(SmbError::Refused(Refusal::Mechanism))
     );
     assert!(client.take_output().is_empty());
@@ -486,7 +505,7 @@ fn calls_out_of_turn_are_refused() {
     let mut peer = Peer::new(config.clone());
     let mut client = Client::new(offer(config.host)).expect("encodes");
     assert_eq!(
-        client.authenticate(ntlm(&config, config.password), SEED),
+        client.authenticate(ntlm(&config, config.password), SEED, None),
         Err(SmbError::Protocol),
         "before negotiating"
     );
@@ -501,11 +520,17 @@ fn calls_out_of_turn_are_refused() {
     ] {
         assert_eq!(refused, Err(SmbError::Protocol), "with no session");
     }
+    assert_eq!(
+        client.authenticate(ntlm(&config, config.password), SEED, Some(0)),
+        Err(SmbError::Protocol),
+        "replacing session zero, which no session is"
+    );
+    assert!(client.take_output().is_empty());
     client
-        .authenticate(ntlm(&config, config.password), SEED)
+        .authenticate(ntlm(&config, config.password), SEED, None)
         .expect("starts");
     assert_eq!(
-        client.authenticate(ntlm(&config, config.password), SEED),
+        client.authenticate(ntlm(&config, config.password), SEED, None),
         Err(SmbError::Protocol),
         "twice"
     );
@@ -549,7 +574,8 @@ fn calls_out_of_turn_are_refused() {
 #[test]
 fn share_names_that_could_leave_the_tree_path_are_refused() {
     let (mut client, _peer) = established(&PeerConfig::new(Dialect::Smb311));
-    for name in ["", r"a\b", "a/b", "a\0b", "a\nb", "\u{85}"] {
+    let too_long = "s".repeat(81);
+    for name in ["", r"a\b", "a/b", "a\0b", "a\nb", "\u{85}", &too_long] {
         assert_eq!(
             client.connect_tree(name),
             Err(SmbError::Malformed),
@@ -557,6 +583,10 @@ fn share_names_that_could_leave_the_tree_path_are_refused() {
         );
     }
     assert!(client.take_output().is_empty());
+    assert!(
+        client.connect_tree(&"s".repeat(80)).is_ok(),
+        "the longest name"
+    );
 }
 
 #[test]
@@ -596,7 +626,7 @@ fn a_tree_disconnects_and_the_session_logs_off() {
     assert_eq!(peer.session_id(), None);
     assert_eq!(client.connect_tree(DISK_SHARE), Err(SmbError::Protocol));
     assert_eq!(
-        client.authenticate(ntlm(&config, config.password), SEED),
+        client.authenticate(ntlm(&config, config.password), SEED, None),
         Err(SmbError::Protocol),
         "a connection serves one session"
     );
@@ -686,7 +716,7 @@ fn on_3_1_1_any_change_to_the_negotiation_or_a_setup_leg_breaks_the_keys() {
     pump_tampering(&mut client, &mut peer, 0, CREDITS_AT).expect("negotiates");
     events(&mut client);
     client
-        .authenticate(ntlm(&config, config.password), SEED)
+        .authenticate(ntlm(&config, config.password), SEED, None)
         .expect("starts");
     assert_eq!(
         pump(&mut client, &mut peer),
@@ -696,7 +726,7 @@ fn on_3_1_1_any_change_to_the_negotiation_or_a_setup_leg_breaks_the_keys() {
 
     let (mut client, mut peer) = negotiated(&config);
     client
-        .authenticate(ntlm(&config, config.password), SEED)
+        .authenticate(ntlm(&config, config.password), SEED, None)
         .expect("starts");
     assert_eq!(
         pump_tampering(&mut client, &mut peer, 0, CREDITS_AT),
@@ -737,7 +767,7 @@ fn a_samba_servers_answers_are_taken_and_its_challenge_answered() {
     };
     let ntlm = NtlmInitiator::new(credential, "cifs/office", inputs).expect("fits");
     client
-        .authenticate(Mechanism::Ntlm(ntlm), SEED)
+        .authenticate(Mechanism::Ntlm(ntlm), SEED, None)
         .expect("starts");
     client.take_output();
     client

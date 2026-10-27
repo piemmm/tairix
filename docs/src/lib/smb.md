@@ -2,13 +2,13 @@
 
 `lib/smb` speaks SMB 3 (MS-SMB2) for the `smbfs` service: the message codec,
 negotiation, key derivation, signing, the encryption transform, the
-connection core, SPNEGO and NTLMv2 authentication, and the client that holds
-one principal's session and trees. It is pure — no socket, clock or random
-source — so the code the tests and the fuzzer drive is the code the
+connection core, SPNEGO and NTLMv2 authentication, the client that holds one
+principal's session and trees, what is done with files on a tree, and the
+listing of a server's shares over DCE/RPC. It is pure — no socket, clock or
+random source — so the code the tests and the fuzzer drive is the code the
 capability-empty sandbox worker runs: the worker hands it the bytes the front
 read and the random bytes a session needs, and writes back what it returns.
-`plans/SMB.md` stages file operations and share enumeration on top, and
-`plans/KERBEROS.md` K4 the Kerberos mechanism beside NTLM.
+`plans/KERBEROS.md` K4 adds the Kerberos mechanism beside NTLM.
 
 ## The protocol floor
 
@@ -105,7 +105,9 @@ write come out, and what happened arrives as `Event`s.
   from the hash over every message but the last — and installed only once the
   final response's signature verifies under them. Under NTLM that signature
   is the only proof the server knew the password. The server's mechListMIC is
-  verified whenever it sends one.
+  verified whenever it sends one. After a dropped connection the new session
+  names the old one on every leg (`PreviousSessionId`), so the server lets it
+  go and keeps its durable opens for this one.
 - **Refusals and failures.** A server status refusing the authentication —
   a wrong password, a disabled account — is `Event::Rejected`, and another
   attempt may follow on the same connection. Everything else wrong ends it.
@@ -116,8 +118,9 @@ write come out, and what happened arrives as `Event`s.
   that cannot confirm the negotiation is not trusted to have received it
   untampered. A validation owed when no credit is free goes once one frees.
 - **Trees.** `connect_tree` builds `\\<server>\<share>` from the name dialled,
-  refusing a share name holding a separator or a control character; a refused
-  share is `Event::TreeRefused`. A session holds at most 64 trees.
+  taking a share name only as `tree::is_share_name` does — one to 80
+  characters, none a separator or a control character — and a refused share
+  is `Event::TreeRefused`. A session holds at most 64 trees.
 - **Requests.** `send` puts requests on a handed-out tree, sealed and
   compounded, filling in the session and tree; each answer is an
   `Event::Response`. The client's own commands — negotiate, session setup,
@@ -137,12 +140,96 @@ prefix arrives, so a large read is never regrown — opened in place, and
 delivered as a `Message` over that same buffer. Only a compound's messages,
 or a frame followed by more bytes, cost a copy, and then of the shorter part.
 
+## Files
+
+`file` builds the requests a client makes on a tree and reads their answers,
+each decoder total and bounded.
+
+- **Names and paths** cross only when TAIRiX and SMB can both carry them: a
+  name is a TAIRiX path component — at most 255 bytes, no `/` or NUL, never
+  `.` or `..` — holding none of the characters an SMB filename may not
+  (`" \ / : | < > * ?` and the controls), and a path is such names a single
+  `\` apart, at most 32,760 UTF-16 units. So a stranger's listing cannot
+  smuggle a separator, a stream name or a wildcard into a path, and no name
+  opens a different object than the one it spells. Names that do not
+  round-trip through UTF-16 are refused, never replaced.
+- **Times** are `Time64` both ways, exactly: a FILETIME is always one
+  `Time64`, and a `Time64` is written only when it sits on FILETIME's 100
+  nanoseconds after 1601 — rounding would make a copied time disagree with
+  its source. FILETIME zero means "leave it unchanged" in a set, so the epoch
+  itself cannot be set.
+- **Create** asks with a version 2 lease, a version 2 durable handle or its
+  reconnection, the maximal access and the on-disk id. A context list is read
+  whole: at most 16 contexts, each inside the list, eight-byte aligned and
+  named once; one never asked for is passed over. A granted lease and the
+  lease oplock come together or not at all.
+- **Read and write** move at most 1 MiB, charged one credit per 64 KiB. A
+  read's data is borrowed from the response it arrived in and must lie past
+  the response's fixed part; a write's is written straight into its frame.
+- **Listings** read `FileIdBothDirectoryInformation` in place, at most
+  256 KiB a response. Each entry is checked as it is reached; its name is
+  decoded only when asked for, so a name neither side carries costs that
+  entry, never the listing. The dot entries are recognised and never named.
+- **Information** classes — basic, standard, internal, network-open,
+  end-of-file, disposition, rename, and the volume's size, attributes and
+  label — are read at exactly their length where it is fixed, and a rename's
+  path, a filesystem's name and a volume's label within their bounds.
+- **Change notification** waits under an interim response; its records walk
+  in place, a path neither side carries costing its record. A response
+  carrying no records with `STATUS_NOTIFY_ENUM_DIR` means more changed than
+  the server could say, and `STATUS_NOTIFY_CLEANUP` that the watched open
+  was closed.
+- **Leases.** A break arrives unsolicited and may arrive unsigned (MS-SMB2
+  §5.1): it can only take caching away, so it is acted on without being
+  trusted for more. Its acknowledgment goes out through `send` like any
+  request.
+- **Durable handles.** An open made durable outlives its connection for the
+  timeout the server granted. A new connection negotiating with the same
+  client GUID, its session naming the old one, reclaims it with a create
+  carrying the reconnect context and the same lease key. The id it answers
+  with — the persistent half unchanged, the volatile half the server may
+  renew — is what the open is known by from then on.
+
+## Share enumeration
+
+`rpc` speaks connection-oriented DCE/RPC (C706) over a named pipe, and the
+one call this client makes: `srvsvc`'s `NetrShareEnum` at level 1 (MS-SRVS),
+for every share's name, type and remark. `ShareListing` is the whole
+exchange as a sequence of requests on the `IPC$` tree — open `srvsvc`, write
+the bind and read its acknowledgment, send the call with
+`FSCTL_PIPE_TRANSCEIVE`, read whatever fragments follow, close — and checks
+each answer before naming the next request:
+
+- The bind offers one context, `srvsvc` 3.0 under NDR 2.0, with 4280-byte
+  fragments both ways; its acknowledgment must accept exactly that, for this
+  call, with room for the request. A refusal is `SmbError::Rpc` with its
+  reason.
+- Every PDU must be version 5.0 in little-endian NDR, carry no
+  authentication — the SMB session already seals every byte — and be no
+  larger than the fragments this client said it receives. A pipe read that
+  ends short of a PDU (`STATUS_BUFFER_OVERFLOW`) is read on.
+- The answer must come under the call's id and context, opened by one first
+  fragment and closed by a last; a fault is `SmbError::Rpc` with its status,
+  and so is a call that failed. The answer is at most 256 KiB in all and at
+  most 256 shares.
+- A share whose name no tree connect could take is left out and counted, so
+  a surface can say some were not shown. A remark is display text: a unit
+  that does not decode is U+FFFD and costs it nothing.
+- A listing that fails after opening the pipe still closes it.
+
+Both names and remarks are a stranger's text, for `lib/visible`'s policy to
+show.
+
 ## Bounds
 
 A frame is at most 8 MiB and a compound 32 messages; negotiate contexts and
 their ids, tree paths, IOCTL outputs and error data carry their own caps, as
 do NTLM's target information (4 KiB) and names (512 bytes of UTF-16) and the
-mechanisms a server's hints may list (16). These are security bounds on a
+mechanisms a server's hints may list (16). On a tree, a read or write moves
+at most 1 MiB, a listing response 256 KiB, an information class 4 KiB, a
+change response 64 KiB, a create 16 contexts; a name is at most 255 bytes and
+a path 32,760 units. A share listing reads fragments of at most 4280 bytes,
+an answer of at most 256 KiB, and 256 shares. These are security bounds on a
 stranger's bytes, not capacities. Nothing a server sends is allocated for
 infallibly: exhaustion is `SmbError::OutOfMemory`.
 
@@ -158,7 +245,9 @@ decoded and re-encoded byte for byte. The connection accepts a Windows
 server's sealed answer end to end. NTLMv2 is held to MS-NLMP §4.2.4's worked
 example and to the MIC Windows computed over its own exchange; SPNEGO to the
 tokens Windows framed; and both, through the client, to a QNAP NAS's Samba
-captured on a LAN.
+captured on a LAN. The `WRITE` and `READ` each Windows session sealed decode
+and re-encode byte for byte, and the `srvsvc` bind is the one every Windows
+and Samba client sends.
 
 The client runs against a scripted server (the `test-support` feature's
 `peer`) that checks what a real one would — the NTLMv2 proof, the MIC, the
@@ -166,12 +255,23 @@ service name, the mechListMIC, and through the keys it derives the pre-auth
 hash — under every dialect and cipher, and with each misbehaviour it can be
 asked for: a guest session, an unsigned or forged final response, a forged
 mechListMIC, another mechanism, a weakened challenge, a downgraded or refused
-validation, an expiring session, starved credits.
+validation, an expiring session, starved credits. Its disk share is held in
+memory and outlives a connection, so file traffic runs end to end: every
+create disposition, data at the 1 MiB bound, a listing a page at a time,
+information set and read back exactly, deletion with the last open, a watch
+reporting a rename and ending cancelled or with its open, a conflicting open
+held until the lease it breaks is acknowledged, a related compound, and a
+durable open reclaimed over a new connection. Its `IPC$` serves `srvsvc`,
+answering a listing in as many fragments as it takes, or refusing the bind,
+denying the call, or naming a share no tree connect could take.
 
 `tests/fuzz_smb.rs` feeds noise, mutated messages and splices to every
-decoder, holds every accepted message to re-encode stably, splits frame
-streams at random, and requires that a sealed frame with any byte changed is
-never accepted. Against the scripted server with one of its frames changed,
+decoder — session, tree, file, listing, information-class, change, lease and
+DCE/RPC — holds every accepted message to re-encode stably, walks every
+listing and change response to its end, splits frame streams at random, and
+requires that a sealed frame with any byte changed is never accepted. A
+share listing given a server's answers with one changed always ends, and
+closes the pipe it opened. Against the scripted server with one of its frames changed,
 the client never establishes a session whose final response was changed, nor
 on 3.1.1 one whose negotiation or setup was, and on 3.0 and 3.0.2 never hands
 out a tree after a changed dialect, capability, GUID or security mode.

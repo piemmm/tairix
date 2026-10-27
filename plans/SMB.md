@@ -25,8 +25,8 @@ change (§2.13).
 | SMB3 | `lib/der`: the bounded, fail-closed DER codec SPNEGO and Kerberos share | done |
 | SMB4 | `lib/smb` transport: the SMB2/3 codec, 3.0–3.1.1 negotiation, pre-auth integrity and validate-negotiate, credits, signing, mandatory encryption, compounding; fuzzed | done |
 | SMB5 | `lib/smb` authentication: SPNEGO with mechListMIC, NTLMv2 (target info, MIC, SPN), and the `client` — the session-setup, re-authentication and tree-connect state machine its mechanisms plug into; Kerberos joins it in KERBEROS K4 | done |
-| SMB6 | `lib/smb` file operations: create/close/read/write/flush, directory enumeration, query/set info, leases, change notify, durable handles and reconnect | planned |
-| SMB7 | `lib/smb` share enumeration: DCE/RPC bind and NDR `NetrShareEnum` over `IPC$` | planned |
+| SMB6 | `lib/smb` file operations: create/close/read/write/flush, directory enumeration, query/set info, leases, change notify, durable handles and reconnect | done |
+| SMB7 | `lib/smb` share enumeration: DCE/RPC bind and NDR `NetrShareEnum` over `IPC$` | done |
 | SMB8 | `netshare-v1`, the client protocol to `smbfs`, and the `lib/netshare` client `files.app` and the commands share | planned |
 | SMB9 | `userland/net/smbfs`: the socket-owning front, the sandboxed engine workers, one served filesystem per mounted share, the caches, credentials and tickets, endpoint pinning, session-bound lifetime, audit | planned |
 | SMB10 | The commands: the `mount` bundle with `-t smb` (closes D1014 for network sources), `unmount` for served volumes, `smbtree` | planned |
@@ -185,20 +185,46 @@ Authentication (SMB5):
   error answer. A server refusing an authentication is an event and the
   connection stays usable for another attempt; anything else wrong ends it.
   `Mechanism` is the seam: NTLM now, Kerberos with KERBEROS K4. `send` puts
-  requests on a handed-out tree, the seam SMB6 and SMB7 build on.
+  requests on a handed-out tree. After a dropped connection, `authenticate`'s
+  `previous` names the replaced session on every leg, so the server keeps its
+  durable opens for the new one.
 - `peer` (the `test-support` feature) — the scripted server the client's
   tests and fuzz harness drive it against, verifying what a real server
-  would.
+  would. Its disk share (`Share`) is held in memory and outlives a
+  connection, with opens, leases and their breaks, watches, related
+  compounds and durable opens; its `IPC$` serves `srvsvc`.
 
-File operations (SMB6) and share enumeration (SMB7):
+File operations (SMB6):
 
-- `file` — request builders and response parsers for create (with lease and
-  durable-v2 contexts), close, read, write, flush, query directory
-  (`FileIdBothDirectoryInformation`), query/set info, change notify, lease
-  break acknowledgement, and the name and time mappings (UTF-16 names refused
-  if they cannot round-trip; FILETIME ↔ `Time64` checked, never truncated).
-- `rpc` — DCE/RPC bind and request PDUs, NDR for `NetrShareEnum` level 1
-  (name, type, remark), the `srvsvc` pipe.
+- `file` — the request and response codecs for create, close, read, write,
+  flush, query directory, query/set info, change notify, lease breaks and
+  their acknowledgment, each decoder total and bounded. Names cross only when
+  both TAIRiX and SMB carry them (`name`: a TAIRiX component holding no
+  character an SMB filename may not; a path is such names a single `\`
+  apart, at most 32,760 units), and FILETIME ↔ `Time64` is exact or refused.
+  Create carries a v2 lease, a v2 durable request or reconnect, maximal access
+  and the on-disk id, its context list at most 16 contexts, aligned and named
+  once; a granted lease and the lease oplock come together. Reads and writes
+  move at most 1 MiB, borrowed from or written into their frames. A listing
+  (`FileIdBothDirectoryInformation`, at most 256 KiB) and a change response
+  (at most 64 KiB) are walked in place, a name neither side carries costing
+  its entry or record. A break may arrive unsigned (MS-SMB2 §5.1) and only
+  takes caching away. A durable open is reclaimed over a new connection with
+  the same client GUID, by a reconnect carrying its lease key; the id the
+  answer carries is what it is known by after.
+
+Share enumeration (SMB7):
+
+- `rpc` — connection-oriented DCE/RPC (C706): bind, acknowledgment,
+  rejection, request, response and fault, version 5.0 in little-endian NDR,
+  never authenticated; NDR for `NetrShareEnum` level 1. `ShareListing` is the
+  exchange as requests on `IPC$`: open `srvsvc`, bind by write and read, call
+  by `FSCTL_PIPE_TRANSCEIVE`, read on any further fragments, close — the pipe
+  closed even when the listing fails. The bind must be accepted as offered,
+  answers must carry the call's ids, fragments are at most 4280 bytes and an
+  answer at most 256 KiB and 256 shares. A share whose name no tree connect
+  takes (`tree::is_share_name`: one to 80 characters, no separator or control)
+  is left out and counted; a remark is display text, a bad unit U+FFFD.
 
 Every module is held to Microsoft's published Windows traffic where it exists
 (`docs/src/lib/smb.md`) and fuzzed by `tests/fuzz_smb.rs`.

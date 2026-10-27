@@ -31,6 +31,11 @@
 //! - [`spnego`] — the negotiation SMB carries its authentication tokens in.
 //! - [`client`] — one principal's connection: negotiation, the session's
 //!   authentication, and its trees.
+//! - [`file`](mod@file) — what is done on a tree: create and close, read, write and
+//!   flush, directory listings, file information, change notification,
+//!   leases and durable handles.
+//! - [`rpc`] — DCE/RPC over a named pipe, and listing a server's shares
+//!   through its `srvsvc` pipe on `IPC$`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -38,14 +43,67 @@
 
 extern crate alloc;
 
+/// A set of bit flags over one unsigned integer, as a field carries it.
+macro_rules! flags {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident($bits:ty) {
+            $( $(#[$flag_meta:meta])* const $flag:ident = $value:expr; )*
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+        $vis struct $name($bits);
+
+        impl $name {
+            $( $(#[$flag_meta])* pub const $flag: Self = Self($value); )*
+
+            /// No flag set.
+            pub const NONE: Self = Self(0);
+
+            /// The flags of raw value `bits`.
+            #[must_use]
+            pub const fn from_bits(bits: $bits) -> Self {
+                Self(bits)
+            }
+
+            /// The raw value.
+            #[must_use]
+            pub const fn bits(self) -> $bits {
+                self.0
+            }
+
+            /// These flags with `other` set too.
+            #[must_use]
+            pub const fn with(self, other: Self) -> Self {
+                Self(self.0 | other.0)
+            }
+
+            /// These flags with `other` clear.
+            #[must_use]
+            pub const fn without(self, other: Self) -> Self {
+                Self(self.0 & !other.0)
+            }
+
+            /// Whether every flag of `other` is set.
+            #[must_use]
+            pub const fn contains(self, other: Self) -> bool {
+                self.0 & other.0 == other.0
+            }
+        }
+    };
+}
+
 pub mod client;
 pub mod connection;
 pub mod crypt;
+pub mod file;
 pub mod frame;
 pub mod header;
 pub mod ioctl;
 pub mod negotiate;
 pub mod ntlm;
+pub mod rpc;
 pub mod session;
 pub mod simple;
 pub mod spnego;
@@ -124,9 +182,15 @@ pub enum SmbError {
     TooLarge,
     /// No credit or message id is free to send with.
     NoCredit,
-    /// A time the protocol cannot carry: before 1601 or past FILETIME's
-    /// range.
+    /// A time the protocol cannot carry exactly: before 1601, past
+    /// FILETIME's range, or finer than its 100 nanoseconds.
     TimeOutOfRange,
+    /// A name or path one side cannot carry: empty, a dot name, past a length
+    /// bound, or holding a character TAIRiX or SMB reserves.
+    Name,
+    /// A remote call failed with this status: an RPC fault, a refused bind's
+    /// reason, or the call's own result.
+    Rpc(u32),
 }
 
 impl fmt::Display for SmbError {
@@ -150,7 +214,9 @@ impl fmt::Display for SmbError {
             Self::OutOfMemory => f.write_str("smb: out of memory"),
             Self::TooLarge => f.write_str("smb: message too large"),
             Self::NoCredit => f.write_str("smb: no credit to send with"),
-            Self::TimeOutOfRange => f.write_str("smb: time outside what FILETIME carries"),
+            Self::TimeOutOfRange => f.write_str("smb: time FILETIME cannot carry exactly"),
+            Self::Name => f.write_str("smb: name TAIRiX and SMB cannot both carry"),
+            Self::Rpc(status) => write!(f, "smb: remote call failed with status {status:#010x}"),
         }
     }
 }

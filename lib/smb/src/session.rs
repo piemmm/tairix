@@ -69,34 +69,15 @@ impl SessionSetupRequest {
     }
 }
 
-/// A `SESSION_SETUP` response's flags (MS-SMB2 §2.2.6).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub struct SessionFlags(u16);
-
-impl SessionFlags {
-    /// The session is a guest's.
-    pub const IS_GUEST: Self = Self(0x0001);
-    /// The session is anonymous.
-    pub const IS_NULL: Self = Self(0x0002);
-    /// The server requires the session's messages encrypted.
-    pub const ENCRYPT_DATA: Self = Self(0x0004);
-
-    /// The flags of raw value `bits`.
-    #[must_use]
-    pub const fn from_bits(bits: u16) -> Self {
-        Self(bits)
-    }
-
-    /// The raw value.
-    #[must_use]
-    pub const fn bits(self) -> u16 {
-        self.0
-    }
-
-    /// Whether every flag of `other` is set.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+flags! {
+    /// A `SESSION_SETUP` response's flags (MS-SMB2 §2.2.6).
+    pub struct SessionFlags(u16) {
+        /// The session is a guest's.
+        const IS_GUEST = 0x0001;
+        /// The session is anonymous.
+        const IS_NULL = 0x0002;
+        /// The server requires the session's messages encrypted.
+        const ENCRYPT_DATA = 0x0004;
     }
 }
 

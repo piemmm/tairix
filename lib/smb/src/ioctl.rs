@@ -2,15 +2,10 @@
 
 use alloc::vec::Vec;
 
+use crate::file::FileId;
 use crate::header::{structure, HEADER_LEN};
 use crate::wire::{buffer_at, owned, Encoder};
 use crate::SmbError;
-
-/// A file id: the persistent and volatile halves a `CREATE` returns.
-pub type FileId = [u8; 16];
-
-/// The file id a request about no open file carries.
-pub const NO_FILE: FileId = [0xff; 16];
 
 /// The flag marking the control code a filesystem control.
 pub const IS_FSCTL: u32 = 0x0000_0001;
@@ -29,7 +24,7 @@ const MAX_OUTPUT: usize = 1 << 20;
 pub struct IoctlRequest {
     /// The control code.
     pub ctl_code: u32,
-    /// The open the control is about, or [`NO_FILE`].
+    /// The open the control is about, or [`NO_FILE`](crate::file::NO_FILE).
     pub file_id: FileId,
     /// The input buffer.
     pub input: Vec<u8>,

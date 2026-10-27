@@ -1,6 +1,6 @@
 [package]
 name = "tairix-smb"
-description = "TAIRiX SMB 3 protocol engine: the SMB2/3 message codec in both directions, dialect 3.0–3.1.1 negotiation with pre-auth integrity and validate-negotiate, credits and message ids, signing (AES-CMAC, AES-GMAC) and the mandatory encryption transform (AES-CCM, AES-GCM), compounding, SPNEGO and NTLMv2 authentication, and the client the sandboxed smbfs worker runs: one principal's connection, its session and its trees. Pure: no I/O, clock or randomness. no_std + alloc, forbids unsafe, bounded and fail-closed on every byte a server sends."
+description = "TAIRiX SMB 3 protocol engine: the SMB2/3 message codec in both directions, dialect 3.0–3.1.1 negotiation with pre-auth integrity and validate-negotiate, credits and message ids, signing (AES-CMAC, AES-GMAC) and the mandatory encryption transform (AES-CCM, AES-GCM), compounding, SPNEGO and NTLMv2 authentication, the client the sandboxed smbfs worker runs (one principal's connection, its session and its trees), the file operations on a tree (create with leases and durable handles, read and write, listings, information, change notification), and share listing over DCE/RPC. Pure: no I/O, clock or randomness. no_std + alloc, forbids unsafe, bounded and fail-closed on every byte a server sends."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

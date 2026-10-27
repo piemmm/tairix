@@ -4,8 +4,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::file::NO_FILE;
 use crate::header::{structure, HEADER_LEN};
-use crate::ioctl::{IoctlRequest, IS_FSCTL, NO_FILE};
+use crate::ioctl::{IoctlRequest, IS_FSCTL};
 use crate::wire::{buffer_at, from_utf16le, owned, utf16le, utf16le_len, Encoder, Guid, Reader};
 use crate::{Refusal, SmbError};
 
@@ -46,88 +47,35 @@ impl Dialect {
     }
 }
 
-/// A negotiate `SecurityMode` (MS-SMB2 §2.2.3).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub struct SecurityMode(u16);
-
-impl SecurityMode {
-    /// Signing is enabled.
-    pub const SIGNING_ENABLED: Self = Self(0x0001);
-    /// Signing is required.
-    pub const SIGNING_REQUIRED: Self = Self(0x0002);
-
-    /// The mode of raw value `bits`.
-    #[must_use]
-    pub const fn from_bits(bits: u16) -> Self {
-        Self(bits)
-    }
-
-    /// The raw value.
-    #[must_use]
-    pub const fn bits(self) -> u16 {
-        self.0
-    }
-
-    /// This mode with `other` set too.
-    #[must_use]
-    pub const fn with(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// Whether every bit of `other` is set.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+flags! {
+    /// A negotiate `SecurityMode` (MS-SMB2 §2.2.3).
+    pub struct SecurityMode(u16) {
+        /// Signing is enabled.
+        const SIGNING_ENABLED = 0x0001;
+        /// Signing is required.
+        const SIGNING_REQUIRED = 0x0002;
     }
 }
 
-/// Global capabilities (MS-SMB2 §2.2.3).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub struct Capabilities(u32);
-
-impl Capabilities {
-    /// Distributed File System.
-    pub const DFS: Self = Self(0x0000_0001);
-    /// Leasing.
-    pub const LEASING: Self = Self(0x0000_0002);
-    /// Multi-credit operations.
-    pub const LARGE_MTU: Self = Self(0x0000_0004);
-    /// Multiple channels per session.
-    pub const MULTI_CHANNEL: Self = Self(0x0000_0008);
-    /// Persistent handles.
-    pub const PERSISTENT_HANDLES: Self = Self(0x0000_0010);
-    /// Directory leasing.
-    pub const DIRECTORY_LEASING: Self = Self(0x0000_0020);
-    /// Encryption, as 3.0 and 3.0.2 announce it.
-    pub const ENCRYPTION: Self = Self(0x0000_0040);
-    /// One-way notifications.
-    pub const NOTIFICATIONS: Self = Self(0x0000_0080);
-
-    /// No capability.
-    pub const NONE: Self = Self(0);
-
-    /// The capabilities of raw value `bits`.
-    #[must_use]
-    pub const fn from_bits(bits: u32) -> Self {
-        Self(bits)
-    }
-
-    /// The raw value.
-    #[must_use]
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-
-    /// These capabilities with `other` too.
-    #[must_use]
-    pub const fn with(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// Whether every capability of `other` is present.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+flags! {
+    /// Global capabilities (MS-SMB2 §2.2.3).
+    pub struct Capabilities(u32) {
+        /// Distributed File System.
+        const DFS = 0x0000_0001;
+        /// Leasing.
+        const LEASING = 0x0000_0002;
+        /// Multi-credit operations.
+        const LARGE_MTU = 0x0000_0004;
+        /// Multiple channels per session.
+        const MULTI_CHANNEL = 0x0000_0008;
+        /// Persistent handles.
+        const PERSISTENT_HANDLES = 0x0000_0010;
+        /// Directory leasing.
+        const DIRECTORY_LEASING = 0x0000_0020;
+        /// Encryption, as 3.0 and 3.0.2 announce it.
+        const ENCRYPTION = 0x0000_0040;
+        /// One-way notifications.
+        const NOTIFICATIONS = 0x0000_0080;
     }
 }
 

@@ -9,6 +9,8 @@ impl NtStatus {
     pub const SUCCESS: Self = Self(0x0000_0000);
     /// An interim response: the final one follows asynchronously.
     pub const PENDING: Self = Self(0x0000_0103);
+    /// A watch ended because its directory's open was closed.
+    pub const NOTIFY_CLEANUP: Self = Self(0x0000_010b);
     /// A change notification overflowed: re-read the whole directory.
     pub const NOTIFY_ENUM_DIR: Self = Self(0x0000_010c);
     /// Success, with more data than the response held.

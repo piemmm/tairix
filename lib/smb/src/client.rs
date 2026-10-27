@@ -29,9 +29,10 @@ use tairix_inline::ArrayVec;
 
 use crate::connection::{Body, Connection, Message, Outgoing, Received, Sent, Ticket};
 use crate::crypt::{KeyInputs, PreauthHash, SessionKeys, NONCE_SEED_LEN};
+use crate::file::NO_FILE;
 use crate::frame::MAX_COMPOUND;
 use crate::header::{Address, Command, Flags, Header};
-use crate::ioctl::{IoctlRequest, IoctlResponse, NO_FILE};
+use crate::ioctl::{IoctlRequest, IoctlResponse};
 use crate::negotiate::{
     check_validate_negotiate, validate_negotiate_request, Capabilities, Dialect, NegotiateRequest,
     NegotiateResponse, Negotiated, Offer, SecurityMode, CLIENT_CAPABILITIES,
@@ -42,7 +43,7 @@ use crate::session::{SessionFlags, SessionSetupRequest, SessionSetupResponse};
 use crate::simple::encode_empty;
 use crate::spnego::{self, NegState, Reply};
 use crate::status::NtStatus;
-use crate::tree::{TreeConnectRequest, TreeConnectResponse};
+use crate::tree::{is_share_name, TreeConnectRequest, TreeConnectResponse};
 use crate::{Refusal, Role, SmbError};
 
 /// The most trees a session holds, connected or connecting: past the mounts a
@@ -284,6 +285,8 @@ struct Setup {
     exchange: Exchange,
     /// Zero until the server's first answer names the session.
     session_id: u64,
+    /// The session this one replaces, or zero.
+    previous_session_id: u64,
     /// The session's pre-auth hash, on 3.1.1.
     preauth: Option<PreauthHash>,
     nonce_seed: [u8; NONCE_SEED_LEN],
@@ -462,23 +465,30 @@ impl Client {
 
     /// Authenticate the session with `mechanism`, its keys to seal under
     /// nonces seeded from `nonce_seed`, which must be fresh CSPRNG output.
+    /// After a dropped connection, `previous` names the session this one
+    /// replaces, so the server lets the old one go and keeps its durable opens
+    /// for this one to reclaim; the offer must then carry the same client
+    /// GUID.
     ///
     /// # Errors
     ///
     /// [`SmbError::Refused`] with [`Refusal::Mechanism`] when the server
     /// offers no such mechanism; [`SmbError::Protocol`] before the
-    /// negotiation settles or while a session exists; [`SmbError::NoCredit`]
-    /// when no credit is free; or the failure that ended the connection.
+    /// negotiation settles, while a session exists, or for a previous session
+    /// of id zero; [`SmbError::NoCredit`] when no credit is free; or the
+    /// failure that ended the connection.
     pub fn authenticate(
         &mut self,
         mechanism: Mechanism,
         nonce_seed: [u8; NONCE_SEED_LEN],
+        previous: Option<u64>,
     ) -> Result<(), SmbError> {
         self.guard()?;
         let settled = self.settled()?;
-        if !matches!(self.session, Session::None) {
+        if !matches!(self.session, Session::None) || previous == Some(0) {
             return Err(SmbError::Protocol);
         }
+        let previous_session_id = previous.unwrap_or(0);
         match mechanism {
             Mechanism::Ntlm(_) if !settled.ntlm_offered => {
                 return Err(SmbError::Refused(Refusal::Mechanism));
@@ -488,7 +498,7 @@ impl Client {
         let mut preauth =
             (settled.negotiated.dialect == Dialect::Smb311).then(|| settled.preauth.clone());
         let (exchange, token) = Exchange::start(mechanism)?;
-        let request = setup_request(token);
+        let request = setup_request(token, previous_session_id);
         let sent = self
             .conn
             .send(&[setup_leg(0, &|enc| request.encode(enc))])?;
@@ -499,6 +509,7 @@ impl Client {
         self.session = Session::SettingUp(Setup {
             exchange,
             session_id: 0,
+            previous_session_id,
             preauth,
             nonce_seed,
         });
@@ -523,7 +534,7 @@ impl Client {
         }
         let id = established.id;
         let (exchange, token) = Exchange::start(mechanism)?;
-        let request = setup_request(token);
+        let request = setup_request(token, 0);
         let sent = self
             .conn
             .send(&[setup_leg(id, &|enc| request.encode(enc))])?;
@@ -540,18 +551,14 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// [`SmbError::Malformed`] for a share name that is empty or holds a path
-    /// separator or control character; [`SmbError::TooLarge`] past
-    /// [`MAX_TREES`]; [`SmbError::Protocol`] with no established session;
-    /// [`SmbError::NoCredit`]; or the failure that ended the connection.
+    /// [`SmbError::Malformed`] for a name [`is_share_name`] refuses;
+    /// [`SmbError::TooLarge`] past [`MAX_TREES`]; [`SmbError::Protocol`] with
+    /// no established session; [`SmbError::NoCredit`]; or the failure that
+    /// ended the connection.
     pub fn connect_tree(&mut self, share: &str) -> Result<Ticket, SmbError> {
         self.guard()?;
         let session_id = self.session_id()?;
-        if share.is_empty()
-            || share
-                .chars()
-                .any(|c| matches!(c, '\\' | '/') || c.is_control())
-        {
+        if !is_share_name(share) {
             return Err(SmbError::Malformed);
         }
         let connecting = self
@@ -847,7 +854,7 @@ impl Client {
                 }
                 let response = SessionSetupResponse::decode(message)?;
                 let token = setup.exchange.next_token(&response.security_buffer)?;
-                setup.exchange.owed = Some(setup_request(token));
+                setup.exchange.owed = Some(setup_request(token, setup.previous_session_id));
                 self.session = Session::SettingUp(setup);
                 Ok(())
             }
@@ -903,7 +910,7 @@ impl Client {
             NtStatus::MORE_PROCESSING_REQUIRED => {
                 let response = SessionSetupResponse::decode(message)?;
                 let token = renewal.next_token(&response.security_buffer)?;
-                renewal.owed = Some(setup_request(token));
+                renewal.owed = Some(setup_request(token, 0));
                 established.renewal = Some(renewal);
                 Ok(())
             }
@@ -1092,12 +1099,15 @@ fn track(
     Ok(ticket)
 }
 
-fn setup_request(security_buffer: Vec<u8>) -> SessionSetupRequest {
+/// One setup leg carrying `security_buffer`. Every leg of a first
+/// authentication names the session it replaces: a server lets the old one go
+/// on the leg that completes.
+fn setup_request(security_buffer: Vec<u8>, previous_session_id: u64) -> SessionSetupRequest {
     SessionSetupRequest {
         binding: false,
         security_mode: SecurityMode::SIGNING_ENABLED.with(SecurityMode::SIGNING_REQUIRED),
         capabilities: SETUP_CAPABILITIES,
-        previous_session_id: 0,
+        previous_session_id,
         security_buffer,
     }
 }
@@ -1148,3 +1158,7 @@ const fn is_control(command: Command) -> bool {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_file_tests.rs"]
+mod file_tests;

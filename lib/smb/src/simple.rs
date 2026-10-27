@@ -44,12 +44,7 @@ impl ErrorResponse {
         enc.u8(0);
         let len = enc.u32_of(self.data.len());
         enc.u32(len);
-        if self.data.is_empty() {
-            // The structure size counts one byte of data, present or not.
-            enc.u8(0);
-        } else {
-            enc.bytes(&self.data);
-        }
+        enc.buffer(&self.data);
     }
 
     /// The error response in `message`, header included.
