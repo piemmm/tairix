@@ -2841,6 +2841,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-gpu"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-collections",
+ "tairix-fuzzseed",
+ "tairix-inline",
+ "tairix-rt",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-greeter"
 version = "0.0.0"
 dependencies = [
@@ -4561,6 +4573,7 @@ dependencies = [
  "tairix-hash",
  "tairix-inline",
  "tairix-smb",
+ "tairix-util",
  "zeroize",
 ]
 

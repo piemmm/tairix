@@ -330,6 +330,35 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::OneProcess,
     },
     Target {
+        package: "tairix-gpu",
+        description: "`lib/rt`'s futex lock and condition variable under the contention a \
+                      device's threads put them to — work run on one thread while another \
+                      parks on its fence, a context released under a waiter, memory locked \
+                      in pairs by the work and singly by the CPU — where the data-race \
+                      detector reads every cell the locks guard; the crate itself forbids \
+                      `unsafe`",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &["device_tests::memory_the_machine_cannot_supply_is_refused_after_the_attempt"],
+            reason: "it asks the host for an exbibyte so that the allocator's refusal is a real \
+                     one; the interpreter cannot represent the request and ends the whole run \
+                     as resource exhaustion instead of answering it, and the refusal path it \
+                     proves carries no `unsafe`",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-gpu",
+        description: "the same locks driven by the submission fuzz harness's copies, fills \
+                      and updates over memories shared between buffers",
+        features: &[],
+        scope: Scope::Test {
+            name: "fuzz_gpu",
+            reason: "a binary of its own, outside the library's narrowed run",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-raster",
         description: "the vector blend, blur and run-scan kernels over pixel and running-sum \
                       rows of every length against the portable reference; the lent store's \

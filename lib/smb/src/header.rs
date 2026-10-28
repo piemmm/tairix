@@ -1,5 +1,7 @@
 //! The 64-byte SMB2 header (MS-SMB2 §2.2.1) and the command set.
 
+use tairix_util::flags;
+
 use crate::status::NtStatus;
 use crate::wire::{Encoder, Reader};
 use crate::SmbError;

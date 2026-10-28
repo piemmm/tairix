@@ -2,6 +2,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_util::flags;
+
 use crate::header::{structure, HEADER_LEN};
 use crate::negotiate::{Capabilities, SecurityMode};
 use crate::wire::{buffer_at, owned, Encoder};

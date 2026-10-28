@@ -33,6 +33,8 @@ tairix-hash = { path = "../hash", version = "=0.0.0" }
 # The bounded vector a tree's compound is assembled in, so sending allocates
 # nothing beyond the frame.
 tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The bit-flag sets its header, negotiation, session and file fields carry.
+tairix-util = { path = "../util", version = "=0.0.0" }
 # The volatile wipe for session keys, NTLM's keys and the password they
 # derive from, on drop.
 zeroize = { version = "1.8.1", default-features = false }

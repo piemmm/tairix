@@ -6,6 +6,8 @@
 //! client to cache less. What to flush before acknowledging it is the
 //! caller's coherence protocol, not this codec's.
 
+use tairix_util::flags;
+
 use crate::file::FileId;
 use crate::header::structure;
 use crate::wire::{Encoder, Reader};

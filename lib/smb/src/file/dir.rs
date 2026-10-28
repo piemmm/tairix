@@ -7,6 +7,8 @@
 
 use alloc::string::String;
 
+use tairix_util::flags;
+
 use crate::file::name::decode_name;
 use crate::file::{output_buffer, write_output_buffer, FileAttributes, FileId, FileTimes};
 use crate::header::{structure, HEADER_LEN};

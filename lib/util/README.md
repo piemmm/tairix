@@ -34,6 +34,8 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
 * `fallible` — reserving a data-sized buffer before filling it (`filled`,
   `collected`, `grow_to`, `reserve`, `read_snapshot`), so an allocation the
   machine refuses is a typed refusal rather than an abort.
+* `flags!` — a set of bit flags over one unsigned integer, as a field carries
+  it (`NONE`, `with`, `without`, `contains`, `from_bits`, `bits`).
 * `getopt` — a command line read as GNU's `getopt_long` reads it (`Scan`
   over a tool's `Opt` table: short options clustered, a value attached or
   following, a long option by any unambiguous prefix, `--` ending the

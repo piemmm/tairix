@@ -33,6 +33,7 @@ a later tier.
 | `ChunkVec<T, CHUNK>` | a growable list in chunks of `CHUNK` elements, each allocated whole: an element never moves once pushed, so a push costs one write or one chunk's allocation however many it holds, and indexing one load more than a slice | the ray tracer's list of a scene's objects, a `Vec` whose doubling copied hundreds of megabytes in one unit of preparation |
 | `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: lookup, insertion, removal and tagging cost the tree's height — eleven nodes at most — whatever it holds, and an ordered or tagged walk resumes from the path it last took | a sorted `Vec` whose every insertion moved the entries above it |
 | `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved either way or withdrawn in O(log n), and every entry at or below a bound walked in O(k) for the k it returns | a per-slot deadline array swept whole for what was due, and `alloc::BinaryHeap`, which can neither find an entry nor move one |
+| `SlotMap<K, V>` | values filed under keys it issues: O(1) insertion, lookup and removal, and a generation in every key that refuses it once its value is gone | a counter handing out identifiers with no reuse and no generation, so a stale one aliased whatever took its place |
 
 ## `ByteQueue`
 
@@ -137,6 +138,29 @@ slot's place in the heap beside the heap itself.
 Its first consumers are the multicast DNS record cache and question table in
 `lib/net`, whose deadlines are each record's expiry and refresh points and
 each question's next query.
+
+## `SlotMap`
+
+A table of objects a client names by handle needs the handle refused once its
+object is gone, or a stale handle resolves to whatever took the slot next.
+`SlotMap` files each value in a slot and issues a key carrying the slot's index
+and its generation.
+
+* Removal advances the slot's generation, so every key issued for the slot
+  before is refused from then on. A slot whose generation is spent is retired,
+  never reused: no key is ever accepted for a value it did not name.
+* Vacant slots are reused most recently freed first; iteration visits slots in
+  index order. `clear` and `retain` advance the generations they vacate.
+* A holder names its keys with the `Key` trait, so the keys of two maps cannot
+  be mixed up at compile time. A key is an identifier, not an authority: it
+  names a slot of the map that issued it, so a holder keeping several maps that
+  must tell their keys apart carries its own identity beside it.
+* `try_reserve` makes room for that many insertions, after which none
+  allocates; an index past the last a key can carry is
+  `TryReserveError::CapacityOverflow`.
+
+Its first consumer is `lib/gpu`, which files a device's contexts and jobs and a
+context's allocations, buffers and timelines in it.
 
 ## `RangeMap` and `RangeSet`
 

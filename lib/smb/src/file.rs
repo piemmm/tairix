@@ -7,6 +7,8 @@
 
 use tairix_abi::time::Time64;
 
+use tairix_util::flags;
+
 use crate::wire::{filetime_exact, time_of_filetime, Encoder, Reader};
 use crate::SmbError;
 

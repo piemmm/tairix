@@ -8,6 +8,7 @@
 //! asked is the caller's to judge.
 
 use tairix_inline::ArrayVec;
+use tairix_util::flags;
 
 use crate::file::lease::Lease;
 use crate::file::name::SharePath;

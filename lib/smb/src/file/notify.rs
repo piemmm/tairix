@@ -6,6 +6,8 @@
 //! the watched directory, is held to the same rules as any other path a
 //! server names.
 
+use tairix_util::flags;
+
 use crate::file::name::SharePath;
 use crate::file::{output_buffer, write_output_buffer, FileId};
 use crate::header::structure;

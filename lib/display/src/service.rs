@@ -24,14 +24,13 @@ use tairix_abi::display_ipc::{DisplayEvent, DISPLAY_ENDPOINT, DISPLAY_MAX_REQUES
 use tairix_abi::driver::display::{Display, OutputMode, RefreshRate};
 use tairix_abi::driver::{sole_framebuffer, DeviceWake};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
-use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_caps::CapabilitySet;
 use tairix_drvrt::exit::{end, error, step, DriverExit};
 use tairix_drvrt::{GrantSyscalls, RtDriverHost};
 use tairix_log::{EventId, Field, FieldValue, Level};
 use tairix_rt::changenotice::ChangeNotice;
-use tairix_rt::LogSink;
+use tairix_rt::{ClockDelay, LogSink};
 
 use crate::events::{
     EVENTS_FAILED, FIRST_PRESENT, FIRST_PRESENT_MESSAGE, LATCH_OVERDUE, LATCH_UNDELIVERED,
@@ -116,7 +115,7 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
             )],
         );
     };
-    let mut server = DisplayServer::new(RtClock);
+    let mut server = DisplayServer::new(ClockDelay);
     let mut peer = RtPeerFacts;
     let mut delivery = RtDelivery { grantor };
     let mut request = [0u8; DISPLAY_MAX_REQUEST];
@@ -183,7 +182,7 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
 /// output that moved.
 fn service_events(
     display: &mut dyn Display,
-    server: &mut DisplayServer<RtClock>,
+    server: &mut DisplayServer<ClockDelay>,
     delivery: &mut RtDelivery,
     output: &mut Announced,
 ) {
@@ -423,13 +422,5 @@ fn note_latch(latch: Latch) {
                 value: FieldValue::SignedInt(i64::from(err.as_i32())),
             }],
         ),
-    }
-}
-
-struct RtClock;
-
-impl MonotonicClock for RtClock {
-    fn now_ns(&self) -> u64 {
-        tairix_rt::clock_get()
     }
 }

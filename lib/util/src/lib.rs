@@ -20,6 +20,8 @@
 //!   answered in turn.
 //! * [`fallible`] — reserving a data-sized buffer before filling it, so
 //!   exhaustion is a refusal rather than an allocation abort.
+//! * [`flags!`] — a set of bit flags over one unsigned integer, as a field
+//!   carries it.
 //! * [`fmt`] — numeric formatters that allocate nothing, for structured-log
 //!   fields.
 //! * [`getopt`] — a command line read as GNU's `getopt_long` reads it, from a
@@ -73,6 +75,7 @@ pub mod conf;
 pub mod count;
 pub mod defer;
 pub mod fallible;
+mod flags;
 pub mod fmt;
 pub mod getopt;
 pub mod hex;

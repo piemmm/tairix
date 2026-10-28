@@ -91,6 +91,7 @@
   - [`tairix-fsserve`](./lib/fsserve.md)
   - [`tairix-font`](./lib/font.md)
   - [`tairix-glob`](./lib/glob.md)
+  - [`tairix-gpu`](./lib/gpu.md)
   - [`tairix-greeter`](./lib/greeter.md)
   - [`tairix-hash`](./lib/hash.md)
   - [`tairix-help`](./lib/help.md)

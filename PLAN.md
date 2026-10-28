@@ -288,6 +288,8 @@ or in a block of its own, and the volume probe, read through), `lib/fscopy` (the
 extended attributes and reporting what a destination could not keep),
 `lib/fsserve` (the one dispatch of `fsserve-v1` onto the filesystem driver
 traits, which every user-space filesystem driver serves its volume through),
+`lib/gpu` (the device-neutral GPU seam's memory and submission model and the
+software device implementing it on every target, `plans/GPU.md`),
 and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
@@ -303,6 +305,7 @@ README requires this file to name them:
 | `count`, `tailwindow` | `head`, `tail`; `count` also the QEMU verticals reading a figure from a guest's log |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`), Date & Time's, Music's and `netmap`'s work queues, WinterSun's client |
 | `fallible` | `lib/audio`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/font`, `lib/fsprobe`, `lib/glob`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/terrain`, `lib/writeback`, the kernel, the ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `sysinfod`, `thermald`, `devmgr`, `cp`, `mv`, `fstree`, the file manager, TextEdit, `view`, Paint, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
+| `flags` | `lib/smb`, `lib/gpu` |
 | `getopt` | every command app that takes options (`cat`, `cp`, `df`, `du`, `head`, `ls`, `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo`, …), the desktop session's command line (`applib`), the file manager's |
 | `fmt` | `kernel/sec`, `kernel/ipc`, `kernel/syscall`, `kernel/core`, the kernel binary, the xHCI, USB HID, USB mass-storage, RAID and volume-manager drivers, `lib/controls`, `lib/dmaengine`, `lib/sysconfig`, `devmgr`, `xtask`, the QEMU verticals |
 | `hex` | `tools/cc`, `tools/mkimage`, `tools/signkeys`, `tools/tzcompile` |

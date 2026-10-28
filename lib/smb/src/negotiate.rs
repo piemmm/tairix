@@ -4,6 +4,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_util::flags;
+
 use crate::file::NO_FILE;
 use crate::header::{structure, HEADER_LEN};
 use crate::ioctl::{IoctlRequest, IS_FSCTL};

@@ -21,6 +21,7 @@ depends on it for the inline half of its `SmallVec`.
 | `ChunkVec<T, CHUNK>` | a growable list held in chunks of `CHUNK` elements: an element never moves once pushed, so a push costs one write or one chunk's allocation however many it holds; indexing costs one load more than a slice |
 | `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: every operation, and each step of an ordered or tagged walk, costs the tree's height; nodes are reserved before a change |
 | `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved or withdrawn in O(log n), everything at or below a bound walked in O(k); room for a slot is reserved before a change and never given back |
+| `SlotMap<K, V>` | values filed under keys it issues: O(1) insertion, lookup and removal; each key carries its slot's generation, so it is refused once its value is gone, and a slot whose generation is spent is retired |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed across both container
 crates and what is still to come. `HashSet` and `SmallVec` are the two types

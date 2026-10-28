@@ -30,6 +30,9 @@
 //! 9. An `IndexedHeap` agrees with a slot-to-priority map — membership, the
 //!    least priority, and the walk of everything at or below a bound — over
 //!    priorities crowded into ties and slots both packed and sparse.
+//! 10. A `SlotMap` agrees with a key-to-value model over the keys it issued,
+//!     refuses every key whose value is gone however often its slot is reused,
+//!     and drops every value exactly once.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -40,7 +43,7 @@ use std::rc::Rc;
 
 use tairix_collections::{
     ByteQueue, HashMap, IndexedHeap, LruMap, QueueError, RadixTree, RangeError, RangeKey, RangeMap,
-    RangeSet, SmallVec,
+    RangeSet, SlotKey, SlotMap, SmallVec,
 };
 use tairix_fuzzseed::Prng;
 use tairix_hash::{BuildSipHash13, HashSeed};
@@ -654,6 +657,40 @@ fn sweep_indexed_heap(rng: &mut Prng) {
     }
 }
 
+/// Drive a `SlotMap` against a key-to-value model, presenting the keys it
+/// issued, live and since refused alike.
+fn sweep_slot_map(rng: &mut Prng, live: &Rc<Cell<i64>>) {
+    let mut map: SlotMap<SlotKey, Tracked> = SlotMap::new();
+    let mut model: std::collections::HashMap<SlotKey, u64> = std::collections::HashMap::new();
+    let mut seen: Vec<SlotKey> = Vec::new();
+    for _ in 0..OPS_PER_ROUND {
+        let presented = match (rng.below(4), seen.is_empty()) {
+            (_, true) | (0, _) => None,
+            _ => Some(*rng.pick(&seen)),
+        };
+        match (rng.below(3), presented) {
+            (0, _) | (_, None) => {
+                let value = rng.next_u64();
+                let key = map
+                    .try_insert(Tracked::new(value, live))
+                    .expect("the host allocator supplies a slot");
+                assert!(model.insert(key, value).is_none(), "a key was issued twice");
+                seen.push(key);
+            }
+            (1, Some(key)) => assert_eq!(map.remove(key).map(|t| t.key), model.remove(&key)),
+            (_, Some(key)) => {
+                assert_eq!(map.get(key).map(|t| t.key), model.get(&key).copied());
+            }
+        }
+        assert_eq!(map.len(), model.len());
+    }
+    let mut filed: Vec<(SlotKey, u64)> = map.iter().map(|(k, t)| (k, t.key)).collect();
+    let mut expected: Vec<(SlotKey, u64)> = model.into_iter().collect();
+    filed.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(filed, expected);
+}
+
 #[test]
 fn heap_backed_containers_agree_with_their_models() {
     let mut rng = Prng::new(tairix_fuzzseed::start(
@@ -689,6 +726,10 @@ fn heap_backed_containers_agree_with_their_models() {
             assert_eq!(live.get(), 0, "a `RadixTree` leaked or double-dropped");
 
             sweep_indexed_heap(&mut rng);
+
+            let live = Rc::new(Cell::new(0i64));
+            sweep_slot_map(&mut rng, &live);
+            assert_eq!(live.get(), 0, "a `SlotMap` leaked or double-dropped");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

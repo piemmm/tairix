@@ -1,0 +1,32 @@
+[package]
+name = "tairix-gpu"
+description = "TAIRiX device-neutral GPU seam: the memory and submission model every backend implements — contexts as the unit of isolation, typed allocations charged to a context's limit and a heap, buffers made for stated uses, command buffers checked whole at submission and refused rather than clamped, in-order queues, timelines reached only once every earlier signal has landed, fences, and a deadline on every submission whose overrun loses only its own context — and the software device that implements it on the CPU on every target (plans/GPU.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Duration64` deadlines and the `MonotonicClock` seam they are read from.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The generational tables a context's objects and a device's jobs are filed
+# in, so a handle that outlived its object is refused.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+# The bounded lists a device description and a submission's points are held
+# in.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The futex-backed lock the device's state is kept under and the condition
+# variable a wait parks on.
+tairix-rt = { path = "../rt", version = "=0.0.0" }
+# The bit-flag sets, and the fallible fills memory and recorded data are
+# made with.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The shared per-run seed and budget the fuzz harness draws through.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

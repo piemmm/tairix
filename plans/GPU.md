@@ -29,9 +29,10 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 |---|---|---|
 | GP0 | This plan, `plans/SHADER.md`, the jump-sheet rows, the §3 map entries, the `PLAN.md` section | done |
 | GP1 | `drivers/display/gpu_virtio`: the 2D driver — `register`, `BIND_KEYS`, resources, scanout, and the flip-completion interrupt | done: delivered by `plans/FIX-DISPLAY-ACCELERATION.md` C |
-| GP2 | The memory and submission model: context-local GPU address spaces, typed allocations, command submission with validation, timeline fences, the reset watchdog, and the IOMMU requirement | planned |
-| GP3 | `lib/gpu`: the device-neutral **render and compute** vocabulary, and the software backend — including the tile-wide SPIR-V interpreter that makes it complete rather than render-only | planned |
+| GP2 | The memory and submission model in `lib/gpu`: contexts as the unit of isolation, typed allocations charged to a context and a heap, buffers made for stated uses, submissions checked whole, in-order queues, timelines and fences, deadlines and the engine reset — software-complete | done |
+| GP3 | `lib/gpu`: the device-neutral **render and compute** vocabulary, and the software backend — including the tile-wide SPIR-V interpreter that makes it complete rather than render-only | blocked: `plans/SHADER.md` SH2 |
 | GP4 | The pinned first-party pipeline set: OS chrome and the game's passes as build-time SPIR-V, with the conformance suite | planned |
+| GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | planned |
 | GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | planned |
 | GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | planned |
 | GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — offloaded | planned |
@@ -46,13 +47,14 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | done |
 | GD5 | The screen fade as a lone layer's opacity | done |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode in GP4's pinned set, agreeing with `lib/raster` within a stated tolerance | blocked: GP4 |
-| GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3 |
+| GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3, GP11 |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
 whole-project gate — before the next begins. Several items additionally wait on
-`plans/SHADER.md`; that plan's ledger carries the mapping in its own `Blocks`
-column and is the single place it is recorded. The GD items (§7) are a track of
-their own beside GP2–GP10, joining it only where a row says it is blocked.
+`plans/SHADER.md`, whose ledger names in its own `Blocks` column which of these
+each of its items holds back; a row here blocked by one says so. The GD items
+(§7) are a track of their own beside GP2–GP11, joining it only where a row says
+it is blocked.
 
 ### Milestones
 
@@ -63,7 +65,7 @@ proceed past a milestone whose criterion is unmet.
 |---|---|---|
 | **MG0 — pixels through hardware** | GP1 | `devmgr` autoloads `gpu_virtio` by discovery-match on all three bare-metal QEMU targets; a scanout resource is created, transferred and flipped; flip completion arrives as an interrupt and its waiter parks. |
 | **MG1 — one API, software-complete** | GP2, GP3, GP4 | Every seam method has a software implementation; the compositor draws its chrome through pinned SPIR-V pipelines on the software backend; a consumer compiled against the seam runs unchanged with no device present. |
-| **MG2 — real shaders on real hardware** | GP5, GP6, GP7 | The same pinned pipelines execute on the host GPU through Venus and produce the software backend's picture within tolerance; WinterSun's frame is drawn by the GPU and the gain is measured. |
+| **MG2 — real shaders on real hardware** | GP11, GP5, GP6, GP7 | The same pinned pipelines execute on the host GPU through Venus and produce the software backend's picture within tolerance; WinterSun's frame is drawn by the GPU and the gain is measured. |
 | **MG3 — untrusted shaders** | GP8 | A shader module supplied at run time by an unprivileged process is compiled in a sandbox, admitted, executed, and cannot read another context's memory; a malicious module is refused or contained, and the fuzz corpus is clean. |
 | **MG4 — native silicon** | GP9 | The Pi's V3D executes the pinned set from TAIRiX-generated ISA, conformant against the software reference. |
 | **MG5 — a ported game runs** | GP10 | A third-party application, built against the published surface and linking no TAIRiX source, renders and presents. |
@@ -129,7 +131,10 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    capability-gated request, holds a context-local address space, and can reach
    no memory it was not given (§2). A compromised client reaches its own
    resources and nothing else. Every submission is validated before it touches
-   the ring (§5.4).
+   the ring (§5.4). The gate guards a device a driver serves to every process
+   (GP11); the software device is the process's own CPU, reaches nothing
+   another process holds, and is created with no capability, as decision 5
+   requires.
 8. **Where an IOMMU exists, the GPU is behind it.** A device with unrestricted
    DMA to physical memory defeats every isolation property above, and a
    user-space driver holding such a device is a full-memory compromise waiting
@@ -221,10 +226,13 @@ An explicit render **and compute** vocabulary at the altitude modern APIs
 settled on: resources created up front, state gathered into immutable objects,
 work recorded into command buffers and submitted with explicit synchronisation.
 
-- `Device` — an adapter opened through the driver seam, reporting an honest
-  capability set. There is always at least one: the software backend.
-- `Allocation`, `Buffer`, `Image` — typed, sized, usage-declared, with explicit
-  transfer and no implicit copies. Memory types are enumerated, not assumed.
+GP2 built what every kind of work shares, with its software implementation:
+`Device` and its `DeviceInfo`, `Context`, `Allocation`, `Buffer`,
+`CommandBuffer`, `Queue`, `Timeline` and `Fence` (§2). GP3 adds what drawing and
+computing need, each checked on the same submission path:
+
+- `Image` — typed, sized, usage-declared, with explicit transfer and no implicit
+  copies.
 - `BindSetLayout`, `BindSet` — a validated group of resources bound in one
   checked operation rather than slot-by-slot mutation.
 - `ShaderModule` — a **validated** SPIR-V module (`plans/SHADER.md`). The seam
@@ -236,43 +244,64 @@ work recorded into command buffers and submitted with explicit synchronisation.
   with no compute variant is the incomplete primitive §27 forbids.
 - `Pass` — a render-target set with a load/store action per attachment and a
   scissor, so a damage-scoped frame costs a damage-scoped pass.
-- `CommandBuffer`, `Queue`, `TimelineSemaphore`, `Fence` — record, submit, and
-  wait. Waiting parks on the driver's completion interrupt, never a busy-poll
-  (§2.23).
 - `Swapchain` — presentation, resolved against the compositor (GP6).
 
-## 2. GP2 — memory, submission, isolation
+## 2. GP2 and GP11 — memory, submission, isolation
 
-This is the layer the previous draft of this plan omitted entirely, and it is
-where the security properties actually live.
+This is where the security properties live. GP2 built the model in `lib/gpu`,
+complete on the software device; GP11 serves it from a driver to every client
+process. The design is `docs/src/lib/gpu.md`'s.
 
-- **A context is the unit of isolation.** Creating one yields a GPU address
-  space private to it. Resources are bound into that space and nowhere else; two
-  contexts sharing a surface do so through an explicit, capability-carried
-  export, never by naming each other's handles.
-- **Submission is validated, then queued.** Every command buffer is checked
-  before it reaches the ring: every referenced resource belongs to the
-  submitting context, every offset and extent is in bounds, no privileged
-  register is written, and every pipeline is one this context created. A
-  submission failing any check is refused whole as a typed error — never
-  partially applied, never clamped into range (§5.4, §23.1).
-- **Synchronisation is explicit and timeline-based.** Timeline semaphores order
-  work within and across queues; fences report completion to the CPU. A waiter
-  parks on the device interrupt.
-- **Deadlines and reset.** Every submission carries a deadline. A submission
-  that overruns it marks its context lost, resets the device through the
-  driver's reset path, and reports the loss to the client as a typed error; the
-  compositor and every other context survive. A client whose context is lost
-  recreates it — the device is never left wedged and nothing retries forever
-  (§2.1, §26.5).
-- **Capacities scale, bounds stay fixed** (§24). Allocation counts, queue depth
-  and the resident-resource budget derive from the discovered device and RAM and
-  grow on demand; the *validation* bounds — maximum module size, maximum
-  binding count, maximum submission size — are security bounds and are fixed
-  (§24.4).
-- **Memory accounting is per context and bounded.** A client cannot exhaust
-  device memory for every other client; a request beyond its effective limit
-  fails closed as a typed error after growth is attempted (§24.3, §26.2).
+**What GP2 guarantees.**
+
+- **A context is the unit of isolation.** Its allocations, buffers, timelines
+  and queues are its own, filed in generational tables (`lib/collections`'
+  `SlotMap`) so a released object's handle is refused. A handle of another
+  context or another device is refused wherever it is named. Memory is shared
+  only by an export another context imports, and stays charged to its
+  allocator.
+- **Memory is typed and accounted.** A device enumerates its heaps and the
+  memory types over them; an allocation is charged to its context's limit and
+  its heap's size, refused past either, then refused if the memory cannot be
+  had, and given back when its last holder lets it go.
+- **Submission is checked whole, then queued.** Every buffer named is the
+  context's, live, and made for the use; every range is within what it names;
+  no copy writes a byte twice or, within one memory, reads what it writes; every
+  signal advances its timeline; the deadline is within the device's; no fixed
+  bound — command buffers, commands, points, copy regions, update bytes — is
+  passed. A refusal names the command and changes nothing; nothing is clamped
+  into range (§5.4, §23.1).
+- **Order is explicit.** A queue runs its work in the order submitted.
+  Timelines order work across queues and with the CPU, and a value is reached
+  only once every signal up to it has landed; a fence is one submission's
+  completion. A wait parks on the timeline it waits for.
+- **Deadlines and reset.** Every submission carries a deadline counted from its
+  start. An overrun loses its own context; an engine reset loses the context of
+  every job past its deadline and of every other job that had begun, and puts
+  the rest back first in their turn. A lost context only releases what it
+  holds; every other context goes on. Nothing retries forever (§2.1, §26.5).
+- **Capacities scale, bounds stay fixed** (§24). The software heap is half the
+  discovered memory and the tables grow on demand; the submission bounds are
+  security bounds and do not move (§24.4).
+
+**What GP11 adds**, landing with the first hardware backend (GP5 or GP9),
+since without one there is no device for it to serve:
+
+- **`gpu-v1`**, the device channel: the wire form of GP2's requests, decoded and
+  checked by the driver, which hosts GP2's model for every client process with
+  each client's contexts out of every other's reach.
+- **The context-creation capability** (§9 decision 2, signed off): the driver
+  binds its channel endpoint restricted-sender on it, so the kernel refuses a
+  caller without it at dispatch; it is granted to the first principal that
+  renders on hardware, and lands with that holder.
+- **Per-context bounds on queued work**, so a client cannot fill the driver's
+  memory with submissions waiting on a value nobody signals (§24.3, §26.2).
+- **The watchdog**: a one-shot timer at the earliest running deadline, tickless
+  (§17.1), whose expiry resets the engine through GP2's reset.
+- **Device address spaces and the IOMMU requirement** (decision 8): a context's
+  resident memory mapped into its own device address space, and a device that
+  is not behind an IOMMU where the platform has one serves no context; where a
+  platform has none, the driver's `README.md` states the limitation.
 
 ## 3. GP1 / GP5 / GP9 — the backends
 
@@ -623,14 +652,14 @@ Each needs sign-off before the item that depends on it; none is assumed.
    closed and lists no graphics-device class. Until GP10 the seam is statically
    linked by first-party consumers and no amendment is needed; GP10 cannot land
    without one. **Blocks GP10.**
-2. **A new capability gating GPU context creation.** Against §5.2's three
-   tests: it guards a class of resources rather than one object (all
-   device-memory allocation, submission, and DMA-capable mapping); it arrives
-   with its enforcement point and a live holder rather than ahead of them; and
-   no existing capability expresses it — `CAP_SHM` grants shared memory, not
-   device submission, and `CAP_DRV_LOAD` is the driver's, not the client's. I
-   judge it passes, but adding to the capability vocabulary is your call.
-   **Blocks GP2.**
+2. **A new capability gating GPU context creation. Signed off.** Against
+   §5.2's three tests: it guards a class of resources rather than one object
+   (all device-memory allocation, submission, and DMA-capable mapping); no
+   existing capability expresses it — `CAP_SHM` grants shared memory, not
+   device submission, and `CAP_DRV_LOAD` is the driver's, not the client's; and
+   it arrives with its enforcement point and a live holder rather than ahead of
+   them, which is GP11's driver endpoint and its first client. The software
+   device needs none (decision 7). **Lands with GP11.**
 3. **§3 map entries** for `lib/gpu`'s changed description and for
    `plans/SHADER.md`'s crates. Prose within a section; no gate implication.
 
@@ -679,11 +708,18 @@ Each needs sign-off before the item that depends on it; none is assumed.
 - **GP1**: binds by discovery-match under `devmgr` on aarch64 `virt`, riscv64
   `virt` and x86_64 q35; resource create/transfer/flush/flip; flip completion
   parks on the interrupt; the display seam drives it end to end.
-- **GP2**: a submission naming another context's resource is refused; an
-  out-of-bounds offset is refused whole, not clamped; a context cannot map
-  memory it was not granted; an overrunning submission loses its context and
-  resets the device while every other context survives; per-context memory
-  limits fail closed after growth is attempted.
+- **GP2**: a handle of another context or device is refused wherever it is
+  named; a submission with one bad command is refused whole, names it, and
+  changes no byte, signal or fence; a range past what it names is refused, not
+  clamped; memory is reached from another context only once imported; limits
+  fail closed after the attempt; a value is reached only once every signal up
+  to it has landed; an overrun loses its own context alone, and an engine reset
+  loses the overrunning and begun contexts and puts the rest back first; the
+  submission path agrees with a byte-array reference under fuzzing.
+- **GP11**: a client reaches only its own contexts; a caller without the
+  capability is refused at dispatch; queued work per context is bounded; the
+  watchdog's timer resets an engine while every other context survives; a
+  device not behind an IOMMU where the platform has one serves no context.
 - **GP3**: every seam method has a software implementation and a host test; a
   program compiled against the seam runs unchanged with no device present.
 - **GP4**: the pinned modules are regenerated reproducibly, verify-mode fails on

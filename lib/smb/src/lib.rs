@@ -43,57 +43,6 @@
 
 extern crate alloc;
 
-/// A set of bit flags over one unsigned integer, as a field carries it.
-macro_rules! flags {
-    (
-        $(#[$meta:meta])*
-        $vis:vis struct $name:ident($bits:ty) {
-            $( $(#[$flag_meta:meta])* const $flag:ident = $value:expr; )*
-        }
-    ) => {
-        $(#[$meta])*
-        #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-        $vis struct $name($bits);
-
-        impl $name {
-            $( $(#[$flag_meta])* pub const $flag: Self = Self($value); )*
-
-            /// No flag set.
-            pub const NONE: Self = Self(0);
-
-            /// The flags of raw value `bits`.
-            #[must_use]
-            pub const fn from_bits(bits: $bits) -> Self {
-                Self(bits)
-            }
-
-            /// The raw value.
-            #[must_use]
-            pub const fn bits(self) -> $bits {
-                self.0
-            }
-
-            /// These flags with `other` set too.
-            #[must_use]
-            pub const fn with(self, other: Self) -> Self {
-                Self(self.0 | other.0)
-            }
-
-            /// These flags with `other` clear.
-            #[must_use]
-            pub const fn without(self, other: Self) -> Self {
-                Self(self.0 & !other.0)
-            }
-
-            /// Whether every flag of `other` is set.
-            #[must_use]
-            pub const fn contains(self, other: Self) -> bool {
-                self.0 & other.0 == other.0
-            }
-        }
-    };
-}
-
 pub mod client;
 pub mod connection;
 pub mod crypt;

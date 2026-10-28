@@ -40,6 +40,10 @@
 //! * [`ChunkVec`] — a growable list in fixed chunks whose elements never move,
 //!   so a push never copies what it holds. What a `Vec` large enough for its
 //!   doubling copy to stall its holder was standing in for.
+//! * [`SlotMap`] — values filed under keys it issues, each carrying its slot's
+//!   generation, so a key that outlived its value is refused. What a counter
+//!   handing out identifiers with no reuse and no generation was standing in
+//!   for.
 //!
 //! ## Rules every container here obeys
 //!
@@ -85,6 +89,7 @@ pub mod range;
 pub mod rangeset;
 mod raw;
 pub mod set;
+pub mod slotmap;
 pub mod smallvec;
 
 pub use bytequeue::{ByteQueue, QueueError};
@@ -96,6 +101,7 @@ pub use radix::RadixTree;
 pub use range::{RangeError, RangeKey, RangeMap};
 pub use rangeset::RangeSet;
 pub use set::HashSet;
+pub use slotmap::{Key, SlotKey, SlotMap};
 pub use smallvec::SmallVec;
 
 /// Why an allocating container operation could not go ahead.

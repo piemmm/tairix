@@ -69,6 +69,10 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   needs — the hardware tree — doubling its buffer from a starting size on
   each `BufferTooSmall`, so the device manager, the System Information
   service and the cooling service read a tree of any size the one way.
+* `flags!` — a set of bit flags over one unsigned integer: the named flags,
+  the empty set, and setting, clearing and testing them. `lib/smb`'s header,
+  negotiation, session and file fields and `lib/gpu`'s memory, buffer and
+  queue kinds are declared through it.
 * `fmt` — no-allocation numeric formatters that render identifiers, counts,
   addresses and byte runs into `lib/log`'s structured field values without
   touching an allocator on the hot path: the kernel's audit and syscall

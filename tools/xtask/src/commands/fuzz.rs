@@ -135,6 +135,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/collections heap-backed tier (hash map, recency map, range map and set, spilling small vector) against naive models",
     },
     Target {
+        package: "tairix-gpu",
+        test: "fuzz_gpu",
+        description: "lib/gpu submission model (copies, fills and updates over buffers sharing allocations, ranges inside, across and past what they name) on the software device against a byte-array reference",
+    },
+    Target {
         package: "tairix-fontface",
         test: "fuzz_face",
         description: "lib/fontface TrueType parser + outline rasteriser",

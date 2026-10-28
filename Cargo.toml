@@ -93,6 +93,7 @@ members = [
     "lib/fwcfg",
     "lib/geometry",
     "lib/glob",
+    "lib/gpu",
     "lib/greeter",
     "lib/hash",
     "lib/help",
