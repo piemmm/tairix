@@ -42,7 +42,7 @@ produced, which names the test it was in. A measured warm run:
 | Stage | Cost | Shape |
 | --- | --- | --- |
 | `fmt --check` | 4 s | sequential, streams live |
-| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `help-lint`, `devids`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `help-lint`, `devids`, `unicode`, `spirv`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
 | `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |

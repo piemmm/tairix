@@ -140,6 +140,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/gpu submission model (copies, fills and updates over buffers sharing allocations, ranges inside, across and past what they name) on the software device against a byte-array reference",
     },
     Target {
+        package: "tairix-spirv",
+        test: "fuzz_spirv",
+        description: "lib/spirv decoder over mutated shader modules (bits, boundary words, insertions, deletions, truncations, either byte order): total, refusals within the module, accepted modules re-encoding exactly",
+    },
+    Target {
         package: "tairix-fontface",
         test: "fuzz_face",
         description: "lib/fontface TrueType parser + outline rasteriser",

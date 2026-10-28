@@ -61,6 +61,9 @@
 //! - `unicode`      — verifies the Unicode property tables in
 //!   `lib/unicode/src/tables.rs` against the pinned UCD snapshot in
 //!   `lib/unicode/assets/` (`--write` to regenerate)
+//! - `spirv`        — verifies the SPIR-V grammar tables in
+//!   `lib/spirv/src/tables.rs` against the pinned Khronos grammar in
+//!   `lib/spirv/assets/` (`--write` to regenerate)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation

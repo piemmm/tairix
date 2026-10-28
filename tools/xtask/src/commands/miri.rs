@@ -359,6 +359,17 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::OneProcess,
     },
     Target {
+        package: "tairix-spirv",
+        description: "the shader-module decoder's every bounds check over hostile words — word \
+                      framing, string scans, enumerant parameters, the definition table's \
+                      binary searches — and the encoder's packing, interpreted; the crate \
+                      forbids `unsafe`, so this is the plan's standing look at the parser \
+                      between an application and the GPU",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-raster",
         description: "the vector blend, blur and run-scan kernels over pixel and running-sum \
                       rows of every length against the portable reference; the lent store's \

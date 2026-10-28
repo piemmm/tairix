@@ -142,6 +142,7 @@ members = [
     "lib/scatter",
     "lib/seat",
     "lib/smb",
+    "lib/spirv",
     "lib/unicode",
     "lib/ssh",
     "lib/supervisor",

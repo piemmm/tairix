@@ -130,6 +130,7 @@
   - [`tairix-scatter`](./lib/scatter.md)
   - [`tairix-smb`](./lib/smb.md)
   - [`tairix-sound`](./lib/sound.md)
+  - [`tairix-spirv`](./lib/spirv.md)
   - [`tairix-soundtheme`](./lib/soundtheme.md)
   - [`tairix-ssh`](./lib/ssh.md)
   - [`tairix-supervisor`](./lib/supervisor.md)

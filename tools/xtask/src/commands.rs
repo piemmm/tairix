@@ -34,6 +34,7 @@ mod help_lint;
 mod host_fonts;
 mod image_apps;
 mod image_drivers;
+mod json;
 mod keys;
 mod linkcheck;
 mod loom;
@@ -52,6 +53,7 @@ mod sound_encode;
 mod source_text;
 mod source_tree;
 mod spec_review;
+mod spirv;
 mod supply_chain;
 mod target_clippy;
 mod unicode;
@@ -75,6 +77,7 @@ pub enum Command {
     Artsheet,
     Devids,
     Unicode,
+    Spirv,
     DepsCheck,
     CfgCheck,
     BoardCheck,
@@ -119,6 +122,7 @@ impl Command {
         Command::Artsheet,
         Command::Devids,
         Command::Unicode,
+        Command::Spirv,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::BoardCheck,
@@ -162,6 +166,7 @@ impl Command {
             "artsheet" => Command::Artsheet,
             "devids" => Command::Devids,
             "unicode" => Command::Unicode,
+            "spirv" => Command::Spirv,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "board-check" => Command::BoardCheck,
@@ -207,6 +212,7 @@ impl Command {
             Command::Artsheet => "artsheet",
             Command::Devids => "devids",
             Command::Unicode => "unicode",
+            Command::Spirv => "spirv",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::BoardCheck => "board-check",
@@ -266,6 +272,10 @@ impl Command {
             }
             Command::Unicode => {
                 "Verify the Unicode property tables against the pinned UCD snapshot \
+                 (`--write` to regenerate)."
+            }
+            Command::Spirv => {
+                "Verify the SPIR-V grammar tables against the pinned Khronos grammar \
                  (`--write` to regenerate)."
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
@@ -336,6 +346,7 @@ impl Command {
             Command::Artsheet => run_artsheet(ctx, args),
             Command::Devids => devids::run(ctx, args),
             Command::Unicode => unicode::run(ctx, args),
+            Command::Spirv => spirv::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::BoardCheck => run_board_check(ctx),
@@ -1587,6 +1598,9 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // The Unicode property tables' drift guard: regenerates from the
         // pinned UCD snapshot in-process, no workspace build and no network.
         static_gate("unicode", ctx, |c| unicode::run(c, &[])),
+        // The SPIR-V grammar tables' drift guard: regenerates from the pinned
+        // Khronos grammar in-process, no workspace build and no network.
+        static_gate("spirv", ctx, |c| spirv::run(c, &[])),
         // Silver: exhaustively model-check the capability + IPC state machine.
         // Exhaustive (not budgeted) and fast; a reachable invariant violation
         // fails closed.

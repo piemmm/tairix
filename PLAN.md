@@ -290,6 +290,9 @@ extended attributes and reporting what a destination could not keep),
 traits, which every user-space filesystem driver serves its volume through),
 `lib/gpu` (the device-neutral GPU seam's memory and submission model and the
 software device implementing it on every target, `plans/GPU.md`),
+`lib/spirv` (the one reading of a SPIR-V shader module: the checked model, its
+total and bounded decoder over the generated Khronos grammar, and its encoder,
+`plans/SHADER.md`),
 and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its

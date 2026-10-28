@@ -1,0 +1,16 @@
+[package]
+name = "tairix-spirv"
+description = "TAIRiX SPIR-V shader module: the checked model the validator, the builder and the GPU backends share, its total and bounded decoder — every instruction recognised by the grammar generated from the vendored Khronos grammar, every id below the bound and defined once, every enumerant known, every string terminated UTF-8, every context-wide literal as wide as its type, every extended instruction resolved — and the encoder back (plans/SHADER.md SH1). no_std + alloc, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The shared per-run seed and budget the fuzz harness draws through.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
