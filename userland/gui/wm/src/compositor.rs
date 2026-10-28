@@ -299,6 +299,9 @@ pub struct Compositor {
     /// own frame behind: the next composite into it encodes the whole output
     /// first.
     heap_behind: bool,
+    /// The strength the display's frames were last encoded at: the reveal,
+    /// or full while the engine shows it as its one layer's opacity.
+    encoded_reveal: u8,
     /// What of a frame a display's back frame lacks beyond what its composite
     /// encodes, held for reuse.
     missed: Region,
@@ -529,6 +532,7 @@ impl Compositor {
             presented: None,
             undelivered: Region::new(),
             heap_behind: false,
+            encoded_reveal: u8::MAX,
             missed: Region::new(),
             present_changes: Region::new(),
             routed: Region::new(),
@@ -3598,7 +3602,8 @@ impl Compositor {
     /// Plan the frame a composite draws, leaving `encoded` naming every output
     /// pixel it encodes: the pointer's own damage marked, the damage clipped
     /// and taken as the plan, the frosts' fields fitted to it, the furniture it
-    /// reaches made resident, and what only the reveal moved set aside.
+    /// reaches made resident, and the whole screen set aside to encode again
+    /// wherever the strength its frames hold changed.
     fn plan_composite(&mut self, encoded: &mut Region) -> Planned {
         encoded.clear();
         let screen = self.screen_rect();
@@ -3641,6 +3646,14 @@ impl Compositor {
         }
         self.plan = plan;
         let (split, zones) = self.layer_depths();
+        let strength = self.frame_reveal();
+        if strength == self.encoded_reveal {
+            // What only the engine's opacity shows moved nothing in the frames.
+            self.scanout.clear();
+        } else {
+            self.scanout.add(screen);
+            self.encoded_reveal = strength;
+        }
         if self.scaled_in_hardware() {
             self.scanout.clear();
         } else if self.scaled.is_some() {
@@ -3739,6 +3752,16 @@ impl Compositor {
         self.scanout = rescan;
     }
 
+    /// The strength a frame is encoded at: full while a layered stack shows
+    /// the reveal as its one layer's opacity, the reveal itself otherwise.
+    fn frame_reveal(&self) -> u8 {
+        if self.layers.is_some() {
+            u8::MAX
+        } else {
+            self.reveal
+        }
+    }
+
     /// Compose the base `planned` plans and encode it into the compositor's
     /// own frame, bringing that frame level first wherever a frame drawn into
     /// a display's own memory left it behind.
@@ -3748,7 +3771,7 @@ impl Compositor {
             bytes: &mut frame,
             stride: self.mode.stride_bytes as usize,
             origin: Point::ORIGIN,
-            reveal: self.reveal,
+            reveal: self.frame_reveal(),
         };
         if self.heap_behind && !self.scaled_in_hardware() {
             self.heap_behind = false;
@@ -3773,7 +3796,7 @@ impl Compositor {
             bytes,
             stride: usize::try_from(stride).unwrap_or(usize::MAX),
             origin: Point::ORIGIN,
-            reveal: self.reveal,
+            reveal: self.frame_reveal(),
         };
         self.compose_frame(planned, Some(&mut scanout));
         let mut missed = core::mem::take(&mut self.missed);

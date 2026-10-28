@@ -36,7 +36,7 @@ use tairix_inline::ArrayVec;
 
 use crate::driver_error_from_errno;
 use crate::memory::copy_rows;
-use crate::presenter::{Base, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
+use crate::presenter::{Base, BaseFrame, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
 use crate::scanout::as_damage;
 
 /// One request/reply exchange with the display service.
@@ -716,9 +716,9 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
         // A base with nothing new is the frame on screen, named again; before
         // any was shown, a base is the whole frame.
         let whole = DamageRect::full(&self.mode);
-        let fresh = match &base {
-            Base::Frame { damage, .. } => !damage.is_empty(),
-            Base::Drawn { damage, .. } => damage.intersects(self.surface),
+        let fresh = match &base.frame {
+            BaseFrame::Copied { damage, .. } => !damage.is_empty(),
+            BaseFrame::Drawn { damage, .. } => damage.intersects(self.surface),
         };
         let unchanged = self.shown.filter(|_| !fresh);
         let frame_at = unchanged.unwrap_or(self.back);
@@ -730,7 +730,7 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
             dst_y: 0,
             dst_width_px: whole.width_px,
             dst_height_px: whole.height_px,
-            opacity: u8::MAX,
+            opacity: base.opacity,
         };
         for layer in core::iter::once(&frame).chain(layers) {
             stack
@@ -738,8 +738,8 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
                 .map_err(|_| DriverError::LengthOutOfRange)?;
         }
         if unchanged.is_none() {
-            match base {
-                Base::Frame { frame, damage } => {
+            match base.frame {
+                BaseFrame::Copied { frame, damage } => {
                     let damage = if damage.is_empty() {
                         core::slice::from_ref(&whole)
                     } else {
@@ -748,7 +748,7 @@ impl<M: BufferMapper, T: DisplayTransport> LayerPresenter for RemoteDisplay<M, T
                     DamageRect::validate_list(damage, &self.mode)?;
                     self.stage(frame, damage)?;
                 }
-                Base::Drawn { damage, draw } => {
+                BaseFrame::Drawn { damage, draw } => {
                     let mut changed = core::mem::take(&mut self.changed);
                     changed.clone_from(damage);
                     changed.clip(self.surface);

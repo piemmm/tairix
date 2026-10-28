@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 535 open, 1012 closed, 1547 total.
+**closed**, and a partial fix stays **open**. 535 open, 1018 closed, 1553 total.
 
 ### Open (535)
 
@@ -564,7 +564,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1538 | `timed` picks up a time server a DHCP lease names only within its bounded ~17-minute configuration ladder, though the network stack's `Network` notice announces an address change; a lease that arrives later leaves the built-in fallback in use until the service restarts | **low**; noticed closing D1535; logged by the user's direction; replacing the ladder with the notice means revisiting TS-7's tiering and churn rules (`plans/TIMESYNC.md`). `userland/system/timed/src/run.rs` |
 | D1540 | two syscall paths allocate a kernel object with an infallible `Arc::new`, so a heap that cannot hold it aborts the kernel rather than failing the call `OutOfMemory`: `call_create`'s registration of the endpoint it built, and the spawn path's child-id cell | **medium**; noticed making the served-volume paths' allocations fallible (`Arc::try_new`), which those paths now are; not absorbed, because a regression test needs an allocation-failure seam the host test allocator (`kernel/core/src/test_alloc.rs`) does not offer. The spawn cell is of a piece with D122. `kernel/core/src/syscalls.rs` `call_create`, the spawn admission |
 
-### Closed (1012)
+### Closed (1018)
 
 | ID | Subject |
 |---|---|
@@ -1580,6 +1580,12 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1550 | a graphics device's utilisation was the time the display service spent inside its driver's present calls, so a scan-out compositor — the HVS, which composites every layer as it scans out — read near zero whatever it was handed, and the Switchboard showed it as a lone figure with no history; its page also still said no query publishes the device's busy time or memory — closed: a driver that accounts its compositor's load reports it (`Display::engine_busy_ns`; the HVS's planes against its core clock's ceiling, held over time), the display service serves that from the window's opening, flagged `engine_load`, and the Graphics pane graphs each interval's share and names what it counts (`the_engines_busy_time_is_its_planes_share_of_the_core_held_over_time`, `a_device_accounting_its_compositors_load_reports_that_as_its_busy_time`, `the_graphics_utilisation_names_what_it_counts`, `the_graphics_utilisation_is_an_interval_share_and_breaks_on_a_gap`) |
 | D1551 | a frosted window whose blur scaled to no pixel — a radius of one at half scale — was frosted where the frame drew it by a one-pass frost that wrote nothing at radius zero, so its interior, which the composite leaves to the frost, kept whatever the back buffer held there before; a radius of zero is now the backdrop itself, laid by `Surface::frost_halved_from` as `Surface::blur_halved_from` retains it; `a_radius_of_zero_lays_the_backdrop`, `an_unretained_frost_whose_blur_scales_to_nothing_shows_its_backdrop` |
 | D1552 | a window's own layer baked while the window hung past the screen's left edge dropped every run of its row that began left of the screen — the run blend's clip (`surface::overlap`) and a shadow's span beneath its window (`shadow::middle`) refused a negative starting column — so the client, its plate and its title-bar strip went unbaked in that buffer, on-screen part included, and with the other buffer baked whole a translucent window dragged off the left and back lost its left side on every other repaint until a resize gave it new buffers; a column left of the screen now wraps for the dither, which reads only its phase; `a_run_left_of_the_screen_is_laid_as_one_on_it`, `a_blended_row_lays_exactly_what_each_pixel_samples` (windows past the left edge), `a_frosted_window_dragged_off_the_left_edge_and_back_keeps_every_column` |
+| D1553 | a refused `netshare-v1` or elevation request encode left what it had written in the caller's buffer, the password among it: both wrote field by field into a buffer too short for the frame; each now refuses before writing, the netshare request sized from the one connection-length definition its bound is built from; `a_short_buffer_is_refused_rather_than_left_holding_the_password` (`netshare_ipc`, `elevate`) |
+| D1554 | a `netshare-v1` pin's address was taken as it came — unspecified, multicast or broadcast — in requests and replies, where an endpoint's must be unicast; a pin at any other address is refused both ways; `a_pin_at_an_address_that_is_not_unicast_is_refused_both_ways` |
+| D1555 | the SMB port was defined twice, in `netshare-v1` and in the discovery catalogue; the catalogue and `lib/browse` take the ABI's, the one definition left |
+| D1556 | the network-share client said a server short of the caller's dialect floor spoke none "from 3.0 up", untrue for a 3.1.1 floor; the reason names no dialect; `a_dialect_shortfall_names_no_dialect_of_its_own` |
+| D1557 | `netshare-v1`'s documentation said the service checks what a connection *proves* against a pin, though the GUID is unauthenticated and the address spoofable, so an impostor repeating both passes, and spoke of the client's consumers as existing; it says the pin catches a different host, that only Kerberos proves the server, and what the client is for |
+| D1558 | a library's `program` feature was linted only inside a program turning it on, so `lib/netshare`'s transport, which no program uses yet, was compiled by nothing; target clippy lints every library declaring one with it on; `every_library_declaring_a_program_feature_is_linted_with_it`, `a_feature_is_declared_only_by_its_own_key_in_the_features_table` |
 
 ## Scope
 

@@ -17,7 +17,7 @@ probe hosts and ports, or carry data out, through the service.
 
 | Op | Request   | Carries                                   | Answer |
 |----|-----------|-------------------------------------------|--------|
-| 1  | `Shares`  | the endpoint, how to sign in, `special`   | the pin the connection proved, the special shares left out, the shares no tree connect could name, and the disk shares |
+| 1  | `Shares`  | the endpoint, how to sign in, `special`   | the pin the connection reported, the special shares left out, the shares no tree connect could name, and the disk shares |
 | 2  | `Mount`   | the endpoint, how to sign in, the share, `read_only` | the pin, and the `OfferId` the caller attaches |
 | 3  | `Unmount` | an `OfferId` the caller holds             | nothing |
 | 4  | `Mounts`  | nothing                                   | the caller's mounts: offer, host, share, read-only, and whether it is serving, reconnecting or lost |
@@ -36,9 +36,11 @@ decided by the kernel against the real caller.
   interface it was found on; a port is never zero.
 - **Pin** — the server GUID a `NEGOTIATE` answered with and the address it was
   reached at. A remembered credential is offered only with the pin it was
-  remembered under; the service checks what the connection proves against it
+  remembered under; the service checks what the connection reports against it
   before any credential leaves, and a host that differs is `PinMismatch`,
-  carrying what it proved instead.
+  carrying what it reported instead. The pin catches a different host
+  answering, not an impostor, which can repeat both an unauthenticated GUID
+  and an address; only Kerberos proves the server (`plans/SMB.md`).
 - **Floor** — the oldest dialect accepted: 3.0, 3.0.2 or 3.1.1. Nothing lowers
   it below 3.0.
 - **Credentials** — an NTLMv2 user (never empty), domain (empty for the
@@ -56,7 +58,7 @@ Outcome `0` is an answer; the refusals are:
 |---|---|---|
 | 1 | `UnknownHost` — the name resolves to no address | |
 | 2 | `Unreachable` — no connection could be made | |
-| 3 | `PinMismatch` — followed by the pin proved | |
+| 3 | `PinMismatch` — followed by the pin reported | |
 | 4 | `Unsupported` — the server falls short | `Dialect`, `Encryption`, `Signing`, `Authentication`, `Guest` |
 | 5 | `Tampered` — the connection failed its integrity checks | |
 | 6 | `Protocol` — the server broke the protocol | |

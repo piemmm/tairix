@@ -38,7 +38,7 @@ use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, DamageRect, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::DriverError;
-use tairix_display::{damage_list, Base, ChannelOrder, LayerPresenter, Presenter};
+use tairix_display::{damage_list, Base, BaseFrame, ChannelOrder, LayerPresenter, Presenter};
 use tairix_inline::ArrayVec;
 use tairix_parallel::JobRunner;
 
@@ -332,9 +332,9 @@ impl Layer {
             || self.presented_at != Some(self.at.origin)
     }
 
-    /// The layer as the engine is to show it, `output` the screen a desktop
-    /// layer is scaled onto.
-    fn as_accel(&self, output: (u32, u32)) -> Option<AccelLayer> {
+    /// The layer as the engine is to show it at `opacity`, `output` the
+    /// screen a desktop layer is scaled onto.
+    fn as_accel(&self, output: (u32, u32), opacity: u8) -> Option<AccelLayer> {
         let held = self.held.get(self.current()?)?;
         let shows = self.shows.intersection(&self.at);
         let (dst_width_px, dst_height_px) = match self.source {
@@ -354,7 +354,7 @@ impl Layer {
             dst_y: shows.top(),
             dst_width_px,
             dst_height_px,
-            opacity: u8::MAX,
+            opacity,
         })
     }
 
@@ -697,15 +697,26 @@ impl Compositor {
         }
     }
 
-    /// Whether this frame may go to `presenter`'s layer engine at all.
+    /// Whether this frame may go to `presenter`'s layer engine at all: a fade
+    /// only where the engine shows it as its one layer's opacity.
     pub(super) fn layers_wanted(&self, presenter: &mut dyn Presenter) -> bool {
-        if self.reveal != u8::MAX || self.refused.stack {
+        if self.refused.stack {
             return false;
         }
         presenter.layers().is_some_and(|engine| {
             let caps = engine.caps();
-            caps.max_layers >= 2 && (self.scaled.is_none() || caps.hw_scaling)
+            let room = if self.fades() {
+                caps.per_layer_opacity && caps.max_layers >= 1
+            } else {
+                caps.max_layers >= 2
+            };
+            room && (self.scaled.is_none() || caps.hw_scaling)
         })
+    }
+
+    /// Whether the screen is shown at less than full strength.
+    pub(super) const fn fades(&self) -> bool {
+        self.reveal != u8::MAX
     }
 
     /// Present through the display's layer engine, answering whether it did.
@@ -870,14 +881,17 @@ impl Compositor {
         Ok(())
     }
 
-    /// The layers as the engine is to show them, or
+    /// The layers as the engine is to show them — at the reveal's opacity,
+    /// which only a fade's lone layer is shown at short of opaque — or
     /// [`DriverError::OutOfMemory`] where one has no buffer baked, which would
     /// leave its window out of the frame.
     fn accel_layers(&self) -> Result<ArrayVec<AccelLayer, MAX_ACCEL_LAYERS>, DriverError> {
         let output = (self.mode.width_px, self.mode.height_px);
         let mut layers = ArrayVec::new();
         for layer in self.layers.iter().flat_map(|stack| &stack.layers) {
-            let accel = layer.as_accel(output).ok_or(DriverError::OutOfMemory)?;
+            let accel = layer
+                .as_accel(output, self.reveal)
+                .ok_or(DriverError::OutOfMemory)?;
             let _ = layers.try_push(accel);
         }
         Ok(layers)
@@ -918,6 +932,7 @@ impl Compositor {
         (encoded, shown): (&Region, &Region),
         layers: &[AccelLayer],
     ) -> Result<(), DriverError> {
+        let opacity = self.reveal;
         if !self.refused.drawn {
             let mut handed = false;
             let drawn = {
@@ -926,9 +941,12 @@ impl Compositor {
                     self.draw_frame(planned, encoded, (bytes, stride, refresh));
                     Ok(())
                 };
-                let base = Base::Drawn {
-                    damage: shown,
-                    draw: &mut lay,
+                let base = Base {
+                    frame: BaseFrame::Drawn {
+                        damage: shown,
+                        draw: &mut lay,
+                    },
+                    opacity,
                 };
                 engine.present_layers(Some(base), layers)
             };
@@ -937,7 +955,10 @@ impl Compositor {
                     self.heap_behind = true;
                     return result;
                 }
-                (Err(DriverError::Unsupported), false) => self.refused.drawn = true,
+                // At an opacity, the refusal may be of the opacity.
+                (Err(DriverError::Unsupported), false) if opacity == u8::MAX => {
+                    self.refused.drawn = true;
+                }
                 (result, false) => {
                     self.compose_frame(planned, None);
                     return result;
@@ -952,9 +973,12 @@ impl Compositor {
         } else {
             damage_list(shown, &self.mode, &mut list).unwrap_or(&whole)
         };
-        let base = Base::Frame {
-            frame: &self.frame,
-            damage,
+        let base = Base {
+            frame: BaseFrame::Copied {
+                frame: &self.frame,
+                damage,
+            },
+            opacity,
         };
         engine.present_layers(Some(base), layers)
     }
@@ -1043,6 +1067,9 @@ impl Compositor {
                 shape: Shape::Desktop,
             });
         }
+        if self.fades() {
+            return Some(self.fade_plan(fits));
+        }
         if pointer_layer {
             let capacity = self
                 .pointer
@@ -1052,28 +1079,17 @@ impl Compositor {
                 return None;
             }
         }
-        let refused = |window: &Window, at: Rect| {
-            self.refused.window == Some((window.id(), (at.width, at.height)))
-        };
         let room = usize::try_from(caps.max_layers)
             .unwrap_or(usize::MAX)
             .min(MAX_ACCEL_LAYERS)
             .checked_sub(1 + usize::from(pointer_layer))
             .filter(|room| *room > 0)?;
+        if let Some(plan) = self.promoted_plan(fits) {
+            return Some(plan);
+        }
+        let refused = |window: &Window, at: Rect| self.window_refused(window, at);
         let reach = self.shadow.reach();
         let screen = self.screen_rect();
-        if let Some(cover) = self.fullscreen_cover() {
-            let footprint = cover.footprint(reach);
-            if Self::promotable(cover) && fits(footprint) && !refused(cover, footprint) {
-                let mut windows = ArrayVec::new();
-                let _ = windows.try_push((cover.id(), Laid::showing(Role::Free, footprint)));
-                return Some(Plan {
-                    split: self.index_of(cover.id())?,
-                    windows,
-                    shape: Shape::Promoted,
-                });
-            }
-        }
         let mut chosen: ArrayVec<(usize, Laid), MAX_ACCEL_LAYERS> = ArrayVec::new();
         'windows: for (index, window) in self.windows.iter().enumerate().rev() {
             if !window.is_visible() {
@@ -1121,6 +1137,41 @@ impl Compositor {
             windows,
             shape: Shape::Based,
         })
+    }
+
+    /// The one layer a fade is shown through at the reveal's opacity: a
+    /// promoted window the pointer draws nothing over, or the base, holding
+    /// every window.
+    fn fade_plan(&self, fits: impl Fn(Rect) -> bool) -> Plan {
+        self.promoted_plan(fits)
+            .filter(|_| self.pointer.sprite_bounds().is_none())
+            .unwrap_or_else(|| Plan {
+                split: self.windows.len(),
+                windows: ArrayVec::new(),
+                shape: Shape::Based,
+            })
+    }
+
+    /// A fullscreen window covering the output alone on the one layer, where
+    /// it may be.
+    fn promoted_plan(&self, fits: impl Fn(Rect) -> bool) -> Option<Plan> {
+        let cover = self.fullscreen_cover()?;
+        let footprint = cover.footprint(self.shadow.reach());
+        if !Self::promotable(cover) || !fits(footprint) || self.window_refused(cover, footprint) {
+            return None;
+        }
+        let mut windows = ArrayVec::new();
+        let _ = windows.try_push((cover.id(), Laid::showing(Role::Free, footprint)));
+        Some(Plan {
+            split: self.index_of(cover.id())?,
+            windows,
+            shape: Shape::Promoted,
+        })
+    }
+
+    /// Whether the engine refused `window` buffers the size of `at`.
+    fn window_refused(&self, window: &Window, at: Rect) -> bool {
+        self.refused.window == Some((window.id(), (at.width, at.height)))
     }
 
     /// Leave out of `chosen` every window whose composite zone crosses a
@@ -1203,7 +1254,8 @@ impl Compositor {
     /// from the highest — so a window the display cannot give buffers joins
     /// the base with everything beneath it, the layers above it are kept, and
     /// the refusal is remembered until that window's size changes. `false`
-    /// when not one window's layer, or the pointer's, could be had.
+    /// when not one window's layer, or the pointer's, could be had, but for a
+    /// fade, whose base needs none.
     fn reconcile(
         &mut self,
         engine: &mut dyn LayerPresenter,
@@ -1290,7 +1342,7 @@ impl Compositor {
             placed |= matches!(layer.source, Source::Window(..) | Source::Desktop);
             kept.push(layer);
         }
-        if !whole || !placed {
+        if !whole || !(placed || self.fades()) {
             stack.layers.append(&mut kept);
             stack.spare = kept;
             self.layers = Some(stack);
@@ -1584,13 +1636,14 @@ impl Compositor {
     ///
     /// A plane that refuses keeps the pointer off it until the pointer's
     /// shape changes: the frame shows it instead, and a lost seat is the
-    /// present's to report. Nor does the plane carry it through a screen
-    /// fade, which only the frame's pixels follow.
+    /// present's to report. Nor does the plane or a layer of its own carry it
+    /// through a screen fade, which only the frame follows.
     pub(super) fn route_pointer(&mut self, presenter: &mut dyn Presenter, layered: bool) {
         let scaled = self.scaled.is_some();
-        let faded = self.reveal != u8::MAX;
+        let faded = self.fades();
         let own_layer = layered
             && !scaled
+            && !faded
             && self.pointer.sprite_bounds().is_some()
             && presenter
                 .layers()
@@ -1682,9 +1735,11 @@ impl Compositor {
 
     /// Whether windows may go on layers with the pointer where it is: on the
     /// plane or a layer of its own, inside a desktop the engine scales, or
-    /// not drawn at all — never in the frame beneath them.
+    /// not drawn at all — never in the frame beneath them. A fade lays no
+    /// window above the frame.
     pub(super) fn pointer_allows_layers(&self) -> bool {
-        self.scaled.is_some()
+        self.fades()
+            || self.scaled.is_some()
             || self.pointer.route() != PointerRoute::Frame
             || self.pointer.sprite_bounds().is_none()
     }

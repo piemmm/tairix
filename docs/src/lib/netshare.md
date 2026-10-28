@@ -9,15 +9,15 @@ withdraws a mount, and lists its own, through the network-share service over
 - **`Client`** — the pure client over an injected `Transport`: `shares`,
   `mount`, `unmount` and `mounts`, one call each. A listing and the mounts
   borrow the client's reply buffer until its next request; a mount answers a
-  `Mounted`, the pin the connection proved and the offer the caller attaches.
+  `Mounted`, the pin the connection reported and the offer the caller attaches.
 - **`Error`** — why a request did not succeed: refused by the protocol before
   it was sent (`Invalid`), no service running (`Unavailable`), a program
   without `CAP_NET`, which the kernel refuses (`NotPermitted`), the service's
   own reason (`Refused`), a request it could not read (`Unreadable`), the call
   failing (`Transport`), a reply it never sends (`Malformed`), or no memory for
   the reply (`OutOfMemory`). Its
-  `Display` is the one wording of each reason the commands and `files.app`
-  show.
+  `Display` is the one wording of each reason, for every surface that reports
+  one.
 - **`RtTransport`** (the `program` feature) — the service's endpoint, called
   through the kernel.
 

@@ -594,7 +594,8 @@ impl<'a> ElevateRequest<'a> {
     ///
     /// [`Errno::LengthOutOfRange`] when a field is empty or the encoding
     /// would exceed [`ELEVATE_MAX_REQUEST`]; [`Errno::BufferTooSmall`] when
-    /// `out` cannot hold it.
+    /// `out` cannot hold it, which leaves `out` untouched rather than holding
+    /// a password the rest did not follow.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         let total = 2
             + 1
@@ -645,6 +646,9 @@ impl<'a> ElevateRequest<'a> {
             };
         if total > ELEVATE_MAX_REQUEST {
             return Err(Errno::LengthOutOfRange);
+        }
+        if out.len() < total {
+            return Err(Errno::BufferTooSmall);
         }
         let mut w = Writer::new(out);
         w.u16(ELEVATE_VERSION)?;
@@ -1096,6 +1100,23 @@ mod tests {
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = req.encode(&mut buf).expect("encodes");
         assert_eq!(ElevateRequest::decode(&buf[..len]), Ok(req));
+    }
+
+    #[test]
+    fn a_short_buffer_is_refused_rather_than_left_holding_the_password() {
+        let req = ElevateRequest::Run {
+            username: "root",
+            password: Secret::new("hunter2"),
+            program: "/System/Commands/users.app/Run",
+            argv: ElevateArgv::NONE,
+        };
+        let mut full = [0u8; ELEVATE_MAX_REQUEST];
+        let len = req.encode(&mut full).expect("encodes");
+        for short in 0..len {
+            let mut out = [0u8; ELEVATE_MAX_REQUEST];
+            assert_eq!(req.encode(&mut out[..short]), Err(Errno::BufferTooSmall));
+            assert!(out.iter().all(|byte| *byte == 0), "{short} bytes");
+        }
     }
 
     #[test]

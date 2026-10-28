@@ -10,7 +10,7 @@ use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageRect, DisplayMode, DisplayPower,
 };
 use tairix_abi::DriverError;
-use tairix_display::{Base, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
+use tairix_display::{Base, BaseFrame, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
 
 use crate::color::{Color, Pixel};
 use crate::corner::Corners;
@@ -210,11 +210,13 @@ impl MockEngine {
                 }
                 let sx = (layer.src.x + lx * layer.src.width_px / layer.dst_width_px) as usize;
                 let sy = (layer.src.y + ly * layer.src.height_px / layer.dst_height_px) as usize;
-                let src = &bytes[(sy * bw + sx) * 4..(sy * bw + sx) * 4 + 4];
+                let src = bytes[(sy * bw + sx) * 4..(sy * bw + sx) * 4 + 4]
+                    .iter()
+                    .map(|&channel| faded(channel, layer.opacity));
                 let at = y as usize * stride + x as usize * 4;
-                let keep = 255 - u32::from(src[3]);
+                let keep = 255 - u32::from(faded(bytes[(sy * bw + sx) * 4 + 3], layer.opacity));
                 for (under, laid) in self.screen[at..at + 4].iter_mut().zip(src) {
-                    let blended = u32::from(*laid) + (u32::from(*under) * keep + 127) / 255;
+                    let blended = u32::from(laid) + (u32::from(*under) * keep + 127) / 255;
                     *under = u8::try_from(blended.min(255)).expect("a channel");
                 }
             }
@@ -337,14 +339,17 @@ impl LayerPresenter for MockEngine {
             layer.validate(&self.caps, buffer.width, buffer.height)?;
         }
         self.base_damage.clear();
-        let based = base.is_some();
-        match base {
-            Some(Base::Frame { frame, damage }) => {
+        let opacity = base.as_ref().map(|base| base.opacity);
+        if opacity.is_some_and(|opacity| opacity != u8::MAX && !self.caps.per_layer_opacity) {
+            return Err(DriverError::Unsupported);
+        }
+        match base.map(|base| base.frame) {
+            Some(BaseFrame::Copied { frame, damage }) => {
                 self.base_damage.extend_from_slice(damage);
                 self.take(damage, frame);
                 self.screen = self.frame.clone();
             }
-            Some(Base::Drawn { damage, draw }) => {
+            Some(BaseFrame::Drawn { damage, draw }) => {
                 let frames = self.drawn.as_mut().ok_or(DriverError::Unsupported)?;
                 frames.base(damage, draw)?;
                 self.base_damage
@@ -363,11 +368,21 @@ impl LayerPresenter for MockEngine {
                 }
             }
         }
+        // Over the engine's black, which the screen is opaque at.
+        for pixel in self.screen.as_chunks_mut::<4>().0 {
+            let opacity = opacity.unwrap_or(u8::MAX);
+            *pixel = [
+                faded(pixel[0], opacity),
+                faded(pixel[1], opacity),
+                faded(pixel[2], opacity),
+                255,
+            ];
+        }
         for layer in layers {
             self.lay(layer);
         }
         let mut stack = Vec::new();
-        if based {
+        if let Some(opacity) = opacity {
             stack.push(AccelLayer {
                 buffer: BufferId::new(u32::MAX).expect("a marker"),
                 src: DamageRect::full(&self.mode),
@@ -375,11 +390,11 @@ impl LayerPresenter for MockEngine {
                 dst_y: 0,
                 dst_width_px: self.mode.width_px,
                 dst_height_px: self.mode.height_px,
-                opacity: u8::MAX,
+                opacity,
             });
         }
         stack.extend_from_slice(layers);
-        self.stacks.push((based, stack));
+        self.stacks.push((opacity.is_some(), stack));
         Ok(())
     }
 }
@@ -433,6 +448,12 @@ impl CursorPlane for MockEngine {
     fn showing(&self) -> bool {
         self.plane_up
     }
+}
+
+/// A premultiplied channel at `opacity`, rounded to nearest as the software
+/// reveal rounds.
+fn faded(channel: u8, opacity: u8) -> u8 {
+    u8::try_from((u32::from(channel) * u32::from(opacity) + 127) / 255).expect("a channel")
 }
 
 /// The scene `build` makes, composited in software: what a layered present
@@ -2268,6 +2289,136 @@ fn a_reveal_presents_the_frame_and_gives_the_layers_back() {
     );
 }
 
+/// An engine that lays a layer at an opacity of its own.
+fn fading_engine(output: DisplayMode) -> MockEngine {
+    let mut engine = MockEngine::new(output);
+    engine.caps.per_layer_opacity = true;
+    engine
+}
+
+/// Windows on layers, a frosted one among them, and the pointer over them.
+fn fading_scene(c: &mut Compositor) {
+    three(c);
+    let glass = c.add_window(Point::new(4, 6), glass(16, 8));
+    assert!(c.set_backdrop_blur(glass, 2));
+    c.set_cursor(
+        solid_cursor(4, Color::rgb(250, 250, 250)),
+        Point::new(18, 10),
+    );
+}
+
+/// What `engine`'s display frames have been drawn so far.
+fn draws(engine: &MockEngine) -> usize {
+    engine.drawn.as_ref().map_or(0, |frames| frames.draws)
+}
+
+#[test]
+fn a_fade_through_the_engine_s_opacity_moves_no_pixel_after_its_first_step() {
+    // Its first step flattens the layers into the base; every step after it
+    // hands the engine an opacity and nothing else.
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    fading_scene(&mut c);
+    let mut engine = fading_engine(output);
+    c.present(&mut engine).expect("presents");
+    assert!(engine.layers().len() >= 2, "the windows ride layers");
+    for (step, reveal) in [200u8, 150, 90, 30, 0, 60, 180].into_iter().enumerate() {
+        let (buffers, drawn) = (snapshot(&engine), draws(&engine));
+        assert!(c.set_reveal(reveal));
+        c.present(&mut engine).expect("presents");
+        let (based, stack) = engine.stacks.last().expect("a stack");
+        assert!(*based && stack.len() == 1, "step {step}: the base alone");
+        assert_eq!(stack[0].opacity, reveal, "step {step}");
+        if step > 0 {
+            assert_eq!(draws(&engine), drawn, "step {step}: no frame drawn");
+            assert!(written(&engine, &buffers).is_empty(), "step {step}");
+            assert_eq!(c.frame_stats().encoded_px, 0, "step {step}");
+        }
+        let faded = software(output, BLUE, |c| {
+            fading_scene(c);
+            c.set_reveal(reveal);
+        });
+        assert_close(&engine.screen, &faded, 1);
+    }
+    assert!(c.set_reveal(u8::MAX));
+    c.present(&mut engine).expect("presents");
+    assert!(engine.layers().len() >= 2, "back on layers once it is over");
+    assert_close(&engine.screen, &software(output, BLUE, fading_scene), 1);
+}
+
+#[test]
+fn a_promoted_window_fades_through_its_own_layer() {
+    let output = mode(80, 60);
+    let (mut c, id) = fullscreenable(output);
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    let mut engine = fading_engine(output);
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
+    let before = snapshot(&engine);
+    assert!(c.set_reveal(100));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
+    let (based, stack) = engine.stacks.last().expect("a stack");
+    assert!(!based && stack.len() == 1, "its own layer alone");
+    assert_eq!(stack[0].opacity, 100);
+    assert!(
+        written(&engine, &before).is_empty(),
+        "its pixels are untouched"
+    );
+    assert_eq!(
+        pixel(&engine.screen, output, 5, 5),
+        [faded(255, 100), 0, 0, 255]
+    );
+}
+
+#[test]
+fn a_pointer_moving_through_a_fade_redraws_only_its_own_pixels() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    fading_scene(&mut c);
+    let mut engine = fading_engine(output);
+    c.present(&mut engine).expect("presents");
+    assert!(c.set_reveal(120));
+    c.present(&mut engine).expect("presents");
+    c.move_cursor(Point::new(6, 3));
+    c.present(&mut engine).expect("presents");
+    let stats = c.frame_stats();
+    assert!(
+        stats.encoded_px > 0 && stats.encoded_px <= 2 * 4 * 4,
+        "where it was and where it is, at full strength: {stats:?}"
+    );
+    assert_eq!(engine.stacks.last().expect("a stack").1[0].opacity, 120);
+    let faded = software(output, BLUE, |c| {
+        fading_scene(c);
+        c.move_cursor(Point::new(6, 3));
+        c.set_reveal(120);
+    });
+    assert_close(&engine.screen, &faded, 1);
+}
+
+#[test]
+fn a_fade_the_engine_stops_taking_is_finished_in_software_at_its_strength() {
+    // The frames the engine faded hold the screen at full strength, so the
+    // composite taking over encodes all of it again at the reveal.
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    fading_scene(&mut c);
+    let mut engine = fading_engine(output);
+    c.present(&mut engine).expect("presents");
+    assert!(c.set_reveal(150));
+    c.present(&mut engine).expect("presents");
+    engine.refusal = Some(DriverError::Unsupported);
+    c.move_cursor(Point::new(6, 3));
+    c.present(&mut engine).expect("presents");
+    let faded = software(output, BLUE, |c| {
+        fading_scene(c);
+        c.move_cursor(Point::new(6, 3));
+        c.set_reveal(150);
+    });
+    assert_close(&engine.screen, &faded, 1);
+}
+
 #[test]
 fn a_smaller_desktop_is_scaled_by_an_engine_that_scales() {
     let output = mode(32, 24);
@@ -2285,6 +2436,28 @@ fn a_smaller_desktop_is_scaled_by_an_engine_that_scales() {
     assert_eq!((desktop.dst_width_px, desktop.dst_height_px), (32, 24));
     assert_eq!(pixel(&engine.screen, output, 5, 5), [255, 0, 0, 255]);
     assert_eq!(pixel(&engine.screen, output, 20, 20), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_desktop_the_engine_scales_fades_through_its_own_layer() {
+    let output = mode(32, 24);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    assert!(c.set_desktop_size(16, 12));
+    let mut engine = fading_engine(output);
+    engine.caps.hw_scaling = true;
+    c.present(&mut engine).expect("presents");
+    let before = snapshot(&engine);
+    assert!(c.set_reveal(90));
+    c.present(&mut engine).expect("presents");
+    let (based, stack) = engine.stacks.last().expect("a stack");
+    assert!(!based && stack.len() == 1, "the desktop alone");
+    assert_eq!(stack[0].opacity, 90);
+    assert!(written(&engine, &before).is_empty(), "no pixel moved");
+    assert_eq!(
+        pixel(&engine.screen, output, 5, 5),
+        [faded(255, 90), 0, 0, 255]
+    );
 }
 
 /// A scaled desktop the display cannot give a layer is composited, and its

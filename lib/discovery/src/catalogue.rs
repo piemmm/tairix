@@ -20,6 +20,7 @@ use core::net::IpAddr;
 
 use tairix_abi::discovery_ipc::{Entry, ServiceTypeField, Transport, REQUESTS_PER_ACCOUNT};
 use tairix_abi::net_ipc::IF_NAME_LEN;
+use tairix_abi::netshare_ipc::SMB_PORT;
 
 use crate::walk::{Ask, Bounds, Computer, Directory, Discovery, Service};
 use crate::OwnedMembership;
@@ -30,10 +31,6 @@ pub const STORAGE_TYPES: [ServiceTypeField<'static>; 1] = [ServiceTypeField {
     name: b"smb",
     transport: Transport::Tcp,
 }];
-
-/// The port a computer, or a host the user named, is reached at when nothing
-/// advertised another: SMB over TCP.
-pub const SMB_PORT: u16 = 445;
 
 /// The most endpoints listed.
 pub const MAX_ENDPOINTS: usize = 256;

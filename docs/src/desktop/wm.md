@@ -202,9 +202,9 @@ nothing else in the compositor reads it.
 
 It is applied at exactly one point — the step in `compose_span` where a
 composited pixel becomes a scan-out byte — so every present path
-(`composite`, `present`) dims each pixel exactly once; the layered path is
-not taken while a reveal runs, since the engine scans a layer out as it was
-handed it. The back buffer deliberately keeps
+(`composite`, `present`) dims each pixel exactly once, or, on an engine that
+lays a layer at an opacity of its own, not at all (below). The back buffer
+deliberately keeps
 the **true** composed colour: a frosted window samples the backdrop out of
 it, and a blur-split rectangle re-reads it for its second segment, so
 dimming the buffer instead would dim those pixels twice.
@@ -233,6 +233,16 @@ That is what makes a screen fade cost what it changes. Measured over a
 one step falls from 997 µs to 490 µs over an opaque stack and from 2.81 ms to
 490 µs over a translucent one or one with a backdrop blur — and the cost stops
 depending on the scene at all, because a fade no longer composes it.
+
+**On an engine with per-layer opacity, a fade step is an opacity.** The stack
+is one layer shown at the reveal's opacity over the engine's black — the base,
+holding every window and the pointer; a promoted window the pointer draws
+nothing over; or a desktop the engine scales — and its frames are encoded at
+full strength. The fade's first step flattens any layers into the base; every
+step after it hands the engine a new opacity and moves no pixel. The frames are
+encoded again, whole, only where the strength they hold changes, so a fade the
+engine stops taking is finished in software at its strength. An engine without
+per-layer opacity fades in software as above.
 
 ## The desktop layer
 
@@ -269,10 +279,11 @@ desktop layer's owner rather than swallowed: see *Input routing*, below.
 
 The compositor presents through `tairix_display::Presenter`, never a driver
 trait. Where the display reports a layer engine (`Presenter::layers`, at least
-two layers, and hardware scaling if the desktop is scaled) and no screen
-reveal is running, `Compositor::present` takes the layered path; otherwise,
-and whenever no stack is taken, it composites the frame in software and
-presents its damage, so a hardware frame is never partial.
+two layers, and hardware scaling if the desktop is scaled), and while a screen
+reveal runs one that lays a layer at an opacity of its own (see
+[Screen reveal](#screen-reveal)), `Compositor::present` takes the layered
+path; otherwise, and whenever no stack is taken, it composites the frame in
+software and presents its damage, so a hardware frame is never partial.
 
 A layered present shows a **base** — the output frame, holding the desktop
 and every window below the lowest layer, composited in software as ever —
@@ -308,7 +319,7 @@ what it shows: its damage less every composite zone, which is opaque and hides
 it, so a dragged frosted window draws into the display's frame the strip it
 uncovered rather than its whole footprint, and nothing of a zone is drawn into
 the base at all. The base is drawn straight into the display's own back frame
-(`Base::Drawn`), and a flattened footprint into the buffer its layer shows
+(`BaseFrame::Drawn`), and a flattened footprint into the buffer its layer shows
 next, by the pass that composes them; each then takes from the back buffer
 only what it missed while the other buffer was shown. What a zone left stale
 beneath it is composed again before it can show, because a zone that moves, a

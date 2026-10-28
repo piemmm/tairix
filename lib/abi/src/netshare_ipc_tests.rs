@@ -150,7 +150,76 @@ fn every_request_round_trips() {
         NetshareRequest::Mounts,
     ] {
         let bytes = encoded(&request);
+        assert_eq!(bytes.len(), request.encoded_len(), "{request:?}");
         assert_eq!(NetshareRequest::decode(&bytes), Ok(request), "{request:?}");
+    }
+}
+
+#[test]
+fn a_short_buffer_is_refused_rather_than_left_holding_the_password() {
+    for request in [
+        NetshareRequest::Mount {
+            connect: connect(true),
+            share: "Backups",
+            read_only: false,
+        },
+        NetshareRequest::Shares {
+            connect: connect(false),
+            special: false,
+        },
+    ] {
+        for short in 0..encoded(&request).len() {
+            let mut out = vec![0u8; short];
+            assert_eq!(request.encode(&mut out), Err(Errno::BufferTooSmall));
+            assert!(out.iter().all(|byte| *byte == 0), "{short} bytes");
+        }
+    }
+}
+
+/// `frame` with its pin's address, 198.51.100.9 and none other there, moved to `to`.
+fn repinned(mut frame: Vec<u8>, to: [u8; 4]) -> Vec<u8> {
+    let at = frame
+        .windows(5)
+        .position(|window| window == [4, 198, 51, 100, 9])
+        .expect("the pin's address");
+    frame[at + 1..at + 5].copy_from_slice(&to);
+    frame
+}
+
+#[test]
+fn a_pin_at_an_address_that_is_not_unicast_is_refused_both_ways() {
+    let pinned = |address: Ipv4Addr| Pin {
+        address: IpAddr::V4(address),
+        ..pin()
+    };
+    let shares = |pin: Pin| NetshareRequest::Shares {
+        connect: Connect {
+            pin: Some(pin),
+            ..connect(false)
+        },
+        special: false,
+    };
+    let listing = |pin: Pin| {
+        NetshareReply::Shares(Shares {
+            pin,
+            hidden: 0,
+            unnamed: 0,
+            shares: Records::new(&[]),
+        })
+    };
+    let good = pinned(Ipv4Addr::new(198, 51, 100, 9));
+    for bad in [[0, 0, 0, 0], [224, 0, 0, 1], [255, 255, 255, 255]] {
+        let address = Ipv4Addr::from(bad);
+        assert_eq!(refused(&shares(pinned(address))), Err(Errno::OutOfRange));
+        let mut out = vec![0; NETSHARE_MAX_REPLY];
+        assert_eq!(
+            listing(pinned(address)).encode(&mut out),
+            Err(Errno::OutOfRange)
+        );
+        let request = repinned(encoded(&shares(good)), bad);
+        assert_eq!(NetshareRequest::decode(&request), Err(Errno::OutOfRange));
+        let reply = repinned(encoded_reply(&listing(good)), bad);
+        assert_eq!(NetshareReply::decode(&reply), Err(Errno::OutOfRange));
     }
 }
 

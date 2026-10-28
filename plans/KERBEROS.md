@@ -66,4 +66,7 @@ client's setup then admits a success at the first leg — NTLM's takes two — a
 takes the session id from that final response. `netshare-v1`
 (`lib/abi/src/netshare_ipc.rs`) gains the Kerberos credential beside NTLMv2's
 — a principal and its password, and the `sec=` choice — and `Forget`, which
-drops the caller's cached tickets.
+drops the caller's cached tickets. The service principal is built from the
+host as a component, never parsed from `cifs/<host>`: `netshare-v1` admits a
+host with `@`, which a NetBIOS name may carry, and parsed it would name a
+realm.

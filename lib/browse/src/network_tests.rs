@@ -4,7 +4,8 @@ use alloc::vec::Vec;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tairix_abi::net_ipc::IF_NAME_LEN;
-use tairix_discovery::catalogue::{Endpoint, Found, Listing, Source, SMB_PORT};
+use tairix_abi::netshare_ipc::SMB_PORT;
+use tairix_discovery::catalogue::{Endpoint, Found, Listing, Source};
 use tairix_discovery::OwnedMembership;
 use tairix_icon::IconKind;
 

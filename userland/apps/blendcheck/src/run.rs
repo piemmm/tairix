@@ -24,7 +24,9 @@ mod program {
     use tairix_abi::touch::TouchFrame;
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_blendcheck::{parse, pattern, Command, USAGE};
-    use tairix_display::{establish_display, Base, DisplayClient, Presenter, RtDisplayTransport};
+    use tairix_display::{
+        establish_display, Base, BaseFrame, DisplayClient, Presenter, RtDisplayTransport,
+    };
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
 
     const NAME: &str = "blendcheck";
@@ -134,9 +136,12 @@ mod program {
         let shown = laid
             && engine
                 .present_layers(
-                    Some(Base::Frame {
-                        frame: &pattern.frame,
-                        damage: &[DamageRect::full(&output.mode)],
+                    Some(Base {
+                        frame: BaseFrame::Copied {
+                            frame: &pattern.frame,
+                            damage: &[DamageRect::full(&output.mode)],
+                        },
+                        opacity: u8::MAX,
                     }),
                     &[pattern.engine_layer(buffer)],
                 )

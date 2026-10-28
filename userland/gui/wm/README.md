@@ -131,14 +131,14 @@ router**:
   a frame is **one** present naming every disjoint dirty rectangle it
   touched — up to `MAX_DAMAGE_RECTS`, past which the list degrades to its
   bounding box. The frame is planned, then composed straight into the
-  display's own back frame (`Presenter::present_drawn`, and `Base::Drawn`
-  beneath layers), with what that frame missed encoded from the back
-  buffer, so nothing is copied into the display; only a display holding no
-  frame of its own is sent the compositor's own frame, and it is asked
-  once, not every frame. A frame publishes itself once however scattered it
-  is, and a bounding box that merely *spans* the screen (two far-apart corners
-  do) is not whole-screen damage: `tairix_display::damage_list` is the one
-  place that tells those apart.
+  display's own back frame (`Presenter::present_drawn`, and
+  `BaseFrame::Drawn` beneath layers), with what that frame missed encoded
+  from the back buffer, so nothing is copied into the display; only a
+  display holding no frame of its own is sent the compositor's own frame,
+  and it is asked once, not every frame. A frame publishes itself once
+  however scattered it is, and a bounding box that merely *spans* the screen
+  (two far-apart corners do) is not whole-screen damage:
+  `tairix_display::damage_list` is the one place that tells those apart.
   Recomposition resolves each covering layer's source row, the back-buffer
   row, and the frame row once per row (`Window::row`), leaving a column a
   slice index and a blend.
@@ -164,8 +164,8 @@ router**:
   the window's rectangle of, so a move inside the field writes only the
   corners and composites none of its pixels; one whose blur is not retained,
   and a window translucent as a whole, are baked flattened onto a layer,
-  opaque. The layered path stands aside during a reveal (below), and nothing
-  an opaque layer covers is drawn into the base. A flattened window's changed
+  opaque. A reveal is one layer's opacity where the engine has it (below),
+  and nothing an opaque layer covers is drawn into the base. A flattened window's changed
   pixels are encoded into the buffer its layer shows next by the pass that
   composes them. Where the compositor *bakes* a window into
   a layer — over its footprint, so its shadow is baked with it, each row
@@ -186,10 +186,13 @@ router**:
   reveal short-circuits, so an unfaded screen costs one comparison per
   encoded pixel and is byte-identical to one that never heard of the
   reveal. A change damages the whole screen, a repeat damages nothing, and
-  a mode change carries the strength over. The layered path stands aside
-  while a reveal is in flight, because a hardware layer is scanned out as
-  the driver was handed it and would show at full strength while the fade
-  ran.
+  a mode change carries the strength over. On an engine that lays a layer
+  at an opacity of its own, a fade is one layer at the reveal's opacity —
+  the base holding every window and the pointer, a promoted window the
+  pointer draws nothing over, or a desktop the engine scales — encoded at
+  full strength, so a step after the first moves no pixel; the frames are
+  encoded again only where the strength they hold changes. An engine
+  without one fades in software.
 - Transients (`add_transient_window`): an app-owned popup
   (`tairix_abi::window_ipc::WindowRequest::CreatePopup`) is an ordinary
   undecorated window that *belongs to* the one that opened it. It is

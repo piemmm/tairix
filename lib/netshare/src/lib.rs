@@ -98,7 +98,7 @@ const fn refusal(error: NetshareError) -> &'static str {
             "the host is not the one the saved sign-in is for: it is a new, unknown host"
         }
         NetshareError::Unsupported(Shortfall::Dialect) => {
-            "the server speaks no SMB dialect from 3.0 up"
+            "the server speaks no SMB dialect as new as the one asked for"
         }
         NetshareError::Unsupported(Shortfall::Encryption) => "the server cannot encrypt",
         NetshareError::Unsupported(Shortfall::Signing) => {
@@ -130,7 +130,7 @@ const fn refusal(error: NetshareError) -> &'static str {
 /// A share the service serves, waiting to be attached.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Mounted {
-    /// What the connection proved about the endpoint: what a credential the
+    /// What the connection reported of the endpoint: what a credential the
     /// user asks to remember is remembered under.
     pub pin: Pin,
     /// The offer the caller attaches.

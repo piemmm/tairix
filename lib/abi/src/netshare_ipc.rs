@@ -27,9 +27,11 @@
 //! endpoint is reserved, the password is a [`Secret`], and both ends erase
 //! their copies once the exchange resolves. A remembered credential is
 //! offered only with the [`Pin`] it was remembered under: the service checks
-//! what the connection proves against it before any credential leaves, and a
+//! what the connection reports against it before any credential leaves, and a
 //! host whose pin differs is [`NetshareError::PinMismatch`] — new and
-//! unknown — and never authenticated to.
+//! unknown — and never authenticated to. The pin catches a different host
+//! answering, not an impostor, which can repeat both an unauthenticated GUID
+//! and an address; only Kerberos proves the server (`plans/SMB.md`).
 //!
 //! # Wire shape
 //!
@@ -122,16 +124,28 @@ const PIN_LEN: usize = 16 + ADDRESS_LEN;
 
 /// The largest request: a mount with every field at its bound.
 pub const NETSHARE_MAX_REQUEST: usize = HEADER_LEN
-    + (2 + HOST_MAX)
-    + ADDRESS_LEN
-    + IF_NAME_LEN
-    + 2
-    + 1
-    + PIN_LEN
-    + 1
-    + 2 * (2 + ACCOUNT_NAME_MAX)
-    + (2 + MAX_PASSWORD_LEN)
+    + connect_len(
+        HOST_MAX,
+        ACCOUNT_NAME_MAX,
+        ACCOUNT_NAME_MAX,
+        MAX_PASSWORD_LEN,
+    )
     + (2 + SHARE_NAME_BYTES);
+
+/// The bytes a connection's fields take for a host, user, domain and password
+/// of these lengths.
+const fn connect_len(host: usize, user: usize, domain: usize, password: usize) -> usize {
+    (2 + host)
+        + ADDRESS_LEN
+        + IF_NAME_LEN
+        + 2
+        + 1
+        + PIN_LEN
+        + 1
+        + (2 + user)
+        + (2 + domain)
+        + (2 + password)
+}
 
 const SHARE_ENTRY_MAX: usize = (2 + SHARE_NAME_BYTES) + 1 + (2 + REMARK_MAX);
 const MOUNT_ENTRY_MAX: usize = 8 + (2 + HOST_MAX) + (2 + SHARE_NAME_BYTES) + 1 + 1;
@@ -267,7 +281,7 @@ pub struct Endpoint<'a> {
     pub port: u16,
 }
 
-/// What a connection proved about its endpoint: the server GUID its
+/// What a connection reported of its endpoint: the server GUID its
 /// `NEGOTIATE` answered with, and the address it was reached at.
 ///
 /// With the host as chosen, this is what a remembered credential is bound
@@ -356,6 +370,7 @@ fn check_connect(connect: &Connect<'_>) -> Result<(), Errno> {
     let credentials = &connect.credentials;
     if !is_host_name(endpoint.host)
         || endpoint.address.is_some_and(|address| !is_unicast(address))
+        || connect.pin.is_some_and(|pin| !is_unicast(pin.address))
         || endpoint.port == 0
         || (link_local && endpoint.interface.is_none())
         || credentials.user.is_empty()
@@ -398,6 +413,9 @@ fn read_address(r: &mut Reader<'_>) -> Result<Option<IpAddr>, Errno> {
 }
 
 fn put_pin(w: &mut Writer<'_>, pin: &Pin) -> Result<(), Errno> {
+    if !is_unicast(pin.address) {
+        return Err(Errno::OutOfRange);
+    }
     w.bytes(&pin.server_guid)?;
     put_address(w, Some(pin.address))
 }
@@ -405,7 +423,9 @@ fn put_pin(w: &mut Writer<'_>, pin: &Pin) -> Result<(), Errno> {
 fn read_pin(r: &mut Reader<'_>) -> Result<Pin, Errno> {
     let mut server_guid = [0; 16];
     server_guid.copy_from_slice(r.take(16)?);
-    let address = read_address(r)?.ok_or(Errno::OutOfRange)?;
+    let address = read_address(r)?
+        .filter(|address| is_unicast(*address))
+        .ok_or(Errno::OutOfRange)?;
     Ok(Pin {
         server_guid,
         address,
@@ -477,15 +497,28 @@ impl<'a> NetshareRequest<'a> {
     /// [`Errno::OutOfRange`] for a field the protocol refuses — a host,
     /// account or share name out of shape, an address that is not unicast,
     /// a link-local one with no interface, port zero;
-    /// [`Errno::BufferTooSmall`] when `out` cannot hold it.
+    /// [`Errno::BufferTooSmall`] when `out` cannot hold it, which leaves `out`
+    /// untouched rather than holding a password the rest did not follow.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        match self {
+            Self::Shares { connect, .. } => check_connect(connect)?,
+            Self::Mount { connect, share, .. } => {
+                check_connect(connect)?;
+                if !is_share_name(share) {
+                    return Err(Errno::OutOfRange);
+                }
+            }
+            Self::Unmount { .. } | Self::Mounts => {}
+        }
+        if out.len() < self.encoded_len() {
+            return Err(Errno::BufferTooSmall);
+        }
         let mut w = Writer::new(out);
         w.u32(NETSHARE_REQUEST_MAGIC)?;
         w.u16(NETSHARE_VERSION)?;
         w.u8(self.op() as u8)?;
         match self {
             Self::Shares { connect, special } => {
-                check_connect(connect)?;
                 w.u8(if *special { FLAG_SPECIAL } else { 0 })?;
                 put_connect(&mut w, connect)?;
             }
@@ -494,10 +527,6 @@ impl<'a> NetshareRequest<'a> {
                 share,
                 read_only,
             } => {
-                check_connect(connect)?;
-                if !is_share_name(share) {
-                    return Err(Errno::OutOfRange);
-                }
                 w.u8(if *read_only { FLAG_READ_ONLY } else { 0 })?;
                 put_connect(&mut w, connect)?;
                 w.str(share)?;
@@ -509,6 +538,28 @@ impl<'a> NetshareRequest<'a> {
             Self::Mounts => w.u8(0)?,
         }
         Ok(w.written())
+    }
+
+    /// The bytes [`encode`](Self::encode) writes.
+    fn encoded_len(&self) -> usize {
+        let connect = |connect: &Connect<'_>| {
+            let credentials = &connect.credentials;
+            connect_len(
+                connect.endpoint.host.len(),
+                credentials.user.len(),
+                credentials.domain.len(),
+                credentials.password.len(),
+            )
+        };
+        HEADER_LEN
+            + match self {
+                Self::Shares { connect: c, .. } => connect(c),
+                Self::Mount {
+                    connect: c, share, ..
+                } => connect(c) + (2 + share.len()),
+                Self::Unmount { .. } => 8,
+                Self::Mounts => 0,
+            }
     }
 
     /// Decode the request in `bytes`, failing closed on anything another
@@ -630,7 +681,7 @@ pub enum NetshareError {
     /// No connection to the endpoint could be made.
     Unreachable,
     /// The host is not the one the pin names: it is shown as new and
-    /// unknown. Carries what the connection proved instead.
+    /// unknown. Carries what the connection reported instead.
     PinMismatch(Pin),
     /// The server falls short of what this system requires.
     Unsupported(Shortfall),
@@ -791,7 +842,8 @@ impl<'a, T: Copy> Records<'a, T> {
 macro_rules! listing {
     ($entry:ident, $read:path) => {
         impl<'a> Records<'a, $entry<'a>> {
-            /// The records, in order.
+            /// The records, in order, read again from the reply on each
+            /// walk: a caller walking them repeatedly collects them once.
             pub fn iter(&self) -> impl Iterator<Item = $entry<'a>> + 'a {
                 self.walk($read)
             }
@@ -927,7 +979,7 @@ impl<'a> MountEntry<'a> {
 /// An endpoint's shares.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Shares<'a> {
-    /// What the connection proved about the endpoint.
+    /// What the connection reported of the endpoint.
     pub pin: Pin,
     /// How many special shares were left out, since they were not asked for.
     pub hidden: u32,
@@ -945,7 +997,7 @@ pub enum NetshareReply<'a> {
     /// The answer to [`NetshareRequest::Mount`]: the share is served and
     /// `offer` waits for the caller to attach it.
     Mounted {
-        /// What the connection proved about the endpoint.
+        /// What the connection reported of the endpoint.
         pin: Pin,
         /// The offer.
         offer: OfferId,

@@ -432,6 +432,25 @@ pub(super) fn package_name(manifest: &str) -> Option<String> {
     None
 }
 
+/// Whether `manifest` declares `feature` in its `[features]` table.
+pub(super) fn declares_feature(manifest: &str, feature: &str) -> bool {
+    let mut in_features = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_features = trimmed == "[features]";
+            continue;
+        }
+        let named = trimmed
+            .strip_prefix(feature)
+            .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if in_features && named {
+            return true;
+        }
+    }
+    false
+}
+
 /// Resolve every build-graph `path =` dependency in `manifest` to a
 /// workspace-relative directory. `[dev-dependencies]` tables are skipped.
 fn dependency_dirs(manifest: &str, crate_rel_dir: &str) -> Vec<String> {
@@ -810,6 +829,16 @@ mod tests {
         assert!(!layer_allows(Layer::Lib, Layer::KernelSubsystem));
         assert!(!layer_allows(Layer::Driver, Layer::KernelSubsystem));
         assert!(!layer_allows(Layer::ArchImpl, Layer::SchedImpl));
+    }
+
+    #[test]
+    fn a_feature_is_declared_only_by_its_own_key_in_the_features_table() {
+        let manifest = "[package]\nname = \"x\"\nprogram = 1\n\n[features]\n\
+                        programs = []\nprogram = [\"dep:tairix-rt\"]\n";
+        assert!(declares_feature(manifest, "program"));
+        assert!(!declares_feature(manifest, "rt"));
+        let elsewhere = "[package]\nprogram = 1\n[features]\nprograms = []\n";
+        assert!(!declares_feature(elsewhere, "program"));
     }
 
     #[test]

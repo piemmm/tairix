@@ -286,6 +286,14 @@ fn a_request_the_protocol_refuses_is_never_sent() {
 }
 
 #[test]
+fn a_dialect_shortfall_names_no_dialect_of_its_own() {
+    // The floor the caller asked for may be any, and a reason naming one
+    // misstates the others.
+    let reason = Error::Refused(NetshareError::Unsupported(Shortfall::Dialect)).to_string();
+    assert!(!reason.contains("3."), "{reason}");
+}
+
+#[test]
 fn every_failure_states_a_reason_of_its_own() {
     let mut refusals = vec![
         NetshareError::UnknownHost,

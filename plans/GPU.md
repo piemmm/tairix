@@ -44,7 +44,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD8 | The frost is a function of what lies beneath it: sampled past the window's edges, retained as a field with a margin, so a drag inside it blurs nothing | done |
 | GD9 | A frost layer is its window's field, cropped by the engine: a drag writes display memory only at the corners | done |
 | GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | done |
-| GD5 | The screen fade as a lone layer's opacity | planned |
+| GD5 | The screen fade as a lone layer's opacity | done |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode in GP4's pinned set, agreeing with `lib/raster` within a stated tolerance | blocked: GP4 |
 | GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3 |
 
@@ -444,7 +444,7 @@ layer that moves, joins the base or is given back marks where it lay.
 written into the buffer its layer shows next by the pass that composes it; only
 what that buffer missed while the other was shown is encoded from the back
 buffer. The base is composed into the display's own back frame —
-`Presenter::present_drawn` for a frame, `Base::Drawn` beneath layers — with
+`Presenter::present_drawn` for a frame, `BaseFrame::Drawn` beneath layers — with
 what that frame missed encoded from the back buffer, so the compositor's own
 frame serves only a display with no frame of its own, which is remembered
 rather than asked every frame. Both halves keep the back buffer as the one
@@ -559,13 +559,26 @@ layer's source crop, which `AccelLayer` already carries).
   field, or whose field cannot be had, is flattened — the one layer of its
   footprint over what lies beneath it — until its rectangle changes.
 
-**GD5 — the screen fade as a lone layer's opacity.** A stack of one layer — the
-base alone, or a promoted window — fades through its per-layer opacity over the
-engine's black background, so a fade step presents no pixel where today it
-re-encodes the screen and, on the Pi 4, copies it into uncached memory twice.
-The software reveal is not dithered (`Pixel::dimmed`), so the engine's is no
-worse; the pointer fades with it because a fade already takes the pointer into
-the frame. A multi-layer stack still flattens into the base first.
+**GD5 — the screen fade as a lone layer's opacity.** On an engine that states
+`per_layer_opacity`, a fade is a stack of one layer shown at the reveal's opacity
+over the engine's black: the base, holding every window and the pointer; a
+promoted window the pointer draws nothing over; or a desktop the engine scales.
+A multi-layer stack flattens into the base at the fade's first step, and every
+step after it hands the engine an opacity and moves no pixel, where the software
+reveal re-encodes the whole screen into display memory. The software reveal is
+not dithered (`Pixel::dimmed`), so the engine's is no worse; the pointer fades
+with it because a fade takes the pointer off the cursor plane into the frame.
+- **The base carries an opacity.** `Base` is the base layer — its pixels, a
+  `BaseFrame` copied in or drawn in place, and the opacity it is laid at — and a
+  base with nothing new names the frame on screen again at the new opacity.
+- **Frames hold one strength.** A layered stack is encoded at full strength and
+  the software path at the reveal; the frames are encoded again, whole, only
+  where the strength they hold changes, so a fade the engine stops taking is
+  finished in software at its strength and nothing is dimmed twice.
+- **Only an opaque base's refusal means no frames.** A drawn base the display
+  refuses as unsupported without drawing it marks the display as holding no
+  frame of its own only when the base was opaque; at an opacity, the refusal
+  may be of the opacity, which ends the stack instead.
 
 **GD6 — the desktop's passes on a GPU.** The box blur's passes, the dithered
 premultiplied *over*, copy, fill and the channel-order encode join GP4's pinned

@@ -27,7 +27,7 @@ use tairix_geometry::{Rect, Region};
 
 use crate::client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
 use crate::driver_error_from_errno;
-use crate::presenter::{Base, Presenter};
+use crate::presenter::{Base, BaseFrame, Presenter};
 use crate::server::{
     Delivery, DisplayServer, Latch, PeerFacts, DISPLAY_REPLY_MAX, PRESENT_LATCH_DEADLINE_NS,
 };
@@ -1473,9 +1473,12 @@ fn a_layered_present_lays_the_output_frame_beneath_its_layers() {
         .expect("a layer");
     let mut frame = vec![0u8; FRAME_LEN];
     frame[0..4].fill(0x11);
-    let base = Base::Frame {
-        frame: &frame,
-        damage: &[rect(0, 0, 1, 1)],
+    let base = Base {
+        frame: BaseFrame::Copied {
+            frame: &frame,
+            damage: &[rect(0, 0, 1, 1)],
+        },
+        opacity: u8::MAX,
     };
     remote
         .layers()
@@ -1565,9 +1568,12 @@ fn a_layered_present_with_nothing_new_in_the_base_names_the_frame_on_screen() {
     let whole = [full()];
     let engine = remote.layers().expect("a compositor");
     for damage in [&whole[..], &[]] {
-        let base = Base::Frame {
-            frame: &frame,
-            damage,
+        let base = Base {
+            frame: BaseFrame::Copied {
+                frame: &frame,
+                damage,
+            },
+            opacity: u8::MAX,
         };
         engine
             .present_layers(Some(base), &[layer(window, 2, 2)])
@@ -1578,6 +1584,51 @@ fn a_layered_present_with_nothing_new_in_the_base_names_the_frame_on_screen() {
     assert_eq!(
         stacks[1][0].buffer, frames[0],
         "an unchanged frame is named again, never copied into another"
+    );
+}
+
+/// A base is laid at its opacity, and a change of opacity alone names the frame
+/// on screen again at the new one: a fade step moves no pixel.
+#[test]
+fn a_base_is_laid_at_its_opacity_and_a_new_opacity_moves_no_pixel() {
+    let mut rig = Rig::new();
+    rig.display.accel = Some(AccelCaps {
+        per_layer_opacity: true,
+        ..CAPS
+    });
+    let (rig, mut remote) = remote(rig);
+    let frames: Vec<BufferId> = rig
+        .borrow()
+        .display
+        .live
+        .iter()
+        .map(|held| held.id)
+        .collect();
+    let frame = vec![0x44u8; FRAME_LEN];
+    let whole = [full()];
+    let engine = remote.layers().expect("a compositor");
+    for (damage, opacity) in [(&whole[..], u8::MAX), (&[][..], 128), (&[][..], 0)] {
+        let base = Base {
+            frame: BaseFrame::Copied {
+                frame: &frame,
+                damage,
+            },
+            opacity,
+        };
+        engine.present_layers(Some(base), &[]).expect("shown");
+    }
+    let stacks = rig.borrow().display.layers.clone();
+    let laid: Vec<(BufferId, u8)> = stacks
+        .iter()
+        .map(|stack| (stack[0].buffer, stack[0].opacity))
+        .collect();
+    assert_eq!(
+        laid,
+        [(frames[0], u8::MAX), (frames[0], 128), (frames[0], 0)]
+    );
+    assert!(
+        remote.frame(1).iter().all(|byte| *byte == 0),
+        "no fade step copied the frame into the other"
     );
 }
 
@@ -1626,16 +1677,22 @@ fn a_layered_base_drawn_in_place_is_handed_what_the_back_frame_owes() {
         let engine = remote.layers().expect("a compositor");
         let stack = [layer(window, 2, 2)];
         for damage in [&whole, &corner] {
-            let base = Base::Drawn {
-                damage,
-                draw: &mut draw,
+            let base = Base {
+                frame: BaseFrame::Drawn {
+                    damage,
+                    draw: &mut draw,
+                },
+                opacity: u8::MAX,
             };
             engine.present_layers(Some(base), &stack).expect("shown");
         }
         refusing.set(true);
-        let base = Base::Drawn {
-            damage: &corner,
-            draw: &mut draw,
+        let base = Base {
+            frame: BaseFrame::Drawn {
+                damage: &corner,
+                draw: &mut draw,
+            },
+            opacity: u8::MAX,
         };
         assert_eq!(
             engine.present_layers(Some(base), &stack).err(),
@@ -1643,9 +1700,12 @@ fn a_layered_base_drawn_in_place_is_handed_what_the_back_frame_owes() {
         );
         refusing.set(false);
         let nothing = Region::new();
-        let base = Base::Drawn {
-            damage: &nothing,
-            draw: &mut draw,
+        let base = Base {
+            frame: BaseFrame::Drawn {
+                damage: &nothing,
+                draw: &mut draw,
+            },
+            opacity: u8::MAX,
         };
         engine
             .present_layers(Some(base), &stack)

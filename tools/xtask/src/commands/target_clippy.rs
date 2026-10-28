@@ -45,6 +45,14 @@
 //! core into a gated module, or code only a gated module uses, would pass
 //! the gate and break the first guest built alone.
 //!
+//! ## The library-program pass
+//!
+//! A `lib/*` crate's `program` feature — its runtime half, the transport it
+//! calls the kernel through — is otherwise linted only inside a program that
+//! turns it on, since the library pass lints the crates without it. A library
+//! no program uses yet would then ship a production path nothing compiles, so
+//! each library declaring one is linted once more with it on.
+//!
 //! ## The debug-image pass
 //!
 //! The kernel stratum is linted twice per target: once as the shippable
@@ -74,6 +82,7 @@
 //! lints those.
 
 use std::ffi::OsString;
+use std::path::Path;
 
 use tairix_itest_harness::pie::PieArch;
 
@@ -87,11 +96,25 @@ use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 /// pass forwards them.
 pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let crates = deps_check::build_graph(&ctx.workspace_root)?;
+    let programs = lib_programs(&ctx.workspace_root, &crates)?;
+    let program_features = programs
+        .iter()
+        .map(|name| format!("{name}/program"))
+        .collect::<Vec<_>>()
+        .join(",");
     for &arch in PieArch::ALL {
         for stratum in Stratum::ALL {
             let packages = selection(&crates, arch, stratum);
             lint(ctx, arch.target_triple(), stratum.label(), &packages, args)?;
         }
+        lint_with_features(
+            ctx,
+            arch.target_triple(),
+            "lib+program",
+            &programs,
+            &program_features,
+            args,
+        )?;
         lint(
             ctx,
             arch.target_triple(),
@@ -117,6 +140,23 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let (wasm_target, wasm_verticals) = wasm_tests::packages();
     lint(ctx, wasm_target, "arch", &wasm_arch(&crates), args)?;
     lint(ctx, wasm_target, "verticals", &wasm_verticals, args)
+}
+
+/// The `lib/*` crates declaring a `program` feature.
+fn lib_programs<'a>(root: &Path, crates: &'a [Crate]) -> Result<Vec<&'a str>, String> {
+    let mut programs = Vec::new();
+    for lib in crates
+        .iter()
+        .filter(|c| Stratum::of(&c.rel_dir) == Some(Stratum::Lib))
+    {
+        let manifest = root.join(&lib.rel_dir).join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| format!("target-clippy: cannot read {}: {e}", manifest.display()))?;
+        if deps_check::declares_feature(&text, "program") {
+            programs.push(lib.name.as_str());
+        }
+    }
+    Ok(programs)
 }
 
 /// `arch`'s own architecture backend, by itself.
@@ -258,6 +298,25 @@ mod tests {
             .expect("xtask sits two levels below the workspace root")
             .to_path_buf();
         deps_check::build_graph(&root).expect("the workspace graph parses")
+    }
+
+    /// A library whose `program` feature no program turns on yet is linted
+    /// with it on all the same, and nothing outside `lib/` is.
+    #[test]
+    fn every_library_declaring_a_program_feature_is_linted_with_it() {
+        let crates = graph();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the workspace root");
+        let programs = lib_programs(root, &crates).expect("the manifests read");
+        assert!(programs.contains(&"tairix-netshare"), "{programs:?}");
+        assert!(programs.contains(&"tairix-discovery"), "{programs:?}");
+        assert!(!programs.contains(&"tairix-rt"), "{programs:?}");
+        for name in &programs {
+            let lib = crates.iter().find(|c| c.name == *name).expect("a crate");
+            assert!(lib.rel_dir.starts_with("lib/"), "{}", lib.rel_dir);
+        }
     }
 
     /// Every directory `arch` lints, across all of its strata.

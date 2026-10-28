@@ -82,10 +82,19 @@ pub trait Presenter {
 }
 
 /// The output frame beneath a layered present, laid out as
-/// [`Presenter::mode`].
-pub enum Base<'a, 'd> {
+/// [`Presenter::mode`], and the opacity it is shown at over the engine's
+/// black.
+pub struct Base<'a, 'd> {
+    /// How its pixels reach the display.
+    pub frame: BaseFrame<'a, 'd>,
+    /// `u8::MAX` opaque; anything else needs [`AccelCaps::per_layer_opacity`].
+    pub opacity: u8,
+}
+
+/// How a layered present's base reaches the display.
+pub enum BaseFrame<'a, 'd> {
     /// A frame encoded elsewhere, as [`Presenter::present`] takes one.
-    Frame {
+    Copied {
         /// The frame.
         frame: &'a [u8],
         /// What changed in it since the previous frame the display took.
@@ -135,7 +144,9 @@ pub trait LayerPresenter {
     /// Show `layers`, bottom-most first, over `base` where there is one: the
     /// output frame [`Presenter::present`] would have shown — or, drawn in
     /// place, the one [`Presenter::present_drawn`] would — of which only its
-    /// damage changed, laid beneath them as the whole output.
+    /// damage changed, laid beneath them as the whole output at the base's
+    /// opacity. A base with nothing new names the frame on screen again, so
+    /// a change of its opacity alone moves no pixel.
     ///
     /// Each layer's buffer is read until the next present is
     /// [`ready`](Presenter::ready), so a compositor bakes a changed layer
