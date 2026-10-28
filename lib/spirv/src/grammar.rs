@@ -1,8 +1,9 @@
 //! The shapes the generated grammar tables are written in, and the lookups the
 //! decoder walks them through.
 
+use crate::enumerant::Capability;
 use crate::tables::{GLSL_STD_450, INSTRUCTIONS};
-use crate::{Kind, Op};
+use crate::{Kind, Op, Version};
 
 /// How many times an operand occurs: the grammar places every optional and
 /// repeated operand last.
@@ -37,11 +38,25 @@ pub(crate) enum Shape {
     Bits,
 }
 
+/// What enables an instruction or enumerant in a module.
+pub(crate) struct Gate {
+    /// Any one of these must be declared; none, and it needs no capability.
+    /// For a capability, the capabilities it implicitly declares instead.
+    pub(crate) capabilities: &'static [Capability],
+    /// Before `version`, any one of these extensions enables it.
+    pub(crate) extensions: &'static [&'static str],
+    /// The version it is core from; `None` where only an extension enables it.
+    pub(crate) version: Option<Version>,
+    /// The newest version it exists in.
+    pub(crate) last: Option<Version>,
+}
+
 /// One instruction of the grammar.
 pub(crate) struct Spec {
     pub(crate) op: Op,
     pub(crate) name: &'static str,
     pub(crate) operands: &'static [(Kind, Quantity)],
+    pub(crate) gate: Gate,
 }
 
 impl Spec {
@@ -70,12 +85,15 @@ impl Spec {
 pub(crate) struct Enumerant {
     pub(crate) value: u32,
     pub(crate) parameters: &'static [Kind],
+    pub(crate) gate: Gate,
 }
 
-/// One `GLSL.std.450` extended instruction and how many ids it takes.
+/// One `GLSL.std.450` extended instruction, how many ids it takes, and the
+/// capabilities any one of which it needs.
 pub(crate) struct ExtInst {
     pub(crate) number: u32,
     pub(crate) operands: usize,
+    pub(crate) capabilities: &'static [Capability],
 }
 
 /// The instruction `op` names, if the grammar recognises it.

@@ -142,7 +142,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-spirv",
         test: "fuzz_spirv",
-        description: "lib/spirv decoder over mutated shader modules (bits, boundary words, insertions, deletions, truncations, either byte order): total, refusals within the module, accepted modules re-encoding exactly",
+        description: "lib/spirv decoder and validator over mutated shader modules (bits, boundary words, insertions, deletions, truncations, either byte order): both total, refusals within the module, accepted modules re-encoding exactly, validation deterministic, admitted entry points agreeing with their own layout",
     },
     Target {
         package: "tairix-fontface",

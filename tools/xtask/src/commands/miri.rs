@@ -362,11 +362,44 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-spirv",
         description: "the shader-module decoder's every bounds check over hostile words — word \
                       framing, string scans, enumerant parameters, the definition table's \
-                      binary searches — and the encoder's packing, interpreted; the crate \
-                      forbids `unsafe`, so this is the plan's standing look at the parser \
-                      between an application and the GPU",
+                      binary searches — the validator's index tables, dominator walks, \
+                      construct ladder and reused per-function scratch, and the encoder's \
+                      packing, interpreted; the crate forbids `unsafe`, so this is the plan's \
+                      standing look at the parser between an application and the GPU",
         features: &[],
-        scope: Scope::AllTargets,
+        scope: Scope::LibExcept {
+            skip: &[
+                "validate::scale_tests::a_hundred_thousand_selections_in_sequence_are_admitted",
+                "validate::scale_tests::nesting_to_the_bound_is_admitted_and_past_it_refused",
+                "validate::scale_tests::a_call_chain_to_the_bound_is_admitted_and_past_it_refused",
+                "validate::scale_tests::bindings_to_the_bound_are_admitted_and_past_it_refused",
+                "validate::scale_tests::globals_to_the_bound_are_admitted_and_past_it_refused",
+                "validate::scale_tests::locals_to_the_bound_are_admitted_and_past_it_refused",
+                "validate::scale_tests::members_and_cases_to_the_bound_are_admitted_and_past_it_refused",
+                "validate::cfg::ladder_tests::the_ladder_agrees_with_the_parents_on_a_chain_as_deep_as_nesting_goes",
+            ],
+            reason: "each builds modules at one of the validator's fixed bounds and one past it, \
+                     a hundred thousand selections in sequence, or a construct ladder as deep as \
+                     nesting goes, so its extent is its assertion, and there it costs minutes to \
+                     hours interpreted. The crate holds no `unsafe`, the tests kept take the same \
+                     paths below each bound at small scale, and all eight run in full under the \
+                     ordinary test matrix; the `fuzz_spirv` harness is enrolled beside the \
+                     library",
+        },
+        spread: Spread::Sharded(
+            "interpreted, its tests cost twenty minutes in one process, most of it assembling, \
+             decoding and validating each test's modules",
+        ),
+    },
+    Target {
+        package: "tairix-spirv",
+        description: "the decoder and validator held total and deterministic over mutated \
+                      modules, interpreted",
+        features: &[],
+        scope: Scope::Test {
+            name: "fuzz_spirv",
+            reason: "a binary of its own, so it cannot share the sharded library's listing",
+        },
         spread: Spread::OneProcess,
     },
     Target {

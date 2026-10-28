@@ -30,7 +30,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP0 | This plan, `plans/SHADER.md`, the jump-sheet rows, the §3 map entries, the `PLAN.md` section | done |
 | GP1 | `drivers/display/gpu_virtio`: the 2D driver — `register`, `BIND_KEYS`, resources, scanout, and the flip-completion interrupt | done: delivered by `plans/FIX-DISPLAY-ACCELERATION.md` C |
 | GP2 | The memory and submission model in `lib/gpu`: contexts as the unit of isolation, typed allocations charged to a context and a heap, buffers made for stated uses, submissions checked whole, in-order queues, timelines and fences, deadlines and the engine reset — software-complete | done |
-| GP3 | `lib/gpu`: the device-neutral **render and compute** vocabulary, and the software backend — including the tile-wide SPIR-V interpreter that makes it complete rather than render-only | blocked: `plans/SHADER.md` SH2 |
+| GP3 | `lib/gpu`: the device-neutral **render and compute** vocabulary, and the software backend — including the tile-wide SPIR-V interpreter that makes it complete rather than render-only | planned |
 | GP4 | The pinned first-party pipeline set: OS chrome and the game's passes as build-time SPIR-V, with the conformance suite | planned |
 | GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | planned |
 | GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | planned |

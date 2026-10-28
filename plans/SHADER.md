@@ -24,7 +24,7 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 |---|---|---|---|
 | SH0 | This plan, the jump-sheet row, the §3 map entries, the `PLAN.md` section | done | — |
 | SH1 | `lib/spirv`: the module model, and the total, bounded binary decoder and encoder | done | SH2 |
-| SH2 | The validator: the capability allow-list, the addressing-model refusal, structural control flow, types, and resource binding | planned | GP3 |
+| SH2 | The validator: the capability allow-list, the addressing-model refusal, structural control flow, types, and resource binding | done | GP3 |
 | SH3 | The builder: a Rust API that emits validated modules, plus `cargo xtask shaders` and the pinned first-party set | planned | GP4 |
 | SH4 | The compile sandbox: the service process, its request/answer protocol, its capability floor, and containment on crash | planned | GP8 |
 | SH5 | `lib/wgsl`: the WGSL front end — lexer, parser, resolver, and SPIR-V emission | planned | GP8 |
@@ -135,6 +135,120 @@ so a module may loop forever; that is contained by `plans/GPU.md` GP2's
 submission deadline and device reset, which turns a hang into a lost context
 rather than a wedged machine. Stating this plainly is the point — a plan that
 implied the validator prevented it would be lying about its own guarantee.
+
+The validator is `lib/spirv/src/validate/`. `Admitted::new` answers either an
+`Admitted` module or a `Refusal`. An `Admitted` module carries the capabilities
+it declares, with those they imply, and an `EntryPoint` for each entry point. A
+`Refusal` names the word at fault and the `Rule` broken.
+`docs/src/lib/spirv.md` tabulates each check against its rule.
+
+An `EntryPoint` states what a pipeline must provide:
+- its stage and workgroup size;
+- each `Binding`: set, binding, `BindingKind`, count and `Access`;
+- its push-constant bytes;
+- each `Varying` its stage interface occupies.
+
+`EntryPoint::agree` is the resource-binding agreement, decided against a
+pipeline `Layout` when the pipeline is created (`plans/GPU.md` GP3, GP8).
+
+Structured control flow is judged over the dominator and post-dominator trees
+of the structured graph, each construct a difference of dominator subtrees.
+Every pointer access is charged to the memory object it is rooted in, and that
+charge is folded through calls.
+
+### 2.1 The environment
+
+The validator admits SPIR-V's own rules plus the Vulkan environment's
+standalone rules, because TAIRiX's object model is Vulkan's and the Venus
+backend hands an admitted module to a host Vulkan driver unchanged. Where the
+Vulkan runtime rules make a form depend on a device feature, the portable form
+is the only one admitted, so a module that passes runs on every backend.
+
+**Versions 1.3 to 1.6.** 1.3 is the Vulkan 1.1 baseline: the storage-buffer
+storage class, 16-bit storage and the subgroup operations are core there, so
+no back-porting extension is needed. Admitted extensions are those that only
+restate that core (`SPV_KHR_storage_buffer_storage_class`,
+`SPV_KHR_16bit_storage`) and `SPV_KHR_terminate_invocation`, which brings
+`OpTerminateInvocation` to 1.3–1.5. Addressing is `Logical` and the memory
+model `GLSL450`.
+
+**The capability allow-list.** A declared capability outside it is refused,
+and so is every instruction and enumerant no admitted capability, version or
+extension enables.
+
+| Capability | Why it is admitted |
+|---|---|
+| `Shader`, and the `Matrix` it implies | The graphics and compute model: vertex, fragment and compute entry points, structured control flow, descriptor-bound resources. |
+| `Int64`, `Float64` | 64-bit arithmetic: the seed-pure generators' 64-bit mixing and double-precision accumulation, so a compute port agrees with its CPU reference. |
+| `Int16`, `Float16` | Half-width arithmetic for bandwidth-bound passes: particles, blur. |
+| `StorageBuffer16BitAccess`, `UniformAndStorageBuffer16BitAccess`, `StoragePushConstant16`, `StorageInputOutput16` | 16-bit data in buffers, push constants and the stage interface, without widening it in memory. |
+| `Sampled1D`, `Image1D` | One-dimensional lookups: the theme's ramps and palettes. |
+| `SampledBuffer`, `ImageBuffer` | Texel buffers: large linear tables such as terrain heights and material weights. |
+| `SampledCubeArray`, `ImageCubeArray` | Cube-map arrays: point-light shadows in the light pass. |
+| `ImageQuery` | A pass sizing its sampling from the bound image: the frost, blurs. |
+| `ImageGatherExtended` | Gathers at computed offsets: filtered shadows. |
+| `StorageImageExtendedFormats` | One- and two-channel storage images: the frost field, height maps. |
+| `StorageImageReadWithoutFormat`, `StorageImageWriteWithoutFormat` | One compute pass for every pixel format a display offers. |
+| `GroupNonUniform`, `GroupNonUniformVote`, `GroupNonUniformBallot`, `GroupNonUniformArithmetic` | Subgroup reductions: exposure histograms, particle compaction. |
+
+Kernel and OpenCL, physical addressing and variable pointers, the Vulkan memory
+model, descriptor indexing, 8-bit types, geometry and tessellation, mesh and
+ray tracing stay refused until a consumer states its reason. Which admitted
+capabilities a device supports is the backend's to state at pipeline creation
+(`plans/GPU.md` GP3); the admitted module names the ones it declares.
+
+**Refused although SPIR-V admits them**, each for the reason given:
+
+- `BufferBlock`, decoration groups and the `Simple` memory model — deprecated;
+  each has one current form.
+- An array whose length is a specialization constant — so every size the
+  validator and the pipeline check is final: specialization changes values,
+  never shapes.
+- Each of these needs a device feature not every device has:
+  - `LocalSizeId`;
+  - a `Workgroup` variable's initializer;
+  - a non-constant image `Offset` outside a gather;
+  - the `Offsets` image operand;
+  - an index into an array of descriptors that is not a constant;
+  - bit-field and bit-count instructions on anything but 32-bit integers;
+  - atomics on anything but 32-bit integers;
+  - subgroup operations on anything but Booleans, 32-bit integers, and 32-
+    or 64-bit floats.
+- A constant index past an array's fixed length — such an access has no
+  defined result.
+- A texel offset outside −8 to 7, or one a specialization could move — every
+  device's limits take that range, and no wider one.
+- Two resource variables of one entry point at one set and binding — one
+  binding names one resource, so agreement with a layout is decided once.
+- `OpPtrEqual` and `OpPtrNotEqual` — a logical pointer has no identity to
+  compare.
+- `OpDecorateString` and `OpMemberDecorateString`, and the reflection
+  decorations `UserSemantic` and `CounterBuffer` — they serve a front end's
+  reflection, and no driver reads them.
+- `SequentiallyConsistent` memory semantics, and the `SubgroupMemory` and
+  `CrossWorkgroupMemory` bits. The Vulkan environment treats the first as
+  `AcquireRelease` and ignores the other two, so each would promise what no
+  device does.
+- A structure with no members in a stage interface — every interface value
+  must occupy a location, so that the location bound also bounds the
+  interface analysis.
+
+**Admitted though its capability is not declared:** a `ClipDistance` or
+`CullDistance` member of a built-in block, as glslang declares in every
+`gl_PerVertex`. Such a member is latent: reading or writing it, or the whole
+block, is refused.
+
+**Bounds** (fixed; §24.4). The specification's universal limits are the
+validator's: 65,535 characters in a string, 16,383 members in a structure and
+pairs in a switch, 255 indexes in an access chain, extraction or insertion,
+255 function parameters and call arguments, 255 composite nesting levels, 1,023
+control-flow nesting levels, 65,535 global and 524,287 local variables, 255
+execution modes per entry point. TAIRiX adds 64 entry points per module (the
+interface analysis walks the module once for each), a call depth of 255 (the
+interpreter's frame stack), 1,024 resource bindings per entry point (past any
+device's per-stage limit without descriptor indexing), and 64 interface
+locations each for a stage's inputs and its outputs (no device's limits reach
+further).
 
 ## 3. SH3 — the builder and the pinned set
 
@@ -254,17 +368,13 @@ why it is its own item rather than a note inside the validator.
 
 ## 9. Open decisions
 
-1. **The capability allow-list's initial contents.** It should start at what the
-   pinned set and a first third-party consumer need, and grow with a stated
-   reason per entry. Fixing the list now, before either exists, would be
-   speculative (§2.4).
-2. **Whether WGSL conformance fixtures count as authored non-Rust source.** The
+1. **Whether WGSL conformance fixtures count as authored non-Rust source.** The
    front end's test corpus is WGSL text. It is test *data* for a parser of
    third-party input, not TAIRiX source, which is why SH5 is not read as a §1
    violation — but it is a judgement call and is recorded rather than assumed.
    If the answer is that it is one, the fixtures are generated from Rust
    descriptions instead, at some cost in expressiveness.
-3. **Whether a module cache is worth its risk.** Caching compiled modules across
+2. **Whether a module cache is worth its risk.** Caching compiled modules across
    runs saves real time on a large application and introduces a persistent
    artefact an attacker may try to poison. If it lands, the cache is keyed on a
    hash of the validated module and revalidated on load — never trusted because

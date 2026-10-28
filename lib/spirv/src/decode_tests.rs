@@ -1,22 +1,25 @@
 use alloc::vec::Vec;
 
 use super::decode;
+use crate::enumerant::{
+    AddressingModel, BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, MemoryAccess,
+    MemoryModel, Scope, StorageClass,
+};
 use crate::{Arg, DecodeError, EncodeError, Encoder, Fault, Id, Kind, Module, Op, Value, Version};
 
 const V1_0: Version = Version { major: 1, minor: 0 };
 
-// Enumerant values the modules below use, as the SPIR-V specification numbers
-// them.
-const SHADER: u32 = 1;
-const LOGICAL: u32 = 0;
-const GLSL450: u32 = 1;
-const GL_COMPUTE: u32 = 5;
-const LOCAL_SIZE: u32 = 17;
-const SPEC_ID: u32 = 1;
-const BUILT_IN: u32 = 11;
-const GLOBAL_INVOCATION_ID: u32 = 28;
-const FUNCTION_STORAGE: u32 = 7;
-const MEMORY_ACCESS_ALIGNED: u32 = 2;
+const SHADER: u32 = Capability::SHADER.0;
+const LOGICAL: u32 = AddressingModel::LOGICAL.0;
+const GLSL450: u32 = MemoryModel::GLSL450.0;
+const GL_COMPUTE: u32 = ExecutionModel::GL_COMPUTE.0;
+const LOCAL_SIZE: u32 = ExecutionMode::LOCAL_SIZE.0;
+const SPEC_ID: u32 = Decoration::SPEC_ID.0;
+const BUILT_IN: u32 = Decoration::BUILT_IN.0;
+const GLOBAL_INVOCATION_ID: u32 = BuiltIn::GLOBAL_INVOCATION_ID.0;
+const FUNCTION_STORAGE: u32 = StorageClass::FUNCTION.0;
+const MEMORY_ACCESS_ALIGNED: u32 = MemoryAccess::ALIGNED.0;
+/// `GLSL.std.450`'s `Round`.
 const ROUND: u32 = 1;
 
 fn encode(build: impl FnOnce(&mut Encoder) -> Result<(), EncodeError>) -> Vec<u8> {
@@ -472,6 +475,34 @@ fn an_opcode_the_grammar_does_not_recognise_is_refused() {
     let mut bytes = shader().0;
     bytes.extend_from_slice(&first_word(1, vendor).to_le_bytes());
     assert_eq!(fault(&bytes), Fault::UnknownOpcode);
+}
+
+#[test]
+fn a_core_instruction_a_vendor_extension_first_brought_is_recognised() {
+    let bytes = encode(|e| {
+        let ty = e.next_id()?;
+        let scope = e.next_id()?;
+        e.emit(Op::CAPABILITY, &[Arg::Word(SHADER)])?;
+        e.emit(Op::MEMORY_MODEL, &[Arg::Word(LOGICAL), Arg::Word(GLSL450)])?;
+        e.emit(
+            Op::DECORATE_ID,
+            &[
+                Arg::Id(scope),
+                Arg::Word(Decoration::UNIFORM_ID.0),
+                Arg::Id(scope),
+            ],
+        )?;
+        e.emit(Op::TYPE_INT, &[Arg::Id(ty), Arg::Word(32), Arg::Word(0)])?;
+        e.emit(
+            Op::CONSTANT,
+            &[Arg::Id(ty), Arg::Id(scope), Arg::Word(Scope::SUBGROUP.0)],
+        )
+    });
+    let module = Module::decode(&bytes).expect("decoded");
+    assert_eq!(
+        module.instructions().get(2).map(|i| i.op()),
+        Some(Op::DECORATE_ID)
+    );
 }
 
 #[test]

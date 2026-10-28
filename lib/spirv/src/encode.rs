@@ -114,15 +114,19 @@ impl Encoder {
     pub fn emit(&mut self, op: Op, args: &[Arg<'_>]) -> Result<(), EncodeError> {
         let mut words = 1usize;
         for arg in args {
-            match arg {
-                Arg::Id(id) if id.get() >= self.bound => return Err(EncodeError::IdNotIssued),
-                Arg::Text(text) if text.bytes().any(|b| b == 0) => {
-                    return Err(EncodeError::InteriorNul)
-                }
-                _ => words += arg.words(),
+            if matches!(arg, Arg::Id(id) if id.get() >= self.bound) {
+                return Err(EncodeError::IdNotIssued);
             }
+            words += arg.words();
         }
         let count = u16::try_from(words).map_err(|_| EncodeError::TooLong)?;
+        // An over-long string is refused by its length, unread.
+        if args
+            .iter()
+            .any(|arg| matches!(arg, Arg::Text(text) if text.as_bytes().contains(&0)))
+        {
+            return Err(EncodeError::InteriorNul);
+        }
         self.reserve(words)?;
         self.put(u32::from(count) << 16 | u32::from(op.code()));
         for arg in args {

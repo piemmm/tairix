@@ -4623,6 +4623,7 @@ name = "tairix-spirv"
 version = "0.0.0"
 dependencies = [
  "tairix-fuzzseed",
+ "tairix-util",
 ]
 
 [[package]]

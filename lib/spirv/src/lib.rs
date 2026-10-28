@@ -1,6 +1,6 @@
-//! SPIR-V shader modules: the checked model the validator, the builder and
-//! the GPU backends share, its total and bounded decoder, and its encoder
-//! (`plans/SHADER.md` SH1).
+//! SPIR-V shader modules: the checked model the builder and the GPU backends
+//! share, its total and bounded decoder and validator, and its encoder
+//! (`plans/SHADER.md` SH1, SH2).
 //!
 //! # What the decoder guarantees
 //!
@@ -32,8 +32,30 @@
 //! capability is itself unrecognised is refused as unknown. Of extended
 //! instruction sets it recognises `GLSL.std.450`.
 //!
-//! What a module means — its types, control flow, capabilities and bindings —
-//! is the validator's to judge, not the decoder's.
+//! # What the validator guarantees
+//!
+//! [`Admitted::new`] takes a decoded module and either refuses it, naming the
+//! instruction at fault and the [`Rule`] it broke, or answers an [`Admitted`]
+//! module in which:
+//!
+//! - the version is 1.3 to 1.6, and every capability, extension, instruction
+//!   and enumerant is on the allow-lists or enabled by what is;
+//! - addressing is logical and the memory model `GLSL450`;
+//! - every id is defined, referenced ahead of its definition only where
+//!   SPIR-V allows, local to its own function, and dominates its uses;
+//! - every type is well formed, and every operand and result typed as the
+//!   specification gives;
+//! - every pointer is rooted in a declared variable, and no memory is
+//!   written or read where it may not be;
+//! - control flow is structured, and the call graph acyclic and bounded;
+//! - every entry point's interface, built-ins, locations, execution modes and
+//!   resources are complete and consistent;
+//! - every bound (`MAX_*`) holds.
+//!
+//! Each [`EntryPoint`] states what a pipeline must provide it, and
+//! [`EntryPoint::agree`] decides a layout against it. Termination is not
+//! claimed: an admitted module may loop forever, and the submission deadline
+//! contains it.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -46,6 +68,7 @@ mod encode;
 mod error;
 mod grammar;
 mod module;
+mod validate;
 // Generated, so laid out by its generator.
 #[rustfmt::skip]
 mod tables;
@@ -53,7 +76,13 @@ mod tables;
 pub use encode::{Arg, Encoder};
 pub use error::{DecodeError, EncodeError, Fault};
 pub use module::{Id, Instruction, Module, Op, Operand, Value, Version};
-pub use tables::Kind;
+pub use tables::{enumerant, Kind};
+pub use validate::{
+    Access, Admitted, Binding, BindingKind, Component, Disagreement, EntryPoint, ImageShape,
+    Layout, Limit, Refusal, Rule, Stage, Varying, WorkgroupSize, MAX_BINDINGS, MAX_CALL_DEPTH,
+    MAX_ENTRY_POINTS, MAX_GLOBALS, MAX_INDEXES, MAX_LOCALS, MAX_LOCATIONS, MAX_MEMBERS, MAX_MODES,
+    MAX_NESTING, MAX_STRING, MAX_TYPE_DEPTH,
+};
 
 /// The largest module decoded or encoded, in bytes.
 pub const MAX_MODULE_BYTES: usize = 16 << 20;

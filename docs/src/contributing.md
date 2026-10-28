@@ -52,7 +52,7 @@ produced, which names the test it was in. A measured warm run:
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 2 feature-lane + 17 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 226 guests + 3 fixture cross-compiles) | 681 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s and `kernel/core`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s, `kernel/core`'s and `lib/spirv`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
 program, so libtest takes a crate's tests one after another whatever the host

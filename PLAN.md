@@ -147,7 +147,7 @@ plan's ledger. A `blocked` row names its blocker.
 | SOUND | The audio stack and the `dmaengine-v1` DMA-engine seam (`plans/SOUND.md`) | in progress |
 | FIX-DISPLAY-ACCELERATION | Driver-allocated scan-out, hardware layers and the cursor plane, `gpu_virtio`, and the console a display hosts (`plans/FIX-DISPLAY-ACCELERATION.md`) | done |
 | GPU | The `lib/gpu` render and compute seam and its backends (`plans/GPU.md`) | in progress |
-| SHADER | SPIR-V, its validator, and the WGSL front end (`plans/SHADER.md`) | planned |
+| SHADER | SPIR-V, its validator, and the WGSL front end (`plans/SHADER.md`) | in progress |
 
 ### Networking and remote access
 
@@ -291,8 +291,8 @@ traits, which every user-space filesystem driver serves its volume through),
 `lib/gpu` (the device-neutral GPU seam's memory and submission model and the
 software device implementing it on every target, `plans/GPU.md`),
 `lib/spirv` (the one reading of a SPIR-V shader module: the checked model, its
-total and bounded decoder over the generated Khronos grammar, and its encoder,
-`plans/SHADER.md`),
+total and bounded decoder over the generated Khronos grammar, its validator,
+and its encoder, `plans/SHADER.md`),
 and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its

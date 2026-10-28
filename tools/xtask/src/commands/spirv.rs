@@ -77,6 +77,10 @@ const COMPOSITES: [(&str, [&str; 2]); 3] = [
     ("PairIdRefIdRef", ["IdRef", "IdRef"]),
 ];
 
+/// The enumerated kinds no operand names, whose values `IdScope` and
+/// `IdMemorySemantics` operands carry as constants.
+const CARRIED: [&str; 2] = ["Scope", "MemorySemantics"];
+
 pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
     let write = match args {
         [] => false,
@@ -151,43 +155,59 @@ fn value_of(value: &Json, what: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("spirv: {what} has no 32-bit value"))
 }
 
+/// The capabilities the grammar recognises, each name it goes by mapped to
+/// the one it is declared under.
+struct Capabilities(BTreeMap<String, String>);
+
+impl Capabilities {
+    fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
+    fn canonical(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+}
+
 /// Whether the grammar recognises `item` given the capabilities it does: not
-/// provisional, enabled by the core or a Khronos extension, and reachable
-/// through a recognised capability where it names any.
-fn recognised(item: &Json, capabilities: &BTreeSet<String>) -> bool {
+/// provisional, part of the core from some version or else enabled by a
+/// Khronos extension, and reachable through a recognised capability where it
+/// names any. What a vendor's extension brought into the core is the core's.
+fn recognised(item: &Json, capabilities: &Capabilities) -> bool {
     if item.get("provisional").and_then(Json::as_bool) == Some(true) {
         return false;
     }
+    let core = item.get("version").and_then(Json::as_str) != Some("None");
     let extensions = names(item, "extensions");
-    let khronos = extensions.is_empty()
+    let khronos = core
+        || extensions.is_empty()
         || extensions
             .iter()
             .any(|e| e.starts_with("SPV_KHR_") || e.starts_with("SPV_EXT_"));
     let needs = names(item, "capabilities");
-    khronos && (needs.is_empty() || needs.iter().any(|c| capabilities.contains(*c)))
+    khronos && (needs.is_empty() || needs.iter().any(|c| capabilities.contains(c)))
 }
 
 /// The capabilities the grammar recognises: each reachable from the core
 /// through capabilities recognised before it, under every name it goes by.
-fn recognised_capabilities(kinds: &[Json]) -> Result<BTreeSet<String>, String> {
+fn recognised_capabilities(kinds: &[Json]) -> Result<Capabilities, String> {
     let capability = kinds
         .iter()
         .find(|k| k.get("kind").and_then(Json::as_str) == Some("Capability"))
         .ok_or("spirv: the grammar has no Capability kind")?;
     let enumerants = list(capability, "enumerants");
-    let mut kept = BTreeSet::new();
+    let mut kept = Capabilities(BTreeMap::new());
     loop {
-        let before = kept.len();
+        let before = kept.0.len();
         for enumerant in enumerants {
             let name = text(enumerant, "enumerant", "a capability")?;
             if !kept.contains(name) && recognised(enumerant, &kept) {
-                kept.insert(name.to_string());
-                for alias in names(enumerant, "aliases") {
-                    kept.insert(alias.to_string());
+                for alias in names(enumerant, "aliases").into_iter().chain([name]) {
+                    kept.0.insert(alias.to_string(), name.to_string());
                 }
             }
         }
-        if kept.len() == before {
+        if kept.0.len() == before {
             return Ok(kept);
         }
     }
@@ -214,8 +234,9 @@ fn upper_snake(name: &str) -> String {
         if i > 0 && c.is_ascii_uppercase() {
             let before = chars[i - 1];
             let lower_after = chars.get(i + 1).is_some_and(char::is_ascii_lowercase);
+            let last = i + 1 == chars.len();
             if before.is_ascii_lowercase()
-                || before.is_ascii_digit()
+                || (before.is_ascii_digit() && !last)
                 || (before.is_ascii_uppercase() && lower_after)
             {
                 out.push('_');
@@ -232,22 +253,79 @@ struct Operand {
     quantity: &'static str,
 }
 
+/// What enables an instruction or enumerant: any one of `capabilities` (for
+/// a capability, those it implicitly declares), and from `version` on — or,
+/// before it, any one of `extensions`; `version` is `None` where only an
+/// extension does. `last` is the newest version it exists in.
+struct Gate {
+    capabilities: Vec<String>,
+    extensions: Vec<String>,
+    version: Option<(u8, u8)>,
+    last: Option<(u8, u8)>,
+}
+
 struct Instruction {
     opcode: u32,
     name: String,
     operands: Vec<Operand>,
+    gate: Gate,
 }
 
 struct Enumerant {
     value: u32,
+    name: String,
     parameters: Vec<String>,
+    gate: Gate,
+}
+
+struct ExtInst {
+    number: u32,
+    operands: usize,
+    capabilities: Vec<String>,
 }
 
 struct Grammar {
     version: (u64, u64, u64),
     instructions: Vec<Instruction>,
     kinds: BTreeMap<String, (String, Vec<Enumerant>)>,
-    glsl: Vec<(u32, usize)>,
+    glsl: Vec<ExtInst>,
+}
+
+/// A `major.minor` version as the grammar spells it.
+fn version_of(spelled: &str, what: &str) -> Result<(u8, u8), String> {
+    spelled
+        .split_once('.')
+        .and_then(|(major, minor)| Some((major.parse().ok()?, minor.parse().ok()?)))
+        .ok_or_else(|| format!("spirv: {what} has version `{spelled}`"))
+}
+
+/// The gate of `item`, keeping the capabilities and extensions the grammar
+/// recognises.
+fn gate_of(item: &Json, capabilities: &Capabilities, what: &str) -> Result<Gate, String> {
+    let version = match item.get("version").and_then(Json::as_str) {
+        None => Some((1, 0)),
+        Some("None") => None,
+        Some(spelled) => Some(version_of(spelled, what)?),
+    };
+    let last = item
+        .get("lastVersion")
+        .and_then(Json::as_str)
+        .map(|spelled| version_of(spelled, what))
+        .transpose()?;
+    Ok(Gate {
+        capabilities: names(item, "capabilities")
+            .into_iter()
+            .filter_map(|c| capabilities.canonical(c))
+            .map(str::to_string)
+            .collect(),
+        extensions: names(item, "extensions")
+            .into_iter()
+            .filter(|e| e.starts_with("SPV_KHR_") || e.starts_with("SPV_EXT_"))
+            .map(str::to_string)
+            .collect(),
+        version,
+        last,
+    })
 }
 
 fn operand(value: &Json, what: &str) -> Result<Operand, String> {
@@ -312,15 +390,12 @@ fn parse(core: &str, glsl: &str) -> Result<Grammar, String> {
         version,
         instructions,
         kinds,
-        glsl: glsl_of(&json::parse(glsl)?)?,
+        glsl: glsl_of(&json::parse(glsl)?, &capabilities)?,
     })
 }
 
 /// Every instruction recognised, by ascending opcode.
-fn instructions_of(
-    core: &Json,
-    capabilities: &BTreeSet<String>,
-) -> Result<Vec<Instruction>, String> {
+fn instructions_of(core: &Json, capabilities: &Capabilities) -> Result<Vec<Instruction>, String> {
     let mut instructions = Vec::new();
     for item in list(core, "instructions") {
         if !recognised(item, capabilities) {
@@ -333,10 +408,12 @@ fn instructions_of(
             .map(|o| operand(o, &name))
             .collect::<Result<Vec<_>, _>>()?;
         check_operands(&name, &operands)?;
+        let gate = gate_of(item, capabilities, &name)?;
         instructions.push(Instruction {
             opcode,
             name,
             operands,
+            gate,
         });
     }
     instructions.sort_by_key(|i| i.opcode);
@@ -351,11 +428,12 @@ fn instructions_of(
 fn kinds_of(
     kinds: &[Json],
     instructions: &[Instruction],
-    capabilities: &BTreeSet<String>,
+    capabilities: &Capabilities,
 ) -> Result<BTreeMap<String, (String, Vec<Enumerant>)>, String> {
     let mut used: BTreeSet<String> = instructions
         .iter()
         .flat_map(|i| i.operands.iter().map(|o| o.kind.clone()))
+        .chain(CARRIED.iter().map(|k| (*k).to_string()))
         .collect();
     let by_name: BTreeMap<&str, &Json> = kinds
         .iter()
@@ -408,7 +486,7 @@ fn enumerants_of(
     json: &Json,
     kind: &str,
     category: &str,
-    capabilities: &BTreeSet<String>,
+    capabilities: &Capabilities,
 ) -> Result<Vec<Enumerant>, String> {
     let mut enumerants = Vec::new();
     for item in list(json, "enumerants") {
@@ -428,7 +506,12 @@ fn enumerants_of(
             }
             parameters.push(parameter.kind);
         }
-        enumerants.push(Enumerant { value, parameters });
+        enumerants.push(Enumerant {
+            value,
+            name: name.to_string(),
+            parameters,
+            gate: gate_of(item, capabilities, name)?,
+        });
     }
     enumerants.sort_by_key(|e| e.value);
     if enumerants.windows(2).any(|w| w[0].value == w[1].value) {
@@ -437,8 +520,9 @@ fn enumerants_of(
     Ok(enumerants)
 }
 
-/// Each `GLSL.std.450` instruction's number and how many ids it takes.
-fn glsl_of(glsl: &Json) -> Result<Vec<(u32, usize)>, String> {
+/// Each `GLSL.std.450` instruction's number, how many ids it takes, and the
+/// capabilities any one of which it needs.
+fn glsl_of(glsl: &Json, capabilities: &Capabilities) -> Result<Vec<ExtInst>, String> {
     let mut found = Vec::new();
     for item in list(glsl, "instructions") {
         let name = text(item, "opname", "a GLSL.std.450 instruction")?;
@@ -451,9 +535,20 @@ fn glsl_of(glsl: &Json) -> Result<Vec<(u32, usize)>, String> {
                 "spirv: GLSL.std.450 {name} takes more than plain ids"
             ));
         }
-        found.push((number, operands.len()));
+        let needs = names(item, "capabilities")
+            .into_iter()
+            .map(|c| capabilities.canonical(c).map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                format!("spirv: GLSL.std.450 {name} needs an unrecognised capability")
+            })?;
+        found.push(ExtInst {
+            number,
+            operands: operands.len(),
+            capabilities: needs,
+        });
     }
-    found.sort_by_key(|(number, _)| *number);
+    found.sort_by_key(|inst| inst.number);
     Ok(found)
 }
 
@@ -482,6 +577,7 @@ fn generate(root: &Path) -> Result<String, String> {
     read(root, &LICENSE)?;
     let grammar = parse(&read(root, &CORE)?, &read(root, &GLSL)?)?;
     let (major, minor, revision) = grammar.version;
+    let names = constant_names(&grammar.kinds)?;
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -491,16 +587,123 @@ fn generate(root: &Path) -> Result<String, String> {
          // in `lib/spirv/assets/` (SPIRV-Headers {RELEASE}; MIT, see `LICENSE`\n\
          // there). `cargo xtask spirv` (run by `ci`) fails closed if this file\n\
          // drifts from a fresh generation.\n\n\
-         use crate::grammar::{{Enumerant, ExtInst, Quantity, Shape, Spec}};\n\
-         use crate::Op;\n\n\
+         use crate::grammar::{{Enumerant, ExtInst, Gate, Quantity, Shape, Spec}};\n\
+         use crate::{{Op, Version}};\n\
+         use enumerant::Capability;\n\n\
          /// The grammar's SPIR-V version (revision {revision}), the newest a module may\n\
          /// declare.\n\
          pub(crate) const VERSION: (u8, u8) = ({major}, {minor});\n"
     );
+    emit_versions(&mut out, &grammar);
     emit_ops(&mut out, &grammar.instructions)?;
-    emit_kinds(&mut out, &grammar.kinds);
-    emit_tables(&mut out, &grammar);
+    emit_enumerants(&mut out, &grammar.kinds, &names)?;
+    emit_kinds(&mut out, &grammar.kinds, &names)?;
+    emit_tables(&mut out, &grammar, &names)?;
     Ok(out)
+}
+
+/// The gates of every instruction and enumerant.
+fn gates(grammar: &Grammar) -> impl Iterator<Item = &Gate> {
+    grammar.instructions.iter().map(|i| &i.gate).chain(
+        grammar
+            .kinds
+            .values()
+            .flat_map(|(_, enumerants)| enumerants.iter().map(|e| &e.gate)),
+    )
+}
+
+/// A constant per version a gate names, and the gate most entries share.
+fn emit_versions(w: &mut String, grammar: &Grammar) {
+    let used: BTreeSet<(u8, u8)> = gates(grammar)
+        .flat_map(|g| g.version.into_iter().chain(g.last))
+        .chain([(1, 0)])
+        .collect();
+    for (major, minor) in used {
+        let _ = writeln!(
+            w,
+            "const V{major}_{minor}: Option<Version> = \
+             Some(Version {{ major: {major}, minor: {minor} }});"
+        );
+    }
+    let _ = writeln!(
+        w,
+        "\n/// Core from the first version, needing nothing.\n\
+         const CORE: Gate = Gate {{ capabilities: &[], extensions: &[], version: V1_0, last: None }};\n"
+    );
+}
+
+/// `gate` as the tables write it.
+fn gate(gate: &Gate, names: &Names) -> Result<String, String> {
+    let version = |v: Option<(u8, u8)>| v.map_or("None".to_string(), |(a, b)| format!("V{a}_{b}"));
+    if gate.capabilities.is_empty()
+        && gate.extensions.is_empty()
+        && gate.version == Some((1, 0))
+        && gate.last.is_none()
+    {
+        return Ok("CORE".to_string());
+    }
+    let capabilities = gate
+        .capabilities
+        .iter()
+        .map(|c| capability(c, names))
+        .collect::<Result<Vec<_>, _>>()?;
+    let extensions: Vec<String> = gate.extensions.iter().map(|e| format!("\"{e}\"")).collect();
+    Ok(format!(
+        "Gate {{ capabilities: &[{}], extensions: &[{}], version: {}, last: {} }}",
+        capabilities.join(", "),
+        extensions.join(", "),
+        version(gate.version),
+        version(gate.last)
+    ))
+}
+
+/// The constant naming the capability `name`.
+fn capability(name: &str, names: &Names) -> Result<String, String> {
+    names
+        .capabilities
+        .get(name)
+        .map(|constant| format!("Capability::{constant}"))
+        .ok_or_else(|| format!("spirv: a gate names unknown capability {name}"))
+}
+
+/// Each enumerant's constant name within its kind, keyed by kind and value,
+/// and each capability's by its name.
+struct Names {
+    by_value: BTreeMap<(String, u32), String>,
+    capabilities: BTreeMap<String, String>,
+}
+
+fn constant_names(kinds: &BTreeMap<String, (String, Vec<Enumerant>)>) -> Result<Names, String> {
+    let mut names = Names {
+        by_value: BTreeMap::new(),
+        capabilities: BTreeMap::new(),
+    };
+    for (kind, (_, enumerants)) in kinds {
+        let mut seen = BTreeSet::new();
+        for enumerant in enumerants {
+            let constant = if enumerant.name.starts_with(|c: char| c.is_ascii_digit()) {
+                format!(
+                    "{}_{}",
+                    upper_snake(kind),
+                    enumerant.name.to_ascii_uppercase()
+                )
+            } else {
+                upper_snake(&enumerant.name)
+            };
+            if !seen.insert(constant.clone()) {
+                return Err(format!("spirv: two {kind} enumerants are both {constant}"));
+            }
+            if kind == "Capability" {
+                names
+                    .capabilities
+                    .insert(enumerant.name.clone(), constant.clone());
+            }
+            names
+                .by_value
+                .insert((kind.clone(), enumerant.value), constant);
+        }
+    }
+    Ok(names)
 }
 
 /// An associated constant on `Op` for each instruction.
@@ -527,8 +730,59 @@ fn emit_ops(w: &mut String, instructions: &[Instruction]) -> Result<(), String> 
     Ok(())
 }
 
+/// The `enumerant` module: a value type per enumerated kind, with a constant
+/// per recognised enumerant.
+fn emit_enumerants(
+    w: &mut String,
+    kinds: &BTreeMap<String, (String, Vec<Enumerant>)>,
+    names: &Names,
+) -> Result<(), String> {
+    let _ = writeln!(
+        w,
+        "pub mod enumerant {{\n    \
+         //! The values of the grammar's enumerated kinds, by name: a type per kind,\n    \
+         //! holding a value or, for a set of bits, a mask.\n"
+    );
+    for (kind, (category, enumerants)) in kinds {
+        if enumerants.is_empty() {
+            continue;
+        }
+        let what = if category == "BitEnum" {
+            "set of bits"
+        } else {
+            "value"
+        };
+        let _ = writeln!(
+            w,
+            "    /// A `{kind}` {what}.\n    \
+             #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]\n    \
+             pub struct {kind}(pub u32);\n\n    \
+             impl {kind} {{"
+        );
+        for enumerant in enumerants {
+            let constant = names
+                .by_value
+                .get(&(kind.clone(), enumerant.value))
+                .ok_or_else(|| format!("spirv: {kind} {} has no constant", enumerant.name))?;
+            let _ = writeln!(
+                w,
+                "        /// `{}`.\n        pub const {constant}: Self = Self({});",
+                enumerant.name,
+                hex(enumerant.value)
+            );
+        }
+        let _ = writeln!(w, "    }}\n");
+    }
+    let _ = writeln!(w, "}}\n");
+    Ok(())
+}
+
 /// The `Kind` enumeration, how the decoder reads each, and its enumerants.
-fn emit_kinds(w: &mut String, kinds: &BTreeMap<String, (String, Vec<Enumerant>)>) {
+fn emit_kinds(
+    w: &mut String,
+    kinds: &BTreeMap<String, (String, Vec<Enumerant>)>,
+    names: &Names,
+) -> Result<(), String> {
     let _ = writeln!(
         w,
         "/// A kind of operand the grammar names.\n\
@@ -584,17 +838,19 @@ fn emit_kinds(w: &mut String, kinds: &BTreeMap<String, (String, Vec<Enumerant>)>
                 .collect();
             let _ = writeln!(
                 w,
-                "    Enumerant {{ value: {}, parameters: &[{}] }},",
+                "    Enumerant {{ value: {}, parameters: &[{}], gate: {} }},",
                 hex(enumerant.value),
-                parameters.join(", ")
+                parameters.join(", "),
+                gate(&enumerant.gate, names)?
             );
         }
         let _ = writeln!(w, "];\n");
     }
+    Ok(())
 }
 
 /// The instruction and `GLSL.std.450` tables.
-fn emit_tables(w: &mut String, grammar: &Grammar) {
+fn emit_tables(w: &mut String, grammar: &Grammar, names: &Names) -> Result<(), String> {
     let _ = writeln!(
         w,
         "/// Every instruction recognised, by ascending opcode.\n\
@@ -609,10 +865,11 @@ fn emit_tables(w: &mut String, grammar: &Grammar) {
             .collect();
         let _ = writeln!(
             w,
-            "    Spec {{ op: Op({}), name: \"{}\", operands: &[{}] }},",
+            "    Spec {{ op: Op({}), name: \"{}\", operands: &[{}], gate: {} }},",
             instruction.opcode,
             instruction.name,
-            operands.join(", ")
+            operands.join(", "),
+            gate(&instruction.gate, names)?
         );
     }
     let _ = writeln!(
@@ -621,13 +878,22 @@ fn emit_tables(w: &mut String, grammar: &Grammar) {
          pub(crate) static GLSL_STD_450: [ExtInst; {}] = [",
         grammar.glsl.len()
     );
-    for (number, operands) in &grammar.glsl {
+    for inst in &grammar.glsl {
+        let capabilities = inst
+            .capabilities
+            .iter()
+            .map(|c| capability(c, names))
+            .collect::<Result<Vec<_>, _>>()?;
         let _ = writeln!(
             w,
-            "    ExtInst {{ number: {number}, operands: {operands} }},"
+            "    ExtInst {{ number: {}, operands: {}, capabilities: &[{}] }},",
+            inst.number,
+            inst.operands,
+            capabilities.join(", ")
         );
     }
     let _ = writeln!(w, "];");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -648,6 +914,12 @@ mod tests {
                 "IMAGE_SAMPLE_DREF_IMPLICIT_LOD",
             ),
             ("FPFastMathMode", "FP_FAST_MATH_MODE"),
+            ("Int64Atomics", "INT64_ATOMICS"),
+            ("StorageBuffer16BitAccess", "STORAGE_BUFFER16_BIT_ACCESS"),
+            ("Sampled1D", "SAMPLED1D"),
+            ("Rgb10A2", "RGB10_A2"),
+            ("Float8E4M3EXT", "FLOAT8_E4_M3_EXT"),
+            ("Rgba8Snorm", "RGBA8_SNORM"),
         ] {
             assert_eq!(upper_snake(name), constant, "{name}");
         }

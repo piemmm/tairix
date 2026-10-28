@@ -1,13 +1,14 @@
 # `tairix-spirv` — shader modules
 
-`lib/spirv` is the one reading of a SPIR-V module in the tree
-(`plans/SHADER.md`). The validator, the builder and the GPU backends share its
-model, so they cannot disagree about what a module holds; a second parse
-anywhere would be duplication.
+`lib/spirv` is the one reading of a SPIR-V module in the tree, and the one
+judgement of whether it may run (`plans/SHADER.md`). The builder and the GPU
+backends share its model, so nothing can disagree about what a module holds; a
+second parse or a second validator anywhere would be duplication.
 
 A module is untrusted input: an application supplies it, and it may have
-crossed a network. The decoder is the first parser between that input and the
-GPU, so it is total, bounded and strict.
+crossed a network. The decoder and the validator stand between that input and a
+driver's compiler, which trusts what it is given, so both are total, bounded
+and strict.
 
 ## Decoding
 
@@ -29,9 +30,8 @@ with a `DecodeError` naming the word at fault and a `Fault`, or answers a
 | a nested operation (`OpSpecConstantOp`) is one whose operands are fixed in shape | `UnknownOpcode` |
 | an import names `GLSL.std.450`, and an extended instruction an import, one of its instructions, and exactly its operands | `UnknownExtInstSet`, `UnknownExtInst`, `ExtInstArity` |
 
-Nothing more is judged here. Whether the module's types agree, its control flow
-is structured, its capabilities are admitted and its bindings match a pipeline
-is the validator's to decide (`plans/SHADER.md` SH2).
+Nothing more is judged here: what the module means is the validator's to
+decide.
 
 The decoder is **total and bounded**: no input panics it, and what it allocates
 follows the input's length, never a value the input chose. The first pass
@@ -72,13 +72,107 @@ add. An instruction or enumerant is left out — and a module using it refused a
 unrecognised — when it is provisional, when only a single vendor's extension
 enables it, or when every capability it names is itself unrecognised; the
 capabilities are closed over first, each recognised only if reachable from the
-core through recognised ones. That keeps 476 of the grammar's 877
+core through recognised ones. That keeps 490 of the grammar's 877
 instructions. The one extended instruction set recognised is `GLSL.std.450`.
+Each instruction and enumerant carries its gate for the validator to apply:
+the capabilities any one of which enables it, the version that made it core,
+the extensions that bring it to an earlier one, and the last version that has
+it.
 
 The generator refuses a grammar whose shape the decoder does not read: a
 required operand after an optional one, a repeated operand that is not last, a
 result placed anywhere but first, an operand kind of an unknown category, a
 quantified enumerant parameter, or a bit-set value of more than one bit.
+
+## Validation
+
+`Admitted::new` takes a decoded `Module`. It either refuses it with a
+`Refusal`, or answers an `Admitted` module. A refusal carries the first word of
+the instruction at fault (zero where the module as a whole is) and the `Rule`
+broken. An admitted module carries:
+- the module itself;
+- the capabilities it declares with those they imply, which is what a device
+  must support to run it;
+- its entry points.
+
+What is admitted is `plans/SHADER.md` §2.1: SPIR-V 1.3 to 1.6, the capability
+and extension allow-lists, the forms refused although SPIR-V allows them, and
+the fixed bounds.
+
+| Checked | Refused as |
+|---|---|
+| a version of 1.3 or later; every capability and extension on its allow-list; every instruction and enumerant enabled by a declared capability, the version or a declared extension | `Version`, `Capability`, `Extension`, `InstructionNotEnabled`, `EnumerantNotEnabled` |
+| logical addressing, the `GLSL450` memory model, an entry point, and every instruction in its section and place | `AddressingModel`, `MemoryModel`, `NoEntryPoint`, `Layout`, `NotAdmitted` |
+| every id defined, of the sort its operand names, local to its own function, and dominating its uses | `Undefined`, `ForwardReference`, `OtherFunction`, `WrongKind`, `NotDominated` |
+| types well formed; a non-aggregate type declared once; array lengths constant; a run-time array only as the last member of a storage buffer; each width only with its capability | `Type`, `DuplicateType`, `ArrayLength`, `RuntimeArray`, `Contents` |
+| constants and specialization operations typed | `Constant`, `SpecConstantOp` |
+| decorations only on what they may decorate, each once, none conflicting; buffers laid out by the Vulkan environment's extended alignment (uniform buffers) or base alignment (storage buffers, push constants) | `DecorationTarget`, `DuplicateDecoration`, `ConflictingDecorations`, `ExplicitLayout` |
+| variables in admitted storage classes, of types those allow; pointers logical; each access to memory that may be accessed that way | `StorageClass`, `VariableType`, `Initializer`, `LogicalPointer`, `AccessChain`, `NotWritable`, `NotReadable`, `OpaqueUse` |
+| every operand and result typed as the specification gives; scopes, memory semantics and image operands admitted | `OperandType`, `ResultType`, `OperandValue`, `Semantics`, `ImageOperands` |
+| structured control flow | `Block`, `BranchTarget`, `BlockOrder`, `Phi`, `Merge`, `MergeBlock`, `ContinueTarget`, `BackEdge`, `ConstructExit`, `ConstructEntry`, `Fallthrough`, `NoExit` |
+| calls matching their callees; no recursion; returns typed | `Call`, `Recursion`, `Return` |
+| each entry point's function, model, execution modes, interface, built-ins, locations and resources | `EntryPoint`, `ExecutionModel`, `ExecutionMode`, `Interface`, `BuiltIn`, `Location`, `Resource` |
+| every fixed bound, and the memory the analysis needs | `Limit`, `OutOfMemory` |
+
+**Structured control flow.** A function's branch edges form its structured
+graph once each header's merge and continue edges are added. The validator
+computes two trees over that graph:
+- dominators, by Lengauer and Tarjan's algorithm;
+- post-dominators, from a virtual exit that every termination reaches.
+
+A block the entry reaches but that reaches no termination is refused.
+
+The back edges are those of a depth-first walk. Each must go to a loop header
+that has exactly one, from a block its continue target dominates and
+post-dominates.
+
+In the structured graph a header immediately dominates its merge block, its
+continue target and its case targets. Each construct is therefore a difference
+of dominator subtrees, and one walk down the tree finds every block's innermost
+construct. Each branch edge is then checked against the exits and entries the
+rules allow, and each switch's fall-throughs against its targets' order.
+
+**Pointers and access.** Every pointer is rooted in a memory object
+declaration: a variable, a pointer parameter, or an image's texel. An access is
+charged to its root, and two kinds are refused:
+- a write to memory that may not be written: a uniform buffer, push constants,
+  an input, an image or sampler variable, or anything `NonWritable`;
+- a read from memory decorated `NonReadable`.
+
+A call charges each argument's root with what the callee does through that
+parameter, folded bottom-up over the call graph, and refuses the call where
+the root forbids that access. What an entry point reads and writes is
+therefore known, and held to its declarations, through any depth of calls.
+
+**Entry points.** Each `EntryPoint` states what a pipeline must provide it:
+- its stage and workgroup size;
+- the resource bindings its call tree statically uses, each as a set, binding,
+  `BindingKind`, descriptor count and `Access`;
+- the bytes of push constants it reads;
+- the locations its user-defined inputs and outputs occupy (`Varying`).
+
+`EntryPoint::agree` decides a pipeline layout against it. Every binding must be
+present, with:
+- the same kind and shape (a storage image of unknown format takes any);
+- at least as many descriptors as the entry point uses;
+- the access it uses.
+
+The layout must also have room for its push constants. The answer is the first
+`Disagreement` in ascending binding order.
+
+A built-in block may declare `ClipDistance` and `CullDistance` members without
+their capabilities, as glslang's `gl_PerVertex` does. Such a member is latent:
+reading or writing it, or the whole block, is refused.
+
+Like the decoder, the validator is total and bounded. No input panics it, and
+every allocation fails closed as `OutOfMemory`. Its walks over control flow and
+calls are iterative; it recurses only down a type's nesting, which
+`MAX_TYPE_DEPTH` caps. Its time grows with the module's length to within
+logarithmic factors, whatever the module's shape. The checks of each entry
+point run once for each of the at most 64. Each function's tables are reused
+for the next. It does not claim termination: an admitted module
+may loop forever, and the submission deadline contains it (`plans/GPU.md`
+GP2).
 
 ## Encoding
 
@@ -102,11 +196,32 @@ may hold, and a builder's mistake is a refusal at build time.
   one, constants of each width, a nested operation, an extended instruction,
   switches on 32- and 64-bit selectors — and replace one instruction at a time
   to exercise each refusal from a module that is otherwise valid.
-- `tests/fuzz_spirv.rs` (in `cargo xtask fuzz`) mutates valid modules — bits,
+- The validator's tests assemble modules from text (`src/validate/assemble.rs`).
+  Admitted whole: a vertex, a fragment and a compute shader, and the
+  control-flow shapes front ends emit. Refused, each from a module otherwise
+  admitted: every rule, and every exit from or entry into a construct the rules
+  forbid. A test fails if an instruction the allow-list enables is neither
+  checked nor refused by name, or an enabled `GLSL.std.450` instruction has no
+  typing rule. Each fixed bound is refused one past it, and admitted at it
+  wherever a module can reach it; the string bound is counted in characters,
+  not bytes. `scale_tests.rs` also builds shapes that would make super-linear
+  work explode: thousands of phis after a switch whose every case is its
+  merge, breaks out of the deepest nesting, nested continue constructs, deep
+  arrays of matrices, wide built-in and located blocks, and many entry points
+  sharing deep outputs. Each is decided in milliseconds; a regression shows as
+  a slow test, not a failing one.
+- `tests/fuzz_spirv.rs` (in `cargo xtask fuzz`) mutates valid modules: bits,
   boundary words, insertions, deletions, duplications, truncations, either byte
-  order — and holds the decoder total, its refusals within the module, and every
+  order. It holds the decoder total, its refusals within the module, and every
   accepted module to an exact re-encoding and an identical decode from either
-  byte order.
-- `cargo xtask miri` interprets the crate's tests and harness. The crate
-  forbids `unsafe`; loom has nothing to model, since nothing here is shared
-  between threads.
+  byte order. It holds the validator total and deterministic over every
+  accepted module, with its refusals within the module. Each admitted entry
+  point must agree with a layout of its own bindings, and be refused by one
+  missing the first of them.
+- `cargo xtask miri` interprets the crate's tests, dealt across the host's
+  cores, and the harness. It leaves out eight whose extent is their assertion
+  and costs minutes to hours interpreted: the bounds on nesting, call depth,
+  bindings, globals, locals, and members and cases, a hundred thousand
+  selections, and a ladder as deep as nesting goes. The ordinary matrix runs
+  those in full. The crate forbids `unsafe`; loom has nothing to model, since
+  nothing here is shared between threads.

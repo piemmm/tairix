@@ -221,6 +221,8 @@ const SOURCES: &[&str] = &[
     // and its source exchange.
     "CTA-861",
     "HDMI",
+    // The shader intermediate language the validator admits.
+    "SPIR-V",
     // Architectures and vendors whose manuals are cited by section.
     "Arm",
     "ARM",
@@ -810,6 +812,7 @@ mod tests {
             "//! Reference: Maxim DS3231 data sheet, §9 (register map).",
             "/// The Logical Screen Descriptor's fixed length (`GIF89a` §18).",
             "/// NDR 2.0 (C706 §14).",
+            "//! and the structured control-flow rules (SPIR-V 1.6 §2.11).",
         ] {
             assert!(
                 reasons(body).is_empty(),
