@@ -716,7 +716,7 @@ covered by the tests its stage lists.
   `create_link`, `link`, `attrs_fs`) are the ones a wrapper can refuse by
   omission — silently, fail-closed, with no test noticing. The property is
   stated once, in `kernel/core/src/fs/wrapper_conformance.rs`, and every
-  wrapper (`CachedFs`, `GroupMappedFs`, `Box<dyn KernelFs>`, the counting
+  wrapper (`CachedFs`, `PresentedFs`, `Box<dyn KernelFs>`, the counting
   test shim) runs that suite against a reference driver that supports
   everything; a wrapper that *replaces* a method asserts the replacement
   instead, so the divergence is declared. The suite's own premise — that

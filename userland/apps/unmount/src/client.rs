@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
-use tairix_abi::sysinfo::{MountAvailability, MOUNT_VOLUME_ID_LEN};
+use tairix_abi::sysinfo::{MountAvailability, VOLUME_ID_LEN};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{for_each_mount, Transport, WalkStep};
 
@@ -24,7 +24,7 @@ const OWN_WORD: &str = "unmount";
 /// The facts the resolver needs about the matched mount: the volume's
 /// stable identity and whether the listing already marks it unavailable.
 struct Resolved {
-    volume_id: [u8; MOUNT_VOLUME_ID_LEN],
+    volume_id: [u8; VOLUME_ID_LEN],
     unavailable: bool,
 }
 
@@ -66,7 +66,7 @@ pub fn run(
 
     let resolved =
         resolve(&name, transport)?.ok_or_else(|| UnmountError::NotFound(name.clone()))?;
-    if resolved.volume_id == [0u8; MOUNT_VOLUME_ID_LEN] {
+    if resolved.volume_id == [0u8; VOLUME_ID_LEN] {
         return Err(UnmountError::NotDetachable(name));
     }
     match detacher.detach(resolved.volume_id, force) {

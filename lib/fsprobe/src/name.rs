@@ -1,8 +1,9 @@
-//! The catalog-naming policy (`docs/src/drivers/block.md`).
+//! The catalog-naming policy (`docs/src/drivers/block.md`): the one the
+//! volume manager names a recognised volume by and the kernel names a network
+//! volume by (`plans/FSSERVE.md` §6).
 //!
-//! A recognised volume is published under `/Storage/<name>`, a name derived
-//! from the volume itself, never from its format or from what else is
-//! attached:
+//! A volume is published under `/Storage/<name>`, a name derived from the
+//! volume itself, never from its format or from what else is attached:
 //!
 //! 1. its **label**, read where its format keeps it, in kebab case: ASCII
 //!    letters lowercased, digits kept, each run of anything else one `-`,
@@ -21,10 +22,10 @@
 //! (`tairix_abi::volume::validate_volume_name`) by construction; the kernel
 //! still re-validates it.
 
+use crate::{fingerprint, FINGERPRINT_CHARS};
 use tairix_abi::blkio::BlkTransport;
 use tairix_abi::fs::ROOT_VIEW;
 use tairix_abi::volume::VOLUME_NAME_MAX;
-use tairix_fsprobe::{fingerprint, FINGERPRINT_CHARS};
 use tairix_path::RESOLVER_NAMES;
 use tairix_resref::KnownNamespace;
 

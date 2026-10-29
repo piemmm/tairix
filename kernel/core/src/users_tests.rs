@@ -197,6 +197,7 @@ fn valid_db_text() -> String {
     UsersDb::new(alloc::vec![record])
         .expect("valid db")
         .serialise()
+        .expect("serialises")
 }
 
 #[test]

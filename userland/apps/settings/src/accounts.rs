@@ -497,6 +497,8 @@ pub(crate) enum Unappliable {
     /// A staged value reached the argv builder that no tool can carry,
     /// which is a routing defect rather than anything the reader did.
     Unspellable,
+    /// The memory to spell the change in was not free.
+    Unheld,
 }
 
 impl Unappliable {
@@ -516,6 +518,9 @@ impl Unappliable {
                  and nothing was sent."
             }
             Self::Unspellable => "This change cannot be expressed as a command.",
+            Self::Unheld => {
+                "Not enough memory was free to prepare the change, so nothing was sent."
+            }
         }
     }
 }
@@ -868,7 +873,7 @@ fn password_run(
         tool: AccountTool::Password,
         argv: alloc::vec![
             String::from("--record"),
-            record.encode(),
+            record.encode().map_err(|_| Unappliable::Unheld)?,
             String::from("--"),
             String::from(username),
         ],

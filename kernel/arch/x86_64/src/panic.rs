@@ -16,7 +16,7 @@
 use core::fmt;
 use core::panic::{Location, PanicInfo};
 
-use tairix_arch_api::fatal::{self, KernelFault, Processor, Reporter};
+use tairix_arch_api::fatal::{self, Cause, KernelFault, Processor, Reporter};
 use tairix_arch_api::CpuStateCapture as _;
 
 use crate::backtrace::Backtracer;
@@ -38,7 +38,7 @@ pub fn refuse(reason: &str) -> ! {
 }
 
 fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> ! {
-    let entry = fatal::enter();
+    let entry = fatal::enter(&Cause::panic(location));
     REPORTER.panic(
         &mut fatal_com1(),
         entry,
@@ -56,7 +56,7 @@ fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> 
 /// this report's own: a vector delivered on an IST stack runs on a stack of
 /// its own, which says nothing about where the interrupted code's was.
 pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
-    let entry = fatal::enter();
+    let entry = fatal::enter(&Cause::Fault(*fault));
     REPORTER.fault(
         &mut fatal_com1(),
         entry,

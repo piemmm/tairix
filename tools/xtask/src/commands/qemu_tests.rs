@@ -17081,7 +17081,8 @@ fn planted_entry_index<S: tairix_browse::DirectorySource>(
 /// open lands, parsed with the same shared spelling the session parses `HOME`
 /// with.
 fn planted_home_components() -> Result<Vec<String>, String> {
-    let home = tairix_users::default_home(tairix_test_arxfs_image::USERS_FIXTURE_USERNAME);
+    let home = tairix_users::default_home(tairix_test_arxfs_image::USERS_FIXTURE_USERNAME)
+        .map_err(|e| format!("pick script: the planted home: {e}"))?;
     let home = tairix_browse::vfs::components_from_absolute_path(&home)
         .map_err(|e| format!("pick script: {home} is not a spellable path: {e:?}"))?;
     let [files, _] = tairix_browse::bare_open_places(&home);
@@ -19609,12 +19610,13 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
 
     let serial_log = sidecar_path(kernel, t, replica, "serial.log");
     remove_stale_sidecar(t.package, "serial log", &serial_log)?;
-    // The hang dump is removed too. It is written only when a run actually
-    // hangs, so leaving a stale one behind published the *previous* failure's
-    // guest CPU state beside this run's transcript — and the CI collector
-    // copies both. A reader then diagnosed two unrelated events as one.
-    let hang_state = sidecar_path(kernel, t, replica, "hang.txt");
-    remove_stale_sidecar(t.package, "hang dump", &hang_state)?;
+    // The CPU dump is removed too. It is written only when a run hangs or its
+    // kernel dies, so leaving a stale one behind published the *previous*
+    // failure's guest CPU state beside this run's transcript — and the CI
+    // collector copies both. A reader then diagnosed two unrelated events as
+    // one.
+    let cpu_dump = sidecar_path(kernel, t, replica, "cpu.txt");
+    remove_stale_sidecar(t.package, "cpu dump", &cpu_dump)?;
 
     // Always collect the peer's verdict, even when the run itself failed,
     // so the thread never outlives the run unjoined.
@@ -19635,7 +19637,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
             t,
             outcome,
             &serial_log,
-            &hang_state,
+            &cpu_dump,
             &screendump_paths,
             audio_capture
                 .as_ref()
@@ -19651,7 +19653,7 @@ fn pass_verdict(
     t: &QemuTest,
     outcome: Outcome,
     serial_log: &Path,
-    hang_state: &Path,
+    cpu_dump: &Path,
     screendump_paths: &[(PathBuf, ScreendumpAssert)],
     audio_capture: Option<(&Path, SoundCard)>,
 ) -> Result<(), String> {
@@ -19686,7 +19688,7 @@ fn pass_verdict(
             serial,
             cpu_state,
         } => {
-            let hang = persist_hang_state(t.package, hang_state, &cpu_state)?;
+            let hang = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
             Err(format!(
                 "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
@@ -19705,18 +19707,25 @@ fn pass_verdict(
             // service retrying on a timer), while a silence close to the
             // ceiling means the guest went quiet early and stalled — the
             // transcript's last line is then the stall point.
-            let hang = persist_hang_state(t.package, hang_state, &cpu_state)?;
+            let hang = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
             Err(format!(
                 "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
         }
-        Outcome::Fatal { record, serial } => Err(format!(
-            "test --qemu ({}) FATAL: the guest's kernel stopped: {record} (full serial: {})\n--- serial ---\n{serial}\n--- end ---",
-            t.package,
-            serial_log.display()
-        )),
+        Outcome::Fatal {
+            record,
+            serial,
+            cpu_state,
+        } => {
+            let dump = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
+            Err(format!(
+                "test --qemu ({}) FATAL: the guest's kernel stopped: {record} (full serial: {}; guest cpu state: {dump})\n--- serial ---\n{serial}\n--- guest cpu state at the record ---\n{cpu_state}\n--- end ---",
+                t.package,
+                serial_log.display()
+            ))
+        }
     }
 }
 
@@ -19777,7 +19786,7 @@ fn remove_stale_sidecar(package: &str, kind: &str, path: &Path) -> Result<(), St
         })
 }
 
-fn persist_hang_state(package: &str, path: &Path, cpu_state: &str) -> Result<String, String> {
+fn persist_cpu_state(package: &str, path: &Path, cpu_state: &str) -> Result<String, String> {
     std::fs::write(path, cpu_state).map_err(|e| {
         format!(
             "test --qemu ({package}): persist guest cpu state {}: {e}",
@@ -22254,6 +22263,7 @@ mod tests {
         Outcome::Fatal {
             record: record.to_string(),
             serial: String::from("boot\n"),
+            cpu_state: String::from("CPU#0\n"),
         }
     }
 

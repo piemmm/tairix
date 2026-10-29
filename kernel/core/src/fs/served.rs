@@ -19,6 +19,11 @@
 //! any later call is posted, and a pin the driver turns out to have granted,
 //! which no descriptor owns, is let go again. A release that cannot be sent
 //! meanwhile answers [`DriverError::Busy`], and the registration keeps it.
+//!
+//! A volume with other writers is served by several *lanes* ([`ServedFs::lanes`]):
+//! each is this proxy over the shared endpoint, moving its data through its
+//! own span of the window, so its quarantine and its holds are its own and a
+//! call on one lane never waits for another's.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -32,9 +37,10 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::fs::{SeekRegion, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_SYMLINK_MAX};
 use tairix_abi::fsserve::{
-    decode_reply, encode_request, Answer, DirEnd, Op, Request, ServeOffer, ServerState, Span,
-    FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX, FSSERVE_WINDOW_LEN,
+    decode_reply, encode_request, Answer, DirEnd, Lanes, Op, Request, ServeOffer, ServerState,
+    Span, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX, SERVED_IDLE_NS,
 };
+use tairix_abi::netattach::OfferId;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, Errno};
 use tairix_caps::CapabilitySet;
@@ -50,23 +56,15 @@ use crate::waitq::{
     WaitQueueArch, CALL_WAITQ, NO_DEADLINE,
 };
 
-/// How long a driver may go neither answering a call nor touching its
-/// volume before the call is abandoned.
-///
-/// A driver waiting on its device is working, however slow the device: the
-/// device's own deadline bounds each transfer. Ten seconds of neither is a
-/// driver that has stopped, not one that is computing.
-pub const SERVED_IDLE_NS: u64 = 10_000_000_000;
-
 /// The most entries one listing call hands its caller before the driver is
 /// taken to be inventing them: a directory this large is no removable
 /// volume's, and the bound keeps a hostile driver from holding a caller in an
 /// endless listing.
 const LISTING_MAX: usize = 1 << 24;
 
-/// How many calls a served volume's endpoint holds at once: the proxy has one
-/// call out at a time, and the release after a call it abandoned.
-pub const SERVED_ENDPOINT_CAPACITY: usize = 2;
+/// How many calls one lane of a served volume puts on its endpoint at once:
+/// one call out at a time, and the release after a call it abandoned.
+pub const LANE_ENDPOINT_CAPACITY: usize = 2;
 
 /// Where the synthetic identities the proxies post under are numbered from:
 /// readable in an audit record, and disjoint from every real process.
@@ -78,6 +76,9 @@ static NEXT_POSTER: AtomicU64 = AtomicU64::new(POSTER_BASE);
 /// The serial of the next endpoint the kernel creates for a served volume.
 static NEXT_SERVED_ENDPOINT: AtomicU32 = AtomicU32::new(0);
 
+/// The next network offer's id.
+static NEXT_OFFER: AtomicU64 = AtomicU64::new(1);
+
 /// A served-volume endpoint id no endpoint has held this boot, or `None` once
 /// the range is spent.
 #[must_use]
@@ -86,6 +87,16 @@ pub fn mint_served_endpoint() -> Option<u64> {
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
         .ok()
         .map(tairix_abi::fsserve::served_endpoint)
+}
+
+/// A network offer id no offer has held this boot, or `None` once the range is
+/// spent.
+#[must_use]
+pub fn mint_offer() -> Option<OfferId> {
+    NEXT_OFFER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .ok()
+        .and_then(OfferId::new)
 }
 
 /// What a served volume's driver is doing with its block grant, which is how
@@ -102,6 +113,12 @@ impl ServerActivity {
     pub fn enter(&self) -> ActivityGuard<'_> {
         self.busy.fetch_add(1, Ordering::Relaxed);
         ActivityGuard(self)
+    }
+
+    /// The driver showed life outside any transfer: a network server's word
+    /// that it is still working on the calls it holds.
+    pub fn touch(&self) {
+        self.progress.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A reading that changes whenever the driver makes progress, or `None`
@@ -240,10 +257,13 @@ impl From<Failed> for DriverError {
     }
 }
 
-/// A volume served by a user-space driver, seen as a filesystem driver.
+/// A volume served by a user-space driver, seen as a filesystem driver: one
+/// lane of it.
 pub struct ServedFs {
     endpoint: Arc<CallEndpoint>,
-    window: KernelHold,
+    window: Arc<KernelHold>,
+    /// The part of the window this lane moves data through.
+    span: Span,
     caps: TaskCapabilities,
     audit: &'static (dyn Sink + Sync),
     offer: ServeOffer,
@@ -272,17 +292,43 @@ impl ServedFs {
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for a window of any length but
-    /// [`FSSERVE_WINDOW_LEN`]; [`Errno::MessageTooLarge`] for an endpoint whose
+    /// [`FSSERVE_WINDOW_LEN`](tairix_abi::fsserve::FSSERVE_WINDOW_LEN);
+    /// [`Errno::MessageTooLarge`] for an endpoint whose
     /// frame bounds cannot carry the protocol; [`Errno::OutOfMemory`] if the
     /// request buffer cannot be allocated.
     pub fn new(
-        endpoint: Arc<CallEndpoint>,
+        endpoint: &Arc<CallEndpoint>,
         window: KernelHold,
         offer: ServeOffer,
-        activity: Arc<ServerActivity>,
+        activity: &Arc<ServerActivity>,
         audit: &'static (dyn Sink + Sync),
     ) -> Result<Self, Errno> {
-        if window.len() != FSSERVE_WINDOW_LEN {
+        let window = Arc::try_new(window).map_err(|_| Errno::OutOfMemory)?;
+        let mut lanes = Self::lanes(endpoint, &window, Lanes::ONE, offer, activity, audit)?;
+        lanes.pop().ok_or(Errno::OutOfRange)
+    }
+
+    /// Serve the volume the driver `offer`ed over `endpoint` by `lanes`
+    /// lanes, each moving file data through its own span of `window` and all
+    /// sharing the driver's liveness `activity` and the state it reports.
+    /// Dropped, the lanes leave the endpoint and the window as they found
+    /// them, so a refused attach can build them again.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a window of any length but the one
+    /// `lanes` divide; [`Errno::MessageTooLarge`] for an endpoint whose frame
+    /// bounds cannot carry the protocol; [`Errno::OutOfMemory`] if a lane
+    /// cannot be allocated.
+    pub fn lanes(
+        endpoint: &Arc<CallEndpoint>,
+        window: &Arc<KernelHold>,
+        lanes: Lanes,
+        offer: ServeOffer,
+        activity: &Arc<ServerActivity>,
+        audit: &'static (dyn Sink + Sync),
+    ) -> Result<Vec<Self>, Errno> {
+        if window.len() != lanes.window_len() {
             return Err(Errno::LengthOutOfRange);
         }
         if (endpoint.max_request() as usize) < FSSERVE_REQUEST_MAX
@@ -290,6 +336,36 @@ impl ServedFs {
         {
             return Err(Errno::MessageTooLarge);
         }
+        let state = Arc::try_new(ServedState::default()).map_err(|_| Errno::OutOfMemory)?;
+        let mut served = Vec::new();
+        served
+            .try_reserve_exact(lanes.count())
+            .map_err(|_| Errno::OutOfMemory)?;
+        for index in 0..lanes.count() {
+            let span = lanes.lane(index).ok_or(Errno::OutOfRange)?;
+            served.push(Self::lane(
+                Arc::clone(endpoint),
+                Arc::clone(window),
+                span,
+                offer,
+                Arc::clone(activity),
+                Arc::clone(&state),
+                audit,
+            )?);
+        }
+        Ok(served)
+    }
+
+    /// One lane over `span` of `window`.
+    fn lane(
+        endpoint: Arc<CallEndpoint>,
+        window: Arc<KernelHold>,
+        span: Span,
+        offer: ServeOffer,
+        activity: Arc<ServerActivity>,
+        state: Arc<ServedState>,
+        audit: &'static (dyn Sink + Sync),
+    ) -> Result<Self, Errno> {
         let mut frame = Vec::new();
         frame
             .try_reserve_exact(FSSERVE_REQUEST_MAX)
@@ -307,11 +383,12 @@ impl ServedFs {
         Ok(Self {
             endpoint,
             window,
+            span,
             caps,
             audit,
             offer,
             activity,
-            state: Arc::new(ServedState::default()),
+            state,
             quarantined: false,
             unsettled: None,
             class: AllocationClass::Ordinary,
@@ -358,9 +435,10 @@ impl ServedFs {
         take(self, answer)
     }
 
-    /// Prove the driver done with every call it was sent before this one.
+    /// Prove the driver done with every call it was sent before this one
+    /// through this lane's span.
     fn release(&mut self) -> Result<(), DriverError> {
-        let request = Request::Release;
+        let request = Request::Release { span: self.span };
         let bytes = self.call(&request)?;
         let Ok(reply) = decode_reply(&bytes, &request) else {
             self.misbehaved(AuditEvent::ServedReplyMalformed, Op::Release);
@@ -601,27 +679,35 @@ impl ServedFs {
         );
     }
 
-    /// Copy `data` into the window at its start.
+    /// Copy `data` into this lane's span.
     fn stage(&self, data: &[u8]) {
-        debug_assert!(data.len() <= self.window.len());
-        // SAFETY: `new` held the window to `FSSERVE_WINDOW_LEN` bytes and
-        // every caller bounds `data` by it. The copy goes through raw
-        // pointers, so no reference is formed over memory the driver shares;
-        // the source is a live kernel slice.
+        debug_assert!(data.len() <= self.span.size());
+        // SAFETY: `lanes` held the window to what its lanes divide, so the
+        // span lies inside it, and every caller bounds `data` by the span.
+        // The copy goes through raw pointers, so no reference is formed over
+        // memory the driver shares; the source is a live kernel slice.
         unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), self.window.as_ptr(), data.len());
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                self.window.as_ptr().add(self.span.offset()),
+                data.len(),
+            );
         }
     }
 
-    /// Copy the window's first `out.len()` bytes out.
+    /// Copy the first `out.len()` bytes of this lane's span out.
     fn unstage(&self, out: &mut [u8]) {
-        debug_assert!(out.len() <= self.window.len());
-        // SAFETY: as `stage`, bounded by the window's length, raw-pointer
-        // copy only, into a live kernel slice. The bytes are file data the
-        // driver vouches for; a torn write by a hostile driver yields wrong
-        // data, never unsafety.
+        debug_assert!(out.len() <= self.span.size());
+        // SAFETY: as `stage`, inside the span, raw-pointer copy only, into a
+        // live kernel slice. The bytes are file data the driver vouches for;
+        // a torn write by a hostile driver yields wrong data, never
+        // unsafety.
         unsafe {
-            core::ptr::copy_nonoverlapping(self.window.as_ptr(), out.as_mut_ptr(), out.len());
+            core::ptr::copy_nonoverlapping(
+                self.window.as_ptr().add(self.span.offset()),
+                out.as_mut_ptr(),
+                out.len(),
+            );
         }
     }
 }
@@ -716,8 +802,8 @@ impl FilesystemRead for ServedFs {
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         let mut done = 0;
         while done < buf.len() {
-            let want = (buf.len() - done).min(FSSERVE_WINDOW_LEN);
-            let span = Span::new(0, want).map_err(|_| DriverError::OutOfRange)?;
+            let want = (buf.len() - done).min(self.span.size());
+            let span = Span::new(self.span.offset(), want).map_err(|_| DriverError::OutOfRange)?;
             let offset = offset
                 .checked_add(done as u64)
                 .ok_or(DriverError::OutOfRange)?;
@@ -897,8 +983,9 @@ impl FilesystemWrite for ServedFs {
     fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
         let mut written = 0;
         while written < data.len() {
-            let chunk = &data[written..data.len().min(written + FSSERVE_WINDOW_LEN)];
-            let span = Span::new(0, chunk.len()).map_err(|_| DriverError::OutOfRange)?;
+            let chunk = &data[written..data.len().min(written + self.span.size())];
+            let span =
+                Span::new(self.span.offset(), chunk.len()).map_err(|_| DriverError::OutOfRange)?;
             let offset = offset
                 .checked_add(written as u64)
                 .ok_or(DriverError::OutOfRange)?;

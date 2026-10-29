@@ -23,7 +23,7 @@ use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, KernelMemoryStats, MountAvailability, MountRecord,
     MountVolumeState, VolumeHealth, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
-    MOUNT_VOLUME_ID_LEN,
+    VOLUME_ID_LEN,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery, MemoryClass, MEMORY_CLASS_COUNT};
 use tairix_controls::{CompositionBar, CompositionError, CompositionSegment, PressureKind};
@@ -130,7 +130,7 @@ fn fact<'a>(device: &'a ResourceDevice, label: &str) -> &'a Reading {
 }
 
 /// The volume identity the one-volume fixtures use.
-const VOLUME: [u8; MOUNT_VOLUME_ID_LEN] = [7; MOUNT_VOLUME_ID_LEN];
+const VOLUME: [u8; VOLUME_ID_LEN] = [7; VOLUME_ID_LEN];
 
 /// The block-service endpoint the fixtures' service counters name.
 const DEV: u64 = 0x5953_2001;
@@ -290,8 +290,8 @@ fn storage(report: &ResourceReport) -> Vec<(DeviceId, alloc::string::String)> {
 fn the_rail_grows_one_entry_per_discovered_device_and_interface() {
     let sample = Sample {
         mounts: Some(alloc::vec![
-            mount_of("nvme0", "System:", [7; MOUNT_VOLUME_ID_LEN], 4_096, 100, 40),
-            mount_of("sda", "Backup:", [9; MOUNT_VOLUME_ID_LEN], 4_096, 200, 10),
+            mount_of("nvme0", "System:", [7; VOLUME_ID_LEN], 4_096, 100, 40),
+            mount_of("sda", "Backup:", [9; VOLUME_ID_LEN], 4_096, 200, 10),
         ]),
         net_facts: Some(alloc::vec![iface("eth0"), iface("eth1"), iface("lo")]),
         ..permitted()
@@ -310,9 +310,9 @@ fn the_rail_grows_one_entry_per_discovered_device_and_interface() {
 
 #[test]
 fn a_volume_states_where_its_root_is_mounted_and_under_what_policy() {
-    let shown = mount_of("ARXFSRoot", "/", [7; MOUNT_VOLUME_ID_LEN], 4_096, 100, 40);
+    let shown = mount_of("ARXFSRoot", "/", [7; VOLUME_ID_LEN], 4_096, 100, 40);
     // A volume no binding shows from its root states no mount point.
-    let unshown = mount_of("Spare", "", [9; MOUNT_VOLUME_ID_LEN], 4_096, 50, 10);
+    let unshown = mount_of("Spare", "", [9; VOLUME_ID_LEN], 4_096, 50, 10);
     let sample = Sample {
         mounts: Some(alloc::vec![shown, unshown]),
         ..permitted()
@@ -320,13 +320,13 @@ fn a_volume_states_where_its_root_is_mounted_and_under_what_policy() {
     let report = report_of(&sample);
     let root = device(
         &report,
-        DeviceId::Storage(StorageId::Volume([7; MOUNT_VOLUME_ID_LEN])),
+        DeviceId::Storage(StorageId::Volume([7; VOLUME_ID_LEN])),
     );
     assert_eq!(fact(root, "/"), &Reading::measured("rw"));
     assert_eq!(fact(root, "Volumes"), &Reading::measured("1"));
     let spare = device(
         &report,
-        DeviceId::Storage(StorageId::Volume([9; MOUNT_VOLUME_ID_LEN])),
+        DeviceId::Storage(StorageId::Volume([9; VOLUME_ID_LEN])),
     );
     for block in &spare.blocks {
         if let BlockBody::Facts(facts) | BlockBody::Health { facts, .. } = &block.body {
@@ -342,8 +342,8 @@ fn a_volume_states_where_its_root_is_mounted_and_under_what_policy() {
 fn volumes_sharing_one_served_device_are_one_rail_entry() {
     // Two partitions of one disk report the *same* device fold, so drawing
     // one entry each would state that disk's throughput twice.
-    let root = [7; MOUNT_VOLUME_ID_LEN];
-    let system = [8; MOUNT_VOLUME_ID_LEN];
+    let root = [7; VOLUME_ID_LEN];
+    let system = [8; VOLUME_ID_LEN];
     let counters = BlkIoCounters {
         read_bytes: 4 << 20,
         write_bytes: 1 << 20,
@@ -431,8 +431,8 @@ fn a_devices_health_pill_takes_the_worst_of_the_volumes_on_it() {
     // in *its own* record alone, so reading only the first volume would
     // report a healthy device with a dirty volume sitting on it. The
     // buckets are the device's own fold and identical in every record.
-    let root = [7; MOUNT_VOLUME_ID_LEN];
-    let system = [8; MOUNT_VOLUME_ID_LEN];
+    let root = [7; VOLUME_ID_LEN];
+    let system = [8; VOLUME_ID_LEN];
     let counters = BlkHealthCounters {
         completions: 12,
         ok: 12,
@@ -525,8 +525,8 @@ fn a_mount_with_no_backing_volume_is_no_storage_device() {
     // reporting them as disks is the per-mount defect wearing another hat.
     let sample = Sample {
         mounts: Some(alloc::vec![
-            mount_of("", "/System", [0; MOUNT_VOLUME_ID_LEN], 0, 0, 0),
-            mount_of("", "/Users", [0; MOUNT_VOLUME_ID_LEN], 0, 0, 0),
+            mount_of("", "/System", [0; VOLUME_ID_LEN], 0, 0, 0),
+            mount_of("", "/Users", [0; VOLUME_ID_LEN], 0, 0, 0),
         ]),
         ..permitted()
     };

@@ -66,10 +66,10 @@
 //! logging the deliberate data loss with its own event id.
 //!
 //! A plain detach is also refused while a descriptor holds one of the
-//! volume's nodes. A force detach revokes them — the driver completing each
-//! deletion they deferred — so a revoked descriptor answers stale. A runtime
-//! volume is attached only directly beneath the catalog, so no volume is ever
-//! shown beneath another's projection for a detach to strand.
+//! volume's nodes, or a bind stands within the volume. A force detach revokes
+//! the descriptors — the driver completing each deletion they deferred — so a
+//! revoked descriptor answers stale, and withdraws the binds within the
+//! volume first, as a medium that leaves does.
 //!
 //! # Verified re-insert (`plans/DEVICES.md` D4c)
 //!
@@ -107,6 +107,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::fsserve::{is_served_endpoint, ServeOffer};
 use tairix_abi::hwtree::HwDeviceClass;
+use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{
     FormatName, VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeFsType, VolumeInfo,
@@ -120,12 +121,14 @@ use tairix_kernel_core::fs::blkclient::BlkClient;
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fs::served::ServedFs;
 use tairix_kernel_core::fs::{
-    ChunkSink, ChunkSource, JournaledBlock, RetainedWrites, ServeChannel, VolumeNodes,
+    ChunkSink, ChunkSource, JournaledBlock, OfferingServer, Principal, RetainedWrites,
+    ServeChannel, VolumeNodes,
 };
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{
-    Attachment, DriverLock, Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService,
+    Attachment, BindsWithin, DriverLock, Metadata, Mode, Path, SleepLock, Vfs, VfsError,
+    VolumePublishError, VolumeService,
 };
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -133,6 +136,7 @@ use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_partition::PartitionBlock;
 use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::{OnceCell, SpinLock};
+use tairix_util::fallible::concatenated;
 
 use crate::block_cache::{BlockCache, REMOVABLE_DISK_OWNER};
 use crate::hwtree_store::HwTreeStore;
@@ -140,7 +144,10 @@ use crate::kernel_fs::KernelFs;
 use crate::served_volume::ServedVolume;
 use crate::shared_block::{OwnedBlockWindow, SharedBlock};
 use crate::system_mount::{cached, publish_volume_identity, LATE_FILESYSTEM, VOLUME_FOREST};
-use crate::volume_policy::{GroupMappedFs, LATE_STORAGE_GID};
+use crate::volume_policy::{Presented, PresentedFs, LATE_STORAGE_GID};
+
+#[path = "network_volume.rs"]
+mod network;
 
 /// Audit event: a runtime volume was first served by its driver, mounted,
 /// and its root published (drives.md `fs.hotplug.root_added`).
@@ -590,6 +597,8 @@ pub struct RuntimeVolumeService {
     next_handle: AtomicU64,
     /// The next served-volume id to mint.
     next_served: AtomicU64,
+    /// The volumes network filesystem servers offer and serve.
+    network: network::NetworkVolumes,
 }
 
 /// One served block device's place in the registry: the lock every whole
@@ -756,6 +765,7 @@ impl RuntimeVolumeService {
             served: SpinLock::new(Vec::new()),
             next_handle: AtomicU64::new(VOLUME_HANDLE_BASE + 1),
             next_served: AtomicU64::new(1),
+            network: network::NetworkVolumes::new(),
         }
     }
 
@@ -1012,7 +1022,9 @@ impl RuntimeVolumeService {
         self.retire_served(entry.served.as_deref(), entry.node);
         if entry.mount.format().is_some() {
             if let Ok(vfs) = LATE_FILESYSTEM.vfs() {
-                let _ = vfs.mounts_write().detach(entry.handle);
+                let _ = vfs
+                    .mounts_write()
+                    .detach(entry.handle, BindsWithin::Withdraw);
             }
             let _ = LATE_FILESYSTEM.unregister(entry.handle);
             let _ = VOLUME_FOREST.unpublish(&entry.id);
@@ -1044,11 +1056,13 @@ impl RuntimeVolumeService {
         if entry.claimed {
             return Err(Errno::Busy);
         }
+        let name = concatenated(&[&entry.name]).ok_or(Errno::OutOfMemory)?;
+        let path = entry.path.owned().map_err(VfsError::to_errno)?;
         entry.claimed = true;
         let target = ServeTarget {
             id: entry.id,
-            name: entry.name.clone(),
-            path: entry.path.clone(),
+            name,
+            path,
             handle: entry.handle,
             endpoint: entry.endpoint,
             window: entry.window,
@@ -1131,17 +1145,17 @@ impl RuntimeVolumeService {
     ) -> Result<(), (&'static str, Errno)> {
         // The kernel named the format from its own probe; a driver names
         // only the generation it is.
-        if offer.format.family() != target.fstype {
+        if offer.format.family() != Some(target.fstype) {
             return Err(("format_mismatch", Errno::BadMagic));
         }
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| ("no_mount_table", err))?;
         let fs = ServedFs::new(
-            channel.endpoint,
+            &channel.endpoint,
             channel.window,
             *offer,
-            target.served.activity(),
+            &target.served.activity(),
             wiring.audit,
         )
         .map_err(|err| ("proxy_unbuilt", err))?;
@@ -1150,7 +1164,7 @@ impl RuntimeVolumeService {
         let handle = target.handle.as_u64();
         let (driver, watch) = match map_gid {
             Some(gid) => cached(
-                GroupMappedFs::new(fs, gid),
+                PresentedFs::new(fs, Presented::removable(gid)),
                 handle,
                 target.id,
                 wiring.pressure,
@@ -1165,10 +1179,12 @@ impl RuntimeVolumeService {
                 wiring.audit,
                 wiring.watches,
             ),
-        };
+        }
+        .map_err(|err| ("cache_unbuilt", err))?;
         let read_only = target.served.read_only() || offer.write_refusal.is_some();
         let attachment = Attachment::new(target.handle, device.medium, mount_flags(read_only));
         let template = mount_template(map_gid);
+        let path = held_path(&target.path)?;
         let register = |driver, watch| {
             register_with_health(
                 target.handle,
@@ -1189,15 +1205,17 @@ impl RuntimeVolumeService {
             // registration, so a descriptor held across the loss answers stale.
             let standing = LATE_FILESYSTEM.driver(target.handle).ok();
             let _held = standing.as_deref().map(DriverLock::lock);
-            reattach(vfs, attachment, target.path.clone(), template)?;
+            reattach(vfs, attachment, path, template)?;
             let _ = LATE_FILESYSTEM.unregister(target.handle);
             register(driver, watch)?;
         } else {
             vfs.mounts_write()
-                .attach_at(attachment, target.path.clone(), template)
+                .attach_at(attachment, path, template)
                 .map_err(|_| ("name_in_use", Errno::AlreadyExists))?;
             let unmount = || {
-                let _ = vfs.mounts_write().detach(target.handle);
+                let _ = vfs
+                    .mounts_write()
+                    .detach(target.handle, BindsWithin::Withdraw);
             };
             // Published before the driver is reachable, so a refusal has no
             // operation to turn away: one would wait on a driver that is
@@ -1471,12 +1489,19 @@ impl Default for RuntimeVolumeService {
 pub(crate) type VolumeWindow =
     PartitionBlock<JournaledBlock<OwnedBlockWindow<BlockCache<BlkClient>>>>;
 
+/// A copy of `path` the heap can hold.
+fn held_path(path: &Path) -> Result<Path, (&'static str, Errno)> {
+    path.owned()
+        .map_err(|_| ("path_unallocated", Errno::OutOfMemory))
+}
+
 /// Where the catalog shows a volume named `name`.
 fn storage_path(name: &str) -> Result<Path, (&'static str, Errno)> {
     Path::parse(&format!("/Storage/{name}")).map_err(|_| ("mount_path_invalid", Errno::OutOfRange))
 }
 
-/// Move the mount at `path` to `attachment`'s posture.
+/// Move the mount at `path` to `attachment`'s posture. The binds standing
+/// within the volume go with the projection they stood in.
 ///
 /// A refusal leaves the path unmounted — fail closed — and cannot occur
 /// while the volume's claim is held: only that operation touches the handle,
@@ -1488,7 +1513,7 @@ fn reattach(
     template: Metadata,
 ) -> Result<(), (&'static str, Errno)> {
     let mut mounts = vfs.mounts_write();
-    let _ = mounts.detach(attachment.driver());
+    let _ = mounts.detach(attachment.driver(), BindsWithin::Withdraw);
     mounts
         .attach_at(attachment, path, template)
         .map_err(|_| ("mount_path_invalid", Errno::Busy))
@@ -1654,7 +1679,7 @@ fn mount_flags(read_only: bool) -> MountFlags {
 /// the volume's own records.
 fn mount_template(map_gid: Option<GroupId>) -> Metadata {
     match map_gid {
-        Some(gid) => Metadata::new(UserId(0), gid, Mode::from_bits(0o775)),
+        Some(gid) => Presented::removable(gid).template(),
         None => Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)),
     }
 }
@@ -1838,7 +1863,10 @@ impl VolumeService for RuntimeVolumeService {
         // A re-insert of a surprise-removed volume is recovered in place
         // — proven unmutated and replayed, or held read-only with its
         // retained set — never re-attached as a duplicate (D4c).
-        if let Some((target, _claim)) = self.claim_reinsert_target(recognised.as_ref()) {
+        if let Some((target, _claim)) = self
+            .claim_reinsert_target(recognised.as_ref())
+            .map_err(|errno| refused("recovery_unclaimed", errno))?
+        {
             return self.recover(request, publisher, wiring, &device, &target);
         }
         // A name another volume holds is answered before the volume is judged,
@@ -1914,9 +1942,26 @@ impl VolumeService for RuntimeVolumeService {
         Ok(())
     }
 
-    fn detach(&self, request: &VolumeDetachRequest) -> Result<(), Errno> {
-        let audit = self.wiring()?.audit;
-        self.detach_volume(&request.volume_id, request.force, audit)
+    fn detach(&self, request: &VolumeDetachRequest, caller: &Principal<'_>) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        if self.network.holds(&request.volume_id) {
+            return self.network.detach(wiring, request, caller);
+        }
+        if !caller.may_mount() {
+            let name = self
+                .attached_device(&request.volume_id)
+                .map(|(name, _)| name);
+            let Some(name) = name else {
+                return Err(Errno::NotFound);
+            };
+            return Err(Self::refuse_detach(
+                wiring.audit,
+                &name,
+                "no_mount_authority",
+                Errno::PermissionDenied,
+            ));
+        }
+        self.detach_volume(&request.volume_id, request.force, wiring.audit)
     }
 
     fn read(
@@ -2008,18 +2053,45 @@ impl VolumeService for RuntimeVolumeService {
         self.retract_unserved(&target, wiring.audit, "driver_refused", why.as_errno());
         Ok(())
     }
+
+    fn offer(
+        &self,
+        server: &OfferingServer<'_>,
+        offer: &NetworkOffer<'_>,
+        id: OfferId,
+        channel: ServeChannel,
+    ) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        self.network.offer(wiring, server, offer, id, channel)
+    }
+
+    fn attach_offered(
+        &self,
+        caller: &Principal<'_>,
+        offer: OfferId,
+        attach: &NetworkAttach<'_>,
+    ) -> Result<AttachReply, Errno> {
+        let wiring = self.wiring()?;
+        self.network.attach(wiring, caller, offer, attach, &|name| {
+            self.name_reserved(name)
+        })
+    }
+
+    fn offer_ctl(&self, server: u64, offer: OfferId, op: FsserveCtl) -> Result<(), Errno> {
+        let wiring = self.wiring()?;
+        self.network.ctl(wiring, server, offer, op)
+    }
 }
 
 impl RuntimeVolumeService {
     /// Detach the volume `id`; when `force`, revoke the descriptors holding
-    /// its nodes and discard what cannot be committed. A runtime volume is
-    /// attached only directly beneath the catalog, so none is ever shown
-    /// beneath another's projection.
+    /// its nodes, withdraw the binds standing within it, and discard what
+    /// cannot be committed.
     ///
     /// # Errors
     ///
     /// As [`VolumeService::detach`]: a plain detach is refused while a
-    /// descriptor holds a node.
+    /// descriptor holds a node or a bind stands within the volume.
     fn detach_volume(
         &self,
         id: &[u8; 16],
@@ -2068,11 +2140,16 @@ impl RuntimeVolumeService {
         // The table's own word, not the registry's: a reattach the heap
         // refused leaves a volume once mounted out of it, still detachable.
         let mounted = vfs.mounts().attachment(handle).is_some();
+        let binds = if force {
+            BindsWithin::Withdraw
+        } else {
+            BindsWithin::Refuse
+        };
         // Asked before anything is revoked or discarded, so a volume the table
         // would keep loses nothing to a detach that cannot happen.
         if mounted {
             vfs.mounts()
-                .detachable(handle)
+                .detachable(handle, binds)
                 .map_err(|err| refused("not_detachable", err.to_errno()))?;
         }
 
@@ -2145,7 +2222,7 @@ impl RuntimeVolumeService {
         // slot.
         if mounted {
             vfs.mounts_write()
-                .detach(handle)
+                .detach(handle, binds)
                 .map_err(|err| refused("not_detachable", err.to_errno()))?;
         }
         if let Some(fs) = fs.as_deref_mut() {
@@ -2382,14 +2459,21 @@ impl RuntimeVolumeService {
     /// other operation holds. Only a volume whose serving driver is gone is a recovery
     /// target: a live volume with the same identity is a duplicate, refused
     /// by the normal attach path.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the target cannot be held; the volume is
+    /// left unclaimed.
     fn claim_reinsert_target(
         &self,
         recognised: Option<&ProbedVolume>,
-    ) -> Option<(RecoveryTarget, VolumeClaim<'_>)> {
-        let recognised = recognised?;
+    ) -> Result<Option<(RecoveryTarget, VolumeClaim<'_>)>, Errno> {
+        let Some(recognised) = recognised else {
+            return Ok(None);
+        };
         let identity = recognised.identity;
         let mut state = self.state.lock();
-        let volume = state.iter_mut().find(|v| {
+        let found = state.iter_mut().find(|v| {
             v.id == identity
                 && v.fstype == recognised.fstype
                 && !v.claimed
@@ -2397,12 +2481,19 @@ impl RuntimeVolumeService {
                     v.availability,
                     Availability::UnavailableDirty | Availability::UnavailableLost
                 )
-        })?;
-        let format = volume.mount.format()?;
+        });
+        let Some(volume) = found else {
+            return Ok(None);
+        };
+        let Some(format) = volume.mount.format() else {
+            return Ok(None);
+        };
+        let name = concatenated(&[&volume.name]).ok_or(Errno::OutOfMemory)?;
+        let path = volume.path.owned().map_err(VfsError::to_errno)?;
         volume.claimed = true;
         let target = RecoveryTarget {
-            name: volume.name.clone(),
-            path: volume.path.clone(),
+            name,
+            path,
             handle: volume.handle,
             format,
             id: volume.id,
@@ -2411,13 +2502,13 @@ impl RuntimeVolumeService {
             blocks: volume.blocks,
             lost: volume.availability == Availability::UnavailableLost,
         };
-        Some((
+        Ok(Some((
             target,
             VolumeClaim {
                 service: self,
                 id: identity,
             },
-        ))
+        )))
     }
 
     /// Prove the re-inserted medium was not mutated elsewhere and replay
@@ -2522,6 +2613,7 @@ impl RuntimeVolumeService {
         let journaled = JournaledBlock::new(disk, Arc::clone(&target.journal), wiring.pressure);
         let window = PartitionBlock::new(journaled, request.first_lba, request.blocks)
             .map_err(|err| refused("window_invalid", err.as_errno()))?;
+        let path = held_path(&target.path).map_err(|(cause, errno)| refused(cause, errno))?;
         let served = self
             .new_served(window, read_only)
             .map_err(|err| refused("served_volume_unbuilt", err))?;
@@ -2534,7 +2626,7 @@ impl RuntimeVolumeService {
         reattach(
             vfs,
             Attachment::new(target.handle, device.medium, mount_flags(read_only)),
-            target.path.clone(),
+            path,
             mount_template(identity_map_gid(request.fstype)),
         )
         .map_err(|(cause, errno)| {
@@ -2782,6 +2874,7 @@ impl RuntimeVolumeService {
         let Ok(wiring) = self.wiring() else {
             return;
         };
+        self.network.server_lost(server, wiring.audit);
         let lost = {
             let mut state = self.state.lock();
             state

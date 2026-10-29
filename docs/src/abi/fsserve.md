@@ -5,7 +5,9 @@ kernel's VFS (`lib/abi/src/fsserve.rs`, `plans/FSSERVE.md`). The kernel's proxy
 (`kernel/core/src/fs/served.rs`) is the client and the driver is the server;
 the driver's side is the shared runtime in [`lib/fsserve`](../lib/fsserve.md).
 How a removable volume comes to be served is
-[Volumes served from user space](../filesystem/served.md).
+[Volumes served from user space](../filesystem/served.md); a network
+filesystem server serves its volumes the same way, offered to one principal
+([Network volumes](#network-volumes)).
 
 ## Transport
 
@@ -20,6 +22,14 @@ by the kernel when it accepts the driver's offer (`volume_serve`):
 - The window is `FSSERVE_WINDOW_LEN` (256 KiB), mapped into the driver and
   held by the kernel. Only file data crosses it, at the `Span` a `ReadAt` or
   `WriteAt` names; every other request and reply travels inline.
+
+A network volume, which other writers change, is served by several *lanes*
+(`Lanes`): up to `SERVED_LANES_MAX` (16) one-call proxies over the shared
+endpoint, each moving data through its own span of the window, a power of two
+from `LANE_SPAN_MIN` (16 KiB) to `FSSERVE_WINDOW_LEN`. An operation takes any
+free lane, so no caller waits behind another's round trip, and the window is
+the lanes' spans end to end, at most `FSSERVE_WINDOW_MAX`. A local volume has
+one lane.
 
 ## Frames
 
@@ -44,10 +54,10 @@ and `Release`.
   truncate or punch names the node it changes.
 - A listing is answered in batches bounded by `FSSERVE_REPLY_MAX`, each ending
   `More`, `Ended` or `Failed`, and resumed from the last name returned.
-- `Release` answers once the driver has finished every earlier request. The
-  proxy sends it before it next uses the window after abandoning a call, so a
-  driver still working on the abandoned call can never write data into
-  another call's bytes.
+- `Release` names its lane's span, and answers once the driver has finished
+  every earlier request on it. The proxy sends it before it next uses that
+  span after abandoning a call, so a driver still working on the abandoned
+  call can never write data into another call's bytes.
 - A caller being killed, or a driver found stopped, abandons any call. An
   abandoned `Pin`, `Unpin` or `ReleasePins` is not withdrawn: the kernel
   counts each hold it takes and lets go, so the proxy waits the call out
@@ -100,3 +110,50 @@ resource its node carries.
   flushes, or discards.
 - A write to a read-only volume is `ReadOnly`. A volume that has left service
   answers `NotFound` or `DeviceOffline`.
+
+## Network volumes
+
+A network filesystem server holds `CAP_FS_SERVE` and is admitted from a signed
+bundle; it serves no volume grant. It offers each volume to the one principal
+that may attach it, and the kernel mints the endpoint and the window as it
+does at `volume_serve`.
+
+| No. | Name             | Arguments                                         | Returns          |
+|-----|------------------|---------------------------------------------------|------------------|
+| 159 | `fsserve_offer`  | `NetworkOffer`, grant buffer                      | `OFFER_GRANT_LEN` |
+| 160 | `fsserve_attach` | offer, `NetworkAttach`, reply buffer              | `ATTACH_REPLY_LEN` |
+| 161 | `fsserve_ctl`    | offer, `FsserveCtl`                               | `errno`          |
+
+- A `NetworkOffer` (`lib/abi/src/netattach.rs`, at most `NETWORK_OFFER_MAX`)
+  is a `ServeFrame` over a network `FormatName` (`smb3`), the uid it is for,
+  its lanes, a 16-byte key, and the source the mount table shows
+  (`//host/share`). It is answered with an `OfferGrant` (32 bytes): the
+  `ServeGrant` and the `OfferId`, never zero and never reused in a boot. An
+  offer mounts nothing. Only a server the kernel admitted from a signed bundle
+  may make one: the volume's identity is derived from the server's attested
+  application identity, the principal and the key, so a server never names a
+  local volume, or another server's.
+- `fsserve_attach` is called by the principal the offer names; to anyone else
+  the offer does not exist (`NotFound`). A `NetworkAttach` names the volume (a
+  base name the kernel suffixes through the shared naming policy until one is
+  free), its presentation, a narrowing to read-only, and optionally a target
+  it is also bound at. *Private* — owner the caller, its primary group,
+  `rwx------` and `rw-------` — is anyone's; *shared* (the storage group,
+  `rwxrwx---`, `rw-rw----`) and *explicit* (an owner, group and modes held to
+  the permission bits) need `CAP_FS_MOUNT`. Every node is presented so,
+  whatever owner the server claims to record, and no security record is
+  stored through it; a node the server marks read-only loses its write bits. The volume appears at `/Storage/<name>`, `noexec`; the
+  reply (56 bytes) is its identity and the name it took. A target refused
+  leaves the offer to be attached again.
+- `fsserve_ctl` is the server's word on an offer it made: `Alive` while calls
+  it is working on are outstanding — a network server touches no volume grant,
+  so this is what keeps a slow call from being abandoned after
+  `SERVED_IDLE_NS` — and `Withdraw`, which retires the offer or its volume
+  without waiting on the server's own lanes. Another process naming the offer
+  is answered `NotFound`.
+- `volume_detach` retires an attached network volume for its owner, or any
+  caller holding `CAP_FS_MOUNT`, and takes its endpoint down; the server
+  learns the volume is gone by its endpoint going. A volume whose server is
+  withdrawn or lost leaves the namespace at once, unless the server last said
+  it held writes it had not published: that one stays, reporting
+  `UnavailableLost`, until its owner detaches it with `force`.

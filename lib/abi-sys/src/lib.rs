@@ -92,6 +92,11 @@ const NUM_VOLUME_READ: u64 = SyscallNumber::VOLUME_READ.as_u16() as u64;
 const NUM_VOLUME_WRITE: u64 = SyscallNumber::VOLUME_WRITE.as_u16() as u64;
 const NUM_VOLUME_CTL: u64 = SyscallNumber::VOLUME_CTL.as_u16() as u64;
 const NUM_VOLUME_SERVE: u64 = SyscallNumber::VOLUME_SERVE.as_u16() as u64;
+const NUM_FSSERVE_OFFER: u64 = SyscallNumber::FSSERVE_OFFER.as_u16() as u64;
+const NUM_FSSERVE_ATTACH: u64 = SyscallNumber::FSSERVE_ATTACH.as_u16() as u64;
+const NUM_FSSERVE_CTL: u64 = SyscallNumber::FSSERVE_CTL.as_u16() as u64;
+const NUM_VIEW_BIND: u64 = SyscallNumber::VIEW_BIND.as_u16() as u64;
+const NUM_VIEW_UNBIND: u64 = SyscallNumber::VIEW_UNBIND.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
@@ -1688,7 +1693,8 @@ pub extern "C" fn sys_volume_attach(request: *const u8, request_len: usize) -> i
 /// `volume_detach`: flush, unmount, and unpublish a runtime-attached
 /// volume (`SyscallNumber::VOLUME_DETACH`). `request`/`request_len` name
 /// an encoded volume-detach request frame (the volume's stable 16-byte
-/// identity); requires `CAP_FS_MOUNT`. Returns a `TAIRIX_E_*` code.
+/// identity); its owner may detach a network volume, any other needs
+/// `CAP_FS_MOUNT`. Returns a `TAIRIX_E_*` code.
 #[must_use]
 #[export_name = "tairix_sys_volume_detach"]
 pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i32 {
@@ -1788,6 +1794,107 @@ pub extern "C" fn sys_volume_serve(
                 0,
             ],
         )
+    }
+}
+
+/// `fsserve_offer`: offer the network volume the offer at `frame` describes,
+/// writing the grant to `grant` (`SyscallNumber::FSSERVE_OFFER`). Returns the
+/// grant's length or a `TAIRIX_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "tairix_sys_fsserve_offer"]
+pub extern "C" fn sys_fsserve_offer(
+    frame: *mut c_void,
+    frame_len: usize,
+    grant: *mut c_void,
+    grant_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both pointer pairs.
+    unsafe {
+        raw_syscall(
+            NUM_FSSERVE_OFFER,
+            [
+                ptr_arg(frame),
+                frame_len as u64,
+                ptr_arg(grant),
+                grant_cap as u64,
+                0,
+                0,
+            ],
+        )
+    }
+}
+
+/// `fsserve_attach`: attach the network volume `offer` names as the attach at
+/// `frame` asks, writing the reply to `reply`
+/// (`SyscallNumber::FSSERVE_ATTACH`). Returns the reply's length or a
+/// `TAIRIX_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "tairix_sys_fsserve_attach"]
+pub extern "C" fn sys_fsserve_attach(
+    offer: u64,
+    frame: *mut c_void,
+    frame_len: usize,
+    reply: *mut c_void,
+    reply_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both pointer pairs.
+    unsafe {
+        raw_syscall(
+            NUM_FSSERVE_ATTACH,
+            [
+                offer,
+                ptr_arg(frame),
+                frame_len as u64,
+                ptr_arg(reply),
+                reply_cap as u64,
+                0,
+            ],
+        )
+    }
+}
+
+/// `fsserve_ctl`: tell the kernel `op` of the network volume `offer` names
+/// (`SyscallNumber::FSSERVE_CTL`). Returns `0` or a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_fsserve_ctl"]
+pub extern "C" fn sys_fsserve_ctl(offer: u64, op: u32) -> i32 {
+    // SAFETY: see `sys_yield`; the call reads no caller memory.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FSSERVE_CTL,
+            [offer, u64::from(op), 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `view_bind`: project the volume subtree the request at `request` names at
+/// its target (`SyscallNumber::VIEW_BIND`). Returns `0` or a `TAIRIX_E_*`
+/// code.
+#[must_use]
+#[export_name = "tairix_sys_view_bind"]
+pub extern "C" fn sys_view_bind(request: *mut c_void, request_len: usize) -> i32 {
+    // SAFETY: see `sys_yield`; the kernel validates the pointer pair before
+    // reading it.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VIEW_BIND,
+            [ptr_arg(request), request_len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
+/// `view_unbind`: withdraw the projection at the path at `target`
+/// (`SyscallNumber::VIEW_UNBIND`). Returns `0` or a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_view_unbind"]
+pub extern "C" fn sys_view_unbind(target: *mut c_void, target_len: usize) -> i32 {
+    // SAFETY: see `sys_yield`; the kernel validates the pointer pair before
+    // reading it.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_VIEW_UNBIND,
+            [ptr_arg(target), target_len as u64, 0, 0, 0, 0],
+        ))
     }
 }
 
@@ -4044,6 +4151,11 @@ mod tests {
         (NUM_VOLUME_WRITE, "volume_write", 4),
         (NUM_VOLUME_CTL, "volume_ctl", 5),
         (NUM_VOLUME_SERVE, "volume_serve", 5),
+        (NUM_FSSERVE_OFFER, "fsserve_offer", 4),
+        (NUM_FSSERVE_ATTACH, "fsserve_attach", 5),
+        (NUM_FSSERVE_CTL, "fsserve_ctl", 2),
+        (NUM_VIEW_BIND, "view_bind", 2),
+        (NUM_VIEW_UNBIND, "view_unbind", 2),
         (NUM_WAIT, "wait", 3),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
@@ -4834,6 +4946,46 @@ mod tests {
         });
         assert_eq!(number, NUM_VOLUME_SERVE);
         assert_eq!(args, [9, at, 16, reply_at, 24, 0]);
+    }
+
+    #[test]
+    fn network_attachments_and_view_bindings_marshal_their_operands() {
+        let mut data = [0u8; 64];
+        let mut reply = [0u8; 64];
+        let at = data.as_mut_ptr() as u64;
+        let reply_at = reply.as_mut_ptr() as u64;
+        let (number, args) = capture(32, || {
+            let ret =
+                sys_fsserve_offer(data.as_mut_ptr().cast(), 44, reply.as_mut_ptr().cast(), 32);
+            assert_eq!(ret, 32);
+        });
+        assert_eq!(number, NUM_FSSERVE_OFFER);
+        assert_eq!(args, [at, 44, reply_at, 32, 0, 0]);
+        let (number, args) = capture(56, || {
+            let ret = sys_fsserve_attach(
+                7,
+                data.as_mut_ptr().cast(),
+                25,
+                reply.as_mut_ptr().cast(),
+                56,
+            );
+            assert_eq!(ret, 56);
+        });
+        assert_eq!(number, NUM_FSSERVE_ATTACH);
+        assert_eq!(args, [7, at, 25, reply_at, 56, 0]);
+        let (number, args) = capture(0, || assert_eq!(sys_fsserve_ctl(7, 2), 0));
+        assert_eq!(number, NUM_FSSERVE_CTL);
+        assert_eq!(args, [7, 2, 0, 0, 0, 0]);
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_view_bind(data.as_mut_ptr().cast(), 30), 0);
+        });
+        assert_eq!(number, NUM_VIEW_BIND);
+        assert_eq!(args, [at, 30, 0, 0, 0, 0]);
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_view_unbind(data.as_mut_ptr().cast(), 9), 0);
+        });
+        assert_eq!(number, NUM_VIEW_UNBIND);
+        assert_eq!(args, [at, 9, 0, 0, 0, 0]);
     }
 
     #[test]

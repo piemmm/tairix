@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::IF_NAME_LEN;
-use tairix_abi::sysinfo::MOUNT_VOLUME_ID_LEN;
+use tairix_abi::sysinfo::VOLUME_ID_LEN;
 use tairix_controls::{Chart, ControlRole, PressureKind, FULL_PERMILLE};
 use tairix_theme::SignalRole;
 
@@ -77,7 +77,7 @@ pub enum StorageId {
     /// A served block device, by the block-service endpoint id serving it.
     Device(u64),
     /// A volume the kernel publishes no serving device for.
-    Volume([u8; MOUNT_VOLUME_ID_LEN]),
+    Volume([u8; VOLUME_ID_LEN]),
 }
 
 /// A device's own stable identity, which the selection remembers.

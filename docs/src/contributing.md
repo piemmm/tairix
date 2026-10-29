@@ -346,10 +346,13 @@ budget, so it cannot silently shorten one, and a malformed value is rejected
 rather than quietly ignored. The QEMU verticals keep their own per-guest
 budgets — this is an outer backstop, not a replacement for them.
 
-A guest killed for falling silent, or for reaching its runtime ceiling, is
-interrogated over its QEMU monitor first: every vCPU's registers are read and
-the addresses named against the kernel ELF's symbol table, then reported inline
-and kept beside the transcript as `<binary>.hang.txt`. That is what separates a
+A guest killed for falling silent, for reaching its runtime ceiling, or because
+its kernel wrote a fatal record, is interrogated over its QEMU monitor first:
+every vCPU's registers and 32 KiB of its stack are read and the addresses named
+against the kernel ELF's symbol table, then reported inline and kept beside the
+transcript as `<binary>.cpu.txt`. The stack's return addresses say how each
+core reached where it stopped — for a fatal stop, through the report and
+whatever it was reporting, which the record alone cannot. That is what separates a
 machine whose cores are all halted in a wait-for-interrupt — nothing runnable,
 so a wake-up was lost — from one still executing inside an interrupt-masked
 section. Without it a hang can only be diagnosed by re-running it, which

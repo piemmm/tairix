@@ -354,6 +354,8 @@ fn users_db(
             .fill(&mut salt)
             .map_err(|e| MkimageError::Entropy(format!("users salt: {e:?}")))?;
 
+        let home = tairix_users::default_home(DEBUG_USERNAME)
+            .map_err(|e| MkimageError::UsersDb(format!("debug root home: {e}")))?;
         let record = UserRecord::with_password(
             Identity {
                 username: DEBUG_USERNAME,
@@ -361,7 +363,7 @@ fn users_db(
                 primary_gid: DEBUG_PRIMARY_GID,
                 supplementary_gids: &[STORAGE_GID],
                 display_name: "System Administrator",
-                home: Some(&tairix_users::default_home(DEBUG_USERNAME)),
+                home: Some(&home),
                 shell: Some(tairix_users::DEFAULT_SHELL),
                 capabilities: tairix_users::administrator_ceiling(),
                 state: AccountState::Active,
@@ -373,9 +375,9 @@ fn users_db(
         .map_err(|e| MkimageError::UsersDb(format!("debug root record: {e}")))?;
         records.push(record);
     }
-    let db = UsersDb::new(records)
-        .map_err(|e| MkimageError::UsersDb(format!("seeded database: {e}")))?;
-    Ok(db.serialise())
+    UsersDb::new(records)
+        .and_then(|db| db.serialise())
+        .map_err(|e| MkimageError::UsersDb(format!("seeded database: {e}")))
 }
 
 /// Build the profile's `/System/Security/Groups` text.
@@ -401,9 +403,9 @@ fn groups_db(profile: ImageProfile) -> Result<String, MkimageError> {
                 .map_err(|e| MkimageError::GroupsDb(format!("debug group record: {e}")))?,
         );
     }
-    let db = GroupsDb::new(records)
-        .map_err(|e| MkimageError::GroupsDb(format!("seeded registry: {e}")))?;
-    Ok(db.serialise())
+    GroupsDb::new(records)
+        .and_then(|db| db.serialise())
+        .map_err(|e| MkimageError::GroupsDb(format!("seeded registry: {e}")))
 }
 
 /// Build the debug-profile log-attestation key file image:

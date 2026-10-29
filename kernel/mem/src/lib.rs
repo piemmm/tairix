@@ -48,6 +48,10 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 pub mod anon;
 pub mod anon_window;
 pub mod bootinfo;

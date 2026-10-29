@@ -4,14 +4,16 @@
 //! the opens on it, the leases they hold, the watches outstanding, the creates
 //! waiting on a break, and the durable opens a dropped connection leaves to be
 //! reclaimed. A [`Share`] outlives the connection serving it, so a test can
-//! drop one connection and reconnect another to the same share.
+//! drop one connection and reconnect another to the same share. Names are
+//! matched as a Windows or a default Samba share matches them, ASCII letters
+//! alike in either case, and kept as they were first spelled.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
 
-use super::{behind_header, empty_error, DISK_SHARE, MAXIMAL_ACCESS};
+use super::{behind_header, empty_error, Fault, DISK_SHARE, MAXIMAL_ACCESS};
 use crate::file::create::{
     Access, CreateAction, CreateOptions, CreateRequest, CreateResponse, DiskId, Disposition,
     Durable, MaximalAccess, OplockLevel,
@@ -69,11 +71,22 @@ const GRANTABLE: [u32; 4] = [0x1, 0x3, 0x5, 0x7];
 
 /// Who a request comes from, which a durable open is reclaimed against.
 #[derive(Copy, Clone, Debug)]
-pub(super) struct Caller<'a> {
+pub(super) struct Caller {
     /// The session's user.
-    pub user: &'a str,
+    pub user: &'static str,
     /// The connection's client GUID.
     pub client_guid: Guid,
+    /// The server's misbehaviour.
+    pub fault: Fault,
+    /// Whether the server grants leases on directories.
+    pub directory_leasing: bool,
+}
+
+/// A message the share has for a client, by its client GUID.
+#[derive(Debug)]
+struct Outgoing {
+    to: Guid,
+    sent: Sent,
 }
 
 /// A message the share has for the client.
@@ -95,8 +108,16 @@ pub(super) enum Sent {
 /// open, or the status it failed with.
 #[derive(Debug, Default)]
 pub(super) struct Chain {
+    /// The connection the chain's requests come from.
+    client: Guid,
     file_id: Option<FileId>,
     failed: Option<NtStatus>,
+    /// The status the last request failed with, for a server failing what
+    /// follows it.
+    prior: Option<NtStatus>,
+    /// The create the chain waits on, gone asynchronous: what follows it in
+    /// the chain is held with it, and carried out once it completes.
+    parked: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -115,11 +136,15 @@ struct DurableGrant {
     create_guid: Guid,
     client_guid: Guid,
     owner: String,
+    /// How long it outlives its connection.
+    timeout_ms: u32,
 }
 
 #[derive(Debug)]
 struct Open {
     file_id: FileId,
+    /// The connection holding it.
+    client: Guid,
     node: usize,
     path: SharePath,
     access: Access,
@@ -128,6 +153,9 @@ struct Open {
     durable: Option<DurableGrant>,
     /// Whether a connection holds it: a durable open outlives its own.
     attached: bool,
+    /// When its connection dropped, for a durable open waiting to be
+    /// reclaimed.
+    detached_at: Option<u64>,
     /// How far an enumeration of the directory has reached.
     listed: usize,
 }
@@ -135,6 +163,8 @@ struct Open {
 #[derive(Debug)]
 struct LeaseEntry {
     key: LeaseKey,
+    /// The connection holding it, which its breaks go to.
+    client: Guid,
     node: usize,
     state: LeaseState,
     epoch: u16,
@@ -145,8 +175,13 @@ struct LeaseEntry {
 #[derive(Debug)]
 struct Deferred {
     request: Header,
+    /// Who asked, whom its final response goes to.
+    caller: Caller,
     async_id: u64,
     waiting: Waiting,
+    /// The related requests behind it in its compound, as a server that
+    /// splits a compound around an asynchronous request holds them.
+    rest: Vec<(Header, Vec<u8>)>,
 }
 
 #[derive(Debug)]
@@ -248,9 +283,13 @@ pub struct Share {
     opens: Vec<Open>,
     leases: Vec<LeaseEntry>,
     deferred: Vec<Deferred>,
-    sent: Vec<Sent>,
+    sent: Vec<Outgoing>,
     clock: i64,
     next_id: u64,
+    /// The test's monotonic time, which durable opens time out by.
+    now_ns: u64,
+    /// Durable opens taken back by a reconnect create.
+    reclaimed: usize,
 }
 
 impl Default for Share {
@@ -285,7 +324,56 @@ impl Share {
             sent: Vec::new(),
             clock: EPOCH_SECS,
             next_id: 1,
+            now_ns: 0,
+            reclaimed: 0,
         }
+    }
+
+    /// How many durable opens a reconnect create has taken back.
+    #[must_use]
+    pub const fn reclaimed(&self) -> usize {
+        self.reclaimed
+    }
+
+    /// The server restarted: every open and lease it held is gone, durable
+    /// or not, and the files stay.
+    pub fn restart(&mut self) {
+        self.opens.clear();
+        self.leases.clear();
+        self.deferred.clear();
+        self.sent.clear();
+    }
+
+    /// Time has reached `now_ns`: every durable open whose connection
+    /// dropped longer ago than its timeout is closed, as a server lets
+    /// one go, and the creates its lease held carry on.
+    ///
+    /// # Errors
+    ///
+    /// What answering a create that carries on fails with.
+    pub fn advance(&mut self, now_ns: u64) -> Result<(), SmbError> {
+        self.now_ns = self.now_ns.max(now_ns);
+        let now = self.now_ns;
+        let (expired, kept): (Vec<Open>, Vec<Open>) = core::mem::take(&mut self.opens)
+            .into_iter()
+            .partition(|open| {
+                open.durable
+                    .as_ref()
+                    .zip(open.detached_at)
+                    .is_some_and(|(grant, at)| {
+                        at.saturating_add(u64::from(grant.timeout_ms) * 1_000_000) <= now
+                    })
+            });
+        self.opens = kept;
+        for open in &expired {
+            self.release(open)?;
+            if let Some(key) = open.lease {
+                if !self.leases.iter().any(|lease| lease.key == key) {
+                    self.resume(key)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The data of the file `names` reach from the root, if one is there.
@@ -297,6 +385,12 @@ impl Share {
         self.nodes[node].as_ref()?.data.as_deref()
     }
 
+    /// How many opens a connection holds.
+    #[must_use]
+    pub fn attached_opens(&self) -> usize {
+        self.opens.iter().filter(|open| open.attached).count()
+    }
+
     /// How many opens a dropped connection left for reclaiming.
     #[must_use]
     pub fn detached_opens(&self) -> usize {
@@ -304,57 +398,86 @@ impl Share {
     }
 
     /// What the share has for the client, taken.
-    pub(super) fn take_sent(&mut self) -> Vec<Sent> {
-        core::mem::take(&mut self.sent)
+    pub(super) fn take_sent_for(&mut self, client: Guid) -> Vec<Sent> {
+        let mut taken = Vec::new();
+        let mut at = 0;
+        while at < self.sent.len() {
+            if self.sent[at].to == client {
+                taken.push(self.sent.remove(at).sent);
+            } else {
+                at += 1;
+            }
+        }
+        taken
     }
 
-    /// The connection serving the share dropped: every open but the durable
-    /// ones closes, and nothing in flight is ever answered.
-    pub(super) fn detach(&mut self) -> Result<(), SmbError> {
-        self.deferred.clear();
-        let (durable, closing): (Vec<Open>, Vec<Open>) = core::mem::take(&mut self.opens)
+    /// The connection of `client` dropped: every open of its but the durable
+    /// ones closes, and nothing it had in flight is ever answered.
+    pub(super) fn detach(&mut self, client: Guid) -> Result<(), SmbError> {
+        self.deferred
+            .retain(|deferred| deferred.caller.client_guid != client);
+        let (closing, kept): (Vec<Open>, Vec<Open>) = core::mem::take(&mut self.opens)
             .into_iter()
-            .partition(|open| open.durable.is_some());
-        self.opens = durable;
-        for open in &mut self.opens {
+            .partition(|open| open.client == client && open.durable.is_none());
+        self.opens = kept;
+        let now = self.now_ns;
+        for open in self.opens.iter_mut().filter(|open| open.client == client) {
             open.attached = false;
+            open.detached_at = Some(now);
         }
         for open in &closing {
             self.release(open)?;
         }
-        self.sent.clear();
+        self.sent.retain(|outgoing| outgoing.to != client);
         Ok(())
     }
 
     /// Answer one request on the share.
     pub(super) fn request(
         &mut self,
-        caller: Caller<'_>,
+        caller: Caller,
         header: &Header,
         message: &[u8],
         chain: &mut Chain,
     ) -> Result<(), SmbError> {
-        if !header.flags.contains(Flags::RELATED_OPERATIONS) {
+        let related = header.flags.contains(Flags::RELATED_OPERATIONS);
+        if !related {
             *chain = Chain::default();
         }
-        let outcome = match header.command {
-            Command::Create => self.create(caller, header, message, None),
-            Command::Close => self.close(header, message, chain),
-            Command::Read => self.read(header, message, chain),
-            Command::Write => self.write(header, message, chain),
-            Command::Flush => self.flush(header, message, chain),
-            Command::QueryDirectory => self.query_directory(header, message, chain),
-            Command::QueryInfo => self.query_info(header, message, chain),
-            Command::SetInfo => self.set_info(header, message, chain),
-            Command::ChangeNotify => self.change_notify(header, message, chain),
-            Command::OplockBreak => self.lease_ack(message),
-            Command::Cancel => return self.cancel(header),
-            _ => Err(NtStatus::NOT_SUPPORTED.into()),
+        chain.client = caller.client_guid;
+        if let (true, Some(async_id)) = (related, chain.parked) {
+            return self.park_behind(async_id, header, message);
+        }
+        let failed_before = (caller.fault == Fault::ChainedFailure && related)
+            .then_some(chain.prior)
+            .flatten();
+        let outcome = if let Some(status) = failed_before {
+            Err(Fail::Status(status))
+        } else {
+            match header.command {
+                Command::Create => self.create(caller, header, message, None),
+                Command::Close => self.close(header, message, chain),
+                Command::Read => self.read(header, message, chain, caller.fault == Fault::LongRead),
+                Command::Write => {
+                    self.write(header, message, chain, caller.fault == Fault::ShortWrite)
+                }
+                Command::Flush => self.flush(header, message, chain),
+                Command::QueryDirectory => self.query_directory(header, message, chain),
+                Command::QueryInfo => self.query_info(header, message, chain),
+                Command::SetInfo => self.set_info(header, message, chain),
+                Command::ChangeNotify => self.change_notify(caller, header, message, chain),
+                Command::OplockBreak => self.lease_ack(message),
+                Command::Cancel => return self.cancel(caller, header),
+                _ => Err(NtStatus::NOT_SUPPORTED.into()),
+            }
         };
         let Address::Sync { tree_id } = header.address else {
             return Err(SmbError::Protocol);
         };
         match &outcome {
+            Ok(Answer::Interim(async_id)) if header.command == Command::Create => {
+                chain.parked = Some(*async_id);
+            }
             Ok(Answer::Opened { file_id, .. }) => {
                 chain.file_id = Some(*file_id);
                 chain.failed = None;
@@ -365,19 +488,28 @@ impl Share {
             }
             _ => {}
         }
+        if let Err(Fail::Status(status)) = &outcome {
+            chain.prior = Some(*status);
+        }
         let acked = match &outcome {
             Ok(Answer::Acked { key, .. }) => Some(*key),
             _ => None,
         };
-        self.finish(header, Address::Sync { tree_id }, outcome)?;
+        self.finish(
+            caller.client_guid,
+            header,
+            Address::Sync { tree_id },
+            outcome,
+        )?;
         match acked {
-            Some(key) => self.resume(caller, key),
+            Some(key) => self.resume(key),
             None => Ok(()),
         }
     }
 
     fn finish(
         &mut self,
+        to: Guid,
         request: &Header,
         address: Address,
         outcome: Result<Answer, Fail>,
@@ -396,19 +528,22 @@ impl Share {
             Err(Fail::Status(status)) => (address, status, behind_header(empty_error)?),
             Err(Fail::Drop(err)) => return Err(err),
         };
-        self.push(Sent::Response {
-            request: *request,
-            address,
-            status,
-            body,
-        })
+        self.push(
+            to,
+            Sent::Response {
+                request: *request,
+                address,
+                status,
+                body,
+            },
+        )
     }
 
-    fn push(&mut self, sent: Sent) -> Result<(), SmbError> {
+    fn push(&mut self, to: Guid, sent: Sent) -> Result<(), SmbError> {
         self.sent
             .try_reserve(1)
             .map_err(|_| SmbError::OutOfMemory)?;
-        self.sent.push(sent);
+        self.sent.push(Outgoing { to, sent });
         Ok(())
     }
 
@@ -427,8 +562,11 @@ impl Share {
     }
 
     fn child(&self, parent: usize, name: &str) -> Option<usize> {
-        self.children(parent)
-            .find(|&id| self.nodes[id].as_ref().is_some_and(|n| n.name == name))
+        self.children(parent).find(|&id| {
+            self.nodes[id]
+                .as_ref()
+                .is_some_and(|n| n.name.eq_ignore_ascii_case(name))
+        })
     }
 
     fn children(&self, parent: usize) -> impl Iterator<Item = usize> + '_ {
@@ -464,7 +602,9 @@ impl Share {
         };
         self.opens
             .iter()
-            .position(|open| open.attached && open.file_id == file_id)
+            .position(|open| {
+                open.attached && open.client == chain.client && open.file_id == file_id
+            })
             .ok_or_else(|| NtStatus::FILE_CLOSED.into())
     }
 
@@ -507,7 +647,7 @@ impl Share {
 
     fn create(
         &mut self,
-        caller: Caller<'_>,
+        caller: Caller,
         header: &Header,
         message: &[u8],
         resumed: Option<u64>,
@@ -520,6 +660,13 @@ impl Share {
         {
             return self.reconnect(caller, &request, file_id, create_guid);
         }
+        if let Some(Durable::Request { create_guid, .. }) = request.durable {
+            if header.flags.contains(Flags::REPLAY_OPERATION) {
+                if let Some(at) = self.replayed(caller, &request, create_guid) {
+                    return self.reattach(caller, &request, at, true);
+                }
+            }
+        }
         let options = request.options;
         if options.contains(CreateOptions::DELETE_ON_CLOSE)
             && !request.access.contains(Access::DELETE)
@@ -531,7 +678,7 @@ impl Share {
         if let Located::Existing(node) = located {
             let own = request.lease.map(|lease| lease.key);
             if let Some(key) = self.conflicting_lease(node, own) {
-                return self.defer_create(header, message, key, resumed);
+                return self.defer_create(caller, header, message, key, resumed);
             }
         }
         let (node, action) = self.apply(located, &request)?;
@@ -541,7 +688,7 @@ impl Share {
             request.access
         };
         let lease = match request.lease {
-            Some(asked) => self.grant_lease(node, asked)?,
+            Some(asked) => self.grant_lease(caller, node, asked)?,
             None => None,
         };
         let durable = match request.durable {
@@ -560,6 +707,7 @@ impl Share {
                         create_guid,
                         client_guid: caller.client_guid,
                         owner: String::from(caller.user),
+                        timeout_ms: timeout,
                     },
                 ))
             }
@@ -573,6 +721,7 @@ impl Share {
             .map_err(|_| SmbError::OutOfMemory)?;
         self.opens.push(Open {
             file_id: id,
+            client: caller.client_guid,
             node,
             path: request.path.clone(),
             access,
@@ -580,6 +729,7 @@ impl Share {
             lease: lease.map(|lease| lease.key),
             durable: durable.map(|(_, grant)| grant),
             attached: true,
+            detached_at: None,
             listed: 0,
         });
         let response = CreateResponse {
@@ -750,6 +900,7 @@ impl Share {
     /// acknowledged.
     fn defer_create(
         &mut self,
+        caller: Caller,
         header: &Header,
         message: &[u8],
         key: LeaseKey,
@@ -770,8 +921,9 @@ impl Share {
                 current: entry.state,
                 new: LeaseState::READ,
             });
+            let holder = entry.client;
             let body = behind_header(|enc| notice.encode(enc))?;
-            self.push(Sent::Break(body))?;
+            self.push(holder, Sent::Break(body))?;
         }
         let async_id = match resumed {
             Some(async_id) => async_id,
@@ -782,7 +934,9 @@ impl Share {
             .map_err(|_| SmbError::OutOfMemory)?;
         self.deferred.push(Deferred {
             request: *header,
+            caller,
             async_id,
+            rest: Vec::new(),
             waiting: Waiting::Create {
                 message: owned(message)?,
                 breaking: key,
@@ -794,11 +948,21 @@ impl Share {
         })
     }
 
-    /// The lease `asked` for, as far as `node` allows it: none on a
-    /// directory, since the share offers no directory leasing, and reads
-    /// alone beside another key's lease.
-    fn grant_lease(&mut self, node: usize, asked: Lease) -> Result<Option<Lease>, Fail> {
-        if self.node(node)?.data.is_none() || !GRANTABLE.contains(&asked.state.bits()) {
+    /// The lease `asked` for, as far as `node` allows it: on a directory,
+    /// reads and the handle, only where the server offers directory leasing;
+    /// and reads alone beside another key's lease.
+    fn grant_lease(
+        &mut self,
+        caller: Caller,
+        node: usize,
+        asked: Lease,
+    ) -> Result<Option<Lease>, Fail> {
+        if !GRANTABLE.contains(&asked.state.bits()) {
+            return Ok(None);
+        }
+        if self.node(node)?.data.is_none()
+            && (!caller.directory_leasing || asked.state.contains(LeaseState::WRITE))
+        {
             return Ok(None);
         }
         let shared = self
@@ -825,6 +989,7 @@ impl Share {
                     .map_err(|_| SmbError::OutOfMemory)?;
                 self.leases.push(LeaseEntry {
                     key: asked.key,
+                    client: caller.client_guid,
                     node,
                     state: granted,
                     epoch: 1,
@@ -845,7 +1010,7 @@ impl Share {
 
     fn reconnect(
         &mut self,
-        caller: Caller<'_>,
+        caller: Caller,
         request: &CreateRequest,
         file_id: FileId,
         create_guid: Guid,
@@ -871,7 +1036,48 @@ impl Share {
         if grant.owner != caller.user {
             return Err(NtStatus::ACCESS_DENIED.into());
         }
+        self.reclaimed += 1;
+        self.reattach(caller, request, at, false)
+    }
+
+    /// The open a replayed create made before its answer was lost: the one
+    /// its caller's client asked under `create_guid`, on the same path
+    /// (MS-SMB2 3.3.5.9.10).
+    fn replayed(
+        &self,
+        caller: Caller,
+        request: &CreateRequest,
+        create_guid: Guid,
+    ) -> Option<usize> {
+        self.opens.iter().position(|open| {
+            open.path == request.path
+                && open.durable.as_ref().is_some_and(|grant| {
+                    grant.create_guid == create_guid
+                        && grant.client_guid == caller.client_guid
+                        && grant.owner == caller.user
+                })
+        })
+    }
+
+    /// Hand the open `at` to `caller`'s connection under a fresh volatile
+    /// id, answered as the create that opened it — with its durability
+    /// again, for a `replay` of the ask that made it.
+    fn reattach(
+        &mut self,
+        caller: Caller,
+        request: &CreateRequest,
+        at: usize,
+        replay: bool,
+    ) -> Result<Answer, Fail> {
+        let open = &self.opens[at];
+        let asked = open.lease;
+        let file_id = open.file_id;
         let node = open.node;
+        let durable_timeout_ms = open
+            .durable
+            .as_ref()
+            .filter(|_| replay)
+            .map(|grant| grant.timeout_ms);
         let lease = match open.lease {
             Some(key) => {
                 let entry = self
@@ -894,8 +1100,21 @@ impl Share {
         let id = open_id(persistent, self.fresh_id());
         let open = &mut self.opens[at];
         open.file_id = id;
+        open.client = caller.client_guid;
         open.attached = true;
-        opened(&self.create_response(node, id, CreateAction::Opened, lease, request)?)
+        open.detached_at = None;
+        for entry in self
+            .leases
+            .iter_mut()
+            .filter(|entry| Some(entry.key) == asked)
+        {
+            entry.client = caller.client_guid;
+        }
+        let response = CreateResponse {
+            durable_timeout_ms,
+            ..self.create_response(node, id, CreateAction::Opened, lease, request)?
+        };
+        opened(&response)
     }
 
     fn close(&mut self, header: &Header, message: &[u8], chain: &Chain) -> Result<Answer, Fail> {
@@ -928,14 +1147,17 @@ impl Share {
                     let ended = self.deferred.remove(at);
                     let body =
                         behind_header(|enc| ChangeNotifyResponse { output: &[] }.encode(enc))?;
-                    self.push(Sent::Response {
-                        request: ended.request,
-                        address: Address::Async {
-                            async_id: ended.async_id,
+                    self.push(
+                        ended.caller.client_guid,
+                        Sent::Response {
+                            request: ended.request,
+                            address: Address::Async {
+                                async_id: ended.async_id,
+                            },
+                            status: NtStatus::NOTIFY_CLEANUP,
+                            body,
                         },
-                        status: NtStatus::NOTIFY_CLEANUP,
-                        body,
-                    })?;
+                    )?;
                 }
                 _ => at += 1,
             }
@@ -978,7 +1200,13 @@ impl Share {
         }])
     }
 
-    fn read(&mut self, header: &Header, message: &[u8], chain: &Chain) -> Result<Answer, Fail> {
+    fn read(
+        &mut self,
+        header: &Header,
+        message: &[u8],
+        chain: &Chain,
+        long: bool,
+    ) -> Result<Answer, Fail> {
         let request = ReadRequest::decode(message)?;
         let at = self.resolve(header, request.file_id, chain)?;
         require(self.opens[at].access, Access::READ_DATA)?;
@@ -994,10 +1222,22 @@ impl Share {
             return Err(NtStatus::END_OF_FILE.into());
         }
         let read = &data[start..end];
+        if long {
+            let mut more = Vec::new();
+            more.extend_from_slice(read);
+            more.push(0);
+            return done(|enc| ReadResponse { data: &more }.encode(enc));
+        }
         done(|enc| ReadResponse { data: read }.encode(enc))
     }
 
-    fn write(&mut self, header: &Header, message: &[u8], chain: &Chain) -> Result<Answer, Fail> {
+    fn write(
+        &mut self,
+        header: &Header,
+        message: &[u8],
+        chain: &Chain,
+        short: bool,
+    ) -> Result<Answer, Fail> {
         let request = WriteRequest::decode(message)?;
         let at = self.resolve(header, request.file_id, chain)?;
         require(
@@ -1005,13 +1245,22 @@ impl Share {
             Access::WRITE_DATA.with(Access::APPEND_DATA),
         )?;
         let node = self.opens[at].node;
-        let len = request.data.len() as u64;
+        let taken = if short {
+            &request.data[..request.data.len() / 2]
+        } else {
+            request.data
+        };
+        let len = taken.len() as u64;
         let end = request
             .offset
             .checked_add(len)
             .ok_or(NtStatus::INVALID_PARAMETER)?;
         if end > MAX_FILE {
             return Err(NtStatus::DISK_FULL.into());
+        }
+        let count = u32::try_from(taken.len()).map_err(|_| SmbError::Protocol)?;
+        if taken.is_empty() {
+            return done(|enc| WriteResponse { count }.encode(enc));
         }
         let now = self.tick();
         let n = self.node_mut(node)?;
@@ -1023,7 +1272,7 @@ impl Share {
         if data.len() < end {
             data.resize(end, 0);
         }
-        data[start..end].copy_from_slice(request.data);
+        data[start..end].copy_from_slice(taken);
         n.times.written = now;
         n.times.changed = now;
         let event = Event {
@@ -1033,7 +1282,6 @@ impl Share {
             what: NotifyFilter::SIZE.with(NotifyFilter::LAST_WRITE),
         };
         self.notify(&[event])?;
-        let count = u32::try_from(request.data.len()).map_err(|_| SmbError::Protocol)?;
         done(|enc| WriteResponse { count }.encode(enc))
     }
 
@@ -1254,7 +1502,15 @@ impl Share {
         }
         let (parent, name) = match self.locate(&rename.target)? {
             Located::Absent { parent, name } => (parent, name),
-            Located::Existing(existing) if existing == node => return Ok(()),
+            // A move onto itself takes the spelling it names.
+            Located::Existing(existing) if existing == node => {
+                let spelled = rename.target.names().last().unwrap_or_default();
+                let n = self.node_mut(node)?;
+                if n.name != spelled {
+                    n.name = String::from(spelled);
+                }
+                return Ok(());
+            }
             Located::Existing(existing) => {
                 let occupant = self.node(existing)?;
                 if !rename.replace
@@ -1308,6 +1564,7 @@ impl Share {
 
     fn change_notify(
         &mut self,
+        caller: Caller,
         header: &Header,
         message: &[u8],
         chain: &Chain,
@@ -1331,14 +1588,49 @@ impl Share {
             .map_err(|_| SmbError::OutOfMemory)?;
         self.deferred.push(Deferred {
             request: *header,
+            caller,
             async_id,
+            rest: Vec::new(),
             waiting,
         });
         Ok(Answer::Interim(async_id))
     }
 
+    /// Break every lease on the directory `dir`, as what a listing of it
+    /// would show has changed: a lease on a directory caches its listing.
+    fn break_directory(&mut self, dir: usize) -> Result<(), SmbError> {
+        let mut notices = Vec::new();
+        for entry in self.leases.iter_mut().filter(|lease| {
+            lease.node == dir && lease.breaking_to.is_none() && lease.state.bits() != 0
+        }) {
+            entry.breaking_to = Some(LeaseState::NONE);
+            entry.epoch = entry.epoch.wrapping_add(1);
+            let notice = BreakNotice::Lease(LeaseBreak {
+                epoch: entry.epoch,
+                ack_required: entry.state.contains(LeaseState::HANDLE),
+                key: entry.key,
+                current: entry.state,
+                new: LeaseState::NONE,
+            });
+            if !entry.state.contains(LeaseState::HANDLE) {
+                // Nothing to wait for: the lease is gone at once.
+                entry.state = LeaseState::NONE;
+                entry.breaking_to = None;
+            }
+            notices.push((entry.client, notice));
+        }
+        for (client, notice) in notices {
+            let body = behind_header(|enc| notice.encode(enc))?;
+            self.push(client, Sent::Break(body))?;
+        }
+        Ok(())
+    }
+
     /// Complete every watch `events` concern with the records it may see.
     fn notify(&mut self, events: &[Event]) -> Result<(), SmbError> {
+        for event in events {
+            self.break_directory(event.parent)?;
+        }
         let mut at = 0;
         while at < self.deferred.len() {
             let Waiting::Watch {
@@ -1380,14 +1672,17 @@ impl Share {
             };
             let body = behind_header(|enc| ChangeNotifyResponse { output }.encode(enc))?;
             let watch = self.deferred.remove(at);
-            self.push(Sent::Response {
-                request: watch.request,
-                address: Address::Async {
-                    async_id: watch.async_id,
+            self.push(
+                watch.caller.client_guid,
+                Sent::Response {
+                    request: watch.request,
+                    address: Address::Async {
+                        async_id: watch.async_id,
+                    },
+                    status,
+                    body,
                 },
-                status,
-                body,
-            })?;
+            )?;
         }
         Ok(())
     }
@@ -1433,8 +1728,9 @@ impl Share {
         })
     }
 
-    /// Carry on with the creates the break of `key` held.
-    fn resume(&mut self, caller: Caller<'_>, key: LeaseKey) -> Result<(), SmbError> {
+    /// Carry on with the creates the break of `key` held, each as its own
+    /// caller made it.
+    fn resume(&mut self, key: LeaseKey) -> Result<(), SmbError> {
         let mut at = 0;
         while at < self.deferred.len() {
             let held = matches!(
@@ -1449,40 +1745,90 @@ impl Share {
             let Waiting::Create { message, .. } = deferred.waiting else {
                 continue;
             };
-            let outcome = self.create(caller, &deferred.request, &message, Some(deferred.async_id));
+            let outcome = self.create(
+                deferred.caller,
+                &deferred.request,
+                &message,
+                Some(deferred.async_id),
+            );
+            let mut chain = Chain {
+                client: deferred.caller.client_guid,
+                ..Chain::default()
+            };
+            match &outcome {
+                Ok(Answer::Held) => {
+                    // Deferred again behind another break: what followed it
+                    // waits on with it.
+                    if let Some(again) = self
+                        .deferred
+                        .iter_mut()
+                        .find(|held| held.async_id == deferred.async_id)
+                    {
+                        again.rest = deferred.rest;
+                    }
+                    continue;
+                }
+                Ok(Answer::Opened { file_id, .. }) => chain.file_id = Some(*file_id),
+                Err(Fail::Status(status)) => chain.failed = Some(*status),
+                _ => {}
+            }
             self.finish(
+                deferred.caller.client_guid,
                 &deferred.request,
                 Address::Async {
                     async_id: deferred.async_id,
                 },
                 outcome,
             )?;
+            for (header, message) in deferred.rest {
+                self.request(deferred.caller, &header, &message, &mut chain)?;
+            }
         }
+        Ok(())
+    }
+
+    /// Hold the related request `header` behind the create `async_id` its
+    /// chain waits on.
+    fn park_behind(
+        &mut self,
+        async_id: u64,
+        header: &Header,
+        message: &[u8],
+    ) -> Result<(), SmbError> {
+        let deferred = self
+            .deferred
+            .iter_mut()
+            .find(|held| held.async_id == async_id)
+            .ok_or(SmbError::Protocol)?;
+        deferred.rest.push((*header, owned(message)?));
         Ok(())
     }
 
     /// Cancel what `header` names; the cancelled request answers, the
     /// cancel never does.
-    fn cancel(&mut self, header: &Header) -> Result<(), SmbError> {
-        let found = self
-            .deferred
-            .iter()
-            .position(|deferred| match header.address {
-                Address::Async { async_id } => deferred.async_id == async_id,
-                Address::Sync { .. } => deferred.request.message_id == header.message_id,
-            });
+    fn cancel(&mut self, caller: Caller, header: &Header) -> Result<(), SmbError> {
+        let found = self.deferred.iter().position(|deferred| {
+            deferred.caller.client_guid == caller.client_guid
+                && match header.address {
+                    Address::Async { async_id } => deferred.async_id == async_id,
+                    Address::Sync { .. } => deferred.request.message_id == header.message_id,
+                }
+        });
         let Some(at) = found else {
             return Ok(());
         };
         let cancelled = self.deferred.remove(at);
         let body = behind_header(empty_error)?;
-        self.push(Sent::Response {
-            request: cancelled.request,
-            address: Address::Async {
-                async_id: cancelled.async_id,
+        self.push(
+            caller.client_guid,
+            Sent::Response {
+                request: cancelled.request,
+                address: Address::Async {
+                    async_id: cancelled.async_id,
+                },
+                status: NtStatus::CANCELLED,
+                body,
             },
-            status: NtStatus::CANCELLED,
-            body,
-        })
+        )
     }
 }

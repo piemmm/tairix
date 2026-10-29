@@ -90,6 +90,24 @@ macro_rules! scrub_nonargument_gprs {
     };
 }
 
+/// Template text clearing the direction flag on entry, before any call into
+/// Rust. The System V AMD64 ABI requires `DF=0` at a function's entry, and the
+/// compiler emits `memcpy`/`memset` as `rep movs`/`rep stos`, which read `DF`
+/// to pick their direction. A `syscall` clears `DF` through `IA32_FMASK`, but
+/// interrupt, exception, and trap-gate delivery do not — so an interrupt taken
+/// inside the brief `std`…`cld` window of a backward `memmove`
+/// (`compiler_builtins`' `copy_backward`) would otherwise enter the dispatcher
+/// with `DF=1` and run its string ops backward, corrupting the interrupted
+/// stack. A stub splices this in after its saves and before its call; the
+/// interrupted context's own `DF` is untouched, restored by `iretq`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! clear_direction_flag {
+    () => {
+        "cld\n"
+    };
+}
+
 /// Template text for an interrupt return with `%rsp` at the CPU frame:
 /// clear the buffers when the frame goes back to ring 3, `iretq`, and trap
 /// straight-line speculation behind it. The `naked_asm!` it is spliced

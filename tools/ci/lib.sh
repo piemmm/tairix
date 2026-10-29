@@ -67,8 +67,8 @@ ci_stamp() {
 # post-mortems so a failure can still be diagnosed after the run.
 #
 # `cargo xtask test --qemu` writes each guest's full serial log and, when a
-# guest hangs, a dump of every core's CPU state, and names both in its failure
-# message. They land under `CARGO_TARGET_DIR`, which is a build cache the
+# guest hangs or its kernel dies, a dump of every core's CPU state and stack,
+# and names both in its failure message. They land under `CARGO_TARGET_DIR`, which is a build cache the
 # workflows do not upload and `cargo xtask clean` wipes at the start of the
 # next run — so the one artefact a hang is diagnosable from is discarded
 # before anyone reads the failure. Copying them beside the logs that *are*
@@ -81,7 +81,7 @@ ci_collect_qemu_artefacts() {
     local target="${CARGO_TARGET_DIR:-$TAIRIX_CI_REPO/target}"
     [ -d "$target" ] || return 0
     mkdir -p "$dest" 2>/dev/null || return 0
-    find "$target" -type f \( -name '*.serial.log' -o -name '*.hang.txt' \) \
+    find "$target" -type f \( -name '*.serial.log' -o -name '*.cpu.txt' \) \
         -exec cp -p {} "$dest/" \; 2>/dev/null
     return 0
 }

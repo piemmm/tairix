@@ -252,6 +252,7 @@ pub(crate) fn watched_service(volume: [u8; 16]) -> Watched {
         unpressured(),
         sink,
     )
+    .expect("a cache")
     .with_watch(claim);
     let cell: &'static LateFilesystem<CachedFs<RwMockFs>> =
         crate::forever(Box::new(LateFilesystem::new()));

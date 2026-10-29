@@ -22,6 +22,8 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_util::fallible::collected;
+
 use tairix_abi::sysinfo::SYSTEM_CONFIG_MAX_LEN;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
@@ -472,52 +474,52 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             reserved: 0,
             class_bytes,
         };
-        Ok(stats.to_le_bytes().to_vec())
+        copied(&stats.to_le_bytes())
     }
 
     fn mounts(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
-        Ok(record_page(
-            &self.filesystem.mount_snapshot(),
+        record_page(
+            &self.filesystem.mount_snapshot()?,
             offset,
             max_records,
             MountRecord::to_le_bytes,
-        ))
+        )
     }
 
     fn views(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
-        Ok(record_page(
-            &self.filesystem.view_snapshot(),
+        record_page(
+            &self.filesystem.view_snapshot()?,
             offset,
             max_records,
             ViewBindingRecord::to_le_bytes,
-        ))
+        )
     }
 
     fn volume_io_health(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
-        Ok(record_page(
-            &self.filesystem.volume_io_health_snapshot(),
+        record_page(
+            &self.filesystem.volume_io_health_snapshot()?,
             offset,
             max_records,
             VolumeIoHealthRecord::to_le_bytes,
-        ))
+        )
     }
 
     fn volume_io_stats(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
-        Ok(record_page(
-            &self.filesystem.volume_io_stats_snapshot(),
+        record_page(
+            &self.filesystem.volume_io_stats_snapshot()?,
             offset,
             max_records,
             VolumeIoStatsRecord::to_le_bytes,
-        ))
+        )
     }
 
     fn volume_io_queue(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
-        Ok(record_page(
-            &self.filesystem.volume_io_queue_snapshot(),
+        record_page(
+            &self.filesystem.volume_io_queue_snapshot()?,
             offset,
             max_records,
             VolumeIoQueueRecord::to_le_bytes,
-        ))
+        )
     }
 
     fn system_config(&self) -> Result<Vec<u8>, Errno> {
@@ -534,7 +536,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             OS_VERSION_PATCH,
             b"",
         )?;
-        Ok(identity.to_le_bytes().to_vec())
+        copied(&identity.to_le_bytes())
     }
 
     fn uptime(&self) -> Result<Vec<u8>, Errno> {
@@ -554,7 +556,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             since_boot,
             boot_time,
         };
-        Ok(uptime.to_le_bytes().to_vec())
+        copied(&uptime.to_le_bytes())
     }
 
     fn load_average(&self) -> Result<Vec<u8>, Errno> {
@@ -602,7 +604,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             total_tasks: total,
             users: u32::try_from(uids.len()).unwrap_or(u32::MAX),
         };
-        Ok(load.to_le_bytes().to_vec())
+        copied(&load.to_le_bytes())
     }
 
     fn user_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
@@ -671,7 +673,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             exit_bytes: thresholds.exit_watermarks().map(to_u64),
             band_entries,
         };
-        Ok(stats.to_le_bytes().to_vec())
+        copied(&stats.to_le_bytes())
     }
 
     fn memory_pressure_band(&self) -> Result<Vec<u8>, Errno> {
@@ -683,7 +685,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             band: crate::memstats::MEM_STATS.published_band().depth(),
             reserved: [0u8; 7],
         };
-        Ok(report.to_le_bytes().to_vec())
+        copied(&report.to_le_bytes())
     }
 
     fn memory_total_bytes(&self) -> Result<Vec<u8>, Errno> {
@@ -695,7 +697,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         let total = MemoryTotal {
             total_bytes: usable_ram_bytes(self.usable_frames()),
         };
-        Ok(total.to_le_bytes().to_vec())
+        copied(&total.to_le_bytes())
     }
 
     fn cache_ledgers(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
@@ -703,12 +705,12 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // cache's own identity; the wire class id is the class's index,
         // pinned equal across `lib/abi` and `kernel/mem` by the
         // `reclaim_classes_match_the_abi_registry` test below.
-        Ok(record_page(
-            &crate::memstats::MEM_STATS.cache_ledger_records(),
+        record_page(
+            &crate::memstats::MEM_STATS.cache_ledger_records()?,
             offset,
             max_records,
             CacheLedgerRecord::to_le_bytes,
-        ))
+        )
     }
 
     fn ramzip(&self) -> Result<Vec<u8>, Errno> {
@@ -720,7 +722,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // observing — whether or not a tier is running.
         let mut stats = crate::memstats::MEM_STATS.ramzip_stats();
         stats.pinned_bytes = self.state.aspaces.read().pinned_total_bytes();
-        Ok(stats.to_le_bytes().to_vec())
+        copied(&stats.to_le_bytes())
     }
 
     fn cpu_load(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
@@ -851,7 +853,9 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 aspaces.open_file_count(process),
             )
         };
-        let mut out = Vec::with_capacity(RESOURCE_LIMITS_REPORT_LEN);
+        let mut out = Vec::new();
+        out.try_reserve_exact(RESOURCE_LIMITS_REPORT_LEN)
+            .map_err(|_| Errno::OutOfMemory)?;
         for kind in LimitKind::ALL {
             let usage = match kind {
                 LimitKind::AddressSpaceBytes => aspace_usage,
@@ -882,8 +886,9 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
 /// mounted/unlocked, or none is installed) truthfully lists just the
 /// compiled half — never an error the broker would refuse ungated clients
 /// over and never a fabricated account. The held text was validated by
-/// the same fail-closed parser at load, so a re-parse failure equally
-/// yields no human rows.
+/// the same fail-closed parser at load and is read where it lies, record
+/// by record, so a page copies no database and builds no record; a text
+/// that no longer reads yields no human rows.
 ///
 /// Only the uid, login group and username cross this boundary: password
 /// records stay behind the capability-gated `users_db_read` syscall, and
@@ -898,11 +903,6 @@ fn user_directory_page(
     offset: u64,
     max_records: usize,
 ) -> Result<Vec<u8>, Errno> {
-    let humans = users_db.text().ok().and_then(|text| {
-        core::str::from_utf8(&text)
-            .ok()
-            .and_then(|text| tairix_users::UsersDb::parse(text).ok())
-    });
     let mut page = Page::new(offset, max_records);
     for (uid, primary_gid, username) in tairix_users::system_account_directory() {
         page.push(|| {
@@ -910,18 +910,22 @@ fn user_directory_page(
                 .map(|entry| entry.to_le_bytes())
         })?;
     }
-    if let Some(db) = &humans {
-        for record in db.records() {
+    let mut listed = Ok(());
+    // A kernel holding no database lists the compiled half alone.
+    let _ = users_db.with_text(&mut |text| {
+        listed = held_rows(text, tairix_users::UsersDb::views, |view| {
+            let identity = view.identity();
             page.push(|| {
                 UserDirectoryRecord::new(
-                    record.uid().0,
-                    record.primary_gid().0,
-                    record.username().as_bytes(),
+                    identity.uid.0,
+                    identity.primary_gid.0,
+                    identity.username.as_bytes(),
                 )
                 .map(|entry| entry.to_le_bytes())
-            })?;
-        }
-    }
+            })
+        });
+    });
+    listed?;
     Ok(page.finish())
 }
 
@@ -944,26 +948,23 @@ fn group_directory_page(
     offset: u64,
     max_records: usize,
 ) -> Result<Vec<u8>, Errno> {
-    let held = groups_db.text().ok().and_then(|text| {
-        core::str::from_utf8(&text)
-            .ok()
-            .and_then(|text| tairix_users::GroupsDb::parse(text).ok())
-    });
     let mut page = Page::new(offset, max_records);
-    for group in tairix_users::system_groups().unwrap_or_default() {
+    for (gid, name) in tairix_users::system_group_directory() {
         page.push(|| {
-            GroupDirectoryRecord::new(group.gid().0, group.name().as_bytes())
-                .map(|record| record.to_le_bytes())
+            GroupDirectoryRecord::new(gid.0, name.as_bytes()).map(|record| record.to_le_bytes())
         })?;
     }
-    if let Some(db) = &held {
-        for record in db.records() {
+    let mut listed = Ok(());
+    // A kernel holding no registry lists the compiled half alone.
+    let _ = groups_db.with_text(&mut |text| {
+        listed = held_rows(text, tairix_users::GroupsDb::views, |view| {
             page.push(|| {
-                GroupDirectoryRecord::new(record.gid().0, record.name().as_bytes())
+                GroupDirectoryRecord::new(view.gid().0, view.name().as_bytes())
                     .map(|entry| entry.to_le_bytes())
-            })?;
-        }
-    }
+            })
+        });
+    });
+    listed?;
     Ok(page.finish())
 }
 
@@ -974,25 +975,54 @@ fn group_directory_page(
 /// out-of-range directory page is: the broker's client asked about an
 /// account that is not there, which is a fact rather than a failure.
 fn account_record(users_db: &dyn UsersDbSource, uid: u32) -> Result<Vec<u8>, Errno> {
-    if let Some(record) = tairix_users::system_accounts()
-        .unwrap_or_default()
-        .iter()
-        .find(|record| record.uid().0 == uid)
-    {
-        return Ok(encode_account(record)?.to_le_bytes().to_vec());
-    }
-    let held = users_db.text().ok().and_then(|text| {
-        core::str::from_utf8(&text)
-            .ok()
-            .and_then(|text| tairix_users::UsersDb::parse(text).ok())
+    let found =
+        if let Some(identity) = tairix_users::system_account_identity(tairix_users::Uid(uid)) {
+            Some(encode_account(&identity)?)
+        } else {
+            held_account(users_db, uid)?
+        };
+    found.map_or_else(|| Ok(Vec::new()), |record| copied(&record.to_le_bytes()))
+}
+
+/// The on-disk account `uid` names, read where the held database lies; none
+/// where no database is held.
+fn held_account(
+    users_db: &dyn UsersDbSource,
+    uid: u32,
+) -> Result<Option<SelfAccountRecord>, Errno> {
+    let mut found = Ok(None);
+    let _ = users_db.with_text(&mut |text| {
+        let mut account = None;
+        found = held_rows(text, tairix_users::UsersDb::views, |view| {
+            let identity = view.identity();
+            if account.is_none() && identity.uid.0 == uid {
+                account = Some(encode_account(&identity)?);
+            }
+            Ok(())
+        })
+        .map(|()| account);
     });
-    let Some(db) = held else {
-        return Ok(Vec::new());
+    found
+}
+
+/// Offer `row` each record `views` reads from a held database `text`, once
+/// every record of it reads: a text the shared parser would refuse yields
+/// no rows, as the whole parse it was held under would.
+fn held_rows<'t, V, I>(
+    text: &'t [u8],
+    views: impl Fn(&'t str) -> I,
+    row: impl FnMut(V) -> Result<(), Errno>,
+) -> Result<(), Errno>
+where
+    I: Iterator<Item = Result<V, tairix_users::LocatedError>>,
+{
+    let Ok(text) = core::str::from_utf8(text) else {
+        return Ok(());
     };
-    let Some(record) = db.records().iter().find(|record| record.uid().0 == uid) else {
-        return Ok(Vec::new());
-    };
-    Ok(encode_account(record)?.to_le_bytes().to_vec())
+    if !views(text).all(|view| view.is_ok()) {
+        return Ok(());
+    }
+    views(text).flatten().try_for_each(row)
 }
 
 /// One account's display fields as a [`SelfAccountRecord`].
@@ -1000,21 +1030,22 @@ fn account_record(users_db: &dyn UsersDbSource, uid: u32) -> Result<Vec<u8>, Err
 /// An absent home or shell is reported as the database's own `none`
 /// marker rather than an empty string, so a no-login account states the
 /// intent it actually carries instead of looking like a missing reading.
-fn encode_account(record: &tairix_users::UserRecord) -> Result<SelfAccountRecord, Errno> {
-    let gids: Vec<u32> = record
-        .supplementary_gids()
-        .iter()
-        .map(|gid| gid.0)
-        .collect();
+fn encode_account(identity: &tairix_users::Identity<'_>) -> Result<SelfAccountRecord, Errno> {
+    let mut gids = [0u32; tairix_abi::account::MAX_SUPPLEMENTARY_GIDS];
+    let held = identity.supplementary_gids;
+    let gids = gids.get_mut(..held.len()).ok_or(Errno::LengthOutOfRange)?;
+    for (slot, gid) in gids.iter_mut().zip(held) {
+        *slot = gid.0;
+    }
     SelfAccountRecord::new(
-        record.uid().0,
-        record.primary_gid().0,
-        &gids,
+        identity.uid.0,
+        identity.primary_gid.0,
+        gids,
         tairix_abi::sysinfo::SelfAccountText {
-            name: record.username().as_bytes(),
-            display_name: record.display_name().as_bytes(),
-            home: record.home().unwrap_or(NO_PATH_MARKER).as_bytes(),
-            shell: record.shell().unwrap_or(NO_PATH_MARKER).as_bytes(),
+            name: identity.username.as_bytes(),
+            display_name: identity.display_name.as_bytes(),
+            home: identity.home.unwrap_or(NO_PATH_MARKER).as_bytes(),
+            shell: identity.shell.unwrap_or(NO_PATH_MARKER).as_bytes(),
         },
     )
 }
@@ -1055,7 +1086,9 @@ impl Page {
         if self.remaining == 0 {
             return Ok(());
         }
-        self.out.extend_from_slice(&encode()?);
+        let encoded = encode()?;
+        self.out.try_reserve(N).map_err(|_| Errno::OutOfMemory)?;
+        self.out.extend_from_slice(&encoded);
         self.remaining -= 1;
         Ok(())
     }
@@ -1076,28 +1109,44 @@ impl Page {
 /// for this target's `usize` — yields the empty page every paged domain
 /// terminates with, never an error. Each caller's snapshot arrives in a
 /// stable order of its own, so a client paging the list sees each row once.
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when the page cannot be held.
 fn record_page<R, const N: usize>(
     records: &[R],
     offset: u64,
     max_records: usize,
     encode: impl Fn(&R) -> [u8; N],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, Errno> {
     let total = records.len();
     let first = usize::try_from(offset).unwrap_or(total).min(total);
     let last = first.saturating_add(max_records).min(total);
+    let page = &records[first..last];
     let mut out = Vec::new();
-    for record in &records[first..last] {
+    out.try_reserve_exact(page.len().saturating_mul(N))
+        .map_err(|_| Errno::OutOfMemory)?;
+    for record in page {
         out.extend_from_slice(&encode(record));
     }
-    out
+    Ok(out)
+}
+
+/// A copy of `bytes`, or [`Errno::OutOfMemory`].
+fn copied(bytes: &[u8]) -> Result<Vec<u8>, Errno> {
+    collected(bytes.len(), bytes.iter().copied()).ok_or(Errno::OutOfMemory)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{counts_toward_load, record_page, GroupReading, JobGeneration};
+    use super::{
+        copied, counts_toward_load, encode_account, record_page, GroupReading, JobGeneration,
+    };
+    use crate::test_alloc::past_each_refusal;
     use tairix_abi::sysinfo::{
         CacheLedgerRecord, CacheOwnerKind, PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT,
     };
+    use tairix_abi::Errno;
     use tairix_kernel_sched_api::TaskState;
     use tairix_reclaim::ReclaimClass;
 
@@ -1158,20 +1207,20 @@ mod tests {
         // identity, owner, and figures a client reads are the ones the
         // registry holds.
         assert_eq!(
-            decode(&record_page(
-                &rows,
-                0,
-                rows.len(),
-                CacheLedgerRecord::to_le_bytes
-            )),
+            decode(
+                &record_page(&rows, 0, rows.len(), CacheLedgerRecord::to_le_bytes).expect("a page")
+            ),
             rows
         );
 
         // A limit truncates from the front; the offset then resumes from
         // exactly where the previous page stopped, so a paging client sees
         // every row once and none twice.
-        let first = decode(&record_page(&rows, 0, 2, CacheLedgerRecord::to_le_bytes));
-        let second = decode(&record_page(&rows, 2, 2, CacheLedgerRecord::to_le_bytes));
+        let page = |offset, limit| {
+            record_page(&rows, offset, limit, CacheLedgerRecord::to_le_bytes).expect("a page")
+        };
+        let first = decode(&page(0, 2));
+        let second = decode(&page(2, 2));
         assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 1);
         let paged: Vec<&str> = first
@@ -1182,7 +1231,43 @@ mod tests {
         assert_eq!(paged, LEDGER_LABELS);
 
         // A limit of nothing asks for nothing, and is not an error.
-        assert!(record_page(&rows, 0, 0, CacheLedgerRecord::to_le_bytes).is_empty());
+        assert!(page(0, 0).is_empty());
+    }
+
+    /// A reply the heap cannot hold is refused, never an abort.
+    ///
+    /// Regression: a page, a fixed record and an account's groups were each
+    /// copied out infallibly.
+    #[test]
+    fn a_reply_the_heap_cannot_hold_is_refused() {
+        let rows = ledger_rows();
+        let page = past_each_refusal(&Err(Errno::OutOfMemory), || {
+            record_page(&rows, 0, rows.len(), CacheLedgerRecord::to_le_bytes)
+        });
+        assert_eq!(page.map(|page| decode(&page)), Ok(rows));
+        assert_eq!(
+            past_each_refusal(&Err(Errno::OutOfMemory), || copied(b"a record")),
+            Ok(b"a record".to_vec())
+        );
+        let account = tairix_users::UserRecord::new(
+            tairix_users::Identity {
+                username: "ann",
+                uid: tairix_users::Uid(1000),
+                primary_gid: tairix_users::Gid(1000),
+                supplementary_gids: &[tairix_users::Gid(100), tairix_users::Gid(200)],
+                display_name: "",
+                home: Some("/Users/ann"),
+                shell: Some("/System/Commands/elsh.app/Run"),
+                capabilities: tairix_caps::CapabilitySet::empty(),
+                state: tairix_users::AccountState::Active,
+            },
+            crate::test_identity::shared_password(),
+        )
+        .expect("valid record");
+        let groups = past_each_refusal(&Err(Errno::OutOfMemory), || {
+            encode_account(&account.identity()).map(|record| record.supplementary_gids().len())
+        });
+        assert_eq!(groups, Ok(2));
     }
 
     #[test]
@@ -1194,12 +1279,16 @@ mod tests {
         // domain ends with, never an error and never a wrapped row.
         for offset in [total, total + 1, u64::MAX] {
             assert!(
-                record_page(&rows, offset, rows.len(), CacheLedgerRecord::to_le_bytes).is_empty()
+                record_page(&rows, offset, rows.len(), CacheLedgerRecord::to_le_bytes)
+                    .expect("a page")
+                    .is_empty()
             );
         }
         // An empty registry is the same terminator from the first read.
         let empty: [CacheLedgerRecord; 0] = [];
-        assert!(record_page(&empty, 0, 8, CacheLedgerRecord::to_le_bytes).is_empty());
+        assert!(record_page(&empty, 0, 8, CacheLedgerRecord::to_le_bytes)
+            .expect("a page")
+            .is_empty());
     }
 
     /// The pressure export's band vocabulary is the kernel gauge's own
@@ -1438,9 +1527,111 @@ mod tests {
         .expect("valid record");
         let db = tairix_users::UsersDb::new(alloc::vec![record]).expect("valid db");
         let cell = LateUsersDb::new();
-        cell.install(HeldUsersDbSource::new(db.serialise().into_bytes()))
-            .expect("fresh cell installs");
+        cell.install(HeldUsersDbSource::new(
+            db.serialise().expect("serialises").into_bytes(),
+        ))
+        .expect("fresh cell installs");
         cell
+    }
+
+    /// A users cell of `count` human accounts and a groups cell of `count`
+    /// groups, named `u0`, `u1`, … and `g0`, `g1`, ….
+    fn held_of(count: u32) -> (LateUsersDb, LateGroupsDb) {
+        let names: Vec<String> = (0..count).map(|at| alloc::format!("u{at}")).collect();
+        let records = names
+            .iter()
+            .zip(1000..)
+            .map(|(name, uid)| {
+                tairix_users::UserRecord::new(
+                    tairix_users::Identity {
+                        username: name,
+                        uid: tairix_users::Uid(uid),
+                        primary_gid: tairix_users::Gid(1000),
+                        supplementary_gids: &[tairix_users::Gid(100), tairix_users::Gid(1000)],
+                        display_name: "",
+                        home: Some("/Users/u"),
+                        shell: Some("/System/Commands/elsh.app/Run"),
+                        capabilities: tairix_caps::CapabilitySet::empty(),
+                        state: tairix_users::AccountState::Active,
+                    },
+                    crate::test_identity::shared_password(),
+                )
+                .expect("valid record")
+            })
+            .collect();
+        let users = LateUsersDb::new();
+        users
+            .install(HeldUsersDbSource::new(
+                tairix_users::UsersDb::new(records)
+                    .expect("valid db")
+                    .serialise()
+                    .expect("serialises")
+                    .into_bytes(),
+            ))
+            .expect("fresh cell installs");
+        let groups: Vec<tairix_users::GroupRecord> = (0..count)
+            .map(|at| {
+                tairix_users::GroupRecord::new(
+                    &alloc::format!("g{at}"),
+                    tairix_users::Gid(2000 + at),
+                )
+                .expect("valid group")
+            })
+            .collect();
+        let registry = LateGroupsDb::new();
+        registry.publish(
+            tairix_users::GroupsDb::new(groups)
+                .expect("valid registry")
+                .serialise()
+                .expect("serialises")
+                .into_bytes(),
+        );
+        (users, registry)
+    }
+
+    /// A directory page or an account read takes from the heap only what its
+    /// answer holds, however many accounts the database holds, and a refusal
+    /// anywhere is refused whole.
+    ///
+    /// Regression: each copied the whole database and parsed it into owned
+    /// records, infallibly, on every call.
+    #[test]
+    fn a_directory_is_read_where_it_lies() {
+        use crate::test_alloc::{opt_in_current_thread, opt_out_current_thread, LiveBytes};
+        static COUNTER: LiveBytes = LiveBytes::new();
+        let asked = |count: u32| {
+            let (users, groups) = held_of(count);
+            opt_in_current_thread(&COUNTER);
+            let before = COUNTER.allocations();
+            let read = (
+                user_directory_page(&users, 0, 4).map(|page| page.len()),
+                group_directory_page(&groups, 0, 4).map(|page| page.len()),
+                account_record(&users, 1000 + count - 1).map(|record| record.len()),
+            );
+            let asked = COUNTER.allocations() - before;
+            opt_out_current_thread();
+            assert_eq!(
+                read,
+                (
+                    Ok(4 * UserDirectoryRecord::WIRE_LEN),
+                    Ok(4 * GroupDirectoryRecord::WIRE_LEN),
+                    Ok(SelfAccountRecord::WIRE_LEN)
+                )
+            );
+            asked
+        };
+        assert_eq!(asked(300), asked(3));
+
+        let (users, groups) = held_of(40);
+        let oom = Err(Errno::OutOfMemory);
+        let users_page = || user_directory_page(&users, 30, 30).map(|page| page.len());
+        let groups_page = || group_directory_page(&groups, 30, 30).map(|page| page.len());
+        let account = || account_record(&users, 1020).map(|record| record.len());
+        assert_eq!(past_each_refusal(&oom, users_page), users_page());
+        assert_eq!(past_each_refusal(&oom, groups_page), groups_page());
+        assert_eq!(past_each_refusal(&oom, account), account());
+        assert_eq!(account(), Ok(SelfAccountRecord::WIRE_LEN));
+        assert!(users_page().expect("a page") > 0 && groups_page().expect("a page") > 0);
     }
 
     #[test]
@@ -1485,25 +1676,25 @@ mod tests {
         let cell = human_db();
         // The whole directory: compiled rows first, then the human half.
         let all = rows(&user_directory_page(&cell, 0, 64).expect("page encodes"));
-        assert_eq!(all.len(), 16);
+        assert_eq!(all.len(), 17);
         assert_eq!(all[0], (0, 0, String::from("system")));
-        assert_eq!(all[15], (1000, 1000, String::from("root")));
+        assert_eq!(all[16], (1000, 1000, String::from("root")));
         // A page straddling the seam carries the tail of the compiled half
         // and the head of the human half.
-        let seam = rows(&user_directory_page(&cell, 14, 2).expect("page encodes"));
+        let seam = rows(&user_directory_page(&cell, 15, 2).expect("page encodes"));
         assert_eq!(
             seam,
             alloc::vec![
                 (
-                    tairix_users::THERMALD_UID.0,
+                    tairix_users::SMBFS_UID.0,
                     tairix_users::SERVICES_GID.0,
-                    String::from("thermald")
+                    String::from("smbfs")
                 ),
                 (1000, 1000, String::from("root")),
             ]
         );
         // An offset past the end is the empty paging terminator.
-        assert!(rows(&user_directory_page(&cell, 16, 64).expect("page encodes")).is_empty());
+        assert!(rows(&user_directory_page(&cell, 17, 64).expect("page encodes")).is_empty());
     }
 
     /// Decode a group page's packed records into owned `(gid, name)` rows.
@@ -1530,7 +1721,7 @@ mod tests {
             tairix_users::GroupRecord::new("staff", tairix_users::Gid(1000)).expect("valid group");
         let db = tairix_users::GroupsDb::new(alloc::vec![record]).expect("valid registry");
         let cell = LateGroupsDb::new();
-        cell.publish(db.serialise().into_bytes());
+        cell.publish(db.serialise().expect("serialises").into_bytes());
         cell
     }
 

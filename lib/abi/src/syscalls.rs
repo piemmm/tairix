@@ -2116,10 +2116,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        // The retraction half of `volume_attach`: the same mount
-        // authority, and every decision is audited (the drives.md
-        // fs.hotplug.root_removed events).
-        required_capability: Some(CapabilityId::FS_MOUNT),
+        // The retraction half of `volume_attach`. Its owner may detach a
+        // network volume, so the mount authority is checked by the handler
+        // against the volume named; every decision is audited (the
+        // drives.md fs.hotplug.root_removed events).
+        required_capability: None,
         audit: true,
     },
     SyscallSpec {
@@ -3828,6 +3829,106 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::FS_SERVE),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::FSSERVE_OFFER,
+        name: "fsserve_offer",
+        arg_count: 4,
+        args: [
+            // Non-null `UserPtr` to the `NetworkOffer` and its length,
+            // non-null `UserPtr` for the `OfferGrant` and its capacity.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // The serving half of a network volume: the user-space filesystem
+        // driver's class capability, and every offer is audited.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FSSERVE_ATTACH,
+        name: "fsserve_attach",
+        arg_count: 5,
+        args: [
+            // The offer, non-null `UserPtr` to the `NetworkAttach` and its
+            // length, non-null `UserPtr` for the `AttachReply` and its
+            // capacity.
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // The offer names the one principal who may attach it, and a wider
+        // presentation needs the mount authority, both judged by the
+        // handler against the caller; every attach is audited.
+        required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FSSERVE_CTL,
+        name: "fsserve_ctl",
+        arg_count: 2,
+        args: [
+            // The offer, then the `FsserveCtl` code.
+            AbiType::U64,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Only the server that made an offer speaks for it. A withdrawal
+        // is audited by the handler; a sign of life, sent often, is not.
+        required_capability: Some(CapabilityId::FS_SERVE),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VIEW_BIND,
+        name: "view_bind",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the `ViewBindRequest` and its length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // An owner may bind its own volume onto an empty directory it owns,
+        // judged by the handler under the resolution the bind takes;
+        // anything wider needs the mount authority. Every bind is audited.
+        required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::VIEW_UNBIND,
+        name: "view_unbind",
+        arg_count: 2,
+        args: [
+            // Non-null `UserPtr` to the target path and its length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The binder or a mount-authority holder, judged by the handler;
+        // every withdrawal is audited.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -4424,15 +4525,28 @@ mod tests {
 
     #[test]
     fn volume_capability_requirements_are_frozen() {
-        // Attaching and detaching runtime volumes reshapes the storage
-        // namespace for every principal: both carry the mount authority
-        // and both are audited per call. Lock this down so a refactor
-        // cannot loosen the gate or drop the audit.
-        for number in [SyscallNumber::VOLUME_ATTACH, SyscallNumber::VOLUME_DETACH] {
+        // Attaching a runtime volume reshapes the storage namespace for
+        // every principal: it carries the mount authority. Detaching, an
+        // attach of a network volume and a view binding are judged by their
+        // handlers against the volume and the caller, so they carry none at
+        // the dispatcher; serving carries the server's class capability.
+        // Every one is audited. Lock this down so a refactor cannot loosen a
+        // gate or drop an audit.
+        let gates = [
+            (SyscallNumber::VOLUME_ATTACH, Some(CapabilityId::FS_MOUNT)),
+            (SyscallNumber::VOLUME_DETACH, None),
+            (SyscallNumber::FSSERVE_OFFER, Some(CapabilityId::FS_SERVE)),
+            (SyscallNumber::FSSERVE_ATTACH, None),
+            (SyscallNumber::VIEW_BIND, None),
+            (SyscallNumber::VIEW_UNBIND, None),
+        ];
+        for (number, gate) in gates {
             let spec = spec_for(number).unwrap();
-            assert_eq!(spec.required_capability, Some(CapabilityId::FS_MOUNT));
+            assert_eq!(spec.required_capability, gate, "{}", spec.name);
             assert!(spec.audit, "{} must be audited", spec.name);
         }
+        let ctl = spec_for(SyscallNumber::FSSERVE_CTL).unwrap();
+        assert_eq!(ctl.required_capability, Some(CapabilityId::FS_SERVE));
     }
 
     #[test]

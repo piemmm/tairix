@@ -62,6 +62,10 @@ pub mod topology;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 // The shared bus-driver locate/BAR primitives (`locate.rs`): the one
 // definition the generic xHCI driver and a root-complex bus driver both
 // reach, re-exported at the crate root beside the

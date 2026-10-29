@@ -196,7 +196,8 @@ each decoder total and bounded.
 
 `rpc` speaks connection-oriented DCE/RPC (C706) over a named pipe, and the
 one call this client makes: `srvsvc`'s `NetrShareEnum` at level 1 (MS-SRVS),
-for every share's name, type and remark. `ShareListing` is the whole
+for every share's name, type and remark, of which it keeps the disk shares.
+`ShareListing` is the whole
 exchange as a sequence of requests on the `IPC$` tree — open `srvsvc`, write
 the bind and read its acknowledgment, send the call with
 `FSCTL_PIPE_TRANSCEIVE`, read whatever fragments follow, close — and checks
@@ -212,10 +213,15 @@ each answer before naming the next request:
   ends short of a PDU (`STATUS_BUFFER_OVERFLOW`) is read on.
 - The answer must come under the call's id and context, opened by one first
   fragment and closed by a last; a fault is `SmbError::Rpc` with its status,
-  and so is a call that failed. The answer is at most 256 KiB in all and at
-  most the 256 shares a `netshare-v1` listing carries.
-- A share whose name no tree connect could take is left out and counted, so
-  a surface can say some were not shown. A remark is display text: a unit
+  and so is a call that failed. The answer is at most 256 KiB in all, and
+  each share's fixed part is read in place beside the strings it points to,
+  so a count the answer cannot hold is refused before anything is reserved
+  for it.
+- Only disk shares are kept, the special ones (`C$`, `ADMIN$`) only when
+  asked for, and of those the first 256 — what a `netshare-v1` listing
+  carries. A special share not asked for, a share whose name no tree connect
+  could take, and a share past the first 256 are each left out and counted,
+  so a surface can say some were not shown. A remark is display text: a unit
   that does not decode is U+FFFD and costs it nothing, and a remark past
   1024 bytes is cut at its last character within them.
 - A listing that fails after opening the pipe still closes it.
@@ -231,8 +237,9 @@ do NTLM's target information (4 KiB) and names (512 bytes of UTF-16) and the
 mechanisms a server's hints may list (16). On a tree, a read or write moves
 at most 1 MiB, a listing response 256 KiB, an information class 4 KiB, a
 change response 64 KiB, a create 16 contexts; a name is at most 255 bytes and
-a path 32,760 units. A share listing reads fragments of at most 4280 bytes,
-an answer of at most 256 KiB, and 256 shares. These are security bounds on a
+a path 32,760 units. A share listing reads fragments of at most 4280 bytes
+and an answer of at most 256 KiB, and keeps 256 shares. These are security
+bounds on a
 stranger's bytes, not capacities. Nothing a server sends is allocated for
 infallibly: exhaustion is `SmbError::OutOfMemory`.
 

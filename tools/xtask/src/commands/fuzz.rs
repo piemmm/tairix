@@ -281,6 +281,11 @@ pub const TARGETS: &[Target] = &[
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",
     },
     Target {
+        package: "tairix-smbfs",
+        test: "fuzz_smbfs",
+        description: "smbfs front/worker channel (canonical frame codecs, and the front against workers whose frames are dropped, repeated, corrupted or replaced: every call answered once, nothing left behind)",
+    },
+    Target {
         package: "tairix-discoveryd",
         test: "fuzz_discoveryd",
         description: "discoveryd front/decoder channel (canonical frame codecs, the sandboxed decoder over hostile datagrams, and the front against a hostile decoder: containment, replacement, tick pacing, back-pressure)",

@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 
 use super::{
     read_share_enum, read_share_enum_request, write_share_enum, write_share_enum_request, Bind,
-    BindAck, Pdu, RequestFragment, ResponseFragment, Share, ShareKind, ShareList, ShareListing,
-    ShareRecord, Syntax, ACCEPTANCE, MAX_FRAGMENT, NDR, SHARE_ENUM, SPECIAL, SRVSVC, TEMPORARY,
+    BindAck, Pdu, RequestFragment, ResponseFragment, ShareKind, ShareList, ShareListing,
+    ShareRecord, Syntax, ACCEPTANCE, MAX_FRAGMENT, NDR, SHARE_ENUM, SPECIAL, SRVSVC,
 };
 use crate::file::create::{CreateAction, CreateResponse, OplockLevel};
 use crate::file::io::{CloseResponse, ReadResponse, WriteResponse};
@@ -36,6 +36,11 @@ fn stub(encode: impl FnOnce(&mut Encoder)) -> Vec<u8> {
     enc.finish().expect("encodes")
 }
 
+/// MS-SRVS §2.2.2.4's flags for a share not kept across restarts, and for one
+/// a cluster serves: neither changes what kind of share it is.
+const STYPE_TEMPORARY: u32 = 0x4000_0000;
+const STYPE_CLUSTER_FS: u32 = 0x0200_0000;
+
 fn records<'a>(names: &[&'a str]) -> Vec<ShareRecord<'a>> {
     names
         .iter()
@@ -44,6 +49,14 @@ fn records<'a>(names: &[&'a str]) -> Vec<ShareRecord<'a>> {
             share_type: ShareKind::Disk.code(),
             remark: "",
         })
+        .collect()
+}
+
+/// The names of `list`'s shares, in order.
+fn names(list: &ShareList) -> Vec<&str> {
+    list.shares
+        .iter()
+        .map(|share| share.name.as_str())
         .collect()
 }
 
@@ -195,7 +208,7 @@ fn the_share_enum_request_asks_for_every_share_at_level_one() {
 }
 
 #[test]
-fn a_listing_reads_each_share_s_name_kind_and_remark() {
+fn a_listing_keeps_the_disk_shares_and_the_special_ones_only_when_asked() {
     let listed = [
         ShareRecord {
             name: "share",
@@ -209,71 +222,82 @@ fn a_listing_reads_each_share_s_name_kind_and_remark() {
         },
         ShareRecord {
             name: "printer",
-            share_type: ShareKind::PrintQueue.code() | TEMPORARY,
+            share_type: ShareKind::PrintQueue.code() | STYPE_TEMPORARY,
             remark: "Second floor",
         },
         ShareRecord {
-            name: "odd",
-            share_type: 0x0200_0007,
+            name: "clustered",
+            share_type: ShareKind::Disk.code() | STYPE_CLUSTER_FS,
             remark: "A clustered share",
+        },
+        ShareRecord {
+            name: "odd",
+            share_type: STYPE_CLUSTER_FS | 7,
+            remark: "",
+        },
+        ShareRecord {
+            name: "ADMIN$",
+            share_type: ShareKind::Disk.code() | SPECIAL,
+            remark: "Remote Admin",
+        },
+        ShareRecord {
+            name: "scratch",
+            share_type: ShareKind::Disk.code() | STYPE_TEMPORARY,
+            remark: "",
         },
     ];
     let bytes = stub(|enc| write_share_enum(enc, &listed, 0));
-    let list = read_share_enum(&bytes).expect("a listing");
-    assert_eq!(list.omitted, 0);
+    let plain = read_share_enum(&bytes, false).expect("a listing");
+    assert_eq!(names(&plain), ["share", "clustered", "scratch"]);
+    assert_eq!((plain.hidden, plain.unnamed, plain.unlisted), (1, 0, 0));
+    assert_eq!(plain.shares[0].remark, "The test share");
+    assert!(plain.shares.iter().all(|share| !share.special));
+
+    let special = read_share_enum(&bytes, true).expect("a listing");
+    assert_eq!(names(&special), ["share", "clustered", "ADMIN$", "scratch"]);
     assert_eq!(
-        list.shares,
-        [
-            Share {
-                name: String::from("share"),
-                kind: ShareKind::Disk,
-                special: false,
-                temporary: false,
-                remark: String::from("The test share"),
-            },
-            Share {
-                name: String::from("IPC$"),
-                kind: ShareKind::Ipc,
-                special: true,
-                temporary: false,
-                remark: String::new(),
-            },
-            Share {
-                name: String::from("printer"),
-                kind: ShareKind::PrintQueue,
-                special: false,
-                temporary: true,
-                remark: String::from("Second floor"),
-            },
-            Share {
-                name: String::from("odd"),
-                kind: ShareKind::Other(7),
-                special: false,
-                temporary: false,
-                remark: String::from("A clustered share"),
-            },
-        ]
+        (special.hidden, special.unnamed, special.unlisted),
+        (0, 0, 0)
     );
     assert_eq!(
-        read_share_enum(&stub(|enc| write_share_enum(enc, &[], 0))),
+        special
+            .shares
+            .iter()
+            .map(|share| (share.special, share.remark.as_str()))
+            .nth(2),
+        Some((true, "Remote Admin"))
+    );
+    assert_eq!(
+        read_share_enum(&stub(|enc| write_share_enum(enc, &[], 0)), true),
         Ok(ShareList::default())
     );
 }
 
 #[test]
-fn a_share_no_tree_connect_could_name_is_omitted_and_counted() {
+fn a_share_no_tree_connect_could_name_is_left_out_and_counted() {
     let long = "x".repeat(81);
-    let names = [r"a\b", "a/b", "nul\0in", long.as_str(), "kept"];
-    let bytes = stub(|enc| write_share_enum(enc, &records(&names), 0));
-    let list = read_share_enum(&bytes).expect("a listing");
-    assert_eq!(list.omitted, 4);
-    assert_eq!(
-        list.shares
-            .iter()
-            .map(|share| share.name.as_str())
-            .collect::<Vec<_>>(),
-        ["kept"]
-    );
+    let wide = "\u{1f600}".repeat(81);
+    let listed = [
+        r"a\b",
+        "a/b",
+        "nul\0in",
+        long.as_str(),
+        wide.as_str(),
+        "kept",
+    ];
+    let mut bytes = stub(|enc| write_share_enum(enc, &records(&listed), 0));
+    let list = read_share_enum(&bytes, false).expect("a listing");
+    assert_eq!(list.unnamed, 5);
+    assert_eq!(names(&list), ["kept"]);
+
+    // A lone surrogate in the last name's first unit.
+    let kept_at = bytes
+        .windows(8)
+        .rposition(|window| window == [b'k', 0, b'e', 0, b'p', 0, b't', 0])
+        .expect("the name");
+    bytes[kept_at..kept_at + 2].copy_from_slice(&0xdc00_u16.to_le_bytes());
+    let list = read_share_enum(&bytes, false).expect("a listing");
+    assert_eq!((list.shares.len(), list.unnamed), (0, 6));
 }
 
 #[test]
@@ -295,7 +319,7 @@ fn a_remark_that_does_not_decode_keeps_its_share() {
         .rposition(|window| window == [b'a', 0, b'b', 0, 0, 0])
         .expect("the remark");
     bytes[remark_at..remark_at + 2].copy_from_slice(&0xd800_u16.to_le_bytes());
-    let list = read_share_enum(&bytes).expect("a listing");
+    let list = read_share_enum(&bytes, false).expect("a listing");
     assert_eq!(list.shares[0].remark, "\u{fffd}b");
 }
 
@@ -320,7 +344,7 @@ fn a_long_remark_is_cut_at_a_character_within_its_bound() {
                 0,
             );
         });
-        let list = read_share_enum(&bytes).expect("a listing");
+        let list = read_share_enum(&bytes, false).expect("a listing");
         assert_eq!(list.shares[0].remark, kept);
         assert!(list.shares[0].remark.len() <= REMARK_MAX);
     }
@@ -329,7 +353,7 @@ fn a_long_remark_is_cut_at_a_character_within_its_bound() {
 #[test]
 fn a_failed_call_is_its_status() {
     let bytes = stub(|enc| write_share_enum(enc, &records(&["share"]), 5));
-    assert_eq!(read_share_enum(&bytes), Err(SmbError::Rpc(5)));
+    assert_eq!(read_share_enum(&bytes, false), Err(SmbError::Rpc(5)));
 }
 
 #[test]
@@ -353,12 +377,50 @@ fn a_listing_out_of_shape_is_refused() {
         ("a string without its terminator", unterminated),
         ("bytes after the status", trailing),
     ] {
-        assert_eq!(read_share_enum(&bytes), Err(SmbError::Malformed), "{what}");
+        assert_eq!(
+            read_share_enum(&bytes, false),
+            Err(SmbError::Malformed),
+            "{what}"
+        );
     }
-    let names: Vec<String> = (0..=SHARES_MAX).map(|index| format!("s{index}")).collect();
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let many = stub(|enc| write_share_enum(enc, &records(&names), 0));
-    assert_eq!(read_share_enum(&many), Err(SmbError::TooLarge));
+    let mut overcounted = good.clone();
+    // The count and the array's conformance, claiming more shares than the
+    // stub holds.
+    overcounted[12..16].copy_from_slice(&1000_u32.to_le_bytes());
+    overcounted[20..24].copy_from_slice(&1000_u32.to_le_bytes());
+    assert_eq!(
+        read_share_enum(&overcounted, false),
+        Err(SmbError::Malformed)
+    );
+}
+
+#[test]
+fn past_the_first_shares_the_rest_are_counted_not_listed() {
+    let numbered: Vec<String> = (0..SHARES_MAX + 3)
+        .map(|index| format!("s{index}"))
+        .collect();
+    let mut listed: Vec<ShareRecord<'_>> = (0..10)
+        .map(|_| ShareRecord {
+            name: "printer",
+            share_type: ShareKind::PrintQueue.code(),
+            remark: "",
+        })
+        .collect();
+    listed.extend(records(
+        &numbered.iter().map(String::as_str).collect::<Vec<_>>(),
+    ));
+    listed.extend(records(&["a/b"]));
+    listed.push(ShareRecord {
+        name: "D$",
+        share_type: ShareKind::Disk.code() | SPECIAL,
+        remark: "",
+    });
+    let bytes = stub(|enc| write_share_enum(enc, &listed, 0));
+    let list = read_share_enum(&bytes, false).expect("a listing");
+    assert_eq!(list.shares.len(), SHARES_MAX, "the printers take no place");
+    assert_eq!(names(&list)[..2], ["s0", "s1"]);
+    assert_eq!(list.shares[SHARES_MAX - 1].name.as_str(), "s255");
+    assert_eq!((list.hidden, list.unnamed, list.unlisted), (1, 1, 3));
 }
 
 /// A response to the listing's request, behind a header of `command` with
@@ -410,7 +472,7 @@ fn opened() -> Vec<u8> {
 
 /// A listing that has bound, and now sends its call.
 fn bound() -> ShareListing {
-    let mut listing = ShareListing::new("nas").expect("a listing");
+    let mut listing = ShareListing::new("nas", false).expect("a listing");
     listing.answer(&opened());
     let bind_len = 72;
     listing.answer(&answer(Command::Write, NtStatus::SUCCESS, |enc| {
@@ -472,7 +534,7 @@ fn a_listing_reads_an_answer_split_across_reads_and_fragments() {
     listing.answer(&closed());
     assert_eq!(listing.command(), None);
     let shares = listing.finish().expect("listed").shares;
-    assert_eq!(shares[0].name, "share");
+    assert_eq!(shares[0].name.as_str(), "share");
 }
 
 #[test]
@@ -556,7 +618,7 @@ fn an_answer_past_its_bound_is_refused() {
 
 #[test]
 fn a_bind_the_pipe_did_not_take_whole_ends_the_listing() {
-    let mut listing = ShareListing::new("nas").expect("a listing");
+    let mut listing = ShareListing::new("nas", false).expect("a listing");
     listing.answer(&opened());
     listing.answer(&answer(Command::Write, NtStatus::SUCCESS, |enc| {
         WriteResponse { count: 71 }.encode(enc);
@@ -568,7 +630,7 @@ fn a_bind_the_pipe_did_not_take_whole_ends_the_listing() {
 
 #[test]
 fn a_refused_bind_ends_the_listing() {
-    let mut listing = ShareListing::new("nas").expect("a listing");
+    let mut listing = ShareListing::new("nas", false).expect("a listing");
     listing.answer(&opened());
     listing.answer(&answer(Command::Write, NtStatus::SUCCESS, |enc| {
         WriteResponse { count: 72 }.encode(enc);
@@ -583,7 +645,7 @@ fn a_refused_bind_ends_the_listing() {
     listing.answer(&closed());
     assert_eq!(listing.finish(), Err(SmbError::Rpc(4)));
 
-    let mut unopened = ShareListing::new("nas").expect("a listing");
+    let mut unopened = ShareListing::new("nas", false).expect("a listing");
     unopened.answer(&answer(Command::Create, NtStatus::ACCESS_DENIED, |enc| {
         enc.u16(9);
         enc.zeros(7);
@@ -636,7 +698,7 @@ fn a_bind_ack_must_accept_what_was_offered() {
             SmbError::Protocol,
         ),
     ] {
-        let mut listing = ShareListing::new("nas").expect("a listing");
+        let mut listing = ShareListing::new("nas", false).expect("a listing");
         listing.answer(&opened());
         listing.answer(&answer(Command::Write, NtStatus::SUCCESS, |enc| {
             WriteResponse { count: 72 }.encode(enc);

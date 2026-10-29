@@ -6,7 +6,7 @@
 | NS-2 | Find the `/System` volume by superblock identity, never by partition type | planned |
 | NS-3 | The signed namespace policy on `/System` | planned |
 | NS-4 | `nsmgr`, the user-space namespace manager applying the policy | planned |
-| NS-4a | `view_bind` / `view_unbind`: projecting an attachment at a chosen directory under `/Users` or `/Storage` — an empty directory the caller owns, or any directory for a `CAP_FS_MOUNT` holder — never under `/System`; first consumer the SMB mount (`plans/SMB.md`) | planned |
+| NS-4a | `view_bind` / `view_unbind`: projecting an attachment over a chosen directory under `/Users` or inside a catalog volume — an empty directory the caller owns, or any for a `CAP_FS_MOUNT` holder — or at a second catalog name for a holder, never under `/System`; first consumer the SMB mount (`plans/SMB.md`) | done |
 | NS-5 | Root-volume unlock and its driver in user space | planned |
 | NS-6 | Delete the compiled-in boot layout | planned |
 
@@ -294,26 +294,44 @@ the whole point.
   Distinct from `volmgr`: `volmgr` is a per-node *driver* that probes one
   storage unit, `nsmgr` is the policy engine that turns the signed document
   into `volume_attach` + `view_bind` calls (NS-4a).
-
-### NS-4a — `view_bind` and `view_unbind`
-
-- `view_bind(volume, subtree, target, narrowing)` projects an attachment's
-  subtree at `target`, through `MountTable::attach_at`; `view_unbind(target)`
-  withdraws it. A projection's flags are its attachment's plus the narrowing,
-  so widening stays unrepresentable (NS-1).
-- **Where.** `target`'s first component is `Users` or `Storage`; `/System`,
-  the root, and a new top-level entry are refused to everyone (§16.1). A
-  caller without `CAP_FS_MOUNT` may bind only an attachment it owns
-  (`plans/FSSERVE.md` §6) onto an **empty directory it owns**, checked by the
-  kernel under the same resolution the bind takes — never a path string
-  judged earlier. A `CAP_FS_MOUNT` holder may bind any attachment onto any
-  directory under those two roots.
-- A projection is withdrawn with its attachment, and `VIEW_LIST` reports it
-  with its binder. Audit: `fs.view.bind.{allow,deny}`, `fs.view.unbind`.
 - Holds `CAP_FS_MOUNT` and nothing else it does not need. Every request is
   re-validated kernel-side; `nsmgr` is policy, never authority (§4).
 - Adds `userland/system/nsmgr/` to §3 and to `PLAN.md` in the stage that
   creates it.
+
+### NS-4a — `view_bind` and `view_unbind`
+
+- `view_bind(volume, subtree, target, narrowing)` projects an attachment's
+  subtree at `target` (`MountTable::bind`); `view_unbind(target)` withdraws
+  it, for its binder or a `CAP_FS_MOUNT` holder. A projection's flags are its
+  attachment's plus the narrowing, so widening stays unrepresentable (NS-1).
+- **Where.** Over a directory under `/Users` or inside a volume in the
+  `/Storage` catalog, or at a second catalog name for a holder alone;
+  `/System`, the root and a new top-level entry are refused to everyone
+  (§16.1). A caller without `CAP_FS_MOUNT` binds only an attachment it owns
+  (`plans/FSSERVE.md` §6) onto an **empty directory it owns**, every directory
+  on its way its own or the system's (a bind holds them where they are, so no
+  one holds another's), judged under the walk the bind makes, which follows no
+  link; the subtree is walked as the caller too. The covering volume must name
+  its nodes stably, so a lookup meets the pinned id again.
+- **What a bind holds.** A `Cover`: the projection it is reached through, and
+  a pin on the covered directory and on each directory down to it, taken and
+  entered in the table under one hold of that volume's driver. A rename of
+  any of them is `Busy`, so the bind's view path stays true. The table keeps
+  the covered and guarded directories in a sorted index (`Covers`), replaced
+  at each change and shared with the walks, so a lookup through a projection
+  with binds is a binary search with no lock. A name walk that reaches the
+  covered directory, or a `..` climb onto it, crosses into the bind; a `..` from the bind's floor stands at the directory holding it
+  (`Stand::Holder`, pinned by the bind); a link's step never crosses.
+- **Binds within binds.** A bind may stand within any backed projection — a
+  runtime volume, or another bind — and while one does, a plain detach or
+  unbind of what holds it is `NotEmpty`. A forced detach, a medium that left,
+  a lost server and a returning medium's re-attach withdraw the binds standing
+  within the volume with it (`MountTable::detach` under `BindsWithin::Withdraw`).
+- A projection is withdrawn with its attachment; a descriptor opened through
+  it then answers stale. `VIEW_LIST` reports it with its binder. Audit:
+  `fs.view.bind.{allow,deny}` (4310–4311), `fs.view.unbind.{allow,deny}`
+  (4312–4313).
 
 ### NS-5 — Root-volume unlock moves to user space
 

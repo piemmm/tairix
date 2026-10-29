@@ -61,6 +61,10 @@ impl NtStatus {
     pub const LOGON_FAILURE: Self = Self(0xc000_006d);
     /// An account restriction refused the logon.
     pub const ACCOUNT_RESTRICTION: Self = Self(0xc000_006e);
+    /// The account may not sign in at this hour.
+    pub const INVALID_LOGON_HOURS: Self = Self(0xc000_006f);
+    /// The account may not sign in from this workstation.
+    pub const INVALID_WORKSTATION: Self = Self(0xc000_0070);
     /// The password has expired.
     pub const PASSWORD_EXPIRED: Self = Self(0xc000_0071);
     /// The account is disabled.
@@ -79,6 +83,8 @@ impl NtStatus {
     pub const NOT_SUPPORTED: Self = Self(0xc000_00bb);
     /// The share was deleted while connected.
     pub const NETWORK_NAME_DELETED: Self = Self(0xc000_00c9);
+    /// The account may not use the share.
+    pub const NETWORK_ACCESS_DENIED: Self = Self(0xc000_00ca);
     /// No share by that name.
     pub const BAD_NETWORK_NAME: Self = Self(0xc000_00cc);
     /// A rename crosses devices.
@@ -97,12 +103,18 @@ impl NtStatus {
     pub const FILE_CLOSED: Self = Self(0xc000_0128);
     /// The client's clock is too far from the domain controller's.
     pub const TIME_DIFFERENCE_AT_DC: Self = Self(0xc000_0133);
+    /// The account has expired.
+    pub const ACCOUNT_EXPIRED: Self = Self(0xc000_0193);
     /// The session was deleted on the server.
     pub const USER_SESSION_DELETED: Self = Self(0xc000_0203);
     /// The server lacks the resources for another session.
     pub const INSUFF_SERVER_RESOURCES: Self = Self(0xc000_0205);
+    /// The password must be changed before the account signs in.
+    pub const PASSWORD_MUST_CHANGE: Self = Self(0xc000_0224);
     /// The object was not found.
     pub const NOT_FOUND: Self = Self(0xc000_0225);
+    /// The account is locked out.
+    pub const ACCOUNT_LOCKED_OUT: Self = Self(0xc000_0234);
     /// The path is served by another server: a DFS referral is needed.
     pub const PATH_NOT_COVERED: Self = Self(0xc000_0257);
     /// The session's credentials have expired.

@@ -99,8 +99,9 @@ privileged *act* of mounting is gated separately by `CAP_FS_MOUNT`
 reports each attached volume once — its source, type, attach flags,
 capacity, availability, medium and identity, and the view path showing its
 root — and `VIEW_LIST` each view binding: its path, the subtree of the
-volume it shows, the flags it narrows that volume to, and the volume's
-identity, so a consumer resolving a path takes the covering binding and
+volume it shows, the flags it narrows that volume to, the volume's
+identity, and for a `view_bind` binding its binder, so a consumer resolving
+a path takes the covering binding and
 joins it to its volume (`tairix_procinfo::Namespace`). A binding showing no
 volume, the `/Storage` catalog, carries the all-zero identity and so joins
 to nothing. `RESOURCE_LIMITS` is self-scoped — it
@@ -763,9 +764,12 @@ the request/render libraries stay testable against in-memory fixtures.
   neither a surprise-removed volume nor one on a composed backing that has
   lost redundancy reads as healthy — a degraded
   array's completions carry that state across the block-service seam,
-  [block drivers](../drivers/block.md)), its stable 16-byte volume identity ([`MOUNT_VOLUME_ID_LEN`],
+  [block drivers](../drivers/block.md)), its stable 16-byte volume identity ([`VOLUME_ID_LEN`],
   all-zero when the mount publishes none — the identity a `volume_detach`
-  request names), the storage `medium` of the block device backing it, and
+  request names), the principal that attached it when a network volume's
+  principal did (`owner`, which may detach it without `CAP_FS_MOUNT`), its
+  [`VolumeClass`] (local or network), the storage `medium` of the block
+  device backing it, and
   the volume's space accounting as a `VolumeStats` usage block (block size,
   whether the volume is down to its reserve, and 64-bit
   total/free/available block and inode counts) — the figures `df` renders.
@@ -871,7 +875,8 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`MOUNT_SOURCE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_SOURCE_MAX.html
 [`MOUNT_TARGET_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_TARGET_MAX.html
 [`MOUNT_FSTYPE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html
-[`MOUNT_VOLUME_ID_LEN`]: ../../tairix_abi/sysinfo/constant.MOUNT_VOLUME_ID_LEN.html
+[`VOLUME_ID_LEN`]: ../../tairix_abi/volume/constant.VOLUME_ID_LEN.html
+[`VolumeClass`]: ../../tairix_abi/sysinfo/enum.VolumeClass.html
 [`MountFlags`]: ../../tairix_abi/driver/filesystem/struct.MountFlags.html
 [`BlkMedium`]: ../../tairix_abi/blkio/enum.BlkMedium.html
 [`ResourceLimitRecord`]: ../../tairix_abi/sysinfo/struct.ResourceLimitRecord.html

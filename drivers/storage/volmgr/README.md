@@ -26,7 +26,7 @@ public `tairix_abi::blkio` protocol.
    with the shared signature probe (`lib/fsprobe`). Declared partition
    types are hints the probe ignores; the content signature decides.
 3. Derives each recognised volume's catalog name from the volume alone
-   (`src/name.rs`): its own label in kebab case (FAT32's read from the
+   (`lib/fsprobe`'s `name`): its own label in kebab case (FAT32's read from the
    root-directory label entry, which a relabel rewrites), else
    `<transport>_<fingerprint>` (`usb_25cm`); a label already in use, or one
    spelling a reserved name, takes `_<fingerprint>` of the volume's own

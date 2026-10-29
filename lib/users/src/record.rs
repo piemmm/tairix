@@ -8,9 +8,11 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
+use tairix_util::fallible::{collected, concatenated, written};
 
 use crate::password::{PasswordRecord, Salt, StoredPassword};
 use crate::ParseError;
@@ -124,54 +126,157 @@ pub struct Identity<'a> {
     pub state: AccountState,
 }
 
+/// Refuse an `identity` and `password` no record could hold: an identity
+/// field outside its bounds or charset, a grant `abi-v1` has not named (an
+/// unnamed grant could not be re-read from disk), or a state its home,
+/// shell and password presence disagree with — a login-capable
+/// ([`AccountState::Active`] or [`AccountState::Locked`]) account requires
+/// all three; a [`AccountState::NoLogin`] account carries none of them.
+fn check(identity: &Identity<'_>, password: &StoredPassword) -> Result<(), ParseError> {
+    check_username(identity.username)?;
+    check_display_name(identity.display_name)?;
+    if let Some(home) = identity.home {
+        check_path(home)?;
+    }
+    if let Some(shell) = identity.shell {
+        check_path(shell)?;
+    }
+    let login_shaped = identity.home.is_some()
+        && identity.shell.is_some()
+        && matches!(password, StoredPassword::Password(_));
+    let nologin_shaped = identity.home.is_none()
+        && identity.shell.is_none()
+        && *password == StoredPassword::NeverAuthenticates;
+    let well_shaped = match identity.state {
+        AccountState::Active | AccountState::Locked => login_shaped,
+        AccountState::NoLogin => nologin_shaped,
+    };
+    if !well_shaped {
+        return Err(ParseError::AccountShape);
+    }
+    if identity.supplementary_gids.len() > MAX_SUPPLEMENTARY_GIDS {
+        return Err(ParseError::SupplementaryGids);
+    }
+    if identity.capabilities.iter().any(|cap| cap.name().is_none()) {
+        return Err(ParseError::Capability);
+    }
+    Ok(())
+}
+
+/// Up to [`MAX_SUPPLEMENTARY_GIDS`] groups, held in place.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct GidList {
+    gids: [Gid; MAX_SUPPLEMENTARY_GIDS],
+    len: usize,
+}
+
+impl GidList {
+    fn as_slice(&self) -> &[Gid] {
+        &self.gids[..self.len]
+    }
+}
+
+/// One record line of a users database text, read in place: its names and
+/// paths borrow the text, so reading one takes nothing from the heap. It
+/// holds every invariant a [`UserRecord`] holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserView<'t> {
+    username: &'t str,
+    uid: Uid,
+    primary_gid: Gid,
+    supplementary_gids: GidList,
+    display_name: &'t str,
+    home: Option<&'t str>,
+    shell: Option<&'t str>,
+    capabilities: CapabilitySet,
+    state: AccountState,
+    password: StoredPassword,
+}
+
+impl<'t> UserView<'t> {
+    /// Read one database line.
+    ///
+    /// # Errors
+    ///
+    /// The matching [`ParseError`] for a wrong field count or any field
+    /// that fails its validation.
+    pub fn decode(line: &'t str) -> Result<Self, ParseError> {
+        let mut fields = line.split(FIELD_SEPARATOR);
+        let mut next = || fields.next().ok_or(ParseError::FieldCount);
+        let username = next()?;
+        let uid = parse_u32(next()?).ok_or(ParseError::UserId)?;
+        let primary_gid = parse_u32(next()?).ok_or(ParseError::GroupId)?;
+        let supplementary = next()?;
+        let display_name = next()?;
+        let home = next()?;
+        let shell = next()?;
+        let caps = next()?;
+        let state = AccountState::from_label(next()?)?;
+        let password = StoredPassword::decode(next()?)?;
+        if fields.next().is_some() {
+            return Err(ParseError::FieldCount);
+        }
+        let view = Self {
+            username,
+            uid: Uid(uid),
+            primary_gid: Gid(primary_gid),
+            supplementary_gids: parse_gid_list(supplementary)?,
+            display_name,
+            home: parse_optional_path(home),
+            shell: parse_optional_path(shell),
+            capabilities: parse_capabilities(caps)?,
+            state,
+            password,
+        };
+        check(&view.identity(), &view.password)?;
+        Ok(view)
+    }
+
+    /// The record's identity fields.
+    #[must_use]
+    pub fn identity(&self) -> Identity<'_> {
+        Identity {
+            username: self.username,
+            uid: self.uid,
+            primary_gid: self.primary_gid,
+            supplementary_gids: self.supplementary_gids.as_slice(),
+            display_name: self.display_name,
+            home: self.home,
+            shell: self.shell,
+            capabilities: self.capabilities,
+            state: self.state,
+        }
+    }
+}
+
 impl UserRecord {
     /// Build a record from validated parts.
     ///
     /// # Errors
     ///
-    /// The matching [`ParseError`] if any identity field violates its
-    /// bounds or charset, if `capabilities` contains an id `abi-v1` has
-    /// not named (an unnamed grant could not be re-read from disk), or
-    /// [`ParseError::AccountShape`] when the state and the home/shell/
-    /// password presence disagree: a login-capable ([`AccountState::Active`]
-    /// or [`AccountState::Locked`]) account requires all three; a
-    /// [`AccountState::NoLogin`] account carries none of them.
+    /// The matching [`ParseError`] for an identity and password no record
+    /// could hold — an identity field outside its bounds or charset, a grant
+    /// `abi-v1` has not named, a state its home, shell and password presence
+    /// disagree with — or [`ParseError::OutOfMemory`] when the heap cannot
+    /// hold the record.
     pub fn new(identity: Identity<'_>, password: StoredPassword) -> Result<Self, ParseError> {
-        check_username(identity.username)?;
-        check_display_name(identity.display_name)?;
-        if let Some(home) = identity.home {
-            check_path(home)?;
-        }
-        if let Some(shell) = identity.shell {
-            check_path(shell)?;
-        }
-        let login_shaped = identity.home.is_some()
-            && identity.shell.is_some()
-            && matches!(password, StoredPassword::Password(_));
-        let nologin_shaped = identity.home.is_none()
-            && identity.shell.is_none()
-            && password == StoredPassword::NeverAuthenticates;
-        let well_shaped = match identity.state {
-            AccountState::Active | AccountState::Locked => login_shaped,
-            AccountState::NoLogin => nologin_shaped,
-        };
-        if !well_shaped {
-            return Err(ParseError::AccountShape);
-        }
-        if identity.supplementary_gids.len() > MAX_SUPPLEMENTARY_GIDS {
-            return Err(ParseError::SupplementaryGids);
-        }
-        if identity.capabilities.iter().any(|cap| cap.name().is_none()) {
-            return Err(ParseError::Capability);
-        }
+        check(&identity, &password)?;
+        Self::held(identity, password)
+    }
+
+    /// A record of an `identity` and `password` already checked.
+    fn held(identity: Identity<'_>, password: StoredPassword) -> Result<Self, ParseError> {
+        let copy = |text: &str| concatenated(&[text]).ok_or(ParseError::OutOfMemory);
+        let gids = identity.supplementary_gids;
         Ok(Self {
-            username: String::from(identity.username),
+            username: copy(identity.username)?,
             uid: identity.uid,
             primary_gid: identity.primary_gid,
-            supplementary_gids: identity.supplementary_gids.to_vec(),
-            display_name: String::from(identity.display_name),
-            home: identity.home.map(String::from),
-            shell: identity.shell.map(String::from),
+            supplementary_gids: collected(gids.len(), gids.iter().copied())
+                .ok_or(ParseError::OutOfMemory)?,
+            display_name: copy(identity.display_name)?,
+            home: identity.home.map(copy).transpose()?,
+            shell: identity.shell.map(copy).transpose()?,
             capabilities: identity.capabilities,
             state: identity.state,
             password,
@@ -202,73 +307,69 @@ impl UserRecord {
     /// # Errors
     ///
     /// The matching [`ParseError`] for a wrong field count or any field
-    /// that fails its validation.
+    /// that fails its validation, or [`ParseError::OutOfMemory`] when the
+    /// heap cannot hold the record.
     pub fn decode_line(line: &str) -> Result<Self, ParseError> {
-        let mut fields = line.split(FIELD_SEPARATOR);
-        let mut next = || fields.next().ok_or(ParseError::FieldCount);
-        let username = next()?;
-        let uid = parse_u32(next()?).ok_or(ParseError::UserId)?;
-        let primary_gid = parse_u32(next()?).ok_or(ParseError::GroupId)?;
-        let supplementary = next()?;
-        let display_name = next()?;
-        let home = next()?;
-        let shell = next()?;
-        let caps = next()?;
-        let state = AccountState::from_label(next()?)?;
-        let password = StoredPassword::decode(next()?)?;
-        if fields.next().is_some() {
-            return Err(ParseError::FieldCount);
-        }
-
-        let supplementary_gids = parse_gid_list(supplementary)?;
-        let capabilities = parse_capabilities(caps)?;
-        Self::new(
-            Identity {
-                username,
-                uid: Uid(uid),
-                primary_gid: Gid(primary_gid),
-                supplementary_gids: &supplementary_gids,
-                display_name,
-                home: parse_optional_path(home),
-                shell: parse_optional_path(shell),
-                capabilities,
-                state,
-            },
-            password,
-        )
+        let view = UserView::decode(line)?;
+        Self::held(view.identity(), view.password.clone())
     }
 
     /// Encode the record into the line form [`Self::decode_line`] accepts.
-    #[must_use]
-    pub fn encode_line(&self) -> String {
-        let mut out = String::new();
-        out.push_str(&self.username);
-        push_field(&mut out, &decimal(self.uid.0));
-        push_field(&mut out, &decimal(self.primary_gid.0));
-        out.push(FIELD_SEPARATOR);
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::OutOfMemory`] when the line cannot be held.
+    pub fn encode_line(&self) -> Result<String, ParseError> {
+        written(|out| self.write_line(out)).ok_or(ParseError::OutOfMemory)
+    }
+
+    /// Write the record's line to `out`.
+    pub(crate) fn write_line(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        let sep = FIELD_SEPARATOR;
+        write!(
+            out,
+            "{}{sep}{}{sep}{}{sep}",
+            self.username, self.uid.0, self.primary_gid.0
+        )?;
         for (i, gid) in self.supplementary_gids.iter().enumerate() {
             if i > 0 {
-                out.push(',');
+                out.write_char(',')?;
             }
-            out.push_str(&decimal(gid.0));
+            write!(out, "{}", gid.0)?;
         }
-        push_field(&mut out, &self.display_name);
-        push_field(&mut out, self.home.as_deref().unwrap_or(NO_PATH_MARKER));
-        push_field(&mut out, self.shell.as_deref().unwrap_or(NO_PATH_MARKER));
-        out.push(FIELD_SEPARATOR);
+        write!(
+            out,
+            "{sep}{}{sep}{}{sep}{}{sep}",
+            self.display_name,
+            self.home.as_deref().unwrap_or(NO_PATH_MARKER),
+            self.shell.as_deref().unwrap_or(NO_PATH_MARKER)
+        )?;
         let mut first = true;
-        for cap in &self.capabilities {
-            if let Some(name) = cap.name() {
-                if !first {
-                    out.push(',');
-                }
-                out.push_str(name);
-                first = false;
+        for name in self.capabilities.iter().filter_map(CapabilityId::name) {
+            if !first {
+                out.write_char(',')?;
             }
+            out.write_str(name)?;
+            first = false;
         }
-        push_field(&mut out, self.state.label());
-        push_field(&mut out, &self.password.encode());
-        out
+        write!(out, "{sep}{}{sep}", self.state.label())?;
+        self.password.write(out)
+    }
+
+    /// The record's identity fields.
+    #[must_use]
+    pub fn identity(&self) -> Identity<'_> {
+        Identity {
+            username: &self.username,
+            uid: self.uid,
+            primary_gid: self.primary_gid,
+            supplementary_gids: &self.supplementary_gids,
+            display_name: &self.display_name,
+            home: self.home.as_deref(),
+            shell: self.shell.as_deref(),
+            capabilities: self.capabilities,
+            state: self.state,
+        }
     }
 
     /// The account name.
@@ -472,22 +573,26 @@ fn parse_u32(text: &str) -> Option<u32> {
 }
 
 /// Parse the comma-separated supplementary-gid list (empty allowed).
-fn parse_gid_list(text: &str) -> Result<Vec<Gid>, ParseError> {
+fn parse_gid_list(text: &str) -> Result<GidList, ParseError> {
+    let mut list = GidList {
+        gids: [Gid::default(); MAX_SUPPLEMENTARY_GIDS],
+        len: 0,
+    };
     if text.is_empty() {
-        return Ok(Vec::new());
+        return Ok(list);
     }
-    let mut gids = Vec::new();
     for field in text.split(',') {
-        if gids.len() == MAX_SUPPLEMENTARY_GIDS {
+        if list.len == MAX_SUPPLEMENTARY_GIDS {
             return Err(ParseError::SupplementaryGids);
         }
         let gid = Gid(parse_u32(field).ok_or(ParseError::GroupId)?);
-        if gids.contains(&gid) {
+        if list.as_slice().contains(&gid) {
             return Err(ParseError::SupplementaryGids);
         }
-        gids.push(gid);
+        list.gids[list.len] = gid;
+        list.len += 1;
     }
-    Ok(gids)
+    Ok(list)
 }
 
 /// Parse the comma-separated `CAP_*` grant list (empty allowed), failing
@@ -505,20 +610,6 @@ fn parse_capabilities(text: &str) -> Result<CapabilitySet, ParseError> {
         set.insert(cap);
     }
     Ok(set)
-}
-
-/// Render a `u32` as decimal without an allocator-heavy `format!`.
-fn decimal(value: u32) -> String {
-    let mut out = String::new();
-    // Writing into a `String` cannot fail; `fmt::Write` is total here.
-    let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{value}"));
-    out
-}
-
-/// Append a separator-prefixed field.
-fn push_field(out: &mut String, field: &str) {
-    out.push(FIELD_SEPARATOR);
-    out.push_str(field);
 }
 
 #[cfg(test)]
@@ -621,7 +712,7 @@ mod tests {
     #[test]
     fn encode_decode_round_trips() {
         let original = record();
-        let line = original.encode_line();
+        let line = original.encode_line().expect("encodes");
         assert_eq!(UserRecord::decode_line(&line), Ok(original));
     }
 
@@ -644,7 +735,7 @@ mod tests {
     fn a_no_login_record_round_trips_with_the_explicit_markers() {
         let record = UserRecord::new(no_login_identity(), StoredPassword::NeverAuthenticates)
             .expect("valid record");
-        let line = record.encode_line();
+        let line = record.encode_line().expect("encodes");
         assert_eq!(line, "devmgr:10:101::Device Manager:none:none::nologin:*");
         assert_eq!(UserRecord::decode_line(&line), Ok(record.clone()));
         assert_eq!(record.home(), None);
@@ -706,7 +797,7 @@ mod tests {
         id.display_name = "";
         id.capabilities = CapabilitySet::empty();
         let record = UserRecord::new(id, password()).expect("valid");
-        let line = record.encode_line();
+        let line = record.encode_line().expect("encodes");
         assert_eq!(UserRecord::decode_line(&line), Ok(record));
     }
 
@@ -770,7 +861,10 @@ mod tests {
             Err(ParseError::SupplementaryGids)
         );
 
-        let line = record().encode_line().replace("4,7", "4,4");
+        let line = record()
+            .encode_line()
+            .expect("encodes")
+            .replace("4,7", "4,4");
         assert_eq!(
             UserRecord::decode_line(&line),
             Err(ParseError::SupplementaryGids)
@@ -779,7 +873,7 @@ mod tests {
 
     #[test]
     fn malformed_lines_are_rejected() {
-        let good = record().encode_line();
+        let good = record().encode_line().expect("encodes");
         for (bad, expected) in [
             (String::new(), ParseError::FieldCount),
             (good.replace(":1000:", ":-1:"), ParseError::UserId),

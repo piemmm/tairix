@@ -147,6 +147,8 @@ pub const THERMALD: EventRange = EventRange::new(32_000, 33_000);
 pub const NETMAP: EventRange = EventRange::new(33_000, 34_000);
 /// The machine-settings service.
 pub const SETTINGSD: EventRange = EventRange::new(34_000, 35_000);
+/// The network-share service.
+pub const SMBFS: EventRange = EventRange::new(35_000, 36_000);
 
 /// Every range and the crates that take identifiers from it.
 pub const OWNERS: &[Owner] = &[
@@ -357,6 +359,10 @@ pub const OWNERS: &[Owner] = &[
     Owner {
         range: THERMALD,
         crates: &["userland/system/thermald"],
+    },
+    Owner {
+        range: SMBFS,
+        crates: &["userland/net/smbfs"],
     },
 ];
 

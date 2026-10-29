@@ -1645,7 +1645,8 @@ work is asked again at `netbrowse::PACE_NS` on a one-shot deadline. A
 catalogue that cannot be read is stated and asked again only when the user
 refreshes. Opening an endpoint states that connecting to network shares is
 not available on this system (`plans/ZEROCONF.md` Z11 awaits the `smbfs`
-service, `plans/SMB.md` SMB9). The trusted picker composes no network view.
+service, `plans/SMB.md` SMB9a–SMB9e). The trusted picker composes no network
+view.
 
 ### In-place rename
 

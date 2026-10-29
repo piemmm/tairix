@@ -81,6 +81,9 @@ std::thread_local! {
     /// The smallest allocation the current thread is refused, as a full heap
     /// refuses it; `usize::MAX` refuses none.
     static REFUSED_FROM: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// How many more allocations the current thread is granted before every
+    /// one after is refused; `usize::MAX` counts none.
+    static GRANTED: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
 /// Refuse every allocation the current thread makes from now on, or stop:
@@ -96,17 +99,52 @@ pub fn refuse_allocations_from_on_current_thread(bytes: usize) {
     REFUSED_FROM.with(|slot| slot.set(bytes));
 }
 
+/// What `op` answers once granted every allocation it makes, after a run
+/// refused from its first allocation on, then one refused from its second,
+/// and so on: each must answer `refused`, so no failed allocation is lost on
+/// the way to the answer.
+///
+/// # Panics
+///
+/// If a run answers `refused` with none of its allocations refused.
+pub fn past_each_refusal<T: PartialEq + core::fmt::Debug>(
+    refused: &T,
+    mut op: impl FnMut() -> T,
+) -> T {
+    let mut granted = 0;
+    loop {
+        GRANTED.with(|slot| slot.set(granted));
+        let answer = op();
+        let unspent = GRANTED.with(|slot| slot.replace(usize::MAX));
+        if answer != *refused {
+            return answer;
+        }
+        assert_eq!(unspent, 0, "answered {answer:?} with no allocation refused");
+        granted += 1;
+    }
+}
+
 fn refusing(size: usize) -> bool {
     // A refused panic payload would abort the whole binary and lose the
     // message, so a panicking thread is never refused again.
+    if std::thread::panicking() {
+        let _ = REFUSED_FROM.try_with(|slot| slot.set(usize::MAX));
+        let _ = GRANTED.try_with(|slot| slot.set(usize::MAX));
+        return false;
+    }
     REFUSED_FROM
-        .try_with(|slot| {
-            if std::thread::panicking() {
-                slot.set(usize::MAX);
-            }
-            size >= slot.get()
-        })
+        .try_with(|slot| size >= slot.get())
         .unwrap_or(false)
+        || GRANTED
+            .try_with(|slot| match slot.get() {
+                usize::MAX => false,
+                0 => true,
+                left => {
+                    slot.set(left - 1);
+                    false
+                }
+            })
+            .unwrap_or(false)
 }
 
 /// Feed the current thread's allocations and frees into `counter` from now
@@ -232,6 +270,32 @@ mod tests {
         let mut other: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         assert!(other.try_reserve(64).is_ok());
         assert!(refused.join().unwrap());
+    }
+
+    /// Each run is refused from one allocation further on, so every one of a
+    /// path's allocations is refused once before it completes.
+    #[test]
+    fn a_path_is_refused_at_each_allocation_before_it_completes() {
+        let mut runs = 0;
+        let answer = past_each_refusal(&None, || {
+            runs += 1;
+            let mut first: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            first.try_reserve(8).ok()?;
+            let mut second: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            second.try_reserve(8).ok()?;
+            Some(2)
+        });
+        assert_eq!((answer, runs), (Some(2), 3));
+        let mut after: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        assert!(after.try_reserve(8).is_ok(), "and nothing refused after");
+    }
+
+    /// A run that answers as refused though nothing was refused is no answer
+    /// the heap gave.
+    #[test]
+    #[should_panic(expected = "with no allocation refused")]
+    fn a_refusal_no_allocation_caused_is_found_out() {
+        past_each_refusal(&None::<u8>, || None);
     }
 
     /// A thread that panics while refused keeps its panic's message, and is

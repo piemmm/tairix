@@ -134,7 +134,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len`, `u64 at_ns` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
 |  79 | `pointer_read` | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 |  80 | `volume_attach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
-|  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
+|  81 | `volume_detach` | `user_ptr` (request), `len`            | `errno`       | — (in-service: `CAP_FS_MOUNT`, or a network volume's owner) | yes |
 |  82 | `shm_grant`    | `Handle` (region), `IpcEndpoint`        | `u64` (handle) | `CAP_SHM`      | yes   |
 |  83 | `call_peer_seat` | `IpcEndpoint`, `Handle` (ticket), `u64 seat` | `u64` (generation) | —     | no    |
 |  84 | `fs_attr_get`  | `u32 fd`, `user_ptr` (key), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
@@ -211,6 +211,11 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 156 | `volume_write` | `u64 volume`, `u64 lba`, `user_ptr`, `len` | `errno`      | `CAP_FS_SERVE`          | no      |
 | 157 | `volume_ctl`   | `u64 volume`, `user_ptr` (`VolumeCtl`), `len`, `user_ptr` (reply), `len` | `u64` (bytes) | `CAP_FS_SERVE` | no |
 | 158 | `volume_serve` | `u64 volume`, `user_ptr` (`ServeFrame`), `len`, `user_ptr` (`ServeGrant` out), `len` | `u64` (bytes) | `CAP_FS_SERVE` | yes |
+| 159 | `fsserve_offer` | `user_ptr` (`NetworkOffer`), `len`, `user_ptr` (`OfferGrant` out), `len` | `u64` (bytes) | `CAP_FS_SERVE` | yes |
+| 160 | `fsserve_attach` | `u64 offer`, `user_ptr` (`NetworkAttach`), `len`, `user_ptr` (`AttachReply` out), `len` | `u64` (bytes) | — (in-service: the offer's principal) | yes |
+| 161 | `fsserve_ctl`  | `u64 offer`, `u32 op`                   | `errno`       | `CAP_FS_SERVE`          | no      |
+| 162 | `view_bind`    | `user_ptr` (`ViewBindRequest`), `len`   | `errno`       | — (in-service)          | yes     |
+| 163 | `view_unbind`  | `user_ptr` (target), `len`              | `errno`       | — (in-service)          | yes     |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -238,6 +243,16 @@ volume its node's `HwResourceKind::Volume` grant names, and the offer of that
 volume to the kernel. The dispatcher checks `CAP_FS_SERVE`, the class
 capability of every such driver; the handler checks the grant. See
 [Serving a filesystem](../abi/fsserve.md).
+
+`fsserve_offer`, `fsserve_attach` and `fsserve_ctl` (nos. 159–161) are a
+network filesystem server's offer of a volume to one principal, that
+principal's attach of it, and the server's word on it; `view_bind` and
+`view_unbind` (nos. 162–163) show an attached volume's subtree at a further
+view path and withdraw it. Each attach and bind is judged on its caller's own
+authority — the presentation or target it may ask for, the volume it may bind —
+so no dispatch capability gates them. See
+[Network volumes](../abi/fsserve.md#network-volumes) and
+[Storage namespaces](../filesystem/drives.md) §9.
 
 **Every path-taking call resolves its path one way.** A relative path starts
 at the directory its `dirfd` holds: a descriptor the caller holds on a
@@ -671,7 +686,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
 | `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_access`, `fs_chdir` (the path-taking calls), `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fd_grant`, and — enforced *in the handler* against the identity a node-backed descriptor acts as: the caller's own, or the one frozen into a conferred or granted descriptor — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `fs_lock`, `fs_lock_query`, `file_map` |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
-| `CAP_FS_SERVE`     | `volume_read`, `volume_write`, `volume_ctl`, `volume_serve` (each also needs the caller's grant on the volume it names) |
+| `CAP_FS_SERVE`     | `volume_read`, `volume_write`, `volume_ctl`, `volume_serve` (each also needs the caller's grant on the volume it names), `fsserve_offer` (from an attested application alone), `fsserve_ctl` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
 | `CAP_SYSTEM_POWER` | `system_power`             |

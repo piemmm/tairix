@@ -6,8 +6,10 @@
 //! independent reading of the protocol. Test support, never in a TAIRiX
 //! build.
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::{Ref, RefCell};
 
 use tairix_crypto::ct_eq;
 use tairix_crypto::ntlm::{ntlm_checksum, ntlm_hmac, ntlm_signing_key, NtlmDirection, NtlmKey};
@@ -122,6 +124,13 @@ pub enum Fault {
     DenyShareEnum,
     /// The share listing names a share no tree connect could take.
     HostileShareName,
+    /// A read is answered with a byte more than it asked for.
+    LongRead,
+    /// A related request after one that failed fails with its status, as a
+    /// Windows server may fail a compound's close.
+    ChainedFailure,
+    /// A write takes only the first half of its bytes, so none of one byte.
+    ShortWrite,
 }
 
 /// The server a test talks to.
@@ -153,6 +162,11 @@ pub struct PeerConfig {
     pub extra_shares: u16,
     /// Its misbehaviour.
     pub fault: Fault,
+    /// Whether it grants leases on directories, broken whenever what a
+    /// listing of one would show changes.
+    pub directory_leasing: bool,
+    /// The GUID it negotiates with.
+    pub server_guid: Guid,
 }
 
 impl PeerConfig {
@@ -172,6 +186,8 @@ impl PeerConfig {
             grant: 32,
             extra_shares: 0,
             fault: Fault::None,
+            directory_leasing: false,
+            server_guid: SERVER_GUID,
         }
     }
 
@@ -220,7 +236,8 @@ pub struct Peer {
     trees: Vec<(u32, ShareType)>,
     next_tree: u32,
     validations: usize,
-    share: Share,
+    echoes: usize,
+    share: Rc<RefCell<Share>>,
     pipes: Pipes,
 }
 
@@ -238,13 +255,13 @@ impl Peer {
     /// A server waiting for a client's `NEGOTIATE`, its share empty.
     #[must_use]
     pub fn new(config: PeerConfig) -> Self {
-        Self::with_share(config, Share::new())
+        Self::with_share(config, Rc::new(RefCell::new(Share::new())))
     }
 
     /// A server waiting for a client's `NEGOTIATE` on a new connection to
-    /// `share`.
+    /// `share`, which other connections may be serving too.
     #[must_use]
-    pub const fn with_share(config: PeerConfig, share: Share) -> Self {
+    pub fn with_share(config: PeerConfig, share: Rc<RefCell<Share>>) -> Self {
         Self {
             config,
             framer: Framer::new(),
@@ -259,26 +276,42 @@ impl Peer {
             trees: Vec::new(),
             next_tree: 0,
             validations: 0,
+            echoes: 0,
             share,
             pipes: Pipes::new(),
         }
     }
 
     /// Drop the connection, and keep the share: what only this connection
-    /// held closes, and the durable opens wait to be reclaimed.
+    /// held closes, and its durable opens wait to be reclaimed.
     ///
     /// # Errors
     ///
     /// [`SmbError::OutOfMemory`].
-    pub fn disconnect(mut self) -> Result<Share, SmbError> {
-        self.share.detach()?;
+    pub fn disconnect(self) -> Result<Rc<RefCell<Share>>, SmbError> {
+        if let Some(client) = self.client_guid() {
+            self.share.borrow_mut().detach(client)?;
+        }
         Ok(self.share)
     }
 
     /// The share it serves.
     #[must_use]
-    pub const fn share(&self) -> &Share {
-        &self.share
+    pub fn share(&self) -> Ref<'_, Share> {
+        self.share.borrow()
+    }
+
+    /// The share it serves, for another connection to serve too.
+    #[must_use]
+    pub fn shared(&self) -> Rc<RefCell<Share>> {
+        Rc::clone(&self.share)
+    }
+
+    /// The client GUID the connection negotiated with.
+    fn client_guid(&self) -> Option<Guid> {
+        self.negotiated
+            .as_ref()
+            .map(|(request, _)| request.client_guid)
     }
 
     /// How many pipes are open on `IPC$`.
@@ -303,6 +336,12 @@ impl Peer {
     #[must_use]
     pub const fn validations(&self) -> usize {
         self.validations
+    }
+
+    /// How many `ECHO` requests outside any session have been answered.
+    #[must_use]
+    pub const fn echoes(&self) -> usize {
+        self.echoes
     }
 
     /// The established session's id.
@@ -353,6 +392,18 @@ impl Peer {
         match header.command {
             Command::Negotiate => self.on_negotiate(&header, message),
             Command::SessionSetup => self.on_session_setup(&header, message, sealed),
+            // Outside any session and tree, so answered in the clear.
+            Command::Echo if header.session_id == 0 && !sealed => {
+                self.echoes += 1;
+                let answer = self.message(
+                    &header,
+                    NtStatus::SUCCESS,
+                    0,
+                    Address::Sync { tree_id: 0 },
+                    encode_empty,
+                )?;
+                self.queue(answer, false)
+            }
             // A session that holds keys is served only sealed.
             _ if !sealed => Err(SmbError::Integrity),
             Command::TreeConnect => self.on_tree_connect(&header, message),
@@ -387,11 +438,17 @@ impl Peer {
         }
         let mut preauth = PreauthHash::new();
         preauth.update(message);
+        let directories = if self.config.directory_leasing {
+            Capabilities::DIRECTORY_LEASING
+        } else {
+            Capabilities::NONE
+        };
         let (capabilities, contexts) = match dialect {
             Dialect::Smb300 | Dialect::Smb302 => (
                 Capabilities::LEASING
                     .with(Capabilities::LARGE_MTU)
-                    .with(Capabilities::ENCRYPTION),
+                    .with(Capabilities::ENCRYPTION)
+                    .with(directories),
                 Vec::new(),
             ),
             Dialect::Smb311 => {
@@ -410,7 +467,9 @@ impl Peer {
                     });
                 }
                 (
-                    Capabilities::LEASING.with(Capabilities::LARGE_MTU),
+                    Capabilities::LEASING
+                        .with(Capabilities::LARGE_MTU)
+                        .with(directories),
                     contexts,
                 )
             }
@@ -418,7 +477,7 @@ impl Peer {
         let response = NegotiateResponse {
             security_mode: SecurityMode::SIGNING_ENABLED,
             dialect: dialect.code(),
-            server_guid: SERVER_GUID,
+            server_guid: self.config.server_guid,
             capabilities,
             max_transact_size: 8 << 20,
             max_read_size: 8 << 20,
@@ -792,18 +851,32 @@ impl Peer {
         message: &[u8],
         chain: &mut Chain,
     ) -> Result<(), SmbError> {
-        let client_guid = self
-            .negotiated
-            .as_ref()
-            .map(|(request, _)| request.client_guid)
-            .ok_or(SmbError::Protocol)?;
+        let client_guid = self.client_guid().ok_or(SmbError::Protocol)?;
         let caller = Caller {
             user: self.config.user,
             client_guid,
+            fault: self.config.fault,
+            directory_leasing: self.config.directory_leasing,
         };
-        self.share.request(caller, header, message, chain)?;
+        self.share
+            .borrow_mut()
+            .request(caller, header, message, chain)?;
+        self.deliver()
+    }
+
+    /// Send what the share holds for this connection: its answers, and the
+    /// breaks and completions other connections' requests caused.
+    ///
+    /// # Errors
+    ///
+    /// What sending each would fail with.
+    pub fn deliver(&mut self) -> Result<(), SmbError> {
+        let Some(client_guid) = self.client_guid() else {
+            return Ok(());
+        };
         let session_id = self.session.as_ref().map_or(0, |(id, _)| *id);
-        for sent in self.share.take_sent() {
+        let sent = self.share.borrow_mut().take_sent_for(client_guid);
+        for sent in sent {
             let answer = match sent {
                 Sent::Response {
                     request,

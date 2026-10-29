@@ -36,12 +36,17 @@ audit sink, then halts. Its fields:
 Every fatal report path in the image — this post-mortem, a port's own
 report, the pre-init window — first takes an entry from one shared latch
 (`tairix_arch_api::fatal::enter`). The boot's first entry writes the full
-report. The next writes one bare record under its own cause's id — a panic
+report, and the latch keeps the cause it was taken for — a fault's four
+words, or a panic's file, line and column — before the report reads
+anything. The next writes one bare record under its own cause's id — a panic
 or fault raised while a report is being written, or a second CPU failing
 while the first reports — and never re-enters the machinery that may have
-failed: the display reclaim, the register capture, the walk. Only once the
-record is written does it drain the console, since that drain may be what
-failed. Every later entry writes nothing and halts, so a report whose own
+failed: the display reclaim, the register capture, the walk. The record names
+its own cause in the full record's keys and the first entry's under `first`
+(`fault` or `panic`) and the `first_`-prefixed keys, so a report that died
+before it wrote a line still leaves the machine's cause on the console. Only
+once the record is written does it drain the console, since that drain may be
+what failed. Every later entry writes nothing and halts, so a report whose own
 bare record or drain faults cannot recurse until the stack overruns. On
 aarch64 with stage-1 translation off, where every access is Device memory
 and an exclusive may never complete, the port takes the latch with plain

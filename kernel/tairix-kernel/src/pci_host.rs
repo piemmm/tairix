@@ -247,14 +247,19 @@ impl PciHost {
     /// `registers`; [`None`] where its records cannot be had.
     #[must_use]
     pub fn new(
-        mut segments: Vec<HostSegment>,
+        segments: Vec<HostSegment>,
         registers: Box<dyn MmioMapper + Send + Sync>,
     ) -> Option<Self> {
-        segments.sort_by_key(|segment| segment.number);
-        segments.dedup_by_key(|segment| segment.number);
+        let mut named = Vec::new();
+        named.try_reserve_exact(segments.len()).ok()?;
+        named.extend(segments.into_iter().enumerate());
+        // Where it was named settles a number named twice, so the sort can
+        // be one that takes no scratch from the heap.
+        named.sort_unstable_by_key(|(at, segment)| (segment.number, *at));
+        named.dedup_by_key(|(_, segment)| segment.number);
         let mut owned = Vec::new();
-        owned.try_reserve_exact(segments.len()).ok()?;
-        for segment in segments {
+        owned.try_reserve_exact(named.len()).ok()?;
+        for (_, segment) in named {
             let changed_by = tairix_util::fallible::filled(segment.functions.len(), 0)?;
             owned.push(Segment {
                 number: segment.number,
@@ -1074,6 +1079,51 @@ mod tests {
             host.with(1, |_| ()).is_none(),
             "a segment the host does not own is reached by nothing"
         );
+    }
+
+    /// A host of many segments, some named twice, is ordered by number with
+    /// the first of each kept; one the heap cannot hold is refused.
+    ///
+    /// Regression: the segments were sorted stably, and a stable sort past
+    /// 4 KiB takes its scratch from the heap infallibly.
+    #[test]
+    fn a_host_of_many_segments_keeps_the_first_of_each_number() {
+        let segments = || {
+            (0..64u16)
+                .map(|at| {
+                    let bus = CommandBus {
+                        commands: SpinLock::new(vec![(DEVICE, 0)]),
+                        stuck: vec![],
+                        msix: Vec::new(),
+                        routed: SpinLock::new(Vec::new()),
+                    };
+                    let function = Function {
+                        address: DEVICE,
+                        node: Some(u32::from(at)),
+                        stream: None,
+                        interrupts: None,
+                    };
+                    HostSegment::new(31 - at % 32, Box::new(bus), vec![function], Vec::new())
+                })
+                .collect::<Vec<_>>()
+        };
+        let named = segments();
+        assert!(tairix_fuzzseed::meter::refusing_above(0, || PciHost::new(
+            named,
+            Box::new(crate::test_support::NoRegisters)
+        ))
+        .is_none());
+        let host =
+            PciHost::new(segments(), Box::new(crate::test_support::NoRegisters)).expect("a host");
+        let kept: Vec<_> = host
+            .segments
+            .iter()
+            .map(|segment| (segment.number, segment.functions[0].node))
+            .collect();
+        let first: Vec<_> = (0..32u16)
+            .map(|number| (number, Some(u32::from(31 - number))))
+            .collect();
+        assert_eq!(kept, first);
     }
 
     /// One requester id on two segments is two functions: a change names the

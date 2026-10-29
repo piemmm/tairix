@@ -110,6 +110,29 @@ impl SharePath {
         Ok(Self { text, units })
     }
 
+    /// The path `text` spells: names a single `\` apart, no leading or
+    /// trailing one, each a name both sides carry; empty for the root.
+    ///
+    /// # Errors
+    ///
+    /// [`SmbError::Name`] for an empty name between separators, a name either
+    /// side refuses, or a path past [`MAX_PATH_UNITS`];
+    /// [`SmbError::OutOfMemory`].
+    pub fn parse(text: &str) -> Result<Self, SmbError> {
+        if !text.is_empty() && !text.split('\\').all(is_name) {
+            return Err(SmbError::Name);
+        }
+        let units = text.encode_utf16().count();
+        if units > MAX_PATH_UNITS {
+            return Err(SmbError::Name);
+        }
+        let mut held = String::new();
+        held.try_reserve_exact(text.len())
+            .map_err(|_| SmbError::OutOfMemory)?;
+        held.push_str(text);
+        Ok(Self { text: held, units })
+    }
+
     /// The path a server spelled in UTF-16LE `bytes`: names a single `\`
     /// apart, no leading or trailing one, each a name both sides carry.
     ///

@@ -61,7 +61,12 @@ fn ask(
 
 /// What `request` answered, asked under the ordinary class.
 fn answer_of(server: &mut Server<'_, TestFs, Fixed>, request: &Request<'_>) -> Answered {
-    ask(server, request, AllocationClass::Ordinary, &mut window())
+    ask(
+        server,
+        request,
+        AllocationClass::Ordinary,
+        &mut window()[..],
+    )
 }
 
 fn result<'a>(answered: &'a Answered, request: &Request<'_>) -> Result<Answer<'a>, DriverError> {
@@ -303,7 +308,7 @@ fn a_request_the_kernel_could_not_send_never_reaches_the_driver() {
     // The name's second byte becomes a separator.
     frame[4 + 8 + 2 + 1] = b'/';
     let mut out = vec![0u8; FSSERVE_REPLY_MAX];
-    let replied = server.answer(&frame[..len], &mut window(), &mut out);
+    let replied = server.answer(&frame[..len], &mut window()[..], &mut out);
     assert_eq!(
         decode_reply(&out[..replied], &request).unwrap().result,
         Err(DriverError::OutOfRange)
@@ -313,7 +318,7 @@ fn a_request_the_kernel_could_not_send_never_reaches_the_driver() {
         "nothing was created"
     );
     // A frame naming no operation is answered with nothing a kernel accepts.
-    assert_eq!(server.answer(&[0xFF; 9], &mut window(), &mut out), 0);
+    assert_eq!(server.answer(&[0xFF; 9], &mut window()[..], &mut out), 0);
 }
 
 #[test]
@@ -330,7 +335,7 @@ fn each_call_runs_under_the_class_it_names_and_no_other() {
         &mut server,
         &request,
         AllocationClass::System,
-        &mut window(),
+        &mut window()[..],
     );
     server
         .filesystem()
@@ -456,7 +461,9 @@ fn every_reply_says_what_the_host_holds_and_a_publish_flushes() {
     let volume = DriverHandle::from_raw(9).unwrap();
     host.writeback_due(volume, Some(77));
     host.reserve_crossed(volume, true);
-    let release = Request::Release;
+    let release = Request::Release {
+        span: Span::new(0, FSSERVE_WINDOW_LEN).unwrap(),
+    };
     let answered = answer_of(&mut server, &release);
     assert_eq!(
         answered.reply(&release),

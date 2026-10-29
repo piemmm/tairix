@@ -3,12 +3,12 @@
 //! This crate is a `lib` (the loadable-module identity — the [`BIND_KEYS`]
 //! bind table `devmgr` matches a discovered block-service storage node
 //! against — plus the host-testable policy engine: the partition +
-//! filesystem probe plan ([`plan`]) and the catalog naming policy
-//! ([`name`])) **and** a `Run` binary (`src/main.rs`, the autoloaded
-//! per-node policy process). The blkio block client it probes a device
-//! through is the shared `tairix_blkclient::RemoteBlock`, opened
-//! read-only: this driver only ever inspects a device's layout and commits
-//! nothing to it.
+//! filesystem probe plan ([`plan`]), its volumes named by the shared catalog
+//! naming policy ([`tairix_fsprobe::name`])) **and** a `Run` binary
+//! (`src/main.rs`, the autoloaded per-node policy process). The blkio block
+//! client it probes a device through is the shared
+//! `tairix_blkclient::RemoteBlock`, opened read-only: this driver only ever
+//! inspects a device's layout and commits nothing to it.
 //!
 //! # What it is
 //!
@@ -29,8 +29,8 @@
 //!    signature (`lib/fsprobe`),
 //! 4. derives the catalog name from the volume alone (its own label in
 //!    kebab case, else `<transport>_<fingerprint>`; a label in use or
-//!    reserved takes `_<fingerprint>` of the volume's identity — [`name`]),
-//!    and
+//!    reserved takes `_<fingerprint>` of the volume's identity —
+//!    [`tairix_fsprobe::name`]), and
 //! 5. asks the kernel to attach each recognised volume (the
 //!    `CAP_FS_MOUNT`-gated, audited `volume_attach` syscall — the kernel
 //!    re-validates everything and publishes the volume node its format's
@@ -51,7 +51,6 @@
 #[cfg(test)]
 extern crate alloc;
 
-pub mod name;
 pub mod plan;
 
 use tairix_abi::raid_ipc::RAID_ARRAY_COMPATIBLE;

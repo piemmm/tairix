@@ -1028,6 +1028,14 @@ pub(crate) fn finish_install(
     // — a boot-path logic error — and the unlock fails closed rather than
     // serve half an identity (the rejected table carries no secret; the
     // users holder is zeroed inside `install`).
+    // The registry carries no credential, so it is published as its own
+    // text for the ungated group directory to render names from; held
+    // before anything is published, so a heap that cannot hold it leaves
+    // nothing half-installed.
+    let Ok(groups_text) = groups_db.serialise() else {
+        gave_up(audit, "groups_text_unheld");
+        return UnlockOutcome::GaveUp;
+    };
     if install.identity.replace(identity).is_err() {
         gave_up(audit, "identity_replace_refused");
         return UnlockOutcome::GaveUp;
@@ -1044,9 +1052,7 @@ pub(crate) fn finish_install(
     if let Some(group) = groups_db.lookup(tairix_users::STORAGE_GROUP) {
         install.storage_gid.install(GroupId(group.gid().0));
     }
-    // The registry carries no credential, so it is published as its own
-    // text for the ungated group directory to render names from.
-    install.groups.publish(groups_db.serialise().into_bytes());
+    install.groups.publish(groups_text.into_bytes());
     // With both live cells installed, build and publish the
     // `CAP_USER_ADMIN` engine over the same verified state
     // (`plans/CAPABILITY_USE.md` CU4). Fail-soft: a boot path that wires

@@ -1617,6 +1617,19 @@ mod tests {
         CapabilityId::LOG_EMIT,
     ];
 
+    // The `smbfs` network-share service: the servers its callers name, the
+    // volumes it offers them, its reserved endpoint, its sandboxed workers,
+    // and its records. Launched by init from its on-disk bundle only; the
+    // effective set is this request intersected with `SMBFS_CEILING`, the
+    // same five.
+    const SMBFS_REQUEST: &[CapabilityId] = &[
+        CapabilityId::NET,
+        CapabilityId::FS_SERVE,
+        CapabilityId::IPC_BIND_PRIVILEGED,
+        CapabilityId::SANDBOX_SPAWN,
+        CapabilityId::LOG_EMIT,
+    ];
+
     // The `greeter` login screen (plans/NEW-DESKTOP-LOGIN.md G3):
     // `CAP_DISPLAY` holds the seat's lease, configures the display service
     // and switches the display off while the login screen sleeps,
@@ -1731,6 +1744,7 @@ mod tests {
         ("settings", ProgramKind::Component, WINDOWED_APP_REQUEST),
         ("settingsd", ProgramKind::Service, SETTINGSD_REQUEST),
         ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("smbfs", ProgramKind::Service, SMBFS_REQUEST),
         ("soundd", ProgramKind::Service, SOUNDD_REQUEST),
         ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
         ("stat", ProgramKind::Command, PURE_TOOL_REQUEST),
@@ -1770,6 +1784,11 @@ mod tests {
         ("wintersun", ProgramKind::Application, WINTERSUN_REQUEST),
         ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
     ];
+
+    #[test]
+    fn the_network_share_service_requests_exactly_its_ceiling() {
+        assert_eq!(set(SMBFS_REQUEST), set(tairix_users::SMBFS_CEILING));
+    }
 
     #[test]
     fn the_cooling_service_requests_exactly_its_ceiling() {

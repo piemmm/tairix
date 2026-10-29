@@ -24,6 +24,7 @@
 //! once from a fresh, logged seed; `cargo xtask fuzz` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend it to a wall-clock budget.
 
+use tairix_abi::netshare_ipc::SHARES_MAX;
 use tairix_abi::time::Time64;
 use tairix_fuzzseed::Prng;
 use tairix_smb::client::{Client, Event, Mechanism, Request};
@@ -64,8 +65,8 @@ use tairix_smb::ntlm::{Challenge, NtlmCredential, NtlmInitiator, NtlmInputs};
 use tairix_smb::peer::{Hints, Peer, PeerConfig, DISK_SHARE};
 use tairix_smb::rpc::{
     read_share_enum, read_share_enum_request, write_share_enum, write_share_enum_request, Bind,
-    BindAck, Pdu, RequestFragment, ResponseFragment, ShareKind, ShareListing, ShareRecord,
-    ACCEPTANCE, FSCTL_PIPE_TRANSCEIVE, NDR, SHARE_ENUM, SPECIAL, SRVSVC, TEMPORARY,
+    BindAck, Pdu, RequestFragment, ResponseFragment, ShareKind, ShareList, ShareListing,
+    ShareRecord, ACCEPTANCE, FSCTL_PIPE_TRANSCEIVE, NDR, SHARE_ENUM, SPECIAL, SRVSVC,
 };
 use tairix_smb::session::{SessionFlags, SessionSetupRequest, SessionSetupResponse};
 use tairix_smb::simple::{decode_empty, encode_empty, ErrorResponse};
@@ -207,28 +208,34 @@ fn decoders(input: &[u8]) -> usize {
 }
 
 /// Both `NetrShareEnum` stub decoders over `stub`; whether either accepted
-/// it. A listing that omitted nothing, written back, reads the same.
+/// it. The shares a listing kept, written back, read the same with nothing
+/// left out, and a listing without the special shares keeps none.
 fn share_stubs(stub: &[u8]) -> bool {
     let request = read_share_enum_request(stub).is_ok();
-    let Ok(list) = read_share_enum(stub) else {
+    let Ok(list) = read_share_enum(stub, true) else {
         return request;
     };
-    if list.omitted == 0 {
-        let records: Vec<ShareRecord<'_>> = list
-            .shares
-            .iter()
-            .map(|share| ShareRecord {
-                name: &share.name,
-                share_type: share.kind.code()
-                    | if share.special { SPECIAL } else { 0 }
-                    | if share.temporary { TEMPORARY } else { 0 },
-                remark: &share.remark,
-            })
-            .collect();
-        let mut enc = Encoder::new();
-        write_share_enum(&mut enc, &records, 0);
-        assert_eq!(read_share_enum(&enc.finish().expect("encodes")), Ok(list));
-    }
+    assert!(list.shares.len() <= SHARES_MAX);
+    let records: Vec<ShareRecord<'_>> = list
+        .shares
+        .iter()
+        .map(|share| ShareRecord {
+            name: &share.name,
+            share_type: ShareKind::Disk.code() | if share.special { SPECIAL } else { 0 },
+            remark: &share.remark,
+        })
+        .collect();
+    let mut enc = Encoder::new();
+    write_share_enum(&mut enc, &records, 0);
+    assert_eq!(
+        read_share_enum(&enc.finish().expect("encodes"), true),
+        Ok(ShareList {
+            shares: list.shares.clone(),
+            ..ShareList::default()
+        })
+    );
+    let plain = read_share_enum(stub, false).expect("read with the special shares");
+    assert!(plain.shares.iter().all(|share| !share.special));
     true
 }
 
@@ -456,7 +463,7 @@ fn listing_answers() -> Vec<Vec<u8>> {
 /// change, the listing ends, and once it has opened the pipe its last
 /// request is that pipe's close.
 fn listing_round(rng: &mut Prng, answers: &[Vec<u8>]) {
-    let mut listing = ShareListing::new("nas.example").expect("a listing");
+    let mut listing = ShareListing::new("nas.example", true).expect("a listing");
     let target = rng.below(answers.len());
     let mut closing = false;
     for (index, answer) in answers.iter().enumerate() {
@@ -1283,14 +1290,14 @@ fn hostile_bytes_never_panic_and_never_pass_for_sealed_traffic() {
     let genuine = genuine_tokens();
     let listings = listing_answers();
     // The floor, by construction: an untouched exchange lists every share.
-    let mut untouched = ShareListing::new("nas.example").expect("a listing");
+    let mut untouched = ShareListing::new("nas.example", true).expect("a listing");
     for answer in &listings {
         untouched.answer(answer);
     }
     assert_eq!(
         untouched
             .finish()
-            .map(|list| (list.shares.len(), list.omitted)),
+            .map(|list| (list.shares.len(), list.unnamed)),
         Ok((2, 1))
     );
     // The floor, by construction: untouched, every dialect reaches a tree,

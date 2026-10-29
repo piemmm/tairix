@@ -46,8 +46,8 @@ use tairix_arch_api::backtrace::{
     MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
 use tairix_arch_api::fatal::{
-    self, format_hex_word, Entry, FatalRecord, FaultWords, KernelFault, FAULT_WORDS, KERNEL_FAULT,
-    KERNEL_PANIC,
+    self, format_hex_word, nested_fields, Cause, Entry, FatalRecord, FaultWords, KernelFault,
+    NestedWords, Processor, FAULT_WORDS, KERNEL_FAULT, KERNEL_PANIC, PANIC_KEYS,
 };
 use tairix_arch_api::quiesce::StopOutcome;
 use tairix_arch_api::quiesce_stop_others_best_effort;
@@ -69,7 +69,7 @@ fn reset_panic_guard() {
 /// next one a test drives is nested.
 #[cfg(test)]
 fn simulate_report_under_way() {
-    let _ = fatal::enter();
+    let _ = fatal::enter(&Cause::panic(None));
 }
 
 /// Production [`StackReader`] over the kernel stack the faulting CPU is
@@ -219,6 +219,14 @@ enum Fatal<'a> {
 }
 
 impl Fatal<'_> {
+    /// The cause the fatal latch keeps for this report.
+    fn cause(&self) -> Cause {
+        match *self {
+            Self::Panic(location) => Cause::panic(location),
+            Self::Fault(fault) => Cause::Fault(fault),
+        }
+    }
+
     /// The audit event this cause is recorded under.
     fn event(&self) -> AuditEvent {
         match self {
@@ -451,18 +459,19 @@ fn cause_fields<'b>(
                 ),
                 None => ("<unknown>", "0", "0"),
             };
+            let [file_key, line_key, column_key] = PANIC_KEYS;
             (
                 [
                     Field {
-                        key: "file",
+                        key: file_key,
                         value: FieldValue::Str(file_str),
                     },
                     Field {
-                        key: "line",
+                        key: line_key,
                         value: FieldValue::Str(line_str),
                     },
                     Field {
-                        key: "column",
+                        key: column_key,
                         value: FieldValue::Str(col_str),
                     },
                     unset,
@@ -700,20 +709,19 @@ fn desc_fields<'b>(
 }
 
 /// Emit the bare record for a report re-entered while one was already being
-/// written, under the re-entering cause's own event id.
-fn report_nested(fatal: &Fatal<'_>, cpu: u32, sink: &(dyn Sink + Sync)) {
-    let mut cpu_buf = [0u8; 11];
-    let fields = [Field {
-        key: "cpu",
-        value: FieldValue::Str(format_u32(cpu, &mut cpu_buf)),
-    }];
+/// written, under the re-entering cause's own event id, naming the cause the
+/// first entry was taken for as well as its own.
+fn report_nested(fatal: &Fatal<'_>, first: Option<&Cause>, cpu: u32, sink: &(dyn Sink + Sync)) {
+    let own = fatal.cause();
+    let mut words = NestedWords::new();
+    let fields = nested_fields(Processor::Cpu(cpu), &own, first, &mut words);
     log(
         sink,
         &Event {
             level: Level::Error,
             id: fatal.event().id(),
             message: fatal.record().nested,
-            fields: &fields,
+            fields: fields.as_slice(),
         },
     );
 }
@@ -771,13 +779,13 @@ impl<'b> Fields<'b> {
 /// repaint, a console drain — ends in one bare record and then silence, never
 /// a recursion that overruns the stack.
 fn enter_report<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> CpuId {
-    let entry = fatal::enter();
+    let entry = fatal::enter(&fatal.cause());
     if entry == Entry::Silent {
         ctx.arch.halt();
     }
     let cpu = ctx.arch.current_cpu();
-    if entry == Entry::Nested {
-        report_nested(fatal, cpu, ctx.audit_sink);
+    if let Entry::Nested { first } = entry {
+        report_nested(fatal, first.as_ref(), cpu, ctx.audit_sink);
         // Written first, so a drain that is itself what failed costs only the
         // third entry, which is silent.
         ctx.arch.flush_console_blocking();
@@ -1719,16 +1727,22 @@ mod tests {
         assert_eq!(field("fault_pc"), Some("0x0000000080101234"));
     }
 
-    /// The fatal latch is shared by both causes — a fault taken while a
-    /// report is already being written emits one bare record under its own
-    /// event id, never recursing into the walk.
+    /// A report that dies inside itself ends in one terse record naming what
+    /// re-entered and what the first report was written for: the machine's
+    /// cause survives the report that could not describe it.
     #[test]
-    fn a_nested_fault_emits_one_terse_kernel_fault_record() {
+    fn a_nested_fault_names_its_own_cause_and_the_first_report_s() {
         let _serial = TEST_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
-        simulate_report_under_way();
+        let first = KernelFault {
+            syndrome: Some(0xe),
+            address: Some(0x10),
+            pc: 0x20,
+            sp: Some(0x30),
+        };
+        assert_eq!(fatal::enter(&Cause::Fault(first)), Entry::Report);
 
         let arch = TestArch::with_cpus(1);
         let sink = &TestSink::new();
@@ -1750,7 +1764,26 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, AuditEvent::KernelFault.id());
         assert_eq!(events[0].message, KERNEL_FAULT.nested);
-        assert_eq!(events[0].fields.len(), 1, "cpu only");
+        let fields: alloc::vec::Vec<(&str, &str)> = events[0]
+            .fields
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("cpu", "0"),
+                ("syndrome", "0x0000000000000001"),
+                ("fault_addr", "0x0000000000000002"),
+                ("fault_pc", "0x0000000000000003"),
+                ("fault_sp", "null"),
+                ("first", "fault"),
+                ("first_syndrome", "0x000000000000000e"),
+                ("first_fault_addr", "0x0000000000000010"),
+                ("first_fault_pc", "0x0000000000000020"),
+                ("first_fault_sp", "0x0000000000000030"),
+            ]
+        );
         assert_eq!(arch.halt_count(), 1);
         reset_panic_guard();
     }

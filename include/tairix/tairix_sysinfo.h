@@ -118,7 +118,7 @@
 #define TAIRIX_MOUNT_SOURCE_MAX 64u
 #define TAIRIX_MOUNT_TARGET_MAX 64u
 #define TAIRIX_MOUNT_FSTYPE_MAX 16u
-#define TAIRIX_MOUNT_VOLUME_ID_LEN 16u
+#define TAIRIX_VOLUME_ID_LEN 16u
 #define TAIRIX_MEMORY_CLASS_COUNT 6u
 /* Mount availability carried in a mount record (uint8_t). */
 #define TAIRIX_MOUNT_AVAILABLE ((uint8_t)0u)
@@ -191,8 +191,8 @@
 #define TAIRIX_UPTIME_WIRE_LEN 24u
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
-#define TAIRIX_MOUNT_RECORD_WIRE_LEN 224u
-#define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 152u
+#define TAIRIX_MOUNT_RECORD_WIRE_LEN 232u
+#define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 156u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 44u
 #define TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN 40u
@@ -324,6 +324,8 @@ typedef struct tairix_blk_medium {
 * `usage` is the backing volume's space accounting (all-zero when none is
 * known). `volume_id` is the volume's stable published identity (all-zero
 * when the mount has none), the identity a volume_detach request names.
+* `owner` is the uid that attached a network volume, 0xFFFFFFFF for one
+* no one owns; `volume_class` is 0 for a local volume, 1 for a network one.
 * The inline source/target/fstype buffers are valid for their respective
 * *_len byte counts. */
 typedef struct tairix_mount_record {
@@ -334,7 +336,10 @@ typedef struct tairix_mount_record {
     uint8_t availability;
     tairix_blk_medium_t medium;
     tairix_volume_stats_t usage;
-    uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];
+    uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];
+    uint32_t owner;
+    uint8_t volume_class;
+    uint8_t reserved0[3];
     uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];
     uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
     uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];
@@ -345,14 +350,16 @@ typedef struct tairix_mount_record {
 * MountFlags it narrows that volume to. `volume_id` is the attached
 * volume's, the key of its tairix_mount_record_t; a binding showing no
 * volume (the /Storage catalog) has an empty subtree and an all-zero
-* volume_id. The inline target/subtree buffers are valid for their
-* *_len byte counts. */
+* volume_id. `binder` is the uid that made a view_bind binding,
+* 0xFFFFFFFF for one the system made. The inline target/subtree buffers
+* are valid for their *_len byte counts. */
 typedef struct tairix_view_binding_record {
     uint32_t flags;
     uint8_t target_len;
     uint8_t subtree_len;
     uint8_t reserved0[2];
-    uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];
+    uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];
+    uint32_t binder;
     uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
     uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];
 } tairix_view_binding_record_t;

@@ -26,7 +26,7 @@ and keeps LLMNR and NetBIOS permanently out (§1 below).
 | Z8 | The catalogue query surface: storage-class filter over `_smb._tcp` instances, WS-Discovery computers (Z10) and hosts the user names, per-source fairness, the endpoint a choice carries | done |
 | Z9 | The `files.app` Network view over the existing renderer, opened by a *Network* menu row above *Settings…*; its names drawn through the §6.6 display-safety policy | done |
 | Z10 | WS-Discovery: the `lib/net::wsd` engine (SOAP-over-UDP Probe/ProbeMatches/Hello/Bye/Resolve, the WS-Transfer `pub:Computer` reading), the 3702 sockets and metadata fetch in the `discoveryd` front, the decode in its sandboxed worker, the discovery-v1 computers query | done |
-| Z11 | The discovered-share mount into `Storage:` with §6.3's forced flags, and the QEMU vertical that mounts a discovered share | blocked: awaits `smbfs` (`plans/SMB.md` SMB9) |
+| Z11 | The discovered-share mount into `Storage:` with §6.3's forced flags, and the QEMU vertical that mounts a discovered share | blocked: awaits `smbfs` (`plans/SMB.md` SMB9a–SMB9e) |
 
 ## 0. Scope and decisions (binding)
 
@@ -259,8 +259,9 @@ disk:
 - `noexec` with **no relaxation path**: `CAP_FS_MOUNT_RELAX` does
   not apply. Letting a stranger on the segment place executable content in the
   user's namespace is not a setting.
-- `CAP_FS_MOUNT` as any mount, with the endpoint and its resolved address in
-  the audit record.
+- Presented as any network share is (`plans/SMB.md` §0): privately to the
+  principal who mounted it unless a `CAP_FS_MOUNT` holder chose otherwise,
+  with the endpoint and its resolved address in the audit record.
 - The foreign filesystem/protocol client parses hostile data, so it is
   sandboxed (§19.5) and declares its lossy semantics through the filesystem
   capability API (`drives.md` §20).
@@ -826,7 +827,7 @@ policy by the consumer. Browsing is covered by the storage-class grant
 connecting. It is a query: nothing in it has a path, and nothing raises a
 credential prompt. A choice carries its `Endpoint` — link, name, what found it,
 host, addresses, port — to the mount, which pins credentials to what the
-connection proves (§6.4, `plans/SMB.md` SMB9).
+connection reports (§6.4, `plans/SMB.md` SMB9b).
 
 ### Z11 — the discovered-share mount
 

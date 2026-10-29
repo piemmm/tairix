@@ -14,7 +14,7 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::sysinfo::{
     KernelMemoryStats, LoadAverage, MemoryBand, MemoryPressureBand, MountAvailability,
-    ProcessState, SystemIdentity, Uptime, MACHINE_ID_LEN, MOUNT_VOLUME_ID_LEN,
+    ProcessState, SystemIdentity, Uptime, MACHINE_ID_LEN, VOLUME_ID_LEN,
 };
 use tairix_abi::{Duration64, MemoryClass, SchedPriority, Time64, MEMORY_CLASS_COUNT};
 
@@ -75,8 +75,8 @@ fn unread() -> Sample {
 }
 
 /// A volume identity distinct for each `index`.
-fn volume(index: u8) -> [u8; MOUNT_VOLUME_ID_LEN] {
-    [index.saturating_add(1); MOUNT_VOLUME_ID_LEN]
+fn volume(index: u8) -> [u8; VOLUME_ID_LEN] {
+    [index.saturating_add(1); VOLUME_ID_LEN]
 }
 
 #[test]

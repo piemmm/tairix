@@ -233,7 +233,7 @@ fn mount(
             availability,
             medium: Some(STICK),
         },
-        [0; tairix_abi::sysinfo::MOUNT_VOLUME_ID_LEN],
+        [0; tairix_abi::sysinfo::VOLUME_ID_LEN],
     )
     .expect("a well-formed record")
 }

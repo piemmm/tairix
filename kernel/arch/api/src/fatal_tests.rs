@@ -2,9 +2,13 @@ extern crate std;
 
 use std::string::String;
 
+use core::panic::Location;
+use std::format;
+
 use super::{
-    enter, enter_without_atomics, format_hex_word, reset_for_tests, Entry, FaultWords, KernelFault,
-    Processor, Reporter, HEX_WORD_LEN, KERNEL_FAULT, KERNEL_PANIC,
+    enter, enter_without_atomics, file_tail, format_hex_word, reset_for_tests, Cause, Entry,
+    FaultWords, KernelFault, Processor, Reporter, FILE_TAIL, HEX_WORD_LEN, KERNEL_FAULT,
+    KERNEL_PANIC,
 };
 use crate::backtrace::BootStackGuard;
 
@@ -183,7 +187,7 @@ fn a_nested_entry_writes_only_the_bare_record() {
     let mut report = String::new();
     PORT.panic(
         &mut report,
-        Entry::Nested,
+        Entry::Nested { first: None },
         Processor::Cpu(1),
         &"unused",
         None,
@@ -191,13 +195,14 @@ fn a_nested_entry_writes_only_the_bare_record() {
     );
     assert_eq!(
         report,
-        "[ERROR] id=4010 kernel panic (nested — re-entered the fatal-report path) cpu=1\n"
+        "[ERROR] id=4010 kernel panic (nested — re-entered the fatal-report path) cpu=1 \
+         file=null line=0 column=0 first=null\n"
     );
 
     let mut fault = String::new();
     PORT.fault(
         &mut fault,
-        Entry::Nested,
+        Entry::Nested { first: None },
         Processor::Cpu(1),
         &VTABLE_BRANCH,
         format_args!("unused"),
@@ -205,8 +210,74 @@ fn a_nested_entry_writes_only_the_bare_record() {
     );
     assert_eq!(
         fault,
-        "[ERROR] id=4011 fatal kernel fault (nested — re-entered the fatal-report path) cpu=1\n"
+        "[ERROR] id=4011 fatal kernel fault (nested — re-entered the fatal-report path) cpu=1 \
+         syndrome=0x0000000086000000 fault_addr=0x3ff0000000000000 \
+         fault_pc=0x3ff0000000000000 fault_sp=0x0000000040081f40 first=null\n"
     );
+}
+
+/// A report that died inside itself leaves the bare record as the only line
+/// about the machine's death, so that record names the cause the first entry
+/// was taken for: a fault's four words, or a panic's place.
+#[test]
+fn a_bare_record_names_the_cause_the_first_entry_was_taken_for() {
+    let mut after_a_fault = String::new();
+    PORT.panic(
+        &mut after_a_fault,
+        Entry::Nested {
+            first: Some(Cause::Fault(VTABLE_BRANCH)),
+        },
+        Processor::Cpu(0),
+        &"unused",
+        None,
+        || None,
+    );
+    assert!(
+        after_a_fault.ends_with(
+            " first=fault first_syndrome=0x0000000086000000 \
+             first_fault_addr=0x3ff0000000000000 first_fault_pc=0x3ff0000000000000 \
+             first_fault_sp=0x0000000040081f40\n"
+        ),
+        "{after_a_fault}"
+    );
+
+    let raised = Location::caller();
+    let mut after_a_panic = String::new();
+    PORT.fault(
+        &mut after_a_panic,
+        Entry::Nested {
+            first: Some(Cause::panic(Some(raised))),
+        },
+        Processor::Cpu(0),
+        &VTABLE_BRANCH,
+        format_args!("unused"),
+        || None,
+    );
+    assert!(
+        after_a_panic.ends_with(&format!(
+            " first=panic first_file={} first_line={} first_column={}\n",
+            raised.file(),
+            raised.line(),
+            raised.column()
+        )),
+        "{after_a_panic}"
+    );
+}
+
+/// A path longer than the tail keeps its end, where the file's name is, cut
+/// where a character begins.
+#[test]
+fn a_long_path_keeps_its_end_whole_characters_only() {
+    let short = "src/fatal.rs";
+    let (bytes, len) = file_tail(short);
+    assert_eq!(&bytes[..usize::from(len)], short.as_bytes());
+
+    let long = format!("{}é/src/fatal.rs", "d".repeat(FILE_TAIL));
+    let (bytes, len) = file_tail(&long);
+    let kept = core::str::from_utf8(&bytes[..usize::from(len)]).expect("whole characters");
+    assert!(long.ends_with(kept));
+    assert!(kept.len() <= FILE_TAIL);
+    assert!(kept.ends_with("/src/fatal.rs"));
 }
 
 #[test]
@@ -234,23 +305,40 @@ fn a_silent_entry_writes_nothing() {
 /// The one test that drives the process-wide latch, so no two race on it.
 #[test]
 fn the_latch_grants_one_report_then_one_nested_record_then_silence() {
+    let fault = Cause::Fault(VTABLE_BRANCH);
+    let panic = Cause::panic(Some(Location::caller()));
     reset_for_tests();
-    assert_eq!(enter(), Entry::Report);
-    assert_eq!(enter(), Entry::Nested);
-    assert_eq!(enter(), Entry::Silent);
-    assert_eq!(enter(), Entry::Silent);
+    assert_eq!(enter(&fault), Entry::Report);
+    assert_eq!(
+        enter(&panic),
+        Entry::Nested { first: Some(fault) },
+        "the second entry is told what the first was taken for"
+    );
+    assert_eq!(enter(&panic), Entry::Silent);
+    assert_eq!(enter(&fault), Entry::Silent);
 
-    // The atomics-free entry reads and advances the same count, so a boot that
-    // mixes the two still reports once.
+    // The atomics-free entry reads and advances the same count and keeps the
+    // same cause, so a boot that mixes the two still reports once.
     reset_for_tests();
-    assert_eq!(enter_without_atomics(), Entry::Report);
-    assert_eq!(enter(), Entry::Nested);
-    assert_eq!(enter_without_atomics(), Entry::Silent);
+    assert_eq!(enter_without_atomics(&panic), Entry::Report);
+    assert_eq!(enter(&fault), Entry::Nested { first: Some(panic) });
+    assert_eq!(enter_without_atomics(&fault), Entry::Silent);
+
+    // A word the CPU did not give is still absent when the cause is read back.
+    reset_for_tests();
+    let fiq = Cause::Fault(KernelFault {
+        syndrome: None,
+        address: None,
+        pc: 0x4008_0000,
+        sp: None,
+    });
+    assert_eq!(enter(&fiq), Entry::Report);
+    assert_eq!(enter(&fault), Entry::Nested { first: Some(fiq) });
 
     // The count saturates rather than wrapping back to a first entry.
     super::ENTRIES.store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
-    assert_eq!(enter(), Entry::Silent);
-    assert_eq!(enter_without_atomics(), Entry::Silent);
+    assert_eq!(enter(&fault), Entry::Silent);
+    assert_eq!(enter_without_atomics(&fault), Entry::Silent);
     reset_for_tests();
 }
 

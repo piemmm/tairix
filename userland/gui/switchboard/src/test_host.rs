@@ -16,7 +16,7 @@ use tairix_abi::net_ipc::{
 use tairix_abi::switchboard_ipc::{MachineReport, NetworkReport, SwitchboardRequest, TraySummary};
 use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState,
-    SysinfoQueryId, SysinfoRequestHeader, MOUNT_VOLUME_ID_LEN,
+    SysinfoQueryId, SysinfoRequestHeader, VOLUME_ID_LEN,
 };
 use tairix_abi::window_ipc::{AppMenu, WindowRegion};
 use tairix_abi::{
@@ -123,7 +123,7 @@ pub(crate) fn iface(name: &str) -> NetInterfaceFactsRecord {
 pub(crate) fn mount_of(
     source: &str,
     target: &str,
-    volume: [u8; MOUNT_VOLUME_ID_LEN],
+    volume: [u8; VOLUME_ID_LEN],
     block: u32,
     total: u64,
     avail: u64,

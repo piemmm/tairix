@@ -31,6 +31,9 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
+
+use tairix_util::fallible::{concatenated, written};
 
 use crate::record::{name_charset_ok, parse_canonical_u32, Gid, FIELD_SEPARATOR};
 use crate::table::{Keyed, RecordLine, Table};
@@ -82,19 +85,77 @@ pub struct GroupRecord {
     gid: Gid,
 }
 
+/// Refuse a group name the identifier grammar or [`MAX_GROUPNAME_LEN`]
+/// does not admit.
+fn check_name(name: &str) -> Result<(), ParseError> {
+    if name_charset_ok(name, MAX_GROUPNAME_LEN) {
+        Ok(())
+    } else {
+        Err(ParseError::GroupName)
+    }
+}
+
+/// One record line of a groups database text, read in place: its name
+/// borrows the text, so reading one takes nothing from the heap.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GroupView<'t> {
+    name: &'t str,
+    gid: Gid,
+}
+
+impl<'t> GroupView<'t> {
+    /// Read one database line `groupname:gid`.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::FieldCount`] for the wrong number of `:`-separated
+    /// fields, [`ParseError::GroupName`] for an invalid name, or
+    /// [`ParseError::GroupId`] for a non-canonically-spelled gid.
+    pub fn decode(line: &'t str) -> Result<Self, ParseError> {
+        let mut fields = line.split(FIELD_SEPARATOR);
+        let name = fields.next().ok_or(ParseError::FieldCount)?;
+        let gid = fields.next().ok_or(ParseError::FieldCount)?;
+        if fields.next().is_some() {
+            return Err(ParseError::FieldCount);
+        }
+        let gid = parse_canonical_u32(gid).ok_or(ParseError::GroupId)?;
+        check_name(name)?;
+        Ok(Self {
+            name,
+            gid: Gid(gid),
+        })
+    }
+
+    /// The group name.
+    #[must_use]
+    pub fn name(&self) -> &'t str {
+        self.name
+    }
+
+    /// The numeric group id.
+    #[must_use]
+    pub fn gid(&self) -> Gid {
+        self.gid
+    }
+}
+
 impl GroupRecord {
     /// Build a record from a validated name and gid.
     ///
     /// # Errors
     ///
     /// [`ParseError::GroupName`] if `name` violates the identifier grammar
-    /// or the [`MAX_GROUPNAME_LEN`] bound.
+    /// or the [`MAX_GROUPNAME_LEN`] bound, or [`ParseError::OutOfMemory`]
+    /// when the heap cannot hold it.
     pub fn new(name: &str, gid: Gid) -> Result<Self, ParseError> {
-        if !name_charset_ok(name, MAX_GROUPNAME_LEN) {
-            return Err(ParseError::GroupName);
-        }
+        check_name(name)?;
+        Self::held(name, gid)
+    }
+
+    /// A record of a `name` already checked.
+    fn held(name: &str, gid: Gid) -> Result<Self, ParseError> {
         Ok(Self {
-            name: String::from(name),
+            name: concatenated(&[name]).ok_or(ParseError::OutOfMemory)?,
             gid,
         })
     }
@@ -103,28 +164,25 @@ impl GroupRecord {
     ///
     /// # Errors
     ///
-    /// [`ParseError::FieldCount`] for the wrong number of `:`-separated
-    /// fields, [`ParseError::GroupName`] for an invalid name, or
-    /// [`ParseError::GroupId`] for a non-canonically-spelled gid.
+    /// As [`GroupView::decode`], or [`ParseError::OutOfMemory`] when the
+    /// heap cannot hold the record.
     pub fn decode_line(line: &str) -> Result<Self, ParseError> {
-        let mut fields = line.split(FIELD_SEPARATOR);
-        let name = fields.next().ok_or(ParseError::FieldCount)?;
-        let gid = fields.next().ok_or(ParseError::FieldCount)?;
-        if fields.next().is_some() {
-            return Err(ParseError::FieldCount);
-        }
-        let gid = parse_canonical_u32(gid).ok_or(ParseError::GroupId)?;
-        Self::new(name, Gid(gid))
+        let view = GroupView::decode(line)?;
+        Self::held(view.name, view.gid)
     }
 
     /// Encode the record into the line form [`Self::decode_line`] accepts.
-    #[must_use]
-    pub fn encode_line(&self) -> String {
-        let mut out = String::new();
-        out.push_str(&self.name);
-        out.push(FIELD_SEPARATOR);
-        let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{}", self.gid.0));
-        out
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::OutOfMemory`] when the line cannot be held.
+    pub fn encode_line(&self) -> Result<String, ParseError> {
+        written(|out| self.write_line(out)).ok_or(ParseError::OutOfMemory)
+    }
+
+    /// Write the record's line to `out`.
+    fn write_line(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        write!(out, "{}{FIELD_SEPARATOR}{}", self.name, self.gid.0)
     }
 
     /// The group name.
@@ -173,6 +231,17 @@ impl GroupsDb {
             .map(|records| Self { records })
     }
 
+    /// The records of `text`, a text [`Self::parse`] took, read in place and
+    /// in file order, for a reader that keeps no copy of the database. A
+    /// defect is the error naming it, and what follows it means nothing.
+    pub fn views(text: &str) -> impl Iterator<Item = Result<GroupView<'_>, LocatedError>> {
+        GROUPS.records(text).map(|read| {
+            read.and_then(|(number, line)| {
+                GroupView::decode(line).map_err(|kind| LocatedError::at(number, kind))
+            })
+        })
+    }
+
     /// How `line`, a line after the header, reads as [`Self::parse`] reads
     /// it.
     #[must_use]
@@ -181,15 +250,20 @@ impl GroupsDb {
     }
 
     /// Serialise the database into the text form [`Self::parse`] accepts.
-    #[must_use]
-    pub fn serialise(&self) -> String {
-        let mut out = String::from(GROUPS_FORMAT_HEADER);
-        out.push('\n');
-        for record in &self.records {
-            out.push_str(&record.encode_line());
-            out.push('\n');
-        }
-        out
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::OutOfMemory`] when the text cannot be held.
+    pub fn serialise(&self) -> Result<String, ParseError> {
+        written(|out| {
+            writeln!(out, "{GROUPS_FORMAT_HEADER}")?;
+            for record in &self.records {
+                record.write_line(out)?;
+                out.write_char('\n')?;
+            }
+            Ok(())
+        })
+        .ok_or(ParseError::OutOfMemory)
     }
 
     /// Every record, in file order.
@@ -253,10 +327,44 @@ mod tests {
         .expect("valid db")
     }
 
+    /// A groups text is read in place record by record, as the whole parse
+    /// reads it, with nothing taken from the heap; one the heap cannot hold
+    /// is refused, never an abort.
+    ///
+    /// Regression: parsing and serialising allocated infallibly.
+    #[test]
+    fn a_groups_text_is_read_in_place_and_refused_whole_when_unheld() {
+        use tairix_fuzzseed::meter::{metered, refusing_above};
+        let db = db();
+        let text = db.serialise().expect("serialises");
+        let (read, metering) = metered(|| {
+            GroupsDb::views(&text).try_fold(0usize, |seen, view| {
+                let view = view?;
+                let parsed = &db.records()[seen];
+                assert_eq!((view.name(), view.gid()), (parsed.name(), parsed.gid()));
+                Ok::<_, LocatedError>(seen + 1)
+            })
+        });
+        assert_eq!(read, Ok(db.records().len()));
+        assert_eq!(metering.allocations, 0);
+        assert_eq!(
+            refusing_above(0, || GroupsDb::parse(&text)),
+            Err(LocatedError::whole(ParseError::OutOfMemory))
+        );
+        assert_eq!(
+            refusing_above(0, || db.serialise()),
+            Err(ParseError::OutOfMemory)
+        );
+        assert_eq!(
+            refusing_above(0, || GroupRecord::new("ops", Gid(7))),
+            Err(ParseError::OutOfMemory)
+        );
+    }
+
     #[test]
     fn serialise_parse_round_trips() {
         let original = db();
-        let text = original.serialise();
+        let text = original.serialise().expect("serialises");
         assert!(text.starts_with("tairix-groups-v1\n"));
         assert_eq!(GroupsDb::parse(&text), Ok(original));
     }
@@ -264,7 +372,7 @@ mod tests {
     #[test]
     fn record_line_round_trips() {
         let record = GroupRecord::new("wheel", Gid(0)).expect("valid");
-        assert_eq!(record.encode_line(), "wheel:0");
+        assert_eq!(record.encode_line().expect("encodes"), "wheel:0");
         assert_eq!(GroupRecord::decode_line("wheel:0"), Ok(record));
     }
 

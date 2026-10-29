@@ -105,3 +105,42 @@ writes.
 | 4193 | `fs.serve.resumed`       | served again after a lost driver or a re-insert |
 | 4194 | `fs.serve.refused`       | not served (`cause`: `driver_refused` or the kernel's refusal); retracted, or kept when conflicted |
 | 4195 | `fs.serve.lost`          | its driver is gone (`cause`: `unpublished_writes_lost` or `nothing_unpublished`) |
+
+## Network volumes
+
+A network filesystem server (`smbfs`, `plans/SMB.md`) serves volumes the
+kernel never probes: an SMB share has no device. The server offers each one to
+the principal that asked for it (`fsserve_offer`), and that principal attaches
+it (`fsserve_attach`), so the authority to show it — privately, to the storage
+group, or as an explicit owner and modes — is judged against the real caller
+([`fsserve-v1`](../abi/fsserve.md#network-volumes)).
+
+What differs from a removable volume follows from other writers changing it:
+
+- **Uncached.** No `CachedFs` stands in front of it and it has no
+  directory-watch feed: the server caches under its own coherence protocol
+  (SMB leases).
+- **Lanes.** Several one-call proxies serve it at once, each over its own span
+  of the window, so a slow call holds up no other caller.
+- **Liveness.** The server touches no volume grant, so it says it is alive
+  (`fsserve_ctl(Alive)`) while it works on the calls it holds.
+- **Presented whole.** Every node is shown as the presentation says, whatever
+  owner the server claims to record: a server's owners are no principal of
+  this machine, and a server never shows a node to anyone the presentation
+  does not.
+- **Identity.** Derived by the kernel from the server's attested application
+  identity, the principal and the offer's key; the mount listing reports the
+  volume's owner and its class (`VolumeClass::Network`).
+- **Owner detach.** Its owner detaches it without `CAP_FS_MOUNT`. A volume
+  whose server withdraws it or dies leaves the namespace at once, unless the
+  server held writes it had not published; that one stays `UnavailableLost`
+  until its owner detaches it with `force`.
+
+| Id   | Name                       | Meaning |
+|------|----------------------------|---------|
+| 4300 | `fs.network.offered`       | a server offered a volume to a principal |
+| 4301 | `fs.network.attached`      | its principal attached it (`cause`: the presentation) |
+| 4302 | `fs.network.attach_refused` | an attach was refused (`cause`) |
+| 4303 | `fs.network.detached`      | detached (`cause`: `clean` or `forced`) |
+| 4304 | `fs.network.detach_refused` | a detach was refused (`cause`) |
+| 4305 | `fs.network.retired`       | its server withdrew it or was lost (`cause`, `outcome`) |

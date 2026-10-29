@@ -63,6 +63,20 @@ pub fn shown(text: &str) -> alloc::borrow::Cow<'_, str> {
     alloc::borrow::Cow::Owned(out)
 }
 
+/// Cut `text` to at most `most` bytes at a character boundary, ending it in
+/// `…` when anything was cut, so a cut always shows.
+pub fn cut(text: &mut alloc::string::String, most: usize) {
+    if text.len() <= most {
+        return;
+    }
+    let mut end = most.saturating_sub('…'.len_utf8());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push('…');
+}
+
 /// Whether `text` mixes scripts the way an impersonation needs — Latin with
 /// Cyrillic or Greek, or any mixture no stricter UTS #39 restriction level
 /// admits — so a surface showing it can say it may not be what it looks like.
@@ -77,7 +91,7 @@ mod tests {
     use alloc::borrow::Cow;
     use core::cmp::Ordering;
 
-    use super::{fold, folded, mixes_scripts, reader_order, sequence_len, shown};
+    use super::{cut, fold, folded, mixes_scripts, reader_order, sequence_len, shown};
 
     /// A name shown as written is borrowed — a combining sequence within its
     /// limits and a replacement character it already holds included — and
@@ -163,5 +177,19 @@ mod tests {
             });
             assert_eq!(sequence_len(lead), decoded, "lead {lead:#04x}");
         }
+    }
+
+    #[test]
+    fn a_cut_ends_at_a_character_and_shows() {
+        let mut fits = alloc::string::String::from("//nas/share");
+        cut(&mut fits, 11);
+        assert_eq!(fits, "//nas/share");
+        let mut long = alloc::string::String::from("//nas/share");
+        cut(&mut long, 10);
+        assert_eq!(long, "//nas/s…");
+        let mut wide = alloc::string::String::from("ab\u{1f600}\u{1f600}");
+        cut(&mut wide, 8);
+        assert_eq!(wide, "ab…");
+        assert!(wide.len() <= 8);
     }
 }

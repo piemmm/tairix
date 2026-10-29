@@ -12,14 +12,14 @@ use tairix_abi::driver::filesystem::{
     Unpinned, VolumeHost,
 };
 use tairix_abi::fsserve::{
-    decode_request, encode_request, Op, ServeOffer, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX,
+    decode_request, encode_request, Op, ServeOffer, Span, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX,
     FSSERVE_WINDOW_LEN,
 };
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::time::Time64;
 use tairix_abi::{DriverError, DriverHandle};
 use tairix_caps::CapabilitySet;
-use tairix_fsserve::{Clock, ServedHost, Server};
+use tairix_fsserve::{Clock, ServedHost, Server, Window as ServedWindow};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::Sink;
@@ -90,9 +90,9 @@ fn endpoint() -> Arc<CallEndpoint> {
 }
 
 /// The window a test leaks for the proxy and its server to share, each
-/// touching it only while the protocol gives it the turn.
+/// touching a span only while the protocol gives it that span's turn.
 #[derive(Clone, Copy)]
-struct Window(NonNull<u8>);
+struct Window(NonNull<u8>, usize);
 
 // SAFETY: leaked test memory alive for the process; the request/reply
 // protocol alternates access to it.
@@ -100,24 +100,35 @@ unsafe impl Send for Window {}
 
 impl Window {
     fn leak() -> Self {
+        Self::leak_of(FSSERVE_WINDOW_LEN)
+    }
+
+    fn leak_of(len: usize) -> Self {
         Self(
-            NonNull::new(
-                crate::forever(vec![0u8; FSSERVE_WINDOW_LEN].into_boxed_slice()).as_mut_ptr(),
-            )
-            .expect("a window"),
+            NonNull::new(crate::forever(vec![0u8; len].into_boxed_slice()).as_mut_ptr())
+                .expect("a window"),
+            len,
         )
     }
 
     fn hold(self) -> KernelHold {
-        KernelHold::for_test(self.0, FSSERVE_WINDOW_LEN)
+        KernelHold::for_test(self.0, self.1)
     }
+}
 
-    /// The server's view, while it answers a call.
-    fn bytes(&self) -> &'static mut [u8] {
-        // SAFETY: the leaked window is `FSSERVE_WINDOW_LEN` bytes alive for
-        // the process, and the proxy leaves it alone while a call is in
-        // service, so this borrow is the only one in use.
-        unsafe { core::slice::from_raw_parts_mut(self.0.as_ptr(), FSSERVE_WINDOW_LEN) }
+impl ServedWindow for Window {
+    fn span(&mut self, span: Span) -> Option<&mut [u8]> {
+        let range = span.range();
+        if range.end > self.1 {
+            return None;
+        }
+        // SAFETY: the range lies within the `self.1` bytes leaked for the
+        // process, and the proxy leaves a call's span alone while the call is
+        // in service, using only other lanes' spans, so this borrow of it is
+        // the only one in use.
+        Some(unsafe {
+            core::slice::from_raw_parts_mut(self.0.as_ptr().add(range.start), range.len())
+        })
     }
 }
 
@@ -171,14 +182,7 @@ impl Served {
             format: tairix_abi::volume::FormatName::Ext4,
         };
         let activity = Arc::new(ServerActivity::default());
-        let fs = ServedFs::new(
-            Arc::clone(&endpoint),
-            window.hold(),
-            offer,
-            Arc::clone(&activity),
-            &SINK,
-        )
-        .expect("a proxy");
+        let fs = ServedFs::new(&endpoint, window.hold(), offer, &activity, &SINK).expect("a proxy");
         Self {
             fs,
             endpoint,
@@ -216,7 +220,7 @@ impl Drop for Served {
 
 fn serve(
     endpoint: &CallEndpoint,
-    window: Window,
+    mut window: Window,
     inner: RwMockFs,
     mut tamper: Option<Tamper>,
     seen: &Mutex<Vec<Op>>,
@@ -234,7 +238,7 @@ fn serve(
         if let Ok(op) = op {
             seen.lock().unwrap().push(op);
         }
-        let mut len = server.answer(&call.request, window.bytes(), &mut out);
+        let mut len = server.answer(&call.request, &mut window, &mut out);
         if let (Some(tamper), Ok(op)) = (tamper.as_mut(), op) {
             tamper(op, &mut out, &mut len);
         }
@@ -250,6 +254,115 @@ fn the_proxy_forwards_the_whole_driver_surface() {
     assert_security_forwards(&mut served.fs);
     assert_stats_forwards(&mut served.fs);
     assert_attrs_forwards(&mut served.fs);
+}
+
+#[test]
+fn lanes_carry_calls_at_once_each_through_its_own_span() {
+    use tairix_abi::fsserve::{Lanes, Request};
+    let lanes = Lanes::new(2, 64 * 1024).unwrap();
+    let mut inner = RwMockFs::new();
+    let root = inner.root();
+    let offer = ServeOffer {
+        root,
+        name_matching: inner.name_matching(),
+        node_identity: inner.node_identity(),
+        attrs: inner.attrs_fs().is_some(),
+        write_refusal: None,
+        format: tairix_abi::volume::FormatName::Smb3,
+    };
+    let endpoint = endpoint();
+    let window = Window::leak_of(lanes.window_len());
+    let activity = Arc::new(ServerActivity::default());
+    let mut proxies = ServedFs::lanes(
+        &endpoint,
+        &Arc::new(window.hold()),
+        lanes,
+        offer,
+        &activity,
+        &SINK,
+    )
+    .expect("the lanes");
+    assert_eq!(proxies.len(), 2);
+    let spans = StdArc::new(Mutex::new(Vec::new()));
+    let server = {
+        let endpoint = Arc::clone(&endpoint);
+        let spans = StdArc::clone(&spans);
+        let mut window = window;
+        thread::spawn(move || {
+            let host = ServedHost::new(TestClock);
+            let mut server = Server::new(inner, &host).expect("a server");
+            let mut out = vec![0u8; FSSERVE_REPLY_MAX];
+            while !endpoint.is_closed() {
+                let RecvCall::Received(call) = endpoint.recv_call(usize::MAX) else {
+                    thread::yield_now();
+                    continue;
+                };
+                if let Ok((_, request)) = decode_request(&call.request) {
+                    if let Some(span) = request.span() {
+                        spans.lock().unwrap().push(span.offset());
+                    }
+                    assert!(!matches!(request, Request::Release { .. }));
+                }
+                let len = server.answer(&call.request, &mut window, &mut out);
+                let _ = endpoint.reply(call.ticket, &out[..len], &SINK);
+            }
+        })
+    };
+    let workers: Vec<_> = proxies
+        .drain(..)
+        .enumerate()
+        .map(|(index, mut fs)| {
+            thread::spawn(move || {
+                let name = std::format!("lane-{index}");
+                let file = fs
+                    .create(root, name.as_bytes(), NodeKind::RegularFile, &ADMIN_RECORD)
+                    .unwrap();
+                let len = 64 * 1024 * 3 + 5;
+                let shift = u8::try_from(index).unwrap();
+                let mut body = (0..251u8)
+                    .map(|b| b.wrapping_add(shift))
+                    .collect::<Vec<u8>>()
+                    .repeat(len / 251 + 1);
+                body.truncate(len);
+                assert_eq!(fs.write_at(file, 0, &body), Ok(len));
+                let mut back = vec![0u8; len];
+                assert_eq!(fs.read_at(file, 0, &mut back), Ok(len));
+                assert_eq!(back, body, "lane {index} read back what it wrote");
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().expect("a lane's caller ends");
+    }
+    endpoint.destroy(&SINK);
+    server.join().expect("the server ends");
+    let spans = spans.lock().unwrap();
+    assert!(spans.iter().all(|at| *at == 0 || *at == 64 * 1024));
+    assert!(spans.contains(&0) && spans.contains(&(64 * 1024)));
+}
+
+#[test]
+fn lanes_are_held_to_the_window_they_divide() {
+    use tairix_abi::fsserve::Lanes;
+    let lanes = Lanes::new(4, 64 * 1024).unwrap();
+    let inner = RwMockFs::new();
+    let offer = ServeOffer {
+        root: inner.root(),
+        name_matching: inner.name_matching(),
+        node_identity: inner.node_identity(),
+        attrs: false,
+        write_refusal: None,
+        format: tairix_abi::volume::FormatName::Smb3,
+    };
+    let built = ServedFs::lanes(
+        &endpoint(),
+        &Arc::new(Window::leak_of(2 * 64 * 1024).hold()),
+        lanes,
+        offer,
+        &Arc::new(ServerActivity::default()),
+        &SINK,
+    );
+    assert_eq!(built.err(), Some(tairix_abi::Errno::LengthOutOfRange));
 }
 
 #[test]
@@ -486,6 +599,22 @@ fn activity_counts_a_transfer_once_it_ends() {
     assert_eq!(activity.mark(), None);
     drop(guard);
     assert!(shows_life(before, activity.mark()));
+}
+
+#[test]
+fn a_server_with_no_volume_grant_shows_life_by_saying_so() {
+    let activity = ServerActivity::default();
+    let before = activity.mark();
+    assert!(!shows_life(before, activity.mark()), "nothing yet");
+    activity.touch();
+    assert!(shows_life(before, activity.mark()));
+}
+
+#[test]
+fn every_offer_is_named_afresh() {
+    let first = super::mint_offer().expect("an id");
+    let second = super::mint_offer().expect("another");
+    assert!(second > first, "never reused in a boot");
 }
 
 /// Post `call` as the proxy does and leave it unsettled under `liveness`, as

@@ -7,7 +7,7 @@
 //! mount and resolves caller groups through a late-installed
 //! [`LateIdentity`](tairix_kernel_core::LateIdentity) table; until the boot
 //! path installs both, every `fs_*` syscall fails closed
-//! ([`Errno::NotImplemented`](tairix_abi::Errno::NotImplemented)).
+//! ([`Errno::NotImplemented`]).
 //!
 //! # The mount layering: writable root, read-only `/System` shadow
 //!
@@ -70,7 +70,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     MountFlags,
 };
-use tairix_abi::DriverHandle;
+use tairix_abi::{DriverHandle, Errno};
 use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
@@ -115,6 +115,11 @@ pub static VOLUME_FOREST: VolumeForest = VolumeForest::new();
 /// volume's watch table, claimed from `watches` under the volume's stable id
 /// `identity`; the returned reference is what the registration releases the
 /// claim through.
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when the cache cannot be built; its claim is let
+/// go with it.
 pub(crate) fn cached<F>(
     driver: F,
     volume: u64,
@@ -122,7 +127,7 @@ pub(crate) fn cached<F>(
     pressure: &'static MemoryPressure,
     audit: &'static (dyn Sink + Sync),
     watches: Option<&'static WatchRegistry>,
-) -> (Box<dyn KernelFs>, Option<ClaimRef>)
+) -> Result<(Box<dyn KernelFs>, Option<ClaimRef>), Errno>
 where
     F: FilesystemRead
         + FilesystemWrite
@@ -143,7 +148,16 @@ where
         ReclaimOwner::FilesystemVolume { volume },
         pressure,
         audit,
-    );
+    )
+    .map_err(tairix_kernel_core::VfsError::to_errno)?;
+    let reference = claim
+        .as_ref()
+        .map(tairix_kernel_core::fswatch::Claim::reference);
+    let cache = match claim {
+        Some(claim) => cache.with_watch(claim),
+        None => cache,
+    };
+    let cache = Box::try_new(cache).map_err(|_| Errno::OutOfMemory)?;
     // Every production volume cache registers both of its classified pools
     // — clean file data and metadata — with the System Information
     // memory-statistics registry (observation-only). A `None` means
@@ -153,14 +167,7 @@ where
     for ledger in cache.ledgers().into_iter().flatten() {
         tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
     }
-    let reference = claim
-        .as_ref()
-        .map(tairix_kernel_core::fswatch::Claim::reference);
-    let cache = match claim {
-        Some(claim) => cache.with_watch(claim),
-        None => cache,
-    };
-    (Box::new(cache), reference)
+    Ok((cache, reference))
 }
 
 /// The production `fs_*` service the dispatch hook holds from boot
@@ -440,14 +447,17 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "already_installed");
         return None;
     }
-    let (driver, watch) = cached(
+    let Ok((driver, watch)) = cached(
         fs,
         SYSTEM_MOUNT_HANDLE,
         volume_uuid,
         pressure,
         audit,
         watches,
-    );
+    ) else {
+        unavailable(audit, "cache_unbuilt");
+        return None;
+    };
     // The returned lock is not needed here: nothing else in the kernel
     // writes the read-only `/System` volume.
     if let Err(refused) = LATE_FILESYSTEM.register(
@@ -528,14 +538,17 @@ pub fn register_writable_state(
         unavailable(audit, "writable_handle_invalid");
         return None;
     };
-    let (driver, watch) = cached(
+    let Ok((driver, watch)) = cached(
         driver,
         ROOT_VOLUME_HANDLE,
         volume_uuid,
         pressure,
         audit,
         watches,
-    );
+    ) else {
+        unavailable(audit, "cache_unbuilt");
+        return None;
+    };
     let shared =
         match LATE_FILESYSTEM.register(handle, driver, "ARXFSRoot", "arxfs", volume_uuid, watch) {
             Ok(shared) => shared,

@@ -5,7 +5,7 @@ serves a volume to the kernel's VFS over, the kernel's proxy for it, the
 partition-scoped block grant the driver reaches its volume through, and the
 removable-media drivers moved onto it. **Binding under `AGENTS.md`** (§4, §5,
 §8, §17.4, §18, §19.5, §24, §26). It closes `plans/OPEN-DEFECTS.md` D1072
-(`PLAN.md` FS-USERSPACE) and is the protocol `plans/SMB.md` SMB9 serves shares
+(`PLAN.md` FS-USERSPACE) and is the protocol `plans/SMB.md` SMB9a–SMB9e serve shares
 over. It consumes `plans/DEVICES.md` D3–D4 (the attach path, retained writes,
 surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 `plans/ARXFS-WRITEBACK.md` (the commit window) and
@@ -20,7 +20,7 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 | FSS3 | The kernel `ServedFs` proxy: a `KernelFs` over the protocol with liveness-bounded, killable calls, window quarantine, hold calls settled rather than withdrawn, releases reaped by the volume's own operations, fail-closed reply validation, and the server-health overlay | done |
 | FSS4 | The volume block grant: `HwResourceKind::Volume` under `CAP_FS_SERVE`, the kernel's served-volume registry, and `volume_read` / `volume_write` / `volume_ctl` / `volume_serve` | done |
 | FSS5 | Removable volumes served from user space: the kernel-published volume node, the attach, serve, refusal, detach, unplug, server-loss and re-insert flows, the six driver bundles (ext4, FAT32, ADFS, ISO 9660, UDF, ARXFS), and the in-kernel removable path removed | done |
-| FSS6 | Network-served attachments for `plans/SMB.md` SMB9: `fsserve_offer` and attach by the named principal, the owner-bound private presentation, owner and server detach, `MOUNT_LIST`'s owner, and the concurrent uncached registry entry a multi-writer share needs | blocked: lands with SMB9 |
+| FSS6 | Network-served attachments, landing as `plans/SMB.md` SMB9a: the kernel-minted offer and its attach by the one principal it names, the presentations, owner and server detach, server-reported liveness, `MOUNT_LIST`'s owner and class, and the lanes that serve a multi-writer share concurrently and uncached | done |
 
 ## 0. Decisions (binding)
 
@@ -75,7 +75,7 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 - **A local served volume has one writer, the kernel**, so it keeps the
   kernel's cache, the directory-watch feed and per-mount serialisation exactly
   as an in-kernel driver: the proxy is one more `KernelFs` in the registry,
-  under `GroupMappedFs` for the ownerless formats and `CachedFs` for all. The
+  under `PresentedFs` for the ownerless formats and `CachedFs` for all. The
   concurrent uncached entry a multi-writer share needs is FSS6's.
 - **Write-back stays in the driver's process.** A served volume never reports
   a deadline to the kernel's flusher, and its registration is reaped inline —
@@ -89,7 +89,7 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
   from its own probe (`lib/fsprobe`), never from the server. The server may
   ask for read-only, never for writes the device or the kernel refuses. A
   removable mount stays `noexec`, presented through the same template and
-  `GroupMappedFs` map an in-kernel removable volume is.
+  `PresentedFs` map an in-kernel removable volume is.
 
 ## 1. The ABI (`lib/abi/src/fsserve.rs`) — FSS1
 
@@ -189,27 +189,64 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
 
 ## 6. Network attachments — FSS6
 
-- `fsserve_offer(endpoint, window, for_uid)` — `CAP_FS_SERVE` — registers an
-  endpoint as attachable **by that one principal**, naming the server's
-  medium class, declared limits and a 16-byte volume key. It mounts nothing.
-- An offer is named by a `tairix_abi::fsserve::OfferId`, never zero and never
-  reused in a boot; `netshare-v1`'s `Mount` answers one.
-- The attach is called by the principal the offer names, with the target, the
-  presentation and the name, so every authority decision is made against the
-  real caller: without `CAP_FS_MOUNT` the presentation is private (owner the
-  caller, its primary group, directories `rwx------`, files `rw-------`); with
-  it, shared through the removable template or explicit. Flags are `noexec`
-  plus what the caller narrows.
-- A network volume's identity is derived by the kernel from the serving
-  process's attested bundle identity and the offer's key, so a server can
-  never claim a local volume's identity.
-- `volume_detach` succeeds for the owner without `CAP_FS_MOUNT`;
-  `fsserve_withdraw` lets the server retire its own attachment.
-- `MountRecord` gains the owner uid and a network medium class.
-- The registry gains a concurrent entry kind for these attachments: other
-  writers make `CachedFs`'s one-writer model false, so caching is the
-  server's under its own coherence protocol (SMB leases), and no per-mount
-  lock is held across a server call.
-- `fsserve_offer` is gated by `CAP_FS_SERVE`, the removable-media drivers'
-  class capability; no grant scopes it to a kernel-held volume, so the offer
-  names the one principal it is for.
+- **Offer.** `fsserve_offer` — `CAP_FS_SERVE` — takes a `NetworkOffer`: the
+  `ServeOffer` (`FormatName::Smb3`), the uid it is for, a 16-byte volume key,
+  the source the mount table shows (`//host/share`), and its lanes. As
+  `volume_serve` does, the kernel mints the endpoint in the served range and
+  the window, so the kernel is the endpoint's only caller, and answers the
+  `ServeGrant` and an `OfferId`, never zero and never reused in a boot. An
+  offer mounts nothing; it lives until attached, withdrawn, or its server
+  exits. `netshare-v1`'s `Mount` answers it.
+- **Lanes.** A multi-writer share is served by several *lanes*: each is the
+  one-call proxy of §3 over the shared endpoint, owning its own span of the
+  window, and the volume's `DriverLock` hands an operation any free lane, so
+  no caller waits behind another's round trip. A local volume has one lane.
+  The offer names the count and each lane's span, within the kernel's bounds
+  (`SERVED_LANES_MAX`, a span a power of two up to `FSSERVE_WINDOW_LEN`), so
+  the server sizes what one mount costs; detach takes every lane in order.
+  `Release` names its span, since a concurrent server's answer to one span's
+  release says nothing of another's.
+- **Uncached.** Other writers make `CachedFs`'s one-writer model false, so a
+  network attachment is registered without it: caching is the server's,
+  under its own coherence protocol (SMB leases), and the volume has no
+  directory-watch feed.
+- **Liveness.** A network server touches no volume grant, so it shows life
+  through `fsserve_ctl(offer, Alive)`, which it sends while calls it is
+  working on are outstanding; a call is abandoned as in §0 once the server
+  neither answers nor shows life for `SERVED_IDLE_NS`, and the caller stays
+  killable throughout.
+- **Attach.** `fsserve_attach(offer, attach)` is called by the principal the
+  offer names, so every authority decision is made against the real caller;
+  anyone else is answered `NotFound`. It names the volume (a base name the
+  kernel suffixes through the shared volume-naming policy until one is free),
+  the presentation, an optional narrowing to read-only, and an optional
+  explicit target. The presentation is the identity map §0 applies to
+  removable volumes, generalised: *private* for a caller without
+  `CAP_FS_MOUNT` — owner the caller, its primary group, directories
+  `rwx------`, files `rw-------` — and, for a holder, also *shared* (the
+  storage group, `rwxrwx---`/`rw-rw----`) or *explicit*; in each every node is
+  presented so whatever owner the server claims to record
+  (`PresentedFs::whole`), and the write bits drop where the server marks a
+  node read-only. Flags are `noexec` plus
+  what the caller narrows. The volume appears at `/Storage/<name>`; an
+  explicit target is a `view_bind` (`plans/NEW-NAMESPACE.md` NS-4a) made
+  under the same call.
+- **Identity.** A network volume's identity is derived by the kernel from the
+  serving process's attested bundle identity and the offer's key, so a server
+  can never claim a local volume's identity.
+- **Detach.** `volume_detach` succeeds for the attachment's owner without
+  `CAP_FS_MOUNT`, and takes the endpoint down, which is how the server learns
+  the volume is gone; `fsserve_ctl(offer, Withdraw)` lets the server retire
+  its own offer or attachment, after it has flushed what it holds.
+- **Retirement.** A volume its server withdraws, or whose server dies, leaves
+  the namespace without the kernel waiting on the server's own lanes, unless
+  the server last said it held writes it had not published: that one keeps its
+  mount behind the fail-closed stand-in, reporting `UnavailableLost`, until its
+  owner detaches it with `force`. An attach whose explicit target is refused
+  is undone, holds let go, and the offer stays to be attached again.
+- The implementation is `kernel/tairix-kernel/src/network_volume.rs` (audit
+  4300–4305) over `kernel/core`'s lanes (`ServedFs::lanes`,
+  `DriverLock::lanes`), `LateFilesystem::register_network` and
+  `volume_policy::PresentedFs`.
+- `MountRecord` gains the owner uid and the volume's class
+  (`VolumeClass::Network`).

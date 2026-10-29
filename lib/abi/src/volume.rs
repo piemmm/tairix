@@ -27,7 +27,9 @@
 
 use crate::blkio::{BlkMedium, BLK_MEDIUM_LEN};
 use crate::driver::block::{DiscLayout, DiscardCapability, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE};
-use crate::le::{exact_len, put_u32, put_u64, read_u32, read_u64};
+use crate::driver::filesystem::MountFlags;
+use crate::le::{exact_len, put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::sysinfo::MOUNT_TARGET_MAX;
 use crate::Errno;
 
 /// The filesystem drivers a volume can be attached with. Closed set: an
@@ -93,10 +95,12 @@ impl VolumeFsType {
 }
 
 /// What the mount table calls a volume: its format, and for a format with
-/// generations, the one this volume is.
+/// generations, the one this volume is; or, for a network volume, the protocol
+/// it is served over.
 ///
 /// A closed set, so the name a user-space driver gives the kernel is a code
-/// the kernel holds to the format the volume was attached as.
+/// the kernel holds to the format the volume was attached as, and a server
+/// offering a network volume can never name a local format.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FormatName {
@@ -116,6 +120,8 @@ pub enum FormatName {
     Udf = 7,
     /// Acorn ADFS.
     Adfs = 8,
+    /// A share served over SMB 3.
+    Smb3 = 9,
 }
 
 impl FormatName {
@@ -131,20 +137,23 @@ impl FormatName {
             Self::Iso9660 => "iso9660",
             Self::Udf => "udf",
             Self::Adfs => "adfs",
+            Self::Smb3 => "smb3",
         }
     }
 
-    /// The format family the name belongs to.
+    /// The format family a local volume of this name is probed as, or `None`
+    /// for a network protocol, which no local volume carries.
     #[must_use]
-    pub const fn family(self) -> VolumeFsType {
-        match self {
+    pub const fn family(self) -> Option<VolumeFsType> {
+        Some(match self {
             Self::Arxfs => VolumeFsType::ARXFS,
             Self::Ext2 | Self::Ext3 | Self::Ext4 => VolumeFsType::Ext4,
             Self::Fat32 => VolumeFsType::Fat32,
             Self::Iso9660 => VolumeFsType::Iso9660,
             Self::Udf => VolumeFsType::Udf,
             Self::Adfs => VolumeFsType::Adfs,
-        }
+            Self::Smb3 => return None,
+        })
     }
 
     /// The wire code.
@@ -168,6 +177,7 @@ impl FormatName {
             6 => Self::Iso9660,
             7 => Self::Udf,
             8 => Self::Adfs,
+            9 => Self::Smb3,
             _ => return Err(Errno::OutOfRange),
         })
     }
@@ -588,10 +598,168 @@ impl VolumeDetachRequest {
     }
 }
 
+/// The fixed part of a [`ViewBindRequest`]: the volume's identity, the
+/// narrowing (4), and the subtree's and target's lengths (2 each).
+const VIEW_BIND_FIXED_LEN: usize = VOLUME_ID_LEN + 8;
+
+/// The largest [`ViewBindRequest`]: a subtree and a target each at
+/// [`MOUNT_TARGET_MAX`], the bound a binding is listed within.
+pub const VIEW_BIND_MAX: usize = VIEW_BIND_FIXED_LEN + 2 * MOUNT_TARGET_MAX;
+
+/// A projection of an attached volume's subtree at a directory
+/// (`view_bind`, `plans/NEW-NAMESPACE.md` NS-4a).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ViewBindRequest<'a> {
+    /// The volume's stable identity, as the forest published it.
+    pub volume_id: [u8; VOLUME_ID_LEN],
+    /// The directory within the volume projected, `/` for its root.
+    pub subtree: &'a str,
+    /// Where it is projected: an absolute path under `/Users` or `/Storage`.
+    pub target: &'a str,
+    /// Flags the projection adds to its volume's; it can never remove one.
+    pub narrowing: MountFlags,
+}
+
+impl<'a> ViewBindRequest<'a> {
+    /// Encode the request into `out`, returning its length.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for the all-zero identity or a path that is not
+    /// absolute, holds a control character, or passes [`MOUNT_TARGET_MAX`];
+    /// [`Errno::BufferTooSmall`] when `out` cannot hold it.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        check_view_bind(self)?;
+        let len = VIEW_BIND_FIXED_LEN + self.subtree.len() + self.target.len();
+        let out = out.get_mut(..len).ok_or(Errno::BufferTooSmall)?;
+        out[..VOLUME_ID_LEN].copy_from_slice(&self.volume_id);
+        put_u32(out, VOLUME_ID_LEN, self.narrowing.bits());
+        let path_len = |path: &str| u16::try_from(path.len()).map_err(|_| Errno::OutOfRange);
+        put_u16(out, VOLUME_ID_LEN + 4, path_len(self.subtree)?);
+        put_u16(out, VOLUME_ID_LEN + 6, path_len(self.target)?);
+        let paths = &mut out[VIEW_BIND_FIXED_LEN..];
+        paths[..self.subtree.len()].copy_from_slice(self.subtree.as_bytes());
+        paths[self.subtree.len()..].copy_from_slice(self.target.as_bytes());
+        Ok(len)
+    }
+
+    /// Decode a request, failing closed on anything
+    /// [`encode`](Self::encode) could not have written.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an unknown flag or anything `encode`
+    /// refuses; [`Errno::LengthOutOfRange`] for a frame that does not end
+    /// where its target does.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
+        if bytes.len() < VIEW_BIND_FIXED_LEN || bytes.len() > VIEW_BIND_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let subtree_len = usize::from(read_u16(bytes, VOLUME_ID_LEN + 4));
+        let target_len = usize::from(read_u16(bytes, VOLUME_ID_LEN + 6));
+        if bytes.len() != VIEW_BIND_FIXED_LEN + subtree_len + target_len {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut volume_id = [0; VOLUME_ID_LEN];
+        volume_id.copy_from_slice(&bytes[..VOLUME_ID_LEN]);
+        let narrowing =
+            MountFlags::from_bits(read_u32(bytes, VOLUME_ID_LEN)).map_err(|_| Errno::OutOfRange)?;
+        let paths = &bytes[VIEW_BIND_FIXED_LEN..];
+        let text = |bytes| core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange);
+        let request = Self {
+            volume_id,
+            subtree: text(&paths[..subtree_len])?,
+            target: text(&paths[subtree_len..])?,
+            narrowing,
+        };
+        check_view_bind(&request)?;
+        Ok(request)
+    }
+}
+
+/// Whether `path` is an absolute path a binding can be listed with.
+#[must_use]
+pub fn is_binding_path(path: &str) -> bool {
+    path.starts_with('/') && path.len() <= MOUNT_TARGET_MAX && !path.chars().any(char::is_control)
+}
+
+fn check_view_bind(request: &ViewBindRequest<'_>) -> Result<(), Errno> {
+    if request.volume_id == [0; VOLUME_ID_LEN]
+        || !is_binding_path(request.subtree)
+        || !is_binding_path(request.target)
+    {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+
     use super::*;
     use crate::blkio::BlkTransport;
+
+    fn bind<'a>(subtree: &'a str, target: &'a str) -> ViewBindRequest<'a> {
+        ViewBindRequest {
+            volume_id: *b"0123456789abcdef",
+            subtree,
+            target,
+            narrowing: MountFlags::READ_ONLY,
+        }
+    }
+
+    #[test]
+    fn a_view_binding_round_trips_and_the_largest_fits_its_bound() {
+        let mut out = [0u8; VIEW_BIND_MAX];
+        let request = bind("/", "/Users/ann/Home/nas");
+        let len = request.encode(&mut out).unwrap();
+        assert_eq!(ViewBindRequest::decode(&out[..len]), Ok(request));
+        let path = alloc::string::String::from("/") + &"p".repeat(MOUNT_TARGET_MAX - 1);
+        let largest = bind(&path, &path);
+        assert_eq!(largest.encode(&mut out), Ok(VIEW_BIND_MAX));
+        assert_eq!(ViewBindRequest::decode(&out), Ok(largest));
+    }
+
+    #[test]
+    fn a_view_binding_out_of_shape_is_refused_both_ways() {
+        let mut out = [0u8; VIEW_BIND_MAX];
+        let long = alloc::string::String::from("/") + &"p".repeat(MOUNT_TARGET_MAX);
+        for bad in [
+            ViewBindRequest {
+                volume_id: [0; VOLUME_ID_LEN],
+                ..bind("/", "/Storage/x")
+            },
+            bind("docs", "/Storage/x"),
+            bind("/", "Storage/x"),
+            bind("/", &long),
+            bind("/", "/Storage/\u{7}x"),
+        ] {
+            assert_eq!(bad.encode(&mut out), Err(Errno::OutOfRange), "{bad:?}");
+        }
+        assert_eq!(
+            bind("/", "/Storage/x").encode(&mut [0; 8]),
+            Err(Errno::BufferTooSmall)
+        );
+        let len = bind("/", "/Storage/x").encode(&mut out).unwrap();
+        let good = &out[..len];
+        let mut flag = good.to_vec();
+        flag[VOLUME_ID_LEN] = 0x80;
+        assert_eq!(ViewBindRequest::decode(&flag), Err(Errno::OutOfRange));
+        let mut zero = good.to_vec();
+        zero[..VOLUME_ID_LEN].fill(0);
+        assert_eq!(ViewBindRequest::decode(&zero), Err(Errno::OutOfRange));
+        let mut trailing = good.to_vec();
+        trailing.push(b'x');
+        assert_eq!(
+            ViewBindRequest::decode(&trailing),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            ViewBindRequest::decode(&good[..len - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
 
     #[test]
     fn a_control_request_round_trips_and_carries_a_range_only_to_a_discard() {
@@ -695,14 +863,15 @@ mod tests {
 
     #[test]
     fn every_format_name_round_trips_into_its_family() {
-        for raw in 1..=8 {
+        for raw in 1..=9 {
             let name = FormatName::from_u8(raw).expect("a name");
             assert_eq!(name.as_u8(), raw);
             assert!(!name.as_str().is_empty());
+            assert_eq!(name.family().is_none(), name == FormatName::Smb3);
         }
-        assert_eq!(FormatName::Ext2.family(), VolumeFsType::Ext4);
+        assert_eq!(FormatName::Ext2.family(), Some(VolumeFsType::Ext4));
         assert_eq!(FormatName::from_u8(0), Err(Errno::OutOfRange));
-        assert_eq!(FormatName::from_u8(9), Err(Errno::OutOfRange));
+        assert_eq!(FormatName::from_u8(10), Err(Errno::OutOfRange));
     }
 
     #[test]

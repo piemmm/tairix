@@ -130,7 +130,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FOREIGN-MEDIA | ISO 9660, UDF, USB optical drives, and copies that keep holes and foreign metadata (`plans/FOREIGN-MEDIA.md`) | in progress |
 | EXT4-RW | ext2/ext3/ext4 written as Linux leaves them: jbd2 journaling and crash replay, every checksum, lazily initialised groups, extent trees to full depth, indexed directories, POSIX ACLs, over the shared `lib/writeback` core | done |
 | EXFAT | An exFAT driver, for the removable drives other systems format | planned |
-| FS-USERSPACE | `fsserve-v1`, serving a filesystem from user space, and the removable-media drivers moved onto it (`plans/FSSERVE.md` FSS1–FSS5, `plans/OPEN-DEFECTS.md` D1072); network attachments are FSSERVE FSS6, with SMB9 | done |
+| FS-USERSPACE | `fsserve-v1`, serving a filesystem from user space, and the removable-media drivers moved onto it (`plans/FSSERVE.md` FSS1–FSS5, `plans/OPEN-DEFECTS.md` D1072); network attachments are FSSERVE FSS6, with SMB9a | done |
 
 ### Drivers, devices and graphics hardware
 

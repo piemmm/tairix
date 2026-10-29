@@ -205,6 +205,7 @@
 - [Seat-manager service](./userland/seatmgr.md)
 - [Network-stack service](./userland/netstack.md)
 - [Link-local service discovery (`discoveryd`)](./userland/discoveryd.md)
+- [Network shares (`smbfs`)](./userland/smbfs.md)
 - [Audio service (`audiod`)](./userland/audiod.md)
 - [Cue authority (`soundd`)](./userland/soundd.md)
 - [Sound player (`play`)](./userland/play.md)

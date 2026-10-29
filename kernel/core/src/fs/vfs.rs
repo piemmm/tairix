@@ -34,7 +34,7 @@ use super::delegate::{
     Walk,
 };
 use super::listing::{DirPosition, ListEnd};
-use super::mount::{MountTable, Projection};
+use super::mount::{Cover, MountTable, Projection};
 use super::node::{At, NodeHandle, NodeRef, Start};
 use super::path::{
     owned_name, parse_caller_path, spell, CallerPath, Path, Step, TargetStep, MAX_PATH_COMPONENTS,
@@ -141,6 +141,14 @@ enum Stand<'s> {
     Floor(Arc<Projection>),
     /// A directory a descriptor holds, where a relative path starts.
     Held(&'s NodeHandle),
+    /// The directory holding the one a bind covers, reached by a caller's
+    /// `..` from the bind's floor, which the bind keeps pinned.
+    Holder {
+        /// The projection it is reached through.
+        projection: Arc<Projection>,
+        /// The directory.
+        dir: NodeRef,
+    },
 }
 
 /// A caller's path being resolved, across every projection it crosses.
@@ -152,9 +160,9 @@ pub(super) struct Resolution<'s> {
 }
 
 /// What a resolution asks for next.
-enum Next<'s> {
+enum Next {
     /// The driver serving the projection it stands in.
-    Volume(Serve<'s>),
+    Volume(Serve),
     /// Nothing: it ended in a projection no volume backs.
     Catalog(CatalogEnd),
 }
@@ -162,11 +170,11 @@ enum Next<'s> {
 /// The driver a resolution asks to hold: the one serving `projection`, under
 /// the registration `pin` was taken on when the walk stands on a pinned
 /// node.
-pub(super) struct Serve<'s> {
+pub(super) struct Serve {
     /// The projection.
     pub(super) projection: Arc<Projection>,
     /// The pin the walk stands on, whose registration must still serve.
-    pub(super) pin: Option<&'s NodeRef>,
+    pub(super) pin: Option<NodeRef>,
 }
 
 impl<'s> Resolution<'s> {
@@ -229,26 +237,34 @@ impl<'s> Resolution<'s> {
         posture: Posture,
         spelling: Spelling,
     ) -> Result<Self, VfsError> {
-        let (stand, check_start) = if path.absolute {
-            (Stand::Floor(vfs.root_projection()?), false)
+        let floor = |projection: Arc<Projection>, spelling: Spelling| {
+            let spelled = match spelling {
+                Spelling::Unkept => None,
+                Spelling::Label | Spelling::Exact(_) => Some(projection.path().owned_components()?),
+            };
+            Ok::<_, VfsError>((Stand::Floor(projection), spelled))
+        };
+        let ((stand, spelled), check_start) = if path.absolute {
+            (floor(vfs.root_projection()?, spelling)?, false)
         } else {
             match start {
-                Start::Root => (Stand::Floor(vfs.root_projection()?), true),
-                Start::Dir(handle) => (Stand::Held(handle), true),
+                Start::Root => (floor(vfs.root_projection()?, spelling)?, true),
+                Start::Dir(handle) => {
+                    let spelled = match spelling {
+                        Spelling::Unkept => None,
+                        Spelling::Label => Some(match Path::parse(&handle.opened_as) {
+                            Ok(label) => label.into_components(),
+                            Err(_) => handle.projection.path().owned_components()?,
+                        }),
+                        Spelling::Exact(start) => Some(start),
+                    };
+                    ((Stand::Held(handle), spelled), true)
+                }
                 Start::Catalog(catalog) => {
                     let live = vfs.mounts().live(catalog).cloned();
-                    (Stand::Floor(live.ok_or(VfsError::Stale)?), true)
+                    (floor(live.ok_or(VfsError::Stale)?, spelling)?, true)
                 }
             }
-        };
-        let spelled = match (spelling, &stand) {
-            (Spelling::Unkept, _) => None,
-            (_, Stand::Floor(projection)) => Some(projection.path().owned_components()?),
-            (Spelling::Label, Stand::Held(handle)) => Some(match Path::parse(&handle.opened_as) {
-                Ok(label) => label.into_components(),
-                Err(_) => handle.projection.path().owned_components()?,
-            }),
-            (Spelling::Exact(start), Stand::Held(_)) => Some(start),
         };
         let road = Road::new(
             path.steps,
@@ -266,14 +282,19 @@ impl<'s> Resolution<'s> {
 
     /// Walk the projections no volume backs, which need no driver, until the
     /// resolution stands on a volume or ends in one of them.
-    fn advance(&mut self, vfs: &Vfs, cred: &Credentials<'_>) -> Result<Next<'s>, VfsError> {
+    fn advance(&mut self, vfs: &Vfs, cred: &Credentials<'_>) -> Result<Next, VfsError> {
         loop {
             let catalog = match &self.stand {
                 Stand::Held(handle) => {
-                    let handle: &'s NodeHandle = handle;
                     return Ok(Next::Volume(Serve {
                         projection: Arc::clone(&handle.projection),
-                        pin: Some(&handle.node),
+                        pin: Some(handle.node.clone()),
+                    }));
+                }
+                Stand::Holder { projection, dir } => {
+                    return Ok(Next::Volume(Serve {
+                        projection: Arc::clone(projection),
+                        pin: Some(dir.clone()),
                     }));
                 }
                 Stand::Floor(projection) if projection.backing().is_some() => {
@@ -345,6 +366,10 @@ impl<'s> Resolution<'s> {
                     at_floor: handle.at_floor,
                 },
             ),
+            Stand::Holder { projection, dir } => (
+                Arc::clone(projection),
+                Begin::Climbed { node: dir.pinned() },
+            ),
             Stand::Floor(projection) => (
                 Arc::clone(projection),
                 Begin::Floor {
@@ -357,10 +382,22 @@ impl<'s> Resolution<'s> {
         // covered name reaches past the projection shown over it.
         let matching = fs.name_matching();
         let beneath = |name: &str| vfs.mounts().child(&projection, name, matching).cloned();
+        // Taken once, under this hold of the driver every bind through the
+        // projection was made under.
+        let covers = projection
+            .has_binds_within()
+            .then(|| Arc::clone(vfs.mounts().covers()));
+        let covered = |node: NodeId| {
+            covers
+                .as_ref()
+                .and_then(|covers| covers.covering(&projection, node))
+                .cloned()
+        };
         let edge = Edge {
             path: projection.path(),
             has_parent: !projection.path().is_root(),
             beneath: &beneath,
+            covered: &covered,
         };
         let descent =
             DelegatedFs::bind(fs, &projection).walk_segment(cred, begin, &mut self.road, &edge)?;
@@ -371,8 +408,12 @@ impl<'s> Resolution<'s> {
                 walk,
             })),
             Descent::Above => {
-                let up = vfs.mounts().parent(&projection).cloned();
-                self.cross(up.ok_or(VfsError::NotFound)?)?;
+                if let Some(cover) = projection.cover() {
+                    self.climb_out(&projection, cover)?;
+                } else {
+                    let up = vfs.mounts().parent(&projection).cloned();
+                    self.cross(up.ok_or(VfsError::NotFound)?)?;
+                }
                 Ok(None)
             }
             Descent::Into(child) => {
@@ -405,6 +446,7 @@ impl<'s> Resolution<'s> {
         // A link's steps never leave its projection, so every step here is
         // the caller's.
         let next = match step.kind {
+            TargetStep::Up if floor.cover().is_some() => return Err(VfsError::Unserved),
             TargetStep::Up => vfs.mounts().parent(&floor).cloned(),
             TargetStep::Name(name) => Some(
                 vfs.mounts()
@@ -424,6 +466,22 @@ impl<'s> Resolution<'s> {
     fn cross(&mut self, projection: Arc<Projection>) -> Result<(), VfsError> {
         self.road.stand_at(projection.path())?;
         self.stand = Stand::Floor(projection);
+        Ok(())
+    }
+
+    /// Stand where a caller's `..` from the floor of `bind`, which `cover`
+    /// says what it covers, leads: the directory holding the covered one.
+    fn climb_out(&mut self, bind: &Projection, cover: &Cover) -> Result<(), VfsError> {
+        let within = Arc::clone(cover.within());
+        let Some(dir) = cover.holder() else {
+            return self.cross(within);
+        };
+        self.road.stand_at(bind.path())?;
+        self.road.climbed();
+        self.stand = Stand::Holder {
+            projection: within,
+            dir: dir.clone(),
+        };
         Ok(())
     }
 }
@@ -467,7 +525,7 @@ pub(super) trait Drivers {
     /// The refusal of a projection or registration gone since, or `op`'s.
     fn hold<T>(
         &mut self,
-        serve: Serve<'_>,
+        serve: Serve,
         op: impl FnOnce(&mut Self::Fs, &Self::Facts) -> Result<T, VfsError>,
     ) -> Result<T, VfsError>;
 
@@ -502,7 +560,7 @@ impl<F: FilesystemRead + FilesystemSecurity + ?Sized> Drivers for One<'_, F> {
 
     fn hold<T>(
         &mut self,
-        serve: Serve<'_>,
+        serve: Serve,
         op: impl FnOnce(&mut Self::Fs, &Self::Facts) -> Result<T, VfsError>,
     ) -> Result<T, VfsError> {
         let handle = serve.projection.backing().ok_or(VfsError::NotFound)?;
@@ -838,7 +896,11 @@ impl Vfs {
         }
         let serve = Serve {
             projection: Arc::clone(&src.projection),
-            pin: src.dir.pin(),
+            pin: src.dir.pin().cloned(),
+        };
+        let guarded = |node| {
+            src.projection.has_binds_within()
+                && self.mounts().covers().guards(&src.projection, node)
         };
         drivers.hold(serve, |fs, facts| {
             DelegatedFs::bind(fs, &src.projection).rename_places(
@@ -849,6 +911,7 @@ impl Vfs {
                 &dst.name,
                 flags,
                 expect.map(|expect| expect.on(D::volume(facts))),
+                &guarded,
             )
         })
     }
@@ -895,7 +958,7 @@ impl Vfs {
         }
         let serve = Serve {
             projection: Arc::clone(&new.projection),
-            pin: new.dir.pin(),
+            pin: new.dir.pin().cloned(),
         };
         drivers.hold(serve, |fs, _| {
             DelegatedFs::bind(fs, &new.projection).link_places(
@@ -1159,8 +1222,8 @@ impl Vfs {
         path: &Path,
         dir_only: bool,
     ) -> Result<(), VfsError> {
-        let name = path.file_name().ok_or(VfsError::InvalidPath)?.to_string();
-        let parent_path = path.parent().ok_or(VfsError::InvalidPath)?;
+        let name = owned_name(path.file_name().ok_or(VfsError::InvalidPath)?)?;
+        let parent_path = path.parent()?.ok_or(VfsError::InvalidPath)?;
         // Removal mutates the parent directory, so the parent's covering
         // mount governs writability (e.g. removing the `/System/Logs`
         // mount point is forbidden by the read-only `/System`).
@@ -1215,8 +1278,8 @@ impl Vfs {
     /// read-only refusal, parent resolution, parent write permission, and the
     /// no-clobber existence check.
     fn create(&mut self, cred: &Credentials<'_>, path: &Path, child: Node) -> Result<(), VfsError> {
-        let name = path.file_name().ok_or(VfsError::InvalidPath)?.to_string();
-        let parent_path = path.parent().ok_or(VfsError::InvalidPath)?;
+        let name = owned_name(path.file_name().ok_or(VfsError::InvalidPath)?)?;
+        let parent_path = path.parent()?.ok_or(VfsError::InvalidPath)?;
         // Creation mutates the parent directory, so the parent's covering
         // mount governs writability.
         if self.mounts.read().is_read_only(&parent_path) {

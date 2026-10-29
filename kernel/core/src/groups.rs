@@ -89,6 +89,18 @@ pub trait GroupsDbSource: Sync {
     /// answers the compiled-in system groups alone rather than inventing
     /// one.
     fn text(&self) -> Result<alloc::vec::Vec<u8>, Errno>;
+
+    /// Run `read` over the held registry's text where it lies, under the
+    /// guard a replacement waits on, so nothing of it is copied.
+    ///
+    /// # Errors
+    ///
+    /// As [`text`](Self::text).
+    fn with_text(&self, read: &mut dyn FnMut(&[u8])) -> Result<(), Errno> {
+        let text = self.text()?;
+        read(&text);
+        Ok(())
+    }
 }
 
 /// The group-registry source installed before any real holder exists.
@@ -147,7 +159,14 @@ impl Default for LateGroupsDb {
 
 impl GroupsDbSource for LateGroupsDb {
     fn text(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
-        self.held.read().clone().ok_or(Errno::NotFound)
+        let held = self.held.read();
+        let text = held.as_deref().ok_or(Errno::NotFound)?;
+        tairix_util::fallible::collected(text.len(), text.iter().copied()).ok_or(Errno::OutOfMemory)
+    }
+
+    fn with_text(&self, read: &mut dyn FnMut(&[u8])) -> Result<(), Errno> {
+        read(self.held.read().as_deref().ok_or(Errno::NotFound)?);
+        Ok(())
     }
 }
 

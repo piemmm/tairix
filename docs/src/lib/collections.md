@@ -160,7 +160,9 @@ and its generation.
   `TryReserveError::CapacityOverflow`.
 
 Its first consumer is `lib/gpu`, which files a device's contexts and jobs and a
-context's allocations, buffers and timelines in it.
+context's allocations, buffers and timelines in it. `smbfs` files its
+connections in one, keying the deadline heap beside it on the dense slot index
+and carrying each entry's key, so a due deadline names its connection.
 
 ## `RangeMap` and `RangeSet`
 

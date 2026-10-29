@@ -19,11 +19,13 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
-use tairix_abi::{CapabilityQuery, DriverError};
+use tairix_abi::fsserve::SERVED_LANES_MAX;
+use tairix_abi::{CapabilityQuery, DriverError, Errno};
 use tairix_caps::CapabilitySet;
+use tairix_inline::ArrayVec;
 use tairix_sync::SpinLock;
 
 use super::mount::Projection;
@@ -225,12 +227,21 @@ impl VolumeNodes {
 /// A registered volume's driver behind the lock that serialises it, beside the
 /// registration whose releases it reaps.
 ///
+/// A volume with other writers is served by several lanes, each a driver
+/// held alone for an operation, and the lock hands an operation any free
+/// one: it tries every lane from a rotating start, then queues on one. A
+/// volume the kernel alone writes has one lane, held as before.
+///
 /// The write-back flusher only tries a volume's lock, leaving a busy volume
 /// due, so every hold that ends while releases wait wakes it again: a long
 /// operation on one volume never stalls the flusher's work on another.
-pub struct DriverLock<F: ?Sized> {
+pub struct DriverLock<F> {
     nodes: Arc<VolumeNodes>,
-    lock: SleepLock<F>,
+    first: SleepLock<F>,
+    /// The lanes past the first: none for a volume with one writer.
+    more: ArrayVec<SleepLock<F>, { SERVED_LANES_MAX - 1 }>,
+    /// Where the next search for a free lane starts.
+    next: AtomicUsize,
 }
 
 impl<F> DriverLock<F> {
@@ -239,28 +250,96 @@ impl<F> DriverLock<F> {
     pub fn new(driver: F, nodes: Arc<VolumeNodes>) -> Self {
         Self {
             nodes,
-            lock: SleepLock::new(driver),
+            first: SleepLock::new(driver),
+            more: ArrayVec::new(),
+            next: AtomicUsize::new(0),
         }
     }
-}
 
-impl<F: ?Sized> DriverLock<F> {
-    /// Hold the driver, parking until it is free.
+    /// `lanes`, each a driver of one volume serving the registration `nodes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for no lanes or more than [`SERVED_LANES_MAX`].
+    pub fn lanes(
+        lanes: impl IntoIterator<Item = F>,
+        nodes: Arc<VolumeNodes>,
+    ) -> Result<Self, Errno> {
+        let mut lanes = lanes.into_iter();
+        let mut lock = Self::new(lanes.next().ok_or(Errno::OutOfRange)?, nodes);
+        for lane in lanes {
+            lock.more
+                .try_push(SleepLock::new(lane))
+                .map_err(|_| Errno::OutOfRange)?;
+        }
+        Ok(lock)
+    }
+
+    /// How many lanes serve the volume.
+    #[must_use]
+    pub fn lane_count(&self) -> usize {
+        1 + self.more.len()
+    }
+
+    /// Lane `index`, which callers keep below [`Self::lane_count`].
+    fn lane(&self, index: usize) -> &SleepLock<F> {
+        index
+            .checked_sub(1)
+            .and_then(|at| self.more.get(at))
+            .unwrap_or(&self.first)
+    }
+
+    /// Hold a lane of the driver, parking until one is free.
     #[track_caller]
     pub fn lock(&self) -> DriverGuard<'_, F> {
-        DriverGuard {
-            guard: self.lock.lock(),
+        if self.more.is_empty() {
+            return self.guard(self.first.lock());
+        }
+        let count = self.lane_count();
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % count;
+        for step in 0..count {
+            if let Some(guard) = self.lane((start + step) % count).try_lock() {
+                return self.guard(guard);
+            }
+        }
+        self.guard(self.lane(start).lock())
+    }
+
+    /// Hold a lane of the driver if one is free this instant.
+    #[track_caller]
+    pub fn try_lock(&self) -> Option<DriverGuard<'_, F>> {
+        // A loop, not a closure: the lane's own caller site is this caller's
+        // only when the call is made directly.
+        for index in 0..self.lane_count() {
+            if let Some(guard) = self.lane(index).try_lock() {
+                return Some(self.guard(guard));
+            }
+        }
+        None
+    }
+
+    /// Hold every lane, so nothing else is in flight on the volume. Taken in
+    /// order, so two callers taking them all never deadlock, and one taking
+    /// a single lane never holds it while waiting for another.
+    #[track_caller]
+    pub fn lock_all(&self) -> AllLanes<'_, F> {
+        let mut more = ArrayVec::new();
+        for lane in &self.more {
+            // Never full: it holds one guard per lane past the first.
+            let _ = more.try_push(lane.lock());
+        }
+        AllLanes {
+            first: self.first.lock(),
+            more,
             _reported: ReapReport(&self.nodes),
         }
     }
 
-    /// Hold the driver if it is free this instant.
-    #[track_caller]
-    pub fn try_lock(&self) -> Option<DriverGuard<'_, F>> {
-        self.lock.try_lock().map(|guard| DriverGuard {
+    fn guard<'a>(&'a self, guard: SleepGuard<'a, F>) -> DriverGuard<'a, F> {
+        DriverGuard {
             guard,
             _reported: ReapReport(&self.nodes),
-        })
+        }
     }
 
     /// The registration the driver serves.
@@ -270,7 +349,27 @@ impl<F: ?Sized> DriverLock<F> {
     }
 }
 
-impl<F: ?Sized> fmt::Debug for DriverLock<F> {
+/// Every lane of a [`DriverLock`], held.
+pub struct AllLanes<'a, F> {
+    // Dropped before `_reported`, so the wake follows the release.
+    first: SleepGuard<'a, F>,
+    more: ArrayVec<SleepGuard<'a, F>, { SERVED_LANES_MAX - 1 }>,
+    _reported: ReapReport<'a>,
+}
+
+impl<'a, F> AllLanes<'a, F> {
+    /// The first lane: the one an operation on the quiet volume goes through.
+    pub fn first(&mut self) -> &mut F {
+        &mut self.first
+    }
+
+    /// Every lane, in order.
+    pub fn each<'s>(&'s mut self) -> impl Iterator<Item = &'s mut F> + use<'s, 'a, F> {
+        core::iter::once(&mut *self.first).chain(self.more.iter_mut().map(|guard| &mut **guard))
+    }
+}
+
+impl<F> fmt::Debug for DriverLock<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DriverLock")
             .field("nodes", &self.nodes)

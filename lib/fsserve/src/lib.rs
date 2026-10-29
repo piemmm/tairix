@@ -27,7 +27,7 @@ mod volume;
 
 pub use format::{bind_key, Opened, ServedFormat, WritebackBudget, REQUIRED_CAPABILITIES};
 pub use host::{Clock, ServedHost};
-pub use server::{ServedFilesystem, Server};
+pub use server::{ServedFilesystem, Server, Window};
 pub use volume::{GrantedVolume, VolumeAccess};
 
 #[cfg(all(freestanding, feature = "program"))]

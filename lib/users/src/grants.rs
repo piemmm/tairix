@@ -372,6 +372,23 @@ pub const THERMALD_CEILING: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `smbfs` network-share service account's grant ceiling: reach the
+/// servers its callers name, offer the shares they mount, serve its reserved
+/// endpoint, parse every server's bytes in capability-empty workers, and emit
+/// its audit records — nothing more.
+///
+/// The endpoint is bound requiring `CAP_NET` of a caller, which the service
+/// holds and never needs to check. It holds no filesystem access of its own:
+/// it reaches a share's files only over the network, as its caller's
+/// account, and the volume it offers is attached by the caller.
+pub const SMBFS_CEILING: &[CapabilityId] = &[
+    CapabilityId::NET,
+    CapabilityId::FS_SERVE,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `discoveryd` link-local discovery service account's grant ceiling:
 /// hold the multicast DNS sockets, parse every datagram in a capability-empty
 /// worker, serve the reserved discovery endpoint, read the grant store, and
@@ -580,6 +597,19 @@ mod tests {
         assert_eq!(SOUNDD_CEILING.len(), 5);
         assert_eq!(SETTINGSD_CEILING.len(), 3);
         assert_eq!(THERMALD_CEILING.len(), 5);
+        assert_eq!(SMBFS_CEILING.len(), 5);
+        // The network-share service offers volumes its callers attach: it
+        // reads no file of its own and mounts nothing itself.
+        let smbfs = capability_set(SMBFS_CEILING);
+        for cap in [
+            CapabilityId::FS_ACCESS,
+            CapabilityId::FS_MOUNT,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::NET_RAW,
+            CapabilityId::NET_ADMIN,
+        ] {
+            assert!(!smbfs.contains(cap), "{cap:?} must stay off smbfs");
+        }
         // The settings service enforces the settings capability; holding it,
         // or any authority beyond its own files, would make it a way round
         // the gate it keeps.

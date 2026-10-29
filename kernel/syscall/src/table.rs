@@ -9,6 +9,7 @@
 //! (no bloat).
 
 use tairix_abi::driver::DmaReach;
+use tairix_abi::netattach::FsserveCtl;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType, AtFlags,
@@ -3368,6 +3369,84 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Offer the network volume the `NetworkOffer` at `frame` describes,
+    /// writing the `OfferGrant` to `grant`.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_SERVE`] and that both pointers are non-null.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fsserve_offer(
+        &self,
+        _caller: &CallerContext<'_>,
+        _frame: u64,
+        _frame_len: usize,
+        _grant: u64,
+        _grant_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Attach the network volume `offer` names as the `NetworkAttach` at
+    /// `frame` asks, writing the `AttachReply` to `reply`. The handler judges
+    /// the caller against the offer and the presentation it asks for.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fsserve_attach(
+        &self,
+        _caller: &CallerContext<'_>,
+        _offer: u64,
+        _frame: u64,
+        _frame_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Carry out `op` on the network volume `offer` names, which the caller
+    /// must have offered.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_SERVE`] and decoded `op` against the closed
+    /// [`FsserveCtl`] set.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fsserve_ctl(
+        &self,
+        _caller: &CallerContext<'_>,
+        _offer: u64,
+        _op: FsserveCtl,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Project the volume subtree the `ViewBindRequest` at `request` names at
+    /// its target. The handler judges the caller against the volume and the
+    /// directory under the resolution the bind takes.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn view_bind(
+        &self,
+        _caller: &CallerContext<'_>,
+        _request: u64,
+        _request_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Withdraw the projection at the path at `target`.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn view_unbind(
+        &self,
+        _caller: &CallerContext<'_>,
+        _target: u64,
+        _target_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// End the machine's power state: flush every mounted volume, then
     /// power the platform off or reset it (`plans/NEW-TASKBAR.md` T13).
     ///
@@ -4651,6 +4730,31 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.volume_serve(
                     caller, args.0[0], args.0[1], frame_len, args.0[3], grant_cap,
                 )
+            }
+            SyscallNumber::FSSERVE_OFFER => {
+                let frame_len = decode_len(args.0[1])?;
+                let grant_cap = decode_len(args.0[3])?;
+                self.handlers
+                    .fsserve_offer(caller, args.0[0], frame_len, args.0[2], grant_cap)
+            }
+            SyscallNumber::FSSERVE_ATTACH => {
+                let frame_len = decode_len(args.0[2])?;
+                let reply_cap = decode_len(args.0[4])?;
+                self.handlers.fsserve_attach(
+                    caller, args.0[0], args.0[1], frame_len, args.0[3], reply_cap,
+                )
+            }
+            SyscallNumber::FSSERVE_CTL => {
+                let op = FsserveCtl::from_u32(decode_u32(args.0[1]))?;
+                self.handlers.fsserve_ctl(caller, args.0[0], op)
+            }
+            SyscallNumber::VIEW_BIND => {
+                let request_len = decode_len(args.0[1])?;
+                self.handlers.view_bind(caller, args.0[0], request_len)
+            }
+            SyscallNumber::VIEW_UNBIND => {
+                let target_len = decode_len(args.0[1])?;
+                self.handlers.view_unbind(caller, args.0[0], target_len)
             }
             SyscallNumber::FS_CHDIR => {
                 // args[0] is the start directory; args[1]/args[2] the path,
@@ -6619,6 +6723,51 @@ mod tests {
             _grant_cap: usize,
         ) -> SyscallResult {
             self.record("volume_serve");
+            Ok(0)
+        }
+
+        fn fsserve_offer(
+            &self,
+            _c: &CallerContext<'_>,
+            _frame: u64,
+            _frame_len: usize,
+            _grant: u64,
+            _grant_cap: usize,
+        ) -> SyscallResult {
+            self.record("fsserve_offer");
+            Ok(0)
+        }
+
+        fn fsserve_attach(
+            &self,
+            _c: &CallerContext<'_>,
+            _offer: u64,
+            _frame: u64,
+            _frame_len: usize,
+            _reply: u64,
+            _reply_cap: usize,
+        ) -> SyscallResult {
+            self.record("fsserve_attach");
+            Ok(0)
+        }
+
+        fn fsserve_ctl(
+            &self,
+            _c: &CallerContext<'_>,
+            _offer: u64,
+            _op: FsserveCtl,
+        ) -> SyscallResult {
+            self.record("fsserve_ctl");
+            Ok(0)
+        }
+
+        fn view_bind(&self, _c: &CallerContext<'_>, _request: u64, _len: usize) -> SyscallResult {
+            self.record("view_bind");
+            Ok(0)
+        }
+
+        fn view_unbind(&self, _c: &CallerContext<'_>, _target: u64, _len: usize) -> SyscallResult {
+            self.record("view_unbind");
             Ok(0)
         }
 

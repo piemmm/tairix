@@ -14,6 +14,7 @@ use core::num::NonZeroU32;
 use alloc::string::String;
 
 use tairix_crypto::{pbkdf2_sha256, pbkdf2_sha256_verify, PasswordHash, PASSWORD_HASH_LEN};
+use tairix_util::fallible::written;
 
 use crate::ParseError;
 
@@ -105,18 +106,20 @@ impl PasswordRecord {
     }
 
     /// Encode the record into the stored text form [`Self::decode`] accepts.
-    #[must_use]
-    pub fn encode(&self) -> String {
-        let mut out = String::new();
-        // Writing into a `String` cannot fail; `fmt::Write` is total here.
-        let _ = fmt::Write::write_fmt(
-            &mut out,
-            format_args!("{}${}$", PASSWORD_SCHEME, self.iterations),
-        );
-        push_hex(&mut out, &self.salt);
-        out.push('$');
-        push_hex(&mut out, &self.hash);
-        out
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::OutOfMemory`] when the text cannot be held.
+    pub fn encode(&self) -> Result<String, ParseError> {
+        written(|out| self.write(out)).ok_or(ParseError::OutOfMemory)
+    }
+
+    /// Write the stored text form to `out`.
+    fn write(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        write!(out, "{}${}$", PASSWORD_SCHEME, self.iterations)?;
+        write_hex(out, &self.salt)?;
+        out.write_char('$')?;
+        write_hex(out, &self.hash)
     }
 
     /// Verify an offered `password` against this record, in constant time
@@ -178,12 +181,11 @@ impl StoredPassword {
         PasswordRecord::decode(text).map(Self::Password)
     }
 
-    /// Encode into the stored text form [`Self::decode`] accepts.
-    #[must_use]
-    pub fn encode(&self) -> String {
+    /// Write the stored text form [`Self::decode`] accepts to `out`.
+    pub(crate) fn write(&self, out: &mut dyn fmt::Write) -> fmt::Result {
         match self {
-            Self::Password(record) => record.encode(),
-            Self::NeverAuthenticates => String::from(NO_PASSWORD_MARKER),
+            Self::Password(record) => record.write(out),
+            Self::NeverAuthenticates => out.write_str(NO_PASSWORD_MARKER),
         }
     }
 
@@ -242,13 +244,14 @@ fn hex_value(byte: u8) -> Result<u8, ParseError> {
     }
 }
 
-/// Append `bytes` to `out` as lowercase hex.
-fn push_hex(out: &mut String, bytes: &[u8]) {
+/// Write `bytes` to `out` as lowercase hex.
+fn write_hex(out: &mut dyn fmt::Write, bytes: &[u8]) -> fmt::Result {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     for byte in bytes {
-        out.push(DIGITS[usize::from(byte >> 4)] as char);
-        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
+        out.write_char(char::from(DIGITS[usize::from(byte >> 4)]))?;
+        out.write_char(char::from(DIGITS[usize::from(byte & 0x0f)]))?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -268,7 +271,7 @@ mod tests {
     #[test]
     fn encode_decode_round_trips() {
         let original = record();
-        let text = original.encode();
+        let text = original.encode().expect("encodes");
         assert!(text.starts_with("pbkdf2-sha256$1000$a5a5"));
         assert_eq!(PasswordRecord::decode(&text), Ok(original));
     }
@@ -309,7 +312,7 @@ mod tests {
 
     #[test]
     fn malformed_stored_records_are_rejected() {
-        let good = record().encode();
+        let good = record().encode().expect("encodes");
         for bad in [
             String::new(),
             String::from("pbkdf2-sha256"),
@@ -335,6 +338,6 @@ mod tests {
     fn distinct_salts_yield_distinct_hashes() {
         let a = PasswordRecord::new(b"byron", [0x01; 16], MIN_ITERATIONS).expect("valid");
         let b = PasswordRecord::new(b"byron", [0x02; 16], MIN_ITERATIONS).expect("valid");
-        assert_ne!(a.encode(), b.encode());
+        assert_ne!(a.encode().expect("encodes"), b.encode().expect("encodes"));
     }
 }

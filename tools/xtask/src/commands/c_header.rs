@@ -81,8 +81,8 @@ use tairix_abi::{
     LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
     MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN,
     MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
-    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX,
-    PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_EDGE_UNTIMED, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE,
+    PLAUSIBLE_FUTURE_SECS, POINTER_EDGE_UNTIMED, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
     PROCESS_CPU_NONE, PROCESS_FLAG_SANDBOXED, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
     PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
     RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, READDIR_BATCH_MAX, RELEASE_EPOCH_SECS,
@@ -91,7 +91,8 @@ use tairix_abi::{
     SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
     SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_PAYLOAD_MAX,
     SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE,
+    SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT, VOLUME_ID_LEN, WAITSET_CHILD_ANY,
+    WAITSET_TIMEOUT_NONE,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -2035,10 +2036,7 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     let _ = writeln!(out, "#define TAIRIX_MOUNT_SOURCE_MAX {MOUNT_SOURCE_MAX}u");
     let _ = writeln!(out, "#define TAIRIX_MOUNT_TARGET_MAX {MOUNT_TARGET_MAX}u");
     let _ = writeln!(out, "#define TAIRIX_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u");
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_MOUNT_VOLUME_ID_LEN {MOUNT_VOLUME_ID_LEN}u"
-    );
+    let _ = writeln!(out, "#define TAIRIX_VOLUME_ID_LEN {VOLUME_ID_LEN}u");
     let _ = writeln!(
         out,
         "#define TAIRIX_MEMORY_CLASS_COUNT {MEMORY_CLASS_COUNT}u"
@@ -2257,6 +2255,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * `usage` is the backing volume's space accounting (all-zero when none is\n\
          * known). `volume_id` is the volume's stable published identity (all-zero\n\
          * when the mount has none), the identity a volume_detach request names.\n\
+         * `owner` is the uid that attached a network volume, 0xFFFFFFFF for one\n\
+         * no one owns; `volume_class` is 0 for a local volume, 1 for a network one.\n\
          * The inline source/target/fstype buffers are valid for their respective\n\
          * *_len byte counts. */\n\
          typedef struct tairix_mount_record {\n\
@@ -2267,7 +2267,10 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t availability;\n\
          \x20   tairix_blk_medium_t medium;\n\
          \x20   tairix_volume_stats_t usage;\n\
-         \x20   uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];\n\
+         \x20   uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];\n\
+         \x20   uint32_t owner;\n\
+         \x20   uint8_t volume_class;\n\
+         \x20   uint8_t reserved0[3];\n\
          \x20   uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];\n\
          \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];\n\
@@ -2277,14 +2280,16 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * MountFlags it narrows that volume to. `volume_id` is the attached\n\
          * volume's, the key of its tairix_mount_record_t; a binding showing no\n\
          * volume (the /Storage catalog) has an empty subtree and an all-zero\n\
-         * volume_id. The inline target/subtree buffers are valid for their\n\
-         * *_len byte counts. */\n\
+         * volume_id. `binder` is the uid that made a view_bind binding,\n\
+         * 0xFFFFFFFF for one the system made. The inline target/subtree buffers\n\
+         * are valid for their *_len byte counts. */\n\
          typedef struct tairix_view_binding_record {\n\
          \x20   uint32_t flags;\n\
          \x20   uint8_t target_len;\n\
          \x20   uint8_t subtree_len;\n\
          \x20   uint8_t reserved0[2];\n\
-         \x20   uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];\n\
+         \x20   uint8_t volume_id[TAIRIX_VOLUME_ID_LEN];\n\
+         \x20   uint32_t binder;\n\
          \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];\n\
          } tairix_view_binding_record_t;\n\n",
@@ -6009,7 +6014,7 @@ mod tests {
             (
                 "MountRecord",
                 core::mem::size_of::<MountRecord>(),
-                224,
+                232,
                 core::mem::align_of::<MountRecord>(),
                 8,
             ),
@@ -6305,8 +6310,8 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
-            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 224, align_of::<MountRecord>(), 8),
-            ("tairix_sysinfo.h", "} tairix_view_binding_record_t;", size_of::<ViewBindingRecord>(), 152, align_of::<ViewBindingRecord>(), 4),
+            ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 232, align_of::<MountRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_view_binding_record_t;", size_of::<ViewBindingRecord>(), 156, align_of::<ViewBindingRecord>(), 4),
             ("tairix_driver.h", "} tairix_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("tairix_driver.h", "} tairix_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
             ("tairix_driver.h", "} tairix_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),

@@ -292,6 +292,7 @@ pub unsafe extern "C" fn tairix_arch_x86_64_external_irq_common() {
         "subq $8, %rsp",
         crate::fp_frame_save!(),
         crate::scrub_nonargument_gprs!(),
+        crate::clear_direction_flag!(),
         "xorl %ecx, %ecx",
         "xorl %edx, %edx",
         "xorl %r8d, %r8d",

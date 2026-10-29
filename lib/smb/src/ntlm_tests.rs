@@ -10,7 +10,8 @@ use tairix_crypto::ntlm::{ntlm_checksum, ntlm_hmac, ntlm_signing_key, NtlmDirect
 
 use super::{
     av, flag, message_integrity, ntlmv2_response, upper_simple, Challenge, NtlmCredential,
-    NtlmInitiator, NtlmInputs, ACCEPTED, MIC, NEGOTIATE_FLAGS, SIGNATURE_LEN, VERSION,
+    NtlmInitiator, NtlmInputs, ACCEPTED, MAX_NAME_BYTES, MIC, NEGOTIATE_FLAGS, SIGNATURE_LEN,
+    VERSION,
 };
 use crate::peer::{challenge_message, CHALLENGE_FLAGS};
 use crate::vectors::{bytes, qts_tokens, windows_ntlm, windows_session_key};
@@ -31,6 +32,30 @@ fn example_target_info() -> Vec<u8> {
         "01000c00530065007200760065007200",
         "00000000",
     ))
+}
+
+#[test]
+fn a_credential_keyed_by_its_derived_key_is_the_one_its_password_makes() {
+    let typed = NtlmCredential::new("User", "Domain", "Password").expect("fits");
+    let keyed = NtlmCredential::keyed("User", "Domain", typed.response_key()).expect("fits");
+    assert!(keyed.matches(&typed));
+    assert_eq!((keyed.user(), keyed.domain()), ("User", "Domain"));
+    for other in [
+        NtlmCredential::new("User", "Domain", "password").expect("fits"),
+        NtlmCredential::keyed("USER", "Domain", typed.response_key()).expect("fits"),
+        NtlmCredential::keyed("User", "DOMAIN", typed.response_key()).expect("fits"),
+    ] {
+        assert!(!other.matches(&typed), "{other:?}");
+    }
+    assert_eq!(
+        NtlmCredential::keyed("", "Domain", typed.response_key()).map(|_| ()),
+        Err(SmbError::Refused(Refusal::Guest))
+    );
+    let long = "u".repeat(MAX_NAME_BYTES);
+    assert_eq!(
+        NtlmCredential::keyed(&long, "", typed.response_key()).map(|_| ()),
+        Err(SmbError::TooLarge)
+    );
 }
 
 #[test]

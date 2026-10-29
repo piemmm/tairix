@@ -185,7 +185,7 @@ pub fn users_db_text() -> Result<String, ParseError> {
         USERS_FIXTURE_SALT,
         USERS_FIXTURE_ITERATIONS,
     )?];
-    Ok(UsersDb::new(records)?.serialise())
+    UsersDb::new(records)?.serialise()
 }
 
 /// Serialise the users-root volume's `/System/Security/Groups` registry:
@@ -210,7 +210,7 @@ pub fn groups_db_text() -> Result<String, ParseError> {
         GroupRecord::new(tairix_users::STORAGE_GROUP, tairix_users::STORAGE_GID)?,
         GroupRecord::new("wheel", Gid(tairix_users::FIRST_USER_GID))?,
     ];
-    Ok(GroupsDb::new(records)?.serialise())
+    GroupsDb::new(records)?.serialise()
 }
 
 /// In-memory [`Block`] device backing the fixture build and the host

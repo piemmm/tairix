@@ -611,7 +611,8 @@ fn both_cache_layers_share_one_gauge_and_drain_before_the_ramzip_handoff() {
         },
         pressure,
         sink(),
-    );
+    )
+    .expect("a cache");
     let node = cached.lookup(root, b"c").expect("lookup");
 
     // First small read populates both layers (a driver read that fills

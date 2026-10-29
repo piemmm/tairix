@@ -14,8 +14,6 @@
 //! bounds. The driver refuses a request the kernel could not have sent
 //! ([`decode_request`]).
 
-use core::num::NonZeroU64;
-
 use crate::driver::filesystem::{
     AclModel, AllocationClass, DirEntry, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
     NodeSecurity, NodeTimes, SecurityAcl, SecuritySubject, Unpinned, VolumeStats, WriteRefusal,
@@ -43,6 +41,79 @@ pub const FSSERVE_VERSION: u16 = 1;
 /// per-call cost vanishes beside a removable medium's own transfer time.
 pub const FSSERVE_WINDOW_LEN: usize = 256 * 1024;
 
+/// The most lanes one served attachment is served by: a containment bound on
+/// the window and endpoint one attachment costs, not a capacity.
+pub const SERVED_LANES_MAX: usize = 16;
+
+/// The smallest span a lane moves file data through.
+pub const LANE_SPAN_MIN: usize = 16 * 1024;
+
+/// The largest window an attachment's lanes can span.
+pub const FSSERVE_WINDOW_MAX: usize = SERVED_LANES_MAX * FSSERVE_WINDOW_LEN;
+
+/// How a served attachment's calls are spread: each lane carries one call at
+/// a time and moves its file data through its own span of the window, so
+/// calls on different lanes are in flight together.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Lanes {
+    count: usize,
+    span: usize,
+}
+
+impl Lanes {
+    /// One lane over a whole [`FSSERVE_WINDOW_LEN`] window: a volume with one
+    /// writer, the kernel.
+    pub const ONE: Self = Self {
+        count: 1,
+        span: FSSERVE_WINDOW_LEN,
+    };
+
+    /// `count` lanes of `span` bytes each.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for no lanes or more than [`SERVED_LANES_MAX`],
+    /// or a span that is not a power of two from [`LANE_SPAN_MIN`] to
+    /// [`FSSERVE_WINDOW_LEN`].
+    pub const fn new(count: usize, span: usize) -> Result<Self, Errno> {
+        if count == 0
+            || count > SERVED_LANES_MAX
+            || !span.is_power_of_two()
+            || span < LANE_SPAN_MIN
+            || span > FSSERVE_WINDOW_LEN
+        {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self { count, span })
+    }
+
+    /// How many lanes there are.
+    #[must_use]
+    pub const fn count(self) -> usize {
+        self.count
+    }
+
+    /// The bytes of window each lane moves data through.
+    #[must_use]
+    pub const fn span(self) -> usize {
+        self.span
+    }
+
+    /// The whole window the lanes divide.
+    #[must_use]
+    pub const fn window_len(self) -> usize {
+        self.count() * self.span()
+    }
+
+    /// Lane `index`'s span of the window, or `None` past the last lane.
+    #[must_use]
+    pub fn lane(self, index: usize) -> Option<Span> {
+        (index < self.count())
+            .then(|| Span::new(index * self.span(), self.span()).ok())
+            .flatten()
+    }
+}
+
 /// The first call-endpoint id the kernel creates for the drivers serving
 /// volumes: one fresh id per accepted serve, never reused in a boot. No
 /// process creates an endpoint in this range itself, so a served volume's
@@ -64,29 +135,6 @@ pub const fn is_served_endpoint(id: u64) -> bool {
     id >= SERVED_ENDPOINT_BASE && id < SERVED_ENDPOINT_BASE + SERVED_ENDPOINT_SPAN
 }
 
-/// The kernel's name for a network volume a server has offered to one
-/// principal, which that principal attaches (`plans/FSSERVE.md` FSS6).
-/// Never zero, and never reused in a boot.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct OfferId(NonZeroU64);
-
-impl OfferId {
-    /// The offer `raw` names, or `None` for zero, which names none.
-    #[must_use]
-    pub const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
-    /// Its raw value.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
 /// Request header: version (2), operation (1), flags (1).
 const REQUEST_HEAD_LEN: usize = 4;
 
@@ -101,6 +149,15 @@ pub const FSSERVE_REQUEST_MAX: usize =
 /// The largest reply: a listing batch, sized so a directory of a few hundred
 /// entries is answered in one call.
 pub const FSSERVE_REPLY_MAX: usize = 1 << 16;
+
+/// How long a server may go neither answering a call nor showing life — by
+/// touching its volume, or with `FsserveCtl::Alive` — before the kernel
+/// abandons the call.
+///
+/// A driver waiting on its device is working, however slow the device: the
+/// device's own deadline bounds each transfer. Ten seconds of neither is a
+/// server that has stopped, not one that is computing.
+pub const SERVED_IDLE_NS: u64 = 10_000_000_000;
 
 /// The request flag carrying [`AllocationClass::System`].
 const FLAG_SYSTEM: u8 = 1 << 0;
@@ -227,7 +284,8 @@ impl Op {
 }
 
 /// Where in the shared data window a request's file data lies: never empty,
-/// and never past the window's end.
+/// at most [`FSSERVE_WINDOW_LEN`] long, and never past the largest window
+/// lanes may span. Each side holds it to the window it actually has.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Span {
     offset: u32,
@@ -239,11 +297,11 @@ impl Span {
     ///
     /// # Errors
     ///
-    /// [`Errno::LengthOutOfRange`] for an empty span or one reaching past
-    /// [`FSSERVE_WINDOW_LEN`].
+    /// [`Errno::LengthOutOfRange`] for an empty span, one longer than
+    /// [`FSSERVE_WINDOW_LEN`], or one reaching past [`FSSERVE_WINDOW_MAX`].
     pub fn new(offset: usize, len: usize) -> Result<Self, Errno> {
         let end = offset.checked_add(len).ok_or(Errno::LengthOutOfRange)?;
-        if len == 0 || end > FSSERVE_WINDOW_LEN {
+        if len == 0 || len > FSSERVE_WINDOW_LEN || end > FSSERVE_WINDOW_MAX {
             return Err(Errno::LengthOutOfRange);
         }
         Ok(Self {
@@ -472,9 +530,13 @@ pub enum Request<'a> {
         key: &'a [u8],
     },
     /// No operation: answered once the driver has finished with every
-    /// request it received before this one, so the kernel may use the window
-    /// again after abandoning a call.
-    Release,
+    /// request it received before this one that moved data through `span`,
+    /// so the kernel may use that span again after abandoning a call. A
+    /// driver serving calls concurrently answers for that span alone.
+    Release {
+        /// The span the abandoned call used.
+        span: Span,
+    },
 }
 
 impl Request<'_> {
@@ -509,7 +571,7 @@ impl Request<'_> {
             Self::SetAttr { .. } => Op::SetAttr,
             Self::ListAttr { .. } => Op::ListAttr,
             Self::RemoveAttr { .. } => Op::RemoveAttr,
-            Self::Release => Op::Release,
+            Self::Release { .. } => Op::Release,
         }
     }
 
@@ -630,7 +692,8 @@ pub fn encode_request(
             put_node(&mut w, dst_dir)?;
             put_name(&mut w, dst_name)?;
         }
-        Request::ReleasePins | Request::Flush | Request::Stats | Request::Release => {}
+        Request::ReleasePins | Request::Flush | Request::Stats => {}
+        Request::Release { span } => put_span(&mut w, span)?,
         Request::SetSecurity { node, security } => {
             put_node(&mut w, node)?;
             put_security(&mut w, &security)?;
@@ -808,7 +871,9 @@ pub fn decode_request(bytes: &[u8]) -> Result<(AllocationClass, Request<'_>), Er
             node: node(&mut r)?,
             key: check_key(r.bytes16()?)?,
         },
-        Op::Release => Request::Release,
+        Op::Release => Request::Release {
+            span: span(&mut r)?,
+        },
     };
     if !r.exhausted() {
         return Err(Errno::LengthOutOfRange);
@@ -1187,7 +1252,7 @@ pub fn decode_reply<'a>(bytes: &'a [u8], request: &Request<'_>) -> Result<Reply<
         | Request::SetSecurity { .. }
         | Request::SetAttr { .. }
         | Request::RemoveAttr { .. }
-        | Request::Release => Answer::Done,
+        | Request::Release { .. } => Answer::Done,
     };
     if !r.exhausted() {
         return Err(Errno::LengthOutOfRange);
@@ -1331,7 +1396,7 @@ pub struct ServeGrant {
     pub endpoint: u64,
     /// The window's address in the driver's address space.
     pub window: u64,
-    /// The window's length, [`FSSERVE_WINDOW_LEN`].
+    /// The window's length: what the volume's [`Lanes`] divide.
     pub window_len: u32,
 }
 
@@ -1350,14 +1415,14 @@ impl ServeGrant {
         out
     }
 
-    /// Decode a grant.
+    /// Decode a grant for a volume served by `lanes`.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for any length but [`SERVE_GRANT_LEN`], or
-    /// a window of any length but [`FSSERVE_WINDOW_LEN`];
+    /// a window of any length but the one `lanes` divide;
     /// [`Errno::OutOfRange`] for a nonzero pad.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+    pub fn decode(bytes: &[u8], lanes: Lanes) -> Result<Self, Errno> {
         exact_len(bytes, SERVE_GRANT_LEN).map_err(|_| Errno::LengthOutOfRange)?;
         if read_u32(bytes, 20) != 0 {
             return Err(Errno::OutOfRange);
@@ -1367,7 +1432,7 @@ impl ServeGrant {
             window: read_u64(bytes, 8),
             window_len: read_u32(bytes, 16),
         };
-        if grant.window_len as usize != FSSERVE_WINDOW_LEN {
+        if grant.window_len as usize != lanes.window_len() {
             return Err(Errno::LengthOutOfRange);
         }
         Ok(grant)

@@ -13,7 +13,9 @@
 //! bare record, and every later one nothing. A report that fails while it is
 //! being written — a panic in a panic message's `Display`, a fault in the
 //! console — therefore ends in a record rather than recursing until its stack
-//! overruns into whatever lies below it.
+//! overruns into whatever lies below it. The latch keeps the cause the first
+//! entry was taken for, so that bare record still names what killed the
+//! machine as well as what broke its report.
 //!
 //! A port writes its own report where no kernel stands behind it: a minimal
 //! test kernel that links only the port, or a failure before the kernel
@@ -23,7 +25,7 @@
 
 use core::fmt::{self, Write};
 use core::panic::Location;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use tairix_log::{write_diag_line, Event, EventId, Field, FieldValue, Level};
 
@@ -63,17 +65,161 @@ pub enum Entry {
     /// The next: one bare record. It is either the report failing inside
     /// itself or a second processor failing while the first reports, and in
     /// both cases the full report's machinery is what cannot be trusted.
-    Nested,
+    Nested {
+        /// What the first entry was taken for, where it said.
+        first: Option<Cause>,
+    },
     /// Every later entry: nothing more can be written safely.
     Silent,
 }
 
-impl Entry {
-    const fn after(taken: u32) -> Self {
-        match taken {
-            0 => Self::Report,
-            1 => Self::Nested,
-            _ => Self::Silent,
+/// Bytes of a panic's source file a [`Cause`] keeps: the end of the path,
+/// which names the file.
+pub const FILE_TAIL: usize = 64;
+
+// A tail's length is kept in a byte.
+const _: () = assert!(FILE_TAIL <= u8::MAX as usize);
+
+/// Why a fatal report was entered.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Cause {
+    /// A panic, raised where its location says, if it says.
+    Panic {
+        /// The end of the source file's path, `len` bytes of it.
+        file: [u8; FILE_TAIL],
+        /// Bytes of `file` in use.
+        len: u8,
+        /// The source line, or zero where none is known.
+        line: u32,
+        /// The source column, or zero where none is known.
+        column: u32,
+    },
+    /// A fatal exception.
+    Fault(KernelFault),
+}
+
+impl Cause {
+    /// A panic raised at `location`.
+    #[must_use]
+    pub fn panic(location: Option<&Location<'_>>) -> Self {
+        let (file, len) = location.map_or(([0; FILE_TAIL], 0), |at| file_tail(at.file()));
+        let (line, column) = location.map_or((0, 0), |at| (at.line(), at.column()));
+        Self::Panic {
+            file,
+            len,
+            line,
+            column,
+        }
+    }
+
+    /// The kind, as the bare record's `first` field names it.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Panic { .. } => "panic",
+            Self::Fault(_) => "fault",
+        }
+    }
+}
+
+/// The last bytes of `path` that fit [`FILE_TAIL`], cut at a character
+/// boundary, and how many there are.
+fn file_tail(path: &str) -> ([u8; FILE_TAIL], u8) {
+    let mut start = path.len().saturating_sub(FILE_TAIL);
+    while !path.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &path.as_bytes()[start..];
+    let mut file = [0; FILE_TAIL];
+    file[..tail.len()].copy_from_slice(tail);
+    // At most `FILE_TAIL` bytes, which fits.
+    (file, u8::try_from(tail.len()).unwrap_or(u8::MAX))
+}
+
+/// The first entry's cause, published as that entry is taken.
+///
+/// Written only by the one entry the latch grants the full report, its words
+/// before its kind, and read only after the kind, so a reader never sees a
+/// half-written cause.
+struct Kept {
+    kind: AtomicU8,
+    words: [AtomicU64; FAULT_WORDS],
+    /// Which of a fault's words the CPU gave, a bit each.
+    given: AtomicU8,
+    file: [AtomicU8; FILE_TAIL],
+}
+
+const KEPT_NONE: u8 = 0;
+const KEPT_PANIC: u8 = 1;
+const KEPT_FAULT: u8 = 2;
+
+impl Kept {
+    const fn new() -> Self {
+        Self {
+            kind: AtomicU8::new(KEPT_NONE),
+            words: [const { AtomicU64::new(0) }; FAULT_WORDS],
+            given: AtomicU8::new(0),
+            file: [const { AtomicU8::new(0) }; FILE_TAIL],
+        }
+    }
+
+    fn keep(&self, cause: &Cause) {
+        let kind = match *cause {
+            Cause::Panic {
+                file,
+                len,
+                line,
+                column,
+            } => {
+                for (slot, byte) in self.file.iter().zip(file) {
+                    slot.store(byte, Ordering::Relaxed);
+                }
+                self.words[0].store(u64::from(line), Ordering::Relaxed);
+                self.words[1].store(u64::from(column), Ordering::Relaxed);
+                self.words[2].store(u64::from(len), Ordering::Relaxed);
+                KEPT_PANIC
+            }
+            Cause::Fault(fault) => {
+                let mut given = 0;
+                for (at, (slot, word)) in self.words.iter().zip(fault.words()).enumerate() {
+                    if let Some(value) = word {
+                        slot.store(value, Ordering::Relaxed);
+                        given |= 1 << at;
+                    }
+                }
+                self.given.store(given, Ordering::Relaxed);
+                KEPT_FAULT
+            }
+        };
+        self.kind.store(kind, Ordering::Release);
+    }
+
+    fn kept(&self) -> Option<Cause> {
+        let word = |at: usize| self.words[at].load(Ordering::Relaxed);
+        match self.kind.load(Ordering::Acquire) {
+            KEPT_PANIC => {
+                let mut file = [0; FILE_TAIL];
+                for (byte, slot) in file.iter_mut().zip(&self.file) {
+                    *byte = slot.load(Ordering::Relaxed);
+                }
+                Some(Cause::Panic {
+                    file,
+                    len: u8::try_from(word(2)).unwrap_or(0),
+                    line: u32::try_from(word(0)).unwrap_or(0),
+                    column: u32::try_from(word(1)).unwrap_or(0),
+                })
+            }
+            KEPT_FAULT => {
+                let given = self.given.load(Ordering::Relaxed);
+                let at = |bit: usize| (given & (1 << bit) != 0).then(|| word(bit));
+                Some(Cause::Fault(KernelFault {
+                    syndrome: at(0),
+                    address: at(1),
+                    pc: word(2),
+                    sp: at(3),
+                }))
+            }
+            _ => None,
         }
     }
 }
@@ -83,18 +229,36 @@ impl Entry {
 /// or done.
 static ENTRIES: AtomicU32 = AtomicU32::new(0);
 
-/// Enter the fatal-report path.
+/// What the boot's first fatal entry was taken for.
+static FIRST: Kept = Kept::new();
+
+/// What the entry taken after `taken` others may write, keeping `cause` when
+/// it is the first.
+fn entry_after(taken: u32, cause: &Cause) -> Entry {
+    match taken {
+        0 => {
+            FIRST.keep(cause);
+            Entry::Report
+        }
+        1 => Entry::Nested {
+            first: FIRST.kept(),
+        },
+        _ => Entry::Silent,
+    }
+}
+
+/// Enter the fatal-report path for `cause`.
 ///
 /// Shared by every report path in the image, the kernel's post-mortem and the
 /// port's own reports alike, so two of them can never both write a full
 /// report.
-pub fn enter() -> Entry {
+pub fn enter(cause: &Cause) -> Entry {
     let taken = ENTRIES
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |taken| {
             Some(taken.saturating_add(1))
         })
         .unwrap_or_else(|taken| taken);
-    Entry::after(taken)
+    entry_after(taken, cause)
 }
 
 /// [`enter`], for a memory system that cannot perform an atomic
@@ -105,10 +269,10 @@ pub fn enter() -> Entry {
 /// A plain load and store: exact while one processor reports. A processor
 /// racing it through [`enter`] can at worst leave two full reports side by
 /// side, never an unbounded recursion on either.
-pub fn enter_without_atomics() -> Entry {
+pub fn enter_without_atomics(cause: &Cause) -> Entry {
     let taken = ENTRIES.load(Ordering::Relaxed);
     ENTRIES.store(taken.saturating_add(1), Ordering::Relaxed);
-    Entry::after(taken)
+    entry_after(taken, cause)
 }
 
 /// Return the latch to its boot state, so each host test that drives a report
@@ -116,6 +280,7 @@ pub fn enter_without_atomics() -> Entry {
 #[cfg(any(test, feature = "host-tests"))]
 pub fn reset_for_tests() {
     ENTRIES.store(0, Ordering::Release);
+    FIRST.kind.store(KEPT_NONE, Ordering::Release);
 }
 
 /// Bytes [`format_hex_word`] writes: `0x` and sixteen nibbles.
@@ -166,6 +331,21 @@ pub struct KernelFault {
 /// the faulting PC and the interrupted kernel stack pointer.
 pub const FAULT_WORDS: usize = 4;
 
+/// The keys a fault's words are recorded under, in [`KernelFault`]'s order.
+pub const FAULT_KEYS: [&str; FAULT_WORDS] = ["syndrome", "fault_addr", "fault_pc", "fault_sp"];
+
+/// The keys a panic's location is recorded under: its file, line and column.
+pub const PANIC_KEYS: [&str; 3] = ["file", "line", "column"];
+
+/// The keys a bare record names the first entry's cause under.
+const FIRST_FAULT_KEYS: [&str; FAULT_WORDS] = [
+    "first_syndrome",
+    "first_fault_addr",
+    "first_fault_pc",
+    "first_fault_sp",
+];
+const FIRST_PANIC_KEYS: [&str; 3] = ["first_file", "first_line", "first_column"];
+
 /// Stack storage [`KernelFault::fields`] spells its words into, so a fatal
 /// report allocates nothing.
 #[derive(Debug)]
@@ -186,22 +366,26 @@ impl Default for FaultWords {
 }
 
 impl KernelFault {
-    /// The four words in the order and under the keys every record uses.
-    fn words(&self) -> [(&'static str, Option<u64>); FAULT_WORDS] {
-        [
-            ("syndrome", self.syndrome),
-            ("fault_addr", self.address),
-            ("fault_pc", Some(self.pc)),
-            ("fault_sp", self.sp),
-        ]
+    /// The four words in [`FAULT_KEYS`]' order.
+    const fn words(&self) -> [Option<u64>; FAULT_WORDS] {
+        [self.syndrome, self.address, Some(self.pc), self.sp]
     }
 
     /// The record's cause fields, spelled into `words`: a word the CPU did not
     /// give is `null`, never a placeholder that reads as a value.
     #[must_use]
     pub fn fields<'b>(&self, words: &'b mut FaultWords) -> [Field<'b>; FAULT_WORDS] {
+        self.fields_under(&FAULT_KEYS, words)
+    }
+
+    fn fields_under<'b>(
+        &self,
+        keys: &[&'static str; FAULT_WORDS],
+        words: &'b mut FaultWords,
+    ) -> [Field<'b>; FAULT_WORDS] {
         let mut fields = [NULL_FIELD; FAULT_WORDS];
-        for ((field, (key, word)), buf) in fields.iter_mut().zip(self.words()).zip(&mut words.0) {
+        let named = keys.iter().copied().zip(self.words());
+        for ((field, (key, word)), buf) in fields.iter_mut().zip(named).zip(&mut words.0) {
             *field = Field {
                 key,
                 value: word.map_or(FieldValue::Null, |value| {
@@ -218,7 +402,7 @@ impl fmt::Display for KernelFault {
     /// prose report and the record read alike.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut separator = "";
-        for (key, word) in self.words() {
+        for (key, word) in FAULT_KEYS.iter().zip(self.words()) {
             match word {
                 Some(value) => write!(f, "{separator}{key}={value:#018x}")?,
                 None => write!(f, "{separator}{key}=null")?,
@@ -302,7 +486,7 @@ impl Reporter {
         guard: impl FnOnce() -> Option<BootStackGuard>,
     ) {
         if entry != Entry::Report {
-            nested(w, entry, KERNEL_PANIC, on);
+            nested(w, entry, KERNEL_PANIC, on, &Cause::panic(location));
             return;
         }
         let guard = guard();
@@ -316,21 +500,22 @@ impl Reporter {
         let (file, line, column) = location.map_or(("<unknown>", 0, 0), |at| {
             (at.file(), at.line(), at.column())
         });
+        let [file_key, line_key, column_key] = PANIC_KEYS;
         record(
             w,
             KERNEL_PANIC,
             on,
             &[
                 Field {
-                    key: "file",
+                    key: file_key,
                     value: FieldValue::Str(file),
                 },
                 Field {
-                    key: "line",
+                    key: line_key,
                     value: FieldValue::UnsignedInt(u64::from(line)),
                 },
                 Field {
-                    key: "column",
+                    key: column_key,
                     value: FieldValue::UnsignedInt(u64::from(column)),
                 },
             ],
@@ -355,7 +540,7 @@ impl Reporter {
         guard: impl FnOnce() -> Option<BootStackGuard>,
     ) {
         if entry != Entry::Report {
-            nested(w, entry, KERNEL_FAULT, on);
+            nested(w, entry, KERNEL_FAULT, on, &Cause::Fault(*fault));
             return;
         }
         let guard = guard();
@@ -400,9 +585,12 @@ fn banner(
     );
 }
 
-/// Write `kind`'s bare record for a nested entry; a silent one writes nothing.
-fn nested(w: &mut dyn Write, entry: Entry, kind: FatalRecord, on: Processor) {
-    if entry == Entry::Nested {
+/// Write `kind`'s bare record for a nested entry taken for `own`; a silent
+/// one writes nothing.
+fn nested(w: &mut dyn Write, entry: Entry, kind: FatalRecord, on: Processor, own: &Cause) {
+    if let Entry::Nested { first } = entry {
+        let mut words = NestedWords::new();
+        let fields = nested_fields(on, own, first.as_ref(), &mut words);
         write_diag_line(
             w,
             None,
@@ -411,10 +599,126 @@ fn nested(w: &mut dyn Write, entry: Entry, kind: FatalRecord, on: Processor) {
                 level: Level::Error,
                 id: kind.id,
                 message: kind.nested,
-                fields: &[on.field()],
+                fields: fields.as_slice(),
             },
         );
     }
+}
+
+/// Fields a bare record can carry: the processor, the re-entering cause, and
+/// the first entry's kind and cause.
+pub const NESTED_FIELDS: usize = 1 + FAULT_WORDS + 1 + FAULT_WORDS;
+
+/// Stack storage a bare record's words are spelled into, so it allocates
+/// nothing.
+#[derive(Debug, Default)]
+pub struct NestedWords {
+    own: FaultWords,
+    first: FaultWords,
+}
+
+impl NestedWords {
+    /// Storage for one bare record's words.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            own: FaultWords::new(),
+            first: FaultWords::new(),
+        }
+    }
+}
+
+/// A bare record's fields, as [`nested_fields`] spells them.
+#[derive(Debug)]
+pub struct NestedFields<'b> {
+    fields: [Field<'b>; NESTED_FIELDS],
+    len: usize,
+}
+
+impl<'b> NestedFields<'b> {
+    /// The fields, in the order the record carries them.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Field<'b>] {
+        &self.fields[..self.len]
+    }
+
+    fn push(&mut self, field: Field<'b>) {
+        if let Some(slot) = self.fields.get_mut(self.len) {
+            *slot = field;
+            self.len += 1;
+        }
+    }
+
+    fn push_cause(
+        &mut self,
+        cause: &'b Cause,
+        fault_keys: &[&'static str; FAULT_WORDS],
+        panic_keys: &[&'static str; 3],
+        words: &'b mut FaultWords,
+    ) {
+        match cause {
+            Cause::Fault(fault) => {
+                for field in fault.fields_under(fault_keys, words) {
+                    self.push(field);
+                }
+            }
+            Cause::Panic {
+                file,
+                len,
+                line,
+                column,
+            } => {
+                let tail = file.get(..usize::from(*len)).unwrap_or(&[]);
+                let [file_key, line_key, column_key] = *panic_keys;
+                self.push(Field {
+                    key: file_key,
+                    value: match core::str::from_utf8(tail) {
+                        Ok(tail) if !tail.is_empty() => FieldValue::Str(tail),
+                        _ => FieldValue::Null,
+                    },
+                });
+                self.push(Field {
+                    key: line_key,
+                    value: FieldValue::UnsignedInt(u64::from(*line)),
+                });
+                self.push(Field {
+                    key: column_key,
+                    value: FieldValue::UnsignedInt(u64::from(*column)),
+                });
+            }
+        }
+    }
+}
+
+/// The fields of the bare record an entry on `on` for `own` writes when a
+/// report is already under way: the processor, what re-entered, and, under
+/// `first`, what the first entry was taken for, so a report that died inside
+/// itself still names the machine's cause beside what broke the report.
+pub fn nested_fields<'b>(
+    on: Processor,
+    own: &'b Cause,
+    first: Option<&'b Cause>,
+    words: &'b mut NestedWords,
+) -> NestedFields<'b> {
+    let mut fields = NestedFields {
+        fields: [NULL_FIELD; NESTED_FIELDS],
+        len: 0,
+    };
+    fields.push(on.field());
+    fields.push_cause(own, &FAULT_KEYS, &PANIC_KEYS, &mut words.own);
+    fields.push(Field {
+        key: "first",
+        value: first.map_or(FieldValue::Null, |first| FieldValue::Str(first.kind())),
+    });
+    if let Some(first) = first {
+        fields.push_cause(
+            first,
+            &FIRST_FAULT_KEYS,
+            &FIRST_PANIC_KEYS,
+            &mut words.first,
+        );
+    }
+    fields
 }
 
 /// Fields a record can carry: the processor, a fault's words (a panic has

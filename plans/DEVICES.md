@@ -628,7 +628,7 @@ volume-policy service.
   mount outlives it, and a re-plug re-discovers and reloads afresh.
   Events 28080–28084 log probe/attach/nothing-attachable/device-failed.
 - **A volume is named from itself, never from its format or its order**
-  (`drivers/storage/volmgr/src/name.rs`):
+  (`lib/fsprobe/src/name.rs`):
   1. its own label, read where its format keeps it (ext's
      `s_volume_name`; FAT32's root-directory label entry, which a relabel
      rewrites, else the boot sector's copy; a format's `NO NAME`
@@ -679,7 +679,7 @@ volume-policy service.
   `/System/Security/Groups` registry by the trusted root-unlock step
   (`UnlockInstall::storage_gid` → the set-once
   `tairix_kernel::volume_policy::LATE_STORAGE_GID` cell). A runtime-attached
-  ownerless filesystem (FAT32) is wrapped in `GroupMappedFs`: every node
+  ownerless filesystem (FAT32) is wrapped in `PresentedFs`: every node
   reports system ownership under that group — directories `0o775`, files
   `0o664`, `set_security` refused (the format cannot hold a record), and a
   new node owned the same way — and the mount template matches, so any
@@ -714,7 +714,7 @@ volume-policy service.
   100, read + write) and a non-member (write refused, other-class read
   allowed); the readdir merge, dedupe, and merged-name resolution are
   covered over the mock-backed mount service, `direct_children` and
-  `GroupMappedFs` by unit tests, and the unlock test asserts the gid cell
+  `PresentedFs` by unit tests, and the unlock test asserts the gid cell
   arms from the on-disk registry. The live path rides the Pi 4 metal
   acceptance with the D2/D3c precedent (no emulated fixture publishes USB
   nodes).

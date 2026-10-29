@@ -9,15 +9,18 @@
 //! larger than this client said it receives, and the answer is bounded. A
 //! listing that fails still closes the pipe it opened.
 //!
-//! Share names and remarks are a stranger's text: a name is kept only when a
-//! tree connect could name it ([`is_share_name`]), a remark is cut to
-//! [`REMARK_MAX`] bytes, and both are for a display-safety policy to show,
-//! never to be shown raw.
+//! A listing keeps disk shares only, the special ones when asked for, and at
+//! most [`SHARES_MAX`] of them; what it leaves out it counts. Share names and
+//! remarks are a stranger's text: a name is kept only when a tree connect
+//! could name it ([`is_share_name`]), a remark is cut to [`REMARK_MAX`]
+//! bytes, and both are for a display-safety policy to show, never to be shown
+//! raw.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::netshare_ipc::{is_share_name, REMARK_MAX, SHARES_MAX};
+use tairix_abi::netshare_ipc::{is_share_name, REMARK_MAX, SHARES_MAX, SHARE_NAME_BYTES};
+use tairix_inline::ArrayString;
 
 use crate::file::create::{
     Access, CreateOptions, CreateRequest, CreateResponse, Disposition, ShareAccess,
@@ -53,9 +56,6 @@ pub const SHARE_ENUM: u16 = 15;
 /// The share type's flag for a special share: `IPC$`, `ADMIN$`, a drive's.
 pub const SPECIAL: u32 = 0x8000_0000;
 
-/// The share type's flag for a share not kept across restarts.
-pub const TEMPORARY: u32 = 0x4000_0000;
-
 /// Little-endian integers, ASCII characters, IEEE floats.
 const DREP: [u8; 4] = [0x10, 0, 0, 0];
 
@@ -78,6 +78,10 @@ pub const ACCEPTANCE: u16 = 0;
 
 /// The share type's bits naming its kind.
 const KIND_MASK: u32 = 0xff;
+
+/// The bytes of one `SHARE_INFO_1` before the strings it points to: its name
+/// pointer, its type and its remark pointer.
+const SHARE_INFO_1_LEN: usize = 12;
 
 /// The ids this client binds and calls under.
 const BIND_CALL: u32 = 1;
@@ -479,6 +483,7 @@ fn end(r: &Reader<'_>) -> Result<(), SmbError> {
 
 /// Reads NDR (C706 §14) from a stub, each field aligned from the stub's
 /// start.
+#[derive(Clone)]
 struct Ndr<'a> {
     stub: &'a [u8],
     r: Reader<'a>,
@@ -500,6 +505,10 @@ impl<'a> Ndr<'a> {
 
     fn count(&mut self) -> Result<usize, SmbError> {
         usize::try_from(self.u32()?).map_err(|_| SmbError::Malformed)
+    }
+
+    fn skip(&mut self, len: usize) -> Result<(), SmbError> {
+        self.r.skip(len)
     }
 
     /// Whether the next pointer is set.
@@ -631,30 +640,31 @@ impl ShareKind {
     }
 }
 
-/// One share a server listed.
+/// One disk share a server listed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Share {
     /// Its name, one a tree connect can take.
-    pub name: String,
-    /// What it is.
-    pub kind: ShareKind,
-    /// Whether it is a special share: `IPC$`, `ADMIN$`, a drive's.
+    pub name: ArrayString<SHARE_NAME_BYTES>,
+    /// Whether it is a special share: `ADMIN$`, a drive's.
     pub special: bool,
-    /// Whether it lasts only until the server restarts.
-    pub temporary: bool,
     /// The server's description of it, at most [`REMARK_MAX`] bytes. A unit
     /// that does not decode is U+FFFD: this is display text, and a bad unit
     /// costs it no share.
     pub remark: String,
 }
 
-/// A server's shares.
+/// A server's disk shares, and how many a listing left out.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ShareList {
-    /// The shares a tree connect can name, in the server's order.
+    /// The first [`SHARES_MAX`] shares a tree connect can name, in the
+    /// server's order.
     pub shares: Vec<Share>,
-    /// How many it listed under a name no tree connect could take.
-    pub omitted: usize,
+    /// Special shares left out, since they were not asked for.
+    pub hidden: u32,
+    /// Shares listed under a name no tree connect could take.
+    pub unnamed: u32,
+    /// Shares past the first [`SHARES_MAX`].
+    pub unlisted: u32,
 }
 
 /// One share as a server lists it: what [`read_share_enum`] reads back.
@@ -662,7 +672,8 @@ pub struct ShareList {
 pub struct ShareRecord<'a> {
     /// Its name.
     pub name: &'a str,
-    /// Its type: a [`ShareKind`]'s code, and [`SPECIAL`] or [`TEMPORARY`].
+    /// Its type: a [`ShareKind`]'s code with MS-SRVS's flag bits, [`SPECIAL`]
+    /// among them.
     pub share_type: u32,
     /// Its remark.
     pub remark: &'a str,
@@ -700,14 +711,15 @@ pub fn write_share_enum(enc: &mut Encoder, records: &[ShareRecord<'_>], status: 
     enc.u32(status);
 }
 
-/// The shares a `NetrShareEnum` response's stub lists.
+/// The disk shares a `NetrShareEnum` response's stub lists, the special ones
+/// only when `special` is set. Shares of any other kind are not counted.
 ///
 /// # Errors
 ///
 /// [`SmbError::Rpc`] with the call's status when it failed;
-/// [`SmbError::TooLarge`] past [`SHARES_MAX`]; [`SmbError::Malformed`] for
-/// a stub that is not a level-1 answer; [`SmbError::OutOfMemory`].
-pub fn read_share_enum(stub: &[u8]) -> Result<ShareList, SmbError> {
+/// [`SmbError::Malformed`] for a stub that is not a level-1 answer;
+/// [`SmbError::OutOfMemory`].
+pub fn read_share_enum(stub: &[u8], special: bool) -> Result<ShareList, SmbError> {
     let mut ndr = Ndr::new(stub);
     if ndr.u32()? != 1 || ndr.u32()? != 1 {
         return Err(SmbError::Malformed);
@@ -718,41 +730,44 @@ pub fn read_share_enum(stub: &[u8]) -> Result<ShareList, SmbError> {
     } else {
         (0, false)
     };
-    if count > SHARES_MAX {
-        return Err(SmbError::TooLarge);
-    }
-    if (count > 0) != array {
+    if (count > 0) != array || (array && ndr.count()? != count) {
         return Err(SmbError::Malformed);
     }
-    let mut records = Vec::new();
-    records
-        .try_reserve_exact(count)
-        .map_err(|_| SmbError::OutOfMemory)?;
-    if array {
-        if ndr.count()? != count {
-            return Err(SmbError::Malformed);
-        }
-        for _ in 0..count {
-            records.push((ndr.pointer()?, ndr.u32()?, ndr.pointer()?));
-        }
-    }
+    // The shares' fixed parts, then the strings they point to, in order.
+    let mut fixed = ndr.clone();
+    ndr.skip(
+        count
+            .checked_mul(SHARE_INFO_1_LEN)
+            .ok_or(SmbError::Malformed)?,
+    )?;
     let mut list = ShareList::default();
     list.shares
-        .try_reserve_exact(count)
+        .try_reserve_exact(count.min(SHARES_MAX))
         .map_err(|_| SmbError::OutOfMemory)?;
-    for &(named, share_type, remarked) in &records {
+    for _ in 0..count {
+        let named = fixed.pointer()?;
+        let share_type = fixed.u32()?;
+        let remarked = fixed.pointer()?;
         let name = if named { Some(ndr.string()?) } else { None };
         let remark = if remarked { Some(ndr.string()?) } else { None };
-        match name.map(from_utf16le).transpose() {
-            Ok(Some(name)) if is_share_name(&name) => list.shares.push(Share {
-                name,
-                kind: ShareKind::of(share_type),
-                special: share_type & SPECIAL != 0,
-                temporary: share_type & TEMPORARY != 0,
-                remark: remark.map_or(Ok(String::new()), remark_text)?,
-            }),
-            Err(SmbError::OutOfMemory) => return Err(SmbError::OutOfMemory),
-            _ => list.omitted += 1,
+        if ShareKind::of(share_type) != ShareKind::Disk {
+            continue;
+        }
+        let is_special = share_type & SPECIAL != 0;
+        if is_special && !special {
+            list.hidden += 1;
+        } else if let Some(name) = name.and_then(share_name) {
+            if list.shares.len() == SHARES_MAX {
+                list.unlisted += 1;
+            } else {
+                list.shares.push(Share {
+                    name,
+                    special: is_special,
+                    remark: remark.map_or(Ok(String::new()), remark_text)?,
+                });
+            }
+        } else {
+            list.unnamed += 1;
         }
     }
     ndr.u32()?;
@@ -768,6 +783,16 @@ pub fn read_share_enum(stub: &[u8]) -> Result<ShareList, SmbError> {
         return Err(SmbError::Malformed);
     }
     Ok(list)
+}
+
+/// A share's UTF-16LE `units` as its name, when a tree connect could take it.
+fn share_name(units: &[u8]) -> Option<ArrayString<SHARE_NAME_BYTES>> {
+    let (units, _) = units.as_chunks::<2>();
+    let mut name = ArrayString::new();
+    for c in char::decode_utf16(units.iter().map(|unit| u16::from_le_bytes(*unit))) {
+        name.try_push(c.ok()?).ok()?;
+    }
+    is_share_name(&name).then_some(name)
 }
 
 /// A remark's UTF-16LE `units` as text: each unit that does not decode a
@@ -820,18 +845,21 @@ pub struct ShareListing {
     /// Whether the answer's first fragment has arrived.
     answering: bool,
     stub: Vec<u8>,
+    /// Whether the special shares are kept.
+    special: bool,
     list: Option<ShareList>,
     failed: Option<SmbError>,
 }
 
 impl ShareListing {
-    /// A listing of the shares of the server dialled as `server_name`.
+    /// A listing of the disk shares of the server dialled as `server_name`,
+    /// the special ones only when `special` is set.
     ///
     /// # Errors
     ///
     /// [`SmbError::TooLarge`] for a name the call cannot carry in one
     /// fragment; [`SmbError::OutOfMemory`].
-    pub fn new(server_name: &str) -> Result<Self, SmbError> {
+    pub fn new(server_name: &str, special: bool) -> Result<Self, SmbError> {
         let mut server = String::new();
         server
             .try_reserve(2 + server_name.len())
@@ -889,6 +917,7 @@ impl ShareListing {
             pdu: Vec::new(),
             answering: false,
             stub: Vec::new(),
+            special,
             list: None,
             failed: None,
         })
@@ -1079,7 +1108,7 @@ impl ShareListing {
             .map_err(|_| SmbError::OutOfMemory)?;
         self.stub.extend_from_slice(fragment.stub);
         if fragment.last {
-            self.list = Some(read_share_enum(&self.stub)?);
+            self.list = Some(read_share_enum(&self.stub, self.special)?);
             self.stub = Vec::new();
             self.step = Step::Close;
         }

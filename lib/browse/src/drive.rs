@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkIoCounters;
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::sysinfo::{
-    MountAvailability, MountRecord, VolumeHealth, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN,
+    MountAvailability, MountRecord, VolumeHealth, VolumeIoStatsRecord, VOLUME_ID_LEN,
     VOLUME_ID_UNPUBLISHED,
 };
 use tairix_controls::{DuplexRates, RateTrace};
@@ -410,7 +410,7 @@ fn group_thousands(count: u64) -> String {
 
 /// The volume identity as identities are read, or `None` for a volume that
 /// published none.
-fn volume_id(id: [u8; MOUNT_VOLUME_ID_LEN]) -> Option<String> {
+fn volume_id(id: [u8; VOLUME_ID_LEN]) -> Option<String> {
     (id != VOLUME_ID_UNPUBLISHED).then(|| VolumeId::from_bytes(id).to_string())
 }
 

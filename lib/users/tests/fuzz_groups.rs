@@ -48,9 +48,9 @@ fn templates() -> Vec<String> {
     let empty = GroupsDb::new(Vec::new()).expect("valid");
 
     vec![
-        single.serialise(),
-        multi.serialise(),
-        empty.serialise(),
+        single.serialise().expect("serialises"),
+        multi.serialise().expect("serialises"),
+        empty.serialise().expect("serialises"),
         format!("{GROUPS_FORMAT_HEADER}\n# only a comment\n\n"),
     ]
 }
@@ -61,7 +61,8 @@ fn exercise_never_panics(text: &str) {
     let Ok(db) = GroupsDb::parse(text) else {
         return;
     };
-    let reparsed = GroupsDb::parse(&db.serialise()).expect("serialised database parses back");
+    let reparsed = GroupsDb::parse(&db.serialise().expect("serialises"))
+        .expect("serialised database parses back");
     assert_eq!(reparsed, db, "round trip changed the database");
     for record in db.records() {
         let _ = db.lookup(record.name());

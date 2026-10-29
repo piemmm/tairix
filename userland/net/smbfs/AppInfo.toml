@@ -1,0 +1,16 @@
+# Signed-AppInfo manifest source for `smbfs`, the network-share service
+# (plans/SMB.md). Discovered by the build's app-bundle composer, planted under
+# /System/Services/, and enrolled at boot.
+#
+# CAP_NET reaches the servers its callers name. CAP_FS_SERVE offers each
+# mounted share's volume, which the caller attaches itself. CAP_SANDBOX_SPAWN
+# starts the capability-empty worker every connection's bytes are parsed in.
+# CAP_IPC_BIND_PRIVILEGED binds the reserved netshare endpoint, which a
+# squatter would otherwise be handed every password for, and CAP_LOG_EMIT
+# writes its records. It holds no filesystem access and mounts nothing.
+id = "os.tairix.smbfs"
+name = "smbfs"
+title = "Network Shares"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_NET", "CAP_FS_SERVE", "CAP_IPC_BIND_PRIVILEGED", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]

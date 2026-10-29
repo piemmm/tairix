@@ -158,9 +158,15 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
             eprint!("{cpu_state}");
             ExitCode::from(2)
         }
-        Ok(Outcome::Fatal { record, serial }) => {
+        Ok(Outcome::Fatal {
+            record,
+            serial,
+            cpu_state,
+        }) => {
             eprintln!("tairix-qemu-run: FATAL: the guest's kernel stopped: {record}");
             eprint!("{serial}");
+            eprintln!("--- guest cpu state at the record ---");
+            eprint!("{cpu_state}");
             ExitCode::from(1)
         }
         Err(e) => {

@@ -204,7 +204,8 @@ fn a_ready_record_is_validated_before_it_is_stored() {
     let channel = MemChannel::new();
     let record = PasswordRecord::new(b"secret", [3u8; SALT_LEN], MIN_ITERATIONS)
         .expect("builds")
-        .encode();
+        .encode()
+        .expect("encodes");
     go(
         &channel,
         Secret::Record(record.clone()),

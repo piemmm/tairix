@@ -15,6 +15,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use tairix_abi::Errno;
 
@@ -105,6 +106,37 @@ pub fn concatenated(parts: &[&str]) -> Option<String> {
         joined.push_str(part);
     }
     Some(joined)
+}
+
+/// What `write` writes, in a string reserved once to its exact length, or
+/// `None` when the allocator refuses it or `write` fails: `write` runs
+/// twice, measuring and then filling, and a fill writing past what was
+/// measured fails rather than growing the string.
+#[must_use]
+pub fn written(write: impl Fn(&mut dyn fmt::Write) -> fmt::Result) -> Option<String> {
+    struct Measured(usize);
+    impl fmt::Write for Measured {
+        fn write_str(&mut self, part: &str) -> fmt::Result {
+            self.0 = self.0.checked_add(part.len()).ok_or(fmt::Error)?;
+            Ok(())
+        }
+    }
+    struct Within<'s>(&'s mut String);
+    impl fmt::Write for Within<'_> {
+        fn write_str(&mut self, part: &str) -> fmt::Result {
+            if self.0.capacity() - self.0.len() < part.len() {
+                return Err(fmt::Error);
+            }
+            self.0.push_str(part);
+            Ok(())
+        }
+    }
+    let mut measured = Measured(0);
+    write(&mut measured).ok()?;
+    let mut out = String::new();
+    out.try_reserve_exact(measured.0).ok()?;
+    write(&mut Within(&mut out)).ok()?;
+    Some(out)
 }
 
 /// Room in `buffer` for `count` more items, reporting whether the allocator

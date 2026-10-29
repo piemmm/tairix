@@ -12,13 +12,16 @@
 //!
 //! The same service answers the filesystem driver serving an attached volume
 //! from user space (`plans/FSSERVE.md` §4–§5): its block transfers, and its
-//! offer to serve the volume or its refusal.
+//! offer to serve the volume or its refusal; and a network filesystem server's
+//! offer of a volume to one principal, that principal's attach of it, and the
+//! server's word on it (`plans/FSSERVE.md` §6).
 
 use alloc::sync::Arc;
 
 use tairix_abi::fsserve::ServeOffer;
+use tairix_abi::netattach::{AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferId};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeCtl, VolumeDetachRequest, VolumeInfo};
-use tairix_abi::{DriverError, Errno};
+use tairix_abi::{AppIdentity, CapabilityId, CapabilityQuery, DriverError, Errno};
 use tairix_kernel_ipc::CallEndpoint;
 
 use crate::sharedreg::KernelHold;
@@ -39,13 +42,44 @@ pub struct ServeChannel {
     pub window: KernelHold,
 }
 
+/// The kernel-attested facts a decision about a volume is made against: who
+/// asks, and with what authority.
+#[derive(Copy, Clone)]
+pub struct Principal<'a> {
+    /// The caller's uid.
+    pub uid: u32,
+    /// Its primary group.
+    pub gid: u32,
+    /// Its effective capabilities.
+    pub caps: &'a dyn CapabilityQuery,
+}
+
+impl Principal<'_> {
+    /// Whether it holds the mount authority.
+    #[must_use]
+    pub fn may_mount(&self) -> bool {
+        self.caps.holds(CapabilityId::FS_MOUNT)
+    }
+}
+
+/// The server making an offer: its process, which alone speaks for the offer
+/// afterwards, and the application identity the kernel attested for it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OfferingServer<'a> {
+    /// The serving process.
+    pub process: u64,
+    /// Its attested application identity.
+    pub app: &'a AppIdentity,
+}
+
 /// The runtime volume attach/detach operations the syscall handlers
 /// delegate to.
 ///
-/// The caller's `CAP_FS_MOUNT` and its endpoint/window resource grants
-/// have already been verified by the dispatcher and the handler; the
-/// service re-validates everything against live state (the endpoint, the
-/// window, the device geometry, name/identity collisions) and fails
+/// The dispatcher and the handler have verified the syscall's own capability
+/// and the caller's endpoint/window grants; the service decides what turns on
+/// the volume itself — who may detach it, what presentation a principal may
+/// ask for — and re-validates everything against live state (the endpoint,
+/// the window, the device geometry, name/identity collisions), failing
 /// closed.
 pub trait VolumeService: Sync {
     /// Attach a filesystem to the runtime block source `request` names,
@@ -68,18 +102,20 @@ pub trait VolumeService: Sync {
     ) -> Result<(), Errno>;
 
     /// Flush, unmount, and unpublish the runtime-attached volume
-    /// `request` names.
+    /// `request` names, for `caller`: a network volume's owner, or any
+    /// caller holding the mount authority.
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] for an identity this service did not attach
-    /// (the boot volumes are permanent), a flush failure (the volume
-    /// stays attached — data is never silently discarded),
+    /// (the boot volumes are permanent), [`Errno::PermissionDenied`] for a
+    /// caller with no authority over the volume, a flush failure (the
+    /// volume stays attached — data is never silently discarded),
     /// [`Errno::Busy`] for a plain detach while a descriptor holds one of
     /// the volume's nodes or another volume is shown beneath it, the
     /// refusal of a volume beneath that a force detach could not detach
     /// first, or [`Errno::NotImplemented`] before a service is installed.
-    fn detach(&self, request: &VolumeDetachRequest) -> Result<(), Errno>;
+    fn detach(&self, request: &VolumeDetachRequest, caller: &Principal<'_>) -> Result<(), Errno>;
 
     /// Read `len` bytes of whole blocks from `lba` of served volume `volume`,
     /// handing `deliver` each chunk with its offset into the transfer.
@@ -146,6 +182,46 @@ pub trait VolumeService: Sync {
     ///
     /// [`Errno::NotFound`] for no volume awaiting a driver under that id.
     fn refuse(&self, volume: u64, why: DriverError) -> Result<(), Errno>;
+
+    /// Hold the network volume `server` offers, named `id`, served over
+    /// `channel`, for the one principal `offer` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::AlreadyExists`] for a volume of that identity offered or
+    /// attached already, [`Errno::OutOfMemory`], or
+    /// [`Errno::NotImplemented`] before a service is installed.
+    fn offer(
+        &self,
+        server: &OfferingServer<'_>,
+        offer: &NetworkOffer<'_>,
+        id: OfferId,
+        channel: ServeChannel,
+    ) -> Result<(), Errno>;
+
+    /// Attach the network volume `offer` names for `caller`, as `attach`
+    /// asks.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no offer made for `caller`;
+    /// [`Errno::AlreadyExists`] for one attached already, or every name it
+    /// could take in use; [`Errno::PermissionDenied`] for a presentation or
+    /// target `caller` may not ask for; the refusals of mounting it.
+    fn attach_offered(
+        &self,
+        caller: &Principal<'_>,
+        offer: OfferId,
+        attach: &NetworkAttach<'_>,
+    ) -> Result<AttachReply, Errno>;
+
+    /// `op` on the network volume `offer` names, from the server process
+    /// `server`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such offer made by `server`.
+    fn offer_ctl(&self, server: u64, offer: OfferId, op: FsserveCtl) -> Result<(), Errno>;
 }
 
 /// The fail-closed default: every operation reports
@@ -161,7 +237,7 @@ impl VolumeService for NullVolumeService {
         Err(Errno::NotImplemented)
     }
 
-    fn detach(&self, _request: &VolumeDetachRequest) -> Result<(), Errno> {
+    fn detach(&self, _request: &VolumeDetachRequest, _caller: &Principal<'_>) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -205,6 +281,29 @@ impl VolumeService for NullVolumeService {
     fn refuse(&self, _volume: u64, _why: DriverError) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn offer(
+        &self,
+        _server: &OfferingServer<'_>,
+        _offer: &NetworkOffer<'_>,
+        _id: OfferId,
+        _channel: ServeChannel,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn attach_offered(
+        &self,
+        _caller: &Principal<'_>,
+        _offer: OfferId,
+        _attach: &NetworkAttach<'_>,
+    ) -> Result<AttachReply, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn offer_ctl(&self, _server: u64, _offer: OfferId, _op: FsserveCtl) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The shared [`NullVolumeService`] the syscall handlers default to.
@@ -237,11 +336,34 @@ mod tests {
             NULL_VOLUME_SERVICE.refuse(1, DriverError::BadMagic),
             Err(Errno::NotImplemented)
         );
+        let caller = Principal {
+            uid: 1000,
+            gid: 1000,
+            caps: &tairix_caps::CapabilitySet::empty(),
+        };
         assert_eq!(
-            NULL_VOLUME_SERVICE.detach(&VolumeDetachRequest {
-                volume_id: [7; 16],
-                force: false
-            }),
+            NULL_VOLUME_SERVICE.detach(
+                &VolumeDetachRequest {
+                    volume_id: [7; 16],
+                    force: false
+                },
+                &caller
+            ),
+            Err(Errno::NotImplemented)
+        );
+        let offer = OfferId::new(1).unwrap();
+        assert_eq!(
+            NULL_VOLUME_SERVICE.offer_ctl(9, offer, FsserveCtl::Alive),
+            Err(Errno::NotImplemented)
+        );
+        let attach = NetworkAttach {
+            name: "share",
+            presentation: tairix_abi::netattach::Presentation::Private,
+            read_only: false,
+            target: None,
+        };
+        assert_eq!(
+            NULL_VOLUME_SERVICE.attach_offered(&caller, offer, &attach),
             Err(Errno::NotImplemented)
         );
     }

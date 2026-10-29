@@ -199,6 +199,7 @@ enum Control {
     Validate,
     TreeDisconnect(u32),
     Logoff,
+    Echo,
 }
 
 /// One SPNEGO exchange: the mechanism, what its MIC is made over, and the
@@ -615,6 +616,30 @@ impl Client {
         Ok(())
     }
 
+    /// Ask the server whether it still serves the connection. It answers in
+    /// the clear, outside any session and tree, as MS-SMB2 3.3.5.2.9 lets
+    /// it: the bytes arriving are what tell the caller the connection
+    /// lives.
+    ///
+    /// # Errors
+    ///
+    /// [`SmbError::Protocol`] before the dialect is negotiated;
+    /// [`SmbError::NoCredit`]; or the failure that ended the connection.
+    pub fn echo(&mut self) -> Result<(), SmbError> {
+        self.guard()?;
+        self.settled()?;
+        let sent = self.conn.send(&[Outgoing {
+            command: Command::Echo,
+            session_id: 0,
+            tree_id: 0,
+            body: &encode_empty,
+            credit_charge: 1,
+            flags: Flags::NONE,
+        }])?;
+        track(&mut self.control, &sent, Control::Echo)?;
+        Ok(())
+    }
+
     /// Log the session off, once nothing is outstanding on the connection.
     ///
     /// # Errors
@@ -763,6 +788,7 @@ impl Client {
                     Control::Validate => self.on_validate(&header, &message),
                     Control::TreeDisconnect(tree_id) => self.on_tree_disconnect(tree_id, &header),
                     Control::Logoff => self.on_logoff(),
+                    Control::Echo => Ok(()),
                 }
             }
         }

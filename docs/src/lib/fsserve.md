@@ -29,9 +29,12 @@ such a payload may not be left in.
 ## Answering the kernel
 
 `Server::answer` decodes one request, runs it against the driver, and encodes
-the reply with the state `ServedHost` holds. A request the kernel could not
-have sent is refused without reaching the driver, and a listing entry no path
-could name fails the listing closed, as it does from an in-kernel driver.
+the reply with the state `ServedHost` holds. File data moves through a
+`Window`, which lends a call only its own span: the kernel stages and collects
+the other lanes' spans meanwhile, so nothing borrows the whole window. A
+request the kernel could not have sent is refused without reaching the driver,
+and a listing entry no path could name fails the listing closed, as it does
+from an in-kernel driver.
 
 `ServedHost` is the driver's `VolumeHost`: it keeps the commit deadline and
 the reserve the driver reports. `take_due` takes a deadline once it falls due,

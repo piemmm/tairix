@@ -31,6 +31,7 @@
 use core::cell::RefCell;
 
 use proptest::prelude::*;
+use tairix_abi::netattach::FsserveCtl;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     AbiType, AtFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
@@ -1215,6 +1216,41 @@ impl SyscallHandlers for CountingHandlers {
         _grant: u64,
         _grant_cap: usize,
     ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fsserve_offer(
+        &self,
+        _c: &CallerContext<'_>,
+        _frame: u64,
+        _frame_len: usize,
+        _grant: u64,
+        _grant_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fsserve_attach(
+        &self,
+        _c: &CallerContext<'_>,
+        _offer: u64,
+        _frame: u64,
+        _frame_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fsserve_ctl(&self, _c: &CallerContext<'_>, _offer: u64, _op: FsserveCtl) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn view_bind(&self, _c: &CallerContext<'_>, _request: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn view_unbind(&self, _c: &CallerContext<'_>, _target: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)
     }

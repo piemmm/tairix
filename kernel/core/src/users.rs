@@ -36,6 +36,7 @@ use tairix_abi::Errno;
 use tairix_log::{Field, Level, Sink};
 use tairix_sync::RwLock;
 use tairix_users::{LocatedError, UsersDb, MAX_DB_LEN};
+use tairix_util::fallible::collected;
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
@@ -82,6 +83,18 @@ pub trait UsersDbSource: Sync {
     /// [`NullUsersDbSource`] returns [`Errno::NotImplemented`] to mark
     /// an inert interface.
     fn text(&self) -> Result<UsersDbText, Errno>;
+
+    /// Run `read` over the held database's text where it lies, under the
+    /// guard a replacement waits on, so nothing of it is copied.
+    ///
+    /// # Errors
+    ///
+    /// As [`text`](Self::text).
+    fn with_text(&self, read: &mut dyn FnMut(&[u8])) -> Result<(), Errno> {
+        let text = self.text()?;
+        read(&text);
+        Ok(())
+    }
 
     /// Whether the database is still in its *pending* state: a real
     /// holder is being unlocked but has not yet been published or given
@@ -220,7 +233,14 @@ impl UsersDbSource for HeldUsersDbSource {
         // A holder only exists for a successfully loaded database, so the
         // text is always present — unlike [`NullUsersDbSource`], which
         // marks the inert "no database" interface.
-        Ok(UsersDbText(self.text.clone()))
+        collected(self.text.len(), self.text.iter().copied())
+            .map(UsersDbText)
+            .ok_or(Errno::OutOfMemory)
+    }
+
+    fn with_text(&self, read: &mut dyn FnMut(&[u8])) -> Result<(), Errno> {
+        read(&self.text);
+        Ok(())
     }
 }
 
@@ -449,6 +469,14 @@ impl UsersDbSource for LateUsersDb {
         // [`Errno::NotImplemented`] exactly as [`NullUsersDbSource`] does so `login` runs its deny-all prompt.
         match &*self.held.read() {
             Some(held) => held.text(),
+            None if self.resolved.load(Ordering::Acquire) => Err(Errno::NotImplemented),
+            None => Err(Errno::WouldBlock),
+        }
+    }
+
+    fn with_text(&self, read: &mut dyn FnMut(&[u8])) -> Result<(), Errno> {
+        match &*self.held.read() {
+            Some(held) => held.with_text(read),
             None if self.resolved.load(Ordering::Acquire) => Err(Errno::NotImplemented),
             None => Err(Errno::WouldBlock),
         }

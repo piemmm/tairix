@@ -64,7 +64,7 @@ use tairix_inline::intrusive::{IntrusiveList, Link};
 use tairix_reclaim::RESERVE_DIVISOR;
 use tairix_sync::SpinLock;
 
-use crate::bootinfo::{BootMemoryMap, RegionKind};
+use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use crate::error::AllocError;
 use crate::phys::PhysMap;
 
@@ -305,24 +305,51 @@ const DMA32_LIMIT: u64 = 1 << 32;
 /// driver finds after boot may reach only 32 bits without the boot tree
 /// saying so, which is why 4 GiB is always a boundary where RAM spans it.
 /// Each limit is aligned down to the largest block.
-fn zone_boundaries(runs: &[(usize, usize)], reaches: &[core::ops::Range<u64>]) -> Vec<usize> {
+fn zone_boundaries(
+    runs: &[(usize, usize)],
+    reaches: &[core::ops::Range<u64>],
+) -> Result<Vec<usize>, AllocError> {
     let has_usable = |lo: usize, hi: usize| runs.iter().any(|&(a, b)| a < hi && lo < b);
     let block = 1usize << MAX_ORDER;
-    let mut boundaries: Vec<usize> = reaches
-        .iter()
-        .cloned()
-        .chain(core::iter::once(0..DMA32_LIMIT))
-        .filter_map(|reach| {
-            let limit = usize::try_from(reach.end >> PAGE_SHIFT).ok()?;
-            let low = usize::try_from(reach.start >> PAGE_SHIFT).ok()?;
-            let boundary = limit / block * block;
-            (boundary > 0 && has_usable(low, boundary) && has_usable(boundary, usize::MAX))
-                .then_some(boundary)
-        })
-        .collect();
+    let mut boundaries = Vec::new();
+    boundaries
+        .try_reserve_exact(reaches.len() + 1)
+        .map_err(|_| AllocError::MetadataAllocFailed)?;
+    boundaries.extend(
+        reaches
+            .iter()
+            .cloned()
+            .chain(core::iter::once(0..DMA32_LIMIT))
+            .filter_map(|reach| {
+                let limit = usize::try_from(reach.end >> PAGE_SHIFT).ok()?;
+                let low = usize::try_from(reach.start >> PAGE_SHIFT).ok()?;
+                let boundary = limit / block * block;
+                (boundary > 0 && has_usable(low, boundary) && has_usable(boundary, usize::MAX))
+                    .then_some(boundary)
+            }),
+    );
     boundaries.sort_unstable();
     boundaries.dedup();
-    boundaries
+    Ok(boundaries)
+}
+
+/// The regions of `map` by start, refused [`AllocError::InvariantViolation`]
+/// where two overlap. An empty region sorts before another starting with it,
+/// so the sort can be one that takes no scratch from the heap.
+fn sorted_regions(map: &BootMemoryMap) -> Result<Vec<MemoryRegion>, AllocError> {
+    let mut sorted = Vec::new();
+    sorted
+        .try_reserve_exact(map.regions().len())
+        .map_err(|_| AllocError::MetadataAllocFailed)?;
+    sorted.extend_from_slice(map.regions());
+    sorted.sort_unstable_by_key(|r| (r.start.as_u64(), r.length));
+    for win in sorted.windows(2) {
+        let a_end = win[0].end().ok_or(AllocError::InvariantViolation)?;
+        if a_end.as_u64() > win[1].start.as_u64() {
+            return Err(AllocError::InvariantViolation);
+        }
+    }
+    Ok(sorted)
 }
 
 /// A bitmap word whose every frame reads free.
@@ -1201,7 +1228,7 @@ impl FrameAllocator {
     /// malformed (overflow or overlap),
     /// [`AllocError::OutOfMemory`] if the map contains no usable frame, and
     /// [`AllocError::MetadataAllocFailed`] if the heap cannot hold the
-    /// per-frame metadata.
+    /// per-frame metadata or the lists the allocator is built from.
     pub fn with_dma_reaches(
         map: &BootMemoryMap,
         reaches: &[core::ops::Range<u64>],
@@ -1257,15 +1284,9 @@ impl FrameAllocator {
         // `tairix_inline::intrusive::MAX_INDEX`, and the link array is
         // shorter still.
 
-        // 2. Detect overlaps by sorting by start and scanning.
-        let mut sorted: Vec<_> = map.regions().to_vec();
-        sorted.sort_by_key(|r| r.start.as_u64());
-        for win in sorted.windows(2) {
-            let a_end = win[0].end().ok_or(AllocError::InvariantViolation)?;
-            if a_end.as_u64() > win[1].start.as_u64() {
-                return Err(AllocError::InvariantViolation);
-            }
-        }
+        // 2. The regions by start, none overlapping another.
+        let refused = |_| AllocError::MetadataAllocFailed;
+        let sorted = sorted_regions(map)?;
 
         // 3. Pre-pass over the Usable regions: collect the inward-rounded
         //    frame runs (the zero page excluded) and the `[lo, hi)` span of
@@ -1274,6 +1295,8 @@ impl FrameAllocator {
         //    physical address costs an array proportional to the RAM it
         //    covers, not one indexed from frame zero.
         let mut runs: Vec<(usize, usize)> = Vec::new();
+        // A run per region at most, so no push below grows it.
+        runs.try_reserve_exact(sorted.len()).map_err(refused)?;
         let mut lo = usize::MAX;
         let mut hi = 0usize;
         for r in &sorted {
@@ -1330,11 +1353,12 @@ impl FrameAllocator {
         if runs.is_empty() {
             return Err(AllocError::OutOfMemory);
         }
-        let boundaries = zone_boundaries(&runs, reaches);
-        let zones: Vec<Zone> = core::iter::once(lo)
-            .chain(boundaries)
-            .map(Zone::new)
-            .collect();
+        let boundaries = zone_boundaries(&runs, reaches)?;
+        let mut zones = Vec::new();
+        zones
+            .try_reserve_exact(boundaries.len() + 1)
+            .map_err(refused)?;
+        zones.extend(core::iter::once(lo).chain(boundaries).map(Zone::new));
         let mut state = FrameAllocatorState {
             total_frames,
             base_frame,
@@ -2512,8 +2536,11 @@ mod tests {
     fn a_zone_boundary_is_drawn_only_where_usable_ram_lies_on_both_sides_of_a_limit() {
         let bytes = |frames: usize| (frames * PAGE_SIZE) as u64;
         let runs = [(ZONE_GRANULE, 4 * ZONE_GRANULE)];
+        let boundaries = |runs: &[(usize, usize)], reaches: &[core::ops::Range<u64>]| {
+            zone_boundaries(runs, reaches).expect("the heap holds the boundaries")
+        };
         assert_eq!(
-            zone_boundaries(
+            boundaries(
                 &runs,
                 &[0..bytes(2 * ZONE_GRANULE + 1), 0..bytes(2 * ZONE_GRANULE),]
             ),
@@ -2521,7 +2548,7 @@ mod tests {
             "aligned down to the largest block, and one boundary per limit"
         );
         assert!(
-            zone_boundaries(
+            boundaries(
                 &runs,
                 &[
                     bytes(5 * ZONE_GRANULE)..bytes(6 * ZONE_GRANULE),
@@ -2533,10 +2560,63 @@ mod tests {
         );
         let four_gib = usize::try_from(DMA32_LIMIT >> PAGE_SHIFT).unwrap();
         assert_eq!(
-            zone_boundaries(&[(ZONE_GRANULE, four_gib + ZONE_GRANULE)], &[]),
+            boundaries(&[(ZONE_GRANULE, four_gib + ZONE_GRANULE)], &[]),
             [four_gib]
         );
-        assert!(zone_boundaries(&runs, &[]).is_empty());
+        assert!(boundaries(&runs, &[]).is_empty());
+    }
+
+    /// However many regions the map holds, building the allocator asks the
+    /// heap as often as for a few: each list it builds from is reserved
+    /// once.
+    ///
+    /// Regression: the regions were copied and sorted stably, and a stable
+    /// sort past 4 KiB takes its scratch from the heap infallibly.
+    #[test]
+    fn a_map_of_many_regions_asks_the_heap_as_often_as_one_of_few() {
+        let asked = |count: u64| {
+            let mut map = BootMemoryMap::new();
+            for at in (0..count).rev() {
+                map.push(MemoryRegion {
+                    start: PhysAddr::new((at + 1) * MIB),
+                    length: MIB,
+                    kind: if at % 2 == 0 {
+                        RegionKind::Usable
+                    } else {
+                        RegionKind::Reserved
+                    },
+                });
+            }
+            let (built, metering) = tairix_fuzzseed::meter::metered(|| {
+                FrameAllocator::with_dma_reaches(&map, &[]).map(drop)
+            });
+            assert_eq!(built, Ok(()));
+            metering.allocations
+        };
+        assert_eq!(asked(400), asked(8));
+    }
+
+    /// A zero-length region starting where another does overlaps nothing,
+    /// whichever the firmware listed first.
+    #[test]
+    fn an_empty_region_overlaps_nothing_whichever_is_listed_first() {
+        let empty = MemoryRegion {
+            start: PhysAddr::new(64 * MIB),
+            length: 0,
+            kind: RegionKind::Reserved,
+        };
+        let usable = MemoryRegion {
+            start: PhysAddr::new(64 * MIB),
+            length: 64 * MIB,
+            kind: RegionKind::Usable,
+        };
+        for listed in [[empty, usable], [usable, empty]] {
+            let mut map = BootMemoryMap::new();
+            for region in listed {
+                map.push(region);
+            }
+            assert!(FrameAllocator::with_dma_reaches(&map, &[]).is_ok());
+        }
     }
 
     #[test]

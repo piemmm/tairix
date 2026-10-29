@@ -1,6 +1,8 @@
 //! Tests for the shared fallible allocation helpers.
 
-use super::{boxed_array, collected, concatenated, filled, grow_to, push, read_snapshot, reserve};
+use super::{
+    boxed_array, collected, concatenated, filled, grow_to, push, read_snapshot, reserve, written,
+};
 use alloc::vec::Vec;
 use tairix_abi::Errno;
 
@@ -32,6 +34,24 @@ fn a_list_pushed_an_item_at_a_time_grows_by_doubling() {
     assert_eq!(list.len(), 4096);
     assert_eq!(list[4095], 4095);
     assert!(grown <= 13, "{grown} reallocations for 4096 pushes");
+}
+
+/// A written string is exactly what its writer wrote, in a string of
+/// exactly that length; a writer writing more the second time fails rather
+/// than growing the string.
+#[test]
+fn a_written_string_is_reserved_to_what_its_writer_writes() {
+    let (name, uid) = ("ada", 1000);
+    let line = written(|out| write!(out, "{name}:{uid}")).expect("held");
+    assert_eq!(line, "ada:1000");
+    assert_eq!(line.capacity(), line.len());
+    let calls = core::cell::Cell::new(0);
+    let growing = written(|out| {
+        calls.set(calls.get() + 1);
+        (0..calls.get()).try_for_each(|_| out.write_str("more"))
+    });
+    assert_eq!(growing, None);
+    assert_eq!(written(|_| Err(core::fmt::Error)), None);
 }
 
 #[test]

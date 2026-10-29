@@ -28,7 +28,11 @@ change (§2.13).
 | SMB6 | `lib/smb` file operations: create/close/read/write/flush, directory enumeration, query/set info, leases, change notify, durable handles and reconnect | done |
 | SMB7 | `lib/smb` share enumeration: DCE/RPC bind and NDR `NetrShareEnum` over `IPC$` | done |
 | SMB8 | `netshare-v1`, the client protocol to `smbfs`, and the `lib/netshare` client `files.app` and the commands share | done |
-| SMB9 | `userland/net/smbfs`: the socket-owning front, the sandboxed engine workers, one served filesystem per mounted share, the caches, credentials and tickets, endpoint pinning, session-bound lifetime, audit | planned |
+| SMB9a | FSSERVE FSS6 for network shares: the kernel-minted offer and its attach by the named principal, the presentations, owner and server detach, server-reported liveness, `MountRecord`'s owner and class, the lanes and registry entry a multi-writer share needs; with NEW-NAMESPACE NS-4a's `view_bind` for an explicit target | done |
+| SMB9b | `userland/net/smbfs`: the bundle and its account, the front's loop, the `netshare-v1` endpoint and its deferred replies, name resolution off the loop, one sandboxed `lib/smb` worker per connection, connections shared per (principal, pin), listing (the first 256 shares, the rest counted), mount and unmount, the login session's end withdrawing its mounts, the audit | done |
+| SMB9c | The served filesystem: every driver-trait operation over SMB, node ids kept by a path-keyed map, concurrent calls, the front holding every byte not yet written | done |
+| SMB9d | Caching under leases: attributes and listings under a directory lease or for one second, file data and write-back under a read/write lease, every dirty byte flushed before a break is acknowledged, on `fsync`, close and unmount | done |
+| SMB9e | Reconnect: a dropped connection, a stack restart or a lost worker re-established with durable-v2 handles and the replay flag inside the grace window; past it the mount reports lost and is still tried | done |
 | SMB10 | The commands: the `mount` bundle with `-t smb` (closes D1014 for network sources), `unmount` for served volumes, `smbtree` | planned |
 | SMB11 | DFS referrals: following a namespace link to the server that holds it | planned |
 | SMB12 | The test peers: an in-tree SMB 3 server and KDC for host tests, and the QEMU vertical that mounts a share end to end | planned |
@@ -121,13 +125,19 @@ does not exist yet); multichannel, RDMA, QUIC transport and 3.1.1 compression
                                                (lib/smb, lib/krb5)
 ```
 
-- **One worker per server connection**, a `lib/sandbox` supervised session.
-  The worker holds that connection's keys and every piece of parsed server
-  state; the front holds sockets, sends ciphertext the worker produced, and
-  hands the worker the bytes it read, unread. A crashed worker costs its own
+- **One worker per server connection**, a plain `lib/sandbox` session: the
+  worker holds that connection's keys and every piece of parsed server state,
+  which no owner could rebuild, so a lost worker is a lost connection,
+  re-established like a dropped one (SMB9e). The front holds sockets, sends
+  ciphertext the worker produced, hands the worker the bytes it read,
+  unread, and supplies the randomness a sandbox may not draw — nonce seeds,
+  NTLM's client challenge, the client GUID. A crashed worker costs its own
   connection, never the service.
-- **Connections are shared per (principal, endpoint pin)**: listing shares,
-  then mounting two of them, is one TCP connection and one session.
+- **Connections are shared per principal, endpoint and account**: listing
+  shares, then mounting two of them, is one TCP connection and one session. A
+  connection serves only calls naming its account with the same password (the
+  derived keys compared in constant time), so no call rides a session it did
+  not prove it may open; a remembered pin is checked against each call.
 - **The front's typed frames** are bounded and validated before anything they
   carry reaches the kernel; the kernel validates the served replies again
   (FSSERVE §3) — a compromised worker gains no authority.
@@ -222,11 +232,12 @@ Share enumeration (SMB7):
   by `FSCTL_PIPE_TRANSCEIVE`, read on any further fragments, close — the pipe
   closed even when the listing fails. The bind must be accepted as offered,
   answers must carry the call's ids, fragments are at most 4280 bytes and an
-  answer at most 256 KiB and `netshare-v1`'s 256 shares. A share whose name no
-  tree connect takes (`netshare_ipc::is_share_name`: one to 80 characters, no
-  separator or control) is left out and counted; a remark is display text, a
-  bad unit U+FFFD, cut at its last character within `netshare-v1`'s 1024
-  bytes.
+  answer at most 256 KiB. It keeps disk shares only, the special ones when
+  asked, and the first 256 of them — `netshare-v1`'s listing — counting a
+  special share not asked for, a share whose name no tree connect takes
+  (`netshare_ipc::is_share_name`: one to 80 characters, no separator or
+  control), and a share past the 256; a remark is display text, a bad unit
+  U+FFFD, cut at its last character within `netshare-v1`'s 1024 bytes.
 
 Every module is held to Microsoft's published Windows traffic where it exists
 (`docs/src/lib/smb.md`) and fuzzed by `tests/fuzz_smb.rs`.
@@ -234,12 +245,18 @@ Every module is held to Microsoft's published Windows traffic where it exists
 ## 3. The service (`userland/net/smbfs`)
 
 A `service` bundle (`os.tairix.smbfs`) under `/System/Services/`, holding
-`CAP_NET` and `CAP_FS_SERVE` (FSSERVE §6) and nothing else.
+`CAP_NET`, `CAP_FS_SERVE` (FSSERVE §6), `CAP_IPC_BIND_PRIVILEGED` (its
+reserved endpoint, bound with a send capability), `CAP_SANDBOX_SPAWN` (its
+workers) and `CAP_LOG_EMIT` (its audit), and nothing else. It is enrolled
+without `requires=network-up`: a stack restart drops its connections, which
+reconnect inside the grace window (SMB9e) rather than taking every mount
+down.
 
 - **`netshare-v1`** (`lib/abi/src/netshare_ipc.rs`, client `lib/netshare`):
   `Shares` (the endpoint, its pin when the credentials were remembered, the
-  dialect floor and the credentials → the pin proved and the disk shares,
-  special `$` shares only when asked), `Mount` (the same and the share,
+  dialect floor and the credentials → the pin reported and the disk shares,
+  special `$` shares only when asked, the first 256 listed and the rest
+  counted), `Mount` (the same and the share,
   read-only) → the pin and an *offer* the requester attaches itself (FSSERVE
   §6), `Unmount`, `Mounts` (the caller's own). The presentation, the name and
   the target belong to the kernel's attach call, which judges them against the
@@ -253,19 +270,32 @@ A `service` bundle (`os.tairix.smbfs`) under `/System/Services/`, holding
   lookup, NTLM's user and domain), so a program that cannot reach the network
   itself cannot probe a host or port, or carry data out, through it.
   `files.app` already holds `CAP_NET`; `mount` and `smbtree` declare it.
-- **One served filesystem per mounted share** (`lib/fsserve`), its node
-  handles keeping the driver traits' contract (FSSERVE §0): an id names one
+- **One served volume per mounted share**, served by the front itself rather
+  than through `lib/fsserve`'s one-call-at-a-time runtime: every call waits on
+  the network, and the kernel's lanes run concurrently, so each call is held
+  and answered by one compound on the share's tree when its answer arrives.
+  Its node ids keep the driver traits' contract (FSSERVE §0): an id names one
   node for as long as it keeps its name, held across reconnects by a
-  path-keyed map, and answers `Stale` once another writer has removed or
-  replaced it.
+  path-keyed map whose paths compare as the share compares names (ASCII case
+  folded), and answers `Stale` once another writer has removed or replaced
+  it.
 - **Caching follows leases.** Attributes and directory listings are cached
   under a directory lease where the server grants one and for one second
   otherwise (the CIFS `actimeo` default); file data is cached and written back
   only under a read/write lease, and every dirty byte is flushed before a lease
   break is acknowledged, on `fsync`, on close, and before unmount.
-- **Reconnect.** A dropped connection is re-established with durable-v2
-  handles and the replay flag, inside FIX-IO's grace window; past it the mount
-  reports `UnavailableLost` and every operation answers the device error.
+- **Reconnect.** A connection mounts depend on that drops — its socket closing,
+  its worker ending or lying, or, while a call, a file held open or a directory
+  lease rests on it, a silence an SMB2 `ECHO` goes unanswered through — is made
+  again with the same client GUID and a session naming the one it replaces, its
+  trees connected again and its held files' durable-v2 opens reclaimed or, an
+  answer lost, replayed. Its mounts wait a grace window: the longest durable
+  timeout the server granted their files, else MS-SMB2's 60 s. Past it they
+  report `MountState::Lost` and every call fails at once, while attempts go on
+  (backing off to a call's deadline) and a connection made again serves them
+  again; the kernel's `UnavailableLost` is only FSSERVE's for a volume
+  withdrawn holding unpublished writes. A server refusing the account or
+  answering under another pin ends them instead.
 - **Tickets.** Kerberos credentials are held per (uid, principal) in memory,
   zeroed on expiry, `Forget`, and the session's end; never written anywhere.
 - **Audit.** Every mount, unmount, refusal, pin mismatch and authentication
@@ -303,8 +333,9 @@ rail row and context menu.
 
 Server-supplied sizes are capped before use: one SMB message 8 MiB (the
 sandbox frame), read/write 1 MiB per request, 64 credits in flight per
-connection, 4096 entries per directory snapshot page, 255-byte names after
-mapping, 256 shares listed per host. A principal holds at most 32 mounts and
+connection, a directory page 64 KiB and so at most 1024 entries, 255-byte
+names after mapping, 256 shares listed per host and the rest counted. A principal holds
+at most 32 mounts and
 16 connections. Each bound fails closed with a typed error.
 
 ## 7. Tests
@@ -383,13 +414,67 @@ tag-checked readers and a writer; fuzzed.
 
 **SMB8 — `netshare-v1`.** The ABI and its fail-closed, canonical codec
 (`netshare_ipc`, with `Op::max_reply` bounding each operation's reply and
-`fsserve::OfferId` naming an offer), the reserved endpoint, the share-name rule
+`netattach::OfferId` naming an offer), the reserved endpoint, the share-name rule
 and listing bounds `lib/smb` takes from it, the `Secret` a password crosses
 as, the `lib/netshare` client (each request built in an erased buffer, each
 answer accepted only for its request, one wording per reason) and the decoders
 fuzzed in `lib/abi/tests/fuzz_decode.rs`.
 
-**SMB9 — `smbfs`.** As §3, over FSSERVE and SMB4–SMB8.
+**SMB9a — network attachments.** FSSERVE FSS6 as its §6 states, and
+NEW-NAMESPACE NS-4a's `view_bind` and `view_unbind`, so a mount may be placed
+at an explicit target from the start.
+
+**SMB9b — the service.** §1 and §3's front, workers, connections, listing,
+mount and unmount, session-bound lifetime and audit, over FSS6.
+
+**SMB9c — the served filesystem.** §3's served filesystem, uncached: every
+operation the share carries reaches the server as one compound — open, act,
+close — calls in flight concurrently across the kernel's lanes, and a listing
+keeps its directory open between pages. Links, punched holes, security
+records and named attributes are unsupported; ownership is unrecorded.
+
+**SMB9d — caching.** A file the kernel holds open is opened on the server
+under a read/handle/write lease and kept open until its last hold goes, its
+calls run in order through one step queue. Reads fill 64 KiB pages in the
+process's clean-file-data reclaim cache, keyed by the lease's generation.
+Writes are held in 4 KiB blocks that record which of their bytes are held, in
+a radix index per file, and go out as stretches of at most 64 KiB, eight in
+flight per file: by the one-second window, for the bound, before a truncate, a
+sync, a close or a break's acknowledgment, and before an unmount or the
+session's end, which wait at most a call's deadline. What the blocks and
+index pin is held to `tairix_writeback::WritebackBound` over the service's one
+`PinnedShare`; a volume holding nothing always admits one write, and nothing
+is held at critical pressure. Each held file's next deadline — its window, or
+a call's deadline without an answer — is one entry in its volume's indexed
+heap. A short write's rest goes again; a write taking nothing, refused, or
+given up is lost: logged, owed to the volume's next flush, and its file served
+uncached until it is opened again. The front's own removes and renames of a
+held file carry its lease key; removing an open file renames it aside and
+removes that; a rename over a held file waits for its close. Attributes and
+whole listings of up to 4096 entries stand a second in file-metadata caches,
+or while the directory lease the listing's open took holds: at most 16 per
+volume, the least recently used let go first, and each let go after 30 s
+unused (CIFS's `dir_cache_timeout`).
+
+**SMB9e — reconnect.** A drop is detected from the socket, the worker (a lie,
+or its end, which the link reports), or — while a call, a file held open or
+a directory lease rests on the connection, so an idle mount takes no wakeups —
+ten seconds of silence an `ECHO` outside any session then goes ten more
+unanswered. The connection keeps its client GUID and established session id
+across attempts; on a drop each volume is suspended — idempotent calls kept to
+be asked again, a create, remove or rename in flight answered `DeviceOffline`,
+listings set to restart past what was handed out, directory leases dropped —
+and each held file keeps the step the drop interrupted and is marked to reclaim
+(DH2C), or to replay its ask (DH2Q under its create GUID with
+`SMB2_FLAGS_REPLAY_OPERATION`), once the trees are connected again
+(`Phase::Rejoining`). A refused reclaim falls back to a fresh open; a refused
+replay leaves the file reached by path, its bytes lost. Calls wait while the
+volume is suspended and fail at once past the window, when held bytes are lost
+and owed to the next flush. Attempts back off from one second, doubling to a
+call's deadline, and a connection that drops within that of recovering waits as
+a failed attempt. `lib/smb` provides `Client::echo`, and its peer an
+unsessioned `ECHO`, replay detection, durable timeouts (`Share::advance`),
+`Share::restart` and `PeerConfig::server_guid`.
 
 **SMB10 — the commands**, with their help and docs.
 

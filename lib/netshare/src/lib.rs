@@ -25,7 +25,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_abi::fsserve::OfferId;
+use tairix_abi::netattach::OfferId;
 use tairix_abi::netshare_ipc::{
     Connect, MountEntry, NetshareError, NetshareReply, NetshareRequest, Pin, Records, Rejection,
     Shares, Shortfall, NETSHARE_MAX_REQUEST,
@@ -124,6 +124,7 @@ const fn refusal(error: NetshareError) -> &'static str {
         NetshareError::NoSuchMount => "no such mount",
         NetshareError::Limit => "no more mounts or connections may be made",
         NetshareError::Failed => "the network-share service failed",
+        NetshareError::AlreadyMounted => "that share is mounted already",
     }
 }
 

@@ -35,9 +35,9 @@
 //! Each recognised volume yields a [`VolumePlan`] carrying its extent,
 //! filesystem, stable identity, and what its catalog name is made from (its
 //! label, read where its format keeps it, else the device's transport: the
-//! [`crate::name`] policy), in stable device order. Collision handling
-//! happens at attach time ([`crate::name::candidates`]); the plan itself is
-//! one deterministic pass.
+//! [`tairix_fsprobe::name`] policy), in stable device order. Collision
+//! handling happens at attach time ([`tairix_fsprobe::name::candidates`]);
+//! the plan itself is one deterministic pass.
 
 use tairix_abi::blkio::BlkTransport;
 use tairix_abi::driver::block::{Block, BlockGeometry};
@@ -49,7 +49,7 @@ use tairix_partition::{
     parse_partition_table, Partition, PartitionBlock, PartitionError, PartitionTable,
 };
 
-use crate::name::NameBase;
+use tairix_fsprobe::name::NameBase;
 
 /// One attachable volume the probe recognised.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -547,8 +547,8 @@ mod tests {
             layout: None,
         };
         let (plans, _) = collect(&mut dev);
-        let first = crate::name::candidates(plans[0].base, plans[0].identity).next();
-        let second = crate::name::candidates(plans[1].base, plans[1].identity).next();
+        let first = tairix_fsprobe::name::candidates(plans[0].base, plans[0].identity).next();
+        let second = tairix_fsprobe::name::candidates(plans[1].base, plans[1].identity).next();
         assert_ne!(first, second);
     }
 

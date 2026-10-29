@@ -570,7 +570,8 @@ fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), 
         ReclaimOwner::FilesystemVolume { volume: 1 },
         pressure,
         sink,
-    );
+    )
+    .map_err(|_| "the volume's cache")?;
 
     // The in-RAM layout, with the volume mounted at its point. The fixture
     // volume's nodes are owned by uid/gid 0, so that is the principal.

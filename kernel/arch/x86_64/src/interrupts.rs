@@ -518,6 +518,7 @@ macro_rules! define_isr {
                 "movq %rsp, %rdi",
                 $crate::fp_frame_save!(),
                 $crate::scrub_nonargument_gprs!(),
+                $crate::clear_direction_flag!(),
                 "xorl %ecx, %ecx",
                 "xorl %edx, %edx",
                 "xorl %esi, %esi",
@@ -620,6 +621,7 @@ macro_rules! exception_isr_body {
                 "andq $-16, %rsp",
                 "ldmxcsr {kernel_mxcsr}(%rip)",
                 $crate::scrub_nonargument_gprs!(),
+                $crate::clear_direction_flag!(),
                 "call {dispatch}",
                 // The dispatcher diverges; a return is a kernel bug.
                 "ud2",
@@ -718,6 +720,7 @@ pub unsafe extern "C" fn tairix_arch_x86_64_isr_default() {
         "andq $-16, %rsp",
         "ldmxcsr {kernel_mxcsr}(%rip)",
         crate::scrub_nonargument_gprs!(),
+        crate::clear_direction_flag!(),
         "xorl %ecx, %ecx",
         "xorl %edx, %edx",
         "xorl %esi, %esi",

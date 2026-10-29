@@ -2989,15 +2989,14 @@ pub const MOUNT_TARGET_MAX: usize = 64;
 /// keeps a hostile reply from claiming an unbounded type string.
 pub const MOUNT_FSTYPE_MAX: usize = 16;
 
-/// Byte length of the stable volume identity a [`MountRecord`] carries —
-/// the same 16-byte identity the volume forest publishes for `id::` paths
-/// and a `volume_detach` request names. All-zero when the mount has no
-/// published volume identity (the in-RAM layout mounts).
-pub const MOUNT_VOLUME_ID_LEN: usize = 16;
+/// The stable volume identity a [`MountRecord`] carries is the one the
+/// volume forest publishes and a `volume_detach` names; all-zero when the
+/// mount has none (the in-RAM layout mounts).
+pub use crate::volume::VOLUME_ID_LEN;
 
 /// The volume identity of a mount or binding that published none: all zero,
 /// which no published identity is.
-pub const VOLUME_ID_UNPUBLISHED: [u8; MOUNT_VOLUME_ID_LEN] = [0; MOUNT_VOLUME_ID_LEN];
+pub const VOLUME_ID_UNPUBLISHED: [u8; VOLUME_ID_LEN] = [0; VOLUME_ID_LEN];
 
 /// A mounted volume's availability, as reported by
 /// [`SysinfoQueryId::MOUNT_LIST`] (`plans/DEVICES.md` D4).
@@ -3465,7 +3464,10 @@ pub struct MountRecord {
     availability: MountAvailability,
     medium: [u8; BLK_MEDIUM_LEN],
     usage: VolumeStats,
-    volume_id: [u8; MOUNT_VOLUME_ID_LEN],
+    volume_id: [u8; VOLUME_ID_LEN],
+    owner: u32,
+    class: VolumeClass,
+    reserved: [u8; 3],
     source: [u8; MOUNT_SOURCE_MAX],
     target: [u8; MOUNT_TARGET_MAX],
     fstype: [u8; MOUNT_FSTYPE_MAX],
@@ -3495,8 +3497,9 @@ impl MountRecord {
     ///
     /// `4` bytes of flags, three length bytes plus the availability byte,
     /// the storage-medium record, the usage block (`block_size(4)` + reserved
-    /// pad `(4)` + five `u64` counts), the 16-byte volume identity, then the
-    /// three fixed-capacity string buffers.
+    /// pad `(4)` + five `u64` counts), the 16-byte volume identity, the
+    /// owner (4), the volume class (1) and a reserved pad (3), then the three
+    /// fixed-capacity string buffers.
     pub const WIRE_LEN: usize =
         Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX + MOUNT_TARGET_MAX + MOUNT_FSTYPE_MAX;
 
@@ -3505,7 +3508,8 @@ impl MountRecord {
     const MEDIUM_OFFSET: usize = 8;
     const USAGE_OFFSET: usize = Self::MEDIUM_OFFSET + BLK_MEDIUM_LEN;
     const VOLUME_ID_OFFSET: usize = Self::USAGE_OFFSET + 48;
-    const SOURCE_OFFSET: usize = Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN;
+    const OWNER_OFFSET: usize = Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN;
+    const SOURCE_OFFSET: usize = Self::OWNER_OFFSET + 8;
     const TARGET_OFFSET: usize = Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX;
     const FSTYPE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
 
@@ -3529,7 +3533,7 @@ impl MountRecord {
         fstype: &[u8],
         flags: MountFlags,
         state: MountVolumeState,
-        volume_id: [u8; MOUNT_VOLUME_ID_LEN],
+        volume_id: [u8; VOLUME_ID_LEN],
     ) -> Result<Self, Errno> {
         if source.len() > MOUNT_SOURCE_MAX
             || target.len() > MOUNT_TARGET_MAX
@@ -3553,6 +3557,9 @@ impl MountRecord {
             medium: BlkMedium::encode(state.medium),
             usage,
             volume_id,
+            owner: NO_OWNER,
+            class: VolumeClass::Local,
+            reserved: [0; 3],
             source: [0u8; MOUNT_SOURCE_MAX],
             target: [0u8; MOUNT_TARGET_MAX],
             fstype: [0u8; MOUNT_FSTYPE_MAX],
@@ -3563,10 +3570,38 @@ impl MountRecord {
         Ok(record)
     }
 
+    /// This record, of a volume `owner` attached.
+    #[must_use]
+    pub const fn with_owner(self, owner: u32) -> Self {
+        Self { owner, ..self }
+    }
+
+    /// This record, of a volume of `class`.
+    #[must_use]
+    pub const fn with_class(self, class: VolumeClass) -> Self {
+        Self { class, ..self }
+    }
+
     /// The mount policy flags in force on this filesystem.
     #[must_use]
     pub fn flags(&self) -> MountFlags {
         self.flags
+    }
+
+    /// The principal that attached the volume, which may detach it without the
+    /// mount authority; `None` for a volume no one owns.
+    #[must_use]
+    pub const fn owner(&self) -> Option<u32> {
+        match self.owner {
+            NO_OWNER => None,
+            owner => Some(owner),
+        }
+    }
+
+    /// What kind of volume backs the mount.
+    #[must_use]
+    pub const fn class(&self) -> VolumeClass {
+        self.class
     }
 
     /// The backing volume's availability.
@@ -3586,7 +3621,7 @@ impl MountRecord {
     /// The volume's stable published identity, or all-zero when the mount
     /// has none.
     #[must_use]
-    pub fn volume_id(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
+    pub fn volume_id(&self) -> [u8; VOLUME_ID_LEN] {
         self.volume_id
     }
 
@@ -3632,8 +3667,10 @@ impl MountRecord {
         put_u64(&mut out, Self::USAGE_OFFSET + 24, self.usage.avail_blocks);
         put_u64(&mut out, Self::USAGE_OFFSET + 32, self.usage.files);
         put_u64(&mut out, Self::USAGE_OFFSET + 40, self.usage.files_free);
-        out[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN]
+        out[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN]
             .copy_from_slice(&self.volume_id);
+        put_u32(&mut out, Self::OWNER_OFFSET, self.owner);
+        out[Self::OWNER_OFFSET + 4] = self.class as u8;
         out[Self::SOURCE_OFFSET..Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX]
             .copy_from_slice(&self.source);
         out[Self::TARGET_OFFSET..Self::TARGET_OFFSET + MOUNT_TARGET_MAX]
@@ -3651,8 +3688,8 @@ impl MountRecord {
     /// Returns:
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
     /// * [`Errno::OutOfRange`] if the flags word sets a bit outside the
-    ///   known [`MountFlags`] mask, the availability byte names no known
-    ///   state, the usage block's reserved pad is non-zero, or the usage
+    ///   known [`MountFlags`] mask, the availability byte or the volume class
+    ///   names no known state, a reserved pad is non-zero, or the usage
     ///   block is internally
     ///   inconsistent (available exceeding free, or free exceeding total — a
     ///   hostile reply, refused whole).
@@ -3700,12 +3737,19 @@ impl MountRecord {
         if usage.avail_blocks > usage.free_blocks || usage.free_blocks > usage.total_blocks {
             return Err(Errno::OutOfRange);
         }
-        let mut volume_id = [0u8; MOUNT_VOLUME_ID_LEN];
+        if bytes[Self::OWNER_OFFSET + 5..Self::SOURCE_OFFSET]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let class = VolumeClass::from_u8(bytes[Self::OWNER_OFFSET + 4])?;
+        let mut volume_id = [0u8; VOLUME_ID_LEN];
         let mut source = [0u8; MOUNT_SOURCE_MAX];
         let mut target = [0u8; MOUNT_TARGET_MAX];
         let mut fstype = [0u8; MOUNT_FSTYPE_MAX];
         volume_id.copy_from_slice(
-            &bytes[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN],
+            &bytes[Self::VOLUME_ID_OFFSET..Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN],
         );
         source.copy_from_slice(&bytes[Self::SOURCE_OFFSET..Self::SOURCE_OFFSET + MOUNT_SOURCE_MAX]);
         target.copy_from_slice(&bytes[Self::TARGET_OFFSET..Self::TARGET_OFFSET + MOUNT_TARGET_MAX]);
@@ -3719,10 +3763,42 @@ impl MountRecord {
             medium,
             usage,
             volume_id,
+            owner: read_u32(bytes, Self::OWNER_OFFSET),
+            class,
+            reserved: [0; 3],
             source,
             target,
             fstype,
         })
+    }
+}
+
+/// The owner word of a volume no one owns.
+const NO_OWNER: u32 = u32::MAX;
+
+/// What kind of volume backs a mount.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum VolumeClass {
+    /// A volume on a local device, or none (an in-RAM mount).
+    #[default]
+    Local = 0,
+    /// A volume a network filesystem server serves.
+    Network = 1,
+}
+
+impl VolumeClass {
+    /// The class `raw` codes.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a code naming none.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Local),
+            1 => Ok(Self::Network),
+            _ => Err(Errno::OutOfRange),
+        }
     }
 }
 
@@ -3807,8 +3883,9 @@ impl PlatformCompatible {
 /// consumer resolving a path takes the covering binding and reads the volume's
 /// figures in one join. A binding showing no volume — the `/Storage` catalog —
 /// carries an empty `subtree` and the all-zero identity, which joins to
-/// nothing, so a path beneath it is never credited to the volume above. A flat
-/// `repr(C)` block of [`Self::WIRE_LEN`] bytes encoded little-endian.
+/// nothing, so a path beneath it is never credited to the volume above. A
+/// binding made by `view_bind` carries its binder. A flat `repr(C)` block of
+/// [`Self::WIRE_LEN`] bytes encoded little-endian.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ViewBindingRecord {
@@ -3816,20 +3893,22 @@ pub struct ViewBindingRecord {
     target_len: u8,
     subtree_len: u8,
     reserved: [u8; 2],
-    volume_id: [u8; MOUNT_VOLUME_ID_LEN],
+    volume_id: [u8; VOLUME_ID_LEN],
+    binder: u32,
     target: [u8; MOUNT_TARGET_MAX],
     subtree: [u8; MOUNT_TARGET_MAX],
 }
 
 impl ViewBindingRecord {
     /// Encoded size of a [`ViewBindingRecord`] on the wire: the flags word,
-    /// the two length bytes and two reserved bytes, the volume identity, then
-    /// the two fixed-capacity path buffers.
+    /// the two length bytes and two reserved bytes, the volume identity, the
+    /// binder, then the two fixed-capacity path buffers.
     pub const WIRE_LEN: usize = Self::SUBTREE_OFFSET + MOUNT_TARGET_MAX;
 
     const RESERVED_OFFSET: usize = 6;
     const VOLUME_ID_OFFSET: usize = 8;
-    const TARGET_OFFSET: usize = Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN;
+    const BINDER_OFFSET: usize = Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN;
+    const TARGET_OFFSET: usize = Self::BINDER_OFFSET + 4;
     const SUBTREE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
 
     /// Build a record from its parts.
@@ -3842,7 +3921,7 @@ impl ViewBindingRecord {
         target: &[u8],
         subtree: &[u8],
         flags: MountFlags,
-        volume_id: [u8; MOUNT_VOLUME_ID_LEN],
+        volume_id: [u8; VOLUME_ID_LEN],
     ) -> Result<Self, Errno> {
         if target.len() > MOUNT_TARGET_MAX || subtree.len() > MOUNT_TARGET_MAX {
             return Err(Errno::LengthOutOfRange);
@@ -3855,12 +3934,29 @@ impl ViewBindingRecord {
             subtree_len,
             reserved: [0u8; 2],
             volume_id,
+            binder: NO_OWNER,
             target: [0u8; MOUNT_TARGET_MAX],
             subtree: [0u8; MOUNT_TARGET_MAX],
         };
         record.target[..target.len()].copy_from_slice(target);
         record.subtree[..subtree.len()].copy_from_slice(subtree);
         Ok(record)
+    }
+
+    /// This record, of a binding `binder` made.
+    #[must_use]
+    pub const fn with_binder(self, binder: u32) -> Self {
+        Self { binder, ..self }
+    }
+
+    /// The principal that made the binding with `view_bind`; `None` for one
+    /// the system made.
+    #[must_use]
+    pub const fn binder(&self) -> Option<u32> {
+        match self.binder {
+            NO_OWNER => None,
+            binder => Some(binder),
+        }
     }
 
     /// The flags the binding narrows its volume to.
@@ -3872,7 +3968,7 @@ impl ViewBindingRecord {
     /// The attached volume's stable identity, the key of its [`MountRecord`];
     /// all-zero for a binding showing no volume.
     #[must_use]
-    pub fn volume_id(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
+    pub fn volume_id(&self) -> [u8; VOLUME_ID_LEN] {
         self.volume_id
     }
 
@@ -3903,7 +3999,8 @@ impl ViewBindingRecord {
         put_u32(&mut out, 0, self.flags.bits());
         out[4] = self.target_len;
         out[5] = self.subtree_len;
-        out[Self::VOLUME_ID_OFFSET..Self::TARGET_OFFSET].copy_from_slice(&self.volume_id);
+        out[Self::VOLUME_ID_OFFSET..Self::BINDER_OFFSET].copy_from_slice(&self.volume_id);
+        put_u32(&mut out, Self::BINDER_OFFSET, self.binder);
         out[Self::TARGET_OFFSET..Self::SUBTREE_OFFSET].copy_from_slice(&self.target);
         out[Self::SUBTREE_OFFSET..Self::WIRE_LEN].copy_from_slice(&self.subtree);
         out
@@ -3938,13 +4035,14 @@ impl ViewBindingRecord {
             target_len,
             subtree_len,
             reserved: [0u8; 2],
-            volume_id: [0u8; MOUNT_VOLUME_ID_LEN],
+            volume_id: [0u8; VOLUME_ID_LEN],
+            binder: read_u32(bytes, Self::BINDER_OFFSET),
             target: [0u8; MOUNT_TARGET_MAX],
             subtree: [0u8; MOUNT_TARGET_MAX],
         };
         record
             .volume_id
-            .copy_from_slice(&bytes[Self::VOLUME_ID_OFFSET..Self::TARGET_OFFSET]);
+            .copy_from_slice(&bytes[Self::VOLUME_ID_OFFSET..Self::BINDER_OFFSET]);
         record
             .target
             .copy_from_slice(&bytes[Self::TARGET_OFFSET..Self::SUBTREE_OFFSET]);
@@ -7128,6 +7226,7 @@ impl CrashRecord {
 
 #[cfg(test)]
 mod tests {
+    use super::VolumeClass;
     use super::{
         encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeRecord,
         KernelMemoryStats, LoadAverage, MemoryTotal, MountAvailability, MountRecord,
@@ -7155,7 +7254,7 @@ mod tests {
         MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
     };
     use super::{IrqRecord, IRQ_FLAG_QUARANTINED};
-    use super::{ViewBindingRecord, MOUNT_VOLUME_ID_LEN};
+    use super::{ViewBindingRecord, VOLUME_ID_LEN};
     use super::{VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord};
     use crate::blkio::{
         BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkMedium,
@@ -8490,7 +8589,7 @@ mod tests {
 
     #[test]
     fn view_binding_record_round_trips_and_refuses_what_it_cannot_carry() {
-        let volume_id = [0x5Au8; MOUNT_VOLUME_ID_LEN];
+        let volume_id = [0x5Au8; VOLUME_ID_LEN];
         let binding = ViewBindingRecord::new(
             b"/System/Logs",
             b"/System/Logs",
@@ -8511,23 +8610,27 @@ mod tests {
             ViewBindingRecord::VOLUME_ID_OFFSET
         );
         assert_eq!(
+            core::mem::offset_of!(ViewBindingRecord, binder),
+            ViewBindingRecord::BINDER_OFFSET
+        );
+        assert_eq!(
             core::mem::offset_of!(ViewBindingRecord, subtree),
             ViewBindingRecord::SUBTREE_OFFSET
         );
         let decoded = ViewBindingRecord::from_bytes(&bytes).expect("decodes");
         assert_eq!(decoded, binding);
+        assert_eq!(decoded.binder(), None);
+        let bound = binding.with_binder(1000);
+        let decoded = ViewBindingRecord::from_bytes(&bound.to_le_bytes()).expect("decodes");
+        assert_eq!(decoded.binder(), Some(1000));
         assert_eq!(decoded.target_bytes(), b"/System/Logs");
         assert_eq!(decoded.subtree_bytes(), b"/System/Logs");
         assert_eq!(decoded.flags(), MountFlags::NOEXEC);
         assert_eq!(decoded.volume_id(), volume_id);
         assert!(decoded.shows_volume());
-        let catalog = ViewBindingRecord::new(
-            b"/Storage",
-            b"",
-            MountFlags::READ_ONLY,
-            [0; MOUNT_VOLUME_ID_LEN],
-        )
-        .expect("fits");
+        let catalog =
+            ViewBindingRecord::new(b"/Storage", b"", MountFlags::READ_ONLY, [0; VOLUME_ID_LEN])
+                .expect("fits");
         assert!(!catalog.shows_volume());
 
         let long = [b'a'; MOUNT_TARGET_MAX + 1];
@@ -8585,11 +8688,29 @@ mod tests {
             volume_id,
         )
         .unwrap();
-        assert_eq!(MountRecord::WIRE_LEN, 224);
+        assert_eq!(MountRecord::WIRE_LEN, 232);
         // The record's in-memory image is its wire image: the generated C
         // view mirrors one layout, not two.
         assert_eq!(core::mem::size_of::<MountRecord>(), MountRecord::WIRE_LEN);
         assert_eq!(core::mem::align_of::<MountRecord>(), 8);
+        assert_eq!((rec.owner(), rec.class()), (None, VolumeClass::Local));
+        let network = rec.with_owner(1000).with_class(VolumeClass::Network);
+        assert_eq!(
+            (network.owner(), network.class()),
+            (Some(1000), VolumeClass::Network)
+        );
+        let bytes = network.to_le_bytes();
+        assert_eq!(MountRecord::from_bytes(&bytes), Ok(network));
+        let class_at = MountRecord::OWNER_OFFSET + 4;
+        for (at, byte) in [(class_at, 2), (class_at + 1, 1), (class_at + 3, 1)] {
+            let mut bad = bytes;
+            bad[at] = byte;
+            assert_eq!(
+                MountRecord::from_bytes(&bad),
+                Err(Errno::OutOfRange),
+                "byte {at}"
+            );
+        }
         assert_eq!(rec.source_bytes(), b"/Storage/data");
         assert_eq!(rec.target_bytes(), b"/Storage/data");
         assert_eq!(rec.fstype_bytes(), b"arxfs");

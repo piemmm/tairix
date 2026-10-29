@@ -16,9 +16,9 @@ use super::{
     NETSHARE_MAX_REPLY, NETSHARE_MAX_REQUEST, REMARK_MAX, SHARES_MAX, SHARE_NAME_MAX, SMB_PORT,
 };
 use crate::account::MAX_PASSWORD_LEN;
-use crate::fsserve::OfferId;
 use crate::ipc::is_reserved_endpoint;
 use crate::net_ipc::IF_NAME_LEN;
+use crate::netattach::OfferId;
 use crate::secret::Secret;
 use crate::Errno;
 
@@ -204,6 +204,7 @@ fn a_pin_at_an_address_that_is_not_unicast_is_refused_both_ways() {
             pin,
             hidden: 0,
             unnamed: 0,
+            unlisted: 0,
             shares: Records::new(&[]),
         })
     };
@@ -551,11 +552,12 @@ fn every_answer_round_trips() {
         read_only,
         state,
     });
-    for (hidden, shares) in [(2, &listed[..]), (0, &[])] {
+    for (hidden, unlisted, shares) in [(2, 7, &listed[..]), (0, 0, &[])] {
         assert_round_trips(NetshareReply::Shares(Shares {
             pin: pin(),
             hidden,
             unnamed: 1,
+            unlisted,
             shares: Records::new(shares),
         }));
     }
@@ -584,6 +586,7 @@ fn every_refusal_round_trips() {
         NetshareError::NoSuchMount,
         NetshareError::Limit,
         NetshareError::Failed,
+        NetshareError::AlreadyMounted,
     ];
     errors.extend(
         [
@@ -620,6 +623,7 @@ fn a_listing_reads_its_records_back_in_order() {
         pin: pin(),
         hidden: 0,
         unnamed: 0,
+        unlisted: 0,
         shares: Records::new(&listed),
     });
     let bytes = encoded_reply(&reply);
@@ -650,6 +654,7 @@ fn the_largest_reply_fits_its_bound_exactly() {
         },
         hidden: u32::MAX,
         unnamed: u32::MAX,
+        unlisted: u32::MAX,
         shares: Records::new(&listed),
     });
     let bytes = encoded_reply(&reply);
@@ -691,6 +696,7 @@ fn a_listing_past_its_bound_is_refused_both_ways() {
         pin: pin(),
         hidden: 0,
         unnamed: 0,
+        unlisted: 0,
         shares: Records::new(&listed),
     });
     assert_eq!(
@@ -701,11 +707,12 @@ fn a_listing_past_its_bound_is_refused_both_ways() {
         pin: pin(),
         hidden: 0,
         unnamed: 0,
+        unlisted: 0,
         shares: Records::new(&listed[..SHARES_MAX]),
     });
     let mut bytes = encoded_reply(&fitting);
-    // The record count sits past the header, the pin and the two counters.
-    let count_at = 9 + 33 + 8;
+    // The record count sits past the header, the pin and the three counters.
+    let count_at = 9 + 33 + 12;
     bytes[count_at..count_at + 2]
         .copy_from_slice(&u16::try_from(SHARES_MAX + 1).expect("fits").to_le_bytes());
     assert_eq!(NetshareReply::decode(&bytes), Err(Errno::OutOfRange));
@@ -731,6 +738,7 @@ fn a_reply_out_of_shape_is_refused() {
         pin: pin(),
         hidden: 0,
         unnamed: 0,
+        unlisted: 0,
         shares: Records::new(&listed),
     }));
     let refused = encoded_reply(&NetshareReply::Refused {
@@ -743,7 +751,7 @@ fn a_reply_out_of_shape_is_refused() {
         bytes
     };
     // The first record: its name's length, the name, then the special byte.
-    let name_at = 9 + 33 + 8 + 2;
+    let name_at = 9 + 33 + 12 + 2;
     let special_at = name_at + 2 + 5;
     let mut trailing = refused.clone();
     trailing.push(0);
@@ -773,7 +781,7 @@ fn a_reply_out_of_shape_is_refused() {
         ),
         (
             "an unknown outcome",
-            changed(&refused, 7, 15),
+            changed(&refused, 7, 16),
             Errno::OutOfRange,
         ),
         (

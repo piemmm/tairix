@@ -285,6 +285,7 @@ pub unsafe extern "C" fn page_fault_isr() {
         "subq $8, %rsp",
         crate::fp_frame_save!(),
         crate::scrub_nonargument_gprs!(),
+        crate::clear_direction_flag!(),
         "call {dispatch}",
         // The dispatcher returned: the fault is resolved. Restore the
         // interrupted state, drop the hardware error code, and retry the

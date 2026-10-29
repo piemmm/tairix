@@ -58,12 +58,12 @@ pub use db::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_LINE_LEN, MAX_USERS};
 pub use grants::{
     administrator_ceiling, capability_set, session_baseline, ADMINISTRATIVE_SET, AUDIOD_CEILING,
     CONFD_CEILING, DEVMGR_CEILING, DISCOVERYD_CEILING, FONTD_CEILING, LOGIN_CEILING,
-    NETSTACK_CEILING, SEATMGR_CEILING, SESSION_BASELINE, SETTINGSD_CEILING, SOUNDD_CEILING,
-    SYSINFOD_CEILING, THERMALD_CEILING, TIMED_CEILING,
+    NETSTACK_CEILING, SEATMGR_CEILING, SESSION_BASELINE, SETTINGSD_CEILING, SMBFS_CEILING,
+    SOUNDD_CEILING, SYSINFOD_CEILING, THERMALD_CEILING, TIMED_CEILING,
 };
 pub use groups::{
-    GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPNAME_LEN, MAX_GROUPS, MAX_GROUPS_DB_LEN,
-    MAX_GROUP_LINE_LEN, STORAGE_GID, STORAGE_GROUP,
+    GroupRecord, GroupView, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPNAME_LEN, MAX_GROUPS,
+    MAX_GROUPS_DB_LEN, MAX_GROUP_LINE_LEN, STORAGE_GID, STORAGE_GROUP,
 };
 pub use home::provision_home_shape;
 pub use password::{
@@ -76,18 +76,20 @@ pub use policy::{
     HOME_SUBDIRS,
 };
 pub use provision::{
-    is_system_account_name, is_system_group_name, system_account_directory, system_account_uid,
-    system_accounts, system_groups, AUDIOD_UID, AUDIOD_USERNAME, CONFD_UID, CONFD_USERNAME,
-    DEVMGR_UID, DEVMGR_USERNAME, DISCOVERYD_UID, DISCOVERYD_USERNAME, FONTD_UID, FONTD_USERNAME,
-    GREETER_UID, GREETER_USERNAME, LOGIN_UID, LOGIN_USERNAME, NETSTACK_UID, NETSTACK_USERNAME,
-    SEATMGR_UID, SEATMGR_USERNAME, SERVICES_GID, SERVICES_GROUP, SETTINGSD_UID, SETTINGSD_USERNAME,
-    SOUNDD_UID, SOUNDD_USERNAME, SYSINFOD_UID, SYSINFOD_USERNAME, SYSTEM_GID, SYSTEM_GROUP,
-    SYSTEM_UID, SYSTEM_USERNAME, THERMALD_UID, THERMALD_USERNAME, TIMED_UID, TIMED_USERNAME,
+    is_system_account_name, is_system_group_name, system_account_directory,
+    system_account_identity, system_account_uid, system_accounts, system_group_directory,
+    system_groups, AUDIOD_UID, AUDIOD_USERNAME, CONFD_UID, CONFD_USERNAME, DEVMGR_UID,
+    DEVMGR_USERNAME, DISCOVERYD_UID, DISCOVERYD_USERNAME, FONTD_UID, FONTD_USERNAME, GREETER_UID,
+    GREETER_USERNAME, LOGIN_UID, LOGIN_USERNAME, NETSTACK_UID, NETSTACK_USERNAME, SEATMGR_UID,
+    SEATMGR_USERNAME, SERVICES_GID, SERVICES_GROUP, SETTINGSD_UID, SETTINGSD_USERNAME, SMBFS_UID,
+    SMBFS_USERNAME, SOUNDD_UID, SOUNDD_USERNAME, SYSINFOD_UID, SYSINFOD_USERNAME, SYSTEM_GID,
+    SYSTEM_GROUP, SYSTEM_UID, SYSTEM_USERNAME, THERMALD_UID, THERMALD_USERNAME, TIMED_UID,
+    TIMED_USERNAME,
 };
 pub use record::{
     valid_display_name, valid_path, valid_username, AccountState, Gid, Identity, Uid, UserRecord,
-    FIELD_SEPARATOR, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
-    NO_PATH_MARKER,
+    UserView, FIELD_SEPARATOR, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
+    MAX_USERNAME_LEN, NO_PATH_MARKER,
 };
 pub use settings::{
     default_dir_security, document_dir, provision_default_dirs, provision_settings_dirs,
@@ -149,6 +151,8 @@ pub enum ParseError {
     DuplicateGroupId,
     /// The group database exceeds [`MAX_GROUPS`] records.
     TooManyGroups,
+    /// The heap could not hold a record or a database text.
+    OutOfMemory,
 }
 
 /// A refused database text, and the line that raised the refusal.
@@ -180,6 +184,7 @@ impl fmt::Display for ParseError {
             Self::DuplicateGroupName => "groups database repeats a group name",
             Self::DuplicateGroupId => "groups database repeats a gid",
             Self::TooManyGroups => "groups database exceeds the record budget",
+            Self::OutOfMemory => "users database could not be held in memory",
         };
         f.write_str(message)
     }
@@ -201,6 +206,10 @@ impl fmt::Display for AuthError {
         f.write_str("invalid credentials")
     }
 }
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 #[cfg(test)]
 mod tests {

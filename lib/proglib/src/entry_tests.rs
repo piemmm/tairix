@@ -15,13 +15,13 @@ fn long(len: usize) -> String {
 
 #[test]
 fn the_users_view_leaf_matches_the_account_home_layout() {
-    let home = tairix_users::default_home("ada");
+    let home = tairix_users::default_home("ada").expect("held");
     assert_eq!(home, alloc::format!("/{USERS_VIEW_LEAF}/ada"));
 }
 
 #[test]
 fn every_program_store_path_definition_is_admitted() {
-    let home = tairix_users::default_home("ada");
+    let home = tairix_users::default_home("ada").expect("held");
     let app = tairix_abi::BUNDLE_SUFFIX;
     for path in [
         alloc::format!("{}/Editor{app}", tairix_abi::SYSTEM_APPLICATION_STORE),

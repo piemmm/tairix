@@ -147,6 +147,7 @@ fn watched_volume() -> (CachedFs<RwMockFs>, Arc<VolumeWatch>, NodeId, u64) {
         unpressured(),
         sink,
     )
+    .expect("a cache")
     .with_watch(claim);
     let root = fs.root();
     let watcher = arm(&table, root);

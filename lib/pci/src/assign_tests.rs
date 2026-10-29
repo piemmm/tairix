@@ -462,6 +462,80 @@ fn a_window_is_the_aligned_sum_of_what_it_holds() {
     assert_eq!(align_up(u64::MAX, 0x1000), None);
 }
 
+/// A window folds what it holds in the order asked among equal alignments,
+/// however many it holds, its one reservation the only allocation.
+///
+/// Regression: the sizes were sorted stably, and a stable sort past 4 KiB
+/// takes its scratch from the heap infallibly.
+#[test]
+fn a_window_of_many_requests_takes_only_its_reservation() {
+    let requests: Vec<Request> = (0..300u64)
+        .map(|at| Request {
+            space: Space::Memory,
+            size: 0x800 << (at % 2),
+            align: 0x1000,
+            owner: 0,
+            item: Item::Bar(0),
+        })
+        .collect();
+    let in_order = requests
+        .iter()
+        .try_fold(0u64, |offset, r| {
+            align_up(offset, r.align)?.checked_add(r.size)
+        })
+        .and_then(|end| align_up(end, MEMORY_GRANULE))
+        .unwrap();
+    let (span, metering) =
+        tairix_fuzzseed::meter::metered(|| span_of(requests.iter(), MEMORY_GRANULE));
+    assert_eq!(
+        span,
+        Ok(Span::Of {
+            size: in_order,
+            align: MEMORY_GRANULE
+        })
+    );
+    assert_eq!(metering.allocations, 1);
+}
+
+/// Many BARs of one alignment are placed in the order asked, taking from the
+/// heap nothing past what the placement reserves for its order.
+///
+/// Regression: they were sorted stably, and a stable sort past 4 KiB takes
+/// its scratch from the heap infallibly.
+#[test]
+fn many_bars_of_one_alignment_are_placed_in_the_order_asked() {
+    let pci = pci((0..32u8)
+        .map(|device| {
+            (0..4).fold(Device::endpoint((device, 0)), |endpoint, slot| {
+                endpoint.memory(slot, 0x1000, false, false)
+            })
+        })
+        .collect());
+    let mut assignment = Assignment {
+        pci: &pci,
+        nodes: Vec::new(),
+        unplaced: 0,
+    };
+    let (roots, _) = assignment.walk(&(0..=255)).unwrap();
+    let requests = assignment.requests_of(&roots).unwrap();
+    assert_eq!(requests.len(), 128);
+    let order = core::mem::size_of::<(core::cmp::Reverse<u64>, usize)>() * requests.len();
+    let placed = tairix_fuzzseed::meter::refusing_above(order, || {
+        assignment.place(requests, windows().memory, 0)
+    });
+    assert_eq!(placed, Ok(()));
+    let bases: Vec<u64> = assignment
+        .nodes
+        .iter()
+        .flat_map(|node| node.placed.iter().map(|base| base.unwrap()))
+        .collect();
+    assert_eq!(bases.len(), 128);
+    assert!(
+        bases.windows(2).all(|pair| pair[0] < pair[1]),
+        "in the order asked"
+    );
+}
+
 /// QEMU `virt`'s root bus with no 64-bit window in reach: two virtio
 /// functions, each a 32-bit BAR1 and a 64-bit prefetchable BAR4, share the
 /// 32-bit window without overlapping.

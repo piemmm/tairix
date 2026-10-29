@@ -46,7 +46,12 @@ fn nothing_can_be_stored_in_the_storage_catalog() {
         vfs.mkdir(&admin, &p("/Storage/stick"), Mode::from_bits(0o755)),
         Err(VfsError::ReadOnly)
     );
-    let catalog = vfs.mounts().resolve(&p("/Storage/stick")).path().clone();
+    let catalog = vfs
+        .mounts()
+        .resolve(&p("/Storage/stick"))
+        .path()
+        .owned()
+        .expect("held");
     assert_eq!(catalog, p("/Storage"));
     assert_eq!(
         vfs.mounts().resolve(&p("/Users/alice")).path(),

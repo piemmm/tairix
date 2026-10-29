@@ -1267,6 +1267,73 @@ where
         self.aspaces.read().limits(caller.process()).get(kind).soft
     }
 
+    /// Make the channel a filesystem server serves over: an endpoint in the
+    /// served range, so the kernel is its only caller, holding `capacity`
+    /// calls, and a `window_len`-byte window mapped into the server and held
+    /// by the kernel.
+    fn make_serve_channel(
+        &self,
+        caller: &CallerContext<'_>,
+        capacity: usize,
+        window_len: usize,
+    ) -> Result<MadeChannel, Errno> {
+        use tairix_abi::fsserve::{FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX};
+        if window_len == 0 || !window_len.is_multiple_of(PAGE_SIZE) {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let pages = u64::try_from(window_len / PAGE_SIZE).map_err(|_| Errno::OutOfRange)?;
+        let limits = CallEndpointLimits {
+            max_request: u32::try_from(FSSERVE_REQUEST_MAX).map_err(|_| Errno::OutOfRange)?,
+            max_reply: u32::try_from(FSSERVE_REPLY_MAX).map_err(|_| Errno::OutOfRange)?,
+            capacity,
+        };
+        let id = crate::fs::served::mint_served_endpoint().ok_or(Errno::NoSpace)?;
+        let queue_limit = self.soft_limit(caller, LimitKind::IpcQueueBytes);
+        let endpoint = alloc::sync::Arc::try_new(CallEndpoint::create_served(
+            EndpointId(id),
+            caller.caps,
+            limits,
+            queue_limit,
+            self.audit,
+        )?)
+        .map_err(|_| Errno::OutOfMemory)?;
+        crate::callreg::register(alloc::sync::Arc::clone(&endpoint), self.audit)?;
+        let (base, region) =
+            match crate::sharedreg::create(self.shared_mem_facility, caller.process(), pages) {
+                Ok(made) => made,
+                Err(err) => {
+                    self.unbind_served(id);
+                    return Err(err);
+                }
+            };
+        self.publish_region_mapping(caller.process(), base, pages);
+        let window = match crate::sharedreg::kernel_hold(self.shared_mem_facility, region) {
+            Ok(window) => window,
+            Err(err) => {
+                self.unmake_serve_channel(caller, id, base);
+                return Err(err);
+            }
+        };
+        Ok(MadeChannel {
+            endpoint: id,
+            window: base,
+            channel: crate::fs::ServeChannel { endpoint, window },
+        })
+    }
+
+    /// Undo [`Self::make_serve_channel`] for a server nothing was served to.
+    fn unmake_serve_channel(&self, caller: &CallerContext<'_>, endpoint: u64, window: u64) {
+        self.release_shared_mapping(caller.process(), window);
+        self.unbind_served(endpoint);
+    }
+
+    /// Take the served endpoint `endpoint` out of the registry and down.
+    fn unbind_served(&self, endpoint: u64) {
+        if let Some(endpoint) = crate::callreg::unregister(EndpointId(endpoint)) {
+            endpoint.destroy(self.audit);
+        }
+    }
+
     /// Whether `caller` holds the per-endpoint grant `ep` demands of its
     /// posters, if it demands one.
     fn passes_endpoint_restriction(
@@ -6171,6 +6238,24 @@ fn copy_fault_errno(_err: UaccessError) -> Errno {
     Errno::BadAddress
 }
 
+/// A channel made for a filesystem server, as its grant names it.
+struct MadeChannel {
+    /// The endpoint's id.
+    endpoint: u64,
+    /// Where the window is mapped in the server.
+    window: u64,
+    channel: crate::fs::ServeChannel,
+}
+
+/// The kernel-attested facts a volume decision about `caller` is made on.
+fn principal<'a>(caller: &CallerContext<'a>) -> crate::fs::Principal<'a> {
+    crate::fs::Principal {
+        uid: caller.caps.owner().0,
+        gid: caller.caps.primary_gid().0,
+        caps: caller.caps.effective(),
+    }
+}
+
 /// The number of whole `record_len`-byte records that fit in `out_cap`.
 ///
 /// The one shared cap every record-paged `sysinfo_introspect` domain applies:
@@ -8878,7 +8963,9 @@ where
             None => return Err(Errno::BadAddress),
         }
         let decoded = tairix_abi::volume::VolumeDetachRequest::decode(&payload)?;
-        self.volume_service.detach(&decoded).map(|()| 0)
+        self.volume_service
+            .detach(&decoded, &principal(caller))
+            .map(|()| 0)
     }
 
     fn volume_read(
@@ -8970,8 +9057,7 @@ where
         grant_cap: usize,
     ) -> SyscallResult {
         use tairix_abi::fsserve::{
-            ServeFrame, ServeGrant, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX, FSSERVE_WINDOW_LEN,
-            SERVE_FRAME_LEN, SERVE_GRANT_LEN,
+            ServeFrame, ServeGrant, FSSERVE_WINDOW_LEN, SERVE_FRAME_LEN, SERVE_GRANT_LEN,
         };
         self.serves_volume(caller, volume)?;
         if frame_len != SERVE_FRAME_LEN {
@@ -8986,59 +9072,179 @@ where
         if grant_cap < SERVE_GRANT_LEN {
             return Err(Errno::BufferTooSmall);
         }
+        let window_len = u32::try_from(FSSERVE_WINDOW_LEN).map_err(|_| Errno::OutOfRange)?;
         // Built only for a volume that awaits its driver; the bind decides
         // again, atomically, once they exist.
         self.volume_service.awaiting_server(volume)?;
-        let id = crate::fs::served::mint_served_endpoint().ok_or(Errno::NoSpace)?;
-        let limits = CallEndpointLimits {
-            max_request: u32::try_from(FSSERVE_REQUEST_MAX).map_err(|_| Errno::OutOfRange)?,
-            max_reply: u32::try_from(FSSERVE_REPLY_MAX).map_err(|_| Errno::OutOfRange)?,
-            capacity: crate::fs::served::SERVED_ENDPOINT_CAPACITY,
-        };
-        let queue_limit = self.soft_limit(caller, LimitKind::IpcQueueBytes);
-        let endpoint = alloc::sync::Arc::try_new(CallEndpoint::create_served(
-            EndpointId(id),
-            caller.caps,
-            limits,
-            queue_limit,
-            self.audit,
-        )?)
-        .map_err(|_| Errno::OutOfMemory)?;
-        crate::callreg::register(alloc::sync::Arc::clone(&endpoint), self.audit)?;
-        let unbind = || {
-            if let Some(endpoint) = crate::callreg::unregister(EndpointId(id)) {
-                endpoint.destroy(self.audit);
-            }
-        };
-        let pages = (FSSERVE_WINDOW_LEN / PAGE_SIZE) as u64;
-        let (base_va, region) =
-            crate::sharedreg::create(self.shared_mem_facility, caller.process(), pages)
-                .inspect_err(|_| unbind())?;
-        self.publish_region_mapping(caller.process(), base_va, pages);
-        let unmap = || {
-            self.release_shared_mapping(caller.process(), base_va);
-            unbind();
-        };
-        let window = crate::sharedreg::kernel_hold(self.shared_mem_facility, region)
-            .inspect_err(|_| unmap())?;
+        let made = self.make_serve_channel(
+            caller,
+            crate::fs::served::LANE_ENDPOINT_CAPACITY,
+            FSSERVE_WINDOW_LEN,
+        )?;
+        let (endpoint, base) = (made.endpoint, made.window);
         // Written before the bind, so a driver that cannot receive its grant
         // never leaves a volume served by nobody.
         let answer = ServeGrant {
-            endpoint: id,
-            window: base_va,
-            window_len: u32::try_from(FSSERVE_WINDOW_LEN).map_err(|_| Errno::OutOfRange)?,
+            endpoint,
+            window: base,
+            window_len,
         }
         .encode();
         if let Err(err) = self.copy_out_user(caller, grant, &answer) {
-            unmap();
+            self.unmake_serve_channel(caller, endpoint, base);
             return Err(err);
         }
-        let channel = crate::fs::ServeChannel { endpoint, window };
-        if let Err(err) = self.volume_service.serve(volume, &offer, channel) {
-            unmap();
+        if let Err(err) = self.volume_service.serve(volume, &offer, made.channel) {
+            self.unmake_serve_channel(caller, endpoint, base);
             return Err(err);
         }
         Ok(SERVE_GRANT_LEN as u64)
+    }
+
+    fn fsserve_offer(
+        &self,
+        caller: &CallerContext<'_>,
+        frame: u64,
+        frame_len: usize,
+        grant: u64,
+        grant_cap: usize,
+    ) -> SyscallResult {
+        use tairix_abi::fsserve::ServeGrant;
+        use tairix_abi::netattach::{NetworkOffer, OfferGrant, NETWORK_OFFER_MAX, OFFER_GRANT_LEN};
+        if frame_len > NETWORK_OFFER_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut bytes = [0u8; NETWORK_OFFER_MAX];
+        let bytes = &mut bytes[..frame_len];
+        self.copy_in_user(caller, frame, bytes)?;
+        let offer = NetworkOffer::decode(bytes)?;
+        if grant_cap < OFFER_GRANT_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // A network volume's identity is derived from its server's, so only a
+        // server the kernel admitted from a signed bundle may offer one.
+        let app = caller.caps.app_identity().ok_or(Errno::PermissionDenied)?;
+        let window_len = u32::try_from(offer.lanes.window_len()).map_err(|_| Errno::OutOfRange)?;
+        let capacity = crate::fs::served::LANE_ENDPOINT_CAPACITY
+            .checked_mul(offer.lanes.count())
+            .ok_or(Errno::OutOfRange)?;
+        let id = crate::fs::served::mint_offer().ok_or(Errno::NoSpace)?;
+        let made = self.make_serve_channel(caller, capacity, offer.lanes.window_len())?;
+        let (endpoint, base) = (made.endpoint, made.window);
+        // Written before the offer is held, so a server that cannot receive
+        // its grant never leaves an offer nobody serves.
+        let answer = OfferGrant {
+            grant: ServeGrant {
+                endpoint,
+                window: base,
+                window_len,
+            },
+            offer: id,
+        }
+        .encode();
+        if let Err(err) = self.copy_out_user(caller, grant, &answer) {
+            self.unmake_serve_channel(caller, endpoint, base);
+            return Err(err);
+        }
+        let server = crate::fs::OfferingServer {
+            process: caller.process().0,
+            app,
+        };
+        if let Err(err) = self.volume_service.offer(&server, &offer, id, made.channel) {
+            self.unmake_serve_channel(caller, endpoint, base);
+            return Err(err);
+        }
+        Ok(OFFER_GRANT_LEN as u64)
+    }
+
+    fn fsserve_attach(
+        &self,
+        caller: &CallerContext<'_>,
+        offer: u64,
+        frame: u64,
+        frame_len: usize,
+        reply: u64,
+        reply_cap: usize,
+    ) -> SyscallResult {
+        use tairix_abi::netattach::{NetworkAttach, OfferId, ATTACH_REPLY_LEN, NETWORK_ATTACH_MAX};
+        if frame_len > NETWORK_ATTACH_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut bytes = [0u8; NETWORK_ATTACH_MAX];
+        let bytes = &mut bytes[..frame_len];
+        self.copy_in_user(caller, frame, bytes)?;
+        let attach = NetworkAttach::decode(bytes)?;
+        if reply_cap < ATTACH_REPLY_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Proven writable first, so a reply that cannot land is refused before
+        // anything is attached.
+        self.copy_out_user(caller, reply, &[0u8; ATTACH_REPLY_LEN])?;
+        let offer = OfferId::new(offer).ok_or(Errno::NotFound)?;
+        let who = principal(caller);
+        let attached = self.volume_service.attach_offered(&who, offer, &attach)?;
+        if let Err(err) = self.copy_out_user(caller, reply, &attached.encode()) {
+            let undo = tairix_abi::volume::VolumeDetachRequest {
+                volume_id: attached.volume_id,
+                force: true,
+            };
+            let _ = self.volume_service.detach(&undo, &who);
+            return Err(err);
+        }
+        Ok(ATTACH_REPLY_LEN as u64)
+    }
+
+    fn fsserve_ctl(
+        &self,
+        caller: &CallerContext<'_>,
+        offer: u64,
+        op: tairix_abi::netattach::FsserveCtl,
+    ) -> SyscallResult {
+        let offer = tairix_abi::netattach::OfferId::new(offer).ok_or(Errno::NotFound)?;
+        self.volume_service
+            .offer_ctl(caller.process().0, offer, op)
+            .map(|()| 0)
+    }
+
+    fn view_bind(
+        &self,
+        caller: &CallerContext<'_>,
+        request: u64,
+        request_len: usize,
+    ) -> SyscallResult {
+        use tairix_abi::volume::{ViewBindRequest, VIEW_BIND_MAX};
+        if request_len > VIEW_BIND_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut bytes = [0u8; VIEW_BIND_MAX];
+        let bytes = &mut bytes[..request_len];
+        self.copy_in_user(caller, request, bytes)?;
+        let request = ViewBindRequest::decode(bytes)?;
+        self.filesystem
+            .view_bind(caller.caps.owner().0, caller.caps.effective(), &request)
+            .map(|()| 0)
+    }
+
+    fn view_unbind(
+        &self,
+        caller: &CallerContext<'_>,
+        target: u64,
+        target_len: usize,
+    ) -> SyscallResult {
+        use tairix_abi::sysinfo::MOUNT_TARGET_MAX;
+        if target_len > MOUNT_TARGET_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut bytes = [0u8; MOUNT_TARGET_MAX];
+        let bytes = &mut bytes[..target_len];
+        self.copy_in_user(caller, target, bytes)?;
+        let target = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
+        if !tairix_abi::volume::is_binding_path(target) {
+            return Err(Errno::OutOfRange);
+        }
+        self.filesystem
+            .view_unbind(caller.caps.owner().0, caller.caps.effective(), target)
+            .map(|()| 0)
     }
 
     fn file_unmap(&self, caller: &CallerContext<'_>, base: u64, len: u64) -> SyscallResult {
@@ -55402,7 +55608,9 @@ mod tests {
         assert_eq!(write_fd(&h, &ctx, fd, 0, b"one"), Ok(3));
         let handle = tairix_abi::driver::DriverHandle::from_raw(9).expect("handle");
         let vfs = fx.mounted.vfs().expect("installed");
-        vfs.mounts_write().detach(handle).expect("detach");
+        vfs.mounts_write()
+            .detach(handle, crate::fs::BindsWithin::Refuse)
+            .expect("detach");
         drop(fx.mounted.unregister(handle));
         assert_eq!(read_fd(&h, &ctx, fd, 0, 3), Err(Errno::Stale));
         let returning = crate::fs::CachedFs::new(
@@ -55411,7 +55619,8 @@ mod tests {
             tairix_reclaim::ReclaimOwner::FilesystemVolume { volume: 9 },
             crate::test_pressure::unpressured(),
             sink,
-        );
+        )
+        .expect("a cache");
         fx.mounted
             .register(handle, returning, "vol", "memfs", [0xC6; 16], None)
             .expect("another volume registers");
@@ -57870,6 +58079,393 @@ mod tests {
 
         assert_eq!(ep.outstanding(), 0, "every ticket is retired");
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// What a [`Recording`] volume service was asked.
+    #[derive(Default)]
+    struct Asked {
+        /// A detach's caller: its uid, group and mount authority.
+        detach: Option<(u32, u32, bool)>,
+        /// An attach's caller and the offer it named.
+        attach: Option<(u32, u32, bool, u64)>,
+        /// A server's word on an offer: its process, the offer and the op.
+        ctl: Option<(u64, u64, tairix_abi::netattach::FsserveCtl)>,
+        /// An offer's server process and application.
+        offer: Option<u64>,
+    }
+
+    /// A volume service that records what a handler hands it.
+    #[derive(Default)]
+    struct Recording(tairix_sync::SpinLock<Asked>);
+
+    impl VolumeService for Recording {
+        fn attach(
+            &self,
+            _request: &tairix_abi::volume::VolumeAttachRequest<'_>,
+            _publisher: Option<u32>,
+        ) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn detach(
+            &self,
+            _request: &tairix_abi::volume::VolumeDetachRequest,
+            caller: &crate::fs::Principal<'_>,
+        ) -> Result<(), Errno> {
+            self.0.lock().detach = Some((caller.uid, caller.gid, caller.may_mount()));
+            Ok(())
+        }
+
+        fn read(
+            &self,
+            _volume: u64,
+            _lba: u64,
+            _len: usize,
+            _deliver: &mut crate::fs::ChunkSink<'_>,
+        ) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn write(
+            &self,
+            _volume: u64,
+            _lba: u64,
+            _len: usize,
+            _fill: &mut crate::fs::ChunkSource<'_>,
+        ) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn ctl(
+            &self,
+            _volume: u64,
+            _ctl: &tairix_abi::volume::VolumeCtl,
+        ) -> Result<Option<tairix_abi::volume::VolumeInfo>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn awaiting_server(&self, _volume: u64) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn serve(
+            &self,
+            _volume: u64,
+            _offer: &tairix_abi::fsserve::ServeOffer,
+            _channel: crate::fs::ServeChannel,
+        ) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn refuse(&self, _volume: u64, _why: tairix_abi::DriverError) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn offer(
+            &self,
+            server: &crate::fs::OfferingServer<'_>,
+            _offer: &tairix_abi::netattach::NetworkOffer<'_>,
+            _id: tairix_abi::netattach::OfferId,
+            _channel: crate::fs::ServeChannel,
+        ) -> Result<(), Errno> {
+            self.0.lock().offer = Some(server.process);
+            Ok(())
+        }
+
+        fn attach_offered(
+            &self,
+            caller: &crate::fs::Principal<'_>,
+            offer: tairix_abi::netattach::OfferId,
+            _attach: &tairix_abi::netattach::NetworkAttach<'_>,
+        ) -> Result<tairix_abi::netattach::AttachReply, Errno> {
+            self.0.lock().attach = Some((caller.uid, caller.gid, caller.may_mount(), offer.get()));
+            tairix_abi::netattach::AttachReply::new([0x42; 16], "share")
+        }
+
+        fn offer_ctl(
+            &self,
+            server: u64,
+            offer: tairix_abi::netattach::OfferId,
+            op: tairix_abi::netattach::FsserveCtl,
+        ) -> Result<(), Errno> {
+            self.0.lock().ctl = Some((server, offer.get(), op));
+            Ok(())
+        }
+    }
+
+    /// A caller of the volume syscalls with one page of its own at `0x1000`.
+    struct VolumeCaller {
+        owner: u64,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        caps: TaskCapabilities,
+    }
+
+    impl VolumeCaller {
+        /// Uid 1000 holding `items`, running the application `app`.
+        fn new(
+            items: &[CapabilityId],
+            app: Option<tairix_abi::AppIdentity>,
+            sink: &(dyn Sink + Sync),
+        ) -> Self {
+            let owner = crate::test_boot::claim_task();
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+            aspaces
+                .write()
+                .register(ProcessId(owner), space, physmap)
+                .expect("registration succeeds");
+            let caps = make_caps_record(owner, items, sink);
+            let caps = match app {
+                Some(app) => caps.with_app_identity(app),
+                None => caps,
+            };
+            Self {
+                owner,
+                table: RwLock::new(CapTable::new()),
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                caps,
+            }
+        }
+
+        fn context(&self) -> CallerContext<'_> {
+            CallerContext {
+                task_id: SecTaskId(self.owner),
+                caps: &self.caps,
+            }
+        }
+
+        fn handlers<'a>(
+            &'a self,
+            sched: &'a Scheduler<TestArch>,
+            arch: &'a Arc<TestArch>,
+            sink: &'a (dyn Sink + Sync),
+            service: &'static Recording,
+        ) -> KernelSyscallHandlers<'a, TestArch> {
+            KernelSyscallHandlers::new(
+                sched,
+                &self.table,
+                arch,
+                sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+            .with_volume_service(service)
+        }
+    }
+
+    /// An offer of a share for uid 1000 a server could make.
+    fn network_offer() -> Vec<u8> {
+        let offer = tairix_abi::netattach::NetworkOffer {
+            serve: tairix_abi::fsserve::ServeOffer {
+                root: tairix_abi::driver::filesystem::NodeId::from_raw(1),
+                name_matching: tairix_abi::driver::filesystem::NameMatching::AsciiCaseInsensitive,
+                node_identity: tairix_abi::driver::filesystem::NodeIdentity::Stable,
+                attrs: false,
+                write_refusal: None,
+                format: tairix_abi::volume::FormatName::Smb3,
+            },
+            for_uid: 1000,
+            key: *b"0123456789abcdef",
+            lanes: tairix_abi::fsserve::Lanes::ONE,
+            source: "//nas/share",
+        };
+        let mut frame = alloc::vec![0u8; tairix_abi::netattach::NETWORK_OFFER_MAX];
+        let len = offer.encode(&mut frame).expect("encodes");
+        frame.truncate(len);
+        frame
+    }
+
+    #[test]
+    fn an_offer_is_refused_before_anything_is_made_for_it() {
+        use tairix_abi::netattach::{NETWORK_OFFER_MAX, OFFER_GRANT_LEN};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let recorder: &'static Recording = crate::forever(Box::new(Recording::default()));
+        let caller = VolumeCaller::new(&[CapabilityId::FS_SERVE], None, sink);
+        let h = caller.handlers(&sched, &arch, sink, recorder);
+        let ctx = caller.context();
+        let frame = network_offer();
+        h.copy_out_user(&ctx, 0x1000, &frame).expect("staged");
+        assert_eq!(
+            h.fsserve_offer(&ctx, 0x1000, NETWORK_OFFER_MAX + 1, 0x1800, OFFER_GRANT_LEN),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.fsserve_offer(&ctx, 0x1000, frame.len() - 1, 0x1800, OFFER_GRANT_LEN),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.fsserve_offer(&ctx, 0x1000, frame.len(), 0x1800, OFFER_GRANT_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.fsserve_offer(&ctx, 0x1000, frame.len(), 0x1800, OFFER_GRANT_LEN),
+            Err(Errno::PermissionDenied),
+            "a volume's identity is its server's, so only an attested server offers one"
+        );
+        assert_eq!(recorder.0.lock().offer, None);
+    }
+
+    #[test]
+    fn an_attach_hands_the_service_its_callers_attested_authority() {
+        use tairix_abi::netattach::{
+            AttachReply, NetworkAttach, Presentation, ATTACH_REPLY_LEN, NETWORK_ATTACH_MAX,
+        };
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let recorder: &'static Recording = crate::forever(Box::new(Recording::default()));
+        let caller = VolumeCaller::new(&[CapabilityId::FS_MOUNT], None, sink);
+        let h = caller.handlers(&sched, &arch, sink, recorder);
+        let ctx = caller.context();
+        let attach = NetworkAttach {
+            name: "share",
+            presentation: Presentation::Private,
+            read_only: false,
+            target: None,
+        };
+        let mut frame = [0u8; NETWORK_ATTACH_MAX];
+        let len = attach.encode(&mut frame).expect("encodes");
+        h.copy_out_user(&ctx, 0x1000, &frame[..len])
+            .expect("staged");
+        assert_eq!(
+            h.fsserve_attach(&ctx, 0, 0x1000, len, 0x1800, ATTACH_REPLY_LEN),
+            Err(Errno::NotFound),
+            "no offer is numbered zero"
+        );
+        assert_eq!(
+            h.fsserve_attach(&ctx, 5, 0x1000, len, 0x1800, ATTACH_REPLY_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.fsserve_attach(&ctx, 5, 0x1000, len, 0x9000, ATTACH_REPLY_LEN),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(
+            recorder.0.lock().attach,
+            None,
+            "a reply that cannot land attaches nothing"
+        );
+        assert_eq!(
+            h.fsserve_attach(&ctx, 5, 0x1000, len, 0x1800, ATTACH_REPLY_LEN),
+            Ok(ATTACH_REPLY_LEN as u64)
+        );
+        assert_eq!(recorder.0.lock().attach, Some((1000, 0, true, 5)));
+        let mut reply = [0u8; ATTACH_REPLY_LEN];
+        h.copy_in_user(&ctx, 0x1800, &mut reply)
+            .expect("reads back");
+        assert_eq!(
+            AttachReply::decode(&reply).map(|reply| reply.volume_id),
+            Ok([0x42; 16])
+        );
+    }
+
+    #[test]
+    fn a_detach_and_a_servers_word_carry_who_asks() {
+        use tairix_abi::netattach::FsserveCtl;
+        use tairix_abi::volume::{VolumeDetachRequest, VOLUME_DETACH_LEN};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let recorder: &'static Recording = crate::forever(Box::new(Recording::default()));
+        let caller = VolumeCaller::new(&[], None, sink);
+        let h = caller.handlers(&sched, &arch, sink, recorder);
+        let ctx = caller.context();
+        let mut frame = [0u8; VOLUME_DETACH_LEN];
+        VolumeDetachRequest {
+            volume_id: [9; 16],
+            force: false,
+        }
+        .encode(&mut frame)
+        .expect("encodes");
+        h.copy_out_user(&ctx, 0x1000, &frame).expect("staged");
+        assert_eq!(h.volume_detach(&ctx, 0x1000, VOLUME_DETACH_LEN), Ok(0));
+        assert_eq!(
+            recorder.0.lock().detach,
+            Some((1000, 0, false)),
+            "the service decides on the caller's own authority"
+        );
+        assert_eq!(h.fsserve_ctl(&ctx, 7, FsserveCtl::Alive), Ok(0));
+        assert_eq!(
+            recorder.0.lock().ctl,
+            Some((caller.owner, 7, FsserveCtl::Alive))
+        );
+        assert_eq!(
+            h.fsserve_ctl(&ctx, 0, FsserveCtl::Withdraw),
+            Err(Errno::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_view_bind_and_unbind_are_held_to_their_frames() {
+        use tairix_abi::sysinfo::MOUNT_TARGET_MAX;
+        use tairix_abi::volume::{ViewBindRequest, VIEW_BIND_MAX};
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let recorder: &'static Recording = crate::forever(Box::new(Recording::default()));
+        let caller = VolumeCaller::new(&[], None, sink);
+        let h = caller.handlers(&sched, &arch, sink, recorder);
+        let ctx = caller.context();
+        let request = ViewBindRequest {
+            volume_id: [9; 16],
+            subtree: "/",
+            target: "/Users/ann/nas",
+            narrowing: tairix_abi::driver::filesystem::MountFlags::default(),
+        };
+        let mut frame = [0u8; VIEW_BIND_MAX];
+        let len = request.encode(&mut frame).expect("encodes");
+        h.copy_out_user(&ctx, 0x1000, &frame[..len])
+            .expect("staged");
+        assert_eq!(
+            h.view_bind(&ctx, 0x1000, VIEW_BIND_MAX + 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.view_bind(&ctx, 0x1000, len - 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.view_bind(&ctx, 0x1000, len),
+            Err(Errno::NotImplemented),
+            "a well-formed request reaches the filesystem service"
+        );
+        for (target, refused) in [
+            (&b"Users/ann/nas"[..], Errno::OutOfRange),
+            (b"/Users/\xFF", Errno::OutOfRange),
+            (b"/Users/a\nn", Errno::OutOfRange),
+        ] {
+            h.copy_out_user(&ctx, 0x1000, target).expect("staged");
+            assert_eq!(h.view_unbind(&ctx, 0x1000, target.len()), Err(refused));
+        }
+        assert_eq!(
+            h.view_unbind(&ctx, 0x1000, MOUNT_TARGET_MAX + 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        h.copy_out_user(&ctx, 0x1000, b"/Users/ann/nas")
+            .expect("staged");
+        assert_eq!(
+            h.view_unbind(&ctx, 0x1000, "/Users/ann/nas".len()),
+            Err(Errno::NotImplemented)
+        );
     }
 }
 

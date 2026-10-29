@@ -22,7 +22,7 @@
 //!   and the boot floor holds none.
 //! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`, `login`,
 //!   `netstack`, `fontd`, `greeter`, `confd`, `timed`, `audiod`, `discoveryd`,
-//!   `soundd`, `settingsd`, `thermald`),
+//!   `soundd`, `settingsd`, `thermald`, `smbfs`),
 //!   each with its own uid in the
 //!   system range and primary group [`SERVICES_GROUP`] — never a shared service
 //!   user, so per-service log partitioning, IPC peer attestation, and
@@ -44,12 +44,12 @@
 use alloc::vec::Vec;
 
 use tairix_abi::CapabilityId;
-use tairix_caps::CapabilitySet;
 
 use crate::grants::{
     capability_set, AUDIOD_CEILING, CONFD_CEILING, DEVMGR_CEILING, DISCOVERYD_CEILING,
     FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING,
-    SETTINGSD_CEILING, SOUNDD_CEILING, SYSINFOD_CEILING, THERMALD_CEILING, TIMED_CEILING,
+    SETTINGSD_CEILING, SMBFS_CEILING, SOUNDD_CEILING, SYSINFOD_CEILING, THERMALD_CEILING,
+    TIMED_CEILING,
 };
 use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
@@ -173,6 +173,12 @@ pub const THERMALD_USERNAME: &str = "thermald";
 /// The [`Uid`] of [`THERMALD_USERNAME`].
 pub const THERMALD_UID: Uid = Uid(23);
 
+/// Name of the network-share service account.
+pub const SMBFS_USERNAME: &str = "smbfs";
+
+/// The [`Uid`] of [`SMBFS_USERNAME`].
+pub const SMBFS_UID: Uid = Uid(24);
+
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
 /// set and the name→uid lookup can never diverge.
@@ -292,6 +298,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         display_name: "Cooling Service",
         ceiling: THERMALD_CEILING,
     },
+    SystemAccountSpec {
+        username: SMBFS_USERNAME,
+        uid: SMBFS_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Network Share Service",
+        ceiling: SMBFS_CEILING,
+    },
 ];
 
 /// Resolve a compiled-in system account's name onto its [`Uid`].
@@ -322,6 +335,28 @@ pub fn system_account_directory() -> impl Iterator<Item = (Uid, Gid, &'static st
         .map(|spec| (spec.uid, spec.primary_gid, spec.username))
 }
 
+/// The compiled-in account `uid` names, as its record holds it, built with
+/// nothing from the heap; [`None`] for a uid no system account has.
+#[must_use]
+pub fn system_account_identity(uid: Uid) -> Option<Identity<'static>> {
+    SYSTEM_ACCOUNTS
+        .iter()
+        .find(|spec| spec.uid == uid)
+        .map(no_login_identity)
+}
+
+/// The compiled-in groups as the public group directory lists them — gid
+/// and name, in the order [`system_groups`] holds them — built with nothing
+/// from the heap.
+pub fn system_group_directory() -> impl Iterator<Item = (Gid, &'static str)> {
+    SYSTEM_GROUPS.into_iter()
+}
+
+/// The compiled-in groups: `system` and `services`, exactly the groups the
+/// [`system_accounts`] reference.
+const SYSTEM_GROUPS: [(Gid, &str); 2] =
+    [(SYSTEM_GID, SYSTEM_GROUP), (SERVICES_GID, SERVICES_GROUP)];
+
 /// Whether `name` is a compiled-in system account's username.
 ///
 /// The kernel's identity merge refuses an on-disk account carrying a
@@ -341,29 +376,20 @@ pub fn is_system_group_name(name: &str) -> bool {
     name == SYSTEM_GROUP || name == SERVICES_GROUP
 }
 
-/// Build one no-login record: no home, no shell, the typed
-/// never-authenticates password, and exactly `ceiling` as its grants.
-fn no_login_account(
-    username: &'static str,
-    uid: Uid,
-    primary_gid: Gid,
-    display_name: &'static str,
-    ceiling: CapabilitySet,
-) -> Result<UserRecord, ParseError> {
-    UserRecord::new(
-        Identity {
-            username,
-            uid,
-            primary_gid,
-            supplementary_gids: &[],
-            display_name,
-            home: None,
-            shell: None,
-            capabilities: ceiling,
-            state: AccountState::NoLogin,
-        },
-        StoredPassword::NeverAuthenticates,
-    )
+/// The identity of the no-login account `spec` compiles in: no home, no
+/// shell, and exactly its ceiling as its grants.
+fn no_login_identity(spec: &SystemAccountSpec) -> Identity<'static> {
+    Identity {
+        username: spec.username,
+        uid: spec.uid,
+        primary_gid: spec.primary_gid,
+        supplementary_gids: &[],
+        display_name: spec.display_name,
+        home: None,
+        shell: None,
+        capabilities: capability_set(spec.ceiling),
+        state: AccountState::NoLogin,
+    }
 }
 
 /// The compiled-in system accounts, in stable order: `system`, then one
@@ -375,25 +401,25 @@ fn no_login_account(
 ///
 /// # Errors
 ///
-/// The matching [`ParseError`] should any compiled record violate the
-/// format invariants — unreachable by construction (pinned by the tests
-/// below), but the consumer fails closed rather than panicking.
+/// [`ParseError::OutOfMemory`] when the heap cannot hold them. A compiled
+/// record violating the format invariants is unreachable by construction
+/// (pinned by the tests below), but the consumer fails closed rather than
+/// panicking.
 pub fn system_accounts() -> Result<Vec<UserRecord>, ParseError> {
-    let mut records = Vec::with_capacity(SYSTEM_ACCOUNTS.len());
+    let mut records = Vec::new();
+    records
+        .try_reserve_exact(SYSTEM_ACCOUNTS.len())
+        .map_err(|_| ParseError::OutOfMemory)?;
     for spec in SYSTEM_ACCOUNTS {
-        records.push(no_login_account(
-            spec.username,
-            spec.uid,
-            spec.primary_gid,
-            spec.display_name,
-            capability_set(spec.ceiling),
+        records.push(UserRecord::new(
+            no_login_identity(spec),
+            StoredPassword::NeverAuthenticates,
         )?);
     }
     Ok(records)
 }
 
-/// The compiled-in system groups: `system` and `services` — exactly the
-/// groups the [`system_accounts`] reference.
+/// The compiled-in system groups, as records.
 ///
 /// Consumed by the kernel's identity-table build beside
 /// [`system_accounts`]; the removable-storage group stays in the on-disk
@@ -401,13 +427,16 @@ pub fn system_accounts() -> Result<Vec<UserRecord>, ParseError> {
 ///
 /// # Errors
 ///
-/// As [`system_accounts`]: unreachable by construction, failed closed
-/// rather than panicked over.
+/// As [`system_accounts`].
 pub fn system_groups() -> Result<Vec<GroupRecord>, ParseError> {
-    Ok(alloc::vec![
-        GroupRecord::new(SYSTEM_GROUP, SYSTEM_GID)?,
-        GroupRecord::new(SERVICES_GROUP, SERVICES_GID)?,
-    ])
+    let mut groups = Vec::new();
+    groups
+        .try_reserve_exact(SYSTEM_GROUPS.len())
+        .map_err(|_| ParseError::OutOfMemory)?;
+    for (gid, name) in SYSTEM_GROUPS {
+        groups.push(GroupRecord::new(name, gid)?);
+    }
+    Ok(groups)
 }
 
 #[cfg(test)]
@@ -417,6 +446,7 @@ mod tests {
     use crate::groups::GroupsDb;
     use crate::policy::IdRange;
     use crate::AuthError;
+    use tairix_caps::CapabilitySet;
 
     #[test]
     fn the_system_account_set_is_pinned() {
@@ -443,6 +473,7 @@ mod tests {
                 ("soundd", 21, 101),
                 ("settingsd", 22, 101),
                 ("thermald", 23, 101),
+                ("smbfs", 24, 101),
             ]
         );
         for record in &records {
@@ -517,6 +548,10 @@ mod tests {
             by_name("thermald").capabilities(),
             capability_set(THERMALD_CEILING)
         );
+        assert_eq!(
+            by_name("smbfs").capabilities(),
+            capability_set(SMBFS_CEILING)
+        );
     }
 
     #[test]
@@ -566,7 +601,7 @@ mod tests {
     fn the_system_accounts_form_a_valid_database_no_one_can_log_into() {
         let db = UsersDb::new(system_accounts().expect("valid compiled identity"))
             .expect("valid database");
-        let text = db.serialise();
+        let text = db.serialise().expect("serialises");
         assert_eq!(UsersDb::parse(&text), Ok(db.clone()));
         for record in db.records() {
             assert_eq!(

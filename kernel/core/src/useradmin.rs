@@ -282,8 +282,8 @@ impl UserAdminEngine {
 
         // The serialised texts must stay parseable by the next boot's
         // reader, whose format maxima are validation bounds.
-        let users_text = candidate.users.serialise();
-        let groups_text = candidate.groups.serialise();
+        let users_text = candidate.users.serialise().map_err(parse_errno)?;
+        let groups_text = candidate.groups.serialise().map_err(parse_errno)?;
         if users_text.len() > MAX_DB_LEN || groups_text.len() > MAX_GROUPS_DB_LEN {
             return Err(Errno::NoSpace);
         }
@@ -713,9 +713,11 @@ fn capability_set(ids: impl Iterator<Item = CapabilityId>) -> CapabilitySet {
 
 /// Map a `lib/users` validation refusal onto the stable [`Errno`] the
 /// syscall reports: duplicates collide with existing state, record
-/// budgets are exhaustion, and every other refusal is a malformed field.
+/// budgets are exhaustion, a heap refusal is the heap's, and every other
+/// refusal is a malformed field.
 fn parse_errno(err: ParseError) -> Errno {
     match err {
+        ParseError::OutOfMemory => Errno::OutOfMemory,
         ParseError::DuplicateUsername
         | ParseError::DuplicateUserId
         | ParseError::DuplicateGroupName

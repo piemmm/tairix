@@ -170,12 +170,14 @@ pub const DEFAULT_CONFIG: &str = "\
 # sound waits on. `confd` and `settingsd` bind straight away and answer a typed
 # refusal until the root is mounted, since a headless machine needs both.
 # Those whose crash would leave the machine silent, unconfigurable or without
-# its `.local` names restart on failure. `timed`, `discoveryd` and `thermald`
-# are `enrolled`, so an administrator's `disable` survives a reboot: `timed`
-# starts after `netstack` and paces its own retries, `discoveryd` requires
-# `network-up`, so a stack relaunch takes it down and brings it back, and
+# its `.local` names restart on failure. `timed`, `discoveryd`, `thermald` and
+# `smbfs` are `enrolled`, so an administrator's `disable` survives a reboot:
+# `timed` starts after `netstack` and paces its own retries, `discoveryd`
+# requires `network-up`, so a stack relaunch takes it down and brings it back,
 # `thermald` restarts on failure, since the fan's line is undriven while it is
-# down. `fontd`
+# down, and `smbfs` restarts on failure but does not require `network-up`: a
+# stack relaunch drops its connections, which it re-establishes, rather than
+# taking every mounted share down with it. `fontd`
 # is `ondemand`: only a graphical consumer wants glyphs, so it starts when one
 # asks the manager to connect to it.
 console
@@ -190,6 +192,7 @@ service /System/Services/settingsd.app/Run settingsd restart=on-failure ready=no
 enrolled /System/Services/timed.app/Run timed
 enrolled /System/Services/discoveryd.app/Run discoveryd restart=on-failure requires=network-up
 enrolled /System/Services/thermald.app/Run thermald restart=on-failure
+enrolled /System/Services/smbfs.app/Run smbfs restart=on-failure
 ondemand /System/Services/fontd.app/Run fontd
 session /System/Services/login.app/Run login
 ";
@@ -905,6 +908,10 @@ mod tests {
                         tairix_users::THERMALD_UID.0,
                     )
                 },
+                Launch {
+                    restart: RestartPolicy::OnFailure,
+                    ..Launch::plain("/System/Services/smbfs.app/Run", tairix_users::SMBFS_UID.0)
+                },
             ],
         );
         // The on-demand tier: `fontd` alone. It is on neither list above,
@@ -1229,9 +1236,9 @@ mod tests {
         // to the floor is a conscious one.
         assert_eq!(MAX_SERVICES, 8);
         // The same derivation over the `enrolled` keyword: `timed`,
-        // `discoveryd` and `thermald`.
+        // `discoveryd`, `thermald` and `smbfs`.
         assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);
-        assert_eq!(MAX_ENROLLED_SERVICES, 3);
+        assert_eq!(MAX_ENROLLED_SERVICES, 4);
         // And over `ondemand`: `fontd` alone.
         assert_eq!(floor.ondemand().len(), MAX_ONDEMAND_SERVICES);
         assert_eq!(MAX_ONDEMAND_SERVICES, 1);

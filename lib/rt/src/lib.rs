@@ -191,6 +191,16 @@ const NUM_VOLUME_WRITE: u64 = SyscallNumber::VOLUME_WRITE.as_u16() as u64;
 const NUM_VOLUME_CTL: u64 = SyscallNumber::VOLUME_CTL.as_u16() as u64;
 /// `volume_serve` syscall number (as above).
 const NUM_VOLUME_SERVE: u64 = SyscallNumber::VOLUME_SERVE.as_u16() as u64;
+/// `fsserve_offer` syscall number (as above).
+const NUM_FSSERVE_OFFER: u64 = SyscallNumber::FSSERVE_OFFER.as_u16() as u64;
+/// `fsserve_attach` syscall number (as above).
+const NUM_FSSERVE_ATTACH: u64 = SyscallNumber::FSSERVE_ATTACH.as_u16() as u64;
+/// `fsserve_ctl` syscall number (as above).
+const NUM_FSSERVE_CTL: u64 = SyscallNumber::FSSERVE_CTL.as_u16() as u64;
+/// `view_bind` syscall number (as above).
+const NUM_VIEW_BIND: u64 = SyscallNumber::VIEW_BIND.as_u16() as u64;
+/// `view_unbind` syscall number (as above).
+const NUM_VIEW_UNBIND: u64 = SyscallNumber::VIEW_UNBIND.as_u16() as u64;
 
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
@@ -2399,6 +2409,145 @@ pub fn volume_serve(
     served_grant(&grant, answered)
 }
 
+/// Offer a network volume (`SyscallNumber::FSSERVE_OFFER`,
+/// `plans/FSSERVE.md` §6), answering the offer, the endpoint the volume's
+/// calls arrive on, and the window its lanes divide.
+///
+/// # Errors
+///
+/// `offer`'s refusal to encode, the kernel's refusal, or
+/// [`Errno::OutOfRange`] for a grant this target cannot build a window over.
+pub fn fsserve_offer(
+    offer: &tairix_abi::netattach::NetworkOffer<'_>,
+) -> Result<(tairix_abi::netattach::OfferId, u64, crate::shm::ServeWindow), Errno> {
+    use tairix_abi::netattach::{OfferGrant, NETWORK_OFFER_MAX, OFFER_GRANT_LEN};
+    let mut frame = [0u8; NETWORK_OFFER_MAX];
+    let len = offer.encode(&mut frame)?;
+    let mut grant = [0u8; OFFER_GRANT_LEN];
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space. Both are
+    // live local arrays for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FSSERVE_OFFER,
+            [
+                frame.as_ptr() as usize as u64,
+                len as u64,
+                grant.as_mut_ptr() as usize as u64,
+                grant.len() as u64,
+                0,
+                0,
+            ],
+        )
+    };
+    let answered = count_result(ret, grant.len()).map_err(Errno::from_syscall)?;
+    let answer = grant.get(..answered).ok_or(Errno::OutOfRange)?;
+    let granted = OfferGrant::decode(answer, offer.lanes)?;
+    let window = crate::shm::ServeWindow::mapped(granted.grant.window, granted.grant.window_len)
+        .ok_or(Errno::OutOfRange)?;
+    Ok((granted.offer, granted.grant.endpoint, window))
+}
+
+/// Attach the network volume `offer` names, as `attach` asks
+/// (`SyscallNumber::FSSERVE_ATTACH`).
+///
+/// # Errors
+///
+/// `attach`'s refusal to encode, or the kernel's: [`Errno::NotFound`] for an
+/// offer not made for the caller, [`Errno::PermissionDenied`] for a
+/// presentation or target it may not ask for.
+pub fn fsserve_attach(
+    offer: tairix_abi::netattach::OfferId,
+    attach: &tairix_abi::netattach::NetworkAttach<'_>,
+) -> Result<tairix_abi::netattach::AttachReply, Errno> {
+    use tairix_abi::netattach::{AttachReply, ATTACH_REPLY_LEN, NETWORK_ATTACH_MAX};
+    let mut frame = [0u8; NETWORK_ATTACH_MAX];
+    let len = attach.encode(&mut frame)?;
+    let mut reply = [0u8; ATTACH_REPLY_LEN];
+    // SAFETY: as `fsserve_offer`: both pairs are live local arrays the kernel
+    // validates before touching.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FSSERVE_ATTACH,
+            [
+                offer.get(),
+                frame.as_ptr() as usize as u64,
+                len as u64,
+                reply.as_mut_ptr() as usize as u64,
+                reply.len() as u64,
+                0,
+            ],
+        )
+    };
+    let answered = count_result(ret, reply.len()).map_err(Errno::from_syscall)?;
+    AttachReply::decode(reply.get(..answered).ok_or(Errno::OutOfRange)?)
+}
+
+/// Tell the kernel `op` of a network volume this server offered
+/// (`SyscallNumber::FSSERVE_CTL`).
+///
+/// # Errors
+///
+/// The kernel's refusal: [`Errno::NotFound`] for an offer another server made.
+pub fn fsserve_ctl(
+    offer: tairix_abi::netattach::OfferId,
+    op: tairix_abi::netattach::FsserveCtl,
+) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call reads no caller
+    // memory.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FSSERVE_CTL,
+            [offer.get(), u64::from(op as u32), 0, 0, 0, 0],
+        )
+    };
+    status(ret.cast_signed())
+}
+
+/// Project an attached volume's subtree at a directory
+/// (`SyscallNumber::VIEW_BIND`, `plans/NEW-NAMESPACE.md` NS-4a).
+///
+/// # Errors
+///
+/// `request`'s refusal to encode, or the kernel's.
+pub fn view_bind(request: &tairix_abi::volume::ViewBindRequest<'_>) -> Result<(), Errno> {
+    let mut frame = [0u8; tairix_abi::volume::VIEW_BIND_MAX];
+    let len = request.encode(&mut frame)?;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair, a live local array, before reading it.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_VIEW_BIND,
+            [frame.as_ptr() as usize as u64, len as u64, 0, 0, 0, 0],
+        )
+    };
+    status(ret.cast_signed())
+}
+
+/// Withdraw the projection at `target` (`SyscallNumber::VIEW_UNBIND`).
+///
+/// # Errors
+///
+/// The kernel's refusal.
+pub fn view_unbind(target: &str) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair, a live borrowed string, before reading it.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_VIEW_UNBIND,
+            [
+                target.as_ptr() as usize as u64,
+                target.len() as u64,
+                0,
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    status(ret.cast_signed())
+}
+
 /// What a `volume_serve` answer of `answered` bytes of `grant` grants, read
 /// only as far as the kernel wrote it: nothing for a refusal's empty answer,
 /// else the endpoint and window.
@@ -2410,7 +2559,7 @@ fn served_grant(
     if answer.is_empty() {
         return Ok(None);
     }
-    let grant = tairix_abi::fsserve::ServeGrant::decode(answer)?;
+    let grant = tairix_abi::fsserve::ServeGrant::decode(answer, tairix_abi::fsserve::Lanes::ONE)?;
     let window =
         crate::shm::ServeWindow::mapped(grant.window, grant.window_len).ok_or(Errno::OutOfRange)?;
     Ok(Some((grant.endpoint, window)))
@@ -8307,6 +8456,61 @@ mod tests {
                 assert_eq!(volume_serve(5, &serve).err(), Some(Errno::LengthOutOfRange));
             });
         }
+    }
+
+    #[test]
+    fn network_attachments_marshal_their_frames_and_refuse_a_grant_they_cannot_trust() {
+        use tairix_abi::driver::filesystem::{NameMatching, NodeId, NodeIdentity};
+        use tairix_abi::fsserve::{Lanes, ServeOffer};
+        use tairix_abi::netattach::{
+            FsserveCtl, NetworkAttach, NetworkOffer, OfferId, Presentation, ATTACH_REPLY_LEN,
+            OFFER_GRANT_LEN,
+        };
+        let offer = NetworkOffer {
+            serve: ServeOffer {
+                root: NodeId::from_raw(1),
+                name_matching: NameMatching::AsciiCaseInsensitive,
+                node_identity: NodeIdentity::Stable,
+                attrs: false,
+                write_refusal: None,
+                format: tairix_abi::volume::FormatName::Smb3,
+            },
+            for_uid: 1000,
+            key: [7; 16],
+            lanes: Lanes::new(4, 64 * 1024).expect("lanes"),
+            source: "//nas/share",
+        };
+        // A grant the kernel never wrote is refused before any window is
+        // built over it.
+        let (number, args) = capture(OFFER_GRANT_LEN as u64, || {
+            assert_eq!(fsserve_offer(&offer).err(), Some(Errno::LengthOutOfRange));
+        });
+        assert_eq!(number, NUM_FSSERVE_OFFER);
+        assert_eq!(args[1], 44 + 11);
+        assert_eq!(args[3], OFFER_GRANT_LEN as u64);
+        let attach = NetworkAttach {
+            name: "share",
+            presentation: Presentation::Private,
+            read_only: false,
+            target: None,
+        };
+        let id = OfferId::new(9).expect("an offer");
+        let (number, args) = capture(ATTACH_REPLY_LEN as u64, || {
+            assert_eq!(fsserve_attach(id, &attach).err(), Some(Errno::OutOfRange));
+        });
+        assert_eq!(number, NUM_FSSERVE_ATTACH);
+        assert_eq!(
+            (args[0], args[2], args[4]),
+            (9, 25, ATTACH_REPLY_LEN as u64)
+        );
+        let (number, args) = capture(0, || {
+            assert_eq!(fsserve_ctl(id, FsserveCtl::Withdraw), Ok(()));
+        });
+        assert_eq!(number, NUM_FSSERVE_CTL);
+        assert_eq!(&args[..2], &[9, 2]);
+        let (number, args) = capture(0, || assert_eq!(view_unbind("/Storage/x"), Ok(())));
+        assert_eq!(number, NUM_VIEW_UNBIND);
+        assert_eq!(args[1], 10);
     }
 
     #[test]

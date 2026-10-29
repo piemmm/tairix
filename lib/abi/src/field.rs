@@ -78,6 +78,15 @@ pub enum IpAddr {
     V6([u8; IPV6_LEN]),
 }
 
+impl From<core::net::IpAddr> for IpAddr {
+    fn from(address: core::net::IpAddr) -> Self {
+        match address {
+            core::net::IpAddr::V4(v4) => Self::V4(v4.octets()),
+            core::net::IpAddr::V6(v6) => Self::V6(v6.octets()),
+        }
+    }
+}
+
 /// A base-10 fixed-point decimal: `mantissa * 10^-scale`.
 ///
 /// For example `Decimal { mantissa: 1050, scale: 2 }` is `10.50`. Fixed-point
@@ -1026,6 +1035,17 @@ mod tests {
             "value {value:?} must consume what it wrote"
         );
         assert_eq!(decoded, value, "value {value:?} must survive a round trip");
+    }
+
+    #[test]
+    fn an_address_keeps_its_octets_as_a_field() {
+        let v4 = core::net::IpAddr::V4(core::net::Ipv4Addr::new(192, 0, 2, 7));
+        assert_eq!(IpAddr::from(v4), IpAddr::V4([192, 0, 2, 7]));
+        let v6 = core::net::IpAddr::V6(core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+        let mut octets = [0; IPV6_LEN];
+        octets[..2].copy_from_slice(&[0xfe, 0x80]);
+        octets[15] = 1;
+        assert_eq!(IpAddr::from(v6), IpAddr::V6(octets));
     }
 
     #[test]

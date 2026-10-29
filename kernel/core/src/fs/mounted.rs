@@ -55,25 +55,27 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind as DriverNodeKind, NodeTimes,
-    VolumeHost, VolumeStats,
+    FilesystemStats, FilesystemWrite, MountFlags, NodeId, NodeIdentity, NodeInfo,
+    NodeKind as DriverNodeKind, NodeTimes, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::fs::{Access as Wanted, NodeExpect};
+use tairix_abi::home::USERS_DIR;
 use tairix_abi::sysinfo::{
-    MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord, VolumeIoHealthRecord,
-    VolumeIoQueueRecord, VolumeIoStatsRecord,
+    MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord, VolumeClass,
+    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Time64;
+use tairix_abi::volume::{validate_volume_name, ViewBindRequest};
 use tairix_abi::{
-    CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
-    RenameFlags, SeekRegion, UnlinkFlags, FS_MODE_MASK,
+    CapabilityId, CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags,
+    RealpathMode, RenameFlags, SeekRegion, UnlinkFlags, FS_MODE_MASK, STORAGE_CATALOG,
 };
 use tairix_caps::CapabilitySet;
 use tairix_collections::RadixTree;
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
 use tairix_sync::{OnceCell, RwLock, SpinLock};
-use tairix_util::fallible::collected;
+use tairix_util::fallible::{collected, concatenated};
 
 use tairix_log::{Field, FieldValue, Level, Sink};
 
@@ -85,11 +87,11 @@ use super::blkmeter::VolumeIoSource;
 use super::served::ServedState;
 
 use super::delegate::{
-    map_driver_error, DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, Expect, FinalLink,
-    HeldNode, Links, MissingSteps, Walk,
+    holds_entries, map_driver_error, DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef,
+    Expect, FinalLink, HeldNode, Links, MissingSteps, Walk,
 };
 use super::listing::{ListEnd, Listing};
-use super::mount::{ChildMounts, Projection};
+use super::mount::{ChildMounts, Cover, Projection};
 use super::node::{
     Acting, At, Authority, Cwd, DriverLock, NodeHandle, NodeRef, Start, VolumeNodes,
 };
@@ -180,6 +182,11 @@ struct DriverEntry<F: 'static> {
     /// What a user-space driver serving the volume last said of itself: the
     /// writes it holds unpublished, and how its conduct reads.
     served: Option<Arc<ServedState>>,
+    /// The principal that attached a network volume, which may detach it
+    /// without the mount authority.
+    owner: Option<u32>,
+    /// What kind of volume it is.
+    class: VolumeClass,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entries`]
@@ -193,6 +200,16 @@ struct SnapshotEntry<F: 'static> {
     volume_id: [u8; 16],
     availability: MountAvailability,
     usage: Arc<SpinLock<VolumeStats>>,
+    owner: Option<u32>,
+    class: VolumeClass,
+}
+
+/// What a registration names its volume by.
+#[derive(Clone, Copy)]
+struct Names<'a> {
+    source: &'a str,
+    fstype: &'a str,
+    volume_id: [u8; 16],
 }
 
 /// The availability the mount snapshot reports for one registered volume:
@@ -390,8 +407,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// or whose server was lost, takes over the registration `handle` serves,
     /// so the descriptors opened through it answer the stand-in while the
     /// volume is away. With `handle` registered under `nodes`, its driver is
-    /// replaced in place, so no operation finds the handle unregistered in
-    /// between.
+    /// replaced in place, keeping who attached the volume and its class, so
+    /// no operation finds the handle unregistered in between.
     ///
     /// # Errors
     ///
@@ -410,25 +427,71 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         watch: Option<ClaimRef>,
         nodes: Arc<VolumeNodes>,
     ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let shared =
+            Arc::try_new(DriverLock::new(driver, nodes)).map_err(|_| RegisterError::OutOfMemory)?;
+        let names = Names {
+            source,
+            fstype,
+            volume_id,
+        };
+        self.insert(handle, shared, names, watch, None, VolumeClass::Local)
+    }
+
+    /// Register a network volume served by `lanes`, presented to `owner`, under
+    /// a fresh registration reaped inline. It is never cached by the kernel:
+    /// other writers change it, so caching is its server's.
+    ///
+    /// # Errors
+    ///
+    /// As [`register`](Self::register), and [`RegisterError::OutOfMemory`] for
+    /// lanes past what a volume may have.
+    pub fn register_network(
+        &self,
+        handle: DriverHandle,
+        lanes: impl IntoIterator<Item = F>,
+        source: &str,
+        fstype: &str,
+        volume_id: [u8; 16],
+        owner: Option<u32>,
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let nodes = self.registration(VolumeNodes::reaped_inline)?;
+        let lock = DriverLock::lanes(lanes, nodes).map_err(|_| RegisterError::OutOfMemory)?;
+        let shared = Arc::try_new(lock).map_err(|_| RegisterError::OutOfMemory)?;
+        let names = Names {
+            source,
+            fstype,
+            volume_id,
+        };
+        self.insert(handle, shared, names, None, owner, VolumeClass::Network)
+    }
+
+    /// File `shared` under `handle` as the volume `names` describes.
+    fn insert(
+        &self,
+        handle: DriverHandle,
+        shared: Arc<DriverLock<F>>,
+        names: Names<'_>,
+        watch: Option<ClaimRef>,
+        owner: Option<u32>,
+        class: VolumeClass,
+    ) -> Result<Arc<DriverLock<F>>, RegisterError> {
+        let Names {
+            source,
+            fstype,
+            volume_id,
+        } = names;
+        let nodes = Arc::clone(shared.nodes());
         let raw = handle.as_u64();
         let oom = |_| RegisterError::OutOfMemory;
         // Everything the entry holds is allocated before the registry's lock
         // is taken, so a heap that refuses leaves the registry as it was.
-        let shared = Arc::try_new(DriverLock::new(driver, Arc::clone(&nodes))).map_err(oom)?;
         let usage = Arc::try_new(SpinLock::new(VolumeStats::default())).map_err(oom)?;
-        let owned = |text: &str| {
-            let mut owned = String::new();
-            owned
-                .try_reserve_exact(text.len())
-                .map_err(|_| RegisterError::OutOfMemory)?;
-            owned.push_str(text);
-            Ok::<_, RegisterError>(owned)
-        };
+        let copy = |text: &str| concatenated(&[text]).ok_or(RegisterError::OutOfMemory);
         let entry = DriverEntry {
             handle: raw,
             driver: Arc::clone(&shared),
-            source: owned(source)?,
-            fstype: owned(fstype)?,
+            source: copy(source)?,
+            fstype: copy(fstype)?,
             volume_id,
             availability: MountAvailability::Available,
             io: None,
@@ -437,13 +500,15 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             usage,
             nodes,
             served: None,
+            owner,
+            class,
         };
-        // Taken before the entry is visible, so the fast path takes it and
+        // Taken before the entry is visible, so the fast path takes them and
         // cannot park — the surprise-removal path registers a stand-in from a
         // context that must not — and no operation reaches the driver before
         // it has its host: one that did would wait on a server that may be
         // inside the very call serving it.
-        let mut fs = shared.lock();
+        let mut lanes = shared.lock_all();
         let replaced = {
             let mut drivers = self.drivers.lock();
             let at = drivers.iter().position(|e| e.handle == raw);
@@ -451,6 +516,13 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 return Err(RegisterError::AlreadyRegistered);
             }
             if let Some(at) = at {
+                // Who attached the volume, and what kind it is, are the
+                // registration's, so a driver replaced in place keeps them.
+                let entry = DriverEntry {
+                    owner: drivers[at].owner,
+                    class: drivers[at].class,
+                    ..entry
+                };
                 Some(core::mem::replace(&mut drivers[at], entry))
             } else {
                 drivers
@@ -472,9 +544,11 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         // driver that reports a deadline from inside this call has a slot to
         // report it into.
         if let Ok(Some(host)) = self.volume_host.get() {
-            fs.set_volume_host(handle, *host);
+            for fs in lanes.each() {
+                fs.set_volume_host(handle, *host);
+            }
         }
-        drop(fs);
+        drop(lanes);
         // What the mount listing reports of the volume moved — its name,
         // type, space and availability — though the table's own mounts did
         // not: an unlocked root is exactly this.
@@ -784,7 +858,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// live availability the same way the mount snapshot does, names the
     /// serving endpoint, and carries the counters snapshot; it holds no
     /// secret.
-    fn volume_io_health_records(&self) -> Vec<VolumeIoHealthRecord> {
+    fn volume_io_health_records(&self) -> Result<Vec<VolumeIoHealthRecord>, Errno> {
         self.io_records(|entry, source| {
             VolumeIoHealthRecord::new(
                 entry.volume_id,
@@ -799,7 +873,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// service counters, one [`VolumeIoStatsRecord`] per volume with a block
     /// I/O source, in the same order and with the same omissions as
     /// [`volume_io_health_records`](Self::volume_io_health_records).
-    fn volume_io_stats_records(&self) -> Vec<VolumeIoStatsRecord> {
+    fn volume_io_stats_records(&self) -> Result<Vec<VolumeIoStatsRecord>, Errno> {
         self.io_records(|entry, source| {
             VolumeIoStatsRecord::new(
                 entry.volume_id,
@@ -815,7 +889,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// volume with a block I/O source, in the same order and with the same
     /// omissions as
     /// [`volume_io_health_records`](Self::volume_io_health_records).
-    fn volume_io_queue_records(&self) -> Vec<VolumeIoQueueRecord> {
+    fn volume_io_queue_records(&self) -> Result<Vec<VolumeIoQueueRecord>, Errno> {
         self.io_records(|entry, source| {
             VolumeIoQueueRecord::new(
                 entry.volume_id,
@@ -836,15 +910,21 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// reported with fabricated readings, and the order is the registry's
     /// registration order, stable across a walk. A client can therefore join
     /// the three lists by `volume_id`.
-    fn io_records<R>(&self, record: impl Fn(&DriverEntry<F>, &VolumeIoSource) -> R) -> Vec<R> {
-        self.drivers
-            .lock()
-            .iter()
-            .filter_map(|entry| {
-                let source = entry.io.as_ref()?;
-                Some(record(entry, source))
-            })
-            .collect()
+    fn io_records<R>(
+        &self,
+        record: impl Fn(&DriverEntry<F>, &VolumeIoSource) -> R,
+    ) -> Result<Vec<R>, Errno> {
+        let drivers = self.drivers.lock();
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(drivers.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        records.extend(
+            drivers
+                .iter()
+                .filter_map(|entry| Some(record(entry, entry.io.as_ref()?))),
+        );
+        Ok(records)
     }
 
     /// Run `remove` — the orderly hardware-tree removal closure — but only
@@ -954,27 +1034,51 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
 
     /// Every registered volume's snapshot facts, sorted by handle, read under
     /// one hold of the registry lock.
-    fn entries(&self) -> Vec<SnapshotEntry<F>> {
-        let mut entries: Vec<SnapshotEntry<F>> = self
-            .drivers
+    fn entries(&self) -> Result<Vec<SnapshotEntry<F>>, Errno> {
+        let mut entries = Vec::new();
+        {
+            let drivers = self.drivers.lock();
+            entries
+                .try_reserve_exact(drivers.len())
+                .map_err(|_| Errno::OutOfMemory)?;
+            for e in drivers.iter() {
+                let copy = |text: &str| concatenated(&[text]).ok_or(Errno::OutOfMemory);
+                entries.push(SnapshotEntry {
+                    handle: e.handle,
+                    source: copy(&e.source)?,
+                    fstype: copy(&e.fstype)?,
+                    driver: Arc::clone(&e.driver),
+                    volume_id: e.volume_id,
+                    availability: overlaid_availability(
+                        e.availability,
+                        e.io.as_ref(),
+                        e.served.as_deref(),
+                    ),
+                    usage: Arc::clone(&e.usage),
+                    owner: e.owner,
+                    class: e.class,
+                });
+            }
+        }
+        entries.sort_unstable_by_key(|entry| entry.handle);
+        Ok(entries)
+    }
+
+    /// The handle the volume published as `volume_id` is registered under,
+    /// with the principal that attached it, if one did.
+    #[must_use]
+    pub fn volume_of(&self, volume_id: &[u8; 16]) -> Option<(DriverHandle, Option<u32>)> {
+        self.drivers
             .lock()
             .iter()
-            .map(|e| SnapshotEntry {
-                handle: e.handle,
-                source: e.source.clone(),
-                fstype: e.fstype.clone(),
-                driver: Arc::clone(&e.driver),
-                volume_id: e.volume_id,
-                availability: overlaid_availability(
-                    e.availability,
-                    e.io.as_ref(),
-                    e.served.as_deref(),
-                ),
-                usage: Arc::clone(&e.usage),
-            })
-            .collect();
-        entries.sort_unstable_by_key(|entry| entry.handle);
-        entries
+            .find(|e| &e.volume_id == volume_id)
+            .and_then(|e| Some((DriverHandle::from_raw(e.handle).ok()?, e.owner)))
+    }
+
+    /// Where security decisions about the registered volumes are recorded,
+    /// once the boot path installed it.
+    fn audit_sink(&self) -> Option<&'static (dyn Sink + Sync)> {
+        self.audit.get().ok().flatten().copied()
     }
 }
 
@@ -1515,6 +1619,281 @@ where
     }
 }
 
+/// Where a view bind is made.
+enum BindAt {
+    /// A name in the `/Storage` catalog.
+    Catalog(Path),
+    /// Over a directory a walk reaches.
+    Over,
+}
+
+/// What a view bind shows: the volume `handle` serves, from `subtree`, with
+/// `narrowing` added to its flags.
+struct Bound {
+    handle: DriverHandle,
+    subtree: Vec<String>,
+    narrowing: MountFlags,
+}
+
+/// A walk that follows no link, so the path it walks is the one its end has.
+const NO_LINKS: Posture = Posture {
+    final_link: FinalLink::Follow,
+    missing: MissingSteps::Refused,
+    links: Links::Refuse,
+};
+
+impl<F> MountedFilesystemService<F>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemStats + Send + 'static,
+{
+    /// What [`FilesystemService::view_bind`] decides, unrecorded.
+    fn bind_view(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        request: &ViewBindRequest<'_>,
+    ) -> Result<(), Errno> {
+        let may_mount = caps.holds(CapabilityId::FS_MOUNT);
+        let (handle, owner) = self
+            .mount
+            .volume_of(&request.volume_id)
+            .ok_or(Errno::NotFound)?;
+        if !may_mount && owner != Some(uid) {
+            return Err(Errno::PermissionDenied);
+        }
+        let target = Path::parse(request.target).map_err(VfsError::to_errno)?;
+        let at = match target.components() {
+            [root, name] if root.as_str() == STORAGE_CATALOG => {
+                validate_volume_name(name.as_bytes())?;
+                BindAt::Catalog(target)
+            }
+            [root, _, ..] if root.as_str() == USERS_DIR || root.as_str() == STORAGE_CATALOG => {
+                BindAt::Over
+            }
+            _ => return Err(Errno::PermissionDenied),
+        };
+        let bound = Bound {
+            handle,
+            subtree: self.bound_subtree(uid, caps, handle, request.subtree)?,
+            narrowing: request.narrowing,
+        };
+        match at {
+            // A catalog name is no directory a caller could own.
+            BindAt::Catalog(_) if !may_mount => Err(Errno::PermissionDenied),
+            BindAt::Catalog(path) => self
+                .mount
+                .vfs()?
+                .mounts_write()
+                .bind(
+                    path,
+                    bound.handle,
+                    bound.subtree,
+                    bound.narrowing,
+                    None,
+                    uid,
+                )
+                .map_err(VfsError::to_errno),
+            BindAt::Over => self.bind_over(uid, caps, may_mount, request.target, bound),
+        }
+    }
+
+    /// The components of `subtree`, the directory of the volume `handle`
+    /// serves that a bind shows, once a walk as `uid` holding `caps` finds a
+    /// directory there on that volume.
+    fn bound_subtree(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        handle: DriverHandle,
+        subtree: &str,
+    ) -> Result<Vec<String>, Errno> {
+        let components = Path::parse(subtree)
+            .map_err(VfsError::to_errno)?
+            .into_components();
+        if components.is_empty() {
+            return Ok(components);
+        }
+        let mut whole = self
+            .mount
+            .vfs()?
+            .mounts()
+            .shown_at(handle)
+            .ok_or(Errno::NotFound)?
+            .owned_components()
+            .map_err(VfsError::to_errno)?;
+        whole
+            .try_reserve(components.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        whole.extend(components.iter().cloned());
+        let spelled = spell(&whole).map_err(VfsError::to_errno)?;
+        let way = Way {
+            at: At {
+                start: Start::Root,
+                path: &spelled,
+            },
+            posture: NO_LINKS,
+            spelling: Spelling::Unkept,
+        };
+        self.resolved(
+            uid,
+            caps,
+            way,
+            MountUse::Read,
+            |_, _, _, _, landing| {
+                let reached = landing.walk.reached()?;
+                let projection = &landing.projection;
+                if projection.backing() != Some(handle)
+                    || projection.binder().is_some()
+                    || !projection.backing_subtree().is_empty()
+                {
+                    return Err(VfsError::CrossVolume);
+                }
+                if reached.info.kind != DriverNodeKind::Directory {
+                    return Err(VfsError::NotADirectory);
+                }
+                Ok(())
+            },
+            |_, _, _| Err(VfsError::NotFound),
+        )?;
+        Ok(components)
+    }
+
+    /// Bind `bound` over the directory `target` names, as `uid` holding
+    /// `caps`, under one hold of the driver serving it: pinned, with every
+    /// directory down to it, and entered in the mount table before the hold
+    /// ends, so no rename on the volume comes between.
+    fn bind_over(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        may_mount: bool,
+        target: &str,
+        bound: Bound,
+    ) -> Result<(), Errno> {
+        let way = Way {
+            at: At {
+                start: Start::Root,
+                path: target,
+            },
+            posture: NO_LINKS,
+            spelling: Spelling::Unkept,
+        };
+        self.resolved(
+            uid,
+            caps,
+            way,
+            MountUse::Read,
+            |vfs, fs, served, cred, landing| {
+                let reached = landing.walk.reached()?;
+                if reached.info.kind != DriverNodeKind::Directory {
+                    return Err(VfsError::NotADirectory);
+                }
+                // A floor is shown there already.
+                if reached.at_floor {
+                    return Err(VfsError::AlreadyExists);
+                }
+                // Only an id a pin cannot change is one the walk meets again.
+                if fs.node_identity() != NodeIdentity::Stable {
+                    return Err(VfsError::NotSupported);
+                }
+                if !may_mount {
+                    if reached.meta.owner != cred.uid {
+                        return Err(VfsError::PermissionDenied);
+                    }
+                    if holds_entries(fs, reached.node)? {
+                        return Err(VfsError::NotEmpty);
+                    }
+                }
+                let dirs =
+                    DelegatedFs::bind(fs, &landing.projection).dirs_down_to(cred, reached.node)?;
+                // A bind holds every directory on its way where it is, so a
+                // caller may hold only its own and the system's.
+                if !may_mount {
+                    for &dir in &dirs {
+                        let owner = fs.security(dir).map_err(map_driver_error)?.uid;
+                        if owner != cred.uid.0 && owner != tairix_users::SYSTEM_UID.0 {
+                            return Err(VfsError::PermissionDenied);
+                        }
+                    }
+                }
+                let mut above = Vec::new();
+                above
+                    .try_reserve_exact(dirs.len())
+                    .map_err(|_| VfsError::OutOfMemory)?;
+                for dir in dirs {
+                    let pinned = pin(fs, &served.nodes, dir, DriverNodeKind::Directory)?;
+                    if pinned.pinned() != dir {
+                        return Err(VfsError::Io);
+                    }
+                    above.push(pinned);
+                }
+                let covered = above.pop().ok_or(VfsError::Io)?;
+                let cover = Cover::new(Arc::clone(&landing.projection), above, covered);
+                vfs.mounts_write().bind(
+                    Path::parse(target)?,
+                    bound.handle,
+                    bound.subtree,
+                    bound.narrowing,
+                    Some(cover),
+                    uid,
+                )
+            },
+            |_, _, _| Err(VfsError::InvalidPath),
+        )
+    }
+
+    /// What [`FilesystemService::view_unbind`] decides, unrecorded.
+    fn unbind_view(&self, uid: u32, caps: &dyn CapabilityQuery, target: &str) -> Result<(), Errno> {
+        let path = Path::parse(target).map_err(VfsError::to_errno)?;
+        let vfs = self.mount.vfs()?;
+        let mut mounts = vfs.mounts_write();
+        let binder = mounts.binder_at(&path).map_err(VfsError::to_errno)?;
+        if binder != uid && !caps.holds(CapabilityId::FS_MOUNT) {
+            return Err(Errno::PermissionDenied);
+        }
+        mounts.unbind(&path).map_err(VfsError::to_errno)
+    }
+
+    /// Record `uid`'s view decision at `target`: `allowed`, or `refused` with
+    /// its error.
+    fn audit_view(
+        &self,
+        uid: u32,
+        target: &str,
+        decided: Result<(), Errno>,
+        allowed: AuditEvent,
+        refused: AuditEvent,
+    ) {
+        let Some(sink) = self.mount.audit_sink() else {
+            return;
+        };
+        let who = Field {
+            key: "uid",
+            value: FieldValue::UnsignedInt(u64::from(uid)),
+        };
+        let at = Field {
+            key: "target",
+            value: FieldValue::Str(target),
+        };
+        match decided {
+            Ok(()) => audit::emit(sink, Level::Info, allowed, &[who, at]),
+            Err(err) => audit::emit(
+                sink,
+                Level::Warn,
+                refused,
+                &[
+                    who,
+                    at,
+                    Field {
+                        key: "error",
+                        value: FieldValue::Error(err),
+                    },
+                ],
+            ),
+        }
+    }
+}
+
 /// What an operation resolves: a path and where it starts, how links and
 /// missing names are treated, and what is kept of the path.
 struct Way<'a> {
@@ -1556,13 +1935,13 @@ where
 
     fn hold<T>(
         &mut self,
-        serve: Serve<'_>,
+        serve: Serve,
         op: impl FnOnce(&mut Self::Fs, &Self::Facts) -> Result<T, VfsError>,
     ) -> Result<T, VfsError> {
         // A held node answers for its own registration, which only it may
         // reach; a walk that merely crossed into a projection that has since
         // gone finds nothing there.
-        let (driver, served, gone) = if let Some(pin) = serve.pin {
+        let (driver, served, gone) = if let Some(pin) = &serve.pin {
             let (driver, volume_id) = self
                 .mount
                 .registered(pin.instance())
@@ -1592,9 +1971,7 @@ where
         node: NodeId,
         kind: DriverNodeKind,
     ) -> Result<Kept, VfsError> {
-        let slot = served.nodes.admit()?;
-        let pinned = fs.pin(node).map_err(map_driver_error)?;
-        NodeRef::new(slot, pinned, kind).map(Kept::Pinned)
+        pin(fs, &served.nodes, node, kind).map(Kept::Pinned)
     }
 
     fn volume(served: &Self::Facts) -> [u8; 16] {
@@ -1602,9 +1979,21 @@ where
     }
 }
 
+/// Pin `node`, of `kind`, which `fs` serves under the registration `nodes`.
+fn pin<F: FilesystemRead + ?Sized>(
+    fs: &mut F,
+    nodes: &Arc<VolumeNodes>,
+    node: NodeId,
+    kind: DriverNodeKind,
+) -> Result<NodeRef, VfsError> {
+    let slot = nodes.admit()?;
+    let pinned = fs.pin(node).map_err(map_driver_error)?;
+    NodeRef::new(slot, pinned, kind)
+}
+
 /// A volume serving a projection: its driver, its registration, and its
 /// published identity.
-struct ServedVolume<F: ?Sized> {
+struct ServedVolume<F> {
     driver: Arc<DriverLock<F>>,
     nodes: Arc<VolumeNodes>,
     volume_id: [u8; 16],
@@ -2729,101 +3118,123 @@ where
         })
     }
 
-    fn mount_snapshot(&self) -> Vec<MountRecord> {
+    fn mount_snapshot(&self) -> Result<Vec<MountRecord>, Errno> {
         // Before any volume is online there is no VFS; report "no mounts"
         // truthfully rather than fabricating one (fail closed).
         let Ok(vfs) = self.mount.vfs() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         // Copied out, so the table's guard is held across no driver's lock.
-        let volumes = vfs.mounts().volumes();
-        let online = self.mount.entries();
-        volumes
-            .into_iter()
-            .filter_map(|(attachment, shown_at)| {
-                // A volume attached in the namespace whose driver is not yet
-                // registered serves nothing, so it is not reported.
-                let entry = online_entry(&online, attachment.driver())?;
-                // A volume in the middle of a long operation reports the
-                // figures it last gave rather than holding the listing — and
-                // everyone waiting on it — until it is done. A driver fault
-                // reading its accounting reports zero usage: the volume
-                // exists, only its figures are unknown.
-                let usage = match entry.driver.try_lock() {
-                    Some(mut driver) => {
-                        let fresh = driver.stats().unwrap_or_default();
-                        *entry.usage.lock() = fresh;
-                        fresh
-                    }
-                    None => *entry.usage.lock(),
-                };
-                let target = match shown_at {
-                    Some(at) => spell(at.components()).ok()?,
-                    None => String::new(),
-                };
-                // `MountRecord::new` fails only on an over-long field or an
-                // inconsistent usage report; such a volume is left out rather
-                // than misreported.
-                MountRecord::new(
-                    entry.source.as_bytes(),
-                    target.as_bytes(),
-                    entry.fstype.as_bytes(),
-                    attachment.flags(),
-                    MountVolumeState {
-                        usage,
-                        availability: entry.availability,
-                        medium: attachment.medium(),
-                    },
-                    entry.volume_id,
-                )
-                .ok()
-            })
-            .collect()
+        let volumes = vfs.mounts().volumes().map_err(VfsError::to_errno)?;
+        let online = self.mount.entries()?;
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(volumes.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        for (attachment, shown_at) in volumes {
+            // A volume attached in the namespace whose driver is not yet
+            // registered serves nothing, so it is not reported.
+            let Some(entry) = online_entry(&online, attachment.driver()) else {
+                continue;
+            };
+            // A volume in the middle of a long operation reports the
+            // figures it last gave rather than holding the listing — and
+            // everyone waiting on it — until it is done. A driver fault
+            // reading its accounting reports zero usage: the volume
+            // exists, only its figures are unknown.
+            let usage = match entry.driver.try_lock() {
+                Some(mut driver) => {
+                    let fresh = driver.stats().unwrap_or_default();
+                    *entry.usage.lock() = fresh;
+                    fresh
+                }
+                None => *entry.usage.lock(),
+            };
+            let target = match shown_at {
+                Some(at) => spell(at.components()).map_err(VfsError::to_errno)?,
+                None => String::new(),
+            };
+            // `MountRecord::new` fails only on an over-long field or an
+            // inconsistent usage report; such a volume is left out rather
+            // than misreported.
+            let Ok(record) = MountRecord::new(
+                entry.source.as_bytes(),
+                target.as_bytes(),
+                entry.fstype.as_bytes(),
+                attachment.flags(),
+                MountVolumeState {
+                    usage,
+                    availability: entry.availability,
+                    medium: attachment.medium(),
+                },
+                entry.volume_id,
+            ) else {
+                continue;
+            };
+            let record = record.with_class(entry.class);
+            records.push(match entry.owner {
+                Some(owner) => record.with_owner(owner),
+                None => record,
+            });
+        }
+        Ok(records)
     }
 
-    fn view_snapshot(&self) -> Vec<ViewBindingRecord> {
+    fn view_snapshot(&self) -> Result<Vec<ViewBindingRecord>, Errno> {
         let Ok(vfs) = self.mount.vfs() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let online = self.mount.entries();
+        let online = self.mount.entries()?;
         let mounts = vfs.mounts();
-        mounts
-            .iter()
-            .filter_map(|mount| {
-                // A policy-only projection — the `/Storage` catalog — shows no
-                // volume and is listed as such, so a path beneath it is never
-                // credited to the volume above. A backed one is listed once its
-                // volume is.
-                let (subtree, volume_id) = match mount.backing() {
-                    None => (String::new(), [0u8; 16]),
-                    Some(driver) => (
-                        spell(mount.backing_subtree()).ok()?,
-                        online_entry(&online, driver)?.volume_id,
-                    ),
-                };
-                ViewBindingRecord::new(
-                    spell(mount.path().components()).ok()?.as_bytes(),
-                    subtree.as_bytes(),
-                    mount.flags(),
-                    volume_id,
-                )
-                .ok()
-            })
-            .collect()
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(mounts.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        for mount in mounts.iter() {
+            // A policy-only projection — the `/Storage` catalog — shows no
+            // volume and is listed as such, so a path beneath it is never
+            // credited to the volume above. A backed one is listed once its
+            // volume is.
+            let (subtree, volume_id) = match mount.backing() {
+                None => (String::new(), [0u8; 16]),
+                Some(driver) => {
+                    let Some(entry) = online_entry(&online, driver) else {
+                        continue;
+                    };
+                    let subtree = spell(mount.backing_subtree()).map_err(VfsError::to_errno)?;
+                    (subtree, entry.volume_id)
+                }
+            };
+            let target = spell(mount.path().components()).map_err(VfsError::to_errno)?;
+            // An over-long path is left out rather than misreported.
+            let Ok(record) = ViewBindingRecord::new(
+                target.as_bytes(),
+                subtree.as_bytes(),
+                mount.flags(),
+                volume_id,
+            ) else {
+                continue;
+            };
+            records.push(match mount.binder() {
+                Some(binder) => record.with_binder(binder),
+                None => record,
+            });
+        }
+        Ok(records)
     }
 
-    fn volume_io_health_snapshot(&self) -> Vec<VolumeIoHealthRecord> {
+    fn volume_io_health_snapshot(&self) -> Result<Vec<VolumeIoHealthRecord>, Errno> {
         // Served straight from the driver registry, which holds each volume's
         // block I/O source; a system with no mount table registers no driver
         // and so truthfully reports no volumes.
         self.mount.volume_io_health_records()
     }
 
-    fn volume_io_stats_snapshot(&self) -> Vec<VolumeIoStatsRecord> {
+    fn volume_io_stats_snapshot(&self) -> Result<Vec<VolumeIoStatsRecord>, Errno> {
         self.mount.volume_io_stats_records()
     }
 
-    fn volume_io_queue_snapshot(&self) -> Vec<VolumeIoQueueRecord> {
+    fn volume_io_queue_snapshot(&self) -> Result<Vec<VolumeIoQueueRecord>, Errno> {
         self.mount.volume_io_queue_records()
     }
 
@@ -2836,6 +3247,35 @@ where
         // registers under the same lock this holds across the removal, so the
         // busy check and the removal are atomic against a concurrent attach.
         self.mount.remove_if_endpoints_idle(endpoints, remove)
+    }
+
+    fn view_bind(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        request: &ViewBindRequest<'_>,
+    ) -> Result<(), Errno> {
+        let decided = self.bind_view(uid, caps, request);
+        self.audit_view(
+            uid,
+            request.target,
+            decided,
+            AuditEvent::ViewBound,
+            AuditEvent::ViewBindRefused,
+        );
+        decided
+    }
+
+    fn view_unbind(&self, uid: u32, caps: &dyn CapabilityQuery, target: &str) -> Result<(), Errno> {
+        let decided = self.unbind_view(uid, caps, target);
+        self.audit_view(
+            uid,
+            target,
+            decided,
+            AuditEvent::ViewUnbound,
+            AuditEvent::ViewUnbindRefused,
+        );
+        decided
     }
 }
 
@@ -2851,3 +3291,7 @@ fn online_entry<F>(online: &[SnapshotEntry<F>], driver: DriverHandle) -> Option<
 #[cfg(test)]
 #[path = "mounted_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mounted_bind_tests.rs"]
+mod bind_tests;

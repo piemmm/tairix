@@ -24,6 +24,7 @@ extern crate alloc;
 
 pub mod adfs;
 pub mod iso9660;
+pub mod name;
 pub mod udf;
 
 use alloc::boxed::Box;

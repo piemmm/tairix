@@ -100,7 +100,7 @@ impl<'a> UsersAdminDb<'a> {
         // Unreachable by construction (the length and iteration count are
         // in bounds), but fail closed rather than panic.
         let record = record.map_err(|_| Errno::OutOfRange)?;
-        Ok(record.encode())
+        record.encode().map_err(|_| Errno::OutOfMemory)
     }
 }
 
@@ -120,9 +120,10 @@ impl UserDb for UsersAdminDb<'_> {
         let grants = grant_list_into(SESSION_BASELINE, &mut grant_backing)?;
         let mut gid_backing = alloc::vec![0u8; 4 * spec.supplementary_gids.len()];
         let gids = gid_list_into(spec.supplementary_gids, &mut gid_backing)?;
-        let home = spec
-            .home
-            .map_or_else(|| default_home(spec.name), String::from);
+        let home = match spec.home {
+            Some(home) => String::from(home),
+            None => default_home(spec.name).map_err(|_| Errno::OutOfMemory)?,
+        };
         let request = UsersAdminRequest::CreateUser(CreateUser {
             username: spec.name,
             uid,

@@ -12,8 +12,12 @@ use tairix_kernel_sec::GroupId;
 /// A two-node double: node 1 is the root directory, node 2 a regular
 /// file. Every surface reports distinctive values so passthrough is
 /// observable, and its own security record is deliberately restrictive
-/// so a mapping bypass would be caught.
-struct TwoNodeFs;
+/// so a mapping bypass would be caught. Its file's stand-in marks it
+/// read-only when `read_only` is set, as a server reports a read-only file.
+#[derive(Default)]
+struct TwoNodeFs {
+    read_only: bool,
+}
 
 const ROOT: NodeId = NodeId::from_raw(1);
 const FILE: NodeId = NodeId::from_raw(2);
@@ -145,9 +149,14 @@ impl FilesystemWrite for TwoNodeFs {
 }
 
 impl FilesystemSecurity for TwoNodeFs {
-    fn security(&mut self, _node: NodeId) -> Result<NodeSecurity, DriverError> {
+    fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
         // The restrictive record the wrapper must replace, never leak.
-        Ok(NodeSecurity::new(0o600, 0, 0))
+        let mode = if node == FILE && self.read_only {
+            0o400
+        } else {
+            0o600
+        };
+        Ok(NodeSecurity::new(mode, 0, 0))
     }
 
     fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
@@ -178,7 +187,7 @@ const STORAGE: GroupId = GroupId(100);
 
 #[test]
 fn directories_and_files_map_to_the_storage_group() {
-    let mut fs = GroupMappedFs::new(TwoNodeFs, STORAGE);
+    let mut fs = PresentedFs::new(TwoNodeFs::default(), Presented::removable(STORAGE));
     let dir = fs.security(ROOT).expect("root maps");
     assert_eq!((dir.mode, dir.uid, dir.gid), (0o775, 0, STORAGE.0));
     assert_eq!(dir.required_cap, None);
@@ -189,14 +198,75 @@ fn directories_and_files_map_to_the_storage_group() {
 }
 
 #[test]
+fn a_network_volume_is_presented_privately_shared_or_as_its_holder_chose() {
+    let owner = GroupId(1000);
+    for (presented, dir, file) in [
+        (
+            Presented::private(1000, owner),
+            (0o700, 1000, 1000),
+            (0o600, 1000, 1000),
+        ),
+        (
+            Presented::shared(STORAGE),
+            (0o770, 0, STORAGE.0),
+            (0o660, 0, STORAGE.0),
+        ),
+        (
+            Presented::explicit(42, GroupId(7), 0o750, 0o640),
+            (0o750, 42, 7),
+            (0o640, 42, 7),
+        ),
+    ] {
+        let mut fs = PresentedFs::new(TwoNodeFs::default(), presented);
+        let got = fs.security(ROOT).expect("root");
+        assert_eq!((got.mode, got.uid, got.gid), dir, "{presented:?}");
+        let got = fs.security(FILE).expect("file");
+        assert_eq!((got.mode, got.uid, got.gid), file, "{presented:?}");
+    }
+}
+
+#[test]
+fn a_node_its_format_marks_read_only_is_presented_without_write_bits() {
+    let marked = TwoNodeFs { read_only: true };
+    let mut fs = PresentedFs::new(marked, Presented::shared(STORAGE));
+    assert_eq!(fs.security(FILE).expect("file").mode, 0o440);
+    assert_eq!(fs.security(ROOT).expect("root").mode, 0o770);
+}
+
+#[test]
+fn a_volume_presented_whole_shows_no_node_as_its_server_records_it() {
+    let mut fs = tairix_kernel_core::fs::wrapper_conformance::fixture();
+    let root = fs.root();
+    let file = fs.lookup(root, conformance::FILE_NAME).expect("file");
+    fs.set_security(file, NodeSecurity::new(0o4755, 0, 0))
+        .expect("the server's own record");
+    let mut whole = PresentedFs::whole(fs, Presented::private(1000, GroupId(1000)));
+    let shown = whole.security(file).expect("presented");
+    assert_eq!(
+        (shown.mode, shown.uid, shown.gid),
+        (0o600, 1000, 1000),
+        "a server never presents a node to anyone but the principal"
+    );
+    assert_eq!(whole.records_ownership(file), Ok(false));
+    assert_eq!(
+        whole.set_security(file, NodeSecurity::new(0o644, 1000, 1000)),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        whole.records_ownership(NodeId::from_raw(0xDEAD)),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
 fn a_missing_node_still_refuses() {
-    let mut fs = GroupMappedFs::new(TwoNodeFs, STORAGE);
+    let mut fs = PresentedFs::new(TwoNodeFs::default(), Presented::removable(STORAGE));
     assert_eq!(fs.security(NodeId::from_raw(9)), Err(DriverError::NotFound));
 }
 
 #[test]
 fn security_stores_stay_refused() {
-    let mut fs = GroupMappedFs::new(TwoNodeFs, STORAGE);
+    let mut fs = PresentedFs::new(TwoNodeFs::default(), Presented::removable(STORAGE));
     assert_eq!(
         fs.set_security(FILE, NodeSecurity::new(0o777, 5, 5)),
         Err(DriverError::Unsupported)
@@ -205,7 +275,7 @@ fn security_stores_stay_refused() {
 
 #[test]
 fn structural_surfaces_pass_through() {
-    let mut fs = GroupMappedFs::new(TwoNodeFs, STORAGE);
+    let mut fs = PresentedFs::new(TwoNodeFs::default(), Presented::removable(STORAGE));
     assert_eq!(fs.root(), ROOT);
     assert_eq!(fs.lookup(ROOT, b"file"), Ok(FILE));
     let mut buf = [0u8; 16];
@@ -233,7 +303,7 @@ fn the_identity_map_forwards_every_facet_method_it_does_not_replace() {
     // deliberately *mapped* — mount policy, not stored state — so it is
     // asserted as a mapping; a node with recorded ownership, and everything
     // else, must reach the driver.
-    let mut mapped = GroupMappedFs::new(conformance::fixture(), STORAGE);
+    let mut mapped = PresentedFs::new(conformance::fixture(), Presented::removable(STORAGE));
     conformance::assert_read_forwards(&mut mapped);
     conformance::assert_write_forwards(&mut mapped);
     conformance::assert_security_forwards(&mut mapped);
@@ -253,7 +323,7 @@ fn a_recorded_owner_keeps_its_rules_beside_mapped_nodes() {
     let dir = fs.lookup(root, conformance::DIR_NAME).expect("dir");
     let owned = NodeSecurity::new(0o640, 1000, 1000);
     fs.set_security(file, owned).expect("store");
-    let mut mapped = GroupMappedFs::new(fs, STORAGE);
+    let mut mapped = PresentedFs::new(fs, Presented::removable(STORAGE));
 
     let kept = mapped.security(file).expect("recorded");
     assert_eq!((kept.mode, kept.uid, kept.gid), (0o640, 1000, 1000));

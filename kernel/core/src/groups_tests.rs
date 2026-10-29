@@ -61,6 +61,7 @@ fn valid_groups_text() -> String {
     ])
     .expect("valid db")
     .serialise()
+    .expect("serialises")
 }
 
 /// A user record naming `primary` and `supplementary` groups.
@@ -230,18 +231,18 @@ fn an_empty_database_pair_builds_exactly_the_compiled_identity() {
 
     let merged = build_identity_table(&users, &groups, &sink).expect("merged table verifies");
     let compiled = crate::groups::system_identity_table(&sink).expect("compiled table verifies");
+    let accounts: Vec<u32> = tairix_users::system_account_directory()
+        .map(|(uid, _, _)| uid.0)
+        .collect();
     for table in [&merged, &compiled] {
-        assert_eq!(table.user_count(), 15);
-        assert_eq!(table.group_count(), 2);
-        assert!(table.user(UserId(0)).is_ok());
-        assert!(table.user(UserId(tairix_users::LOGIN_UID.0)).is_ok());
-        assert!(table.user(UserId(tairix_users::GREETER_UID.0)).is_ok());
-        assert!(table.user(UserId(tairix_users::TIMED_UID.0)).is_ok());
-        assert!(table.user(UserId(tairix_users::DISCOVERYD_UID.0)).is_ok());
-        assert!(table.user(UserId(tairix_users::AUDIOD_UID.0)).is_ok());
-        assert!(table.user(UserId(tairix_users::SOUNDD_UID.0)).is_ok());
-        assert!(table.user(UserId(tairix_users::SETTINGSD_UID.0)).is_ok());
-        assert!(table.user(UserId(tairix_users::THERMALD_UID.0)).is_ok());
+        assert_eq!(table.user_count(), accounts.len());
+        assert_eq!(
+            table.group_count(),
+            tairix_users::system_group_directory().count()
+        );
+        for &uid in &accounts {
+            assert!(table.user(UserId(uid)).is_ok(), "system account {uid}");
+        }
         assert!(table.user(UserId(1000)).is_err());
     }
 }

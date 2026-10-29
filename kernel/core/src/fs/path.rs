@@ -59,7 +59,7 @@ pub fn resolve_machine_alias(name: &str) -> Option<&'static str> {
 /// * there are at most [`MAX_PATH_COMPONENTS`] components.
 ///
 /// The empty component list is the root (`/`).
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Default)]
+#[derive(Debug, Eq, PartialEq, Hash, Default)]
 pub struct Path {
     components: Vec<String>,
 }
@@ -132,6 +132,17 @@ impl Path {
         Ok(owned)
     }
 
+    /// A copy of the path.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when it cannot be held.
+    pub fn owned(&self) -> Result<Self, VfsError> {
+        Ok(Self {
+            components: self.owned_components()?,
+        })
+    }
+
     /// `true` if this is the root path (`/`).
     #[must_use]
     pub fn is_root(&self) -> bool {
@@ -158,14 +169,22 @@ impl Path {
     }
 
     /// The parent path, or `None` for the root.
-    #[must_use]
-    pub fn parent(&self) -> Option<Path> {
-        if self.components.is_empty() {
-            return None;
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when it cannot be held.
+    pub fn parent(&self) -> Result<Option<Path>, VfsError> {
+        let Some((_, above)) = self.components.split_last() else {
+            return Ok(None);
+        };
+        let mut components = Vec::new();
+        components
+            .try_reserve_exact(above.len())
+            .map_err(|_| VfsError::OutOfMemory)?;
+        for name in above {
+            components.push(owned_name(name)?);
         }
-        let mut components = self.components.clone();
-        components.pop();
-        Some(Self { components })
+        Ok(Some(Self { components }))
     }
 
     /// `true` if `self` is a prefix of (or equal to) `other`, comparing
@@ -402,7 +421,7 @@ mod tests {
         assert_eq!(p.depth(), 0);
         assert_eq!(p.top_level(), None);
         assert_eq!(p.file_name(), None);
-        assert_eq!(p.parent(), None);
+        assert_eq!(p.parent(), Ok(None));
     }
 
     #[test]
@@ -449,8 +468,37 @@ mod tests {
     #[test]
     fn parent_drops_the_last_component() {
         let p = Path::parse("/System/Logs/boot").expect("parses");
-        let parent = p.parent().expect("has parent");
+        let parent = p.parent().expect("held").expect("has parent");
         assert_eq!(parent, Path::parse("/System/Logs").expect("parses"));
+    }
+
+    /// A path the heap cannot hold is refused, never an abort.
+    ///
+    /// Regression: parsing a path, spelling one and taking its parent
+    /// allocated infallibly.
+    #[test]
+    fn a_path_the_heap_cannot_hold_is_refused() {
+        use crate::test_alloc::past_each_refusal;
+        let path = past_each_refusal(&Err(VfsError::OutOfMemory), || {
+            Path::parse("/Users/ann/Home/Documents")
+        })
+        .expect("parses");
+        assert_eq!(
+            past_each_refusal(&Err(VfsError::OutOfMemory), || spell(path.components())),
+            Ok(String::from("/Users/ann/Home/Documents"))
+        );
+        assert_eq!(
+            past_each_refusal(&Err(VfsError::OutOfMemory), || path
+                .parent()
+                .map(|parent| parent.map(|parent| parent.depth()))),
+            Ok(Some(3))
+        );
+        assert_eq!(
+            past_each_refusal(&Err(VfsError::OutOfMemory), || path
+                .owned()
+                .map(|copy| copy == path)),
+            Ok(true)
+        );
     }
 
     #[test]

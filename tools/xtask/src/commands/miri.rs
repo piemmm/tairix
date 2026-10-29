@@ -496,12 +496,19 @@ pub const TARGETS: &[Target] = &[
                 "useradmin::tests::locking_binds_at_the_next_login_and_unlock_restores",
                 "useradmin::tests::modify_user_replaces_identity_fields_and_provisions_a_changed_home",
                 "useradmin::tests::set_password_replaces_the_stored_record_and_rejects_malformed_ones",
+                "appspawn::tests::a_bundle_walk_the_heap_cannot_hold_is_refused",
+                "fs::mount::tests::a_volume_list_the_heap_cannot_hold_is_refused",
             ],
             reason: "a login is each one's assertion, so each derives a password through PBKDF2 \
                      at the minimum accepted cost — a minute and a half a derivation \
                      interpreted, and up to four minutes a test — through the audited cipher \
                      crates and safe code; every other account test decodes precomputed \
-                     records. The library holds all but one test, and naming it is what lets \
+                     records. A bundle walk and a volume list past the stable sort's 4 KiB of \
+                     heap scratch are the refused walks' assertions, and each is made again \
+                     for every one of its hundreds of allocations refused in turn — the \
+                     walk past a shard's whole budget interpreted and the list over half of \
+                     one, through safe code the smaller bundle and mount tests reach as well. \
+                     The library holds all but one test, and naming it is what lets \
                      them be dealt across cores; the integration test is enrolled beside it",
         },
         spread: Spread::Sharded(

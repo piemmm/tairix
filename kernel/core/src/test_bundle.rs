@@ -35,6 +35,7 @@ use crate::test_sink::TestSink;
 extern crate std;
 use std::collections::{BTreeMap, BTreeSet};
 use tairix_sync::Once;
+use tairix_util::fallible::concatenated;
 
 /// The deterministic test signing seed; its derived public key is the trust
 /// anchor the tests pin.
@@ -91,14 +92,28 @@ pub(crate) fn opened_node_in(
     path: &str,
     projection: Arc<Projection>,
 ) -> Opened {
-    let slot = volume.admit().expect("the release slot is reserved");
-    Opened::Node {
-        node: NodeRef::new(slot, NodeId::from_raw(pinned), kind).expect("a pin record allocates"),
+    held_open(volume, pinned, kind, path, projection).expect("the heap holds the open")
+}
+
+/// [`opened_node_in`], refused [`Errno::OutOfMemory`] by a heap that cannot
+/// hold it.
+fn held_open(
+    volume: &Arc<VolumeNodes>,
+    pinned: u64,
+    kind: NodeKind,
+    path: &str,
+    projection: Arc<Projection>,
+) -> Result<Opened, Errno> {
+    let oom = |_| Errno::OutOfMemory;
+    let slot = volume.admit().map_err(oom)?;
+    let named = concatenated(&[path]).ok_or(Errno::OutOfMemory)?;
+    Ok(Opened::Node {
+        node: NodeRef::new(slot, NodeId::from_raw(pinned), kind).map_err(oom)?,
         projection,
         kind,
-        opened_as: Arc::new(String::from(path)),
+        opened_as: Arc::try_new(named).map_err(|_| Errno::OutOfMemory)?,
         at_floor: false,
-    }
+    })
 }
 
 /// The handle a descriptor on `opened` holds: its opener's own.
@@ -113,8 +128,9 @@ pub(crate) fn node_handle(opened: Opened) -> NodeHandle {
 /// as it stands, a relative one after the label of the directory it starts
 /// from, `.` being that directory itself.
 pub(crate) fn fixture_path(at: At<'_>) -> Result<String, Errno> {
+    let held = |parts: &[&str]| concatenated(parts).ok_or(Errno::OutOfMemory);
     if at.path.starts_with('/') {
-        return Ok(at.path.to_string());
+        return held(&[at.path]);
     }
     let base = match at.start {
         Start::Root => "/",
@@ -122,9 +138,9 @@ pub(crate) fn fixture_path(at: At<'_>) -> Result<String, Errno> {
         Start::Catalog(_) => return Err(Errno::NotFound),
     };
     if at.path == "." {
-        return Ok(base.to_string());
+        return held(&[base]);
     }
-    Ok(format!("{}/{}", base.trim_end_matches('/'), at.path))
+    held(&[base.trim_end_matches('/'), "/", at.path])
 }
 
 /// An in-memory [`FilesystemService`] over a fixed file map. Read-only:
@@ -139,6 +155,8 @@ pub(crate) fn fixture_path(at: At<'_>) -> Result<String, Errno> {
 pub(crate) struct MemFs {
     pub(crate) files: BTreeMap<String, Vec<u8>>,
     volume: Arc<VolumeNodes>,
+    /// What every node is reached through.
+    projection: Arc<Projection>,
     read_calls: std::sync::Mutex<BTreeMap<String, usize>>,
     stat_error: Option<Errno>,
     /// Paths the fixture reports as symbolic links rather than regular
@@ -182,7 +200,15 @@ impl MemFs {
                 .map(|(path, bytes)| ((*path).to_string(), bytes.to_vec()))
                 .collect(),
             volume: test_volume(),
-            read_calls: std::sync::Mutex::new(BTreeMap::new()),
+            projection: test_projection(),
+            // Every file tallied from the start, so a read takes nothing from
+            // the heap.
+            read_calls: std::sync::Mutex::new(
+                files
+                    .iter()
+                    .map(|(path, _)| ((*path).to_string(), 0))
+                    .collect(),
+            ),
             stat_error: None,
             links: BTreeSet::new(),
             noexec: false,
@@ -195,6 +221,7 @@ impl MemFs {
     /// as a program.
     pub(crate) fn with_noexec(mut self) -> Self {
         self.noexec = true;
+        self.projection = projection_with(MountFlags::NOEXEC);
         self
     }
 
@@ -257,13 +284,8 @@ impl MemFs {
 
     /// What an open of the node `path` names, of `kind`, answers, through a
     /// projection as `noexec` as the fixture is.
-    fn opened(&self, kind: NodeKind, path: &str) -> Opened {
-        let flags = if self.noexec {
-            MountFlags::NOEXEC
-        } else {
-            MountFlags::default()
-        };
-        opened_node_in(&self.volume, 1, kind, path, projection_with(flags))
+    fn opened(&self, kind: NodeKind, path: &str) -> Result<Opened, Errno> {
+        held_open(&self.volume, 1, kind, path, Arc::clone(&self.projection))
     }
 
     /// How many times the bytes of `path` were read.
@@ -278,12 +300,17 @@ impl MemFs {
 
     /// Read `path`'s bytes from `offset`, counting the read.
     fn serve(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-        *self
+        let mut tally = self
             .read_calls
             .lock()
-            .expect("read-call counter not poisoned")
-            .entry(path.to_string())
-            .or_insert(0) += 1;
+            .expect("read-call counter not poisoned");
+        match tally.get_mut(path) {
+            Some(reads) => *reads += 1,
+            None => {
+                tally.insert(path.to_string(), 1);
+            }
+        }
+        drop(tally);
         let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
         let start = usize::try_from(offset).map_err(|_| Errno::OutOfRange)?;
         if start >= bytes.len() {
@@ -296,24 +323,14 @@ impl MemFs {
 
     /// Whether `path` is a directory: a file lives beneath it.
     fn is_dir(&self, path: &str) -> bool {
-        let prefix = if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{path}/")
-        };
-        self.files.keys().any(|p| p.starts_with(&prefix))
+        self.files.keys().any(|p| beneath(p, path).is_some())
     }
 
     /// The immediate children of `dir`, derived from the file paths.
-    fn children(&self, dir: &str) -> Vec<ReaddirEntry> {
-        let prefix = if dir.ends_with('/') {
-            dir.to_string()
-        } else {
-            format!("{dir}/")
-        };
+    fn children(&self, dir: &str) -> Result<Vec<ReaddirEntry>, Errno> {
         let mut out: Vec<ReaddirEntry> = Vec::new();
         for (path, body) in &self.files {
-            let Some(rest) = path.strip_prefix(&prefix) else {
+            let Some(rest) = beneath(path, dir) else {
                 continue;
             };
             let (kind, name, size) = match rest.split_once('/') {
@@ -321,6 +338,8 @@ impl MemFs {
                 None => (FileKind::Regular, rest, body.len() as u64),
             };
             if !out.iter().any(|e| e.name == name) {
+                let name = concatenated(&[name]).ok_or(Errno::OutOfMemory)?;
+                out.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
                 out.push(ReaddirEntry {
                     kind,
                     size,
@@ -331,13 +350,19 @@ impl MemFs {
                     // `stat` gives.
                     id: FileId::NONE,
                     nlink: 1,
-                    name: name.to_string(),
+                    name,
                     content_gen: 0,
                 });
             }
         }
-        out
+        Ok(out)
     }
+}
+
+/// What of `path` lies beneath the directory `dir`, if it lies there.
+fn beneath<'p>(path: &'p str, dir: &str) -> Option<&'p str> {
+    path.strip_prefix(dir.strip_suffix('/').unwrap_or(dir))?
+        .strip_prefix('/')
 }
 
 impl FilesystemService for MemFs {
@@ -365,7 +390,7 @@ impl FilesystemService for MemFs {
                 if flags.is_read() || flags.is_write() {
                     return Err(Errno::LinkLoop);
                 }
-                return Ok(self.opened(NodeKind::Symlink, &named));
+                return self.opened(NodeKind::Symlink, &named);
             }
             // A link the fixture keeps no target for dangles.
             _ if is_link => return Err(Errno::NotFound),
@@ -381,7 +406,7 @@ impl FilesystemService for MemFs {
         if let Some(err) = self.stat_error {
             return Err(err);
         }
-        Ok(self.opened(kind, &path))
+        self.opened(kind, &path)
     }
 
     fn read_node(
@@ -445,7 +470,7 @@ impl FilesystemService for MemFs {
         at: &mut Listing,
         each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
     ) -> Result<(), Errno> {
-        let children = self.children(&node.opened_as);
+        let children = self.children(&node.opened_as)?;
         if children.is_empty() {
             return Err(Errno::NotFound);
         }
@@ -514,7 +539,7 @@ impl FilesystemService for MemFs {
         _final_link: FinalLink,
         limit: usize,
     ) -> Result<Vec<ReaddirEntry>, Errno> {
-        let children = self.children(&fixture_path(at)?);
+        let children = self.children(&fixture_path(at)?)?;
         if children.is_empty() {
             return Err(Errno::NotFound);
         }

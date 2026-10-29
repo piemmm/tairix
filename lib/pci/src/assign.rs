@@ -590,14 +590,26 @@ impl<C: ConfigSpace> Assignment<'_, C> {
         let mut work = Vec::new();
         work.try_reserve(1).map_err(no_space)?;
         work.push((requests, window, floor));
-        while let Some((mut ordered, window, floor)) = work.pop() {
-            ordered.sort_by_key(|request| core::cmp::Reverse(request.align));
+        while let Some((requests, window, floor)) = work.pop() {
             let Some(window) = window else {
-                self.unplaced += ordered.len();
+                self.unplaced += requests.len();
                 continue;
             };
+            // Ties keep the order asked in, so the sort can be one that takes
+            // no scratch from the heap.
+            let mut ordered = Vec::new();
+            ordered
+                .try_reserve_exact(requests.len())
+                .map_err(no_space)?;
+            ordered.extend(
+                requests
+                    .iter()
+                    .enumerate()
+                    .map(|(at, request)| (core::cmp::Reverse(request.align), at)),
+            );
+            ordered.sort_unstable();
             let mut cursor = window.start.max(floor);
-            for request in ordered {
+            for request in ordered.into_iter().map(|(_, at)| requests[at]) {
                 let span = align_up(cursor, request.align)
                     .and_then(|base| Some(base..base.checked_add(request.size)?))
                     .filter(|span| span.end <= window.end && span.end <= self.reach(&request));
@@ -756,15 +768,21 @@ fn span_of<'r>(
     sizes
         .try_reserve_exact(requests.clone().count())
         .map_err(|_| DriverError::NoSpace)?;
-    sizes.extend(requests.map(|r| (r.align, r.size)));
-    let Some(largest) = sizes.iter().map(|&(align, _)| align).max() else {
+    // Ties keep the order asked in, so the sort can be one that takes no
+    // scratch from the heap.
+    sizes.extend(
+        requests
+            .enumerate()
+            .map(|(at, r)| (core::cmp::Reverse(r.align), at, r.size)),
+    );
+    let Some(largest) = sizes.iter().map(|&(align, _, _)| align.0).max() else {
         return Ok(Span::Empty);
     };
-    sizes.sort_by_key(|&(align, _)| core::cmp::Reverse(align));
+    sizes.sort_unstable();
     let span = sizes
         .iter()
-        .try_fold(0u64, |offset, &(align, size)| {
-            align_up(offset, align)?.checked_add(size)
+        .try_fold(0u64, |offset, &(align, _, size)| {
+            align_up(offset, align.0)?.checked_add(size)
         })
         .and_then(|end| align_up(end, granule));
     Ok(span.map_or(Span::Overflowed, |size| Span::Of {

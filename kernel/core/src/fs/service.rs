@@ -42,6 +42,7 @@ use tairix_abi::sysinfo::{
     MountRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Time64;
+use tairix_abi::volume::ViewBindRequest;
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
     RenameFlags, SeekRegion, UnlinkFlags,
@@ -911,8 +912,12 @@ pub trait FilesystemService: Send + Sync {
     /// so a service that owns no mount table (the fail-closed
     /// [`NullFilesystemService`]) truthfully reports "no mounts" rather than
     /// fabricating one.
-    fn mount_snapshot(&self) -> Vec<MountRecord> {
-        Vec::new()
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the snapshot cannot be held.
+    fn mount_snapshot(&self) -> Result<Vec<MountRecord>, Errno> {
+        Ok(Vec::new())
     }
 
     /// Snapshot every view binding as a wire-ready [`ViewBindingRecord`], in
@@ -921,8 +926,12 @@ pub trait FilesystemService: Send + Sync {
     /// the same terms.
     ///
     /// [`mount_snapshot`]: Self::mount_snapshot
-    fn view_snapshot(&self) -> Vec<ViewBindingRecord> {
-        Vec::new()
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the snapshot cannot be held.
+    fn view_snapshot(&self) -> Result<Vec<ViewBindingRecord>, Errno> {
+        Ok(Vec::new())
     }
 
     /// Snapshot every fault-aware block-backed volume's live I/O health as
@@ -938,8 +947,12 @@ pub trait FilesystemService: Send + Sync {
     /// policy. The default returns an empty snapshot, so a service owning no
     /// mount table (the fail-closed [`NullFilesystemService`]) truthfully
     /// reports "no volumes" rather than fabricating one.
-    fn volume_io_health_snapshot(&self) -> Vec<VolumeIoHealthRecord> {
-        Vec::new()
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the snapshot cannot be held.
+    fn volume_io_health_snapshot(&self) -> Result<Vec<VolumeIoHealthRecord>, Errno> {
+        Ok(Vec::new())
     }
 
     /// Snapshot every fault-aware block-backed volume's cumulative I/O
@@ -954,8 +967,12 @@ pub trait FilesystemService: Send + Sync {
     /// same reason `CPU_TIME_STATS` is: a utilisation figure is one every
     /// user may see. The default returns an empty snapshot, so a service
     /// owning no mount table truthfully reports "no volumes".
-    fn volume_io_stats_snapshot(&self) -> Vec<VolumeIoStatsRecord> {
-        Vec::new()
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the snapshot cannot be held.
+    fn volume_io_stats_snapshot(&self) -> Result<Vec<VolumeIoStatsRecord>, Errno> {
+        Ok(Vec::new())
     }
 
     /// Snapshot every fault-aware block-backed volume's live queue occupancy
@@ -968,8 +985,12 @@ pub trait FilesystemService: Send + Sync {
     /// scheduler internal, so the broker gates it on `CAP_SYSINFO_KERNEL`
     /// where the service counters are ungated. The default returns an empty
     /// snapshot.
-    fn volume_io_queue_snapshot(&self) -> Vec<VolumeIoQueueRecord> {
-        Vec::new()
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the snapshot cannot be held.
+    fn volume_io_queue_snapshot(&self) -> Result<Vec<VolumeIoQueueRecord>, Errno> {
+        Ok(Vec::new())
     }
 
     /// Run `remove` — the caller's hardware-tree removal closure — but only
@@ -1003,6 +1024,45 @@ pub trait FilesystemService: Send + Sync {
         remove: &mut dyn FnMut() -> Result<Vec<u32>, Errno>,
     ) -> Result<Vec<u32>, Errno> {
         remove()
+    }
+
+    /// Show the subtree of an attached volume `request` names at its target,
+    /// as `uid` holding `caps` (`plans/NEW-NAMESPACE.md` NS-4a): over a
+    /// directory under `/Users` the walk reaches following no link, which a
+    /// caller without `CAP_FS_MOUNT` must own and find empty, and bind a volume
+    /// it attached over; at a name in the `/Storage` catalog for a holder
+    /// alone. The default fails closed with [`Errno::NotImplemented`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no such volume or subtree;
+    /// [`Errno::PermissionDenied`] for a target or a volume the caller may not
+    /// bind; [`Errno::NotEmpty`]; [`Errno::AlreadyExists`] for a target shown
+    /// already; [`Errno::LinkLoop`] for a link on the way; the walk's refusals.
+    fn view_bind(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _request: &ViewBindRequest<'_>,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Withdraw the binding at `target`, as `uid` holding `caps`: its binder,
+    /// or a holder of `CAP_FS_MOUNT`. A descriptor opened through it answers
+    /// stale. The default fails closed with [`Errno::NotImplemented`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for no projection there, [`Errno::OutOfRange`] for
+    /// one no `view_bind` made, and [`Errno::PermissionDenied`].
+    fn view_unbind(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _target: &str,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
     }
 }
 

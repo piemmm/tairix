@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::net::{IpAddr, Ipv4Addr};
 use std::collections::BTreeSet;
 
-use tairix_abi::fsserve::OfferId;
+use tairix_abi::netattach::OfferId;
 use tairix_abi::netshare_ipc::{
     Connect, Credentials, DialectFloor, Endpoint, MountEntry, MountState, NetshareError,
     NetshareReply, NetshareRequest, Op, Pin, Records, Rejection, ShareEntry, Shares, Shortfall,
@@ -112,6 +112,7 @@ fn a_listing_answers_the_request_sent() {
         pin: pin(),
         hidden: 0,
         unnamed: 1,
+        unlisted: 4,
         shares: Records::new(&listed),
     }));
     let shares = client.shares(connect(), true).expect("a listing");
@@ -120,7 +121,10 @@ fn a_listing_answers_the_request_sent() {
         .iter()
         .map(|entry| entry.name.to_string())
         .collect();
-    assert_eq!((shares.pin, shares.hidden, shares.unnamed), (pin(), 0, 1));
+    assert_eq!(
+        (shares.pin, shares.hidden, shares.unnamed, shares.unlisted),
+        (pin(), 0, 1, 4)
+    );
     assert_eq!(names, ["share", "C$"]);
     assert_eq!(
         sent(&client),
@@ -308,6 +312,7 @@ fn every_failure_states_a_reason_of_its_own() {
         NetshareError::NoSuchMount,
         NetshareError::Limit,
         NetshareError::Failed,
+        NetshareError::AlreadyMounted,
     ];
     refusals.extend(
         [

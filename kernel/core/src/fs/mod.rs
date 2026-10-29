@@ -73,7 +73,7 @@ pub use blkclient::BlkClient;
 pub use delegate::{DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, FinalLink, HeldNode};
 pub use fscache::CachedFs;
 pub use listing::{DirPosition, ListEnd, Listing, ResumeName};
-pub use mount::{Attachment, ChildMounts, MountTable, Projection};
+pub use mount::{Attachment, BindsWithin, ChildMounts, MountTable, Projection};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
     MountedFilesystemService, RegisterError,
@@ -90,7 +90,8 @@ pub use service::{
 };
 pub use vfs::Vfs;
 pub use volsvc::{
-    ChunkSink, ChunkSource, NullVolumeService, ServeChannel, VolumeService, NULL_VOLUME_SERVICE,
+    ChunkSink, ChunkSource, NullVolumeService, OfferingServer, Principal, ServeChannel,
+    VolumeService, NULL_VOLUME_SERVICE,
 };
 pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 
@@ -307,6 +308,9 @@ pub enum VfsError {
     /// The caller was being terminated, so a served volume's answer was not
     /// waited for.
     Interrupted,
+    /// The directory is one a bind covers, or one on the way to it, and
+    /// stays where it is while the bind stands.
+    Busy,
 }
 
 impl VfsError {
@@ -354,6 +358,7 @@ impl VfsError {
             Self::LimitExceeded => Errno::LimitExceeded,
             Self::Unserved => Errno::NotImplemented,
             Self::Interrupted => Errno::Interrupted,
+            Self::Busy => Errno::Busy,
         }
     }
 }
@@ -384,6 +389,7 @@ impl fmt::Display for VfsError {
             Self::LimitExceeded => "more entries than the walk allows",
             Self::Unserved => "no driver serves the volume yet",
             Self::Interrupted => "caller terminated before the volume answered",
+            Self::Busy => "a bind stands on the directory",
         };
         f.write_str(message)
     }

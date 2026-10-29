@@ -153,10 +153,15 @@ fn system_vfs_attaches_two_volumes_under_five_projections() {
 
     let vfs = system_vfs().expect("the production VFS builds");
     let mounts = vfs.mounts();
-    let volumes = mounts.volumes();
+    let volumes = mounts.volumes().expect("volumes");
     let shown: alloc::vec::Vec<_> = volumes
         .iter()
-        .map(|(volume, at)| (volume.flags(), at.clone()))
+        .map(|(volume, at)| {
+            (
+                volume.flags(),
+                at.as_ref().map(|at| at.owned().expect("held")),
+            )
+        })
         .collect();
     let path = |text: &str| Path::parse(text).expect("valid");
     assert_eq!(
@@ -170,7 +175,7 @@ fn system_vfs_attaches_two_volumes_under_five_projections() {
         .iter()
         .map(|mount| {
             (
-                mount.path().clone(),
+                mount.path().owned().expect("held"),
                 mount.flags(),
                 mount.backing().is_some(),
             )
@@ -323,4 +328,55 @@ fn a_service_bundle_is_read_from_system_before_the_root_is_served() {
             "{path}"
         );
     }
+}
+
+/// A volume cache the heap cannot hold is refused, and the claim on its
+/// change table let go with it, rather than the kernel aborting.
+#[test]
+fn a_volume_cache_the_heap_cannot_hold_is_refused() {
+    use alloc::boxed::Box;
+    use tairix_kernel_core::fs::memfs::RwMockFs;
+    use tairix_kernel_core::fs::CachedFs;
+
+    use crate::test_support::NullSink;
+
+    struct Ample;
+    impl tairix_reclaim::FreeMemorySource for Ample {
+        fn free_bytes(&self) -> usize {
+            1 << 30
+        }
+        fn total_bytes(&self) -> usize {
+            1 << 30
+        }
+    }
+    static AMPLE: Ample = Ample;
+    let pressure: &'static tairix_reclaim::MemoryPressure =
+        Box::leak(Box::new(tairix_reclaim::MemoryPressure::over(&AMPLE)));
+    let watches: &'static tairix_kernel_core::fswatch::WatchRegistry =
+        Box::leak(Box::new(tairix_kernel_core::fswatch::WatchRegistry::new()));
+    let identity = [0x3C; 16];
+    let whole = core::mem::size_of::<CachedFs<RwMockFs>>();
+    let built = tairix_fuzzseed::meter::refusing_above(whole - 1, || {
+        super::cached(
+            RwMockFs::new(),
+            1,
+            identity,
+            pressure,
+            &NullSink,
+            Some(watches),
+        )
+        .map(drop)
+    });
+    assert_eq!(built, Err(tairix_abi::Errno::OutOfMemory));
+    assert!(
+        watches
+            .claim(
+                identity,
+                tairix_abi::driver::filesystem::NameMatching::Exact,
+                pressure
+            )
+            .is_some(),
+        "the refused cache's change table is free again"
+    );
+    assert!(super::cached(RwMockFs::new(), 1, [0x3D; 16], pressure, &NullSink, None).is_ok());
 }

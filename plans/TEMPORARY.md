@@ -93,7 +93,8 @@ same change.
 
 ### D-1 — How an attached volume is named (gates TMP-3)
 
-What the code does (`drivers/storage/volmgr/src/{name.rs,plan.rs,program.rs}`):
+What the code did when this was asked
+(`drivers/storage/volmgr/src/{name.rs,plan.rs,program.rs}`):
 
 - A usable label is lowercased and kept to `a-z0-9-_`, at most 32 bytes.
   Otherwise the name is `<fstype><n>`, where `ext` stands for the whole ext
@@ -169,7 +170,7 @@ What the code does:
   anything at its top level. That is the log's `mkdir … errno=6`: the user
   copied a folder named `files.app` into `/Storage/ext1-25cm` and was refused.
   The file manager keeps no per-volume state.
-- **FAT32** is wrapped in `GroupMappedFs` when a `storage` group exists: uid 0,
+- **FAT32** is wrapped in `PresentedFs` when a `storage` group exists: uid 0,
   gid `storage`, `0775`/`0664`, and security changes refused
   (`volume_policy.rs`).
 - **ARXFS** is mounted unwrapped.
@@ -371,7 +372,7 @@ Done. The completion's reissue word, the engine asking the device
 
 ## TMP-3 — Attached-volume names come from the volume's label (D-1)
 
-The volume manager names a volume from itself (`drivers/storage/volmgr/src/name.rs`):
+The volume manager names a volume from itself (`lib/fsprobe/src/name.rs`):
 
 - **The label**, read where the format keeps it (`lib/fsprobe`): ext's
   `s_volume_name`; FAT32's root-directory label entry, located through the

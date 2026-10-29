@@ -21,7 +21,7 @@ use tairix_abi::sysinfo::{
     MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability, MountRecord,
     MountVolumeState, PageRequest, ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord,
     ResourceLimitRecord, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-    VolumeIoHealthRecord, CPU_INFO_FLAG_FREQ_MEASURED, MACHINE_ID_LEN, MOUNT_VOLUME_ID_LEN,
+    VolumeIoHealthRecord, CPU_INFO_FLAG_FREQ_MEASURED, MACHINE_ID_LEN, VOLUME_ID_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, Time64};
 use tairix_procinfo::Transport;
@@ -388,7 +388,7 @@ fn mount_record(block_size: u32, total_blocks: u64, free_blocks: u64) -> MountRe
             availability: MountAvailability::Available,
             medium: None,
         },
-        [0u8; MOUNT_VOLUME_ID_LEN],
+        [0u8; VOLUME_ID_LEN],
     )
     .expect("a valid mount record")
 }

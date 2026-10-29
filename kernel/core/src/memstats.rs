@@ -50,6 +50,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_abi::sysinfo::{CacheLedgerOrigin, CacheLedgerRecord, RamzipStats};
+use tairix_abi::Errno;
 use tairix_reclaim::{
     BandObserver, CacheLedger, FreeMemorySource, MemoryPressure, PinnedLedger, PressureBand,
     ReclaimClass, ReclaimClassStats,
@@ -158,6 +159,15 @@ pub struct MemStats {
 /// The production registry the boot path and the introspection export
 /// share.
 pub static MEM_STATS: MemStats = MemStats::new();
+
+/// `record`, as a cache this kernel measures reports it; `None` for one its
+/// ledger could not render.
+fn measured(record: Result<CacheLedgerRecord, Errno>) -> Option<CacheLedgerRecord> {
+    let mut record = record.ok()?;
+    record.origin = CacheLedgerOrigin::Kernel;
+    record.reporter_pid = 0;
+    Some(record)
+}
 
 /// Drop every ledger whose cache is gone: one whose books nothing but this
 /// list's own ledgers still holds. `books` names a ledger's shared books
@@ -366,26 +376,38 @@ impl MemStats {
     /// query: one misbehaving cache must not blind the export to every
     /// other registered ledger, and the label defect is exactly what
     /// `to_record`'s own refusal already exists to catch.
-    #[must_use]
-    pub fn cache_ledger_records(&self) -> Vec<CacheLedgerRecord> {
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the records cannot be held.
+    pub fn cache_ledger_records(&self) -> Result<Vec<CacheLedgerRecord>, Errno> {
         let mut records = Vec::new();
         // One registry lock at a time: the two lists are independent, so
-        // taking both at once would create a lock order for no reason.
-        for ledger in self.ledgers.read().iter() {
-            if let Ok(mut record) = ledger.to_record() {
-                record.origin = CacheLedgerOrigin::Kernel;
-                record.reporter_pid = 0;
-                records.push(record);
-            }
+        // taking both at once would create a lock order for no reason. Each
+        // list is reserved whole first, so no record grows the buffer.
+        {
+            let ledgers = self.ledgers.read();
+            records
+                .try_reserve(ledgers.len())
+                .map_err(|_| Errno::OutOfMemory)?;
+            records.extend(
+                ledgers
+                    .iter()
+                    .filter_map(|ledger| measured(ledger.to_record())),
+            );
         }
-        for ledger in self.pinned.read().iter() {
-            if let Ok(mut record) = ledger.to_record() {
-                record.origin = CacheLedgerOrigin::Kernel;
-                record.reporter_pid = 0;
-                records.push(record);
-            }
+        {
+            let pinned = self.pinned.read();
+            records
+                .try_reserve(pinned.len())
+                .map_err(|_| Errno::OutOfMemory)?;
+            records.extend(
+                pinned
+                    .iter()
+                    .filter_map(|ledger| measured(ledger.to_record())),
+            );
         }
-        records
+        Ok(records)
     }
 
     /// The `ramzip` tier's exported counters: the live tier's snapshot
@@ -478,11 +500,15 @@ mod tests {
         stats.register_ledger(CacheLedger::new("b", owner, class, Arc::clone(&detached)));
         let live = Arc::new(CacheAccounting::new());
         stats.register_ledger(CacheLedger::new("c", owner, class, Arc::clone(&live)));
-        assert_eq!(stats.cache_ledger_records().len(), 3, "both caches live");
+        assert_eq!(
+            stats.cache_ledger_records().expect("records").len(),
+            3,
+            "both caches live"
+        );
         drop(detached);
         let next = Arc::new(CacheAccounting::new());
         stats.register_ledger(CacheLedger::new("d", owner, class, Arc::clone(&next)));
-        let records = stats.cache_ledger_records();
+        let records = stats.cache_ledger_records().expect("records");
         let labels: Vec<&str> = records.iter().map(CacheLedgerRecord::label).collect();
         assert_eq!(labels, ["c", "d"], "the gone cache's pools left");
     }
@@ -591,7 +617,7 @@ mod tests {
 
         // Both pools still appear as their own row in the per-cache
         // export, each naming the pool it measures.
-        let records = shared.cache_ledger_records();
+        let records = shared.cache_ledger_records().expect("records");
         assert_eq!(records.len(), 2);
         for (record, (label, class, payload, _)) in records.iter().zip(pools) {
             assert_eq!(record.label(), label);
@@ -603,7 +629,7 @@ mod tests {
     #[test]
     fn cache_ledger_records_is_empty_for_an_empty_registry() {
         let stats = MemStats::new();
-        assert!(stats.cache_ledger_records().is_empty());
+        assert!(stats.cache_ledger_records().expect("records").is_empty());
     }
 
     #[test]
@@ -630,7 +656,7 @@ mod tests {
             Arc::clone(&second),
         ));
 
-        let records = stats.cache_ledger_records();
+        let records = stats.cache_ledger_records().expect("records");
         assert_eq!(records.len(), 2, "one row per registered ledger");
 
         assert_eq!(records[0].label(), "wm.cursor");
@@ -648,6 +674,32 @@ mod tests {
         assert_eq!(records[1].reporter_pid, 0);
         assert_eq!(records[1].payload_bytes, 1024);
         assert_eq!(records[1].metadata_bytes, 32);
+    }
+
+    /// A ledger list the heap cannot hold is refused whole.
+    ///
+    /// Regression: the list was collected infallibly.
+    #[test]
+    fn a_ledger_list_the_heap_cannot_hold_is_refused() {
+        use tairix_reclaim::{PinnedAccounting, PinnedLedger};
+
+        let stats = MemStats::new();
+        let owner = ReclaimOwner::KernelSubsystem("mem");
+        stats.register_ledger(CacheLedger::new(
+            "clean",
+            owner,
+            ReclaimClass::CleanFileData,
+            Arc::new(CacheAccounting::new()),
+        ));
+        stats.register_pinned_ledger(PinnedLedger::new(
+            "pinned",
+            owner,
+            Arc::new(PinnedAccounting::new()),
+        ));
+        let listed = crate::test_alloc::past_each_refusal(&Err(Errno::OutOfMemory), || {
+            stats.cache_ledger_records().map(|records| records.len())
+        });
+        assert_eq!(listed, Ok(2));
     }
 
     #[test]
@@ -673,7 +725,7 @@ mod tests {
             pinned,
         ));
 
-        let records = stats.cache_ledger_records();
+        let records = stats.cache_ledger_records().expect("records");
         assert_eq!(records.len(), 2, "the cache row, then the pinned one");
         assert_eq!(records[0].label(), "arxfs.clean");
         assert_eq!(records[1].label(), "arxfs.writeback");
@@ -712,7 +764,7 @@ mod tests {
             Arc::new(CacheAccounting::new()),
         ));
 
-        let records = stats.cache_ledger_records();
+        let records = stats.cache_ledger_records().expect("records");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].label(), "good-cache");
     }

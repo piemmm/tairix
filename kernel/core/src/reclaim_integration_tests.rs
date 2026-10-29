@@ -66,7 +66,8 @@ fn warmed_pair(
         ReclaimOwner::FilesystemVolume { volume: 1 },
         pressure,
         sink(),
-    );
+    )
+    .expect("a cache");
     let file = file_of(&mut fs_cache);
     let mut buf = [0u8; 64];
     fs_cache.read_at(file, 0, &mut buf).expect("warm data");

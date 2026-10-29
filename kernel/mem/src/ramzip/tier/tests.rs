@@ -913,6 +913,39 @@ fn cluster_restores_only_nearby_contemporaneous_entries() {
     assert_eq!(ramzip.ledger().counters().cluster_restored, 4);
 }
 
+/// A cluster brings back the nearest of its neighbours, the lower page of
+/// two as near, finding them with nothing from the heap.
+///
+/// Regression: the neighbours were collected into a vector the heap could
+/// refuse, aborting the kernel.
+#[test]
+fn a_cluster_brings_back_its_nearest_neighbours_with_nothing_from_the_heap() {
+    let mut env = env!();
+    let mut ramzip = tier(&env);
+    let pages: Vec<Page> = (90..=110).map(|n| env.map_page(n, 1)).collect();
+    env.press_to(PressureBand::Moderate);
+    for page in &pages {
+        compress(&mut env, &mut ramzip, *page);
+    }
+    env.relax();
+    let center = page_at(100);
+    try_fault(&mut env, &mut ramzip, center).expect("fault");
+    let pressure = &env.pressure;
+    let mut ctx = ctx!(env);
+    let restored = tairix_fuzzseed::meter::refusing_above(0, || {
+        ramzip.cluster_after_fault(pressure, &mut ctx, center)
+    });
+    assert_eq!(restored, CLUSTER_MAX_PAGES);
+    for number in 90..=110 {
+        let back = (96..=104).contains(&number);
+        assert_eq!(
+            ramzip.has_entry(SPACE, page_at(number)),
+            !back,
+            "page {number}"
+        );
+    }
+}
+
 #[test]
 fn cluster_does_nothing_under_pressure() {
     let mut env = env!();

@@ -1644,8 +1644,9 @@ impl SyscallNumber {
     /// an unavailable, surprise-removed volume) rather than discarding
     /// uncommitted data; a **force** detach (`plans/DEVICES.md` D4b)
     /// retracts the volume anyway, deliberately discarding the retained
-    /// set with its own audit event. Requires `CAP_FS_MOUNT`; every
-    /// detach decision is audited.
+    /// set with its own audit event. A network volume's owner may detach it;
+    /// any other volume needs `CAP_FS_MOUNT`, checked by the handler once it
+    /// knows the volume. Every detach decision is audited.
     pub const VOLUME_DETACH: Self = Self(81);
 
     /// Grant the serving task of a call endpoint the right to map a shared
@@ -3118,6 +3119,55 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::FS_SERVE`]; audited.
     pub const VOLUME_SERVE: Self = Self(158);
 
+    /// Offer a network volume to one principal (`plans/FSSERVE.md` §6).
+    ///
+    /// Arguments: `frame: *const u8` and `frame_len: usize` (a
+    /// [`crate::netattach::NetworkOffer`]), `grant: *mut u8` and `grant_cap:
+    /// usize`. The kernel creates the volume's call endpoint and data window
+    /// and writes the [`crate::netattach::OfferGrant`] to `grant`, returning
+    /// its length. Nothing is mounted until the principal attaches it. Gated
+    /// by [`crate::CapabilityId::FS_SERVE`]; audited.
+    pub const FSSERVE_OFFER: Self = Self(159);
+
+    /// Attach a network volume offered to the caller.
+    ///
+    /// Arguments: `offer: u64`, `frame: *const u8` and `frame_len: usize` (a
+    /// [`crate::netattach::NetworkAttach`]), `reply: *mut u8` and
+    /// `reply_cap: usize`. Writes the [`crate::netattach::AttachReply`] and
+    /// returns its length. An offer made for anyone else is
+    /// [`Errno::NotFound`]; a shared or explicit presentation needs
+    /// [`crate::CapabilityId::FS_MOUNT`]. Ungated at the dispatcher, since
+    /// the offer names who may; audited.
+    pub const FSSERVE_ATTACH: Self = Self(160);
+
+    /// Tell the kernel about an offer this server made: that it is working on
+    /// the calls it holds, or that it withdraws the offer
+    /// ([`crate::netattach::FsserveCtl`]).
+    ///
+    /// Arguments: `offer: u64`, `op: u32`. Returns `0` or `-errno`; an offer
+    /// another server made is [`Errno::NotFound`]. Gated by
+    /// [`crate::CapabilityId::FS_SERVE`]; a withdrawal is audited, a sign of
+    /// life is not.
+    pub const FSSERVE_CTL: Self = Self(161);
+
+    /// Project an attached volume's subtree at a directory under `/Users` or
+    /// `/Storage` (`plans/NEW-NAMESPACE.md` NS-4a).
+    ///
+    /// Arguments: `request: *const u8` and `request_len: usize` (a
+    /// [`crate::volume::ViewBindRequest`]). Returns `0` or `-errno`. A caller
+    /// without [`crate::CapabilityId::FS_MOUNT`] may bind only a volume it
+    /// owns onto an empty directory it owns. Ungated at the dispatcher;
+    /// audited.
+    pub const VIEW_BIND: Self = Self(162);
+
+    /// Withdraw the projection at a directory.
+    ///
+    /// Arguments: `target: *const u8` and `target_len: usize`, an absolute
+    /// path. Returns `0` or `-errno`. A caller without
+    /// [`crate::CapabilityId::FS_MOUNT`] may withdraw only a projection it
+    /// made. Ungated at the dispatcher; audited.
+    pub const VIEW_UNBIND: Self = Self(163);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3427,6 +3477,11 @@ mod tests {
         assert_eq!(SyscallNumber::VOLUME_WRITE.as_u16(), 156);
         assert_eq!(SyscallNumber::VOLUME_CTL.as_u16(), 157);
         assert_eq!(SyscallNumber::VOLUME_SERVE.as_u16(), 158);
+        assert_eq!(SyscallNumber::FSSERVE_OFFER.as_u16(), 159);
+        assert_eq!(SyscallNumber::FSSERVE_ATTACH.as_u16(), 160);
+        assert_eq!(SyscallNumber::FSSERVE_CTL.as_u16(), 161);
+        assert_eq!(SyscallNumber::VIEW_BIND.as_u16(), 162);
+        assert_eq!(SyscallNumber::VIEW_UNBIND.as_u16(), 163);
     }
 
     #[test]

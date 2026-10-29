@@ -49,7 +49,7 @@ incapable of a session, fail closed by construction.
 ## Fail-closed parsing
 
 The database text is untrusted input (`AGENTS.md` §19.5/§19.6):
-`UsersDb::parse` bounds the file (64 KiB), each line (512 bytes), and the
+`UsersDb::parse` bounds the file (64 KiB), each line (1 KiB), and the
 record count (512) before reading anything; validates every field's length,
 charset, and shape; enforces username and uid uniqueness; and rejects the
 whole file on the first defect, naming the line that raised it
@@ -58,6 +58,16 @@ text that parses back to an equal database, and the deterministic fuzz
 harness (`tests/fuzz_users.rs`, enrolled in `cargo xtask fuzz`) drives the
 parser with mutated, truncated, spliced, and noise inputs under the
 never-panic + round-trip invariants.
+
+Every allocation the crate makes is fallible: a heap that cannot hold a
+record, a parse or a serialised text answers `ParseError::OutOfMemory`,
+never an abort. A text already validated is also read where it lies:
+`UsersDb::views` and `GroupsDb::views` yield each record as a `UserView` /
+`GroupView` whose fields borrow the text, through the same line reader and
+field decoder the owned parse is built on, so a reader that keeps no copy —
+the kernel's account and group directories — builds no record and takes
+nothing from the heap. A view checks every field as a record does; only a
+whole parse sees two records collide.
 
 ## The group registry (`tairix-groups-v1`)
 
@@ -219,9 +229,9 @@ too: `system_accounts()` — the no-login `system` record (uid 0, group
 resolves to) plus one no-login account per system service (`devmgr` 10,
 `sysinfod` 11, `seatmgr` 12, `login` 13, `netstack` 14, `fontd` 15,
 `greeter` 16, `confd` 17, `timed` 18, `audiod` 19, `discoveryd` 20,
-`soundd` 21, `settingsd` 22, `thermald` 23, primary group `services` gid
-101), each carrying exactly its own service's grant ceiling (`DEVMGR_CEILING`
-… `THERMALD_CEILING`) so the ceiling∩manifest intersection does real work. The uids a protocol
+`soundd` 21, `settingsd` 22, `thermald` 23, `smbfs` 24, primary group
+`services` gid 101), each carrying exactly its own service's grant ceiling
+(`DEVMGR_CEILING` … `SMBFS_CEILING`) so the ceiling∩manifest intersection does real work. The uids a protocol
 authenticates its peer by — the network stack's, the discovery service's,
 the cue authority's, and the login service's and device manager's the cue
 authority admits lifecycle sounds by — are defined in that protocol's
@@ -233,4 +243,7 @@ config-parse time and spawns each service with that concrete
 `target_uid`; `is_system_account_name()` / `is_system_group_name()` back
 the kernel merge's reserved-name refusals, and
 `system_account_directory()` supplies the `(uid, login group, username)` rows the
-user-directory introspection lists ahead of the on-disk half.
+user-directory introspection lists ahead of the on-disk half, as
+`system_group_directory()` does the group directory's and
+`system_account_identity()` an account read's, all three built with nothing
+from the heap.

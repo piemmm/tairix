@@ -15,10 +15,16 @@
 //! [`VfsError::Stale`].
 //!
 //! Every projection but the root's sits directly beneath the floor of
-//! another, so a walk crosses into one only at a floor and climbs out of one
-//! only from its own. A runtime volume is shown only directly beneath the
-//! `/Storage` catalog, and nothing is shown beneath a runtime volume, so its
-//! listing is the volume's own.
+//! another, or is a *bind* covering a directory of one: a walk crosses into a
+//! projection at a floor, or at the directory a bind covers, and climbs out of
+//! one only from its own floor. A runtime volume is shown directly beneath the
+//! `/Storage` catalog, and a bind over a directory of any backed projection —
+//! a runtime volume's or another bind's among them — so a runtime volume's
+//! listing is its own. A bind pins the directory it covers and every
+//! directory down to it ([`Cover`]), and none of them is renamed while it
+//! stands, so its view path stays the one it was made at. A plain detach or
+//! unbind is refused while a bind stands within what it withdraws; a forced
+//! one withdraws those binds first.
 //!
 //! Every mutator records its change through `MountTable::changed` under the
 //! table's own lock, so the `Mounts` system notice and every directory watcher
@@ -28,14 +34,15 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tairix_abi::blkio::BlkMedium;
-use tairix_abi::driver::filesystem::{AllocationClass, MountFlags, NameMatching, NodeKind};
+use tairix_abi::driver::filesystem::{AllocationClass, MountFlags, NameMatching, NodeId, NodeKind};
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::fs::Access as Wanted;
 use tairix_abi::STORAGE_CATALOG;
 
+use super::node::NodeRef;
 use super::path::Path;
 use super::perm::{Access, Metadata};
 use super::VfsError;
@@ -118,6 +125,204 @@ pub struct Projection {
     changed_at: u64,
     /// Cleared when the projection leaves the table.
     live: AtomicBool,
+    /// The directory a bind covers, or `None` where the projection sits at a
+    /// floor's name.
+    cover: Option<Cover>,
+    /// Who made it, when a bind did.
+    binder: Option<u32>,
+    /// How many binds cover directories reached through this projection, so a
+    /// walk through one with none asks nothing of the table.
+    binds_within: AtomicUsize,
+}
+
+/// The directory a bind covers, reached through another projection: it and
+/// every directory down to it from that projection's floor are pinned while
+/// the bind stands, so their ids keep naming them and none can be renamed.
+#[derive(Debug)]
+pub struct Cover {
+    within: Arc<Projection>,
+    /// The directories between `within`'s floor and the covered one,
+    /// outermost first.
+    above: Vec<NodeRef>,
+    covered: NodeRef,
+}
+
+impl Cover {
+    /// `covered`, reached through `within` by way of `above`, the directories
+    /// between `within`'s floor and it, outermost first.
+    #[must_use]
+    pub fn new(within: Arc<Projection>, above: Vec<NodeRef>, covered: NodeRef) -> Self {
+        Self {
+            within,
+            above,
+            covered,
+        }
+    }
+
+    /// The projection the covered directory is reached through.
+    #[must_use]
+    pub fn within(&self) -> &Arc<Projection> {
+        &self.within
+    }
+
+    /// The directory holding the covered one, `None` where that is
+    /// [`Self::within`]'s floor.
+    #[must_use]
+    pub fn holder(&self) -> Option<&NodeRef> {
+        self.above.last()
+    }
+
+    /// The covered directory, and the directories on the way to it.
+    fn chain(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.above
+            .iter()
+            .map(NodeRef::pinned)
+            .chain(core::iter::once(self.covered.pinned()))
+    }
+}
+
+/// What a walk asks on each lookup through a projection a bind is made
+/// within: the directories binds cover, and those on the way to them, each
+/// keyed by the projection it is reached through and in key order. Shared
+/// whole with the walks and replaced at each change, so a lookup searches it
+/// with no lock and no copy.
+#[derive(Debug, Default)]
+pub struct Covers {
+    covered: Vec<CoverKey>,
+    guarded: Vec<CoverKey>,
+}
+
+/// A directory reached through a projection, and the bind it is held for.
+#[derive(Debug)]
+struct CoverKey {
+    within: u64,
+    node: u64,
+    bind: Arc<Projection>,
+}
+
+impl CoverKey {
+    fn key(&self) -> (u64, u64) {
+        (self.within, self.node)
+    }
+}
+
+impl Covers {
+    /// The index of the binds among `mounts`.
+    fn of<'a>(mounts: impl Iterator<Item = &'a Arc<Projection>> + Clone) -> Result<Self, VfsError> {
+        let oom = |_| VfsError::OutOfMemory;
+        let covers = mounts.filter_map(|m| Some((m, m.cover.as_ref()?)));
+        let (mut covered, mut guarded) = (Vec::new(), Vec::new());
+        covered
+            .try_reserve_exact(covers.clone().count())
+            .map_err(oom)?;
+        guarded
+            .try_reserve_exact(covers.clone().map(|(_, c)| c.above.len() + 1).sum())
+            .map_err(oom)?;
+        for (bind, cover) in covers {
+            let within = cover.within.id;
+            let key = |node: NodeId| CoverKey {
+                within,
+                node: node.raw(),
+                bind: Arc::clone(bind),
+            };
+            covered.push(key(cover.covered.pinned()));
+            guarded.extend(cover.chain().map(key));
+        }
+        covered.sort_unstable_by_key(CoverKey::key);
+        guarded.sort_unstable_by_key(CoverKey::key);
+        Ok(Self { covered, guarded })
+    }
+
+    /// The live binds an index of `keys` holds for `node` reached through
+    /// `within`. A withdrawn one lingers only where the index could not be
+    /// rebuilt, and is passed over.
+    fn live<'a>(
+        keys: &'a [CoverKey],
+        within: &Projection,
+        node: NodeId,
+    ) -> impl Iterator<Item = &'a Arc<Projection>> {
+        let key = (within.id, node.raw());
+        let from = keys.partition_point(|k| k.key() < key);
+        keys[from..]
+            .iter()
+            .take_while(move |k| k.key() == key)
+            .map(|k| &k.bind)
+            .filter(|bind| bind.is_live())
+    }
+
+    /// The bind covering `node`, a directory reached through `within`.
+    #[must_use]
+    pub fn covering(&self, within: &Projection, node: NodeId) -> Option<&Arc<Projection>> {
+        Self::live(&self.covered, within, node).next()
+    }
+
+    /// Whether `node`, reached through `within`, is a directory a bind
+    /// covers or one on the way to it, which no rename may move.
+    #[must_use]
+    pub fn guards(&self, within: &Projection, node: NodeId) -> bool {
+        Self::live(&self.guarded, within, node).next().is_some()
+    }
+}
+
+/// What detaching a volume does with the binds standing within it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindsWithin {
+    /// Refuse the detach while one stands.
+    Refuse,
+    /// Withdraw them with it, and those within them in turn: a forced detach,
+    /// a medium that left, a server lost.
+    Withdraw,
+}
+
+impl BindsWithin {
+    /// Whether detaching the volume `driver` serves takes `projection` with
+    /// it: a projection of the volume, or under [`Self::Withdraw`] a bind
+    /// standing within one, however deep.
+    fn takes(self, projection: &Projection, driver: DriverHandle) -> bool {
+        let mut here = projection;
+        loop {
+            if here.backing == Some(driver) {
+                return true;
+            }
+            match (self, &here.cover) {
+                (Self::Withdraw, Some(cover)) => here = &cover.within,
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// What a new projection is made of.
+struct Shape {
+    path: Path,
+    flags: MountFlags,
+    backing: Option<DriverHandle>,
+    subtree: Vec<String>,
+    template: Option<Metadata>,
+    class: AllocationClass,
+    cover: Option<Cover>,
+    binder: Option<u32>,
+}
+
+impl Shape {
+    /// A projection at `path` with `flags`, showing `backing`'s `subtree`.
+    fn of(
+        path: Path,
+        flags: MountFlags,
+        backing: Option<DriverHandle>,
+        subtree: Vec<String>,
+    ) -> Self {
+        Self {
+            path,
+            flags,
+            backing,
+            subtree,
+            template: None,
+            class: AllocationClass::Ordinary,
+            cover: None,
+            binder: None,
+        }
+    }
 }
 
 /// What a directory's listing shows of the backed mounts directly beneath
@@ -194,9 +399,36 @@ impl Projection {
         self.live.store(false, Ordering::Release);
     }
 
-    /// Whether a runtime attach made this projection.
+    /// The projection left the table, and no longer covers what it bound.
+    fn leave(&self) {
+        self.withdraw();
+        if let Some(cover) = &self.cover {
+            cover.within.binds_within.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Whether a runtime attach or a bind made this projection.
     fn is_runtime(&self) -> bool {
-        self.template.is_some()
+        self.template.is_some() || self.binder.is_some()
+    }
+
+    /// The directory this bind covers, or `None` for a projection that sits
+    /// at a floor's name.
+    #[must_use]
+    pub fn cover(&self) -> Option<&Cover> {
+        self.cover.as_ref()
+    }
+
+    /// The principal that made this projection, when a bind did.
+    #[must_use]
+    pub fn binder(&self) -> Option<u32> {
+        self.binder
+    }
+
+    /// Whether a bind covers a directory reached through this projection.
+    #[must_use]
+    pub fn has_binds_within(&self) -> bool {
+        self.binds_within.load(Ordering::Acquire) != 0
     }
 
     /// Whether this is the catalog runtime volumes are shown beneath, which
@@ -258,6 +490,8 @@ pub struct MountTable {
     epoch: u64,
     /// The identity the next projection is given.
     next_id: u64,
+    /// The binds' index.
+    covers: Arc<Covers>,
 }
 
 impl MountTable {
@@ -277,9 +511,13 @@ impl MountTable {
                 class: AllocationClass::Ordinary,
                 changed_at: 0,
                 live: AtomicBool::new(true),
+                cover: None,
+                binder: None,
+                binds_within: AtomicUsize::new(0),
             })],
             epoch: 0,
             next_id: 1,
+            covers: Arc::new(Covers::default()),
         }
     }
 
@@ -299,16 +537,18 @@ impl MountTable {
         self.epoch
     }
 
-    /// A new live projection, given the table's next identity.
-    fn project(
-        &mut self,
-        path: Path,
-        flags: MountFlags,
-        backing: Option<DriverHandle>,
-        subtree: Vec<String>,
-        template: Option<Metadata>,
-        class: AllocationClass,
-    ) -> Result<Arc<Projection>, VfsError> {
+    /// A new live projection of `shape`, given the table's next identity.
+    fn project(&mut self, shape: Shape) -> Result<Arc<Projection>, VfsError> {
+        let Shape {
+            path,
+            flags,
+            backing,
+            subtree,
+            template,
+            class,
+            cover,
+            binder,
+        } = shape;
         let projection = Arc::try_new(Projection {
             id: self.next_id,
             path,
@@ -319,6 +559,9 @@ impl MountTable {
             class,
             changed_at: self.epoch.wrapping_add(1),
             live: AtomicBool::new(true),
+            cover,
+            binder,
+            binds_within: AtomicUsize::new(0),
         })
         .map_err(|_| VfsError::OutOfMemory)?;
         self.next_id = self.next_id.wrapping_add(1);
@@ -327,8 +570,8 @@ impl MountTable {
 
     /// The projection whose floor `path` sits directly beneath, if one does.
     fn beneath(&self, path: &Path) -> Option<&Arc<Projection>> {
-        let parent = path.parent()?;
-        self.mounts.iter().find(|m| m.path == parent)
+        let (_, parent) = path.components().split_last()?;
+        self.mounts.iter().find(|m| m.path.components() == parent)
     }
 
     /// Whether a projection may be made at `path`: directly beneath the floor
@@ -339,11 +582,27 @@ impl MountTable {
     }
 
     /// Whether withdrawing every projection `leaving` names would leave
-    /// another beneath no projection's floor.
+    /// another beneath no projection's floor, or a bind over a directory no
+    /// projection shows. Each kept projection is weighed against the few that
+    /// leave, so the cost is the table's size times theirs.
     fn strands(&self, leaving: impl Fn(&Arc<Projection>) -> bool) -> bool {
         self.mounts
             .iter()
-            .any(|m| !leaving(m) && self.beneath(&m.path).is_some_and(&leaving))
+            .filter(|&gone| leaving(gone))
+            .any(|gone| {
+                self.mounts.iter().any(|kept| {
+                    let held = kept
+                        .cover
+                        .as_ref()
+                        .is_some_and(|cover| cover.within.id == gone.id)
+                        || kept
+                            .path
+                            .components()
+                            .split_last()
+                            .is_some_and(|(_, parent)| parent == gone.path.components());
+                    held && !leaving(kept)
+                })
+            })
     }
 
     /// The projection showing `/`.
@@ -368,9 +627,29 @@ impl MountTable {
     }
 
     /// The projection whose floor `projection` sits directly beneath; `None`
-    /// for the root's.
+    /// for the root's, and for a bind, which is left through what it covers.
     pub(super) fn parent(&self, projection: &Projection) -> Option<&Arc<Projection>> {
+        if projection.cover.is_some() {
+            return None;
+        }
         self.beneath(&projection.path)
+    }
+
+    /// The binds' index, for a walk through a projection one is made within
+    /// to search without the table's lock.
+    #[must_use]
+    pub fn covers(&self) -> &Arc<Covers> {
+        &self.covers
+    }
+
+    /// Rebuild the binds' index after a bind left. A heap that cannot hold
+    /// the new one leaves the old, whose departed binds are passed over.
+    fn reindex(&mut self) {
+        if let Ok(covers) = Covers::of(self.mounts.iter())
+            .and_then(|covers| Arc::try_new(covers).map_err(|_| VfsError::OutOfMemory))
+        {
+            self.covers = covers;
+        }
     }
 
     /// `projection`, while the table holds it.
@@ -393,26 +672,33 @@ impl MountTable {
         Ok(())
     }
 
-    /// Detach the volume `driver` serves, withdrawing every projection of it.
+    /// Detach the volume `driver` serves, withdrawing every projection of it
+    /// and, as `binds` says, the binds standing within one.
     ///
     /// # Errors
     ///
     /// * [`VfsError::InvalidPath`] if the volume backs the root projection,
     ///   which is permanent.
     /// * [`VfsError::NotEmpty`] if another volume's projection sits beneath
-    ///   the floor of one of its own.
+    ///   the floor of one of its own, or a bind `binds` refuses for stands
+    ///   within one.
     /// * [`VfsError::NotFound`] if `driver` serves no attached volume.
-    pub fn detach(&mut self, driver: DriverHandle) -> Result<(), VfsError> {
-        let at = self.detachable(driver)?;
+    pub fn detach(&mut self, driver: DriverHandle, binds: BindsWithin) -> Result<(), VfsError> {
+        let at = self.detachable(driver, binds)?;
         self.changed();
         self.attachments.remove(at);
+        let mut covered = false;
         self.mounts.retain(|m| {
-            let kept = m.backing != Some(driver);
+            let kept = !binds.takes(m, driver);
             if !kept {
-                m.withdraw();
+                covered |= m.cover.is_some();
+                m.leave();
             }
             kept
         });
+        if covered {
+            self.reindex();
+        }
         Ok(())
     }
 
@@ -422,7 +708,7 @@ impl MountTable {
     /// # Errors
     ///
     /// As [`Self::detach`].
-    pub fn detachable(&self, driver: DriverHandle) -> Result<usize, VfsError> {
+    pub fn detachable(&self, driver: DriverHandle, binds: BindsWithin) -> Result<usize, VfsError> {
         let at = self
             .attachments
             .iter()
@@ -431,7 +717,7 @@ impl MountTable {
         if self.mounts[0].backing == Some(driver) {
             return Err(VfsError::InvalidPath);
         }
-        if self.strands(|m| m.backing == Some(driver)) {
+        if self.strands(|m| binds.takes(m, driver)) {
             return Err(VfsError::NotEmpty);
         }
         Ok(at)
@@ -449,29 +735,38 @@ impl MountTable {
     /// Every attached volume in attach order, each with the view path of the
     /// earliest projection showing its root, or `None` when no projection
     /// shows the volume from its root.
-    #[must_use]
-    pub fn volumes(&self) -> Vec<(Attachment, Option<Path>)> {
-        let mut roots: Vec<(u64, &Path)> = self
-            .mounts
-            .iter()
-            .filter(|m| m.subtree.is_empty())
-            .filter_map(|m| Some((m.backing?.as_u64(), &m.path)))
-            .collect();
-        // Stable, so the earliest projection of a volume sorts first among
-        // its equals.
-        roots.sort_by_key(|&(driver, _)| driver);
-        self.attachments
-            .iter()
-            .map(|&attachment| {
-                let key = attachment.driver.as_u64();
-                let first = roots.partition_point(|&(driver, _)| driver < key);
-                let shown = roots
-                    .get(first)
-                    .filter(|&&(driver, _)| driver == key)
-                    .map(|&(_, path)| path.clone());
-                (attachment, shown)
-            })
-            .collect()
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the listing cannot be held.
+    pub fn volumes(&self) -> Result<Vec<(Attachment, Option<Path>)>, VfsError> {
+        let oom = |_| VfsError::OutOfMemory;
+        let mut roots: Vec<(u64, usize, &Path)> = Vec::new();
+        roots.try_reserve_exact(self.mounts.len()).map_err(oom)?;
+        roots.extend(
+            self.mounts
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.subtree.is_empty())
+                .filter_map(|(at, m)| Some((m.backing?.as_u64(), at, &m.path))),
+        );
+        // The earliest projection of a volume sorts first among its equals,
+        // with no scratch a stable sort would take from the heap.
+        roots.sort_unstable_by_key(|&(driver, at, _)| (driver, at));
+        let mut volumes = Vec::new();
+        volumes
+            .try_reserve_exact(self.attachments.len())
+            .map_err(oom)?;
+        for &attachment in &self.attachments {
+            let key = attachment.driver.as_u64();
+            let first = roots.partition_point(|&(driver, _, _)| driver < key);
+            let shown = match roots.get(first).filter(|&&(driver, _, _)| driver == key) {
+                Some(&(_, _, path)) => Some(path.owned()?),
+                None => None,
+            };
+            volumes.push((attachment, shown));
+        }
+        Ok(volumes)
     }
 
     /// The flags a projection onto `backing` carries: the attachment's, with
@@ -577,14 +872,10 @@ impl MountTable {
         {
             return Err(VfsError::InvalidPath);
         }
-        let projection = self.project(
-            path,
-            attachment.flags,
-            Some(attachment.driver),
-            Vec::new(),
-            Some(template),
-            AllocationClass::Ordinary,
-        )?;
+        let projection = self.project(Shape {
+            template: Some(template),
+            ..Shape::of(path, attachment.flags, Some(attachment.driver), Vec::new())
+        })?;
         self.mounts
             .try_reserve(1)
             .map_err(|_| VfsError::OutOfMemory)?;
@@ -594,6 +885,140 @@ impl MountTable {
         self.changed();
         self.attachments.push(attachment);
         self.mounts.push(projection);
+        Ok(())
+    }
+
+    /// Bind the `subtree` of the attached volume `backing` serves at `path`,
+    /// made by `binder`, adding `narrowing` to the volume's flags: directly
+    /// beneath the catalog when `cover` is `None`, else over the directory
+    /// `cover` pins, which `path` must be the view path of. The bind takes the
+    /// permission template the volume is shown in the catalog with, if it is.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::AlreadyExists`] if a projection is at `path`, or a bind
+    ///   covers the directory already.
+    /// * [`VfsError::NotFound`] if `backing` serves no attached volume.
+    /// * [`VfsError::InvalidPath`] for a `path` neither beneath the catalog
+    ///   nor beneath the floor of the backed projection `cover` names, the
+    ///   deepest one covering `path`.
+    /// * [`VfsError::Stale`] if that projection left the table.
+    pub fn bind(
+        &mut self,
+        path: Path,
+        backing: DriverHandle,
+        subtree: Vec<String>,
+        narrowing: MountFlags,
+        cover: Option<Cover>,
+        binder: u32,
+    ) -> Result<(), VfsError> {
+        if self.mounts.iter().any(|m| m.path == path) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let template = self
+            .mounts
+            .iter()
+            .find(|m| m.backing == Some(backing) && m.template.is_some())
+            .and_then(|m| m.template.clone());
+        match &cover {
+            None => {
+                if !self
+                    .beneath(&path)
+                    .is_some_and(|parent| parent.is_catalog())
+                {
+                    return Err(VfsError::InvalidPath);
+                }
+            }
+            Some(cover) => {
+                let within = self.live(&cover.within).ok_or(VfsError::Stale)?;
+                if within.backing.is_none()
+                    || within.path == path
+                    || !within.path.is_prefix_of(&path)
+                    || self.resolve(&path).id != within.id
+                {
+                    return Err(VfsError::InvalidPath);
+                }
+                if self
+                    .covers
+                    .covering(within, cover.covered.pinned())
+                    .is_some()
+                {
+                    return Err(VfsError::AlreadyExists);
+                }
+            }
+        }
+        let flags = self.projected(narrowing, Some(backing))?;
+        let projection = self.project(Shape {
+            template,
+            cover,
+            binder: Some(binder),
+            ..Shape::of(path, flags, Some(backing), subtree)
+        })?;
+        self.mounts
+            .try_reserve(1)
+            .map_err(|_| VfsError::OutOfMemory)?;
+        let covers = Covers::of(self.mounts.iter().chain(core::iter::once(&projection)))?;
+        let covers = Arc::try_new(covers).map_err(|_| VfsError::OutOfMemory)?;
+        self.changed();
+        if let Some(cover) = &projection.cover {
+            cover.within.binds_within.fetch_add(1, Ordering::AcqRel);
+        }
+        self.mounts.push(projection);
+        self.covers = covers;
+        Ok(())
+    }
+
+    /// Who made the bind at exactly `path`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::unbind`].
+    pub fn binder_at(&self, path: &Path) -> Result<u32, VfsError> {
+        self.mounts
+            .iter()
+            .find(|m| &m.path == path)
+            .ok_or(VfsError::NotFound)?
+            .binder
+            .ok_or(VfsError::InvalidPath)
+    }
+
+    /// The view path of the earliest projection showing the root of the
+    /// volume `driver` serves, as the system attached it.
+    #[must_use]
+    pub fn shown_at(&self, driver: DriverHandle) -> Option<&Path> {
+        self.mounts
+            .iter()
+            .find(|m| m.backing == Some(driver) && m.subtree.is_empty() && m.binder.is_none())
+            .map(|m| &m.path)
+    }
+
+    /// Withdraw the bind at exactly `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::NotFound`] if no projection is at `path`;
+    /// [`VfsError::InvalidPath`] if one is that no bind made, an attachment
+    /// being detached, never unbound; [`VfsError::NotEmpty`] while a bind
+    /// stands within it.
+    pub fn unbind(&mut self, path: &Path) -> Result<(), VfsError> {
+        let at = self
+            .mounts
+            .iter()
+            .position(|m| &m.path == path)
+            .ok_or(VfsError::NotFound)?;
+        if self.mounts[at].binder.is_none() {
+            return Err(VfsError::InvalidPath);
+        }
+        let id = self.mounts[at].id;
+        if self.strands(|m| m.id == id) {
+            return Err(VfsError::NotEmpty);
+        }
+        self.changed();
+        let bound = self.mounts.remove(at);
+        bound.leave();
+        if bound.cover.is_some() {
+            self.reindex();
+        }
         Ok(())
     }
 
@@ -612,7 +1037,10 @@ impl MountTable {
             return Err(VfsError::InvalidPath);
         }
         let flags = self.projected(narrowing, backing)?;
-        let projection = self.project(path, flags, backing, backing_subtree, None, class)?;
+        let projection = self.project(Shape {
+            class,
+            ..Shape::of(path, flags, backing, backing_subtree)
+        })?;
         self.mounts
             .try_reserve(1)
             .map_err(|_| VfsError::OutOfMemory)?;
@@ -678,14 +1106,11 @@ impl MountTable {
             return Err(VfsError::AlreadyExists);
         }
         let flags = self.projected(old.flags, Some(driver))?;
-        let backed = self.project(
-            old.path.clone(),
-            flags,
-            Some(driver),
-            backing_subtree,
-            old.template.clone(),
-            old.class,
-        )?;
+        let backed = self.project(Shape {
+            template: old.template.clone(),
+            class: old.class,
+            ..Shape::of(old.path.owned()?, flags, Some(driver), backing_subtree)
+        })?;
         self.changed();
         self.mounts[at] = backed;
         old.withdraw();
@@ -714,7 +1139,11 @@ impl MountTable {
             return Err(VfsError::NotEmpty);
         }
         self.changed();
-        self.mounts.remove(at).withdraw();
+        let removed = self.mounts.remove(at);
+        removed.leave();
+        if removed.cover.is_some() {
+            self.reindex();
+        }
         Ok(())
     }
 
@@ -1037,9 +1466,9 @@ mod tests {
         let shown = Arc::clone(table.resolve(&p("/Storage/vol/x")));
         let kept = Arc::clone(table.resolve(&p("/Storage/other/x")));
 
-        assert!(table.detachable(volume).is_ok());
+        assert!(table.detachable(volume, BindsWithin::Refuse).is_ok());
         assert!(shown.is_live(), "asking withdraws nothing");
-        table.detach(volume).expect("detach");
+        table.detach(volume, BindsWithin::Refuse).expect("detach");
         assert!(!shown.is_live(), "a withdrawn projection is dead");
         assert!(kept.is_live());
         assert_eq!(table.attachment(volume), None);
@@ -1050,8 +1479,14 @@ mod tests {
             Some(other),
             "an unrelated volume stays"
         );
-        assert_eq!(table.detachable(volume), Err(VfsError::NotFound));
-        assert_eq!(table.detach(volume), Err(VfsError::NotFound));
+        assert_eq!(
+            table.detachable(volume, BindsWithin::Refuse),
+            Err(VfsError::NotFound)
+        );
+        assert_eq!(
+            table.detach(volume, BindsWithin::Refuse),
+            Err(VfsError::NotFound)
+        );
     }
 
     #[test]
@@ -1059,8 +1494,14 @@ mod tests {
         let mut table = MountTable::new(MountFlags::default());
         let root = attached(&mut table, 0x5A30, MountFlags::default());
         table.back_root(root).expect("root");
-        assert_eq!(table.detachable(root), Err(VfsError::InvalidPath));
-        assert_eq!(table.detach(root), Err(VfsError::InvalidPath));
+        assert_eq!(
+            table.detachable(root, BindsWithin::Refuse),
+            Err(VfsError::InvalidPath)
+        );
+        assert_eq!(
+            table.detach(root, BindsWithin::Refuse),
+            Err(VfsError::InvalidPath)
+        );
         assert_eq!(table.resolve(&p("/x")).backing(), Some(root));
     }
 
@@ -1073,9 +1514,61 @@ mod tests {
             .expect("mount");
         table.unmount(&p("/Storage/vol")).expect("unmount");
         assert_eq!(
-            table.volumes(),
+            table.volumes().expect("volumes"),
             [(Attachment::new(volume, None, MountFlags::NOEXEC), None)]
         );
+    }
+
+    /// However many volumes there are, the list takes from the heap only what
+    /// it asks for fallibly, so any refusal refuses the list whole.
+    ///
+    /// Regression: its roots were sorted stably, and a stable sort past 4 KiB
+    /// takes its scratch from the heap infallibly.
+    #[test]
+    fn a_volume_list_the_heap_cannot_hold_is_refused() {
+        let mut table = with_catalog();
+        for raw in 1..=300 {
+            let volume = attached(&mut table, raw, MountFlags::default());
+            table
+                .mount(
+                    p(&alloc::format!("/Storage/v{raw}")),
+                    MountFlags::default(),
+                    Some(volume),
+                )
+                .expect("shown");
+        }
+        let shown = crate::test_alloc::past_each_refusal(&Err(VfsError::OutOfMemory), || {
+            table
+                .volumes()
+                .map(|volumes| volumes.iter().filter(|(_, at)| at.is_some()).count())
+        });
+        assert_eq!(shown, Ok(300));
+    }
+
+    /// Whether a volume may leave is judged with nothing from the heap.
+    ///
+    /// Regression: each projection's parent was found through a copy of its
+    /// path, once per projection on every detach.
+    #[test]
+    fn a_detach_is_judged_with_nothing_from_the_heap() {
+        let mut table = with_catalog();
+        let volumes: Vec<DriverHandle> = (1..=64)
+            .map(|raw| {
+                let volume = attached(&mut table, raw, MountFlags::default());
+                table
+                    .mount(
+                        p(&alloc::format!("/Storage/v{raw}")),
+                        MountFlags::default(),
+                        Some(volume),
+                    )
+                    .expect("shown");
+                volume
+            })
+            .collect();
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let judged = table.detachable(volumes[31], BindsWithin::Refuse);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(judged, Ok(31));
     }
 
     #[test]
@@ -1108,10 +1601,13 @@ mod tests {
             )
             .expect("only a subtree of it");
 
-        let volumes = table.volumes();
+        let volumes = table.volumes().expect("volumes");
         let shown: Vec<_> = volumes
             .iter()
-            .map(|(attachment, at)| (attachment.driver(), at.clone()))
+            .map(|(attachment, at)| {
+                let at = at.as_ref().map(|at| at.owned().expect("held"));
+                (attachment.driver(), at)
+            })
             .collect();
         assert_eq!(
             shown,
@@ -1236,7 +1732,7 @@ mod tests {
         table
             .attach_at(first, p("/Storage/usb1"), template.clone())
             .expect("runtime mount");
-        let volumes = table.volumes();
+        let volumes = table.volumes().expect("volumes");
 
         // The name is taken: the second volume is not attached either.
         let second = Attachment::new(handle(0x5651), None, MountFlags::NOEXEC);
@@ -1249,7 +1745,7 @@ mod tests {
             table.attach_at(first, p("/Storage/usb2"), template),
             Err(VfsError::AlreadyExists)
         );
-        assert_eq!(table.volumes(), volumes);
+        assert_eq!(table.volumes().expect("volumes"), volumes);
         assert_eq!(table.len(), 3);
     }
 
@@ -1371,7 +1867,7 @@ mod tests {
                 Some(backed)
             ),
             Err(VfsError::InvalidPath),
-            "nothing is shown beneath a runtime volume"
+            "only a bind is made inside a runtime volume"
         );
     }
 
@@ -1414,15 +1910,21 @@ mod tests {
         assert_eq!(table.unmount(&p("/System")), Err(VfsError::NotEmpty));
         // Asked first, the refusal is the one the detach gives, and asking
         // changes nothing.
-        assert_eq!(table.detachable(system), Err(VfsError::NotEmpty));
-        assert_eq!(table.detach(system), Err(VfsError::NotEmpty));
+        assert_eq!(
+            table.detachable(system, BindsWithin::Refuse),
+            Err(VfsError::NotEmpty)
+        );
+        assert_eq!(
+            table.detach(system, BindsWithin::Refuse),
+            Err(VfsError::NotEmpty)
+        );
         assert!(logs.is_live());
         assert_eq!(table.len(), 4);
         assert!(table.attachment(system).is_some());
 
         table.unmount(&p("/System/Logs")).expect("the deeper first");
         table
-            .detach(system)
+            .detach(system, BindsWithin::Refuse)
             .expect("then the volume beneath nothing");
     }
 
@@ -1537,7 +2039,7 @@ mod tests {
 
         let before = generation();
         let leaving = attached(&mut table, 0x5F01, MountFlags::NOEXEC);
-        table.detach(leaving).expect("detach");
+        table.detach(leaving, BindsWithin::Refuse).expect("detach");
         moved("detach", before);
 
         // A refusal changed no mount, so it is not news. Asserted against
@@ -1547,20 +2049,398 @@ mod tests {
         // its validation returns, which is what these refusals exercise.
         let occupied = table.resolve(&p("/Storage/b")).backing();
         let len = table.len();
-        let shown = table.volumes();
+        let shown = table.volumes().expect("volumes");
         assert_eq!(
             table.mount(p("/Storage/b"), MountFlags::default(), None),
             Err(VfsError::AlreadyExists)
         );
         assert_eq!(table.unmount(&p("/Storage/gone")), Err(VfsError::NotFound));
         assert_eq!(table.back_root(backing), Err(VfsError::AlreadyExists));
-        assert_eq!(table.detach(leaving), Err(VfsError::NotFound));
+        assert_eq!(
+            table.detach(leaving, BindsWithin::Refuse),
+            Err(VfsError::NotFound)
+        );
         assert_eq!(
             table.attach(Attachment::new(backing, None, MountFlags::default())),
             Err(VfsError::AlreadyExists)
         );
         assert_eq!(table.len(), len, "a refused mutation changes no mount");
-        assert_eq!(table.volumes(), shown, "nor any attachment");
+        assert_eq!(
+            table.volumes().expect("volumes"),
+            shown,
+            "nor any attachment"
+        );
         assert_eq!(table.resolve(&p("/Storage/b")).backing(), occupied);
+    }
+
+    /// A pin on directory `id` of the registration `nodes`.
+    fn pinned(nodes: &Arc<super::super::node::VolumeNodes>, id: u64) -> NodeRef {
+        let slot = nodes.admit().expect("a release slot");
+        NodeRef::new(slot, NodeId::from_raw(id), NodeKind::Directory).expect("a pin")
+    }
+
+    /// A table whose root a volume backs, with a second volume attached in the
+    /// catalog as `/Storage/share`, and the root volume's registration.
+    fn with_root_and_share() -> (
+        MountTable,
+        DriverHandle,
+        Arc<super::super::node::VolumeNodes>,
+    ) {
+        let mut table = with_catalog();
+        let root = attached(&mut table, 0x6001, MountFlags::default());
+        table.back_root(root).expect("root");
+        let share = handle(0x6002);
+        table
+            .attach_at(
+                Attachment::new(share, None, MountFlags::NOEXEC),
+                p("/Storage/share"),
+                template(),
+            )
+            .expect("in the catalog");
+        let nodes = Arc::new(super::super::node::VolumeNodes::new(1));
+        (table, share, nodes)
+    }
+
+    /// What a bind over directory 4, reached through `within` by way of 2
+    /// and 3, covers.
+    fn cover(within: &Arc<Projection>, nodes: &Arc<super::super::node::VolumeNodes>) -> Cover {
+        Cover::new(
+            Arc::clone(within),
+            alloc::vec![pinned(nodes, 2), pinned(nodes, 3)],
+            pinned(nodes, 4),
+        )
+    }
+
+    #[test]
+    fn a_bind_covers_a_directory_reached_through_the_projection_it_sits_in() {
+        let (mut table, share, nodes) = with_root_and_share();
+        let root = Arc::clone(table.root().expect("root"));
+        let target = p("/Users/ann/nas");
+        table
+            .bind(
+                target.owned().expect("held"),
+                share,
+                Vec::new(),
+                MountFlags::READ_ONLY,
+                Some(cover(&root, &nodes)),
+                1000,
+            )
+            .expect("binds");
+        assert!(root.has_binds_within());
+        let bind = Arc::clone(
+            table
+                .covers()
+                .covering(&root, NodeId::from_raw(4))
+                .expect("covers"),
+        );
+        assert_eq!(bind.path(), &target);
+        assert_eq!(bind.binder(), Some(1000));
+        assert_eq!(
+            bind.flags(),
+            MountFlags::NOEXEC.union(MountFlags::READ_ONLY),
+            "its volume's flags and its narrowing"
+        );
+        assert_eq!(bind.template(), Some(&template()), "the catalog's record");
+        assert_eq!(
+            bind.cover().and_then(Cover::holder).map(NodeRef::pinned),
+            Some(NodeId::from_raw(3))
+        );
+        assert!(table.parent(&bind).is_none(), "left through what it covers");
+        assert!(table
+            .covers()
+            .covering(&root, NodeId::from_raw(3))
+            .is_none());
+        for (node, guarded) in [(2, true), (3, true), (4, true), (5, false)] {
+            assert_eq!(
+                table.covers().guards(&root, NodeId::from_raw(node)),
+                guarded,
+                "{node}"
+            );
+        }
+        assert_eq!(table.binder_at(&target), Ok(1000));
+        assert_eq!(table.shown_at(share), Some(&p("/Storage/share")));
+        assert_eq!(table.resolve(&p("/Users/ann/nas/x")).path(), &target);
+        assert_eq!(nodes.outstanding(), 3, "the bind holds its pins");
+    }
+
+    #[test]
+    fn an_index_a_walk_holds_passes_over_a_bind_gone_since() {
+        let (mut table, share, nodes) = with_root_and_share();
+        let root = Arc::clone(table.root().expect("root"));
+        table
+            .bind(
+                p("/Users/ann/nas"),
+                share,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&root, &nodes)),
+                1,
+            )
+            .expect("binds");
+        let held = Arc::clone(table.covers());
+        table.unbind(&p("/Users/ann/nas")).expect("unbinds");
+        assert!(held.covering(&root, NodeId::from_raw(4)).is_none());
+        assert!(!held.guards(&root, NodeId::from_raw(2)));
+        drop(held);
+        assert_eq!(
+            nodes.outstanding(),
+            0,
+            "its pins go with the last index holding it"
+        );
+    }
+
+    #[test]
+    fn every_bind_of_many_is_found_and_guards_its_own_way() {
+        const USERS: u64 = 300;
+        let (mut table, share, nodes) = with_root_and_share();
+        let root = Arc::clone(table.root().expect("root"));
+        for user in 0..USERS {
+            let base = 10 + user * 3;
+            let cover = Cover::new(
+                Arc::clone(&root),
+                alloc::vec![pinned(&nodes, 1), pinned(&nodes, base)],
+                pinned(&nodes, base + 1),
+            );
+            table
+                .bind(
+                    p(&alloc::format!("/Users/u{user}/nas")),
+                    share,
+                    Vec::new(),
+                    MountFlags::default(),
+                    Some(cover),
+                    1,
+                )
+                .expect("binds");
+        }
+        let covers = table.covers();
+        for user in 0..USERS {
+            let base = 10 + user * 3;
+            let bind = covers
+                .covering(&root, NodeId::from_raw(base + 1))
+                .expect("covered");
+            assert_eq!(bind.path(), &p(&alloc::format!("/Users/u{user}/nas")));
+            assert!(covers.guards(&root, NodeId::from_raw(base)));
+            assert!(!covers.guards(&root, NodeId::from_raw(base + 2)));
+        }
+        assert!(
+            covers.guards(&root, NodeId::from_raw(1)),
+            "an ancestor they share"
+        );
+    }
+
+    #[test]
+    fn a_bind_is_refused_where_it_cannot_stand() {
+        let (mut table, share, nodes) = with_root_and_share();
+        let root = Arc::clone(table.root().expect("root"));
+        table
+            .bind(
+                p("/Users/ann/nas"),
+                share,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&root, &nodes)),
+                1,
+            )
+            .expect("the first");
+        let refused = |table: &mut MountTable, path: &str, cover: Option<Cover>| {
+            table.bind(p(path), share, Vec::new(), MountFlags::default(), cover, 1)
+        };
+        assert_eq!(
+            refused(&mut table, "/Users/ann/nas", Some(cover(&root, &nodes))),
+            Err(VfsError::AlreadyExists),
+            "a projection is there"
+        );
+        assert_eq!(
+            refused(&mut table, "/Users/ann/other", Some(cover(&root, &nodes))),
+            Err(VfsError::AlreadyExists),
+            "the directory is covered already"
+        );
+        assert_eq!(
+            refused(&mut table, "/Users/ann/nas/sub", Some(cover(&root, &nodes))),
+            Err(VfsError::InvalidPath),
+            "a cover names the deepest projection showing its path"
+        );
+        assert_eq!(
+            refused(&mut table, "/Users/a/b", None),
+            Err(VfsError::InvalidPath),
+            "a bind at a name stands in the catalog"
+        );
+        assert_eq!(
+            table.bind(
+                p("/Storage/x"),
+                handle(0x6FFF),
+                Vec::new(),
+                MountFlags::default(),
+                None,
+                1
+            ),
+            Err(VfsError::NotFound),
+            "an unattached volume"
+        );
+        assert_eq!(
+            refused(&mut table, "/Storage/alias", None),
+            Ok(()),
+            "a second catalog name"
+        );
+        assert_eq!(nodes.outstanding(), 3, "a refused bind keeps no pin");
+    }
+
+    #[test]
+    fn a_bind_within_a_volume_or_a_bind_holds_them_until_withdrawn_first() {
+        let (mut table, share, nodes) = with_root_and_share();
+        let root = Arc::clone(table.root().expect("root"));
+        let other = handle(0x6005);
+        table
+            .attach_at(
+                Attachment::new(other, None, MountFlags::NOEXEC),
+                p("/Storage/other"),
+                template(),
+            )
+            .expect("in the catalog");
+        let shown = Arc::clone(table.resolve(&p("/Storage/share")));
+        table
+            .bind(
+                p("/Storage/share/sub"),
+                other,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&shown, &nodes)),
+                1,
+            )
+            .expect("within a runtime volume");
+        table
+            .bind(
+                p("/Users/ann/nas"),
+                share,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&root, &nodes)),
+                1,
+            )
+            .expect("over a directory of the root");
+        let outer = Arc::clone(table.resolve(&p("/Users/ann/nas")));
+        table
+            .bind(
+                p("/Users/ann/nas/deep"),
+                other,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&outer, &nodes)),
+                1,
+            )
+            .expect("within a bind");
+        assert_eq!(
+            table.unbind(&p("/Users/ann/nas")),
+            Err(VfsError::NotEmpty),
+            "a bind stands within it"
+        );
+        assert_eq!(
+            table.detach(share, BindsWithin::Refuse),
+            Err(VfsError::NotEmpty)
+        );
+        assert_eq!(
+            table.detachable(share, BindsWithin::Withdraw).map(drop),
+            Ok(())
+        );
+        table
+            .detach(share, BindsWithin::Withdraw)
+            .expect("withdraws the binds within first");
+        for gone in [
+            "/Storage/share",
+            "/Storage/share/sub",
+            "/Users/ann/nas",
+            "/Users/ann/nas/deep",
+        ] {
+            let shown = table.resolve(&p(gone));
+            assert!(
+                shown.binder().is_none() && shown.backing() != Some(share),
+                "{gone}"
+            );
+        }
+        assert!(
+            table.attachment(other).is_some(),
+            "the volumes bound stay attached"
+        );
+        assert!(!root.has_binds_within());
+        drop((shown, outer));
+        assert_eq!(
+            nodes.outstanding(),
+            0,
+            "every withdrawn bind let its pins go"
+        );
+    }
+
+    #[test]
+    fn a_bind_leaves_when_unbound_or_with_its_volume_and_holds_up_what_it_covers() {
+        let (mut table, share, nodes) = with_root_and_share();
+        let root = Arc::clone(table.root().expect("root"));
+        table
+            .bind(
+                p("/Users/ann/nas"),
+                share,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&root, &nodes)),
+                7,
+            )
+            .expect("binds");
+        assert_eq!(
+            table.unbind(&p("/Storage/share")),
+            Err(VfsError::InvalidPath)
+        );
+        assert_eq!(table.unbind(&p("/Users/gone")), Err(VfsError::NotFound));
+        table.unbind(&p("/Users/ann/nas")).expect("unbinds");
+        assert!(!root.has_binds_within());
+        assert!(!table.covers().guards(&root, NodeId::from_raw(4)));
+        assert_eq!(nodes.outstanding(), 0, "its pins let go");
+
+        table
+            .bind(
+                p("/Users/ann/nas"),
+                share,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&root, &nodes)),
+                7,
+            )
+            .expect("binds again");
+        table
+            .detach(share, BindsWithin::Refuse)
+            .expect("the volume detaches");
+        assert!(!root.has_binds_within(), "withdrawn with its volume");
+        assert!(table
+            .covers()
+            .covering(&root, NodeId::from_raw(4))
+            .is_none());
+
+        // A volume something is bound within stays until the bind goes.
+        let system = attached(&mut table, 0x6003, MountFlags::default());
+        table
+            .mount(p("/System"), MountFlags::default(), Some(system))
+            .expect("/System");
+        let other = handle(0x6004);
+        table
+            .attach_at(
+                Attachment::new(other, None, MountFlags::default()),
+                p("/Storage/other"),
+                template(),
+            )
+            .expect("in the catalog");
+        let shown = Arc::clone(table.resolve(&p("/System")));
+        table
+            .bind(
+                p("/System/x/y"),
+                other,
+                Vec::new(),
+                MountFlags::default(),
+                Some(cover(&shown, &nodes)),
+                7,
+            )
+            .expect("binds within /System");
+        assert_eq!(
+            table.detachable(system, BindsWithin::Refuse),
+            Err(VfsError::NotEmpty)
+        );
+        assert_eq!(table.unmount(&p("/System")), Err(VfsError::NotEmpty));
     }
 }

@@ -24,8 +24,8 @@
 //! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
 //! | 4005 | Info/Warn | `KERNEL_RAM_SELF_TEST`    | log    | The early-boot RAM self-test finished; `verified` short of `usable` emits at `Warn`. |
 //! | 4006 | Info/Warn | `KERNEL_HEAP_GROWTH`      | log    | Whether the heap grows past its bootstrap arena (`growth`), with the arena's `bootstrap_bytes` and boot's `peak_bytes` of it; `failed` emits at `Warn`. |
-//! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
-//! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, `fault_pc`, and `fault_sp` fields name the port's exception syndrome, the faulting address, the faulting instruction, and the kernel stack it ran on, each `null` where the CPU gave none; the register and `frame_N` blocks are the panic dump's. |
+//! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
+//! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, `fault_pc`, and `fault_sp` fields name the port's exception syndrome, the faulting address, the faulting instruction, and the kernel stack it ran on, each `null` where the CPU gave none; the register and `frame_N` blocks are the panic dump's. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
@@ -835,6 +835,18 @@ pub enum AuditEvent {
     /// A wall-clock write lost to its provenance ladder: the stored reading
     /// came from a better source, so a weaker one cannot roll it back.
     WallClockSetRefused,
+    /// A principal bound a volume's subtree at a view path
+    /// (`plans/NEW-NAMESPACE.md` NS-4a). The `uid` and `target` fields name
+    /// the binder and the path.
+    ViewBound,
+    /// A view bind was refused; `uid`, `target` and `error` say whose, where
+    /// and why.
+    ViewBindRefused,
+    /// A principal withdrew a view binding; `uid` and `target` name it.
+    ViewUnbound,
+    /// A view unbind was refused; `uid`, `target` and `error` say whose,
+    /// where and why.
+    ViewUnbindRefused,
     /// An interactive surface overran the frame budget it declared
     /// (`plans/FIX-STALLTRACE.md`).
     ///
@@ -954,6 +966,10 @@ impl AuditEvent {
             Self::ServedReplyMalformed => 4190,
             Self::ServedCallStalled => 4191,
             Self::WallClockSetRefused => 4269,
+            Self::ViewBound => 4310,
+            Self::ViewBindRefused => 4311,
+            Self::ViewUnbound => 4312,
+            Self::ViewUnbindRefused => 4313,
         })
     }
 
@@ -1054,6 +1070,10 @@ impl AuditEvent {
             Self::ServedReplyMalformed => "served filesystem answered with a malformed reply",
             Self::ServedCallStalled => "served filesystem stalled on a call; abandoned",
             Self::WallClockSetRefused => "wall clock write refused by its provenance ladder",
+            Self::ViewBound => "volume bound at a view path",
+            Self::ViewBindRefused => "view bind refused",
+            Self::ViewUnbound => "view binding withdrawn",
+            Self::ViewUnbindRefused => "view unbind refused",
             Self::TaskLatencyOverrun => "interactive surface overran its frame budget",
         }
     }
@@ -1191,6 +1211,10 @@ mod tests {
         AuditEvent::VolumeReserveEntered,
         AuditEvent::VolumeReserveLeft,
         AuditEvent::WallClockSetRefused,
+        AuditEvent::ViewBound,
+        AuditEvent::ViewBindRefused,
+        AuditEvent::ViewUnbound,
+        AuditEvent::ViewUnbindRefused,
         AuditEvent::ServedReplyMalformed,
         AuditEvent::ServedCallStalled,
     ];
@@ -1200,7 +1224,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 92, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 96, "a new event belongs in `ALL`");
     }
 
     #[test]

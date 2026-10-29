@@ -231,6 +231,11 @@ fn serve(config: &PeerConfig, open: &mut PipeOpen, pdu: &[u8]) -> Result<(), Smb
                     share_type: ShareKind::Ipc.code() | SPECIAL,
                     remark: "IPC Service (tairix test peer)",
                 },
+                ShareRecord {
+                    name: "C$",
+                    share_type: ShareKind::Disk.code() | SPECIAL,
+                    remark: "Default share",
+                },
             ]);
             records.extend(names.iter().map(|name| ShareRecord {
                 name,

@@ -59,6 +59,18 @@ impl Mapping {
         unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
     }
 
+    /// The bytes `range` covers, or `None` when it is not a range of them.
+    fn range_mut(&mut self, range: core::ops::Range<usize>) -> Option<&mut [u8]> {
+        let len = range.end.checked_sub(range.start)?;
+        if range.end > self.len {
+            return None;
+        }
+        // SAFETY: `range` lies within the `len` bytes mapped read/write at
+        // `base` while `self` lives, and `&mut self` excludes every other
+        // reference to them on this side.
+        Some(unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr().add(range.start), len) })
+    }
+
     /// The base the kernel resolves an unmap by.
     fn base(&self) -> u64 {
         self.base.as_ptr().addr() as u64
@@ -437,10 +449,12 @@ impl ServeWindow {
         self.mapping.len == 0
     }
 
-    /// The window, for the driver answering a call: the kernel leaves it
-    /// alone while one is in service.
-    pub fn bytes_mut(&mut self) -> &mut [u8] {
-        self.mapping.bytes_mut()
+    /// The bytes `range` covers, for the call in service whose span it is,
+    /// or `None` past the window's end. The kernel leaves that span alone
+    /// until the call is answered while it stages and collects every other
+    /// lane's, so no borrow of more than the span is made.
+    pub fn span_mut(&mut self, range: core::ops::Range<usize>) -> Option<&mut [u8]> {
+        self.mapping.range_mut(range)
     }
 }
 
@@ -521,10 +535,11 @@ mod tests {
         assert_eq!(memory[15], 1);
     }
 
-    /// A serve window is its mapping's bytes, read through a shared reference
-    /// on one thread and written in place on the thread that answers calls.
+    /// A serve window's span is its mapping's bytes there, read through a
+    /// shared reference on one thread and written in place on the thread that
+    /// answers calls.
     #[test]
-    fn a_serve_window_s_bytes_are_its_mapped_bytes_from_any_thread() {
+    fn a_serve_window_s_span_is_its_mapped_bytes_from_any_thread() {
         let mut memory = vec![0u8; 32];
         let mut window = ServeWindow {
             mapping: over(&mut memory),
@@ -534,13 +549,36 @@ mod tests {
             scope.spawn(|| assert_eq!((shared.len(), shared.is_empty()), (32, false)));
         });
         let window = std::thread::spawn(move || {
-            window.bytes_mut()[31] = 5;
+            window.span_mut(30..32).expect("within the window")[1] = 5;
             window
         })
         .join()
         .expect("the answering thread returns its window");
         assert_eq!(window.len(), 32, "the same window comes back");
         assert_eq!(memory[31], 5, "written where it lies");
+    }
+
+    /// A span is the window's bytes only where it lies inside the window.
+    #[test]
+    fn a_span_past_the_window_or_reversed_is_none() {
+        let mut memory = vec![0u8; 32];
+        let mut window = ServeWindow {
+            mapping: over(&mut memory),
+        };
+        assert!(window.span_mut(30..33).is_none(), "past the end");
+        #[allow(clippy::reversed_empty_ranges)] // The reversed range is the case under test.
+        let reversed = window.span_mut(5..3);
+        assert!(reversed.is_none(), "reversed");
+        assert_eq!(
+            window.span_mut(32..32).as_deref().map(<[u8]>::len),
+            Some(0),
+            "empty, at the end"
+        );
+        assert_eq!(
+            window.span_mut(0..32).as_deref().map(<[u8]>::len),
+            Some(32),
+            "the whole window"
+        );
     }
 
     /// A window the kernel reported at address zero is refused before any

@@ -30,6 +30,25 @@ impl<T> ServedFilesystem for T where
 {
 }
 
+/// The data window a served volume's file data moves through, reached a
+/// call's span at a time.
+///
+/// The kernel stages and collects every other lane's span while one call is
+/// in service, so a server is lent the span its call names and never a borrow
+/// of the whole window.
+pub trait Window {
+    /// The bytes of `span`, the call in service's own, or `None` where the
+    /// window does not hold it.
+    fn span(&mut self, span: Span) -> Option<&mut [u8]>;
+}
+
+/// A buffer the server owns outright, which nothing else writes.
+impl Window for [u8] {
+    fn span(&mut self, span: Span) -> Option<&mut [u8]> {
+        self.get_mut(span.range())
+    }
+}
+
 /// The largest value a non-window answer copies: a link target, which is
 /// longer than any attribute value or key.
 const SCRATCH_LEN: usize = if FS_SYMLINK_MAX > FS_ATTR_VALUE_MAX {
@@ -62,13 +81,18 @@ impl<'h, F: ServedFilesystem, C: Clock> Server<'h, F, C> {
         Ok(Self { fs, host, scratch })
     }
 
-    /// Answer the call `request` into `out`, with `window` as the shared data
-    /// window, returning the reply's length.
+    /// Answer the call `request` into `out`, its file data moving through
+    /// `window`, returning the reply's length.
     ///
     /// A request the kernel could not have sent is refused as out of range;
     /// one that names no operation gets an empty reply, which the kernel
     /// refuses in turn. Either way the driver is never reached.
-    pub fn answer(&mut self, request: &[u8], window: &mut [u8], out: &mut [u8]) -> usize {
+    pub fn answer<W: Window + ?Sized>(
+        &mut self,
+        request: &[u8],
+        window: &mut W,
+        out: &mut [u8],
+    ) -> usize {
         let Ok((class, request)) = decode_request(request) else {
             return request_op(request).map_or(0, |op| {
                 encode_reply(op, self.host.state(), Err(DriverError::OutOfRange), out).unwrap_or(0)
@@ -98,7 +122,12 @@ impl<'h, F: ServedFilesystem, C: Clock> Server<'h, F, C> {
         &mut self.fs
     }
 
-    fn call(&mut self, request: &Request<'_>, window: &mut [u8], out: &mut [u8]) -> usize {
+    fn call<W: Window + ?Sized>(
+        &mut self,
+        request: &Request<'_>,
+        window: &mut W,
+        out: &mut [u8],
+    ) -> usize {
         let op = request.op();
         let result = run(&mut self.fs, &mut self.scratch, request, window);
         let state = self.host.state();
@@ -140,20 +169,18 @@ impl<'h, F: ServedFilesystem, C: Clock> Server<'h, F, C> {
 /// Run `request` against `fs`, a link target or attribute landing in
 /// `scratch` and file data moving through `window`.
 #[allow(clippy::too_many_lines)] // One arm per operation; splitting it would scatter the dispatch.
-fn run<'s, F: ServedFilesystem>(
+fn run<'s, F: ServedFilesystem, W: Window + ?Sized>(
     fs: &mut F,
     scratch: &'s mut [u8],
     request: &Request<'_>,
-    window: &mut [u8],
+    window: &mut W,
 ) -> Result<Answer<'s>, DriverError> {
     Ok(match *request {
         Request::NodeInfo { node } => Answer::Info(fs.node_info(node)?),
         Request::Lookup { dir, name } => Answer::Node(fs.lookup(dir, name)?),
         Request::Parent { dir } => Answer::Node(fs.parent(dir)?),
         Request::ReadAt { file, offset, span } => {
-            let slot = window
-                .get_mut(span.range())
-                .ok_or(DriverError::OutOfRange)?;
+            let slot = window.span(span).ok_or(DriverError::OutOfRange)?;
             Answer::Count(counted(fs.read_at(file, offset, slot)?, span)?)
         }
         Request::ReadLink { link, cap } => {
@@ -191,7 +218,7 @@ fn run<'s, F: ServedFilesystem>(
             Answer::Done
         }
         Request::WriteAt { file, offset, span } => {
-            let staged = window.get(span.range()).ok_or(DriverError::OutOfRange)?;
+            let staged = window.span(span).ok_or(DriverError::OutOfRange)?;
             Answer::Count(counted(fs.write_at(file, offset, staged)?, span)?)
         }
         Request::Truncate { file, size } => {
@@ -253,7 +280,7 @@ fn run<'s, F: ServedFilesystem>(
             Answer::Done
         }
         // Calls are answered one at a time, so every earlier one is done.
-        Request::Release => Answer::Done,
+        Request::Release { .. } => Answer::Done,
     })
 }
 

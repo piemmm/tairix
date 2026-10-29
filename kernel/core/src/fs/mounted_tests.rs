@@ -42,8 +42,8 @@ use crate::fs::test_volume::{
     FlushSpy, NullSink, MOUNT, MOUNT_MEDIUM, PLANTED, TEST_ACCOUNT, TEST_GID, TEST_UID,
 };
 use crate::fs::{
-    Attachment, Authority, CreateMode, Cwd, FinalLink, Listing, Mode, NodeHandle, Opened, Path,
-    Vfs, VfsError,
+    Attachment, Authority, BindsWithin, CreateMode, Cwd, FinalLink, Listing, Mode, NodeHandle,
+    Opened, Path, Vfs, VfsError,
 };
 
 /// A removable volume served by `driver`, attached with the flags every
@@ -457,6 +457,42 @@ fn service(
 /// A fully-installed writable service (the common case).
 fn ready() -> MountedFilesystemService<RwMockFs> {
     service(true, true, false)
+}
+
+/// A registration the heap cannot hold is refused and leaves the registry
+/// as it was, and an open it cannot hold is refused, never an abort.
+///
+/// Regression: registering a driver, and naming the descriptor an open
+/// makes, allocated infallibly.
+#[test]
+fn a_registration_or_an_open_the_heap_cannot_hold_is_refused() {
+    use crate::test_alloc::past_each_refusal;
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+    let mut drivers: Vec<RwMockFs> = (0..256).map(|_| driver()).collect();
+    let registered = past_each_refusal(&(Err(super::RegisterError::OutOfMemory), false), || {
+        let driver = drivers.pop().expect("a driver for each run");
+        let registered = cell
+            .register(handle, driver, "vol", "memfs", [0u8; 16], None)
+            .map(drop);
+        (registered, cell.driver(handle).is_ok())
+    });
+    assert_eq!(registered, (Ok(()), true));
+
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity
+        .install(identity_table())
+        .expect("install identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let caps = caps();
+    let path = alloc::format!("{MOUNT}/opened");
+    let mode = CreateMode::new(0o644, 0).expect("a mode");
+    crate::fs::test_volume::create_path(&svc, TEST_UID, &caps, &path, mode).expect("made");
+    let opened = past_each_refusal(&Err(Errno::OutOfMemory), || {
+        open_path(&svc, TEST_UID, &caps, &path, OpenFlags::READ)
+    });
+    assert_eq!(opened, Ok(()));
 }
 
 /// `/Storage` is the catalog of attached volumes, served with no volume
@@ -2259,7 +2295,7 @@ fn a_write_through_a_system_graft_carries_the_system_class() {
 #[test]
 fn mount_snapshot_reports_each_online_volume_once() {
     let svc = ready();
-    let records = svc.mount_snapshot();
+    let records = svc.mount_snapshot().expect("snapshot");
     assert_eq!(records.len(), 1, "only the registered volume: {records:?}");
     let vol = &records[0];
     assert_eq!(vol.source_bytes(), b"vol");
@@ -2273,6 +2309,46 @@ fn mount_snapshot_reports_each_online_volume_once() {
     assert_eq!(usage.total_blocks, 4096);
     assert!(usage.avail_blocks <= usage.free_blocks);
     assert!(usage.free_blocks <= usage.total_blocks);
+}
+
+/// A listing the heap cannot hold is refused whole: wherever a snapshot is
+/// refused memory it answers `OutOfMemory`, never with a row left out.
+///
+/// Regression: the snapshots were collected infallibly, and a path whose
+/// spelling the heap refused dropped its row from the listing.
+#[test]
+fn a_snapshot_the_heap_cannot_hold_is_refused_whole() {
+    use crate::test_alloc::past_each_refusal;
+    let svc = ready();
+    let oom = Err(Errno::OutOfMemory);
+    assert_eq!(
+        past_each_refusal(&oom, || svc.mount_snapshot().map(|rows| rows.len())),
+        Ok(1)
+    );
+    let views = svc.view_snapshot().expect("snapshot").len();
+    assert!(views > 1, "the volume and the bindings showing none");
+    assert_eq!(
+        past_each_refusal(&oom, || svc.view_snapshot().map(|rows| rows.len())),
+        Ok(views)
+    );
+    assert_eq!(
+        past_each_refusal(&oom, || svc
+            .volume_io_health_snapshot()
+            .map(|rows| rows.len())),
+        svc.volume_io_health_snapshot().map(|rows| rows.len())
+    );
+    assert_eq!(
+        past_each_refusal(&oom, || svc
+            .volume_io_stats_snapshot()
+            .map(|rows| rows.len())),
+        svc.volume_io_stats_snapshot().map(|rows| rows.len())
+    );
+    assert_eq!(
+        past_each_refusal(&oom, || svc
+            .volume_io_queue_snapshot()
+            .map(|rows| rows.len())),
+        svc.volume_io_queue_snapshot().map(|rows| rows.len())
+    );
 }
 
 /// A volume busy with a long operation does not hold the mount list up: it
@@ -2300,10 +2376,10 @@ fn a_busy_volume_is_listed_with_its_last_figures_without_waiting() {
     let driver = cell
         .register(handle, driver(), "root", "memfs", [7; 16], None)
         .expect("register");
-    let free = svc.mount_snapshot()[0].usage();
+    let free = svc.mount_snapshot().expect("snapshot")[0].usage();
     assert_eq!(free.total_blocks, 4096, "measured while free");
     let busy = driver.try_lock().expect("held by a long operation");
-    let listed = svc.mount_snapshot();
+    let listed = svc.mount_snapshot().expect("snapshot");
     assert_eq!(listed.len(), 1, "still listed");
     assert_eq!(listed[0].usage(), free, "with the figures it last gave");
     drop(busy);
@@ -2347,6 +2423,7 @@ fn a_volume_shown_at_several_paths_is_reported_once() {
 
     let views = |svc: &MountedFilesystemService<RwMockFs>| -> Vec<_> {
         svc.view_snapshot()
+            .expect("snapshot")
             .iter()
             .map(|view| {
                 (
@@ -2377,7 +2454,10 @@ fn a_volume_shown_at_several_paths_is_reported_once() {
         ),
     ];
 
-    assert!(svc.mount_snapshot().is_empty(), "the driver is not online");
+    assert!(
+        svc.mount_snapshot().expect("snapshot").is_empty(),
+        "the driver is not online"
+    );
     assert_eq!(
         views(&svc),
         unbacked,
@@ -2386,7 +2466,7 @@ fn a_volume_shown_at_several_paths_is_reported_once() {
 
     cell.register(handle, volume, "root", "memfs", id, None)
         .expect("register");
-    let records = svc.mount_snapshot();
+    let records = svc.mount_snapshot().expect("snapshot");
     assert_eq!(records.len(), 1, "one volume: {records:?}");
     assert_eq!(records[0].target_bytes(), b"/");
     assert_eq!(records[0].volume_id(), id);
@@ -2461,6 +2541,7 @@ fn mount_snapshot_overlays_reported_block_health() {
 
     let vol_availability = |svc: &MountedFilesystemService<RwMockFs>| {
         svc.mount_snapshot()
+            .expect("snapshot")
             .iter()
             .find(|record| record.source_bytes() == b"vol")
             .expect("the registered volume is listed")
@@ -2471,9 +2552,12 @@ fn mount_snapshot_overlays_reported_block_health() {
     assert_eq!(vol_availability(&svc), MountAvailability::Available);
 
     // With no I/O source the three per-volume queries list no device.
-    assert!(svc.volume_io_health_snapshot().is_empty());
-    assert!(svc.volume_io_stats_snapshot().is_empty());
-    assert!(svc.volume_io_queue_snapshot().is_empty());
+    assert!(svc
+        .volume_io_health_snapshot()
+        .expect("snapshot")
+        .is_empty());
+    assert!(svc.volume_io_stats_snapshot().expect("snapshot").is_empty());
+    assert!(svc.volume_io_queue_snapshot().expect("snapshot").is_empty());
 
     // A live block-health overlay reporting a blip surfaces as recovering.
     let availability = Arc::new(AtomicU8::new(MountAvailability::Recovering.as_u8()));
@@ -2497,7 +2581,7 @@ fn mount_snapshot_overlays_reported_block_health() {
     // The volume-health query now lists exactly this device, naming its
     // serving endpoint and overlaying the same live availability the mount
     // snapshot shows.
-    let health_records = svc.volume_io_health_snapshot();
+    let health_records = svc.volume_io_health_snapshot().expect("snapshot");
     assert_eq!(health_records.len(), 1);
     assert_eq!(health_records[0].dev(), 0x42);
     assert_eq!(
@@ -2510,8 +2594,8 @@ fn mount_snapshot_overlays_reported_block_health() {
     // ordered identically, so a client can join the three by volume id — and
     // the queue record carries the budget the depth is read against, from the
     // device's own class rather than a global constant.
-    let stats_records = svc.volume_io_stats_snapshot();
-    let queue_records = svc.volume_io_queue_snapshot();
+    let stats_records = svc.volume_io_stats_snapshot().expect("snapshot");
+    let queue_records = svc.volume_io_queue_snapshot().expect("snapshot");
     assert_eq!(stats_records.len(), 1);
     assert_eq!(queue_records.len(), 1);
     assert_eq!(stats_records[0].volume_id(), health_records[0].volume_id());
@@ -2547,7 +2631,7 @@ fn mount_snapshot_overlays_reported_block_health() {
     assert_eq!(vol_availability(&svc), MountAvailability::Degraded);
     // The volume-health query reflects the same degraded overlay.
     assert_eq!(
-        svc.volume_io_health_snapshot()[0].availability(),
+        svc.volume_io_health_snapshot().expect("snapshot")[0].availability(),
         MountAvailability::Degraded
     );
 }
@@ -4365,7 +4449,9 @@ mod held {
         file_with(&svc, "f", b"one");
         let held = own_handle(&svc, TEST_UID, &caps, &path("f"), OpenFlags::READ).expect("opens");
         let vfs = cell.vfs().expect("installed");
-        vfs.mounts_write().detach(handle).expect("detach");
+        vfs.mounts_write()
+            .detach(handle, BindsWithin::Refuse)
+            .expect("detach");
         let mut buf = [0u8; 3];
         assert_eq!(svc.read_node(&held, &who, 0, &mut buf), Err(Errno::Stale));
 
@@ -5562,7 +5648,9 @@ mod resolve {
         vfs.mounts_write()
             .set_backing(&Path::parse("/Storage").expect("path"), handle, Vec::new())
             .expect("replaces the catalog");
-        vfs.mounts_write().detach(handle).expect("detach");
+        vfs.mounts_write()
+            .detach(handle, BindsWithin::Refuse)
+            .expect("detach");
         let stat = |at| {
             svc.stat(TEST_UID, &caps, at, FinalLink::Follow)
                 .map(|s| s.kind)
@@ -5688,4 +5776,31 @@ mod resolve {
         );
         close(&svc, held);
     }
+}
+
+#[test]
+fn a_network_volume_registers_its_lanes_and_its_owner() {
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    let handle = DriverHandle::from_raw(0x4E37).expect("a handle");
+    let lanes = [RwMockFs::new(), RwMockFs::new(), RwMockFs::new()];
+    let id = [0x5A; 16];
+    let driver = cell
+        .register_network(handle, lanes, "//nas/share", "smb3", id, Some(1000))
+        .expect("registers");
+    assert_eq!(driver.lane_count(), 3);
+    assert_eq!(cell.volume_of(&id), Some((handle, Some(1000))));
+    assert_eq!(cell.volume_of(&[0x11; 16]), None);
+    let local = DriverHandle::from_raw(0x4E38).expect("a handle");
+    cell.register(local, RwMockFs::new(), "usb1", "memfs", [0x22; 16], None)
+        .expect("registers");
+    assert_eq!(
+        cell.volume_of(&[0x22; 16]),
+        Some((local, None)),
+        "a local volume is no one's"
+    );
+    assert_eq!(
+        cell.register_network(handle, [RwMockFs::new()], "//nas/x", "smb3", [1; 16], None)
+            .err(),
+        Some(crate::fs::RegisterError::AlreadyRegistered)
+    );
 }

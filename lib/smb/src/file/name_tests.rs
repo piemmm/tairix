@@ -140,3 +140,18 @@ fn a_path_is_bounded_in_utf16_units_both_ways() {
     let past = at_bound + "c";
     assert_eq!(SharePath::decode(&utf16(&past)), Err(SmbError::Name));
 }
+
+#[test]
+fn a_path_parsed_from_its_text_is_the_one_its_names_join_to() {
+    let joined = path(&["Photos", "2026", "été.jpg"]);
+    assert_eq!(SharePath::parse(joined.as_str()), Ok(joined));
+    assert_eq!(SharePath::parse(""), Ok(SharePath::root()));
+    for refused in [
+        "\\a", "a\\", "a\\\\b", "a\\.\\b", "a\\..", "a/b", "a:b\\c", "\\", "a*",
+    ] {
+        assert_eq!(SharePath::parse(refused), Err(SmbError::Name), "{refused}");
+    }
+    let at_bound = "a\\".repeat(MAX_PATH_UNITS / 2 - 1) + "ab";
+    assert!(SharePath::parse(&at_bound).is_ok());
+    assert_eq!(SharePath::parse(&(at_bound + "c")), Err(SmbError::Name));
+}

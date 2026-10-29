@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkMedium;
 use tairix_abi::sysinfo::{
-    MountAvailability, MountRecord, VolumeIoHealthRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN,
+    MountAvailability, MountRecord, VolumeIoHealthRecord, VolumeIoStatsRecord, VOLUME_ID_LEN,
     VOLUME_ID_UNPUBLISHED,
 };
 use tairix_controls::{PressureKind, RateTrace};
@@ -56,7 +56,7 @@ impl StorageSubject<'_> {
     /// The list is non-empty by construction; the nil identity matches no
     /// record, so a subject that somehow held none would read unmeasured
     /// rather than borrow another device's figures.
-    pub(crate) fn key(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
+    pub(crate) fn key(&self) -> [u8; VOLUME_ID_LEN] {
         self.volumes
             .first()
             .map_or(VOLUME_ID_UNPUBLISHED, |volume| volume.volume_id())
@@ -180,7 +180,7 @@ pub(crate) fn subjects(sample: &Sample) -> Vec<StorageSubject<'_>> {
 ///
 /// The service query is the ungated one of the three, so this grouping holds
 /// for a session that may read no queue depth and no health.
-fn subject_of(sample: &Sample, volume: &[u8; MOUNT_VOLUME_ID_LEN]) -> StorageId {
+fn subject_of(sample: &Sample, volume: &[u8; VOLUME_ID_LEN]) -> StorageId {
     super::find_volume_stats(sample.volume_io_stats.as_deref(), volume)
         .map(VolumeIoStatsRecord::dev)
         .filter(|dev| *dev != 0)

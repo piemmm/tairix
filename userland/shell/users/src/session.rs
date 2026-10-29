@@ -290,12 +290,15 @@ fn encode_password_record(
         io.error_line("users: no randomness available");
         return None;
     };
-    if let Ok(record) = PasswordRecord::new(first, salt, config.iterations) {
-        Some(record.encode())
-    } else {
+    let Ok(record) = PasswordRecord::new(first, salt, config.iterations) else {
         io.error_line("users: password rejected (length bounds)");
-        None
+        return None;
+    };
+    let encoded = record.encode();
+    if encoded.is_err() {
+        io.error_line("users: not enough memory to store the password");
     }
+    encoded.ok()
 }
 
 fn create_user(
@@ -332,7 +335,10 @@ fn create_user(
         io.error_line("users: request too large");
         return;
     };
-    let home = default_home(name);
+    let Ok(home) = default_home(name) else {
+        io.error_line("users: not enough memory to name the home directory");
+        return;
+    };
     submit_mutation(
         io,
         channel,

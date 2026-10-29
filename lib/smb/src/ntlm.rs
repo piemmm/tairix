@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::netshare_ipc::ACCOUNT_NAME_MAX;
 use tairix_abi::time::Time64;
+use tairix_crypto::ct_eq;
 use tairix_crypto::ntlm::{
     ntlm_checksum, ntlm_checksum_verify, ntlm_hmac, ntlm_signing_key, ntowfv2, NtlmDirection,
     NtlmKey,
@@ -157,6 +158,24 @@ impl NtlmCredential {
         })
     }
 
+    /// The credential for `user` in `domain` whose password derived
+    /// `response_key`: what a process that never sees the password signs in
+    /// with.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn keyed(user: &str, domain: &str, response_key: &NtlmKey) -> Result<Self, SmbError> {
+        if user.is_empty() {
+            return Err(SmbError::Refused(Refusal::Guest));
+        }
+        Ok(Self {
+            user: bounded_name(user)?,
+            domain: bounded_name(domain)?,
+            response_key: *response_key,
+        })
+    }
+
     /// The account's user name.
     #[must_use]
     pub fn user(&self) -> &str {
@@ -169,10 +188,19 @@ impl NtlmCredential {
         &self.domain
     }
 
-    /// The NTOWFv2 key, which the test server verifies a response with.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) const fn response_key(&self) -> &NtlmKey {
+    /// The NTOWFv2 key: what [`Self::keyed`] is handed, and what a server
+    /// verifies a response with.
+    #[must_use]
+    pub const fn response_key(&self) -> &NtlmKey {
         &self.response_key
+    }
+
+    /// Whether `other` is the same account with the same password, the keys
+    /// compared in constant time.
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        let same_key = ct_eq(&self.response_key, &other.response_key);
+        same_key && self.user == other.user && self.domain == other.domain
     }
 }
 

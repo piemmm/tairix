@@ -73,6 +73,11 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+// Metered, so a host test can refuse what an exhausted kernel heap would.
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 // The boot pipeline is selected per instruction set by the build script
 // (`build.rs` emits the `kernel_isa` name from `CARGO_CFG_TARGET_ARCH`),
 // so the crate body never names `target_arch` inline — that decision

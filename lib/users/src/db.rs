@@ -30,9 +30,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_crypto::{pbkdf2_sha256_verify, PASSWORD_HASH_LEN};
+use tairix_util::fallible::written;
 
 use crate::password::{DEFAULT_ITERATIONS, MAX_PASSWORD_LEN, SALT_LEN};
-use crate::record::{AccountState, Uid, UserRecord};
+use crate::record::{AccountState, Uid, UserRecord, UserView};
 use crate::table::{Keyed, RecordLine, Table};
 use crate::{AuthError, LocatedError, ParseError};
 
@@ -99,16 +100,32 @@ impl UsersDb {
         USERS.line(line)
     }
 
+    /// The records of `text`, a text [`Self::parse`] took, read in place and
+    /// in file order, for a reader that keeps no copy of the database. A
+    /// defect is the error naming it, and what follows it means nothing.
+    pub fn views(text: &str) -> impl Iterator<Item = Result<UserView<'_>, LocatedError>> {
+        USERS.records(text).map(|read| {
+            read.and_then(|(number, line)| {
+                UserView::decode(line).map_err(|kind| LocatedError::at(number, kind))
+            })
+        })
+    }
+
     /// Serialise the database into the text form [`Self::parse`] accepts.
-    #[must_use]
-    pub fn serialise(&self) -> String {
-        let mut out = String::from(FORMAT_HEADER);
-        out.push('\n');
-        for record in &self.records {
-            out.push_str(&record.encode_line());
-            out.push('\n');
-        }
-        out
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::OutOfMemory`] when the text cannot be held.
+    pub fn serialise(&self) -> Result<String, ParseError> {
+        written(|out| {
+            writeln!(out, "{FORMAT_HEADER}")?;
+            for record in &self.records {
+                record.write_line(out)?;
+                out.write_char('\n')?;
+            }
+            Ok(())
+        })
+        .ok_or(ParseError::OutOfMemory)
     }
 
     /// Every record, in file order.
@@ -303,10 +320,80 @@ mod tests {
         .expect("valid db")
     }
 
+    /// A database text is read in place record by record, as the whole parse
+    /// reads it, with nothing taken from the heap; a defect ends what reads.
+    #[test]
+    fn a_database_is_read_in_place_as_the_parse_reads_it() {
+        let db = db();
+        let text = db.serialise().expect("serialises");
+        let (identities, metering) = tairix_fuzzseed::meter::metered(|| {
+            UsersDb::views(&text)
+                .map(|view| view.map(|view| (view.identity().uid, view.identity().primary_gid)))
+                .try_fold(0usize, |seen, read| {
+                    let (uid, gid) = read?;
+                    let parsed = &db.records()[seen];
+                    assert_eq!((uid, gid), (parsed.uid(), parsed.primary_gid()));
+                    Ok::<_, LocatedError>(seen + 1)
+                })
+        });
+        assert_eq!(identities, Ok(db.records().len()));
+        assert_eq!(metering.allocations, 0);
+        let first = UsersDb::views(&text)
+            .next()
+            .expect("a record")
+            .expect("reads");
+        assert_eq!(first.identity(), db.records()[0].identity());
+
+        let broken = text.replacen(":active:", ":dormant:", 1);
+        let read: Vec<_> = UsersDb::views(&broken).collect();
+        assert_eq!(read[0], Err(LocatedError::at(2, ParseError::AccountState)));
+        assert_eq!(
+            UsersDb::views("tairix-users-v0\n").collect::<Vec<_>>(),
+            [Err(LocatedError::at(1, ParseError::Header))]
+        );
+    }
+
+    /// A database the heap cannot hold is refused, never an abort.
+    ///
+    /// Regression: parsing, serialising and building records allocated
+    /// infallibly.
+    #[test]
+    fn a_database_the_heap_cannot_hold_is_refused() {
+        use tairix_fuzzseed::meter::refusing_above;
+        let db = db();
+        let text = db.serialise().expect("serialises");
+        assert_eq!(
+            refusing_above(0, || UsersDb::parse(&text)),
+            Err(LocatedError::whole(ParseError::OutOfMemory))
+        );
+        assert_eq!(
+            refusing_above(0, || db.serialise()),
+            Err(ParseError::OutOfMemory)
+        );
+        assert_eq!(
+            refusing_above(0, || db.records()[0].encode_line()),
+            Err(ParseError::OutOfMemory)
+        );
+        assert_eq!(
+            refusing_above(0, || crate::policy::default_home("ada")),
+            Err(ParseError::OutOfMemory)
+        );
+        let identity = db.records()[1].identity();
+        let password = db.records()[1].password().clone();
+        assert_eq!(
+            refusing_above(0, || UserRecord::new(identity, password)),
+            Err(ParseError::OutOfMemory)
+        );
+        assert_eq!(
+            refusing_above(0, crate::provision::system_accounts),
+            Err(ParseError::OutOfMemory)
+        );
+    }
+
     #[test]
     fn serialise_parse_round_trips() {
         let original = db();
-        let text = original.serialise();
+        let text = original.serialise().expect("serialises");
         assert!(text.starts_with("tairix-users-v1\n"));
         assert_eq!(UsersDb::parse(&text), Ok(original));
     }
@@ -315,7 +402,11 @@ mod tests {
     fn comments_and_blank_lines_are_ignored() {
         let mut text = String::from(FORMAT_HEADER);
         text.push_str("\n# a comment\n\n   \n");
-        text.push_str(&record("ada", 1000, AccountState::Active, b"byron").encode_line());
+        text.push_str(
+            &record("ada", 1000, AccountState::Active, b"byron")
+                .encode_line()
+                .expect("encodes"),
+        );
         text.push('\n');
         let parsed = UsersDb::parse(&text).expect("parses");
         assert_eq!(parsed.records().len(), 1);
@@ -331,7 +422,9 @@ mod tests {
             UsersDb::parse("tairix-users-v2\n"),
             Err(LocatedError::at(1, ParseError::Header))
         );
-        let body = record("ada", 1000, AccountState::Active, b"x").encode_line();
+        let body = record("ada", 1000, AccountState::Active, b"x")
+            .encode_line()
+            .expect("encodes");
         assert_eq!(
             UsersDb::parse(&body),
             Err(LocatedError::at(1, ParseError::Header))
@@ -384,7 +477,9 @@ mod tests {
     #[test]
     fn a_collision_is_refused_at_the_later_record_and_in_scan_order() {
         let line = |name: &str, uid: u32| {
-            let mut out = record(name, uid, AccountState::Active, b"x").encode_line();
+            let mut out = record(name, uid, AccountState::Active, b"x")
+                .encode_line()
+                .expect("encodes");
             out.push('\n');
             out
         };

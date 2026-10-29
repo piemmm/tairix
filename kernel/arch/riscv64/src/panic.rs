@@ -15,7 +15,7 @@
 use core::fmt;
 use core::panic::{Location, PanicInfo};
 
-use tairix_arch_api::fatal::{self, KernelFault, Processor, Reporter};
+use tairix_arch_api::fatal::{self, Cause, KernelFault, Processor, Reporter};
 use tairix_arch_api::CpuStateCapture as _;
 
 use crate::backtrace::Backtracer;
@@ -38,7 +38,7 @@ pub fn refuse(reason: &str) -> ! {
 }
 
 fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> ! {
-    let entry = fatal::enter();
+    let entry = fatal::enter(&Cause::panic(location));
     REPORTER.panic(
         &mut SbiWriter,
         entry,
@@ -55,7 +55,7 @@ fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> 
 
 /// Report a fatal trap no fault handler claimed and park the hart.
 pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
-    let entry = fatal::enter();
+    let entry = fatal::enter(&Cause::Fault(*fault));
     REPORTER.fault(
         &mut SbiWriter,
         entry,

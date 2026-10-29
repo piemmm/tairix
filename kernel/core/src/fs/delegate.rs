@@ -405,7 +405,7 @@ impl Road {
     }
 
     /// The walk's stack climbed to the parent of what it stood on.
-    fn climbed(&mut self) {
+    pub(super) fn climbed(&mut self) {
         if let Some(spelled) = self.spelled.as_mut() {
             spelled.pop();
         }
@@ -479,6 +479,13 @@ pub(super) enum Begin {
         /// Whether it is the projection's floor.
         at_floor: bool,
     },
+    /// The directory holding one a bind covers, which a caller's `..` from the
+    /// bind's floor climbed to: below the floor, and searched only by the
+    /// steps taken from it.
+    Climbed {
+        /// Its pinned id.
+        node: NodeId,
+    },
 }
 
 /// What a walk knows of the projection it walks beyond its volume.
@@ -490,6 +497,8 @@ pub(super) struct Edge<'e> {
     pub(super) has_parent: bool,
     /// The projection shown beneath the floor under a name, if one is.
     pub(super) beneath: &'e dyn Fn(&str) -> Option<Arc<Projection>>,
+    /// The bind covering a directory of the projection, if one does.
+    pub(super) covered: &'e dyn Fn(NodeId) -> Option<Arc<Projection>>,
 }
 
 /// Where one projection's walk stopped.
@@ -502,8 +511,9 @@ pub(super) enum Descent {
     /// A caller's `..` at the floor: the walk goes on at the floor of the
     /// projection this one sits beneath.
     Above,
-    /// A caller's name at the floor that another projection is shown under:
-    /// the walk goes on at that projection's floor.
+    /// A caller's name at the floor that another projection is shown under,
+    /// or one reaching a directory a bind covers: the walk goes on at that
+    /// projection's floor.
     Into(Arc<Projection>),
 }
 
@@ -705,6 +715,33 @@ pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized> {
     mount: MountProjection<'fs>,
 }
 
+/// Where a step reaching `node` goes when a bind covers it: into the bind. As
+/// at a floor, a link's step never reaches what a bind shows, nor the
+/// directory it covers.
+fn into_cover(edge: &Edge<'_>, node: NodeId, from_link: bool) -> Result<Option<Descent>, VfsError> {
+    let Some(bind) = (edge.covered)(node) else {
+        return Ok(None);
+    };
+    if from_link {
+        return Err(VfsError::NotFound);
+    }
+    Ok(Some(Descent::Into(bind)))
+}
+
+/// Whether the directory `dir` holds any entry.
+pub(super) fn holds_entries<R: FilesystemRead + ?Sized>(
+    fs: &mut R,
+    dir: NodeId,
+) -> Result<bool, VfsError> {
+    let mut occupied = false;
+    fs.read_dir(dir, 0, &[], &mut |_, _| {
+        occupied = true;
+        DirVisit::Stop
+    })
+    .map_err(map_driver_error)?;
+    Ok(occupied)
+}
+
 /// The permission metadata the record `fs` stores for `node` grants.
 fn stored_record<R: FilesystemSecurity + ?Sized>(
     fs: &mut R,
@@ -881,6 +918,9 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
                         return Ok(Descent::Above);
                     }
                     let up = self.fs.parent(here).map_err(map_driver_error)?;
+                    if let Some(into) = into_cover(edge, up, step.from_link)? {
+                        return Ok(into);
+                    }
                     let climbed = self.walked(up, None)?;
                     stack.clear();
                     stack.push(climbed);
@@ -914,6 +954,9 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
                         }
                         Err(err) => return Err(map_driver_error(err)),
                     };
+                    if let Some(into) = into_cover(edge, child, step.from_link)? {
+                        return Ok(into);
+                    }
                     let walked = self.walked(child, Some(name))?;
                     if walked.info.kind == NodeKind::Symlink
                         && !(is_final && road.final_link == FinalLink::Keep)
@@ -967,6 +1010,10 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
                 }
                 floor.bottom = Some(at_floor);
                 (self.walked(node, None)?, true)
+            }
+            Begin::Climbed { node } => {
+                floor.bottom = Some(false);
+                (self.walked(node, None)?, false)
             }
         };
         if check {
@@ -1240,6 +1287,38 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
         }
         names.reverse();
         Ok(names)
+    }
+
+    /// The directories from beneath the projection's floor down to `node`,
+    /// outermost first and `node` last, each found by climbing with the
+    /// driver's `parent`.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::InvalidPath`] for the floor itself, or a directory more
+    /// than [`MAX_PATH_COMPONENTS`] climbs below it or not below it at all;
+    /// the driver's refusal to climb.
+    pub(super) fn dirs_down_to(
+        &mut self,
+        cred: &Credentials<'_>,
+        node: NodeId,
+    ) -> Result<Vec<NodeId>, VfsError> {
+        let floor = self.projected_root(cred)?.node;
+        let mut dirs = Vec::new();
+        let mut here = node;
+        while here != floor {
+            if dirs.len() == MAX_PATH_COMPONENTS {
+                return Err(VfsError::InvalidPath);
+            }
+            dirs.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
+            dirs.push(here);
+            here = self.fs.parent(here).map_err(map_driver_error)?;
+        }
+        if dirs.is_empty() {
+            return Err(VfsError::InvalidPath);
+        }
+        dirs.reverse();
+        Ok(dirs)
     }
 
     /// The name `child` has in the directory `dir`'s listing.
@@ -1552,14 +1631,7 @@ impl<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> Delegate
         // Checked here so NotEmpty is answered without a driver round trip;
         // the driver still checks, and its refusal carries the same class.
         if info.kind == NodeKind::Directory {
-            let mut occupied = false;
-            self.fs
-                .read_dir(*node, 0, &[], &mut |_, _| {
-                    occupied = true;
-                    DirVisit::Stop
-                })
-                .map_err(map_driver_error)?;
-            if occupied {
+            if holds_entries(self.fs, *node)? {
                 return Err(VfsError::NotEmpty);
             }
         } else if dir_only {
@@ -1628,6 +1700,8 @@ impl<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> Delegate
     /// * [`VfsError::NotADirectory`] if a directory would replace a
     ///   non-directory, and [`VfsError::IsADirectory`] if a non-directory
     ///   would replace a directory.
+    /// * [`VfsError::Busy`] if either end is a directory `guarded` names: one
+    ///   a bind covers, or one on the way to it.
     /// * [`VfsError::PermissionDenied`] or [`VfsError::Io`].
     // Two places, each a directory and a name, and what the move may do.
     #[allow(clippy::too_many_arguments)]
@@ -1640,12 +1714,21 @@ impl<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized> Delegate
         dst_name: &str,
         flags: RenameFlags,
         expect: Option<Expected<'_>>,
+        guarded: &dyn Fn(NodeId) -> bool,
     ) -> Result<(), VfsError> {
         let src = self.place_in(src_dir, src_name)?.for_write(cred)?;
         let dst = self.place_in(dst_dir, dst_name)?.for_new_name(cred)?;
         let Some((src_node, src_info, src_meta)) = &src.found else {
             return Err(VfsError::NotFound);
         };
+        if guarded(*src_node)
+            || dst
+                .found
+                .as_ref()
+                .is_some_and(|(node, _, _)| guarded(*node))
+        {
+            return Err(VfsError::Busy);
+        }
         // The source loses its name and a replaced destination is destroyed.
         src_meta.admits_name_removal(&src.parent_meta, cred)?;
         if let Some((_, _, dst_meta)) = &dst.found {

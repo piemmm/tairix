@@ -34,6 +34,10 @@ identifies a volume or which tree of a disc is mounted.
   helpers, shared with `drivers/filesystem/fat32`.
 - `fingerprint(identity)` — the lowercase Crockford-base32 display
   fingerprint of an identity; callers take the prefix they need.
+- `name` — the catalog-naming policy a volume is published in `/Storage`
+  under: its label in kebab case, else its transport and fingerprint, a name
+  in use or reserved taking ever more of its own fingerprint. The volume
+  manager names a recognised volume by it and the kernel a network volume.
 
 ## Stability
 

@@ -446,3 +446,52 @@ fn references_are_equal_when_they_name_one_node_of_one_registration() {
     assert_eq!(a.clone(), a);
     assert_eq!((a.instance(), a.pinned().raw()), (8, 3));
 }
+
+#[test]
+fn a_lock_over_lanes_hands_out_a_free_one_until_all_are_held() {
+    let lanes = DriverLock::lanes([0u32, 1, 2], Arc::new(VolumeNodes::new(20))).unwrap();
+    assert_eq!(lanes.lane_count(), 3);
+    let first = lanes.lock();
+    let second = lanes.lock();
+    let third = lanes.try_lock().expect("a lane still free");
+    let mut held = [*first, *second, *third];
+    held.sort_unstable();
+    assert_eq!(held, [0, 1, 2], "every lane handed out once");
+    assert!(lanes.try_lock().is_none(), "no lane is free");
+    drop(second);
+    assert!(lanes.try_lock().is_some());
+}
+
+#[test]
+fn every_lane_is_held_together_in_order() {
+    let lanes = DriverLock::lanes([5u32, 6], Arc::new(VolumeNodes::new(21))).unwrap();
+    {
+        let mut all = lanes.lock_all();
+        assert_eq!(*all.first(), 5);
+        for lane in all.each() {
+            *lane += 10;
+        }
+        assert!(lanes.try_lock().is_none());
+    }
+    let mut seen = [*lanes.lock(), *lanes.lock()];
+    seen.sort_unstable();
+    assert_eq!(seen, [15, 16]);
+    let one = DriverLock::new(7u32, Arc::new(VolumeNodes::new(22)));
+    assert_eq!(one.lane_count(), 1);
+    assert_eq!(one.lock_all().each().count(), 1);
+}
+
+#[test]
+fn lanes_are_bounded_and_never_none() {
+    use tairix_abi::fsserve::SERVED_LANES_MAX;
+    let nodes = || Arc::new(VolumeNodes::new(23));
+    assert_eq!(
+        DriverLock::lanes(Vec::<u32>::new(), nodes()).err(),
+        Some(Errno::OutOfRange)
+    );
+    assert!(DriverLock::lanes(0..SERVED_LANES_MAX, nodes()).is_ok());
+    assert_eq!(
+        DriverLock::lanes(0..=SERVED_LANES_MAX, nodes()).err(),
+        Some(Errno::OutOfRange)
+    );
+}

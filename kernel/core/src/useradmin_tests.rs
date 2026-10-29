@@ -142,13 +142,15 @@ fn fixture() -> Fixture {
     let users_cell: &'static LateUsersDb = crate::forever(Box::new(LateUsersDb::new()));
     let identity_cell: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     users_cell
-        .install(HeldUsersDbSource::new(users.serialise().into_bytes()))
+        .install(HeldUsersDbSource::new(
+            users.serialise().expect("serialises").into_bytes(),
+        ))
         .expect("boot install");
     identity_cell
         .install(crate::groups::build_identity_table(&users, &groups, sink).expect("boot verify"))
         .expect("boot install");
     let groups_cell: &'static LateGroupsDb = crate::forever(Box::new(LateGroupsDb::new()));
-    groups_cell.publish(groups.serialise().into_bytes());
+    groups_cell.publish(groups.serialise().expect("serialises").into_bytes());
     let backing: &'static RecordingBacking = crate::forever(Box::new(RecordingBacking::default()));
     sink.clear();
 

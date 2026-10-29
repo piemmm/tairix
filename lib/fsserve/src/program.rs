@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::FilesystemWrite;
 use tairix_abi::driver::{DriverExit, DriverHandle};
-use tairix_abi::fsserve::{ServeFrame, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX};
+use tairix_abi::fsserve::{ServeFrame, Span, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Time64;
 use tairix_abi::volume::{VolumeCtl, VolumeInfo, VOLUME_INFO_LEN};
@@ -18,7 +18,7 @@ use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_rt::shm::ServeWindow;
 
 use crate::{
-    Clock, GrantedVolume, ServedFilesystem, ServedFormat, ServedHost, Server, VolumeAccess,
+    Clock, GrantedVolume, ServedFilesystem, ServedFormat, ServedHost, Server, VolumeAccess, Window,
     WritebackBudget, REQUIRED_CAPABILITIES,
 };
 
@@ -41,6 +41,12 @@ impl VolumeAccess for RtVolume {
             return Ok(None);
         }
         VolumeInfo::decode(reply.get(..len).ok_or(Errno::OutOfRange)?).map(Some)
+    }
+}
+
+impl Window for ServeWindow {
+    fn span(&mut self, span: Span) -> Option<&mut [u8]> {
+        self.span_mut(span.range())
     }
 }
 
@@ -213,8 +219,7 @@ fn serve<F: ServedFilesystem>(
             ENDPOINT_TOKEN => loop {
                 match tairix_rt::call_recv_ready(endpoint, &mut request) {
                     Ok(Some(call)) => {
-                        let len =
-                            server.answer(&request[..call.len], window.bytes_mut(), &mut reply);
+                        let len = server.answer(&request[..call.len], window, &mut reply);
                         // A caller the kernel withdrew is answered by nobody.
                         let _ = tairix_rt::call_reply(endpoint, call.ticket, &reply[..len]);
                     }

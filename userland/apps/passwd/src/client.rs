@@ -141,8 +141,9 @@ fn hash(first: &[u8], second: &[u8], entropy: &dyn SaltSource) -> Result<String,
     }
     let salt = entropy.salt().ok_or(RunError::NoEntropy)?;
     PasswordRecord::new(first, salt, DEFAULT_ITERATIONS)
-        .map(|record| record.encode())
-        .map_err(|_| RunError::BadPassword)
+        .map_err(|_| RunError::BadPassword)?
+        .encode()
+        .map_err(|_| RunError::Refused(Errno::OutOfMemory))
 }
 
 #[cfg(test)]

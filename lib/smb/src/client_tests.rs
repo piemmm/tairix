@@ -22,15 +22,18 @@ use crate::spnego::{NegState, Reply};
 use crate::status::NtStatus;
 use crate::tree::ShareType;
 use crate::vectors;
-use crate::wire::Encoder;
+use crate::wire::{Encoder, Guid};
 use crate::{Refusal, SmbError};
 
 pub(super) const SEED: [u8; NONCE_SEED_LEN] = [0x3c; NONCE_SEED_LEN];
 
+/// The client GUID a test's connection offers unless it names its own.
+pub(super) const CLIENT_GUID: Guid = [0x11; 16];
+
 pub(super) fn offer(host: &str) -> Offer {
     Offer {
         floor: Dialect::Smb300,
-        client_guid: [0x11; 16],
+        client_guid: CLIENT_GUID,
         salt: [0x22; 32],
         server_name: String::from(host),
     }
@@ -85,12 +88,17 @@ pub(super) fn events(client: &mut Client) -> Vec<Event> {
 
 /// A client whose negotiation with `config`'s server has settled.
 fn negotiated(config: &PeerConfig) -> (Client, Peer) {
-    negotiated_with(Peer::new(config.clone()), config)
+    negotiated_with(Peer::new(config.clone()), config, CLIENT_GUID)
 }
 
-/// A client whose negotiation with `peer`, serving as `config`, has settled.
-fn negotiated_with(mut peer: Peer, config: &PeerConfig) -> (Client, Peer) {
-    let mut client = Client::new(offer(config.host)).expect("encodes");
+/// A client offering `client_guid` whose negotiation with `peer`, serving as
+/// `config`, has settled.
+fn negotiated_with(mut peer: Peer, config: &PeerConfig, client_guid: Guid) -> (Client, Peer) {
+    let mut client = Client::new(Offer {
+        client_guid,
+        ..offer(config.host)
+    })
+    .expect("encodes");
     pump(&mut client, &mut peer).expect("negotiates");
     assert_eq!(events(&mut client), [Event::Negotiated]);
     (client, peer)
@@ -98,12 +106,18 @@ fn negotiated_with(mut peer: Peer, config: &PeerConfig) -> (Client, Peer) {
 
 /// A client with an established session on `config`'s server.
 fn established(config: &PeerConfig) -> (Client, Peer) {
-    established_with(Peer::new(config.clone()), config, None)
+    established_with(Peer::new(config.clone()), config, None, CLIENT_GUID)
 }
 
-/// A client with an established session on `peer`, replacing `previous`.
-fn established_with(peer: Peer, config: &PeerConfig, previous: Option<u64>) -> (Client, Peer) {
-    let (mut client, mut peer) = negotiated_with(peer, config);
+/// A client offering `client_guid` with an established session on `peer`,
+/// replacing `previous`.
+fn established_with(
+    peer: Peer,
+    config: &PeerConfig,
+    previous: Option<u64>,
+    client_guid: Guid,
+) -> (Client, Peer) {
+    let (mut client, mut peer) = negotiated_with(peer, config, client_guid);
     client
         .authenticate(ntlm(config, config.password), SEED, previous)
         .expect("starts");
@@ -115,17 +129,18 @@ fn established_with(peer: Peer, config: &PeerConfig, previous: Option<u64>) -> (
 
 /// A client with the disk share connected on `config`'s server.
 pub(super) fn connected(config: &PeerConfig) -> (Client, Peer, Tree) {
-    connected_with(Peer::new(config.clone()), config, None)
+    connected_with(Peer::new(config.clone()), config, None, CLIENT_GUID)
 }
 
-/// A client with the disk share connected on `peer`, its session replacing
-/// `previous`.
+/// A client offering `client_guid` with the disk share connected on `peer`,
+/// its session replacing `previous`.
 pub(super) fn connected_with(
     peer: Peer,
     config: &PeerConfig,
     previous: Option<u64>,
+    client_guid: Guid,
 ) -> (Client, Peer, Tree) {
-    let (mut client, mut peer) = established_with(peer, config, previous);
+    let (mut client, mut peer) = established_with(peer, config, previous, client_guid);
     let ticket = client.connect_tree(DISK_SHARE).expect("asks");
     pump(&mut client, &mut peer).expect("connects");
     match events(&mut client)[..] {
@@ -824,4 +839,43 @@ fn a_failure_drops_the_sessions_keys() {
     assert_eq!(client.receive(&answer), Err(SmbError::Integrity));
     assert_eq!(client.send(tree.id, &[ECHO]), Err(SmbError::Integrity));
     assert!(matches!(client.session, super::Session::None));
+}
+
+#[test]
+fn an_echo_goes_in_the_clear_outside_any_session_and_reports_nothing() {
+    let (mut client, mut peer, tree) = connected(&PeerConfig::new(Dialect::Smb311));
+    client.echo().expect("asks");
+    let output = client.take_output();
+    let [frame] = frames(&output)[..] else {
+        panic!("one frame");
+    };
+    assert_ne!(frame[..4], TRANSFORM_PROTOCOL_ID, "in the clear");
+    let header = Header::decode(frame).expect("a header");
+    assert_eq!(header.command, Command::Echo);
+    assert_eq!(header.session_id, 0, "outside any session");
+    assert_eq!(header.address, Address::Sync { tree_id: 0 }, "and any tree");
+    peer.receive(&output).expect("the server answers it");
+    assert_eq!(peer.echoes(), 1);
+    let answer = peer.take_output();
+    assert!(
+        !answer.is_empty(),
+        "the answer is what says the connection lives"
+    );
+    client.receive(&answer).expect("receives");
+    assert!(events(&mut client).is_empty(), "nothing to report");
+    let tickets = client
+        .send(tree.id, &[ECHO])
+        .expect("the session serves on");
+    pump(&mut client, &mut peer).expect("answers");
+    assert_eq!(
+        status_of(&events(&mut client)[0], tickets[0]),
+        NtStatus::SUCCESS
+    );
+}
+
+#[test]
+fn an_echo_waits_for_the_negotiation() {
+    let config = PeerConfig::new(Dialect::Smb311);
+    let mut client = Client::new(offer(config.host)).expect("encodes");
+    assert_eq!(client.echo(), Err(SmbError::Protocol));
 }

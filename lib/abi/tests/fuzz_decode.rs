@@ -636,6 +636,138 @@ fn exercise_netshare(bytes: &[u8]) {
     }
 }
 
+/// Drive the network-attachment decoders on `bytes` (one arm of
+/// [`exercise`]): the offer a server makes and the grant it is answered,
+/// the attach a principal asks and its reply, a view bind, and a server's
+/// word on its offer. An accepted frame re-encodes to itself.
+fn exercise_netattach(bytes: &[u8]) {
+    use tairix_abi::fsserve::Lanes;
+    use tairix_abi::netattach::{
+        AttachReply, FsserveCtl, NetworkAttach, NetworkOffer, OfferGrant, NETWORK_ATTACH_MAX,
+        NETWORK_OFFER_MAX,
+    };
+    use tairix_abi::volume::{ViewBindRequest, VIEW_BIND_MAX};
+    if let Ok(offer) = NetworkOffer::decode(bytes) {
+        let mut out = vec![0u8; NETWORK_OFFER_MAX];
+        let len = offer
+            .encode(&mut out)
+            .expect("an accepted offer must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted offer is canonical");
+        assert!(offer.lanes.window_len() <= tairix_abi::fsserve::FSSERVE_WINDOW_MAX);
+    }
+    for lanes in [Lanes::ONE, Lanes::new(4, 64 * 1024).expect("lanes")] {
+        if let Ok(grant) = OfferGrant::decode(bytes, lanes) {
+            assert_eq!(&grant.encode()[..], bytes, "an accepted grant is canonical");
+        }
+    }
+    if let Ok(attach) = NetworkAttach::decode(bytes) {
+        let mut out = vec![0u8; NETWORK_ATTACH_MAX];
+        let len = attach
+            .encode(&mut out)
+            .expect("an accepted attach must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted attach is canonical");
+    }
+    if let Ok(reply) = AttachReply::decode(bytes) {
+        assert_eq!(&reply.encode()[..], bytes, "an accepted reply is canonical");
+        assert!(tairix_abi::volume::validate_volume_name(reply.name().as_bytes()).is_ok());
+    }
+    if let Ok(request) = ViewBindRequest::decode(bytes) {
+        let mut out = vec![0u8; VIEW_BIND_MAX];
+        let len = request
+            .encode(&mut out)
+            .expect("an accepted bind must re-encode");
+        assert_eq!(&out[..len], bytes, "an accepted bind is canonical");
+    }
+    if let Some(word) = bytes.first_chunk::<4>() {
+        let _ = FsserveCtl::from_u32(u32::from_le_bytes(*word));
+    }
+}
+
+/// Well-formed frames of every network-attachment decoder.
+fn netattach_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
+    use tairix_abi::driver::filesystem::{NameMatching, NodeId, NodeIdentity};
+    use tairix_abi::fsserve::{Lanes, ServeGrant, ServeOffer};
+    use tairix_abi::netattach::{
+        AttachReply, NetworkAttach, NetworkOffer, OfferGrant, OfferId, Presentation,
+        NETWORK_ATTACH_MAX, NETWORK_OFFER_MAX,
+    };
+    use tairix_abi::volume::{FormatName, ViewBindRequest, VIEW_BIND_MAX};
+    let lanes = Lanes::new(4, 64 * 1024).expect("lanes");
+    let offer = NetworkOffer {
+        serve: ServeOffer {
+            root: NodeId::from_raw(1),
+            name_matching: NameMatching::AsciiCaseInsensitive,
+            node_identity: NodeIdentity::Stable,
+            attrs: false,
+            write_refusal: None,
+            format: FormatName::Smb3,
+        },
+        for_uid: 1000,
+        key: *b"0123456789abcdef",
+        lanes,
+        source: "//nas/share",
+    };
+    let mut frames = std::vec::Vec::new();
+    let mut out = vec![0u8; NETWORK_OFFER_MAX];
+    let len = offer.encode(&mut out).expect("encodes");
+    frames.push(out[..len].to_vec());
+    let grant = OfferGrant {
+        grant: ServeGrant {
+            endpoint: 7,
+            window: 0x7000_0000,
+            window_len: u32::try_from(lanes.window_len()).expect("a length"),
+        },
+        offer: OfferId::new(3).expect("an id"),
+    };
+    frames.push(grant.encode().to_vec());
+    for presentation in [
+        Presentation::Private,
+        Presentation::Shared,
+        Presentation::Explicit {
+            uid: 42,
+            gid: 7,
+            dir_mode: 0o750,
+            file_mode: 0o640,
+        },
+    ] {
+        let attach = NetworkAttach {
+            name: "share",
+            presentation,
+            read_only: true,
+            target: Some("/Users/ann/Home/nas"),
+        };
+        let mut out = vec![0u8; NETWORK_ATTACH_MAX];
+        let len = attach.encode(&mut out).expect("encodes");
+        frames.push(out[..len].to_vec());
+    }
+    frames.push(
+        AttachReply::new([9; 16], "share-2")
+            .expect("a reply")
+            .encode()
+            .to_vec(),
+    );
+    let bind = ViewBindRequest {
+        volume_id: [9; 16],
+        subtree: "/sub",
+        target: "/Users/ann/Home/nas",
+        narrowing: tairix_abi::driver::filesystem::MountFlags::READ_ONLY,
+    };
+    let mut out = vec![0u8; VIEW_BIND_MAX];
+    let len = bind.encode(&mut out).expect("encodes");
+    frames.push(out[..len].to_vec());
+    frames
+}
+
+/// Every network-attachment frame, each bit flipped in turn: it decodes to
+/// its own encoding or is refused, never panics.
+#[test]
+fn netattach_frames_with_flipped_bits_round_trip_or_are_refused() {
+    for mut frame in netattach_frames() {
+        exercise_netattach(&frame);
+        each_bit_flipped(&mut frame, exercise_netattach);
+    }
+}
+
 /// Drive the link-local discovery decoders on `bytes` (one arm of
 /// [`exercise`]): the call a client sends, the collect reply and doorbell a
 /// client parses from the service, the grant store the service parses from
@@ -1319,6 +1451,7 @@ fn exercise(bytes: &[u8]) {
     exercise_net_channel(bytes);
     exercise_discovery(bytes);
     exercise_netshare(bytes);
+    exercise_netattach(bytes);
     exercise_elevate(bytes);
     exercise_session_ipc(bytes);
     exercise_saver_ipc(bytes);
@@ -1452,7 +1585,7 @@ fn exercise_fsserve(bytes: &[u8]) {
     if let Ok(frame) = ServeFrame::decode(bytes) {
         assert_eq!(&frame.encode()[..], bytes);
     }
-    if let Ok(grant) = ServeGrant::decode(bytes) {
+    if let Ok(grant) = ServeGrant::decode(bytes, tairix_abi::fsserve::Lanes::ONE) {
         assert_eq!(&grant.encode()[..], bytes);
     }
 }
@@ -2003,7 +2136,9 @@ fn fsserve_request_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
             key: b"user.k",
             value: b"v",
         },
-        Request::Release,
+        Request::Release {
+            span: Span::new(0, tairix_abi::fsserve::FSSERVE_WINDOW_LEN).expect("a span"),
+        },
     ];
     requests
         .iter()
@@ -2353,7 +2488,7 @@ const NETSHARE_SEED_PIN: tairix_abi::netshare_ipc::Pin = tairix_abi::netshare_ip
 /// One request of each kind, encoded: pinned, link-local, by offer, bare.
 fn netshare_request_seeds() -> Vec<Vec<u8>> {
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use tairix_abi::fsserve::OfferId;
+    use tairix_abi::netattach::OfferId;
     use tairix_abi::netshare_ipc::{
         Connect, Credentials, DialectFloor, Endpoint, NetshareRequest, NETSHARE_MAX_REQUEST,
         SMB_PORT,
@@ -2413,7 +2548,7 @@ fn netshare_request_seeds() -> Vec<Vec<u8>> {
 
 /// One reply of each kind, encoded, with a pin refusal and a reasoned one.
 fn netshare_reply_seeds() -> Vec<Vec<u8>> {
-    use tairix_abi::fsserve::OfferId;
+    use tairix_abi::netattach::OfferId;
     use tairix_abi::netshare_ipc::{
         MountEntry, MountState, NetshareError, NetshareReply, Op, Records, Rejection, ShareEntry,
         Shares, NETSHARE_MAX_REPLY,
@@ -2444,6 +2579,7 @@ fn netshare_reply_seeds() -> Vec<Vec<u8>> {
             pin,
             hidden: 1,
             unnamed: 2,
+            unlisted: 3,
             shares: Records::new(&shares),
         }),
         NetshareReply::Mounted { pin, offer },

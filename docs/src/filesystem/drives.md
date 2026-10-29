@@ -232,6 +232,28 @@ and mount flags; it may never relax `ro` / `noexec` without the explicit
 relax capability and an audit record (§15). Creating any
 additional default-view entry requires amending `AGENTS.md` §16.1.
 
+**View binds** (`view_bind`, `view_unbind`; `plans/NEW-NAMESPACE.md` NS-4a)
+show a subtree of an attached volume at a further view path: over a directory
+under `/Users` or inside a volume in the `/Storage` catalog, or at a second
+name in the catalog. `/System`, `/` and a new top-level entry are refused to
+everyone. A caller without `CAP_FS_MOUNT` may bind only a volume it attached
+over an empty directory it owns, reached through directories that are its own
+or the system's — a bind holds every directory on its way where it is, so no
+one holds another's; a holder may bind any attached volume over any directory
+there, and in the catalog. The target is judged under the walk the bind makes,
+which follows no link, and the subtree is walked as the caller, so no one binds
+what they cannot reach. A bind pins the directory it covers and every directory
+down to it, and none of them is renamed while it stands (`Busy`), so its view
+path stays the one it was made at; a name walk reaching the covered directory
+crosses into the bind, a `..` from the bind's floor reaches the directory
+holding it, and a link's step never crosses either way. A bind may stand within
+another bind or a volume attached at run time, and while one does, what holds
+it is neither unbound nor detached (`NotEmpty`). A bind leaves with its volume,
+or by `view_unbind` from its binder or a holder; a forced detach, a medium that
+left, a lost server or a returning medium withdraws the binds standing within
+the volume with it. A descriptor opened through a bind that left answers stale.
+`VIEW_LIST` reports each with its binder.
+
 ## 10. Storage catalog `Storage:`
 
 `Storage:/` is a synthetic catalog of published non-core aliases (removable
@@ -252,11 +274,16 @@ listing the catalog is that merge alone, so a runtime `/Storage/<name>` mount
 appears in `/Storage` as a structural directory entry with the same
 `UNIX_EPOCH` stamp any stampless backing reports. The mount points list in
 name order, so a batched listing resumes after the last one it returned. Every
-projection sits directly beneath the floor of another, and a runtime volume is
-attached only directly beneath the catalog, so nothing is ever shown beneath a
-runtime volume and no directory but a floor has a projection beneath it. An
+projection sits directly beneath the floor of another or is a bind over a
+directory of one (§9), and a runtime volume is attached only directly beneath
+the catalog, so what is shown inside a runtime volume is only ever a bind. An
 attach anywhere else is refused, and so is a withdrawal that would leave a
-projection beneath no floor.
+projection beneath no floor or a bind over a directory no projection shows.
+
+A network share is attached here too: its server offers it to one principal
+and that principal attaches it, privately unless it holds `CAP_FS_MOUNT`
+([Volumes served from user space](./served.md#network-volumes)). Its owner
+detaches it without the mount authority.
 
 ## 11. Fail-closed rules
 
@@ -414,7 +441,7 @@ with `TimestampOutOfRange` rather than silently truncating (§22).
 
 **The ownerless-format policy wrapper is landed** (`plans/DEVICES.md` D3d):
 a runtime-attached FAT32 volume is mounted under the kernel's storage-group
-identity map (`tairix_kernel::volume_policy::GroupMappedFs`) — every node
+identity map (`tairix_kernel::volume_policy::PresentedFs`) — every node
 appears owned by the system user and the well-known `storage` group
 (`tairix_users::STORAGE_GROUP`, resolved **by name** from the loaded group
 registry at root unlock), directories `rwxrwxr-x` and files `rw-rw-r--`, so
@@ -537,7 +564,8 @@ Security-relevant namespace decisions are logged through `lib/log` with stable
 event IDs (`AGENTS.md` §5.4, §19.4): `fs.root.{discovered,attached}`,
 `fs.root.publish.{allow,deny}`, `fs.alias.create.{allow,deny}`,
 `fs.alias.remove.{allow,deny}`, `fs.alias.resolve.deny`,
-`fs.view.bind.{allow,deny}`, `fs.flags.relax.{allow,deny}`,
+`fs.view.bind.{allow,deny}`, `fs.view.unbind.{allow,deny}`,
+`fs.flags.relax.{allow,deny}`,
 `fs.raw_device.open.{allow,deny}`, `fs.hotplug.root_{added,removed}`,
 `fs.hotplug.surprise_removal.{clean,dirty,lost}` (a vanished device with
 nothing uncommitted / with its uncommitted writes retained / after retention
@@ -552,8 +580,10 @@ carries the refusing cause and the retained byte count),
 `fs.serve.{awaiting,resumed,refused,lost}` (a removable volume's user-space
 driver awaited, serving again, refused, or gone — see
 [Volumes served from user space](./served.md); `fs.hotplug.root_added` is then
-recorded when its driver first serves it), and
-`fs.conflict.alias_ambiguous`. No secret, key,
+recorded when its driver first serves it),
+`fs.network.{offered,attached,attach_refused,detached,detach_refused,retired}`
+(a network volume offered, attached by its principal, detached, or retired by
+its server), and `fs.conflict.alias_ambiguous`. No secret, key,
 capability-token value, or private path content beyond the audit subsystem's
 policy set is logged.
 

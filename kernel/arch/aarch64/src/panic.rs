@@ -16,7 +16,7 @@
 use core::fmt;
 use core::panic::{Location, PanicInfo};
 
-use tairix_arch_api::fatal::{self, Entry, KernelFault, Processor, Reporter};
+use tairix_arch_api::fatal::{self, Cause, Entry, KernelFault, Processor, Reporter};
 use tairix_arch_api::CpuStateCapture as _;
 
 use crate::backtrace::Backtracer;
@@ -39,7 +39,7 @@ pub fn refuse(reason: &str) -> ! {
 }
 
 fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> ! {
-    let entry = enter();
+    let entry = enter(&Cause::panic(location));
     REPORTER.panic(
         &mut ConsoleWriter,
         entry,
@@ -56,7 +56,7 @@ fn report_panic(message: &dyn fmt::Display, location: Option<&Location<'_>>) -> 
 
 /// Report a fatal exception no fault handler claimed and park the CPU.
 pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
-    let entry = enter();
+    let entry = enter(&Cause::Fault(*fault));
     REPORTER.fault(
         &mut ConsoleWriter,
         entry,
@@ -74,11 +74,11 @@ pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
 /// With stage-1 translation off every access is Device-nGnRnE, where an
 /// atomic read-modify-write may never complete, so the latch is entered with
 /// plain accesses and the queued console, which a lock guards, is left alone.
-fn enter() -> Entry {
+fn enter(cause: &Cause) -> Entry {
     if !crate::paging::translation_enabled() {
-        return fatal::enter_without_atomics();
+        return fatal::enter_without_atomics(cause);
     }
-    let entry = fatal::enter();
+    let entry = fatal::enter(cause);
     if entry == Entry::Report {
         crate::serial::flush_serial_blocking();
     }

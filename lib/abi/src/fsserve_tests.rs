@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use super::{
     decode_reply, decode_request, encode_reply, encode_request, is_served_endpoint, request_op,
-    served_endpoint, Answer, DirEnd, DirReply, Op, Reply, Request, ServeFrame, ServeGrant,
+    served_endpoint, Answer, DirEnd, DirReply, Lanes, Op, Reply, Request, ServeFrame, ServeGrant,
     ServeOffer, ServerState, Span, BATCH_TRAILER_LEN, ENTRY_FIXED_LEN, FSSERVE_REPLY_MAX,
     FSSERVE_REQUEST_MAX, FSSERVE_VERSION, FSSERVE_WINDOW_LEN, NODE_INFO_LEN, REPLY_HEAD_LEN,
     SERVE_FRAME_LEN, SERVE_GRANT_LEN,
@@ -219,7 +219,9 @@ fn other_requests() -> Vec<Request<'static>> {
             node: FILE,
             key: b"user.colour",
         },
-        Request::Release,
+        Request::Release {
+            span: Span::new(FSSERVE_WINDOW_LEN, 64 * 1024).unwrap(),
+        },
     ]
 }
 
@@ -434,11 +436,16 @@ fn every_argument_bound_holds_on_both_sides() {
 }
 
 #[test]
-fn a_span_lies_inside_the_window_and_is_never_empty() {
+fn a_span_lies_inside_the_widest_window_and_is_never_empty() {
     assert!(Span::new(0, FSSERVE_WINDOW_LEN).is_ok());
+    assert!(Span::new(1, FSSERVE_WINDOW_LEN).is_ok());
     assert_eq!(Span::new(0, 0), Err(Errno::LengthOutOfRange));
     assert_eq!(
-        Span::new(1, FSSERVE_WINDOW_LEN),
+        Span::new(0, FSSERVE_WINDOW_LEN + 1),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        Span::new(super::FSSERVE_WINDOW_MAX - 7, 8),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(Span::new(usize::MAX, 2), Err(Errno::LengthOutOfRange));
@@ -454,7 +461,7 @@ fn a_span_lies_inside_the_window_and_is_never_empty() {
         AllocationClass::Ordinary,
     );
     let at = frame.len() - 8;
-    frame[at..at + 4].copy_from_slice(&cap(FSSERVE_WINDOW_LEN).to_le_bytes());
+    frame[at..at + 4].copy_from_slice(&cap(super::FSSERVE_WINDOW_MAX).to_le_bytes());
     assert_eq!(decode_request(&frame), Err(Errno::OutOfRange));
 }
 
@@ -587,7 +594,12 @@ fn other_answers() -> Vec<Case> {
             },
             Answer::Attr(None),
         ),
-        (Request::Release, Answer::Done),
+        (
+            Request::Release {
+                span: Span::new(0, FSSERVE_WINDOW_LEN).unwrap(),
+            },
+            Answer::Done,
+        ),
     ]
 }
 
@@ -1012,7 +1024,7 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
         (5, 2),
         (6, 19),
         (7, 0),
-        (7, 9),
+        (7, 10),
     ] {
         let mut bad = good;
         bad[at] = value;
@@ -1031,6 +1043,45 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
 }
 
 #[test]
+fn lanes_divide_a_window_into_spans_of_a_power_of_two() {
+    let lanes = Lanes::new(4, 64 * 1024).unwrap();
+    assert_eq!(lanes.window_len(), 256 * 1024);
+    assert_eq!(
+        lanes.lane(3),
+        Some(Span::new(3 * 64 * 1024, 64 * 1024).unwrap())
+    );
+    assert_eq!(lanes.lane(4), None);
+    assert_eq!(
+        Lanes::ONE.lane(0),
+        Some(Span::new(0, FSSERVE_WINDOW_LEN).unwrap())
+    );
+    let widest = Lanes::new(super::SERVED_LANES_MAX, FSSERVE_WINDOW_LEN).unwrap();
+    assert_eq!(widest.window_len(), super::FSSERVE_WINDOW_MAX);
+    assert!(widest.lane(super::SERVED_LANES_MAX - 1).is_some());
+    for (count, span) in [
+        (0, 64 * 1024),
+        (super::SERVED_LANES_MAX + 1, 64 * 1024),
+        (2, 48 * 1024),
+        (2, super::LANE_SPAN_MIN / 2),
+        (2, FSSERVE_WINDOW_LEN * 2),
+    ] {
+        assert_eq!(
+            Lanes::new(count, span),
+            Err(Errno::OutOfRange),
+            "{count} x {span}"
+        );
+    }
+    assert_eq!(
+        Span::new(0, FSSERVE_WINDOW_LEN + 1),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        Span::new(super::FSSERVE_WINDOW_MAX - 4096, 8192),
+        Err(Errno::LengthOutOfRange)
+    );
+}
+
+#[test]
 fn a_serve_grant_round_trips_and_names_the_one_window_length() {
     let grant = ServeGrant {
         endpoint: 0xF5_0000_0001,
@@ -1039,11 +1090,24 @@ fn a_serve_grant_round_trips_and_names_the_one_window_length() {
     };
     let bytes = grant.encode();
     assert_eq!(bytes.len(), SERVE_GRANT_LEN);
-    assert_eq!(ServeGrant::decode(&bytes), Ok(grant));
+    assert_eq!(ServeGrant::decode(&bytes, Lanes::ONE), Ok(grant));
     let mut short = bytes;
     short[16..20].copy_from_slice(&4096u32.to_le_bytes());
-    assert_eq!(ServeGrant::decode(&short), Err(Errno::LengthOutOfRange));
+    assert_eq!(
+        ServeGrant::decode(&short, Lanes::ONE),
+        Err(Errno::LengthOutOfRange)
+    );
     let mut pad = bytes;
     pad[23] = 1;
-    assert_eq!(ServeGrant::decode(&pad), Err(Errno::OutOfRange));
+    assert_eq!(ServeGrant::decode(&pad, Lanes::ONE), Err(Errno::OutOfRange));
+    let lanes = Lanes::new(8, 64 * 1024).unwrap();
+    let wide = ServeGrant {
+        window_len: cap(lanes.window_len()),
+        ..grant
+    };
+    assert_eq!(ServeGrant::decode(&wide.encode(), lanes), Ok(wide));
+    assert_eq!(
+        ServeGrant::decode(&wide.encode(), Lanes::ONE),
+        Err(Errno::LengthOutOfRange)
+    );
 }

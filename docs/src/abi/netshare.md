@@ -17,7 +17,7 @@ probe hosts and ports, or carry data out, through the service.
 
 | Op | Request   | Carries                                   | Answer |
 |----|-----------|-------------------------------------------|--------|
-| 1  | `Shares`  | the endpoint, how to sign in, `special`   | the pin the connection reported, the special shares left out, the shares no tree connect could name, and the disk shares |
+| 1  | `Shares`  | the endpoint, how to sign in, `special`   | the pin the connection reported, the counts of the special shares left out, the shares no tree connect could name and those past the first `SHARES_MAX`, and the disk shares |
 | 2  | `Mount`   | the endpoint, how to sign in, the share, `read_only` | the pin, and the `OfferId` the caller attaches |
 | 3  | `Unmount` | an `OfferId` the caller holds             | nothing |
 | 4  | `Mounts`  | nothing                                   | the caller's mounts: offer, host, share, read-only, and whether it is serving, reconnecting or lost |
@@ -70,14 +70,16 @@ Outcome `0` is an answer; the refusals are:
 | 12 | `NoSuchMount` — the caller made no such mount | |
 | 13 | `Limit` — the caller holds as many mounts or connections as it may | |
 | 14 | `Failed` — the service failed | |
+| 15 | `AlreadyMounted` — the caller has that server's share mounted already | |
 
 ## Bounds
 
 A request is at most `NETSHARE_MAX_REQUEST` (1431 bytes). `Op::max_reply`
 bounds each operation's reply, its refusals included, and is the buffer a
-caller receives it in: a listing of at most `SHARES_MAX` (256) shares, each
-name at most `SHARE_NAME_MAX` (80) characters and each remark `REMARK_MAX`
-(1024) bytes, is at most `NETSHARE_MAX_REPLY` (345,396 bytes); a principal's
+caller receives it in: a listing of at most `SHARES_MAX` (256) shares, the
+rest counted, each name at most `SHARE_NAME_MAX` (80) characters and each
+remark `REMARK_MAX` (1024) bytes, is at most `NETSHARE_MAX_REPLY` (345,400
+bytes); a principal's
 mounts, at most `MOUNTS_MAX` (32), at most 18,859 bytes; a mount's answer 50
 bytes and an unmount's 42.
 

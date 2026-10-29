@@ -33,7 +33,8 @@ no-op for the synchronous SBI/COM1 consoles, the PL011 queue's blocking drain
 on aarch64): once the world is stopped, so the lead-up precedes the record,
 and again *after* the record and before the halt; a nested entry drains its
 bare record once written. Every drain runs behind the fatal latch, so one that
-faults is a nested entry, never a re-entry. Nothing that can itself fault may
+faults is a nested entry, never a re-entry. The latch keeps the first entry's
+cause, so that bare record names it beside its own. Nothing that can itself fault may
 sit between capturing this core's state and writing the record either, which
 is why the display-surface reclaim happens once, as the first entry's first
 act, and is not repeated after the stop.

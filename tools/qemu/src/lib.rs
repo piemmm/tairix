@@ -188,6 +188,11 @@ pub enum Outcome {
         record: String,
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
+        /// Every vCPU's register file and stack, read off the QEMU monitor as
+        /// the record arrived, with the kernel-text addresses they name
+        /// resolved against the kernel ELF: the stack still holds the frames
+        /// that reached the report, which the record cannot carry.
+        cpu_state: String,
     },
 }
 
@@ -2492,10 +2497,14 @@ fn supervise(
     // Decided only once the drain has joined, so a record the guest wrote
     // just before it exited is not missed: a kernel that wrote one died,
     // whatever the run did afterwards.
-    let done = match (fatal.record(), drain_failure) {
-        (Some(record), _) => DoneReason::Fatal(record.to_owned()),
-        (None, Some(reason)) => DoneReason::DrainFailed(reason),
-        (None, None) => done,
+    let done = match (done, fatal.record(), drain_failure) {
+        (read @ DoneReason::Fatal { .. }, _, _) => read,
+        (_, Some(record), _) => DoneReason::Fatal {
+            record: record.to_owned(),
+            cpu_state: String::from("unavailable: QEMU exited before its state was read\n"),
+        },
+        (_, None, Some(reason)) => DoneReason::DrainFailed(reason),
+        (done, None, None) => done,
     };
     let mut serial = captured
         .lock()
@@ -2585,9 +2594,12 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
         // A kernel that wrote its fatal record has stopped for good, so the
         // verdict is in: nothing further the guest does can change it.
         if let Some(record) = fatal.record() {
+            let record = record.to_owned();
+            let faulted = fault_stack(&record);
+            let cpu_state = injections.cpu_report(monitor, &spec.kernel, faulted);
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(DoneReason::Fatal(record.to_owned()));
+            return Ok(DoneReason::Fatal { record, cpu_state });
         }
         // The out-of-guest observer has reached a verdict. Act on it before
         // waiting on the guest: in this mode the guest never self-exits, so
@@ -2654,7 +2666,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             // Interrogate the guest *before* killing it: once QEMU is gone
             // the only evidence left is the transcript, which is exactly the
             // evidence that has already run out.
-            let cpu_state = injections.hang_report(monitor, &spec.kernel);
+            let cpu_state = injections.cpu_report(monitor, &spec.kernel, None);
             let _ = child.kill();
             let _ = child.wait();
             return Ok(DoneReason::CeilingExceeded {
@@ -2666,7 +2678,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
         if heartbeat.idle_for(Instant::now()) >= spec.timeout {
             // Strict, no-retry kill, with the guest's own CPU state read off
             // the monitor first so one occurrence is diagnosable.
-            let cpu_state = injections.hang_report(monitor, &spec.kernel);
+            let cpu_state = injections.cpu_report(monitor, &spec.kernel, None);
             let _ = child.kill();
             let _ = child.wait();
             return Ok(if serial_closed {
@@ -2796,7 +2808,11 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             note_on_transcript(&mut serial, Some(&reason));
             Outcome::Fail { status: -1, serial }
         }
-        DoneReason::Fatal(record) => Outcome::Fatal { record, serial },
+        DoneReason::Fatal { record, cpu_state } => Outcome::Fatal {
+            record,
+            serial,
+            cpu_state,
+        },
     }
 }
 
@@ -2985,8 +3001,13 @@ enum DoneReason {
     /// the child was killed. The message identifies the failed channel.
     DrainFailed(String),
     /// The guest wrote a fatal record ([`FatalWatch`]); the child was
-    /// killed. Carries the record.
-    Fatal(String),
+    /// killed once its CPU state was read.
+    Fatal {
+        /// The record.
+        record: String,
+        /// The guest's CPU state at the record.
+        cpu_state: String,
+    },
 }
 
 /// Longest a single monitor read may block while the hang report is being
@@ -3005,6 +3026,76 @@ const MONITOR_READ_BUDGET: Duration = Duration::from_secs(3);
 /// Bytes of monitor reply the hang report will hold. A register dump is a
 /// few kilobytes per vCPU; this bounds a monitor that will not stop talking.
 const MONITOR_READ_MAX_BYTES: usize = 256 * 1024;
+
+/// Words of each core's stack a CPU report reads, from its stack pointer up:
+/// 32 KiB, past the fatal report's own frames to the fault's and what led to
+/// it, inside the monitor read's byte bound.
+const STACK_DUMP_WORDS: usize = 4096;
+
+/// Each core's stack pointer in an `info registers -a` answer, under the
+/// `CPU#n` header the monitor gives it, as each target's monitor spells it:
+/// x86_64's `RSP=`, aarch64's `SP=` and riscv64's `x2/sp` column.
+fn stack_pointers(registers: &str) -> Vec<(u32, u64)> {
+    let mut found: Vec<(u32, u64)> = Vec::new();
+    let mut cpu = None;
+    for line in registers.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("CPU#") {
+            let digits = rest.split(|c: char| !c.is_ascii_digit()).next();
+            cpu = digits.and_then(|digits| digits.parse().ok());
+            continue;
+        }
+        let Some(at) = cpu else { continue };
+        if found.iter().any(|&(seen, _)| seen == at) {
+            continue;
+        }
+        if let Some(sp) = stack_pointer_in(line) {
+            found.push((at, sp));
+        }
+    }
+    found
+}
+
+/// The stack a fatal record's `fault_sp` names, where the faulting code ran.
+fn fault_stack(record: &str) -> Option<u64> {
+    let at = record.find("fault_sp=0x")?;
+    address_word(&record[at + "fault_sp=0x".len()..])
+}
+
+/// The stack pointer one register-dump line names, if it names one.
+fn stack_pointer_in(line: &str) -> Option<u64> {
+    for key in ["RSP=", "x2/sp"] {
+        if let Some(at) = line.find(key) {
+            return address_word(&line[at + key.len()..]);
+        }
+    }
+    // aarch64's bare `SP=`, never the tail of another register's name.
+    line.match_indices("SP=").find_map(|(at, key)| {
+        let bare = line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if bare {
+            address_word(&line[at + key.len()..])
+        } else {
+            None
+        }
+    })
+}
+
+/// The sixteen-digit hexadecimal word `text` begins with, past any spaces.
+fn address_word(text: &str) -> Option<u64> {
+    let text = text.trim_start();
+    let digits = text.get(..16)?;
+    let whole = text[16..]
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_ascii_hexdigit());
+    if whole && digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        u64::from_str_radix(digits, 16).ok()
+    } else {
+        None
+    }
+}
 
 /// Most kernel-text addresses one hang report names. A register dump for a
 /// handful of vCPUs mentions a few dozen distinct ones; this bounds a report
@@ -3999,13 +4090,16 @@ impl InjectionState {
         Ok(self.conn.insert(stream))
     }
 
-    /// Read every vCPU's register file off the QEMU monitor, for a run that
-    /// is about to be killed as hung.
+    /// Read every vCPU's register file and stack off the QEMU monitor, for
+    /// a run that is about to be killed as hung or that ended in a fatal
+    /// record.
     ///
-    /// A hang report that cannot say what the guest's CPUs were doing forces
-    /// a re-run to learn anything, and a re-run is precisely how a hang must
+    /// A report that cannot say what the guest's CPUs were doing forces a
+    /// re-run to learn anything, and a re-run is precisely how a failure must
     /// *not* be diagnosed. `info registers -a` gives each core's program
-    /// counter, link register and interrupt mask, which
+    /// counter, link register and interrupt mask, and each core's stack holds
+    /// the return addresses of the frames that brought it there — for a fatal
+    /// stop, the report's and those of whatever it was reporting — which
     /// [`symbol_legend`] then names: every core sitting in the idle
     /// wait-for-interrupt means nothing was runnable (a lost wake-up),
     /// whereas a core inside a loop with interrupts masked is a spin.
@@ -4014,14 +4108,32 @@ impl InjectionState {
     /// Best effort by construction: it reuses this run's single monitor
     /// connection (a socket chardev serves one client), and a monitor that
     /// cannot be reached, or a QEMU already gone, yields the reason *as* the
-    /// report. The verdict is the hang's, never this call's.
-    fn hang_report(&mut self, monitor: Option<&ReservedSocket>, kernel: &Path) -> String {
+    /// report. The verdict is the run's, never this call's.
+    ///
+    /// `faulted` is the stack a fatal record says the faulting code ran on,
+    /// read too: the report's own frames lie between it and where the core
+    /// halted, and can bury it past the halted core's stack read.
+    fn cpu_report(
+        &mut self,
+        monitor: Option<&ReservedSocket>,
+        kernel: &Path,
+        faulted: Option<u64>,
+    ) -> String {
         let mut report = self.read_monitor_state(monitor);
+        if let Some(sp) = faulted {
+            let dump = format!("x /{STACK_DUMP_WORDS}gx {sp:#x}");
+            let _ = writeln!(report, "--- the faulting stack from {sp:#018x} ---");
+            match self.ask(monitor, &[dump.as_str()]) {
+                Ok(stack) => report.push_str(&stack),
+                Err(reason) => report.push_str(&reason),
+            }
+        }
         report.push_str(&symbol_legend(kernel, &report));
         report
     }
 
-    /// The raw monitor answer [`Self::hang_report`] names addresses from.
+    /// The raw monitor answers [`Self::cpu_report`] names addresses from: the
+    /// register files, then each core's stack.
     fn read_monitor_state(&mut self, monitor: Option<&ReservedSocket>) -> String {
         // Bounded twice over — per-read and in total — because the monitor is
         // being read at the one moment the run has already decided something
@@ -4032,13 +4144,36 @@ impl InjectionState {
         if let Ok(stream) = self.connected(monitor) {
             let _ = stream.set_read_timeout(Some(MONITOR_READ_QUIET));
         }
-        for command in ["info cpus", "info registers -a"] {
-            if let Err(e) = self.send(monitor, "hang diagnosis", command) {
-                return format!("unavailable: {e}\n");
+        let mut state = match self.ask(monitor, &["info cpus", "info registers -a"]) {
+            Ok(state) => state,
+            Err(reason) => return reason,
+        };
+        for (cpu, sp) in stack_pointers(&state) {
+            let select = format!("cpu {cpu}");
+            let dump = format!("x /{STACK_DUMP_WORDS}gx {sp:#x}");
+            let _ = writeln!(state, "--- CPU#{cpu} stack from {sp:#018x} ---");
+            match self.ask(monitor, &[select.as_str(), dump.as_str()]) {
+                Ok(stack) => state.push_str(&stack),
+                Err(reason) => state.push_str(&reason),
+            }
+        }
+        state
+    }
+
+    /// Send `commands` and read the monitor's answer to them, bounded, or the
+    /// reason there is none.
+    fn ask(
+        &mut self,
+        monitor: Option<&ReservedSocket>,
+        commands: &[&str],
+    ) -> Result<String, String> {
+        for command in commands {
+            if let Err(e) = self.send(monitor, "cpu diagnosis", command) {
+                return Err(format!("unavailable: {e}\n"));
             }
         }
         let Some(stream) = self.conn.as_mut() else {
-            return String::from("unavailable: monitor connection vanished\n");
+            return Err(String::from("unavailable: monitor connection vanished\n"));
         };
         let deadline = Instant::now() + MONITOR_READ_BUDGET;
         let mut raw: Vec<u8> = Vec::new();
@@ -4058,13 +4193,13 @@ impl InjectionState {
             }
         }
         if raw.is_empty() {
-            return String::from(if closed {
+            return Err(String::from(if closed {
                 "unavailable: the monitor closed\n"
             } else {
                 "unavailable: the monitor answered nothing\n"
-            });
+            }));
         }
-        String::from_utf8_lossy(&raw).into_owned()
+        Ok(String::from_utf8_lossy(&raw).into_owned())
     }
 }
 
@@ -5218,7 +5353,10 @@ mod tests {
     fn a_fatal_record_ends_the_run_as_a_fatal_outcome() {
         let spec = Spec::for_aarch64_kernel("/tmp/k");
         let outcome = outcome_from_done(
-            DoneReason::Fatal(String::from("[ERROR] id=4011 fatal kernel fault")),
+            DoneReason::Fatal {
+                record: String::from("[ERROR] id=4011 fatal kernel fault"),
+                cpu_state: String::from("CPU#0\n"),
+            },
             &spec,
             String::from("boot\n"),
         );
@@ -5226,7 +5364,8 @@ mod tests {
         assert_eq!(outcome.serial(), "boot\n");
         assert!(matches!(
             outcome,
-            Outcome::Fatal { ref record, .. } if record == "[ERROR] id=4011 fatal kernel fault"
+            Outcome::Fatal { ref record, ref cpu_state, .. }
+                if record == "[ERROR] id=4011 fatal kernel fault" && cpu_state == "CPU#0\n"
         ));
     }
 
@@ -5350,6 +5489,103 @@ mod tests {
         assert_eq!(
             hang_diagnosis(Some("CPU#0 pc=0x1000\n")),
             "CPU#0 pc=0x1000\n"
+        );
+    }
+
+    /// Each target's register dump names its stack pointer its own way, and
+    /// each core's is found under its own header; a register whose name only
+    /// ends in `SP` is not taken for it.
+    #[test]
+    fn each_core_s_stack_pointer_is_read_from_its_register_dump() {
+        let x86 = "CPU#0\nRBP=ffffffff811aed80 RSP=ffffffff811aed78\n\
+                   CPU#1\nRSI=0000000000000002 RSP=ffff800000123450\n";
+        assert_eq!(
+            stack_pointers(x86),
+            [(0, 0xffff_ffff_811a_ed78), (1, 0xffff_8000_0012_3450)]
+        );
+        let aarch64 = "CPU#0\n PC=ffff000040081000 X00=0000000000000000\n\
+                       X29=ffff000041000000 X30=ffff000040082000  SP=ffff000041000f00\n";
+        assert_eq!(stack_pointers(aarch64), [(0, 0xffff_0000_4100_0f00)]);
+        let riscv64 = "CPU#0\n pc       0000000080200000\n x2/sp    ffffffc000123000\n";
+        assert_eq!(stack_pointers(riscv64), [(0, 0xffff_ffc0_0012_3000)]);
+        assert!(stack_pointers("CPU#0\nSP_EL0=0000000000001000 WSP=0000000000002000\n").is_empty());
+        assert!(
+            stack_pointers("RSP=ffffffff811aed78\n").is_empty(),
+            "a pointer under no core's header names no core"
+        );
+    }
+
+    /// A fatal record names the stack the faulting code ran on, read beside
+    /// the halted core's; one that names none adds nothing.
+    #[test]
+    fn a_fatal_record_names_the_stack_the_fault_ran_on() {
+        assert_eq!(
+            fault_stack(
+                "[ERROR] id=4011 fatal kernel fault cpu=0 fault_pc=0x0000000000000003 \
+                 fault_sp=0xffffffff811b9a88 root=0x0000000000102000"
+            ),
+            Some(0xffff_ffff_811b_9a88)
+        );
+        assert_eq!(
+            fault_stack("[ERROR] id=4011 fatal kernel fault cpu=0 fault_sp=null"),
+            None
+        );
+        assert_eq!(fault_stack("[ERROR] id=4010 kernel panic cpu=0"), None);
+    }
+
+    /// A register dump that names a core's stack pointer is followed by that
+    /// core's stack, so the report carries the return addresses of what
+    /// brought the core where it stopped.
+    #[test]
+    fn a_core_s_stack_is_read_after_its_registers() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let socket = ReservedSocket::reserve("stackdiag").expect("a socket path");
+        let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
+        let spec = Spec::for_aarch64_kernel("/kernel");
+        let mut state = InjectionState::new(&spec, None);
+        let monitor = std::thread::spawn(move || {
+            let (peer, _) = listener.accept().expect("the runner connected");
+            let mut writer = peer.try_clone().expect("a second handle");
+            let mut asked = String::new();
+            for line in BufReader::new(peer).lines() {
+                let line = line.expect("a command");
+                asked.push_str(&line);
+                asked.push('\n');
+                match line.as_str() {
+                    "info registers -a" => writer
+                        .write_all(b"CPU#0\nRSP=ffffffff811aed78\n")
+                        .expect("the registers"),
+                    command if command.starts_with("x /") => {
+                        writer
+                            .write_all(b"ffffffff811aed78: 0xffffffff80100000\n")
+                            .expect("the stack");
+                        writer
+                            .shutdown(std::net::Shutdown::Write)
+                            .expect("hangs up");
+                    }
+                    _ => {}
+                }
+            }
+            asked
+        });
+        state.connected(Some(&socket)).expect("the runner connects");
+        let report = state.read_monitor_state(Some(&socket));
+        drop(state);
+        let asked = monitor.join().expect("the monitor ends");
+        assert_eq!(
+            asked,
+            format!(
+                "info cpus\ninfo registers -a\ncpu 0\nx /{STACK_DUMP_WORDS}gx 0xffffffff811aed78\n"
+            )
+        );
+        assert!(
+            report.ends_with(
+                "--- CPU#0 stack from 0xffffffff811aed78 ---\n\
+                 ffffffff811aed78: 0xffffffff80100000\n"
+            ),
+            "{report}"
         );
     }
 

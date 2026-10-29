@@ -75,10 +75,10 @@ use tairix_fsserve::{
 use tairix_hash::{HashSeed, SipHash13};
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::filelock::{self, LockedNode, Request};
-use tairix_kernel_core::fs::served::{mint_served_endpoint, SERVED_ENDPOINT_CAPACITY};
+use tairix_kernel_core::fs::served::{mint_served_endpoint, LANE_ENDPOINT_CAPACITY};
 use tairix_kernel_core::fs::{
     Acting, At, Authority, CreateMode, FilesystemService, FinalLink, FrozenAuthority, Grant,
-    NodeHandle, Opened, ServeChannel, Start,
+    NodeHandle, OfferingServer, Opened, Principal, ServeChannel, Start,
 };
 use tairix_kernel_core::fswatch::WatchRegistry;
 use tairix_kernel_core::{sharedreg, Path, Vfs};
@@ -229,6 +229,33 @@ const OUTSIDER_UID: u32 = 2000;
 /// `/f`, so the ACL, not the mode's group triad, decides its access.
 const GROUP_PEER_UID: u32 = 3000;
 const FIXTURE_GID: u32 = 1000;
+
+/// A caller holding only `CAP_FS_MOUNT`, the authority over any volume.
+struct MountAuthority;
+impl CapabilityQuery for MountAuthority {
+    fn holds(&self, cap: CapabilityId) -> bool {
+        cap == CapabilityId::FS_MOUNT
+    }
+}
+
+/// The system principal holding the mount authority, as the volume manager
+/// and `unmount` ask.
+fn admin() -> Principal<'static> {
+    Principal {
+        uid: 0,
+        gid: 0,
+        caps: &MountAuthority,
+    }
+}
+
+/// `uid`, in its primary group `gid`, holding nothing.
+fn plain(uid: u32, gid: u32) -> Principal<'static> {
+    Principal {
+        uid,
+        gid,
+        caps: &NoCaps,
+    }
+}
 
 /// A caller holding only `CAP_FS_CHOWN`, the authority an owner reassignment
 /// needs.
@@ -894,7 +921,7 @@ impl Driver {
                 CallEndpointLimits {
                     max_request: u32::try_from(FSSERVE_REQUEST_MAX).unwrap(),
                     max_reply: u32::try_from(FSSERVE_REPLY_MAX).unwrap(),
-                    capacity: SERVED_ENDPOINT_CAPACITY,
+                    capacity: LANE_ENDPOINT_CAPACITY,
                 },
                 tairix_abi::RLIMIT_INFINITY,
                 &SINK,
@@ -920,14 +947,14 @@ fn a_reattached_mount_takes_its_new_posture_in_place() {
     vfs.mounts_write()
         .attach_at(
             tairix_kernel_core::Attachment::new(handle, None, super::mount_flags(false)),
-            path.clone(),
+            path.owned().expect("held"),
             super::mount_template(None),
         )
         .expect("the volume was attached writable");
     super::reattach(
         &vfs,
         tairix_kernel_core::Attachment::new(handle, None, super::mount_flags(true)),
-        path.clone(),
+        path.owned().expect("held"),
         super::mount_template(None),
     )
     .expect("the mount moves to its new posture");
@@ -996,11 +1023,23 @@ fn an_unwired_service_fails_closed() {
         ),
         Err(Errno::NotImplemented)
     );
+    let offer = tairix_abi::netattach::OfferId::new(1).expect("an id");
     assert_eq!(
-        service.detach(&VolumeDetachRequest {
-            volume_id: [7; 16],
-            force: false
-        }),
+        service.offer_ctl(1, offer, tairix_abi::netattach::FsserveCtl::Alive),
+        Err(Errno::NotImplemented)
+    );
+    assert_eq!(
+        service.attach_offered(&admin(), offer, &private_attach("share", None)),
+        Err(Errno::NotImplemented)
+    );
+    assert_eq!(
+        service.detach(
+            &VolumeDetachRequest {
+                volume_id: [7; 16],
+                force: false
+            },
+            &admin()
+        ),
         Err(Errno::NotImplemented)
     );
 }
@@ -1057,6 +1096,7 @@ fn fat32_image(serial: u32, payload: &[u8]) -> (RamBlock, [u8; 16]) {
 fn mount_record(source: &[u8]) -> MountRecord {
     FS_SERVICE
         .mount_snapshot()
+        .expect("snapshot")
         .into_iter()
         .find(|record| record.source_bytes() == source)
         .unwrap_or_else(|| std::panic!("no mount snapshot record for {source:?}"))
@@ -1264,18 +1304,8 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         .expect("read through the mounted volume");
     assert_eq!(&buf[..n], b"runtime volume payload");
 
-    // The mount snapshot reports the live volume as available and carries
-    // its stable identity — the facts the unmount tooling resolves by.
-    let record = mount_record(b"usb1");
-    assert_eq!(record.availability(), MountAvailability::Available);
-    assert_eq!(record.volume_id(), expected_identity);
-    // ...and the storage medium the served device declared, which is how a
-    // file manager picks a drive icon without guessing one.
-    assert_eq!(
-        record.medium(),
-        device.lock().unwrap().block.medium(),
-        "the mount reports the medium the block device declared"
-    );
+    let medium = device.lock().unwrap().block.medium();
+    assert_the_snapshot_reports(b"usb1", expected_identity, medium);
 
     assert_identity_mapped_access();
     assert_a_member_creates_on_the_volume();
@@ -1296,7 +1326,12 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         volume_id: expected_identity,
         force: false,
     };
-    VOLUME_SERVICE.detach(&detach).expect("detach");
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach, &member()),
+        Err(Errno::PermissionDenied),
+        "a local volume is the mount authority's to detach"
+    );
+    VOLUME_SERVICE.detach(&detach, &admin()).expect("detach");
     assert_eq!(
         in_flight.lock().write_at(file, 0, b"lost"),
         Err(DriverError::DeviceFault),
@@ -1314,7 +1349,10 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         "the retracted mount fails closed"
     );
     // A repeated detach fails closed.
-    assert_eq!(VOLUME_SERVICE.detach(&detach), Err(Errno::NotFound));
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach, &admin()),
+        Err(Errno::NotFound)
+    );
     assert!(
         table_free(&booted, expected_identity),
         "detaching let its change table go"
@@ -1328,6 +1366,25 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     );
 
     run_scenarios(window_ptr, facility);
+}
+
+/// The mount snapshot reports the volume `source` names as available, under
+/// its stable `identity` and on the `medium` its device declared: what the
+/// unmount tooling resolves it by, and what a file manager picks its drive
+/// icon by without guessing one.
+fn assert_the_snapshot_reports(
+    source: &[u8],
+    identity: [u8; 16],
+    medium: Option<tairix_abi::blkio::BlkMedium>,
+) {
+    let record = mount_record(source);
+    assert_eq!(record.availability(), MountAvailability::Available);
+    assert_eq!(record.volume_id(), identity);
+    assert_eq!(
+        record.medium(),
+        medium,
+        "the mount reports the medium the block device declared"
+    );
 }
 
 /// Every further scenario, over the service the lifecycle test booted.
@@ -1364,6 +1421,12 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_conflicted_volume_its_driver_refuses_is_kept_scenario(window_ptr, facility);
     a_volume_awaiting_its_driver_detaches_scenario(window_ptr, facility);
     a_volume_out_of_the_table_still_detaches_scenario(window_ptr, facility);
+    a_network_volume_is_attached_by_its_principal_alone_scenario(facility);
+    a_target_that_cannot_be_bound_leaves_the_offer_scenario(facility);
+    a_network_volume_is_presented_as_its_principal_may_ask_scenario(facility);
+    a_network_volume_leaves_with_its_server_scenario(facility);
+    a_lost_network_volume_waits_for_its_owner_scenario(facility);
+    a_bind_within_a_network_volume_leaves_with_it_scenario(facility);
 }
 
 /// The served volume, and the node it is published as, of the attached
@@ -1497,10 +1560,13 @@ fn a_volume_its_driver_cannot_open_is_retracted_scenario(
         "nor mounted"
     );
     assert_eq!(
-        VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        }),
+        VOLUME_SERVICE.detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin()
+        ),
         Err(Errno::NotFound),
         "nothing remains to detach"
     );
@@ -1581,10 +1647,13 @@ fn a_driver_offering_another_format_is_refused_scenario(
     assert!(!TREE.is_live(node), "its node is withdrawn");
     assert_eq!(read_first_block(volume), Err(Errno::NotFound));
     assert_eq!(
-        VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        }),
+        VOLUME_SERVICE.detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin()
+        ),
         Err(Errno::NotFound)
     );
     tairix_kernel_core::callreg::teardown_owned_by(liar.owner, &ASPACES, &SINK);
@@ -1650,18 +1719,24 @@ fn a_conflicted_volume_its_driver_refuses_is_kept_scenario(
         "a descriptor held across the removal reaches nothing of the returned volume"
     );
     assert_eq!(
-        VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: round.identity,
-            force: false,
-        }),
+        VOLUME_SERVICE.detach(
+            &VolumeDetachRequest {
+                volume_id: round.identity,
+                force: false,
+            },
+            &admin()
+        ),
         Err(Errno::NotEmpty),
         "only its retained set refuses the plain detach, not the stale descriptor"
     );
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: round.identity,
-            force: true,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: round.identity,
+                force: true,
+            },
+            &admin(),
+        )
         .expect("the audited force retracts it");
     assert_eq!(VOLUME_FOREST.resolve(&round.identity), None);
     inserted.stop.store(true, Ordering::Relaxed);
@@ -1692,10 +1767,13 @@ fn a_volume_awaiting_its_driver_detaches_scenario(
     let (volume, node) = served_volume("wait1");
     assert_eq!(VOLUME_SERVICE.awaiting_server(volume), Ok(()));
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("a volume no driver serves detaches plainly");
     assert_eq!(audited(DETACHED, "wait1"), [None]);
     assert!(!TREE.is_live(node), "its node is withdrawn");
@@ -1738,7 +1816,7 @@ fn a_volume_out_of_the_table_still_detaches_scenario(
         .vfs()
         .expect("installed")
         .mounts_write()
-        .detach(handle)
+        .detach(handle, tairix_kernel_core::BindsWithin::Refuse)
         .expect("the mount leaves the table");
     retire(identity, false, round);
     assert_eq!(audited(DETACHED, "gone1"), [None]);
@@ -1819,10 +1897,13 @@ fn a_changed_medium_retracts_its_volume_and_serves_the_next_scenario(
         "the next disc is reached through a fresh client"
     );
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: second_identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: second_identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("the second disc detaches");
     tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
     stop.store(true, Ordering::Relaxed);
@@ -2012,6 +2093,7 @@ fn served_handle(name: &str) -> DriverHandle {
         .expect("installed")
         .mounts()
         .volumes()
+        .expect("volumes")
         .iter()
         .find(|(_, shown)| shown.as_ref() == Some(&at))
         .map(|(volume, _)| volume.driver())
@@ -2165,10 +2247,13 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         "new I/O on an unavailable-dirty volume fails closed, cache included"
     );
     assert_eq!(
-        VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        }),
+        VOLUME_SERVICE.detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin()
+        ),
         Err(Errno::DeviceFault),
         "a plain detach never discards the retained set"
     );
@@ -2176,6 +2261,7 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     // volume that looks healthy — and still names its identity.
     let record = FS_SERVICE
         .mount_snapshot()
+        .expect("snapshot")
         .into_iter()
         .find(|r| r.source_bytes() == b"usb2")
         .expect("the unavailable volume stays in the mount snapshot");
@@ -2184,10 +2270,13 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     // The audited force-unmount is the deliberate exit: the retained set
     // is discarded, the root withdrawn, and the mount retracted.
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: true,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: true,
+            },
+            &admin(),
+        )
         .expect("force-unmount discards and retracts the unavailable volume");
     assert_eq!(
         VOLUME_FOREST.resolve(&identity),
@@ -2202,6 +2291,7 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     assert!(
         FS_SERVICE
             .mount_snapshot()
+            .expect("snapshot")
             .iter()
             .all(|r| r.source_bytes() != b"usb2"),
         "the force-unmounted volume leaves the mount snapshot"
@@ -2255,7 +2345,12 @@ fn assert_links_and_attributes_fault_on_a_vanished_usb2(held: &Descriptor) {
 /// A volume that leaves leaves the namespace, not only the driver registry:
 /// every volume the mount table still holds has a live driver.
 fn assert_every_attached_volume_is_served() {
-    let volumes = LATE_FILESYSTEM.vfs().expect("installed").mounts().volumes();
+    let volumes = LATE_FILESYSTEM
+        .vfs()
+        .expect("installed")
+        .mounts()
+        .volumes()
+        .expect("volumes");
     assert!(
         volumes
             .iter()
@@ -2298,10 +2393,13 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         "the retracted mount fails closed"
     );
     assert_eq!(
-        VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        }),
+        VOLUME_SERVICE.detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin()
+        ),
         Err(Errno::NotFound),
         "nothing remains to detach"
     );
@@ -2435,10 +2533,13 @@ fn an_unpublished_transaction_is_recorded_lost_scenario(
     let mut buf = [0u8; 8];
     assert_eq!(held.read(0, &mut buf), Err(Errno::DeviceFault));
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: true,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: true,
+            },
+            &admin(),
+        )
         .expect("the audited force retracts it");
     assert_eq!(
         held.read(0, &mut buf),
@@ -2630,6 +2731,7 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
     // and the replayed write visible through the production service.
     let record = FS_SERVICE
         .mount_snapshot()
+        .expect("snapshot")
         .into_iter()
         .find(|r| r.source_bytes() == b"usb5")
         .expect("the recovered volume appears in the mount snapshot");
@@ -2660,10 +2762,13 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
     // A clean detach ends the round: the replay left nothing uncommitted
     // that a flush cannot commit.
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: round.identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: round.identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("the recovered volume detaches cleanly");
     inserted.stop.store(true, Ordering::Relaxed);
     inserted.server.join().expect("reinsert server thread");
@@ -2715,6 +2820,7 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
     // refused by the read-only mount, and the snapshot says why.
     let record = FS_SERVICE
         .mount_snapshot()
+        .expect("snapshot")
         .into_iter()
         .find(|r| r.source_bytes() == b"usb6")
         .expect("the conflicted volume appears in the mount snapshot");
@@ -2730,18 +2836,24 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
     // The retained set is still held: a plain detach would discard it
     // silently, so it is refused; the audited force is the exit.
     assert_eq!(
-        VOLUME_SERVICE.detach(&VolumeDetachRequest {
-            volume_id: round.identity,
-            force: false,
-        }),
+        VOLUME_SERVICE.detach(
+            &VolumeDetachRequest {
+                volume_id: round.identity,
+                force: false,
+            },
+            &admin()
+        ),
         Err(Errno::NotEmpty),
         "a plain detach never discards the conflicted volume's retained set"
     );
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: round.identity,
-            force: true,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: round.identity,
+                force: true,
+            },
+            &admin(),
+        )
         .expect("force-unmount discards and retracts the conflicted volume");
     assert_eq!(VOLUME_FOREST.resolve(&round.identity), None);
     inserted.stop.store(true, Ordering::Relaxed);
@@ -2786,10 +2898,13 @@ fn forced_unmount_of_a_healthy_volume_scenario(
     // Dirty the journal so a discard would be observable, then force.
     write_as(0, "/Storage/usb4/hello.txt", 0, b"F").expect("write dirties the journal");
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: true,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: true,
+            },
+            &admin(),
+        )
         .expect("a force detach of a healthy volume succeeds");
     stop.store(true, Ordering::Relaxed);
     server.join().expect("healthy-force server thread");
@@ -2885,10 +3000,13 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
     // Detaching commits through the same shared client: the device-cache
     // flush no longer opens a client of its own behind the sibling's back.
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: first_identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: first_identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("detach the first partition");
     assert_eq!(
         device.lock().unwrap().geometries,
@@ -2905,10 +3023,13 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
     );
 
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: second_identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: second_identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("detach the second partition");
 
     // The disk's last volume went, so the shared client was released: a
@@ -2920,10 +3041,13 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
         "the released client is re-connected, not resurrected"
     );
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: first_identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: first_identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("detach the re-attached partition");
 
     stop.store(true, Ordering::Relaxed);
@@ -2977,10 +3101,13 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
     assert_volume_reads("/Storage/odd1/hello.txt", b"unclassified payload");
 
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("detach the volume whose class word is unreadable");
 
     stop.store(true, Ordering::Relaxed);
@@ -3082,10 +3209,13 @@ fn a_device_that_stops_answering_holds_up_no_other_scenario(
 
     for volume_id in [identity, stalled_identity] {
         VOLUME_SERVICE
-            .detach(&VolumeDetachRequest {
-                volume_id,
-                force: false,
-            })
+            .detach(
+                &VolumeDetachRequest {
+                    volume_id,
+                    force: false,
+                },
+                &admin(),
+            )
             .expect("detach");
     }
     for (stop, server) in [(stop, server), (stalled_stop, stalled_server)] {
@@ -3230,10 +3360,13 @@ fn link_round_trip_through_the_real_service_scenario(
     assert_eq!(second.nlink, 2);
 
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("detach the ARXFS volume");
     stop.store(true, Ordering::Relaxed);
     server.join().expect("arxfs server thread");
@@ -3282,10 +3415,13 @@ mod ext_fixture;
 /// Detach the volume `identity` and end its serving round.
 fn retire(identity: [u8; 16], force: bool, round: Inserted) {
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force,
+            },
+            &admin(),
+        )
         .expect("the volume detaches");
     round.stop.store(true, Ordering::Relaxed);
     round.server.join().expect("server thread");
@@ -3448,10 +3584,13 @@ fn an_ext_volume_keeps_its_on_disk_ownership_scenario(
     assert_ownership_rules_govern_what_is_made();
 
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: false,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: false,
+            },
+            &admin(),
+        )
         .expect("the volume detaches");
     round.stop.store(true, Ordering::Relaxed);
     round.server.join().expect("server thread");
@@ -3764,7 +3903,7 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
         volume_id: identity,
         force: false,
     };
-    assert_eq!(VOLUME_SERVICE.detach(&plain), Err(Errno::Busy));
+    assert_eq!(VOLUME_SERVICE.detach(&plain, &admin()), Err(Errno::Busy));
     assert_eq!(
         audited(DETACH_REFUSED, "held1"),
         [Some(String::from("nodes_open"))]
@@ -3778,10 +3917,13 @@ fn a_held_descriptor_holds_its_volume_attached_scenario(
     assert_eq!(&buf[..n], b"held payload");
 
     VOLUME_SERVICE
-        .detach(&VolumeDetachRequest {
-            volume_id: identity,
-            force: true,
-        })
+        .detach(
+            &VolumeDetachRequest {
+                volume_id: identity,
+                force: true,
+            },
+            &admin(),
+        )
         .expect("a force detach revokes what is held");
     assert_eq!(held.read(0, &mut buf), Err(Errno::Stale));
     assert_eq!(
@@ -4079,4 +4221,607 @@ fn an_evidence_window_anywhere_in_an_extent_is_read_as_its_whole_blocks() {
         crate::volume_service::evidence_blocks(&request, 512, past),
         None
     );
+}
+
+/// The application identity the scenarios' network server runs as.
+fn smbfs() -> tairix_abi::AppIdentity {
+    tairix_abi::AppIdentity::new(
+        "org.tairix.smbfs",
+        tairix_abi::PublisherId::from_raw([7; 32]),
+    )
+    .expect("an application identity")
+}
+
+/// The lanes the scenarios' servers offer: four, filling one served window.
+fn net_lanes() -> tairix_abi::fsserve::Lanes {
+    tairix_abi::fsserve::Lanes::new(4, FSSERVE_WINDOW_LEN / 4).expect("lanes")
+}
+
+/// A share as an SMB server presents one: `hello.txt`, and no owner recorded
+/// for anything.
+fn share_fs() -> tairix_kernel_core::fs::memfs::RwMockFs {
+    let mut fs = tairix_kernel_core::fs::memfs::RwMockFs::new().with_exact_names();
+    let root = fs.root();
+    let file = fs
+        .create(
+            root,
+            b"hello.txt",
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )
+        .expect("a file");
+    fs.write_at(file, 0, b"network payload").expect("its body");
+    fs.forget_ownership(root);
+    fs.forget_ownership(file);
+    fs
+}
+
+/// A private attach under `name`, bound at `target` when one is given.
+fn private_attach<'a>(
+    name: &'a str,
+    target: Option<&'a str>,
+) -> tairix_abi::netattach::NetworkAttach<'a> {
+    tairix_abi::netattach::NetworkAttach {
+        name,
+        presentation: tairix_abi::netattach::Presentation::Private,
+        read_only: false,
+        target,
+    }
+}
+
+/// The member of the storage group, holding nothing.
+fn member() -> Principal<'static> {
+    plain(MEMBER_UID, STORAGE_GID)
+}
+
+/// A network filesystem server, as `smbfs` runs: the volume it offered, and
+/// the thread answering its lanes until its endpoint goes.
+struct NetServer {
+    owner: u64,
+    offer: tairix_abi::netattach::OfferId,
+    endpoint: StdArc<CallEndpoint>,
+    host: &'static ServedHost<DriverClock>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl NetServer {
+    /// Offer `fs`, shown as `source`, to `for_uid` under `key`, and serve it.
+    fn offer(
+        facility: &'static TestFacility,
+        key: [u8; 16],
+        for_uid: u32,
+        source: &str,
+        fs: tairix_kernel_core::fs::memfs::RwMockFs,
+    ) -> Self {
+        let owner = NEXT_DRIVER.fetch_add(1, Ordering::Relaxed);
+        let lanes = net_lanes();
+        let creator = TaskCapabilities::derive(
+            ProcessId(owner),
+            UserId(0),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &SINK,
+        );
+        let endpoint = StdArc::new(
+            CallEndpoint::create_served(
+                EndpointId(mint_served_endpoint().expect("an endpoint id")),
+                &creator,
+                CallEndpointLimits {
+                    max_request: u32::try_from(FSSERVE_REQUEST_MAX).unwrap(),
+                    max_reply: u32::try_from(FSSERVE_REPLY_MAX).unwrap(),
+                    capacity: LANE_ENDPOINT_CAPACITY * lanes.count(),
+                },
+                tairix_abi::RLIMIT_INFINITY,
+                &SINK,
+            )
+            .expect("a served endpoint"),
+        );
+        tairix_kernel_core::callreg::register(StdArc::clone(&endpoint), &SINK)
+            .expect("register the served endpoint");
+        let (_va, region) = sharedreg::create(facility, ProcessId(owner), SERVED_WINDOW_PAGES)
+            .expect("a data window");
+        let window = sharedreg::kernel_hold(facility, region).expect("held");
+        let bytes = Window(window.as_ptr());
+        let id = tairix_kernel_core::fs::served::mint_offer().expect("an offer id");
+        let app = smbfs();
+        let offer = tairix_abi::netattach::NetworkOffer {
+            serve: tairix_abi::fsserve::ServeOffer {
+                root: fs.root(),
+                name_matching: fs.name_matching(),
+                node_identity: fs.node_identity(),
+                attrs: false,
+                write_refusal: None,
+                format: tairix_abi::volume::FormatName::Smb3,
+            },
+            for_uid,
+            key,
+            lanes,
+            source,
+        };
+        let channel = ServeChannel {
+            endpoint: StdArc::clone(&endpoint),
+            window,
+        };
+        VOLUME_SERVICE
+            .offer(
+                &OfferingServer {
+                    process: owner,
+                    app: &app,
+                },
+                &offer,
+                id,
+                channel,
+            )
+            .expect("offered");
+        let host: &'static ServedHost<DriverClock> =
+            Box::leak(Box::new(ServedHost::new(DriverClock { defer: false })));
+        let calls = StdArc::clone(&endpoint);
+        let thread = thread::spawn(move || {
+            let mut server = Server::new(fs, host).expect("a server");
+            let mut reply = vec![0u8; FSSERVE_REPLY_MAX];
+            while !calls.is_closed() {
+                let RecvCall::Received(call) = calls.recv_call(FSSERVE_REQUEST_MAX) else {
+                    thread::yield_now();
+                    continue;
+                };
+                // SAFETY: the window is a leaked `FSSERVE_WINDOW_LEN`-byte
+                // buffer alive for the process, and each lane leaves its span
+                // alone while a call it posted is in service.
+                let window =
+                    unsafe { core::slice::from_raw_parts_mut(bytes.ptr(), FSSERVE_WINDOW_LEN) };
+                let len = server.answer(&call.request, window, &mut reply);
+                let _ = calls.reply(call.ticket, &reply[..len], &SINK);
+            }
+        });
+        Self {
+            owner,
+            offer: id,
+            endpoint,
+            host,
+            thread: Some(thread),
+        }
+    }
+
+    /// Wait for the server to see its endpoint go.
+    fn join(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("the server thread");
+        }
+    }
+
+    /// The server process ends, taking its endpoint, as a crash would.
+    fn exit(mut self) {
+        tairix_kernel_core::callreg::teardown_owned_by(self.owner, &ASPACES, &SINK);
+        self.join();
+    }
+}
+
+/// The service's network-volume event ids.
+const NETWORK_ATTACH_REFUSED: u32 = 4302;
+const NETWORK_DETACH_REFUSED: u32 = 4304;
+const NETWORK_VOLUME_RETIRED: u32 = 4305;
+
+fn a_network_volume_is_attached_by_its_principal_alone_scenario(facility: &'static TestFacility) {
+    let mut server = NetServer::offer(
+        facility,
+        *b"scenario-key-one",
+        MEMBER_UID,
+        "//nas/one",
+        share_fs(),
+    );
+    let attach = private_attach("share", None);
+    assert_eq!(
+        VOLUME_SERVICE.attach_offered(&plain(OUTSIDER_UID, OUTSIDER_UID), server.offer, &attach),
+        Err(Errno::NotFound),
+        "an offer is no one else's to attach, nor to learn of"
+    );
+    let reply = VOLUME_SERVICE
+        .attach_offered(&member(), server.offer, &attach)
+        .expect("attached");
+    assert_eq!(reply.name(), "share");
+    assert_eq!(
+        VOLUME_SERVICE.attach_offered(&member(), server.offer, &attach),
+        Err(Errno::AlreadyExists)
+    );
+    let record = mount_record(b"//nas/one");
+    assert_eq!(record.owner(), Some(MEMBER_UID));
+    assert_eq!(record.class(), tairix_abi::sysinfo::VolumeClass::Network);
+    assert_eq!(
+        record.flags(),
+        tairix_abi::driver::filesystem::MountFlags::NOEXEC
+    );
+    assert_eq!(record.volume_id(), reply.volume_id);
+    let mut buf = [0u8; 32];
+    let n = read_as(MEMBER_UID, "/Storage/share/hello.txt", 0, &mut buf).expect("reads");
+    assert_eq!(&buf[..n], b"network payload");
+    assert_eq!(
+        read_as(OUTSIDER_UID, "/Storage/share/hello.txt", 0, &mut buf),
+        Err(Errno::PermissionDenied),
+        "a private volume is its principal's alone"
+    );
+    let alive = tairix_abi::netattach::FsserveCtl::Alive;
+    assert_eq!(
+        VOLUME_SERVICE.offer_ctl(server.owner, server.offer, alive),
+        Ok(())
+    );
+    assert_eq!(
+        VOLUME_SERVICE.offer_ctl(server.owner + 1, server.offer, alive),
+        Err(Errno::NotFound),
+        "only the server that made an offer speaks for it"
+    );
+
+    let mut second = NetServer::offer(
+        facility,
+        *b"scenario-key-two",
+        MEMBER_UID,
+        "//nas/two",
+        share_fs(),
+    );
+    let again = VOLUME_SERVICE
+        .attach_offered(&member(), second.offer, &attach)
+        .expect("attached");
+    assert!(again.name().starts_with("share_"), "{}", again.name());
+
+    let detach = |volume_id| VolumeDetachRequest {
+        volume_id,
+        force: false,
+    };
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(reply.volume_id), &plain(OUTSIDER_UID, OUTSIDER_UID)),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        audited(NETWORK_DETACH_REFUSED, "share"),
+        vec![Some(String::from("not_owner"))]
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(reply.volume_id), &member()),
+        Ok(())
+    );
+    server.join();
+    assert!(!tairix_kernel_core::callreg::contains(server.endpoint.id()));
+    assert_eq!(VOLUME_FOREST.resolve(&reply.volume_id), None);
+    assert_eq!(
+        read_as(MEMBER_UID, "/Storage/share/hello.txt", 0, &mut buf),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(again.volume_id), &admin()),
+        Ok(()),
+        "the mount authority detaches anyone's"
+    );
+    second.join();
+}
+
+/// A target that cannot be bound leaves the offer to be attached again, and
+/// shows nothing meanwhile.
+fn a_target_that_cannot_be_bound_leaves_the_offer_scenario(facility: &'static TestFacility) {
+    let mut server = NetServer::offer(
+        facility,
+        *b"scenario-key-3rd",
+        MEMBER_UID,
+        "//nas/three",
+        share_fs(),
+    );
+    assert_eq!(
+        VOLUME_SERVICE.attach_offered(
+            &member(),
+            server.offer,
+            &private_attach("third", Some("/Users/member/nas"))
+        ),
+        Err(Errno::NotFound)
+    );
+    assert!(FS_SERVICE
+        .mount_snapshot()
+        .expect("snapshot")
+        .iter()
+        .all(|record| record.source_bytes() != b"//nas/three"));
+    let reply = VOLUME_SERVICE
+        .attach_offered(&member(), server.offer, &private_attach("third", None))
+        .expect("attached on a second try");
+    VOLUME_SERVICE
+        .detach(&detach_of(reply.volume_id), &member())
+        .expect("detach");
+    server.join();
+}
+
+fn a_network_volume_is_presented_as_its_principal_may_ask_scenario(
+    facility: &'static TestFacility,
+) {
+    use tairix_abi::netattach::{NetworkAttach, Presentation};
+    let holder = Principal {
+        uid: MEMBER_UID,
+        gid: STORAGE_GID,
+        caps: &MountAuthority,
+    };
+    let stat = |uid| {
+        FS_SERVICE
+            .stat(
+                uid,
+                &NoCaps,
+                root("/Storage/shown/hello.txt"),
+                FinalLink::Follow,
+            )
+            .map(|stat| (stat.mode & 0o7777, stat.uid, stat.gid))
+    };
+    let explicit = Presentation::Explicit {
+        uid: OUTSIDER_UID,
+        gid: OUTSIDER_UID,
+        dir_mode: 0o750,
+        file_mode: 0o640,
+    };
+    // Each presentation is reached by the principal it admits, and refused to
+    // the one it does not.
+    for (presentation, admitted, refused, shown) in [
+        (
+            Presentation::Shared,
+            MEMBER_UID,
+            OUTSIDER_UID,
+            (0o660, 0, STORAGE_GID),
+        ),
+        (
+            explicit,
+            OUTSIDER_UID,
+            MEMBER_UID,
+            (0o640, OUTSIDER_UID, OUTSIDER_UID),
+        ),
+    ] {
+        let mut server = NetServer::offer(
+            facility,
+            *b"scenario-key-pre",
+            MEMBER_UID,
+            "//nas/pres",
+            share_fs(),
+        );
+        let asked = NetworkAttach {
+            name: "shown",
+            presentation,
+            read_only: true,
+            target: None,
+        };
+        assert_eq!(
+            VOLUME_SERVICE.attach_offered(&member(), server.offer, &asked),
+            Err(Errno::PermissionDenied),
+            "only the mount authority shows a volume to others"
+        );
+        let reply = VOLUME_SERVICE
+            .attach_offered(&holder, server.offer, &asked)
+            .expect("attached");
+        assert_eq!(stat(admitted), Ok(shown));
+        assert_eq!(stat(refused), Err(Errno::PermissionDenied));
+        assert_eq!(
+            write_as(admitted, "/Storage/shown/hello.txt", 0, b"x"),
+            Err(Errno::ReadOnly),
+            "narrowed to read-only"
+        );
+        VOLUME_SERVICE
+            .detach(
+                &VolumeDetachRequest {
+                    volume_id: reply.volume_id,
+                    force: false,
+                },
+                &holder,
+            )
+            .expect("detach");
+        server.join();
+    }
+    assert!(audited(NETWORK_ATTACH_REFUSED, "shown")
+        .iter()
+        .all(|cause| cause.as_deref() == Some("presentation_refused")));
+}
+
+fn a_network_volume_leaves_with_its_server_scenario(facility: &'static TestFacility) {
+    // An offer no one attached goes with its server.
+    let unattached = NetServer::offer(
+        facility,
+        *b"scenario-key-off",
+        MEMBER_UID,
+        "//nas/off",
+        share_fs(),
+    );
+    let offer = unattached.offer;
+    unattached.exit();
+    assert_eq!(
+        VOLUME_SERVICE.attach_offered(&member(), offer, &private_attach("off", None)),
+        Err(Errno::NotFound)
+    );
+
+    // An attached one holding nothing unpublished leaves the namespace.
+    let server = NetServer::offer(
+        facility,
+        *b"scenario-key-ext",
+        MEMBER_UID,
+        "//nas/exit",
+        share_fs(),
+    );
+    let reply = VOLUME_SERVICE
+        .attach_offered(&member(), server.offer, &private_attach("exit", None))
+        .expect("attached");
+    server.exit();
+    assert!(FS_SERVICE
+        .mount_snapshot()
+        .expect("snapshot")
+        .iter()
+        .all(|record| record.source_bytes() != b"//nas/exit"));
+    assert_eq!(VOLUME_FOREST.resolve(&reply.volume_id), None);
+    assert_eq!(
+        audited(NETWORK_VOLUME_RETIRED, "exit"),
+        vec![Some(String::from("server_lost"))]
+    );
+
+    // And one its server withdraws.
+    let mut server = NetServer::offer(
+        facility,
+        *b"scenario-key-wdr",
+        MEMBER_UID,
+        "//nas/wdr",
+        share_fs(),
+    );
+    VOLUME_SERVICE
+        .attach_offered(&member(), server.offer, &private_attach("withdrawn", None))
+        .expect("attached");
+    assert_eq!(
+        VOLUME_SERVICE.offer_ctl(
+            server.owner,
+            server.offer,
+            tairix_abi::netattach::FsserveCtl::Withdraw
+        ),
+        Ok(())
+    );
+    server.join();
+    assert!(FS_SERVICE
+        .mount_snapshot()
+        .expect("snapshot")
+        .iter()
+        .all(|record| record.source_bytes() != b"//nas/wdr"));
+    assert_eq!(
+        audited(NETWORK_VOLUME_RETIRED, "withdrawn"),
+        vec![Some(String::from("withdrawn"))]
+    );
+}
+
+fn a_lost_network_volume_waits_for_its_owner_scenario(facility: &'static TestFacility) {
+    use tairix_abi::driver::filesystem::VolumeHost as _;
+    let key = *b"scenario-key-lst";
+    let server = NetServer::offer(facility, key, MEMBER_UID, "//nas/lost", share_fs());
+    let reply = VOLUME_SERVICE
+        .attach_offered(&member(), server.offer, &private_attach("lost", None))
+        .expect("attached");
+    // The server now holds a commit it has not made, and says so in its next
+    // reply.
+    server
+        .host
+        .writeback_due(DriverHandle::from_raw(1).expect("a handle"), Some(1));
+    let mut buf = [0u8; 32];
+    read_as(MEMBER_UID, "/Storage/lost/hello.txt", 0, &mut buf).expect("reads");
+    server.exit();
+    let record = mount_record(b"//nas/lost");
+    assert_eq!(record.availability(), MountAvailability::UnavailableLost);
+    assert_eq!(
+        record.owner(),
+        Some(MEMBER_UID),
+        "still its owner's to detach"
+    );
+    assert_eq!(
+        read_as(MEMBER_UID, "/Storage/lost/hello.txt", 0, &mut buf),
+        Err(Errno::DeviceFault)
+    );
+    let detach = |force| VolumeDetachRequest {
+        volume_id: reply.volume_id,
+        force,
+    };
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach(false), &member()),
+        Err(Errno::DeviceFault),
+        "the loss is acknowledged by a forced detach alone"
+    );
+    assert_eq!(VOLUME_SERVICE.detach(&detach(true), &member()), Ok(()));
+    assert!(FS_SERVICE
+        .mount_snapshot()
+        .expect("snapshot")
+        .iter()
+        .all(|record| record.source_bytes() != b"//nas/lost"));
+    // Its identity is free again.
+    let mut again = NetServer::offer(facility, key, MEMBER_UID, "//nas/lost", share_fs());
+    let reply = VOLUME_SERVICE
+        .attach_offered(&member(), again.offer, &private_attach("lost", None))
+        .expect("attached again");
+    VOLUME_SERVICE
+        .detach(&detach_of(reply.volume_id), &member())
+        .expect("detach");
+    again.join();
+}
+
+/// A volume attached over a directory of another holds that one up until its
+/// server leaves, and then leaves the namespace with it, never shown over a
+/// directory no projection shows.
+fn a_bind_within_a_network_volume_leaves_with_it_scenario(facility: &'static TestFacility) {
+    let mut outer_fs = share_fs();
+    let root = outer_fs.root();
+    let nest = outer_fs
+        .create(
+            root,
+            b"nest",
+            NodeKind::Directory,
+            &NodeSecurity::new(0o755, 0, 0),
+        )
+        .expect("a directory");
+    outer_fs.forget_ownership(nest);
+    let outer = NetServer::offer(
+        facility,
+        *b"scenario-key-out",
+        MEMBER_UID,
+        "//nas/outer",
+        outer_fs,
+    );
+    let outer_reply = VOLUME_SERVICE
+        .attach_offered(&member(), outer.offer, &private_attach("outer", None))
+        .expect("attached");
+    let mut inner = NetServer::offer(
+        facility,
+        *b"scenario-key-inn",
+        MEMBER_UID,
+        "//nas/inner",
+        share_fs(),
+    );
+    let inner_reply = VOLUME_SERVICE
+        .attach_offered(
+            &member(),
+            inner.offer,
+            &private_attach("inner", Some("/Storage/outer/nest")),
+        )
+        .expect("attached over a directory of its principal's own volume");
+    let mut buf = [0u8; 32];
+    let n = read_as(MEMBER_UID, "/Storage/outer/nest/hello.txt", 0, &mut buf)
+        .expect("reached through the bind");
+    assert_eq!(&buf[..n], b"network payload");
+    let bound = |target: &[u8]| {
+        FS_SERVICE
+            .view_snapshot()
+            .expect("snapshot")
+            .iter()
+            .filter(|record| record.target_bytes() == target)
+            .map(|record| (record.volume_id(), record.binder()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        bound(b"/Storage/outer/nest"),
+        vec![(inner_reply.volume_id, Some(MEMBER_UID))]
+    );
+    assert_eq!(
+        VOLUME_SERVICE.detach(&detach_of(outer_reply.volume_id), &member()),
+        Err(Errno::NotEmpty),
+        "a bind stands within it"
+    );
+    assert_eq!(
+        read_as(MEMBER_UID, "/Storage/outer/hello.txt", 0, &mut buf).map(drop),
+        Ok(()),
+        "a refused detach leaves the volume served"
+    );
+
+    outer.exit();
+    assert_eq!(
+        audited(NETWORK_VOLUME_RETIRED, "outer"),
+        vec![Some(String::from("server_lost"))]
+    );
+    assert!(bound(b"/Storage/outer/nest").is_empty());
+    assert_eq!(
+        read_as(MEMBER_UID, "/Storage/outer/nest/hello.txt", 0, &mut buf),
+        Err(Errno::NotFound)
+    );
+    let n = read_as(MEMBER_UID, "/Storage/inner/hello.txt", 0, &mut buf)
+        .expect("the bound volume stays attached");
+    assert_eq!(&buf[..n], b"network payload");
+    VOLUME_SERVICE
+        .detach(&detach_of(inner_reply.volume_id), &member())
+        .expect("detach");
+    inner.join();
+}
+
+/// A plain detach of `volume_id`.
+fn detach_of(volume_id: [u8; 16]) -> VolumeDetachRequest {
+    VolumeDetachRequest {
+        volume_id,
+        force: false,
+    }
 }

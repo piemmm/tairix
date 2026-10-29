@@ -245,7 +245,7 @@ fn fixture(contents: &[u8]) -> CachedFs<Counting<RwMockFs>> {
         .expect("create");
     let written = fs.write_at(file, 0, contents).expect("seed contents");
     assert_eq!(written, contents.len());
-    CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
+    CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink()).expect("a cache")
 }
 
 /// A leaked cache-admission control with the filesystem class disabled
@@ -273,6 +273,7 @@ fn fixture_with_control(
     let written = fs.write_at(file, 0, contents).expect("seed contents");
     assert_eq!(written, contents.len());
     CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
+        .expect("a cache")
         .with_cache_control(control)
 }
 
@@ -447,7 +448,8 @@ fn a_node_taking_a_renamed_files_old_id_inherits_nothing_of_it() {
         .create(root, b"before", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
     fs.write_all(file, 0, b"movable").expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
+        .expect("a cache");
     let mut buf = [0u8; 16];
     assert_eq!(cache.read_at(file, 0, &mut buf), Ok(7), "warm the data");
     assert_eq!(cache.node_info(file).expect("warm the stat").size, 7);
@@ -479,7 +481,8 @@ fn the_unpin_that_frees_a_node_drops_what_is_kept_under_its_id() {
         .create(root, b"doomed", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
     fs.write_all(file, 0, b"stale").expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
+        .expect("a cache");
     let held = cache.pin(file).expect("pin");
     cache.remove(root, b"doomed").expect("unlink");
     let mut buf = [0u8; 8];
@@ -520,7 +523,8 @@ fn a_hold_on_a_content_derived_format_drops_what_its_ids_kept() {
         .create(root, b"file", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
     fs.write_all(file, 0, b"body").expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
+        .expect("a cache");
     cache.node_info(file).expect("warm the stat");
     let held = cache.pin(file).expect("pin");
     let before = calls(&cache);
@@ -560,7 +564,8 @@ fn a_lookup_after_a_renumbering_write_answers_the_new_id() {
     let root = fs.root();
     fs.create(root, b"moving", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
+    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink())
+        .expect("a cache");
     let file = cache.lookup(root, b"moving").expect("resolves");
     cache.node_info(file).expect("warm the stat");
 
@@ -844,7 +849,7 @@ fn security_change_is_seen_by_the_services_permission_check() {
     fs.set_security(file, NodeSecurity::new(0o644, 1, 1))
         .expect("open mode");
 
-    let cache = CachedFs::new(fs, budget(), owner(), unpressured(), sink());
+    let cache = CachedFs::new(fs, budget(), owner(), unpressured(), sink()).expect("a cache");
     let other = Account {
         uid: 42,
         gid: 42,
@@ -1033,7 +1038,8 @@ fn eviction_honours_budget_and_hysteresis_and_takes_data_first() {
         owner(),
         unpressured(),
         sink(),
-    );
+    )
+    .expect("a cache");
     let hard = cache.budget().hard();
     let low = cache.budget().low();
     assert!(hard < contents.len());
@@ -1212,7 +1218,8 @@ fn empty_and_zero_budget_cache_still_serves_correctly() {
         owner(),
         unpressured(),
         sink(),
-    );
+    )
+    .expect("a cache");
 
     let file = cache.lookup(root, b"f").expect("resolves");
     let mut buf = [0u8; 16];
@@ -1235,7 +1242,8 @@ fn pressured_fixture(contents: &[u8]) -> (&'static TestSource, CachedFs<Counting
         .create(dir, b"file.txt", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
     fs.write_at(file, 0, contents).expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink());
+    let mut cache =
+        CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink()).expect("a cache");
     let dir = {
         let root = cache.root();
         cache.lookup(root, b"dir").expect("dir resolves")
@@ -1258,7 +1266,8 @@ fn admission_follows_each_classs_band_ceiling() {
         .create(root, b"f", NodeKind::RegularFile, &ADMIN_RECORD)
         .expect("create");
     fs.write_at(file, 0, b"still served").expect("seed");
-    let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink());
+    let mut cache =
+        CachedFs::new(Counting::new(fs), budget(), owner(), pressure, sink()).expect("a cache");
 
     // Mild pressure preserves metadata and begins reclaiming file data, so
     // the cache goes on admitting within those ceilings — a cache the
@@ -1412,7 +1421,8 @@ fn a_detected_defect_is_counted_and_reported_once() {
         owner(),
         unpressured(),
         captured,
-    );
+    )
+    .expect("a cache");
     cache.poison("ledger_imbalance");
     // The poison disables the whole cache, so the one defect is
     // attributed to both classes this cache serves.
@@ -1460,7 +1470,8 @@ fn normal_operation_emits_no_audit_records() {
         owner(),
         unpressured(),
         captured,
-    );
+    )
+    .expect("a cache");
     let file = cache.lookup(root, b"f").expect("resolves");
     let mut buf = [0u8; 8];
     cache.read_at(file, 0, &mut buf).expect("reads");
@@ -1539,7 +1550,8 @@ fn the_cache_forwards_every_facet_method() {
         owner(),
         unpressured(),
         sink(),
-    );
+    )
+    .expect("a cache");
     conformance::assert_read_forwards(&mut cache);
     conformance::assert_write_forwards(&mut cache);
     conformance::assert_security_forwards(&mut cache);
@@ -1566,4 +1578,15 @@ fn names_of<F: FilesystemRead>(cache: &mut F, dir: NodeId) -> Vec<Vec<u8>> {
         .into_iter()
         .map(|(_, name)| name)
         .collect()
+}
+
+/// A cache whose accounting the heap cannot hold is refused, not aborted on.
+#[test]
+fn a_cache_the_heap_cannot_hold_is_refused() {
+    let (fs, budget, owner, pressure, sink) =
+        (RwMockFs::new(), budget(), owner(), unpressured(), sink());
+    crate::test_alloc::refuse_allocations_on_current_thread(true);
+    let built = CachedFs::new(fs, budget, owner, pressure, sink).map(drop);
+    crate::test_alloc::refuse_allocations_on_current_thread(false);
+    assert_eq!(built, Err(VfsError::OutOfMemory));
 }

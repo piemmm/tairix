@@ -63,11 +63,13 @@ socket read and the random bytes a session needs.
   separator, stream name or wildcard into a path. A time is converted exactly
   or refused, never rounded.
 - A share listing's bind must be accepted as offered and its answer arrive
-  under the call's ids; a share no tree connect could name is left out and
-  counted, and a failed listing still closes its pipe.
+  under the call's ids; it keeps the first 256 disk shares, the special ones
+  only when asked, and counts what it leaves out — those not asked for, those
+  no tree connect could name, and those past the 256 — and a failed listing
+  still closes its pipe.
 - Every decoder is total and bounded — a frame is at most 8 MiB, a compound
   32 messages, a session 64 trees, a read or write 1 MiB, a listing 256 KiB,
-  a share listing 256 shares — and nothing a server sends is allocated for
+  a share listing 256 KiB — and nothing a server sends is allocated for
   infallibly. The password-derived NTLM key is wiped once the response is
   made.
 - A frame is encoded once into the buffer it is sent from and sealed there; a

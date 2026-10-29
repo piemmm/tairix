@@ -65,11 +65,11 @@
 use core::net::IpAddr;
 
 use crate::account::MAX_PASSWORD_LEN;
-use crate::fsserve::OfferId;
 use crate::le::{Reader, Writer};
 use crate::net_ipc::{
     address_parts, ip_from_parts, is_unicast, validate_if_name, NetAddrFamily, IF_NAME_LEN,
 };
+use crate::netattach::OfferId;
 use crate::secret::Secret;
 use crate::Errno;
 
@@ -105,13 +105,13 @@ pub const ACCOUNT_NAME_MAX: usize = 256;
 pub const SHARE_NAME_MAX: usize = 80;
 
 /// The longest share name, in bytes of UTF-8.
-const SHARE_NAME_BYTES: usize = SHARE_NAME_MAX * 4;
+pub const SHARE_NAME_BYTES: usize = SHARE_NAME_MAX * 4;
 
 /// The longest share remark, in bytes: past the 256 UTF-16 units of
 /// Windows' `MAXCOMMENTSZ`. A longer one is cut at a character.
 pub const REMARK_MAX: usize = 1024;
 
-/// The most shares one listing carries.
+/// The most shares one listing carries; any more are counted.
 pub const SHARES_MAX: usize = 256;
 
 /// The most mounts one principal holds.
@@ -151,7 +151,7 @@ const SHARE_ENTRY_MAX: usize = (2 + SHARE_NAME_BYTES) + 1 + (2 + REMARK_MAX);
 const MOUNT_ENTRY_MAX: usize = 8 + (2 + HOST_MAX) + (2 + SHARE_NAME_BYTES) + 1 + 1;
 const REFUSED_MAX: usize = REPLY_HEADER_LEN + PIN_LEN;
 const SHARES_REPLY_MAX: usize =
-    REPLY_HEADER_LEN + PIN_LEN + 4 + 4 + 2 + SHARES_MAX * SHARE_ENTRY_MAX;
+    REPLY_HEADER_LEN + PIN_LEN + 3 * 4 + 2 + SHARES_MAX * SHARE_ENTRY_MAX;
 const MOUNTED_LEN: usize = REPLY_HEADER_LEN + PIN_LEN + 8;
 const MOUNTS_REPLY_MAX: usize = REPLY_HEADER_LEN + 2 + MOUNTS_MAX * MOUNT_ENTRY_MAX;
 
@@ -690,8 +690,8 @@ pub enum NetshareError {
     Tampered,
     /// The server broke the protocol.
     Protocol,
-    /// The server answered with more than this system accepts: more than
-    /// [`SHARES_MAX`] shares, or an answer past a fixed bound.
+    /// The server answered with more than this system accepts: an answer
+    /// past a fixed bound.
     TooLarge,
     /// The server refused the credentials.
     Rejected(Rejection),
@@ -707,6 +707,9 @@ pub enum NetshareError {
     Limit,
     /// The service failed.
     Failed,
+    /// The caller has that server's share mounted already: the mount is
+    /// among its [`NetshareRequest::Mounts`].
+    AlreadyMounted,
 }
 
 impl NetshareError {
@@ -726,6 +729,7 @@ impl NetshareError {
             Self::NoSuchMount => (12, 0),
             Self::Limit => (13, 0),
             Self::Failed => (14, 0),
+            Self::AlreadyMounted => (15, 0),
         }
     }
 
@@ -745,6 +749,7 @@ impl NetshareError {
             (12, 0) => Self::NoSuchMount,
             (13, 0) => Self::Limit,
             (14, 0) => Self::Failed,
+            (15, 0) => Self::AlreadyMounted,
             _ => return Err(Errno::OutOfRange),
         };
         Ok(error)
@@ -985,6 +990,8 @@ pub struct Shares<'a> {
     pub hidden: u32,
     /// How many shares the server named in a way no tree connect could take.
     pub unnamed: u32,
+    /// How many shares there were past the first [`SHARES_MAX`].
+    pub unlisted: u32,
     /// The shares, in the server's order.
     pub shares: Records<'a, ShareEntry<'a>>,
 }
@@ -1058,6 +1065,7 @@ impl<'a> NetshareReply<'a> {
                         put_pin(&mut w, &shares.pin)?;
                         w.u32(shares.hidden)?;
                         w.u32(shares.unnamed)?;
+                        w.u32(shares.unlisted)?;
                         shares.shares.write(
                             &mut w,
                             SHARES_MAX,
@@ -1117,6 +1125,7 @@ impl<'a> NetshareReply<'a> {
                         pin: read_pin(&mut r)?,
                         hidden: r.u32()?,
                         unnamed: r.u32()?,
+                        unlisted: r.u32()?,
                         shares: Records::read(&mut r, SHARES_MAX, ShareEntry::read)?,
                     }),
                     Op::Mount => Self::Mounted {

@@ -393,6 +393,8 @@ tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
 
 [dev-dependencies]
 tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
+# The metered allocator the host tests refuse an exhausted heap's requests by.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The in-memory page table and simulated RAM the floor's DMA host is tested
 # over (`HostPageTable`, `SimPhysMap`).
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
@@ -425,7 +427,7 @@ tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0", features 
 # applies only to this crate's test builds; production images never
 # enable it.
 # `fs-conformance` additionally exposes the shared wrapper forwarding suite
-# and its reference driver, which this crate's `GroupMappedFs` and
+# and its reference driver, which this crate's `PresentedFs` and
 # `Box<dyn KernelFs>` tests drive.
 tairix-kernel-core = { path = "../core", version = "=0.0.0", features = [
     "test-arch",

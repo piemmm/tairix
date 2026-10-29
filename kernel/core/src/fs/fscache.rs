@@ -98,6 +98,8 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+
+use super::VfsError;
 use core::mem::size_of;
 
 use tairix_abi::driver::filesystem::{
@@ -291,14 +293,18 @@ impl<F> CachedFs<F> {
     /// classification gate; a refusal poisons the cache from birth, so
     /// every operation is served straight from the driver — fail
     /// closed, the volume still works.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the cache's accounting cannot be
+    /// allocated.
     pub fn new(
         inner: F,
         budget: CacheBudget,
         owner: ReclaimOwner,
         pressure: &'static MemoryPressure,
         sink: &'static (dyn Sink + Sync),
-    ) -> Self {
+    ) -> Result<Self, VfsError> {
         let (data, metadata) = Self::candidates(owner);
         let policies = match (data.classify(), metadata.classify()) {
             (Ok(data), Ok(metadata)) => Some((data, metadata)),
@@ -315,13 +321,14 @@ impl<F> CachedFs<F> {
                 None
             }
         };
-        Self {
+        let accounting = Arc::try_new(CacheAccounting::new()).map_err(|_| VfsError::OutOfMemory)?;
+        Ok(Self {
             inner,
             budget,
             control: &CACHE_CONTROL,
             pressure,
             sink,
-            accounting: Arc::new(CacheAccounting::new()),
+            accounting,
             policies,
             tick: 0,
             poisoned: policies.is_none(),
@@ -334,7 +341,7 @@ impl<F> CachedFs<F> {
             lru_data: BTreeMap::new(),
             lru_meta: BTreeMap::new(),
             changes: None,
-        }
+        })
     }
 
     /// Report every mutation to the volume's watch table, claimed for this

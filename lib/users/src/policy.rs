@@ -11,7 +11,6 @@
 //! format and the grant sets ([`crate::grants`]) and imported everywhere,
 //! never copy-pasted.
 
-use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
@@ -21,7 +20,10 @@ use tairix_abi::home::{
 };
 use tairix_abi::{CapabilityId, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
 
+use tairix_util::fallible::concatenated;
+
 use crate::provision::{CONFD_UID, SERVICES_GID};
+use crate::ParseError;
 
 /// The login shell a created interactive account starts: the `Run` binary
 /// of the default shell's application bundle in the system command store.
@@ -34,9 +36,12 @@ pub const DEFAULT_SHELL: &str = "/System/Commands/elsh.app/Run";
 
 /// The default home directory for the account named `username`: the
 /// `/Users/<name>` layout the installed-system contract fixes.
-#[must_use]
-pub fn default_home(username: &str) -> String {
-    format!("/{USERS_DIR}/{username}")
+///
+/// # Errors
+///
+/// [`ParseError::OutOfMemory`] when the path cannot be held.
+pub fn default_home(username: &str) -> Result<String, ParseError> {
+    concatenated(&["/", USERS_DIR, "/", username]).ok_or(ParseError::OutOfMemory)
 }
 
 /// Permission mode a home directory, and every directory the OS creates
@@ -272,7 +277,7 @@ mod tests {
 
     #[test]
     fn the_default_home_follows_the_users_layout() {
-        assert_eq!(default_home("alice"), "/Users/alice");
+        assert_eq!(default_home("alice").expect("held"), "/Users/alice");
     }
 
     /// Each entry must be a single, plain directory name: a component

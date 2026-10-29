@@ -183,6 +183,11 @@ extern "C" {
 #define TAIRIX_SYS_VOLUME_WRITE 156u
 #define TAIRIX_SYS_VOLUME_CTL 157u
 #define TAIRIX_SYS_VOLUME_SERVE 158u
+#define TAIRIX_SYS_FSSERVE_OFFER 159u
+#define TAIRIX_SYS_FSSERVE_ATTACH 160u
+#define TAIRIX_SYS_FSSERVE_CTL 161u
+#define TAIRIX_SYS_VIEW_BIND 162u
+#define TAIRIX_SYS_VIEW_UNBIND 163u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -814,6 +819,11 @@ int32_t tairix_sys_volume_read(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3
 int32_t tairix_sys_volume_write(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_volume_ctl(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
 uint64_t tairix_sys_volume_serve(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+uint64_t tairix_sys_fsserve_offer(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
+uint64_t tairix_sys_fsserve_attach(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
+int32_t tairix_sys_fsserve_ctl(uint64_t a0, uint32_t a1);
+int32_t tairix_sys_view_bind(void * a0, uintptr_t a1);
+int32_t tairix_sys_view_unbind(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

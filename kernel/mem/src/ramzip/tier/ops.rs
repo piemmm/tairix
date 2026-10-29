@@ -16,6 +16,16 @@ use super::{
 use crate::frame::MemoryClass;
 use crate::retire::Retire;
 use crate::vmm::MapFlags;
+use core::ops::Bound;
+use tairix_inline::arrayvec::ArrayVec;
+
+/// The most entries one search near a page returns: as many as the larger of
+/// a cluster and a warm-up step restores.
+const NEARBY_MAX: usize = if CLUSTER_MAX_PAGES > WARM_BATCH_PAGES {
+    CLUSTER_MAX_PAGES
+} else {
+    WARM_BATCH_PAGES
+};
 
 /// How many pages a compression step takes out of every view at once: one
 /// remote shootdown and one snapshot retirement serve them all.
@@ -443,8 +453,8 @@ impl Ramzip {
         }
 
         let hints: [Option<RecentFault>; RECENT_FAULTS] = self.recent_faults;
-        let mut candidates = alloc::vec::Vec::new();
-        for hint in hints.iter().flatten() {
+        let mut candidates: ArrayVec<u64, WARM_BATCH_PAGES> = ArrayVec::new();
+        'hints: for hint in hints.iter().flatten() {
             if hint.space != ctx.space_id {
                 continue;
             }
@@ -456,13 +466,9 @@ impl Ramzip {
                 None,
             );
             for number in nearby {
-                if !candidates.contains(&number) {
-                    candidates.push(number);
+                if !candidates.contains(&number) && candidates.try_push(number).is_err() {
+                    break 'hints;
                 }
-            }
-            if candidates.len() >= WARM_BATCH_PAGES {
-                candidates.truncate(WARM_BATCH_PAGES);
-                break;
             }
         }
         if candidates.is_empty() {
@@ -496,9 +502,11 @@ impl Ramzip {
     }
 
     /// Compressed entries of `space` within `radius` pages of
-    /// `center`, nearest first, excluding `center` itself, bounded by
-    /// `limit`. With `sealed_near`, only entries sealed within
-    /// [`CLUSTER_EVENT_WINDOW`] events of that seal time qualify.
+    /// `center`, nearest first and the lower of two as near, excluding
+    /// `center` itself, bounded by `limit`. With `sealed_near`, only entries
+    /// sealed within [`CLUSTER_EVENT_WINDOW`] events of that seal time
+    /// qualify. The nearest are met first walking out from `center` either
+    /// way, so the search takes nothing from the heap.
     fn nearby_entries(
         &self,
         space: u64,
@@ -506,22 +514,43 @@ impl Ramzip {
         radius: u64,
         limit: usize,
         sealed_near: Option<u64>,
-    ) -> alloc::vec::Vec<u64> {
-        let low = center.saturating_sub(radius);
-        let high = center.saturating_add(radius);
-        let mut found: alloc::vec::Vec<u64> = self
-            .entries
-            .range((space, low)..=(space, high))
-            .filter(|((_, number), entry)| {
-                *number != center
-                    && sealed_near
-                        .is_none_or(|near| entry.sealed_at.abs_diff(near) <= CLUSTER_EVENT_WINDOW)
-            })
-            .map(|((_, number), _)| *number)
-            .collect();
-        found.sort_by_key(|number| number.abs_diff(center));
-        found.truncate(limit);
-        found
+    ) -> ArrayVec<u64, NEARBY_MAX> {
+        let qualifies = |entry: &Entry| {
+            sealed_near.is_none_or(|near| entry.sealed_at.abs_diff(near) <= CLUSTER_EVENT_WINDOW)
+        };
+        let side = |from: Bound<(u64, u64)>, to: Bound<(u64, u64)>| {
+            self.entries
+                .range((from, to))
+                .filter(move |(_, entry)| qualifies(entry))
+                .map(|((_, number), _)| *number)
+        };
+        let mut below = side(
+            Bound::Included((space, center.saturating_sub(radius))),
+            Bound::Excluded((space, center)),
+        )
+        .rev()
+        .peekable();
+        let mut above = side(
+            Bound::Excluded((space, center)),
+            Bound::Included((space, center.saturating_add(radius))),
+        )
+        .peekable();
+        let mut nearest = ArrayVec::new();
+        while nearest.len() < limit {
+            let next = match (below.peek(), above.peek()) {
+                (Some(&low), Some(&high)) if center - low <= high - center => below.next(),
+                (_, Some(_)) => above.next(),
+                (Some(_), None) => below.next(),
+                (None, None) => None,
+            };
+            let Some(number) = next else {
+                break;
+            };
+            if nearest.try_push(number).is_err() {
+                break;
+            }
+        }
+        nearest
     }
 
     /// The one restore path all three initiators share: allocate a

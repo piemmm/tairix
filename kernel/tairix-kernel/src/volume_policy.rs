@@ -1,5 +1,7 @@
-//! The removable-volume mount policy (`plans/DEVICES.md` D3d): the
-//! storage-group identity map for filesystems that store no owner model.
+//! How a volume whose format stores no owner model is presented: the
+//! removable-volume storage-group map (`plans/DEVICES.md` D3d), and the
+//! private, shared and explicit presentations of a network volume
+//! (`plans/FSSERVE.md` §6).
 //!
 //! A foreign filesystem such as FAT32 stores no per-file owner, mode,
 //! ACL, or capability gate, so its driver honestly reports one uniform,
@@ -13,16 +15,18 @@
 //!   is installed (or when the registry has no such group) the identity
 //!   map is simply absent and a foreign volume stays system-owned — fail
 //!   closed, never an invented gid.
-//! * [`GroupMappedFs`] — the adapter the runtime volume attach wraps a
-//!   foreign-format driver in. A node whose ownership the format does not
-//!   record ([`FilesystemSecurity::records_ownership`]) appears owned by the
-//!   system user and the storage group, directories `rwxrwxr-x` and files
-//!   `rw-rw-r--`, so any logged-in member of the group reads and writes it
-//!   while non-members read only; storing a record for it stays refused (the
-//!   format cannot hold one, and a silently lossy store is forbidden). A node
-//!   whose ownership *is* recorded — a Rock Ridge entry, a UDF file entry
-//!   with a real owner — keeps its own rules, and every structural surface
-//!   passes through untouched.
+//! * [`PresentedFs`] — the adapter an attach wraps such a driver in, over a
+//!   [`Presented`] template. A node whose ownership the format does not
+//!   record ([`FilesystemSecurity::records_ownership`]) appears with the
+//!   template's owner, group and mode — a removable volume's the system user
+//!   and the storage group, directories `rwxrwxr-x` and files `rw-rw-r--`, so
+//!   any logged-in member of the group reads and writes it while non-members
+//!   read only — and without write bits where the format's own stand-in marks
+//!   the node read-only. Storing a record for it stays refused (the format
+//!   cannot hold one, and a silently lossy store is forbidden). A node whose
+//!   ownership *is* recorded — a Rock Ridge entry, a UDF file entry with a
+//!   real owner — keeps its own rules, and every structural surface passes
+//!   through untouched.
 //!
 //! Volumes whose format records ownership for every node (`ARXFS`, ext4)
 //! are never wrapped: their on-disk owners, modes, and ACLs keep governing
@@ -37,16 +41,60 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_abi::SeekRegion;
-use tairix_kernel_sec::GroupId;
+use tairix_kernel_core::{Metadata, Mode};
+use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::OnceCell;
 
-/// Mode the identity map reports for a directory: owner and group
-/// read/write/search, others read/search.
-const MAPPED_DIR_MODE: u32 = 0o775;
+/// Who owns a node its format records no ownership for, and with what mode,
+/// as a mount presents it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Presented {
+    uid: u32,
+    gid: GroupId,
+    dir_mode: u16,
+    file_mode: u16,
+}
 
-/// Mode the identity map reports for a regular file: owner and group
-/// read/write, others read.
-const MAPPED_FILE_MODE: u32 = 0o664;
+impl Presented {
+    /// A removable volume: the system user and the storage group `gid`,
+    /// directories `rwxrwxr-x`, files `rw-rw-r--`.
+    #[must_use]
+    pub const fn removable(gid: GroupId) -> Self {
+        Self::explicit(0, gid, 0o775, 0o664)
+    }
+
+    /// A network volume private to `uid` and its primary group `gid`:
+    /// directories `rwx------`, files `rw-------`.
+    #[must_use]
+    pub const fn private(uid: u32, gid: GroupId) -> Self {
+        Self::explicit(uid, gid, 0o700, 0o600)
+    }
+
+    /// A network volume shared with the storage group `gid`: directories
+    /// `rwxrwx---`, files `rw-rw----`.
+    #[must_use]
+    pub const fn shared(gid: GroupId) -> Self {
+        Self::explicit(0, gid, 0o770, 0o660)
+    }
+
+    /// `uid` and `gid`, with `dir_mode` and `file_mode`, which a caller holds
+    /// to the permission bits.
+    #[must_use]
+    pub const fn explicit(uid: u32, gid: GroupId, dir_mode: u16, file_mode: u16) -> Self {
+        Self {
+            uid,
+            gid,
+            dir_mode,
+            file_mode,
+        }
+    }
+
+    /// The record the volume's mount point is shown with: its directories'.
+    #[must_use]
+    pub fn template(&self) -> Metadata {
+        Metadata::new(UserId(self.uid), self.gid, Mode::from_bits(self.dir_mode))
+    }
+}
 
 /// The set-once storage-group gid cell.
 ///
@@ -97,26 +145,58 @@ impl Default for LateStorageGid {
 /// runtime volume attach reads it.
 pub static LATE_STORAGE_GID: LateStorageGid = LateStorageGid::new();
 
-/// The storage-group identity map over a foreign-format filesystem driver.
+/// A filesystem driver whose ownerless nodes are presented as a template
+/// says.
 ///
 /// See the module docs. Structural I/O and space accounting pass through
 /// to the wrapped driver; only the security of nodes the format records no
-/// ownership for is replaced.
-pub struct GroupMappedFs<F> {
+/// ownership for is replaced — or of every node, for a volume whose
+/// ownership is its server's to claim.
+pub struct PresentedFs<F> {
     inner: F,
-    gid: GroupId,
+    presented: Presented,
+    /// Whether a node the format records an owner for keeps it.
+    keeps_recorded: bool,
 }
 
-impl<F> GroupMappedFs<F> {
-    /// Wrap `inner` so every node whose ownership it does not record reports
-    /// system ownership under `gid` with group read/write.
+impl<F> PresentedFs<F> {
+    /// Wrap `inner` so every node whose ownership it does not record is
+    /// presented as `presented` says.
     #[must_use]
-    pub fn new(inner: F, gid: GroupId) -> Self {
-        Self { inner, gid }
+    pub fn new(inner: F, presented: Presented) -> Self {
+        Self {
+            inner,
+            presented,
+            keeps_recorded: true,
+        }
+    }
+
+    /// Wrap `inner` so every node is presented as `presented` says, whatever
+    /// it claims to record: a network server's owners are no principal of
+    /// this machine, and no server may present a node to anyone else.
+    #[must_use]
+    pub fn whole(inner: F, presented: Presented) -> Self {
+        Self {
+            inner,
+            presented,
+            keeps_recorded: false,
+        }
+    }
+
+    /// Whether `node` keeps the record its format stores for it.
+    fn keeps(&mut self, node: NodeId) -> Result<bool, DriverError>
+    where
+        F: FilesystemSecurity,
+    {
+        if self.keeps_recorded {
+            self.inner.records_ownership(node)
+        } else {
+            Ok(false)
+        }
     }
 }
 
-impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
+impl<F: FilesystemRead> FilesystemRead for PresentedFs<F> {
     fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
         self.inner.read_link(node, out)
     }
@@ -181,7 +261,7 @@ impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
     }
 }
 
-impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
+impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for PresentedFs<F> {
     /// The record reaches the format, which keeps it where it records an
     /// owner; on a node it does not, the mapped record stands as for any
     /// other.
@@ -248,28 +328,35 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
     }
 }
 
-impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for GroupMappedFs<F> {
+impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for PresentedFs<F> {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
-        if self.inner.records_ownership(node)? {
+        if self.keeps(node)? {
             return self.inner.security(node);
         }
-        // The mapped record replaces the stand-in an ownerless node reports;
-        // only its structural kind is consulted.
+        // The presented record replaces the stand-in an ownerless node
+        // reports; only its kind, and whether it may be written, are kept.
         let info = self.inner.node_info(node)?;
+        let presented = &self.presented;
         let mode = match info.kind {
-            NodeKind::Directory => MAPPED_DIR_MODE,
+            NodeKind::Directory => presented.dir_mode,
             // A link gets the file mode, never a wider one. Traversal
             // authority is decided by the directories the resolution walks
             // and by the target it lands on, so a permissive mode on the
             // link itself would grant nothing useful and would be the only
             // fail-open value available here.
-            NodeKind::RegularFile | NodeKind::Symlink => MAPPED_FILE_MODE,
+            NodeKind::RegularFile | NodeKind::Symlink => presented.file_mode,
         };
-        Ok(NodeSecurity::new(mode, 0, self.gid.0))
+        let writable = self.inner.security(node)?.mode & 0o200 != 0;
+        let mode = if writable { mode } else { mode & !0o222 };
+        Ok(NodeSecurity::new(
+            u32::from(mode),
+            presented.uid,
+            presented.gid.0,
+        ))
     }
 
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
-        if self.inner.records_ownership(node)? {
+        if self.keeps(node)? {
             return self.inner.set_security(node, security);
         }
         // The mapped ownership is mount policy, not stored state, and the
@@ -279,11 +366,14 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for GroupMappedF
     }
 
     fn records_ownership(&mut self, node: NodeId) -> Result<bool, DriverError> {
-        self.inner.records_ownership(node)
+        if self.keeps_recorded {
+            return self.inner.records_ownership(node);
+        }
+        self.inner.node_info(node).map(|_| false)
     }
 }
 
-impl<F: FilesystemStats> FilesystemStats for GroupMappedFs<F> {
+impl<F: FilesystemStats> FilesystemStats for PresentedFs<F> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         self.inner.stats()
     }
@@ -294,7 +384,7 @@ impl<F: FilesystemStats> FilesystemStats for GroupMappedFs<F> {
 /// driver: the secured VFS resolves and authorises attribute paths
 /// against the mapped ownership, exactly as it does every other
 /// delegated operation on the volume.
-impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrs for GroupMappedFs<F> {
+impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrs for PresentedFs<F> {
     fn get_attr(
         &mut self,
         node: NodeId,
@@ -337,7 +427,7 @@ impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrs for GroupMappe
     }
 }
 
-impl<F> FilesystemAttrsProvider for GroupMappedFs<F>
+impl<F> FilesystemAttrsProvider for PresentedFs<F>
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + FilesystemAttrsProvider,
 {

@@ -144,24 +144,10 @@ impl Builder {
         let mut text = String::new();
         // Writing to a `String` cannot fail.
         let _ = write(&mut text);
-        cut(&mut text, MAX_LINE_BYTES);
+        crate::utf8::cut(&mut text, MAX_LINE_BYTES);
         self.lines.push(ReportLine { text, heading });
         true
     }
-}
-
-/// Cut `text` to at most `most` bytes at a character boundary, ending it in
-/// `…` when anything was cut.
-fn cut(text: &mut String, most: usize) {
-    if text.len() <= most {
-        return;
-    }
-    let mut end = most.saturating_sub('…'.len_utf8());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    text.push('…');
 }
 
 /// Append `bytes` — text the file carries, in no encoding it promises — to

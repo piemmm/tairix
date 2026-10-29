@@ -6,9 +6,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::netshare_ipc::SHARES_MAX;
 use tairix_abi::time::Time64;
 
-use super::tests::{connected, connected_with, events, pump};
+use super::tests::{connected, connected_with, events, pump, CLIENT_GUID};
 use super::{Client, Event, Request};
 use crate::connection::{Body, Message, Ticket};
 use crate::file::create::{
@@ -34,9 +35,10 @@ use crate::file::{credit_charge, FileAttributes, FileId, MAX_IO, NO_FILE};
 use crate::header::{Command, Flags, Header};
 use crate::negotiate::Dialect;
 use crate::peer::{Fault, Peer, PeerConfig};
-use crate::rpc::{ShareKind, ShareList, ShareListing};
+use crate::rpc::{ShareList, ShareListing};
 use crate::simple::decode_empty;
 use crate::status::NtStatus;
+use crate::wire::Encoder;
 use crate::SmbError;
 
 const CREATE_GUID: [u8; 16] = *b"create guid 0001";
@@ -673,11 +675,12 @@ fn a_durable_open_is_reclaimed_over_a_new_connection() {
     let old_session = files.peer.session_id().expect("a session");
 
     let share = files.peer.disconnect().expect("drops");
-    assert_eq!(share.detached_opens(), 1);
+    assert_eq!(share.borrow().detached_opens(), 1);
     let (client, peer, tree) = connected_with(
         Peer::with_share(config.clone(), share),
         &config,
         Some(old_session),
+        CLIENT_GUID,
     );
     assert_eq!(
         peer.previous_session_ids(),
@@ -725,9 +728,102 @@ fn a_durable_open_is_reclaimed_over_a_new_connection() {
     assert_eq!(files.read(scratch, 0, 16), Err(NtStatus::FILE_CLOSED));
 }
 
-/// The shares `config`'s server lists through `srvsvc` on `IPC$`, and the
-/// server after the listing.
-fn list_shares(config: &PeerConfig) -> (Result<ShareList, SmbError>, Peer) {
+/// `files` over a new connection to the same share, its session replacing
+/// the dropped one's.
+fn reconnected(files: Files, config: &PeerConfig) -> Files {
+    let old_session = files.peer.session_id().expect("a session");
+    let share = files.peer.disconnect().expect("drops");
+    let (client, peer, tree) = connected_with(
+        Peer::with_share(config.clone(), share),
+        config,
+        Some(old_session),
+        CLIENT_GUID,
+    );
+    Files {
+        client,
+        peer,
+        tree: tree.id,
+    }
+}
+
+/// A durable create of `durable.txt` under `timeout_ms`, named
+/// [`CREATE_GUID`], leased reads and the handle.
+fn durable_create(timeout_ms: u32) -> CreateRequest {
+    CreateRequest {
+        durable: Some(Durable::Request {
+            timeout_ms,
+            create_guid: CREATE_GUID,
+        }),
+        ..leased(
+            &["durable.txt"],
+            KEY,
+            LeaseState::READ.with(LeaseState::HANDLE),
+        )
+    }
+}
+
+#[test]
+fn a_replayed_create_whose_answer_was_lost_finds_the_open_it_made() {
+    let config = PeerConfig::new(Dialect::Smb311);
+    let mut files = Files::new(Dialect::Smb311);
+    let create = durable_create(0);
+    files
+        .client
+        .send(
+            files.tree,
+            &[one(Command::Create, &|enc| create.encode(enc))],
+        )
+        .expect("sends");
+    files
+        .peer
+        .receive(&files.client.take_output())
+        .expect("the server opens it");
+    let lost = files.peer.take_output();
+    assert!(!lost.is_empty(), "an answer that never arrives");
+    let mut files = reconnected(files, &config);
+    let body = |enc: &mut Encoder| create.encode(enc);
+    let replay = Request {
+        flags: Flags::REPLAY_OPERATION,
+        ..one(Command::Create, &body)
+    };
+    let message = files.calls(&[replay]).remove(0);
+    assert_eq!(status(&message), NtStatus::SUCCESS);
+    let found = CreateResponse::decode(&message).expect("a create response");
+    assert_eq!(found.action, CreateAction::Opened, "the open it made");
+    assert_eq!(found.durable_timeout_ms, Some(60_000), "still durable");
+    let share = files.peer.shared();
+    assert_eq!(share.borrow().attached_opens(), 1, "and no second one");
+    assert_eq!(share.borrow().detached_opens(), 0);
+    assert_eq!(files.write(found.file_id, 0, b"open"), 4, "and it serves");
+    assert_eq!(files.read(found.file_id, 0, 4), Ok(b"open".to_vec()));
+}
+
+#[test]
+fn a_durable_open_not_reclaimed_within_its_timeout_is_let_go() {
+    let config = PeerConfig::new(Dialect::Smb311);
+    let mut files = Files::new(Dialect::Smb311);
+    let granted = files.create(&durable_create(1_000)).expect("creates");
+    assert_eq!(granted.durable_timeout_ms, Some(1_000));
+    let share = files.peer.shared();
+    share.borrow_mut().advance(5_000_000_000).expect("advances");
+    let mut files = reconnected(files, &config);
+    share.borrow_mut().advance(5_999_000_000).expect("advances");
+    assert_eq!(share.borrow().detached_opens(), 1, "kept for its timeout");
+    share.borrow_mut().advance(6_000_000_000).expect("advances");
+    assert_eq!(share.borrow().detached_opens(), 0, "and no longer");
+    let reclaim = CreateRequest {
+        durable: Some(Durable::Reconnect {
+            file_id: granted.file_id,
+            create_guid: CREATE_GUID,
+        }),
+        ..durable_create(1_000)
+    };
+    assert_eq!(files.create(&reclaim), Err(NtStatus::OBJECT_NAME_NOT_FOUND));
+}
+
+/// The shares `config`'s server lists through `srvsvc` on `IPC$`, the special
+/// ones only when `special` is set, and the server after the listing.
+fn list_shares(config: &PeerConfig, special: bool) -> (Result<ShareList, SmbError>, Peer) {
     let (mut client, mut peer, _) = connected(config);
     let asked = client.connect_tree("IPC$").expect("asks");
     pump(&mut client, &mut peer).expect("connects");
@@ -735,7 +831,7 @@ fn list_shares(config: &PeerConfig) -> (Result<ShareList, SmbError>, Peer) {
         [Event::TreeConnected { ticket, tree }] if *ticket == asked => tree.id,
         other => panic!("{other:?}"),
     };
-    let mut listing = ShareListing::new(config.host).expect("a listing");
+    let mut listing = ShareListing::new(config.host, special).expect("a listing");
     while let Some(command) = listing.command() {
         let tickets = client
             .send(ipc, &[one(command, &|enc| listing.encode(enc))])
@@ -747,23 +843,27 @@ fn list_shares(config: &PeerConfig) -> (Result<ShareList, SmbError>, Peer) {
     (listing.finish(), peer)
 }
 
+/// The names of `list`'s shares, and whether each is special.
+fn shares(list: &ShareList) -> Vec<(&str, bool)> {
+    list.shares
+        .iter()
+        .map(|share| (share.name.as_str(), share.special))
+        .collect()
+}
+
 #[test]
 fn the_shares_are_listed_through_the_srvsvc_pipe() {
-    let (listed, peer) = list_shares(&PeerConfig::new(Dialect::Smb311));
+    let (listed, peer) = list_shares(&PeerConfig::new(Dialect::Smb311), false);
     let list = listed.expect("listed");
-    assert_eq!(list.omitted, 0);
-    assert_eq!(
-        list.shares
-            .iter()
-            .map(|share| (share.name.as_str(), share.kind, share.special))
-            .collect::<Vec<_>>(),
-        [
-            ("share", ShareKind::Disk, false),
-            ("IPC$", ShareKind::Ipc, true)
-        ]
-    );
+    assert_eq!(shares(&list), [("share", false)]);
+    assert_eq!((list.hidden, list.unnamed, list.unlisted), (1, 0, 0));
     assert_eq!(list.shares[0].remark, "The test share");
     assert_eq!(peer.open_pipes(), 0, "the pipe is closed");
+
+    let (listed, _) = list_shares(&PeerConfig::new(Dialect::Smb311), true);
+    let list = listed.expect("listed");
+    assert_eq!(shares(&list), [("share", false), ("C$", true)]);
+    assert_eq!(list.hidden, 0);
 }
 
 #[test]
@@ -772,10 +872,24 @@ fn a_listing_spanning_fragments_is_put_back_together() {
         extra_shares: 100,
         ..PeerConfig::new(Dialect::Smb300)
     };
-    let (listed, _) = list_shares(&config);
+    let (listed, _) = list_shares(&config, false);
     let list = listed.expect("listed");
-    assert_eq!(list.shares.len(), 102);
-    assert_eq!(list.shares[101].name, "share-099");
+    assert_eq!(list.shares.len(), 101);
+    assert_eq!(list.shares[100].name.as_str(), "share-099");
+}
+
+#[test]
+fn a_server_with_more_shares_than_a_listing_carries_has_the_rest_counted() {
+    let config = PeerConfig {
+        extra_shares: 300,
+        ..PeerConfig::new(Dialect::Smb311)
+    };
+    let (listed, peer) = list_shares(&config, false);
+    let list = listed.expect("listed");
+    assert_eq!(list.shares.len(), SHARES_MAX);
+    assert_eq!(list.shares[SHARES_MAX - 1].name.as_str(), "share-254");
+    assert_eq!((list.hidden, list.unnamed, list.unlisted), (1, 0, 45));
+    assert_eq!(peer.open_pipes(), 0);
 }
 
 #[test]
@@ -795,15 +909,8 @@ fn a_listing_that_fails_says_why_and_closes_its_pipe() {
             },
             SmbError::Rpc(5),
         ),
-        (
-            PeerConfig {
-                extra_shares: 300,
-                ..PeerConfig::new(Dialect::Smb311)
-            },
-            SmbError::TooLarge,
-        ),
     ] {
-        let (listed, peer) = list_shares(&config);
+        let (listed, peer) = list_shares(&config, false);
         assert_eq!(listed, Err(failure), "{:?}", config.fault);
         assert_eq!(peer.open_pipes(), 0, "{failure:?}");
     }
@@ -815,7 +922,246 @@ fn a_share_no_tree_connect_could_name_is_left_out_and_counted() {
         fault: Fault::HostileShareName,
         ..PeerConfig::new(Dialect::Smb311)
     };
-    let (listed, _) = list_shares(&config);
+    let (listed, _) = list_shares(&config, false);
     let list = listed.expect("listed");
-    assert_eq!((list.shares.len(), list.omitted), (2, 1));
+    assert_eq!((list.shares.len(), list.unnamed), (1, 1));
+}
+
+#[test]
+fn a_name_is_found_in_either_case_and_kept_as_spelled() {
+    let mut files = Files::new(Dialect::Smb311);
+    let id = files
+        .create(&opening(&["Report.TXT"], Disposition::Create))
+        .expect("creates")
+        .file_id;
+    files.close(id);
+    assert_eq!(
+        files.create(&opening(&["report.txt"], Disposition::Create)),
+        Err(NtStatus::OBJECT_NAME_COLLISION),
+        "one name in either case"
+    );
+    let id = files
+        .create(&opening(&["REPORT.txt"], Disposition::Open))
+        .expect("found in another case")
+        .file_id;
+    let respell = SetInfoRequest::new(Class::Rename, id, |enc| {
+        RenameInfo {
+            replace: false,
+            target: path(&["report.txt"]),
+        }
+        .encode(enc);
+    })
+    .expect("a set");
+    assert_eq!(files.set(&respell), NtStatus::SUCCESS, "a move onto itself");
+    files.close(id);
+    let root = files
+        .create(&directory(&[], Disposition::Open))
+        .expect("opens the root")
+        .file_id;
+    let listed = files.list(root, ListingFlags::RESTART_SCANS, 65_536);
+    assert_eq!(
+        names(&listed),
+        ["dot", "dot", "report.txt"],
+        "the new spelling"
+    );
+}
+
+#[test]
+fn two_connections_to_one_share_each_hear_only_what_is_theirs() {
+    let config = PeerConfig::new(Dialect::Smb311);
+    let mut first = Files::new(Dialect::Smb311);
+    let all = LeaseState::READ
+        .with(LeaseState::HANDLE)
+        .with(LeaseState::WRITE);
+    let held = first
+        .create(&leased(&["shared.txt"], KEY, all))
+        .expect("creates")
+        .file_id;
+    first.write(held, 0, b"first's bytes");
+    let (client, peer, tree) = connected_with(
+        Peer::with_share(config.clone(), first.peer.shared()),
+        &config,
+        None,
+        [0x77; 16],
+    );
+    let mut second = Files {
+        client,
+        peer,
+        tree: tree.id,
+    };
+    assert_eq!(
+        second.read(held, 0, 4),
+        Err(NtStatus::FILE_CLOSED),
+        "another connection's open names nothing here"
+    );
+    let opening = second.start(Command::Create, &|enc| {
+        leased(&["shared.txt"], OTHER_KEY, LeaseState::READ).encode(enc);
+    });
+    assert!(events(&mut second.client).is_empty(), "the create waits");
+    first.peer.deliver().expect("delivers");
+    let to_first = first.peer.take_output();
+    first.client.receive(&to_first).expect("reads");
+    let [Event::Break { message }] = &events(&mut first.client)[..] else {
+        panic!("the break goes to the lease's holder");
+    };
+    assert!(matches!(
+        BreakNotice::decode(message),
+        Ok(BreakNotice::Lease(LeaseBreak { key: KEY, .. }))
+    ));
+    let ack = LeaseAck {
+        key: KEY,
+        state: LeaseState::READ,
+    };
+    first.call(Command::OplockBreak, &|enc| ack.encode(enc));
+    second.peer.deliver().expect("delivers");
+    let to_second = second.peer.take_output();
+    second.client.receive(&to_second).expect("reads");
+    let mut answered = responses(&mut second.client);
+    let opened = take(&mut answered, opening);
+    assert_eq!(
+        status(&opened),
+        NtStatus::SUCCESS,
+        "the create resumes as its own"
+    );
+    let opened = CreateResponse::decode(&opened).expect("opened");
+    assert_eq!(second.read(opened.file_id, 0, 5), Ok(b"first".to_vec()));
+    let _ = first.peer.disconnect().expect("drops");
+    assert_eq!(
+        second.peer.share().attached_opens(),
+        1,
+        "only the first's opens closed"
+    );
+}
+
+#[test]
+fn a_compound_whose_create_waits_on_a_break_finishes_behind_it() {
+    let config = PeerConfig::new(Dialect::Smb311);
+    let mut first = Files::new(Dialect::Smb311);
+    let all = LeaseState::READ
+        .with(LeaseState::HANDLE)
+        .with(LeaseState::WRITE);
+    first
+        .create(&leased(&["shared.txt"], KEY, all))
+        .expect("creates");
+    let (client, peer, tree) = connected_with(
+        Peer::with_share(config.clone(), first.peer.shared()),
+        &config,
+        None,
+        [0x77; 16],
+    );
+    let mut second = Files {
+        client,
+        peer,
+        tree: tree.id,
+    };
+    let open = opening(&["shared.txt"], Disposition::Open);
+    let closing = CloseRequest {
+        post_query: false,
+        file_id: NO_FILE,
+    };
+    let tickets = second
+        .client
+        .send(
+            second.tree,
+            &[
+                one(Command::Create, &|enc| open.encode(enc)),
+                related(Command::Close, &|enc| closing.encode(enc)),
+            ],
+        )
+        .expect("sends");
+    pump(&mut second.client, &mut second.peer).expect("carries");
+    assert!(
+        responses(&mut second.client).is_empty(),
+        "both wait on the break"
+    );
+    first.peer.deliver().expect("delivers");
+    let to_first = first.peer.take_output();
+    first.client.receive(&to_first).expect("reads");
+    assert!(matches!(
+        events(&mut first.client)[..],
+        [Event::Break { .. }]
+    ));
+    let ack = LeaseAck {
+        key: KEY,
+        state: LeaseState::READ,
+    };
+    first.call(Command::OplockBreak, &|enc| ack.encode(enc));
+    second.peer.deliver().expect("delivers");
+    let to_second = second.peer.take_output();
+    second.client.receive(&to_second).expect("reads");
+    let mut answered = responses(&mut second.client);
+    for ticket in tickets {
+        assert_eq!(status(&take(&mut answered, ticket)), NtStatus::SUCCESS);
+    }
+    assert_eq!(
+        second.peer.share().attached_opens(),
+        1,
+        "the related close closed what the create opened"
+    );
+}
+
+#[test]
+fn a_directory_lease_is_granted_only_where_offered_and_breaks_when_its_listing_would_change() {
+    let cached = LeaseState::READ.with(LeaseState::HANDLE);
+    let asked = |key| CreateRequest {
+        lease: Some(Lease {
+            key,
+            state: cached,
+            parent: None,
+            epoch: 0,
+            breaking: false,
+        }),
+        ..directory(&["docs"], Disposition::OpenIf)
+    };
+    let mut plain = Files::new(Dialect::Smb311);
+    let opened = plain.create(&asked(KEY)).expect("opens");
+    assert_eq!(
+        opened.lease, None,
+        "a server offering no directory leasing grants none"
+    );
+
+    let config = PeerConfig {
+        directory_leasing: true,
+        ..PeerConfig::new(Dialect::Smb311)
+    };
+    let (client, peer, tree) =
+        connected_with(Peer::new(config.clone()), &config, None, CLIENT_GUID);
+    let mut first = Files {
+        client,
+        peer,
+        tree: tree.id,
+    };
+    let opened = first.create(&asked(KEY)).expect("opens");
+    assert_eq!(opened.lease.map(|lease| lease.state), Some(cached));
+    let (client, peer, tree) = connected_with(
+        Peer::with_share(config.clone(), first.peer.shared()),
+        &config,
+        None,
+        [0x77; 16],
+    );
+    let mut second = Files {
+        client,
+        peer,
+        tree: tree.id,
+    };
+    let added = second
+        .create(&opening(&["docs", "new.txt"], Disposition::Create))
+        .expect("creates")
+        .file_id;
+    second.close(added);
+    first.peer.deliver().expect("delivers");
+    let to_first = first.peer.take_output();
+    first.client.receive(&to_first).expect("reads");
+    let [Event::Break { message }] = &events(&mut first.client)[..] else {
+        panic!("the directory's lease breaks");
+    };
+    assert!(matches!(
+        BreakNotice::decode(message),
+        Ok(BreakNotice::Lease(LeaseBreak {
+            key: KEY,
+            new: LeaseState::NONE,
+            ack_required: true,
+            ..
+        }))
+    ));
 }

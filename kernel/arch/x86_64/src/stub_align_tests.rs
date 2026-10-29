@@ -362,6 +362,47 @@ fn every_diverging_stub_enters_rust_aligned_under_the_kernel_mxcsr() {
     }
 }
 
+/// Every stub entered by interrupt, exception, or trap-gate delivery clears
+/// the direction flag before it calls into Rust. Hardware clears `DF` only for
+/// `syscall` (through `IA32_FMASK`), not for these, and the System V ABI lets
+/// the dispatcher's compiler-emitted `rep movs`/`rep stos` read `DF` for their
+/// direction — so an interrupt landing inside a backward `memmove`'s `std`…`cld`
+/// window would otherwise run them backward and corrupt the interrupted stack.
+#[test]
+fn every_asynchronous_entry_stub_clears_the_direction_flag_before_rust() {
+    for anchor in [
+        "macro_rules! define_isr",
+        "macro_rules! exception_isr_body",
+        "fn page_fault_isr()",
+        "fn tairix_arch_x86_64_external_irq_common()",
+        "fn tairix_arch_x86_64_isr_default()",
+    ] {
+        let body = stub(anchor, &[]);
+        let cld = body.iter().position(|i| i == "cld");
+        let call = body.iter().position(|i| i.starts_with("call "));
+        assert!(cld.is_some(), "{anchor}: no `cld` on entry");
+        assert!(
+            cld < call,
+            "{anchor}: `cld` must precede the first call into Rust"
+        );
+    }
+}
+
+/// The `syscall` stub needs no `cld`: `IA32_FMASK` clears `DF` on entry, so a
+/// redundant one would be dead weight. This pins that reasoning against drift.
+#[test]
+fn the_syscall_stub_relies_on_fmask_for_the_direction_flag() {
+    let body = stub("fn syscall_entry_stub()", &[]);
+    assert!(
+        !body.iter().any(|i| i == "cld"),
+        "the syscall stub clears DF through IA32_FMASK, not an entry `cld`"
+    );
+    assert!(
+        crate::syscall_entry::fmask_value() & 0x400 != 0,
+        "IA32_FMASK must clear DF (bit 10)"
+    );
+}
+
 /// The frame is sixteen 16-byte slots and the `MXCSR` word above them, as the
 /// template macros lay it out.
 #[test]

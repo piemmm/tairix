@@ -2497,9 +2497,7 @@ dependencies = [
  "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
- "tairix-path",
  "tairix-raidmeta",
- "tairix-resref",
  "tairix-rt",
  "tairix-test-iso9660-image",
  "tairix-util",
@@ -2755,7 +2753,9 @@ dependencies = [
  "tairix-bytedev",
  "tairix-crypto",
  "tairix-fuzzseed",
+ "tairix-path",
  "tairix-raidmeta",
+ "tairix-resref",
  "tairix-test-iso9660-image",
  "tairix-util",
 ]
@@ -3173,6 +3173,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-fsprobe",
  "tairix-fsserve",
+ "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
  "tairix-itest-harness",
@@ -3964,6 +3965,7 @@ name = "tairix-pci"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
 ]
 
 [[package]]
@@ -4575,6 +4577,30 @@ dependencies = [
  "tairix-smb",
  "tairix-util",
  "zeroize",
+]
+
+[[package]]
+name = "tairix-smbfs"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-caps",
+ "tairix-collections",
+ "tairix-crypto",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-inline",
+ "tairix-log",
+ "tairix-procinfo",
+ "tairix-reclaim",
+ "tairix-resolver",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-smb",
+ "tairix-smbfs",
+ "tairix-util",
+ "tairix-writeback",
 ]
 
 [[package]]

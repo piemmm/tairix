@@ -29,6 +29,10 @@ tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 tairix-raidmeta = { path = "../raidmeta", version = "=0.0.0" }
 # Fallible allocation, so a refused buffer is an error rather than an abort.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The storage resolvers and the resource namespaces, which the naming policy
+# publishes no volume under bare.
+tairix-path = { path = "../path", version = "=0.0.0" }
+tairix-resref = { path = "../resref", version = "=0.0.0" }
 
 [dev-dependencies]
 # Per-run PRNG seeding + wall-clock budget for the fuzz harness

@@ -39,8 +39,6 @@
 //! * [`app_error_errno`] — the fail-closed [`AppError`] → [`Errno`] map the
 //!   syscall reports.
 
-use alloc::borrow::ToOwned;
-use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -55,6 +53,7 @@ use tairix_crypto::{Ed25519PublicKey, Ed25519Signature, Sha256Stream};
 use tairix_log::Sink;
 use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::RwLock;
+use tairix_util::fallible::{collected, concatenated};
 
 use crate::aspace::OpenBacking;
 use crate::bootinfo::KernelArch;
@@ -388,14 +387,16 @@ impl<'a> FsBundleStore<'a> {
         if depth > WALK_DEPTH_MAX {
             return Err(Errno::OutOfRange);
         }
+        let joined;
         let abs_dir = if rel_dir.is_empty() {
-            root.to_owned()
+            root
         } else {
-            format!("{root}/{rel_dir}")
+            joined = concatenated(&[root, "/", rel_dir]).ok_or(Errno::OutOfMemory)?;
+            joined.as_str()
         };
         let dir = At {
             start: Start::Root,
-            path: &abs_dir,
+            path: abs_dir,
         };
         for mut entry in
             self.fs
@@ -403,9 +404,9 @@ impl<'a> FsBundleStore<'a> {
         {
             let name = core::mem::take(&mut entry.name);
             let rel = if rel_dir.is_empty() {
-                name.clone()
+                name
             } else {
-                format!("{rel_dir}/{name}")
+                concatenated(&[rel_dir, "/", &name]).ok_or(Errno::OutOfMemory)?
             };
             match entry.kind {
                 FileKind::Regular => {
@@ -415,11 +416,13 @@ impl<'a> FsBundleStore<'a> {
                     if files.len() >= WALK_FILES_MAX {
                         return Err(Errno::OutOfRange);
                     }
-                    let bytes = self.read_file(&format!("{root}/{rel}"), BUNDLE_FILE_MAX)?;
+                    let path = concatenated(&[root, "/", &rel]).ok_or(Errno::OutOfMemory)?;
+                    let bytes = self.read_file(&path, BUNDLE_FILE_MAX)?;
                     *total = total.saturating_add(bytes.len());
                     if *total > BUNDLE_TOTAL_MAX {
                         return Err(Errno::LengthOutOfRange);
                     }
+                    files.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
                     files.push((rel, bytes));
                 }
                 FileKind::Directory => {
@@ -442,16 +445,21 @@ impl BundleStore for FsBundleStore<'_> {
             start: Start::Root,
             path: bundle,
         };
-        Ok(self
-            .fs
-            .readdir_bounded(self.uid, self.caps, at, FinalLink::Follow, WALK_FILES_MAX)?
-            .into_iter()
-            .map(|mut entry| core::mem::take(&mut entry.name))
-            .collect())
+        let listed =
+            self.fs
+                .readdir_bounded(self.uid, self.caps, at, FinalLink::Follow, WALK_FILES_MAX)?;
+        collected(
+            listed.len(),
+            listed
+                .into_iter()
+                .map(|mut entry| core::mem::take(&mut entry.name)),
+        )
+        .ok_or(Errno::OutOfMemory)
     }
 
     fn read_appinfo(&self, bundle: &str) -> Result<Vec<u8>, Errno> {
-        self.read_file(&format!("{bundle}/AppInfo"), APPINFO_WIRE_MAX)
+        let path = concatenated(&[bundle, "/AppInfo"]).ok_or(Errno::OutOfMemory)?;
+        self.read_file(&path, APPINFO_WIRE_MAX)
     }
 
     fn contents(&self, bundle: &str) -> Result<BundleContents, Errno> {
@@ -459,12 +467,16 @@ impl BundleStore for FsBundleStore<'_> {
         let mut total = 0usize;
         self.collect_files(bundle, "", 0, &mut total, &mut files)?;
         // The canonical framing requires strictly ascending paths; one
-        // directory tree cannot yield duplicates, so a byte sort suffices.
-        files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-        let digests: Vec<BundleFileDigest<'_>> = files
-            .iter()
-            .map(|(path, bytes)| BundleFileDigest { path, bytes })
-            .collect();
+        // directory tree cannot yield duplicates, so a sort that takes no
+        // scratch from the heap suffices.
+        files.sort_unstable_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let digests = collected(
+            files.len(),
+            files
+                .iter()
+                .map(|(path, bytes)| BundleFileDigest { path, bytes }),
+        )
+        .ok_or(Errno::OutOfMemory)?;
         let mut hasher = Sha256Stream::new();
         digest_bundle_contents(&digests, &mut |chunk| hasher.update(chunk))?;
         let content_hash = hasher.finalize();
@@ -685,6 +697,33 @@ mod tests {
             vec![],
         );
         assert_eq!(load(&fs, anchor), Err(AppError::PublisherCert));
+    }
+
+    /// A bundle walk the heap cannot hold is refused, never an abort, however
+    /// many files the bundle holds: its paths, listings and sort ask the
+    /// heap only fallibly.
+    ///
+    /// Regression: the walk built its paths and listings infallibly, and
+    /// sorted its files stably, which past 4 KiB takes its scratch from the
+    /// heap infallibly.
+    #[test]
+    fn a_bundle_walk_the_heap_cannot_hold_is_refused() {
+        let names: Vec<String> = (0..90)
+            .map(|at| std::format!("/System/Commands/x.app/Help/{at:03}.md"))
+            .collect();
+        let mut files: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|name| (name.as_str(), &b"d"[..]))
+            .collect();
+        files.push(("/System/Commands/x.app/Run", b"run"));
+        let fs = crate::test_bundle::MemFs::new(&files);
+        let store = FsBundleStore::new(&fs, 0, &NoCaps);
+        let read = crate::test_alloc::past_each_refusal(&Err(Errno::OutOfMemory), || {
+            store
+                .contents("/System/Commands/x.app")
+                .map(|contents| contents.read_bytes)
+        });
+        assert_eq!(read, Ok(93));
     }
 
     #[test]
