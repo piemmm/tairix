@@ -1024,11 +1024,11 @@ pub fn boot(
     // a mute machine — and, if it lands inside a lock's critical section, a
     // system-wide deadlock behind the guard it never dropped.
     //
-    // The slot is set-once and this call never overrides an occupant: a
+    // Each slot is set-once and this call never overrides an occupant: a
     // QEMU vertical that observes its own deliberate faults publishes its
     // handler ahead of `boot` and keeps it, asserting its own install
     // succeeded. Either way the machine has exactly one fatal policy.
-    let _ = crate::riscv64::panic_ctx::install_kernel_fault_handler();
+    let _ = crate::riscv64::panic_ctx::install_fatal_reports();
 
     syscall_entry::set_dispatch_callback(production_dispatch);
 

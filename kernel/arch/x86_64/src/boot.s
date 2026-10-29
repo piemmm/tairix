@@ -151,6 +151,8 @@ pvh_start:
 .size pvh_start, . - pvh_start
 
 boot_common:
+    // Neither boot protocol defines the direction flag; Rust needs it clear.
+    cld
     movl $boot_stack_top, %esp
     xorl %ebp, %ebp
 

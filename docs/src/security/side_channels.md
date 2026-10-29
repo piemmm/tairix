@@ -58,7 +58,9 @@ other stub pins (`stub_align_tests`, `eret_tests`, `sret_tests`) do.
 
 - **x86_64.** Every entry stub zeroes the general-purpose registers it
   saved before its first call into Rust, keeping only the System V
-  argument registers it loads; the syscall stub passes its trampoline a
+  argument registers it loads, and clears the direction flag an interrupt or
+  exception delivers unchanged (`syscall` clears it through `IA32_FMASK`);
+  the syscall stub passes its trampoline a
   pointer to the saved frame rather than the user's `rip` and `rbp`. The
   two GS swaps that depend on the interrupted privilege are followed by
   `lfence` (the SWAPGS variant). `verw` against the kernel data selector is

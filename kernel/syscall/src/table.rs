@@ -4939,10 +4939,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         let mut t = [0u8; 16];
         let mut p = [0u8; PROC_ID_HEX_LEN];
         let mut pp = [0u8; PROC_ID_HEX_LEN];
-        let mut fields = [Field {
-            key: "",
-            value: tairix_log::FieldValue::Null,
-        }; 7];
+        let mut fields = [Field::UNSET; 7];
         fields[0] = Field {
             key: "task",
             value: tairix_log::FieldValue::Str(format_hex_u64(caller.task_id.0, &mut t)),

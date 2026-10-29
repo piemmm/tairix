@@ -30,8 +30,8 @@ use tairix_desktop_session::SizedRecord;
 use tairix_itest_harness::pie::PieArch;
 use tairix_qemu::screendump::Rgb;
 use tairix_qemu::{
-    Display, DmaTranslation, InterruptControllers, NamedKey, Outcome, ReservedSocket, Runner,
-    SoundCard, Spec,
+    CpuState, Display, DmaTranslation, InterruptControllers, NamedKey, Outcome, ReservedSocket,
+    Runner, SoundCard, Spec,
 };
 use tairix_test_audio_wire::ReportedLoss;
 
@@ -19689,8 +19689,9 @@ fn pass_verdict(
             cpu_state,
         } => {
             let hang = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
+            let summary = &cpu_state.summary;
             Err(format!(
-                "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
+                "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {}; guest cpu state and stacks: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{summary}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
@@ -19708,8 +19709,9 @@ fn pass_verdict(
             // ceiling means the guest went quiet early and stalled — the
             // transcript's last line is then the stall point.
             let hang = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
+            let summary = &cpu_state.summary;
             Err(format!(
-                "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
+                "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {}; guest cpu state and stacks: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{summary}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
@@ -19720,8 +19722,9 @@ fn pass_verdict(
             cpu_state,
         } => {
             let dump = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
+            let summary = &cpu_state.summary;
             Err(format!(
-                "test --qemu ({}) FATAL: the guest's kernel stopped: {record} (full serial: {}; guest cpu state: {dump})\n--- serial ---\n{serial}\n--- guest cpu state at the record ---\n{cpu_state}\n--- end ---",
+                "test --qemu ({}) FATAL: the guest's kernel stopped: {record} (full serial: {}; guest cpu state and stacks: {dump})\n--- serial ---\n{serial}\n--- guest cpu state at the record ---\n{summary}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))
@@ -19786,8 +19789,8 @@ fn remove_stale_sidecar(package: &str, kind: &str, path: &Path) -> Result<(), St
         })
 }
 
-fn persist_cpu_state(package: &str, path: &Path, cpu_state: &str) -> Result<String, String> {
-    std::fs::write(path, cpu_state).map_err(|e| {
+fn persist_cpu_state(package: &str, path: &Path, cpu_state: &CpuState) -> Result<String, String> {
+    std::fs::write(path, cpu_state.to_string()).map_err(|e| {
         format!(
             "test --qemu ({package}): persist guest cpu state {}: {e}",
             path.display()
@@ -19818,19 +19821,19 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use tairix_qemu::screendump::Rgb;
-    use tairix_qemu::{Display, Outcome};
+    use tairix_qemu::{CpuState, Display, Outcome};
 
     use super::{
         appbar_pointer_script, armed_irq_drivers, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
-        handover_pointer_script, login_type_plant, netmap_pointer_script, persist_serial,
-        qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext, screendump_path,
-        screensaver_pointer_script, settings_pointer_script, sidecar_path, touch_pointer_script,
-        Expect, FsDisk, NetPeerMode, PrimePlan, QemuTest, TypedStep, AARCH64_TARGET,
-        APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER, AUDIOCUE_LINE,
-        AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
+        handover_pointer_script, login_type_plant, netmap_pointer_script, pass_verdict,
+        persist_serial, qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext,
+        screendump_path, screensaver_pointer_script, settings_pointer_script, sidecar_path,
+        touch_pointer_script, Expect, FsDisk, NetPeerMode, PrimePlan, QemuTest, TypedStep,
+        AARCH64_TARGET, APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER,
+        AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
         AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
-        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
+        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, IPI_SMP_AARCH64,
         KEYBOARD_ONLY_ARMED_OCCURRENCES, LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL,
         LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER, MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE,
         OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
@@ -21949,6 +21952,47 @@ mod tests {
         )));
     }
 
+    /// A failed run's message carries the CPU summary; the stacks, the bulk,
+    /// go whole to the sidecar it names.
+    #[test]
+    fn a_fatal_run_keeps_its_stacks_in_the_sidecar_it_names() {
+        let at = |what: &str| {
+            std::env::temp_dir().join(format!(
+                "tairix-xtask-verdict-{}-{}.{what}",
+                std::process::id(),
+                line!()
+            ))
+        };
+        let cpu_dump = at("cpu.txt");
+        let err = pass_verdict(
+            &IPI_SMP_AARCH64,
+            fatal("[ERROR] id=4012 kernel stack corrupt cpu=0"),
+            &at("serial.log"),
+            &cpu_dump,
+            &[],
+            None,
+        )
+        .expect_err("a fatal run fails");
+        let sidecar = std::fs::read_to_string(&cpu_dump).expect("read the sidecar");
+        std::fs::remove_file(&cpu_dump).expect("remove the sidecar");
+        assert!(
+            err.contains("at the record ---\nCPU#0\n\n--- end ---"),
+            "{err}"
+        );
+        assert!(!err.contains("--- CPU#0 stack"), "{err}");
+        assert!(
+            err.contains(&format!(
+                "guest cpu state and stacks: {}",
+                cpu_dump.display()
+            )),
+            "{err}"
+        );
+        assert_eq!(
+            sidecar,
+            "CPU#0\n--- CPU#0 stack from 0x0000000000001000 ---\n"
+        );
+    }
+
     #[test]
     fn guest_serial_is_persisted_verbatim() {
         let path = std::env::temp_dir().join(format!(
@@ -22263,7 +22307,10 @@ mod tests {
         Outcome::Fatal {
             record: record.to_string(),
             serial: String::from("boot\n"),
-            cpu_state: String::from("CPU#0\n"),
+            cpu_state: CpuState {
+                summary: String::from("CPU#0\n"),
+                stacks: String::from("--- CPU#0 stack from 0x0000000000001000 ---\n"),
+            },
         }
     }
 

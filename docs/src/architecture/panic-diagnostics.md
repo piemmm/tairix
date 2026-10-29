@@ -8,11 +8,13 @@ page describes what a panic record contains, which images produce which
 parts, the deliberate address-leak policy, and how to resolve raw
 addresses offline.
 
-Two things end a kernel this way: a Rust `panic!`, and a **CPU exception
-taken in kernel mode** that the port's vector has no fix-up for. Both go
+Three things end a kernel this way: a Rust `panic!`, a **CPU exception
+taken in kernel mode** that the port's vector has no fix-up for, and a task's
+**kernel stack found corrupt** by the dispatcher. All go
 through the one report path (`kernel_core::panic_dump` /
-`kernel_core::fault_dump`), so both carry the same register block and
-backtrace; only the cause fields and the audit event id differ.
+`kernel_core::fault_dump` / `kernel_core::stack_corruption_dump`), so all
+carry the same register block and backtrace; only the cause fields and the
+audit event id differ.
 
 ## What a panic record contains
 
@@ -37,14 +39,17 @@ Every fatal report path in the image — this post-mortem, a port's own
 report, the pre-init window — first takes an entry from one shared latch
 (`tairix_arch_api::fatal::enter`). The boot's first entry writes the full
 report, and the latch keeps the cause it was taken for — a fault's four
-words, or a panic's file, line and column — before the report reads
-anything. The next writes one bare record under its own cause's id — a panic
-or fault raised while a report is being written, or a second CPU failing
-while the first reports — and never re-enters the machinery that may have
-failed: the display reclaim, the register capture, the walk. The record names
-its own cause in the full record's keys and the first entry's under `first`
-(`fault` or `panic`) and the `first_`-prefixed keys, so a report that died
-before it wrote a line still leaves the machine's cause on the console. Only
+words, a panic's file, line and column, or a corrupt stack's check and words —
+before the report reads anything. The next writes one bare record under its
+own cause's id — a fatal cause raised while a report is being written, or a
+second CPU failing while the first reports — and never re-enters the machinery
+that may have failed: the display reclaim, the register capture, the walk. The
+record names its own cause in the full record's keys and the first entry's
+under `first` (`fault`, `panic` or `stack`) and the `first_`-prefixed keys, so
+a report that died before it wrote a line still leaves the machine's cause on
+the console. Where not even that reached it, the kept cause sits in a fixed
+layout at the exported symbol `tairix_fatal_first_cause`, and the QEMU harness
+reads and decodes it off the stopped guest (`fatal::decode_kept`). Only
 once the record is written does it drain the console, since that drain may be
 what failed. Every later entry writes nothing and halts, so a report whose own
 bare record or drain faults cannot recurse until the stack overruns. On
@@ -99,6 +104,28 @@ deliberately distinct keys. A fault carries no `file`/`line`/`column`, and
 a panic carries no syndrome — neither is fabricated for the other, which is
 why the two are distinct event ids rather than one record with optional
 halves.
+
+## What a corrupt-stack record contains
+
+Before it switches into a task, the dispatcher checks that the task's saved
+stack pointer lies on its own kernel stack, and once the task switches back,
+that the canary below the stack is intact. Either failing means kernel memory
+beside the stack may already be
+damaged — another task's context lost, or an overrun past the guard — so the
+kernel stops with `AuditEvent::KernelStackCorrupt` (`4012`) rather than
+running on:
+
+| Field        | Meaning                                                     |
+| ------------ | ----------------------------------------------------------- |
+| `cpu`        | Decimal id of the CPU whose dispatcher found it.            |
+| `check`      | `guard` (the canary is disturbed) or `suspension` (the saved stack pointer is off the stack). |
+| `task`       | 64-bit hex of the task whose stack it is.                   |
+| `task_sp`    | 64-bit hex of the task's saved kernel stack pointer.        |
+| `stack_base` | 64-bit hex of the usable stack's lowest byte.               |
+| `stack_top`  | 64-bit hex of one past its highest byte.                    |
+
+followed by the register and `frame_N` blocks, which describe the dispatcher
+that found it rather than the task.
 
 Every kernel-mode exception is reported, on every port. aarch64 and riscv64
 fan every unhandled synchronous exception (plus FIQ / `SError` / AArch32

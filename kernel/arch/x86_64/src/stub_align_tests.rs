@@ -15,13 +15,14 @@
 
 extern crate std;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::format;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
 use crate::fpu::{FP_FRAME_BYTES, FP_FRAME_MXCSR};
 use crate::interrupts::{ISR_FRAME_CS, ISR_FRAME_TOP, WORD_ISR_FRAME_CS, WORD_ISR_FRAME_TOP};
+use crate::sidechannel::sidechannel_tests::{instructions, is_assembly, ASM_SOURCES};
 use crate::syscall_entry::SYSCALL_ABOVE_FP_FRAME;
 
 /// Every source a stub or a template macro it splices in lives in.
@@ -362,21 +363,92 @@ fn every_diverging_stub_enters_rust_aligned_under_the_kernel_mxcsr() {
     }
 }
 
+/// How the CPU reaches a naked entry point, which decides what it may assume
+/// of the state it inherits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Reached {
+    /// Interrupt, exception, or trap-gate delivery, which keeps the
+    /// interrupted `DF`.
+    Gate,
+    /// The `syscall` instruction, whose `IA32_FMASK` clears `DF`.
+    Syscall,
+    /// A call from Rust or from entry assembly, under `DF=0` already.
+    Call,
+}
+
+/// Every naked entry point the port defines, by the line its definition
+/// starts at, and how it is reached.
+pub(crate) const NAKED_ENTRIES: &[(&str, Reached)] = &[
+    ("fn syscall_entry_stub()", Reached::Syscall),
+    ("macro_rules! define_isr", Reached::Gate),
+    ("macro_rules! exception_isr_body", Reached::Gate),
+    ("fn page_fault_isr()", Reached::Gate),
+    ("fn tairix_arch_x86_64_external_irq_common()", Reached::Gate),
+    ("fn tairix_arch_x86_64_isr_default()", Reached::Gate),
+    ("fn tairix_arch_x86_64_fpu_enable()", Reached::Call),
+    ("fn tairix_arch_x86_64_xstate_load()", Reached::Call),
+    ("fn tairix_arch_x86_64_x87_scrub()", Reached::Call),
+];
+
+/// The anchors of the entry points reached as `reached`.
+pub(crate) fn reached_by(reached: Reached) -> impl Iterator<Item = &'static str> {
+    NAKED_ENTRIES
+        .iter()
+        .filter(move |(_, how)| *how == reached)
+        .map(|(anchor, _)| *anchor)
+}
+
+/// Every naked function in the port's sources is in [`NAKED_ENTRIES`], so a
+/// new entry stub cannot escape the tests that read the inventory. A naked
+/// function a template macro emits is named by its macro.
+#[test]
+fn every_naked_entry_is_classified() {
+    let mut found = BTreeSet::new();
+    for &(name, source) in ASM_SOURCES {
+        if is_assembly(name) {
+            continue;
+        }
+        let mut lines = source.lines();
+        let mut template = None;
+        while let Some(line) = lines.next() {
+            if let Some(rest) = line.strip_prefix("macro_rules! ") {
+                template = rest.split_whitespace().next();
+            } else if line == "}" {
+                template = None;
+            }
+            if line.trim() != "#[unsafe(naked)]" {
+                continue;
+            }
+            let anchor = if let Some(template) = template {
+                format!("macro_rules! {template}")
+            } else {
+                let signature = lines
+                    .by_ref()
+                    .find(|line| line.contains(" fn "))
+                    .unwrap_or_else(|| panic!("{name}: a naked attribute on no function"));
+                let function = signature
+                    .split(" fn ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('(').next())
+                    .unwrap_or_else(|| panic!("{name}: an unnamed naked function"));
+                format!("fn {function}()")
+            };
+            found.insert(anchor);
+        }
+    }
+    let listed: BTreeSet<String> = NAKED_ENTRIES
+        .iter()
+        .map(|(anchor, _)| (*anchor).to_string())
+        .collect();
+    assert_eq!(found, listed);
+}
+
 /// Every stub entered by interrupt, exception, or trap-gate delivery clears
-/// the direction flag before it calls into Rust. Hardware clears `DF` only for
-/// `syscall` (through `IA32_FMASK`), not for these, and the System V ABI lets
-/// the dispatcher's compiler-emitted `rep movs`/`rep stos` read `DF` for their
-/// direction — so an interrupt landing inside a backward `memmove`'s `std`…`cld`
-/// window would otherwise run them backward and corrupt the interrupted stack.
+/// the direction flag before it calls into Rust: delivery keeps the
+/// interrupted `DF`, and the dispatcher's `rep movs`/`rep stos` read it.
 #[test]
 fn every_asynchronous_entry_stub_clears_the_direction_flag_before_rust() {
-    for anchor in [
-        "macro_rules! define_isr",
-        "macro_rules! exception_isr_body",
-        "fn page_fault_isr()",
-        "fn tairix_arch_x86_64_external_irq_common()",
-        "fn tairix_arch_x86_64_isr_default()",
-    ] {
+    for anchor in reached_by(Reached::Gate) {
         let body = stub(anchor, &[]);
         let cld = body.iter().position(|i| i == "cld");
         let call = body.iter().position(|i| i.starts_with("call "));
@@ -388,19 +460,50 @@ fn every_asynchronous_entry_stub_clears_the_direction_flag_before_rust() {
     }
 }
 
-/// The `syscall` stub needs no `cld`: `IA32_FMASK` clears `DF` on entry, so a
-/// redundant one would be dead weight. This pins that reasoning against drift.
+/// Whether `instruction` is a string instruction, which reads `DF`.
+fn is_string_op(instruction: &str) -> bool {
+    let mnemonic = instruction.split(' ').next().unwrap_or("");
+    mnemonic.starts_with("rep")
+        || ["movs", "stos", "lods", "cmps", "scas"].iter().any(|op| {
+            mnemonic
+                .strip_prefix(op)
+                .is_some_and(|width| ["b", "w", "l", "q"].contains(&width))
+        })
+}
+
+/// Each way the CPU first enters the kernel — the multiboot2 `_start`, the PVH
+/// `pvh_start`, an application processor's start-up trampoline — clears the
+/// direction flag before its first call into Rust or string instruction, since
+/// no boot protocol defines it. Read in file order, which the entries'
+/// straight-line jumps follow.
 #[test]
-fn the_syscall_stub_relies_on_fmask_for_the_direction_flag() {
-    let body = stub("fn syscall_entry_stub()", &[]);
-    assert!(
-        !body.iter().any(|i| i == "cld"),
-        "the syscall stub clears DF through IA32_FMASK, not an entry `cld`"
-    );
-    assert!(
-        crate::syscall_entry::fmask_value() & 0x400 != 0,
-        "IA32_FMASK must clear DF (bit 10)"
-    );
+fn the_boot_entries_clear_the_direction_flag_before_rust() {
+    for (file, entry) in [
+        ("boot.s", "_start:"),
+        ("boot.s", "pvh_start:"),
+        ("ap_trampoline.s", "_ap_trampoline_start:"),
+    ] {
+        let (_, source) = ASM_SOURCES
+            .iter()
+            .find(|(name, _)| *name == file)
+            .unwrap_or_else(|| panic!("{file} is not inspected"));
+        let lines = instructions(file, source);
+        let from = lines
+            .iter()
+            .position(|line| line == entry)
+            .unwrap_or_else(|| panic!("{file}: no `{entry}`"));
+        let path = &lines[from..];
+        let cld = path.iter().position(|i| i == "cld");
+        let first_reader = path
+            .iter()
+            .position(|i| i.starts_with("call") || is_string_op(i))
+            .unwrap_or_else(|| panic!("{file}: `{entry}` reaches no call"));
+        assert!(
+            cld.is_some_and(|cld| cld < first_reader),
+            "{file}: `{entry}` reaches `{}` before clearing the direction flag",
+            path[first_reader]
+        );
+    }
 }
 
 /// The frame is sixteen 16-byte slots and the `MXCSR` word above them, as the

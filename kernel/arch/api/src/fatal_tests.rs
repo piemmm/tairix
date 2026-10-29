@@ -1,18 +1,29 @@
 extern crate std;
 
-use std::string::String;
+use std::string::{String, ToString};
+use std::vec::Vec;
 
+use core::mem::{offset_of, size_of};
 use core::panic::Location;
 use std::format;
 
 use super::{
-    enter, enter_without_atomics, file_tail, format_hex_word, reset_for_tests, Cause, Entry,
-    FaultWords, KernelFault, Processor, Reporter, FILE_TAIL, HEX_WORD_LEN, KERNEL_FAULT,
-    KERNEL_PANIC,
+    decode_kept, enter, enter_without_atomics, file_tail, format_hex_word, kept_image,
+    reset_for_tests, Cause, CauseWords, Entry, Kept, KernelFault, Processor, Reporter, StackCheck,
+    StackCorruption, FATAL_RECORDS, FILE_TAIL, HEX_WORD_LEN, KEPT_BYTES,
 };
 use crate::backtrace::BootStackGuard;
 
 const PORT: Reporter = Reporter { port: "aarch64" };
+
+/// A task's stack found with its guard canary disturbed.
+const OVERRUN: StackCorruption = StackCorruption {
+    check: StackCheck::Guard,
+    task: 0x2a,
+    task_sp: 0x4410_7f00,
+    base: 0x4410_0000,
+    top: 0x4410_8000,
+};
 
 /// The instruction abort a corrupted vtable slot raised in the
 /// figure-determinism vertical: a branch to the `f64` bit pattern of `1.0`.
@@ -144,6 +155,33 @@ fn a_panic_report_ends_with_its_record_naming_where() {
 }
 
 #[test]
+fn a_corrupt_stack_report_ends_with_its_record_naming_the_stack() {
+    let mut report = String::new();
+    PORT.stack_corruption(
+        &mut report,
+        Entry::Report,
+        Processor::Cpu(3),
+        &OVERRUN,
+        || Some(BootStackGuard::Intact),
+    );
+    let mut lines = report.lines().skip_while(|line| line.is_empty());
+    assert_eq!(
+        lines.next(),
+        Some("==================== TAIRiX KERNEL STACK CORRUPTION ====================")
+    );
+    assert_eq!(
+        lines.next(),
+        Some("[tairix-kernel] aarch64 task 0x2a failed its kernel-stack guard check on CPU 3")
+    );
+    assert_eq!(
+        last_line(&report),
+        "[ERROR] id=4012 kernel stack corrupt cpu=3 check=guard task=0x000000000000002a \
+         task_sp=0x0000000044107f00 stack_base=0x0000000044100000 \
+         stack_top=0x0000000044108000 boot_stack_guard=intact"
+    );
+}
+
+#[test]
 fn a_panic_with_no_location_says_so() {
     let mut report = String::new();
     Reporter { port: "riscv64" }.panic(
@@ -214,11 +252,27 @@ fn a_nested_entry_writes_only_the_bare_record() {
          syndrome=0x0000000086000000 fault_addr=0x3ff0000000000000 \
          fault_pc=0x3ff0000000000000 fault_sp=0x0000000040081f40 first=null\n"
     );
+
+    let mut stack = String::new();
+    PORT.stack_corruption(
+        &mut stack,
+        Entry::Nested { first: None },
+        Processor::Cpu(1),
+        &OVERRUN,
+        || unreachable!("a nested entry must not assess the guard"),
+    );
+    assert_eq!(
+        stack,
+        "[ERROR] id=4012 kernel stack corrupt (nested — re-entered the fatal-report path) cpu=1 \
+         check=guard task=0x000000000000002a task_sp=0x0000000044107f00 \
+         stack_base=0x0000000044100000 stack_top=0x0000000044108000 first=null\n"
+    );
 }
 
 /// A report that died inside itself leaves the bare record as the only line
 /// about the machine's death, so that record names the cause the first entry
-/// was taken for: a fault's four words, or a panic's place.
+/// was taken for: a fault's four words, a panic's place, or a stack's check
+/// and bounds.
 #[test]
 fn a_bare_record_names_the_cause_the_first_entry_was_taken_for() {
     let mut after_a_fault = String::new();
@@ -262,6 +316,29 @@ fn a_bare_record_names_the_cause_the_first_entry_was_taken_for() {
         )),
         "{after_a_panic}"
     );
+
+    let mut after_a_stack = String::new();
+    PORT.panic(
+        &mut after_a_stack,
+        Entry::Nested {
+            first: Some(Cause::Stack(StackCorruption {
+                check: StackCheck::Suspension,
+                ..OVERRUN
+            })),
+        },
+        Processor::Cpu(0),
+        &"unused",
+        None,
+        || None,
+    );
+    assert!(
+        after_a_stack.ends_with(
+            " first=stack first_check=suspension first_task=0x000000000000002a \
+             first_task_sp=0x0000000044107f00 first_stack_base=0x0000000044100000 \
+             first_stack_top=0x0000000044108000\n"
+        ),
+        "{after_a_stack}"
+    );
 }
 
 /// A path longer than the tail keeps its end, where the file's name is, cut
@@ -297,6 +374,13 @@ fn a_silent_entry_writes_nothing() {
         Processor::Cpu(1),
         &VTABLE_BRANCH,
         format_args!("unused"),
+        || unreachable!("a silent entry must not assess the guard"),
+    );
+    PORT.stack_corruption(
+        &mut report,
+        Entry::Silent,
+        Processor::Cpu(1),
+        &OVERRUN,
         || unreachable!("a silent entry must not assess the guard"),
     );
     assert!(report.is_empty());
@@ -335,6 +419,14 @@ fn the_latch_grants_one_report_then_one_nested_record_then_silence() {
     assert_eq!(enter(&fiq), Entry::Report);
     assert_eq!(enter(&fault), Entry::Nested { first: Some(fiq) });
 
+    // A corrupt stack is kept with the check that found it.
+    for check in [StackCheck::Guard, StackCheck::Suspension] {
+        reset_for_tests();
+        let stack = Cause::Stack(StackCorruption { check, ..OVERRUN });
+        assert_eq!(enter(&stack), Entry::Report);
+        assert_eq!(enter(&fault), Entry::Nested { first: Some(stack) });
+    }
+
     // The count saturates rather than wrapping back to a first entry.
     super::ENTRIES.store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
     assert_eq!(enter(&fault), Entry::Silent);
@@ -343,10 +435,98 @@ fn the_latch_grants_one_report_then_one_nested_record_then_silence() {
 }
 
 #[test]
-fn the_two_records_are_distinct() {
-    assert_ne!(KERNEL_PANIC.id, KERNEL_FAULT.id);
-    assert_ne!(KERNEL_PANIC.message, KERNEL_FAULT.message);
-    assert_ne!(KERNEL_PANIC.nested, KERNEL_FAULT.nested);
+fn the_records_are_distinct() {
+    for (at, record) in FATAL_RECORDS.iter().enumerate() {
+        for other in &FATAL_RECORDS[at + 1..] {
+            assert_ne!(record.id, other.id);
+            assert_ne!(record.message, other.message);
+            assert_ne!(record.nested, other.nested);
+        }
+    }
+}
+
+#[test]
+fn a_cause_displays_its_kind_then_its_record_fields() {
+    assert_eq!(
+        Cause::Stack(OVERRUN).to_string(),
+        "stack check=guard task=0x000000000000002a task_sp=0x0000000044107f00 \
+         stack_base=0x0000000044100000 stack_top=0x0000000044108000"
+    );
+    assert_eq!(
+        Cause::Fault(VTABLE_BRANCH).to_string(),
+        format!("fault {VTABLE_BRANCH}")
+    );
+    let raised = Location::caller();
+    assert_eq!(
+        Cause::panic(Some(raised)).to_string(),
+        format!(
+            "panic file={} line={} column={}",
+            raised.file(),
+            raised.line(),
+            raised.column()
+        )
+    );
+    assert_eq!(
+        Cause::panic(None).to_string(),
+        "panic file=null line=0 column=0"
+    );
+}
+
+/// `image` as a machine of the other byte order holds it.
+fn byte_swapped(image: &[u8]) -> Vec<u8> {
+    let mut swapped = image.to_vec();
+    let words = offset_of!(Kept, words)..offset_of!(Kept, file);
+    let (words, _) = swapped[words].as_chunks_mut::<{ size_of::<u64>() }>();
+    for word in words {
+        word.reverse();
+    }
+    swapped
+}
+
+/// A report that never reached the console leaves its cause in memory, so
+/// what a debugger reads there decodes to what the latch kept, in either byte
+/// order.
+#[test]
+fn a_kept_cause_decodes_from_the_bytes_a_debugger_reads() {
+    let little_endian = 1u16.to_ne_bytes() == 1u16.to_le_bytes();
+    let causes = [
+        Cause::Fault(VTABLE_BRANCH),
+        Cause::Fault(KernelFault {
+            syndrome: None,
+            address: None,
+            pc: 0x4008_0000,
+            sp: None,
+        }),
+        Cause::panic(Some(Location::caller())),
+        Cause::panic(None),
+        Cause::Stack(OVERRUN),
+        Cause::Stack(StackCorruption {
+            check: StackCheck::Suspension,
+            ..OVERRUN
+        }),
+    ];
+    for cause in causes {
+        let kept = Kept::new();
+        kept.keep(&cause);
+        assert_eq!(kept.kept(), Some(cause));
+        let image = kept_image(&cause);
+        assert_eq!(decode_kept(&image, little_endian), Some(cause));
+        assert_eq!(
+            decode_kept(&byte_swapped(&image), !little_endian),
+            Some(cause)
+        );
+        assert_eq!(decode_kept(&image[..KEPT_BYTES - 1], little_endian), None);
+    }
+    // A latch that has kept nothing holds zeros.
+    assert_eq!(decode_kept(&[0; KEPT_BYTES], little_endian), None);
+}
+
+/// A kind no keep writes decodes to nothing rather than to a guessed cause.
+#[test]
+fn an_unknown_kept_kind_decodes_to_nothing() {
+    let mut image = [0; KEPT_BYTES];
+    image[offset_of!(Kept, kind)] = u8::MAX;
+    assert_eq!(decode_kept(&image, true), None);
 }
 
 #[test]
@@ -370,13 +550,23 @@ fn a_fault_displays_as_the_records_fields() {
 
 #[test]
 fn the_fields_name_each_word_under_its_record_key() {
-    let mut words = FaultWords::new();
-    let keys: std::vec::Vec<_> = VTABLE_BRANCH
+    let mut words = CauseWords::new();
+    let keys: Vec<_> = VTABLE_BRANCH
         .fields(&mut words)
         .iter()
         .map(|field| field.key)
         .collect();
     assert_eq!(keys, ["syndrome", "fault_addr", "fault_pc", "fault_sp"]);
+
+    let keys: Vec<_> = OVERRUN
+        .fields(&mut words)
+        .iter()
+        .map(|field| field.key)
+        .collect();
+    assert_eq!(
+        keys,
+        ["check", "task", "task_sp", "stack_base", "stack_top"]
+    );
 }
 
 #[test]

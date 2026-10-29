@@ -15,7 +15,7 @@
 //! | [`audit`]       | Stable audit-event IDs in the `4_000..5_000` range.    |
 //! | [`bootinfo`]    | [`BootInfo`] hand-off type + [`KernelArch`] trait.     |
 //! | [`init`]        | [`kernel_main`] and the documented init order.         |
-//! | [`mod@panic`]   | [`handle_panic`], [`fault_dump`] and [`PanicContext`]. |
+//! | [`mod@panic`]   | [`handle_panic`], [`fault_dump`], [`stack_corruption_dump`] and [`PanicContext`]. |
 //!
 //! # Init order
 //!
@@ -264,7 +264,10 @@ pub use launch_cache::LaunchCache;
 pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap, LiveSharedMem};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use msimux::{MsiMuxLines, MsiMuxLinesError};
-pub use panic::{fault_dump, handle_panic, panic_dump, PanicContext};
+pub use panic::{
+    fault_dump, handle_panic, panic_dump, set_stack_corruption_report, stack_corruption_dump,
+    PanicContext,
+};
 pub use peerwatch::PeerWatch;
 pub use pipe::{Pipe, PipeEnd, PipeRole, PIPE_CAPACITY};
 pub use preempt::{

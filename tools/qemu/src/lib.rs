@@ -71,7 +71,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -80,6 +80,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tairix_arch_api::fatal::{decode_kept, FATAL_RECORDS, KEPT_BYTES, KEPT_SYMBOL};
 use tairix_binfmt::elf::{ElfView, SHT_SYMTAB};
 
 pub mod aarch64;
@@ -143,10 +144,9 @@ pub enum Outcome {
         budget: Duration,
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
-        /// Every vCPU's register file, read off the QEMU monitor at the
-        /// moment the guest was declared hung, with the kernel-text
-        /// addresses it names resolved against the kernel ELF.
-        cpu_state: String,
+        /// The guest's CPUs, read off the QEMU monitor at the moment the
+        /// guest was declared hung.
+        cpu_state: CpuState,
     },
     /// The run reached its absolute wall-clock ceiling
     /// ([`Spec::runtime_ceiling`]) while the guest was still alive and had
@@ -174,26 +174,54 @@ pub enum Outcome {
         silent_for: Duration,
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
-        /// Every vCPU's register file, read off the QEMU monitor at the
-        /// moment the run was killed, with the kernel-text addresses it
-        /// names resolved against the kernel ELF.
-        cpu_state: String,
+        /// The guest's CPUs, read off the QEMU monitor at the moment the run
+        /// was killed.
+        cpu_state: CpuState,
     },
-    /// The guest's kernel wrote the record a fatal panic or fault report
-    /// ends with ([`tairix_arch_api::fatal`]), and the run was ended at that
-    /// instant: a kernel that has written it has stopped for good, so
-    /// waiting out the inactivity budget would only delay the verdict.
+    /// The guest's kernel wrote the record a fatal report ends with
+    /// ([`tairix_arch_api::fatal`]), and the run was ended at that instant: a
+    /// kernel that has written it has stopped for good, so waiting out the
+    /// inactivity budget would only delay the verdict.
     Fatal {
         /// The record, the one line naming the cause.
         record: String,
         /// Captured QEMU stdout up to the kill, best-effort.
         serial: String,
-        /// Every vCPU's register file and stack, read off the QEMU monitor as
-        /// the record arrived, with the kernel-text addresses they name
-        /// resolved against the kernel ELF: the stack still holds the frames
-        /// that reached the report, which the record cannot carry.
-        cpu_state: String,
+        /// The guest's CPUs, read off the QEMU monitor as the record arrived:
+        /// the stacks still hold the frames that reached the report, which the
+        /// record cannot carry.
+        cpu_state: CpuState,
     },
+}
+
+/// What a stopped guest's QEMU monitor said of its CPUs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CpuState {
+    /// Each vCPU's register file, the cause the kernel's fatal latch kept,
+    /// and the kernel text named anywhere in the report: short enough to show
+    /// in a failure message.
+    pub summary: String,
+    /// Each core's stack, and the one a fatal record says the failing code
+    /// ran on: the bulk, kept beside the transcript.
+    pub stacks: String,
+}
+
+impl CpuState {
+    /// No state, for the reason given.
+    fn unavailable(reason: String) -> Self {
+        Self {
+            summary: reason,
+            stacks: String::new(),
+        }
+    }
+}
+
+impl fmt::Display for CpuState {
+    /// The whole report: the summary, then the stacks.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.summary)?;
+        f.write_str(&self.stacks)
+    }
 }
 
 impl Outcome {
@@ -2501,7 +2529,9 @@ fn supervise(
         (read @ DoneReason::Fatal { .. }, _, _) => read,
         (_, Some(record), _) => DoneReason::Fatal {
             record: record.to_owned(),
-            cpu_state: String::from("unavailable: QEMU exited before its state was read\n"),
+            cpu_state: CpuState::unavailable(String::from(
+                "unavailable: QEMU exited before its state was read\n",
+            )),
         },
         (_, None, Some(reason)) => DoneReason::DrainFailed(reason),
         (done, None, None) => done,
@@ -2595,8 +2625,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
         // verdict is in: nothing further the guest does can change it.
         if let Some(record) = fatal.record() {
             let record = record.to_owned();
-            let faulted = fault_stack(&record);
-            let cpu_state = injections.cpu_report(monitor, &spec.kernel, faulted);
+            let cpu_state = injections.cpu_report(monitor, &spec.kernel, fault_site(&record));
             let _ = child.kill();
             let _ = child.wait();
             return Ok(DoneReason::Fatal { record, cpu_state });
@@ -2966,9 +2995,8 @@ enum DoneReason {
     /// killed. Carries the per-vCPU state read off the monitor before the
     /// kill.
     TimedOut {
-        /// Every vCPU's register file at the kill, with kernel-text
-        /// addresses resolved.
-        cpu_state: String,
+        /// The guest's CPUs at the kill.
+        cpu_state: CpuState,
         /// The scripted exchange left unfinished at the kill, if any.
         script_pending: Option<String>,
     },
@@ -2979,9 +3007,8 @@ enum DoneReason {
     CeilingExceeded {
         /// How long the guest had produced no serial output at the kill.
         silent_for: Duration,
-        /// Every vCPU's register file at the kill, with kernel-text
-        /// addresses resolved.
-        cpu_state: String,
+        /// The guest's CPUs at the kill.
+        cpu_state: CpuState,
         /// The scripted exchange left unfinished at the kill, if any.
         script_pending: Option<String>,
     },
@@ -3005,26 +3032,30 @@ enum DoneReason {
     Fatal {
         /// The record.
         record: String,
-        /// The guest's CPU state at the record.
-        cpu_state: String,
+        /// The guest's CPUs at the record.
+        cpu_state: CpuState,
     },
 }
 
-/// Longest a single monitor read may block while the hang report is being
-/// collected. A reply that has stopped arriving for this long has ended: the
-/// human monitor sends nothing further until it is asked again.
-const MONITOR_READ_QUIET: Duration = Duration::from_millis(250);
+/// What the human monitor prints when it is ready for a command: as a
+/// connection opens, and after each command's reply, which it therefore ends.
+const MONITOR_PROMPT: &str = "(qemu) ";
 
-/// Total wall clock the hang report may spend reading the monitor.
+/// Longest one monitor read blocks, so a reply that never ends is given up
+/// at the report's deadline rather than waited on past it.
+const MONITOR_READ_SLICE: Duration = Duration::from_millis(250);
+
+/// Total wall clock a CPU report may spend on the monitor.
 ///
 /// The report is taken at the one moment the run has already concluded
 /// something is wrong, so it must never itself become a second thing that
-/// hangs. A whole register file for a handful of vCPUs arrives in
-/// milliseconds; this is orders of magnitude more than that.
-const MONITOR_READ_BUDGET: Duration = Duration::from_secs(3);
+/// hangs. A responsive monitor answers the whole report in milliseconds;
+/// this is orders of magnitude more than that.
+const MONITOR_READ_BUDGET: Duration = Duration::from_secs(10);
 
-/// Bytes of monitor reply the hang report will hold. A register dump is a
-/// few kilobytes per vCPU; this bounds a monitor that will not stop talking.
+/// Bytes of one monitor reply a CPU report will hold. A register dump is a
+/// few kilobytes per vCPU and a stack dump about a hundred; this bounds a
+/// monitor that will not stop talking.
 const MONITOR_READ_MAX_BYTES: usize = 256 * 1024;
 
 /// Words of each core's stack a CPU report reads, from its stack pointer up:
@@ -3055,10 +3086,43 @@ fn stack_pointers(registers: &str) -> Vec<(u32, u64)> {
     found
 }
 
-/// The stack a fatal record's `fault_sp` names, where the faulting code ran.
-fn fault_stack(record: &str) -> Option<u64> {
-    let at = record.find("fault_sp=0x")?;
-    address_word(&record[at + "fault_sp=0x".len()..])
+/// Where a fatal record says the failing code ran: its stack, and the CPU when
+/// the record names it by the kernel's number, which is QEMU's vCPU index too.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct FaultSite {
+    cpu: Option<u32>,
+    sp: u64,
+}
+
+/// The stack a fatal record names — a fault's `fault_sp`, a corrupt stack's
+/// `task_sp` — and the `cpu` it names.
+fn fault_site(record: &str) -> Option<FaultSite> {
+    let sp = ["fault_sp", "task_sp"]
+        .into_iter()
+        .find_map(|key| address_word(record_field(record, key)?.strip_prefix("0x")?))?;
+    let cpu = record_field(record, "cpu").and_then(|digits| digits.parse().ok());
+    Some(FaultSite { cpu, sp })
+}
+
+/// The value of the record's own `key`, never one a longer key ends with.
+fn record_field<'r>(record: &'r str, key: &str) -> Option<&'r str> {
+    record
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// The bytes an `x /Nxb` answer prints, in address order.
+fn memory_bytes(answer: &str) -> Vec<u8> {
+    answer
+        .lines()
+        .filter_map(|line| line.trim().split_once(':'))
+        .filter(|(addr, _)| !addr.is_empty() && addr.chars().all(|c| c.is_ascii_hexdigit()))
+        .flat_map(|(_, bytes)| {
+            bytes
+                .split_whitespace()
+                .filter_map(|byte| u8::from_str_radix(byte.strip_prefix("0x")?, 16).ok())
+        })
+        .collect()
 }
 
 /// The stack pointer one register-dump line names, if it names one.
@@ -3097,10 +3161,13 @@ fn address_word(text: &str) -> Option<u64> {
     }
 }
 
-/// Most kernel-text addresses one hang report names. A register dump for a
-/// handful of vCPUs mentions a few dozen distinct ones; this bounds a report
-/// that somehow mentions far more.
+/// Most kernel-text addresses one CPU report names. A handful of vCPUs'
+/// registers and stacks mention a few dozen distinct return addresses; this
+/// bounds a report that somehow mentions far more.
 const LEGEND_MAX_ENTRIES: usize = 256;
+
+/// `st_info` symbol type for a data object (`STT_OBJECT`).
+const STT_OBJECT: u8 = 1;
 
 /// `st_info` symbol type for a function (`STT_FUNC`).
 const STT_FUNC: u8 = 2;
@@ -3115,25 +3182,21 @@ const STT_FUNC: u8 = 2;
 /// address the dump happens to show — usually what says *how* a core reached
 /// where it stopped.
 ///
-/// Best effort: an unreadable or symbol-less ELF yields no legend rather than
-/// an error. The verdict belongs to the hang, never to this.
-fn symbol_legend(kernel: &Path, report: &str) -> String {
-    let Ok(bytes) = std::fs::read(kernel) else {
-        return String::new();
-    };
-    let functions = kernel_functions(&bytes);
+/// Best effort: a symbol-less ELF yields no legend rather than an error. The
+/// verdict belongs to the run, never to this.
+fn symbol_legend(functions: &[(u64, u64, &str)], reports: &[&str]) -> String {
     if functions.is_empty() {
         return String::new();
     }
     let mut resolved: BTreeMap<u64, String> = BTreeMap::new();
-    for addr in hex_words(report) {
+    for addr in reports.iter().flat_map(|report| hex_words(report)) {
         if resolved.len() >= LEGEND_MAX_ENTRIES {
             break;
         }
         if resolved.contains_key(&addr) {
             continue;
         }
-        if let Some(named) = resolve_addr(&functions, addr) {
+        if let Some(named) = resolve_addr(functions, addr) {
             resolved.insert(addr, named);
         }
     }
@@ -3150,8 +3213,8 @@ fn symbol_legend(kernel: &Path, report: &str) -> String {
 /// Name `addr` as an offset into the function containing it, or [`None`]
 /// when it lands in no function's extent.
 ///
-/// `functions` must be sorted by start address ([`kernel_functions`]).
-fn resolve_addr(functions: &[(u64, u64, String)], addr: u64) -> Option<String> {
+/// `functions` must be sorted by start address ([`KernelSymbols`]).
+fn resolve_addr(functions: &[(u64, u64, &str)], addr: u64) -> Option<String> {
     let index = match functions.binary_search_by_key(&addr, |(start, _, _)| *start) {
         Ok(exact) => exact,
         Err(0) => return None,
@@ -3161,41 +3224,63 @@ fn resolve_addr(functions: &[(u64, u64, String)], addr: u64) -> Option<String> {
     (addr < start.saturating_add(*size)).then(|| format!("{name}+0x{:x}", addr - start))
 }
 
-/// Every sized function the kernel ELF defines, sorted by address.
-///
-/// Sized, because a nearest-preceding-symbol guess would put a name on an
-/// address past the last function; a report that invents a call site is worse
-/// than one that leaves the number alone.
-fn kernel_functions(bytes: &[u8]) -> Vec<(u64, u64, String)> {
-    let Ok(view) = ElfView::parse(bytes) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(u64, u64, String)> = Vec::new();
-    for index in 0..view.header().shnum {
-        let Ok(section) = view.section(index) else {
-            continue;
-        };
-        if section.sh_type != SHT_SYMTAB {
-            continue;
-        }
-        let Ok(table) = view.symbol_table(index) else {
-            continue;
-        };
-        for i in 0..table.len() {
-            let Ok(symbol) = table.symbol(i) else {
-                continue;
-            };
-            if symbol.info & 0x0f != STT_FUNC || symbol.value == 0 || symbol.size == 0 {
-                continue;
-            }
-            let Ok(name) = table.name(&symbol) else {
-                continue;
-            };
-            out.push((symbol.value, symbol.size, name.to_string()));
-        }
+/// What a kernel image's symbol tables give a CPU report: its sized
+/// functions, sorted by address, and where its fatal latch keeps the cause.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct KernelSymbols<'i> {
+    functions: Vec<(u64, u64, &'i str)>,
+    kept: Option<u64>,
+}
+
+impl<'i> KernelSymbols<'i> {
+    /// Read `image`'s symbol tables, of which an image that is not ELF has
+    /// none.
+    fn read(image: &'i [u8]) -> Self {
+        Self::from_defined(kernel_symbols(image))
     }
-    out.sort_unstable();
-    out
+
+    /// Keep what a report can use of `symbols`, each a type, value, size and
+    /// name. Only sized functions name code: a nearest-preceding-symbol guess
+    /// would put a name on an address past the last function, and a report
+    /// that invents a call site is worse than one that leaves the number
+    /// alone.
+    fn from_defined(symbols: impl IntoIterator<Item = (u8, u64, u64, &'i str)>) -> Self {
+        let mut found = Self::default();
+        for (kind, value, size, name) in symbols {
+            match kind {
+                _ if value == 0 => {}
+                STT_FUNC if size != 0 => found.functions.push((value, size, name)),
+                STT_OBJECT if found.kept.is_none() && name == KEPT_SYMBOL => {
+                    found.kept = Some(value);
+                }
+                _ => {}
+            }
+        }
+        found.functions.sort_unstable();
+        found
+    }
+}
+
+/// Each named symbol the kernel ELF's symbol tables define, as its type,
+/// value, size and name.
+fn kernel_symbols(image: &[u8]) -> impl Iterator<Item = (u8, u64, u64, &str)> {
+    let view = ElfView::parse(image).ok();
+    let sections = view.as_ref().map_or(0, |view| view.header().shnum);
+    (0..sections)
+        .filter_map(move |index| {
+            let view = view.as_ref()?;
+            let section = view.section(index).ok()?;
+            (section.sh_type == SHT_SYMTAB)
+                .then(|| view.symbol_table(index).ok())
+                .flatten()
+        })
+        .flat_map(|table| {
+            (0..table.len()).filter_map(move |at| {
+                let symbol = table.symbol(at).ok()?;
+                let name = table.name(&symbol).ok()?;
+                Some((symbol.info & 0x0f, symbol.value, symbol.size, name))
+            })
+        })
 }
 
 /// Every address-width hexadecimal word in `text`, as a value.
@@ -3401,23 +3486,20 @@ impl ReadinessFlags {
 
 /// Watches the serial stream for the record a fatal kernel report ends with
 /// ([`tairix_arch_api::fatal`]): the diagnostic line whose `id=` token names
-/// [`KERNEL_PANIC`](tairix_arch_api::fatal::KERNEL_PANIC) or
-/// [`KERNEL_FAULT`](tairix_arch_api::fatal::KERNEL_FAULT).
+/// one of [`FATAL_RECORDS`].
 ///
 /// The drain offers it each line as the line completes, so every line is
 /// looked at once however long the run; the first record is kept.
 struct FatalWatch {
-    /// The two records' `id=` tokens, as they follow the level tag.
-    needles: [String; 2],
+    /// The records' `id=` tokens, as they follow the level tag.
+    needles: [String; FATAL_RECORDS.len()],
     record: std::sync::OnceLock<String>,
 }
 
 impl FatalWatch {
     fn new() -> Self {
-        use tairix_arch_api::fatal::{FatalRecord, KERNEL_FAULT, KERNEL_PANIC};
-        let needle = |record: FatalRecord| format!("] id={} ", record.id.0);
         Self {
-            needles: [needle(KERNEL_PANIC), needle(KERNEL_FAULT)],
+            needles: FATAL_RECORDS.map(|record| format!("] id={} ", record.id.0)),
             record: std::sync::OnceLock::new(),
         }
     }
@@ -3694,7 +3776,7 @@ struct InjectionState {
     /// The raw monitor command to send next (`monitor_commands.len()`
     /// once every command was sent, or when none was requested).
     monitor_step: usize,
-    conn: Option<UnixStream>,
+    conn: Option<MonitorConn>,
     /// The touchscreen's control monitor, when the run attaches one.
     touchscreen: Option<TouchScreen>,
 }
@@ -4055,9 +4137,8 @@ impl InjectionState {
         self.send(monitor, "pointer", &command)
     }
 
-    /// Write one newline-terminated command over the shared monitor
-    /// connection, opening it on the first send. The HMP monitor accepts
-    /// commands immediately, so the banner need not be read first.
+    /// Send one injection over the shared monitor connection, opening it on
+    /// the first send.
     ///
     /// # Errors
     ///
@@ -4069,25 +4150,22 @@ impl InjectionState {
         command: &str,
     ) -> Result<(), String> {
         self.connected(monitor)
-            .and_then(|stream| {
-                stream.write_all(format!("{command}\n").as_bytes())?;
-                stream.flush()
-            })
+            .and_then(|conn| conn.send(command))
             .map_err(|e| format!("{what} injection failed: {e}"))
     }
 
     /// The run's one monitor connection, opened on first use.
-    fn connected(&mut self, monitor: Option<&ReservedSocket>) -> io::Result<&mut UnixStream> {
-        let stream = self.conn.take().map_or_else(
+    fn connected(&mut self, monitor: Option<&ReservedSocket>) -> io::Result<&mut MonitorConn> {
+        let conn = self.conn.take().map_or_else(
             || {
                 // Every run attaches a monitor, so this is unreachable in a
                 // real run; refuse rather than panic if one ever is not.
                 let mon = monitor.ok_or_else(|| io::Error::other("no monitor attached"))?;
-                UnixStream::connect(mon.path())
+                MonitorConn::connect(mon.path())
             },
             Ok,
         )?;
-        Ok(self.conn.insert(stream))
+        Ok(self.conn.insert(conn))
     }
 
     /// Read every vCPU's register file and stack off the QEMU monitor, for
@@ -4096,110 +4174,317 @@ impl InjectionState {
     ///
     /// A report that cannot say what the guest's CPUs were doing forces a
     /// re-run to learn anything, and a re-run is precisely how a failure must
-    /// *not* be diagnosed. `info registers -a` gives each core's program
-    /// counter, link register and interrupt mask, and each core's stack holds
-    /// the return addresses of the frames that brought it there — for a fatal
-    /// stop, the report's and those of whatever it was reporting — which
-    /// [`symbol_legend`] then names: every core sitting in the idle
-    /// wait-for-interrupt means nothing was runnable (a lost wake-up),
-    /// whereas a core inside a loop with interrupts masked is a spin.
-    /// `info cpus` enumerates the vCPUs the dump then walks.
+    /// *not* be diagnosed. Each core's registers and stack hold the frames that
+    /// brought it where it stopped, which [`symbol_legend`] names: every core
+    /// in the idle wait-for-interrupt means nothing was runnable, whereas a
+    /// core in a loop with interrupts masked is a spin.
     ///
-    /// Best effort by construction: it reuses this run's single monitor
-    /// connection (a socket chardev serves one client), and a monitor that
+    /// The guest is stopped first, so every core's registers and stack are one
+    /// instant's. `fault` is where a fatal record says the failing code ran,
+    /// whose stack is read too: the report's own frames lie between it and
+    /// where the core halted, and can bury it past the halted core's stack
+    /// read. The cause the kernel's fatal latch kept is read last, for a report
+    /// that never reached the console.
+    ///
+    /// Best effort and bounded by [`MONITOR_READ_BUDGET`]: a monitor that
     /// cannot be reached, or a QEMU already gone, yields the reason *as* the
     /// report. The verdict is the run's, never this call's.
-    ///
-    /// `faulted` is the stack a fatal record says the faulting code ran on,
-    /// read too: the report's own frames lie between it and where the core
-    /// halted, and can bury it past the halted core's stack read.
     fn cpu_report(
         &mut self,
         monitor: Option<&ReservedSocket>,
         kernel: &Path,
-        faulted: Option<u64>,
-    ) -> String {
-        let mut report = self.read_monitor_state(monitor);
-        if let Some(sp) = faulted {
-            let dump = format!("x /{STACK_DUMP_WORDS}gx {sp:#x}");
-            let _ = writeln!(report, "--- the faulting stack from {sp:#018x} ---");
-            match self.ask(monitor, &[dump.as_str()]) {
-                Ok(stack) => report.push_str(&stack),
-                Err(reason) => report.push_str(&reason),
-            }
-        }
-        report.push_str(&symbol_legend(kernel, &report));
-        report
-    }
-
-    /// The raw monitor answers [`Self::cpu_report`] names addresses from: the
-    /// register files, then each core's stack.
-    fn read_monitor_state(&mut self, monitor: Option<&ReservedSocket>) -> String {
-        // Bounded twice over — per-read and in total — because the monitor is
-        // being read at the one moment the run has already decided something
-        // is wrong, so it must never become a second thing that hangs. Armed
-        // before asking, while the monitor is still there to take the option:
-        // macOS refuses options on a socket its peer has shut both ways, and a
-        // read of such a socket cannot block anyway.
-        if let Ok(stream) = self.connected(monitor) {
-            let _ = stream.set_read_timeout(Some(MONITOR_READ_QUIET));
-        }
-        let mut state = match self.ask(monitor, &["info cpus", "info registers -a"]) {
-            Ok(state) => state,
-            Err(reason) => return reason,
-        };
-        for (cpu, sp) in stack_pointers(&state) {
-            let select = format!("cpu {cpu}");
-            let dump = format!("x /{STACK_DUMP_WORDS}gx {sp:#x}");
-            let _ = writeln!(state, "--- CPU#{cpu} stack from {sp:#018x} ---");
-            match self.ask(monitor, &[select.as_str(), dump.as_str()]) {
-                Ok(stack) => state.push_str(&stack),
-                Err(reason) => state.push_str(&reason),
-            }
-        }
-        state
-    }
-
-    /// Send `commands` and read the monitor's answer to them, bounded, or the
-    /// reason there is none.
-    fn ask(
-        &mut self,
-        monitor: Option<&ReservedSocket>,
-        commands: &[&str],
-    ) -> Result<String, String> {
-        for command in commands {
-            if let Err(e) = self.send(monitor, "cpu diagnosis", command) {
-                return Err(format!("unavailable: {e}\n"));
-            }
-        }
-        let Some(stream) = self.conn.as_mut() else {
-            return Err(String::from("unavailable: monitor connection vanished\n"));
-        };
+        fault: Option<FaultSite>,
+    ) -> CpuState {
         let deadline = Instant::now() + MONITOR_READ_BUDGET;
-        let mut raw: Vec<u8> = Vec::new();
+        let conn = match self.connected(monitor) {
+            Ok(conn) => conn,
+            Err(e) => return CpuState::unavailable(format!("unavailable: {e}\n")),
+        };
+        let mut summary = match conn.ask(&["stop", "info cpus", "info registers -a"], deadline) {
+            Ok(replies) => replies.concat(),
+            Err(reason) => return CpuState::unavailable(reason),
+        };
+        let mut stacks = String::new();
+        for (cpu, sp) in stack_pointers(&summary) {
+            conn.dump_stack(
+                &mut stacks,
+                Some(cpu),
+                sp,
+                &format!("CPU#{cpu} stack"),
+                deadline,
+            );
+        }
+        let fault_cpu = fault.and_then(|site| site.cpu);
+        if let Some(site) = fault {
+            conn.dump_stack(
+                &mut stacks,
+                fault_cpu,
+                site.sp,
+                "the faulting stack",
+                deadline,
+            );
+        }
+        if let Ok(image) = std::fs::read(kernel) {
+            let symbols = KernelSymbols::read(&image);
+            if let Some(addr) = symbols.kept {
+                summary.push_str(&conn.kept_cause(addr, fault_cpu, deadline));
+            }
+            summary.push_str(&symbol_legend(&symbols.functions, &[&summary, &stacks]));
+        }
+        CpuState { summary, stacks }
+    }
+}
+
+/// The run's one connection to QEMU's human monitor, and where its replies
+/// stand. The monitor echoes each command, prints its reply, then a prompt,
+/// as it prints one when a connection opens, so a reply ends at its prompt.
+struct MonitorConn {
+    stream: UnixStream,
+    /// Prompts still to come: the banner's, and one per command sent.
+    owed: usize,
+    scan: PromptScan,
+    /// Longest one read of a reply waits.
+    read_slice: Duration,
+}
+
+/// Why a read of the monitor's owed replies stopped short of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Cut {
+    /// The monitor closed.
+    Closed,
+    /// The report's deadline passed.
+    Late,
+    /// The reply outgrew [`MONITOR_READ_MAX_BYTES`].
+    Full,
+    /// The read failed.
+    Failed,
+}
+
+impl fmt::Display for Cut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Closed => "the monitor closed",
+            Self::Late => "the monitor did not answer in time",
+            Self::Full => "the reply outgrew the bound",
+            Self::Failed => "the read failed",
+        })
+    }
+}
+
+impl MonitorConn {
+    fn connect(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            stream: UnixStream::connect(path)?,
+            owed: 1,
+            scan: PromptScan::default(),
+            read_slice: MONITOR_READ_SLICE,
+        })
+    }
+
+    /// Send an injection, then drop whatever replies have already arrived: an
+    /// injection's echo is never read for itself, and left to pile up it would
+    /// stand between the next reply that is and its reader.
+    fn send(&mut self, command: &str) -> io::Result<()> {
+        self.write(command)?;
+        self.discard_arrived();
+        Ok(())
+    }
+
+    fn write(&mut self, command: &str) -> io::Result<()> {
+        self.stream.write_all(format!("{command}\n").as_bytes())?;
+        self.stream.flush()?;
+        self.owed += 1;
+        Ok(())
+    }
+
+    /// Read without waiting until nothing more has arrived.
+    fn discard_arrived(&mut self) {
+        if self.stream.set_nonblocking(true).is_err() {
+            return;
+        }
         let mut chunk = [0u8; 4096];
-        let mut closed = false;
-        while Instant::now() < deadline && raw.len() < MONITOR_READ_MAX_BYTES {
-            // A closed socket and a read that times out both mean the reply
-            // has ended: the monitor sends nothing further until it is asked
-            // again, so neither is a failure.
-            match stream.read(&mut chunk) {
-                Ok(0) => {
-                    closed = true;
-                    break;
+        while self.owed > 0 {
+            match self.stream.read(&mut chunk) {
+                Ok(n) if n > 0 => {
+                    self.owed = self.owed.saturating_sub(self.scan.count(&chunk[..n]));
                 }
-                Ok(n) => raw.extend_from_slice(&chunk[..n]),
-                Err(_) => break,
+                _ => break,
             }
         }
-        if raw.is_empty() {
-            return Err(String::from(if closed {
-                "unavailable: the monitor closed\n"
-            } else {
-                "unavailable: the monitor answered nothing\n"
-            }));
+        let _ = self.stream.set_nonblocking(false);
+    }
+
+    /// Send `commands` and return each one's reply, in order: what it printed
+    /// after the echo of its own line. A reply cut short — by the deadline, the
+    /// bound, or the monitor going — is the last returned, and says so.
+    ///
+    /// # Errors
+    ///
+    /// Why there is no reply at all.
+    fn ask(&mut self, commands: &[&str], deadline: Instant) -> Result<Vec<String>, String> {
+        // Where the option is refused — macOS refuses it on a socket its peer
+        // has shut both ways — reads take only what has already arrived, so
+        // none can wait past the deadline.
+        let waits = self.stream.set_read_timeout(Some(self.read_slice)).is_ok();
+        self.stream
+            .set_nonblocking(!waits)
+            .map_err(|e| format!("unavailable: {e}\n"))?;
+        // What earlier commands still owe goes first, so what follows answers
+        // these alone.
+        self.read_owed(deadline, waits, None)
+            .map_err(|cut| format!("unavailable: {cut}\n"))?;
+        for command in commands {
+            self.write(command)
+                .map_err(|e| format!("unavailable: {e}\n"))?;
         }
-        Ok(String::from_utf8_lossy(&raw).into_owned())
+        let mut raw = Vec::new();
+        let read = self.read_owed(deadline, waits, Some(&mut raw));
+        if let (Err(cut), true) = (read, raw.is_empty()) {
+            return Err(format!("unavailable: {cut}\n"));
+        }
+        let text = String::from_utf8_lossy(&raw).replace('\r', "");
+        let mut parts: Vec<&str> = text.split(MONITOR_PROMPT).collect();
+        let unfinished = parts.pop().unwrap_or_default();
+        let mut replies: Vec<String> = parts.into_iter().map(printed).collect();
+        if let Err(cut) = read {
+            replies.push(format!(
+                "{}--- the reply was cut short: {cut} ---\n",
+                printed(unfinished)
+            ));
+        }
+        Ok(replies)
+    }
+
+    /// Read until every owed prompt has arrived, keeping what is read in
+    /// `keep`; each read waits a slice for more when `waits`, else none.
+    fn read_owed(
+        &mut self,
+        deadline: Instant,
+        waits: bool,
+        mut keep: Option<&mut Vec<u8>>,
+    ) -> Result<(), Cut> {
+        let mut chunk = [0u8; 4096];
+        while self.owed > 0 {
+            if Instant::now() >= deadline {
+                return Err(Cut::Late);
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(Cut::Closed),
+                Ok(n) => {
+                    let read = &chunk[..n];
+                    self.owed = self.owed.saturating_sub(self.scan.count(read));
+                    if let Some(keep) = keep.as_deref_mut() {
+                        keep.extend_from_slice(read);
+                        if self.owed > 0 && keep.len() >= MONITOR_READ_MAX_BYTES {
+                            return Err(Cut::Full);
+                        }
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    // Nothing arrived in the slice: the reply is still coming,
+                    // and may be waited for only where a read is bounded.
+                    if !waits {
+                        return Err(Cut::Late);
+                    }
+                }
+                Err(_) => return Err(Cut::Failed),
+            }
+        }
+        Ok(())
+    }
+
+    /// `command`'s reply, with `cpu` selected first when one is named.
+    fn ask_on(
+        &mut self,
+        cpu: Option<u32>,
+        command: &str,
+        deadline: Instant,
+    ) -> Result<String, String> {
+        let select = cpu.map(|cpu| format!("cpu {cpu}"));
+        let commands: Vec<&str> = select.iter().map(String::as_str).chain([command]).collect();
+        Ok(self.ask(&commands, deadline)?.concat())
+    }
+
+    /// Append the stack from `sp` up, read through `cpu`'s translation when
+    /// one is named, to `out` under `title`.
+    fn dump_stack(
+        &mut self,
+        out: &mut String,
+        cpu: Option<u32>,
+        sp: u64,
+        title: &str,
+        deadline: Instant,
+    ) {
+        let _ = writeln!(out, "--- {title} from {sp:#018x} ---");
+        let dump = format!("x /{STACK_DUMP_WORDS}gx {sp:#x}");
+        match self.ask_on(cpu, &dump, deadline) {
+            Ok(stack) | Err(stack) => out.push_str(&stack),
+        }
+    }
+
+    /// The cause the kernel's fatal latch kept, read off the stopped guest at
+    /// `addr`, through `cpu`'s translation when one is named.
+    fn kept_cause(&mut self, addr: u64, cpu: Option<u32>, deadline: Instant) -> String {
+        let read = format!("x /{KEPT_BYTES}xb {addr:#x}");
+        let verdict = match self.ask_on(cpu, &read, deadline) {
+            Ok(answer) => {
+                let bytes = memory_bytes(&answer);
+                if bytes.len() < KEPT_BYTES {
+                    String::from("unreadable")
+                } else {
+                    // The symbol was found through a view of little-endian
+                    // images only.
+                    decode_kept(&bytes, true)
+                        .map_or_else(|| String::from("none"), |cause| cause.to_string())
+                }
+            }
+            Err(reason) => String::from(reason.trim_end()),
+        };
+        format!("--- the cause the fatal latch kept: {verdict} ---\n")
+    }
+}
+
+/// What a command printed: its reply less the echo of its own line.
+fn printed(reply: &str) -> String {
+    reply
+        .split_once('\n')
+        .map_or("", |(_, printed)| printed)
+        .to_owned()
+}
+
+/// Counts the monitor's prompts in what it sends, one split across two reads
+/// included.
+#[derive(Debug, Default)]
+struct PromptScan {
+    /// Bytes of the prompt matched so far.
+    matched: usize,
+}
+
+impl PromptScan {
+    /// Prompts `bytes` completes.
+    fn count(&mut self, bytes: &[u8]) -> usize {
+        let prompt = MONITOR_PROMPT.as_bytes();
+        let mut completed = 0;
+        for &byte in bytes {
+            // No proper prefix of the prompt is also a suffix of it, so a
+            // mismatch can only restart the match at this byte.
+            self.matched = if prompt.get(self.matched) == Some(&byte) {
+                self.matched + 1
+            } else {
+                usize::from(prompt.first() == Some(&byte))
+            };
+            if self.matched == prompt.len() {
+                completed += 1;
+                self.matched = 0;
+            }
+        }
+        completed
     }
 }
 
@@ -4422,10 +4707,7 @@ mod tests {
         // an address past the last function's extent (a stack value, a small
         // constant) resolves to nothing rather than to whatever symbol
         // happens to precede it.
-        let functions = vec![
-            (0x1000_u64, 0x10_u64, String::from("first")),
-            (0x2000, 0x20, String::from("second")),
-        ];
+        let functions = [(0x1000_u64, 0x10_u64, "first"), (0x2000, 0x20, "second")];
         assert_eq!(
             resolve_addr(&functions, 0x1000).as_deref(),
             Some("first+0x0")
@@ -4458,12 +4740,43 @@ mod tests {
         );
     }
 
+    /// Best effort: the verdict belongs to the run, so an image that is not
+    /// ELF costs the legend and the kept cause, never the report.
     #[test]
-    fn a_hang_report_without_a_readable_kernel_yields_no_legend() {
-        // Best effort: the verdict belongs to the hang, so an ELF that
-        // cannot be read costs the legend, never the report.
-        assert!(
-            symbol_legend(Path::new("/nonexistent/kernel.elf"), "PC=0000000040444cd4").is_empty()
+    fn an_image_that_is_not_elf_yields_no_legend() {
+        assert_eq!(
+            KernelSymbols::read(b"not an elf image"),
+            KernelSymbols::default()
+        );
+        assert!(symbol_legend(&[], &["PC=0000000040444cd4"]).is_empty());
+    }
+
+    /// A report names code by sized functions only, sorted for the search,
+    /// and finds the kept cause by its own name and type, never a function's.
+    #[test]
+    fn a_report_keeps_the_symbols_it_can_use() {
+        let symbols = KernelSymbols::from_defined([
+            (STT_FUNC, 0x2000, 0x20, "second"),
+            (STT_FUNC, 0x1000, 0x10, "first"),
+            (STT_FUNC, 0x3000, 0, "unsized"),
+            (STT_FUNC, 0, 0x10, "undefined"),
+            (STT_FUNC, 0x5000, 0x10, KEPT_SYMBOL),
+            (STT_OBJECT, 0x4000, 0x20, "another_object"),
+            (STT_OBJECT, 0x6000, 0x68, KEPT_SYMBOL),
+            (STT_OBJECT, 0x7000, 0x68, KEPT_SYMBOL),
+        ]);
+        assert_eq!(
+            symbols.functions,
+            [
+                (0x1000, 0x10, "first"),
+                (0x2000, 0x20, "second"),
+                (0x5000, 0x10, KEPT_SYMBOL)
+            ]
+        );
+        assert_eq!(symbols.kept, Some(0x6000));
+        assert_eq!(
+            symbol_legend(&symbols.functions, &["pc 0000000000002004"]),
+            "--- kernel text addresses named above ---\n0x0000000000002004  second+0x4\n"
         );
     }
 
@@ -4483,13 +4796,18 @@ mod tests {
             Outcome::Timeout {
                 budget: Duration::from_secs(1),
                 serial: "pass log".into(),
-                cpu_state: String::new(),
+                cpu_state: CpuState::default(),
             },
             Outcome::RuntimeCeilingExceeded {
                 ceiling: Duration::from_secs(2),
                 silent_for: Duration::ZERO,
                 serial: "pass log".into(),
-                cpu_state: String::new(),
+                cpu_state: CpuState::default(),
+            },
+            Outcome::Fatal {
+                record: "[ERROR] id=4012 kernel stack corrupt cpu=0".into(),
+                serial: "pass log".into(),
+                cpu_state: CpuState::default(),
             },
         ] {
             assert_eq!(outcome.serial(), "pass log");
@@ -4667,7 +4985,7 @@ mod tests {
         let live_but_unfinished = outcome_from_done(
             DoneReason::CeilingExceeded {
                 silent_for: Duration::from_millis(20),
-                cpu_state: String::new(),
+                cpu_state: CpuState::default(),
                 script_pending: None,
             },
             &spec,
@@ -4692,7 +5010,7 @@ mod tests {
         let stalled = outcome_from_done(
             DoneReason::CeilingExceeded {
                 silent_for: Duration::from_secs(355),
-                cpu_state: String::new(),
+                cpu_state: CpuState::default(),
                 script_pending: None,
             },
             &spec,
@@ -4712,7 +5030,7 @@ mod tests {
         assert!(matches!(
             outcome_from_done(
                 DoneReason::TimedOut {
-                    cpu_state: String::new(),
+                    cpu_state: CpuState::default(),
                     script_pending: None,
                 },
                 &spec,
@@ -4790,7 +5108,7 @@ mod tests {
         let killed = outcome_from_done(
             DoneReason::CeilingExceeded {
                 silent_for: Duration::ZERO,
-                cpu_state: String::new(),
+                cpu_state: CpuState::default(),
                 script_pending: waiting.incomplete_reason(&steps),
             },
             &spec,
@@ -5280,9 +5598,9 @@ mod tests {
     }
 
     /// Serial output as the guest's pipe delivers it: in arbitrary pieces.
-    struct Pieces(Vec<&'static [u8]>);
+    struct Pieces<'a>(Vec<&'a [u8]>);
 
-    impl Read for Pieces {
+    impl Read for Pieces<'_> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if self.0.is_empty() {
                 return Ok(0);
@@ -5293,7 +5611,7 @@ mod tests {
         }
     }
 
-    fn watched(pieces: Vec<&'static [u8]>) -> FatalWatch {
+    fn watched(pieces: Vec<&[u8]>) -> FatalWatch {
         let watch = FatalWatch::new();
         drain_stream(
             Some(Pieces(pieces)),
@@ -5329,13 +5647,23 @@ mod tests {
 
     #[test]
     fn prose_and_other_records_are_not_fatal() {
+        assert!(FATAL_RECORDS.iter().all(|record| record.id.0 != 4013));
         let watch = watched(vec![
             b"==================== TAIRiX KERNEL FAULT ====================\n",
             b"[tairix-kernel] a line quoting id=4011 in prose\n",
-            b"[ERROR] id=4012 fatal-looking but another record\n",
+            b"[ERROR] id=4013 fatal-looking but another record\n",
             b"[ERROR] id=4011 with no line end yet",
         ]);
         assert_eq!(watch.record(), None);
+    }
+
+    #[test]
+    fn every_fatal_record_ends_a_run() {
+        for fatal in FATAL_RECORDS {
+            let line = format!("[ERROR] id={} {} cpu=0\n", fatal.id.0, fatal.message);
+            let watch = watched(vec![line.as_bytes()]);
+            assert_eq!(watch.record(), Some(line.trim_end()));
+        }
     }
 
     #[test]
@@ -5352,10 +5680,14 @@ mod tests {
     #[test]
     fn a_fatal_record_ends_the_run_as_a_fatal_outcome() {
         let spec = Spec::for_aarch64_kernel("/tmp/k");
+        let cpus = CpuState {
+            summary: String::from("CPU#0\n"),
+            stacks: String::from("--- CPU#0 stack from 0x0000000000001000 ---\n"),
+        };
         let outcome = outcome_from_done(
             DoneReason::Fatal {
                 record: String::from("[ERROR] id=4011 fatal kernel fault"),
-                cpu_state: String::from("CPU#0\n"),
+                cpu_state: cpus.clone(),
             },
             &spec,
             String::from("boot\n"),
@@ -5365,8 +5697,18 @@ mod tests {
         assert!(matches!(
             outcome,
             Outcome::Fatal { ref record, ref cpu_state, .. }
-                if record == "[ERROR] id=4011 fatal kernel fault" && cpu_state == "CPU#0\n"
+                if record == "[ERROR] id=4011 fatal kernel fault" && *cpu_state == cpus
         ));
+    }
+
+    /// The whole report is the summary, then the stacks.
+    #[test]
+    fn a_cpu_state_displays_its_summary_then_its_stacks() {
+        let cpus = CpuState {
+            summary: String::from("CPU#0\n"),
+            stacks: String::from("--- CPU#0 stack ---\n"),
+        };
+        assert_eq!(cpus.to_string(), "CPU#0\n--- CPU#0 stack ---\n");
     }
 
     #[test]
@@ -5482,14 +5824,307 @@ mod tests {
         let _ = std::fs::remove_file(&dump);
     }
 
-    /// A monitor that answered the hang diagnosis and hung up, as a QEMU that
-    /// is going away does, still has its answer read.
+    /// How a [`fake_monitor`] answers one command, after echoing it as QEMU
+    /// does.
+    enum Answer {
+        /// The reply, then a prompt.
+        Reply(String),
+        /// The start of a reply, then a pause longer than a read slice, then
+        /// the rest and a prompt.
+        Pause(String, String),
+        /// The start of a reply, then the monitor goes away.
+        HangUp(String),
+    }
+
+    /// A fake human monitor on `socket`, framed as QEMU's is: a banner and
+    /// prompt as the runner connects, then for each command its echo — with
+    /// the line redraw QEMU writes — and `answer`'s reply. Joins to the
+    /// commands it was sent.
+    fn fake_monitor(
+        socket: &ReservedSocket,
+        answer: impl Fn(&str) -> Answer + Send + 'static,
+    ) -> std::thread::JoinHandle<String> {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
+        std::thread::spawn(move || {
+            let (peer, _) = listener.accept().expect("the runner connected");
+            let mut out = peer.try_clone().expect("a second handle");
+            let mut say = |text: &str| out.write_all(text.replace('\n', "\r\n").as_bytes());
+            say(&format!("QEMU monitor\n{MONITOR_PROMPT}")).expect("the banner");
+            let mut asked = String::new();
+            for line in BufReader::new(peer).lines() {
+                let Ok(line) = line else { break };
+                asked.push_str(&line);
+                asked.push('\n');
+                let echo = format!("{line}\x1b[K\n");
+                let said = match answer(&line) {
+                    Answer::Reply(reply) => say(&format!("{echo}{reply}{MONITOR_PROMPT}")),
+                    Answer::Pause(start, rest) => say(&format!("{echo}{start}")).and_then(|()| {
+                        std::thread::sleep(MONITOR_READ_SLICE * 2);
+                        say(&format!("{rest}{MONITOR_PROMPT}"))
+                    }),
+                    Answer::HangUp(start) => {
+                        let _ = say(&format!("{echo}{start}"));
+                        break;
+                    }
+                };
+                if said.is_err() {
+                    break;
+                }
+            }
+            asked
+        })
+    }
+
+    /// A one-core guest stopped with its stack pointer at `RSP`.
+    fn one_core(command: &str) -> Answer {
+        Answer::Reply(String::from(match command {
+            "info cpus" => "* CPU #0: thread_id=1\n",
+            "info registers -a" => "CPU#0\nRSP=ffffffff811aed78\n",
+            dump if dump.starts_with("x /") => "ffffffff811aed78: 0xffffffff80100000\n",
+            _ => "",
+        }))
+    }
+
+    /// The CPU report a runner takes over `socket`, with no kernel image to
+    /// name code from.
+    fn report_over(socket: &ReservedSocket, fault: Option<FaultSite>) -> CpuState {
+        let mut state = InjectionState::new(&Spec::for_aarch64_kernel("/kernel"), None);
+        state.cpu_report(Some(socket), Path::new("/nonexistent/kernel"), fault)
+    }
+
+    /// Each command's reply is its own, its echo dropped: what the stop and
+    /// the register dump printed is the summary, and each core's stack, read
+    /// through that core, is the bulk.
     #[test]
-    fn a_monitor_that_hangs_up_after_answering_is_still_read() {
+    fn a_core_s_stack_is_read_after_its_registers() {
+        let socket = ReservedSocket::reserve("stackdiag").expect("a socket path");
+        let monitor = fake_monitor(&socket, one_core);
+        let report = report_over(&socket, None);
         assert_eq!(
-            hang_diagnosis(Some("CPU#0 pc=0x1000\n")),
-            "CPU#0 pc=0x1000\n"
+            monitor.join().expect("the monitor ends"),
+            format!(
+                "stop\ninfo cpus\ninfo registers -a\ncpu 0\nx /{STACK_DUMP_WORDS}gx 0xffffffff811aed78\n"
+            )
         );
+        assert_eq!(
+            report.summary,
+            "* CPU #0: thread_id=1\nCPU#0\nRSP=ffffffff811aed78\n"
+        );
+        assert_eq!(
+            report.stacks,
+            "--- CPU#0 stack from 0xffffffff811aed78 ---\nffffffff811aed78: 0xffffffff80100000\n"
+        );
+    }
+
+    /// The stack a fatal record names is read too, through the CPU the
+    /// record names, after every core's own.
+    #[test]
+    fn the_faulting_stack_is_read_through_the_cpu_the_record_names() {
+        let socket = ReservedSocket::reserve("faultdiag").expect("a socket path");
+        let monitor = fake_monitor(&socket, one_core);
+        let fault = FaultSite {
+            cpu: Some(1),
+            sp: 0x4000_0f00,
+        };
+        let report = report_over(&socket, Some(fault));
+        let asked = monitor.join().expect("the monitor ends");
+        assert!(
+            asked.ends_with(&format!("cpu 1\nx /{STACK_DUMP_WORDS}gx 0x40000f00\n")),
+            "{asked}"
+        );
+        assert!(
+            report.stacks.ends_with(
+                "--- the faulting stack from 0x0000000040000f00 ---\n\
+                 ffffffff811aed78: 0xffffffff80100000\n"
+            ),
+            "{}",
+            report.stacks
+        );
+    }
+
+    /// A reply that pauses for longer than a read slice is still read to its
+    /// prompt, not cut at the silence and handed to the next command.
+    #[test]
+    fn a_reply_that_pauses_is_read_to_its_prompt() {
+        let socket = ReservedSocket::reserve("pausediag").expect("a socket path");
+        let monitor = fake_monitor(&socket, |command| match command {
+            "info registers -a" => Answer::Pause(
+                String::from("CPU#0\n"),
+                String::from("RSP=ffffffff811aed78\n"),
+            ),
+            other => one_core(other),
+        });
+        let report = report_over(&socket, None);
+        monitor.join().expect("the monitor ends");
+        assert!(
+            report.summary.ends_with("CPU#0\nRSP=ffffffff811aed78\n"),
+            "{}",
+            report.summary
+        );
+        assert!(report
+            .stacks
+            .ends_with("ffffffff811aed78: 0xffffffff80100000\n"));
+    }
+
+    /// An injection's echo is dropped, so a later reply is the later
+    /// command's alone.
+    #[test]
+    fn an_injection_s_echo_never_reaches_a_later_reply() {
+        let socket = ReservedSocket::reserve("echodiag").expect("a socket path");
+        let monitor = fake_monitor(&socket, one_core);
+        let mut state = InjectionState::new(&Spec::for_aarch64_kernel("/kernel"), None);
+        for key in ["a", "b", "ret"] {
+            state
+                .send(Some(&socket), "key", &format!("sendkey {key}"))
+                .expect("the key is sent");
+        }
+        let report = state.cpu_report(Some(&socket), Path::new("/nonexistent/kernel"), None);
+        drop(state);
+        assert!(monitor
+            .join()
+            .expect("the monitor ends")
+            .starts_with("sendkey a\nsendkey b\nsendkey ret\nstop\n"));
+        assert_eq!(
+            report.summary,
+            "* CPU #0: thread_id=1\nCPU#0\nRSP=ffffffff811aed78\n"
+        );
+    }
+
+    /// A monitor that goes away mid-reply has what it said kept, marked as cut
+    /// short, and nothing later is read as though it answered.
+    #[test]
+    fn a_monitor_that_hangs_up_mid_reply_is_still_read() {
+        let socket = ReservedSocket::reserve("cutdiag").expect("a socket path");
+        let monitor = fake_monitor(&socket, |command| match command {
+            "info registers -a" => Answer::HangUp(String::from("CPU#0\nRSP=ffffffff811aed78\n")),
+            other => one_core(other),
+        });
+        let report = report_over(&socket, None);
+        monitor.join().expect("the monitor ends");
+        assert_eq!(
+            report.summary,
+            "* CPU #0: thread_id=1\nCPU#0\nRSP=ffffffff811aed78\n\
+             --- the reply was cut short: the monitor closed ---\n"
+        );
+        assert_eq!(
+            report.stacks,
+            "--- CPU#0 stack from 0xffffffff811aed78 ---\nunavailable: the monitor closed\n"
+        );
+    }
+
+    /// The cause the latch kept is decoded from the bytes the monitor reads at
+    /// its symbol, and a read too short to hold one says so.
+    #[test]
+    fn the_kept_cause_is_read_off_the_stopped_guest() {
+        const AT: u64 = 0x4012_3450;
+        let kept = tairix_arch_api::fatal::kept_image(&tairix_arch_api::fatal::Cause::Stack(
+            tairix_arch_api::fatal::StackCorruption {
+                check: tairix_arch_api::fatal::StackCheck::Guard,
+                task: 0x2a,
+                task_sp: 0x4410_7f00,
+                base: 0x4410_0000,
+                top: 0x4410_8000,
+            },
+        ));
+        // As QEMU prints an `x /Nxb`: eight bytes a line under each's address.
+        let mut dump = String::new();
+        for (row, at) in kept.chunks(8).zip((AT..).step_by(8)) {
+            let _ = write!(dump, "{at:016x}:");
+            for byte in row {
+                let _ = write!(dump, " 0x{byte:02x}");
+            }
+            dump.push('\n');
+        }
+        let socket = ReservedSocket::reserve("keptdiag").expect("a socket path");
+        let short = dump
+            .lines()
+            .next()
+            .map(|line| format!("{line}\n"))
+            .unwrap_or_default();
+        let monitor = fake_monitor(&socket, move |command| {
+            Answer::Reply(if command.ends_with("0x40123450") {
+                dump.clone()
+            } else if command.ends_with("0x40123458") {
+                short.clone()
+            } else {
+                String::new()
+            })
+        });
+        let mut state = InjectionState::new(&Spec::for_aarch64_kernel("/kernel"), None);
+        let deadline = Instant::now() + MONITOR_READ_BUDGET;
+        let conn = state.connected(Some(&socket)).expect("the runner connects");
+        assert_eq!(
+            conn.kept_cause(AT, Some(0), deadline),
+            "--- the cause the fatal latch kept: stack check=guard task=0x000000000000002a \
+             task_sp=0x0000000044107f00 stack_base=0x0000000044100000 \
+             stack_top=0x0000000044108000 ---\n"
+        );
+        assert_eq!(
+            conn.kept_cause(AT + 8, None, deadline),
+            "--- the cause the fatal latch kept: unreadable ---\n"
+        );
+        drop(state);
+        let asked = monitor.join().expect("the monitor ends");
+        assert_eq!(
+            asked,
+            format!("cpu 0\nx /{KEPT_BYTES}xb 0x40123450\nx /{KEPT_BYTES}xb 0x40123458\n")
+        );
+    }
+
+    /// A socket that refuses a read timeout is read without waiting, so a
+    /// monitor that never answers cannot hold a reply's read forever.
+    #[test]
+    fn a_read_that_cannot_be_bounded_never_waits() {
+        use std::os::unix::net::UnixListener;
+
+        let socket = ReservedSocket::reserve("unboundeddiag").expect("a socket path");
+        let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let monitor = std::thread::spawn(move || {
+            let (_peer, _) = listener.accept().expect("the runner connected");
+            let _ = held.recv();
+        });
+        let mut state = InjectionState::new(&Spec::for_aarch64_kernel("/kernel"), None);
+        let conn = state.connected(Some(&socket)).expect("the runner connects");
+        // Refused as macOS refuses it on a socket its peer has shut both ways.
+        conn.read_slice = Duration::ZERO;
+        let asked = Instant::now();
+        let deadline = asked + Duration::from_secs(60);
+        assert_eq!(
+            conn.ask(&["info registers -a"], deadline),
+            Err(String::from(
+                "unavailable: the monitor did not answer in time\n"
+            ))
+        );
+        // Reading what has arrived takes microseconds; only a read that waited
+        // for more would come near the deadline.
+        assert!(asked.elapsed() < Duration::from_secs(30));
+        drop(release);
+        monitor.join().expect("the monitor ends");
+    }
+
+    /// A prompt split between two reads is counted once, and a mismatch
+    /// restarts the match at the byte that broke it.
+    #[test]
+    fn a_prompt_split_across_reads_is_counted_once() {
+        let mut scan = PromptScan::default();
+        assert_eq!(scan.count(b"stop\r\n(qe"), 0);
+        assert_eq!(scan.count(b"mu) info cpus\r\n"), 1);
+        assert_eq!(scan.count(b"((qemu) (qemu"), 1);
+        assert_eq!(scan.count(b") "), 1);
+    }
+
+    /// The scan's restart rule holds only while no proper prefix of the prompt
+    /// is also a suffix of it.
+    #[test]
+    fn the_prompt_has_no_border() {
+        let prompt = MONITOR_PROMPT.as_bytes();
+        for len in 1..prompt.len() {
+            assert_ne!(prompt[..len], prompt[prompt.len() - len..], "{len}");
+        }
     }
 
     /// Each target's register dump names its stack pointer its own way, and
@@ -5515,77 +6150,52 @@ mod tests {
         );
     }
 
-    /// A fatal record names the stack the faulting code ran on, read beside
-    /// the halted core's; one that names none adds nothing.
+    /// A fatal record names the stack the failing code ran on and the CPU to
+    /// read it through; one that names no stack of its own adds nothing.
     #[test]
-    fn a_fatal_record_names_the_stack_the_fault_ran_on() {
+    fn a_fatal_record_names_the_stack_the_failure_ran_on() {
         assert_eq!(
-            fault_stack(
+            fault_site(
                 "[ERROR] id=4011 fatal kernel fault cpu=0 fault_pc=0x0000000000000003 \
                  fault_sp=0xffffffff811b9a88 root=0x0000000000102000"
             ),
-            Some(0xffff_ffff_811b_9a88)
+            Some(FaultSite {
+                cpu: Some(0),
+                sp: 0xffff_ffff_811b_9a88
+            })
         );
         assert_eq!(
-            fault_stack("[ERROR] id=4011 fatal kernel fault cpu=0 fault_sp=null"),
+            fault_site(
+                "[ERROR] id=4012 kernel stack corrupt cpu=2 check=guard task=0x000000000000002a \
+                 task_sp=0xffff800000107f00 stack_base=0xffff800000100000 \
+                 stack_top=0xffff800000108000"
+            ),
+            Some(FaultSite {
+                cpu: Some(2),
+                sp: 0xffff_8000_0010_7f00
+            })
+        );
+        // A processor the port could not number is no vCPU index.
+        assert_eq!(
+            fault_site("[ERROR] id=4011 fatal kernel fault hart=3 fault_sp=0xffffffc000123000"),
+            Some(FaultSite {
+                cpu: None,
+                sp: 0xffff_ffc0_0012_3000
+            })
+        );
+        assert_eq!(
+            fault_site("[ERROR] id=4011 fatal kernel fault cpu=0 fault_sp=null"),
             None
         );
-        assert_eq!(fault_stack("[ERROR] id=4010 kernel panic cpu=0"), None);
-    }
-
-    /// A register dump that names a core's stack pointer is followed by that
-    /// core's stack, so the report carries the return addresses of what
-    /// brought the core where it stopped.
-    #[test]
-    fn a_core_s_stack_is_read_after_its_registers() {
-        use std::io::{BufRead, BufReader};
-        use std::os::unix::net::UnixListener;
-
-        let socket = ReservedSocket::reserve("stackdiag").expect("a socket path");
-        let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
-        let spec = Spec::for_aarch64_kernel("/kernel");
-        let mut state = InjectionState::new(&spec, None);
-        let monitor = std::thread::spawn(move || {
-            let (peer, _) = listener.accept().expect("the runner connected");
-            let mut writer = peer.try_clone().expect("a second handle");
-            let mut asked = String::new();
-            for line in BufReader::new(peer).lines() {
-                let line = line.expect("a command");
-                asked.push_str(&line);
-                asked.push('\n');
-                match line.as_str() {
-                    "info registers -a" => writer
-                        .write_all(b"CPU#0\nRSP=ffffffff811aed78\n")
-                        .expect("the registers"),
-                    command if command.starts_with("x /") => {
-                        writer
-                            .write_all(b"ffffffff811aed78: 0xffffffff80100000\n")
-                            .expect("the stack");
-                        writer
-                            .shutdown(std::net::Shutdown::Write)
-                            .expect("hangs up");
-                    }
-                    _ => {}
-                }
-            }
-            asked
-        });
-        state.connected(Some(&socket)).expect("the runner connects");
-        let report = state.read_monitor_state(Some(&socket));
-        drop(state);
-        let asked = monitor.join().expect("the monitor ends");
+        assert_eq!(fault_site("[ERROR] id=4010 kernel panic cpu=0"), None);
+        // A bare record's first cause may have run on another CPU, which the
+        // record does not name.
         assert_eq!(
-            asked,
-            format!(
-                "info cpus\ninfo registers -a\ncpu 0\nx /{STACK_DUMP_WORDS}gx 0xffffffff811aed78\n"
-            )
-        );
-        assert!(
-            report.ends_with(
-                "--- CPU#0 stack from 0xffffffff811aed78 ---\n\
-                 ffffffff811aed78: 0xffffffff80100000\n"
+            fault_site(
+                "[ERROR] id=4010 kernel panic (nested — re-entered the fatal-report path) \
+                 cpu=0 file=null line=0 column=0 first=fault first_fault_sp=0xffffffff811b9a88"
             ),
-            "{report}"
+            None
         );
     }
 
@@ -5593,31 +6203,23 @@ mod tests {
     /// error a refused socket option would name.
     #[test]
     fn a_monitor_that_hangs_up_without_answering_is_reported_closed() {
-        assert_eq!(hang_diagnosis(None), "unavailable: the monitor closed\n");
-    }
-
-    /// The hang diagnosis read off a fake monitor that has written `answer`
-    /// and shut its side before the runner reads, checking both commands
-    /// reached it.
-    fn hang_diagnosis(answer: Option<&str>) -> String {
         use std::os::unix::net::UnixListener;
 
         let socket = ReservedSocket::reserve("hangdiag").expect("a socket path");
         let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
-        let spec = Spec::for_aarch64_kernel("/kernel");
-        let mut state = InjectionState::new(&spec, None);
-        state.connected(Some(&socket)).expect("the runner connects");
-        let (mut peer, _) = listener.accept().expect("the runner connected");
-        if let Some(answer) = answer {
-            peer.write_all(answer.as_bytes()).expect("the answer");
-        }
-        peer.shutdown(std::net::Shutdown::Write).expect("hangs up");
-        let report = state.read_monitor_state(Some(&socket));
-        drop(state);
-        let mut asked = String::new();
-        peer.read_to_string(&mut asked).expect("the commands");
-        assert_eq!(asked, "info cpus\ninfo registers -a\n");
-        report
+        let monitor = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("the runner connected");
+            peer.shutdown(std::net::Shutdown::Write).expect("hangs up");
+            let mut asked = String::new();
+            peer.read_to_string(&mut asked).expect("the commands");
+            asked
+        });
+        let report = report_over(&socket, None);
+        assert_eq!(monitor.join().expect("the monitor ends"), "");
+        assert_eq!(
+            report,
+            CpuState::unavailable(String::from("unavailable: the monitor closed\n"))
+        );
     }
 
     /// A key and a click read their own flag before the dump's, so the drain

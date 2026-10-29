@@ -817,13 +817,13 @@ pub fn bring_up_bsp(
 /// `percpu::init` already routed every exception to an entry that reports
 /// it and `#PF` to the resumable one. The fault-windowed user copy is armed
 /// beside that entry, because its kernel-fault window check is what redirects
-/// an in-window fault to the copy's fix-up. The fatal handler slot is filled
-/// last; it is set-once and never overrides an occupant, so a QEMU vertical
+/// an in-window fault to the copy's fix-up. The fatal report slots are filled
+/// last; each is set-once and never overrides an occupant, so a QEMU vertical
 /// that observes its own deliberate faults publishes ahead of `boot` and keeps
-/// it.
+/// its handler.
 fn install_fault_entries() {
     tairix_arch_x86_64::uaccess::install();
-    let _ = crate::x86_64::panic_ctx::install_kernel_fault_handler();
+    let _ = crate::x86_64::panic_ctx::install_fatal_reports();
 }
 
 fn try_boot(

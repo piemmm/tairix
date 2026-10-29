@@ -1,6 +1,7 @@
 //! x86_64 half of the fatal-report bridge: the port's four values plus
 //! its two entry points ([`handle_panic_via_kernel_core`] for a `panic!`,
-//! [`install_kernel_fault_handler`] for a fatal supervisor exception).
+//! [`install_fatal_reports`] for a fatal supervisor exception or a corrupt
+//! kernel stack).
 //!
 //! # Why this lives in the library half
 //!
@@ -22,12 +23,12 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_arch_api::backtrace::CpuStateCapture;
-use tairix_arch_api::fatal::KernelFault;
-use tairix_arch_api::fault::{set_fault_handler, SetFaultHandlerError};
+use tairix_arch_api::fatal::{KernelFault, StackCorruption};
+use tairix_arch_api::fault::SetFaultHandlerError;
 use tairix_arch_x86_64::backtrace::Backtracer;
 use tairix_log::Sink;
 
-use crate::fatal_bridge::{report_kernel_fault, report_panic, FatalReport};
+use crate::fatal_bridge::{report_panic, FatalReport};
 use crate::x86_64::arch_wrapper::BinArch;
 
 /// The x86_64 post-mortem CPU-state handle the bridge attaches so the
@@ -95,6 +96,10 @@ impl FatalReport for X86Fatal {
     fn report_fault_before_init(fault: &KernelFault) -> ! {
         tairix_arch_x86_64::panic::report_unclaimed_fault(fault)
     }
+
+    fn report_stack_corruption_before_init(corruption: &StackCorruption) -> ! {
+        tairix_arch_x86_64::panic::report_stack_corruption(corruption)
+    }
 }
 
 /// Shared `#[panic_handler]` body used by every bin crate.
@@ -102,18 +107,17 @@ pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
     report_panic::<X86Fatal>(info)
 }
 
-/// Install the production fatal-fault handler on this port.
+/// Install the production fatal reports on this port.
 ///
-/// Called at `boot` entry, before the IDT can deliver anything, so every
-/// supervisor exception gets the kernel's post-mortem rather than the port's
-/// own report, which carries no register snapshot or backtrace.
+/// Called at `boot` entry, before the IDT can deliver anything or a task is
+/// dispatched, so a supervisor exception or a corrupt kernel stack gets the
+/// kernel's post-mortem rather than the port's own report, which carries no
+/// register snapshot or backtrace. Only a QEMU vertical that deliberately
+/// observes its own faults installs ahead of boot.
 ///
 /// # Errors
 ///
-/// [`SetFaultHandlerError::AlreadyInstalled`] when something published a
-/// handler first. The slot is set-once by design, so the existing handler
-/// keeps the machine's fatal policy; only a QEMU vertical that deliberately
-/// observes its own faults installs ahead of boot.
-pub fn install_kernel_fault_handler() -> Result<(), SetFaultHandlerError> {
-    set_fault_handler(report_kernel_fault::<X86Fatal>)
+/// As [`crate::fatal_bridge::install_fatal_reports`].
+pub fn install_fatal_reports() -> Result<(), SetFaultHandlerError> {
+    crate::fatal_bridge::install_fatal_reports::<X86Fatal>()
 }

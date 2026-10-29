@@ -160,6 +160,15 @@ pub struct Field<'a> {
     pub value: FieldValue<'a>,
 }
 
+impl Field<'_> {
+    /// The filler of a fixed-size field list's slots not yet set, which a
+    /// record never carries.
+    pub const UNSET: Self = Self {
+        key: "",
+        value: FieldValue::Null,
+    };
+}
+
 /// Structured log record.
 ///
 /// All references are borrowed for the lifetime of the call; sinks must

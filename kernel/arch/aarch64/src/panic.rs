@@ -16,7 +16,9 @@
 use core::fmt;
 use core::panic::{Location, PanicInfo};
 
-use tairix_arch_api::fatal::{self, Cause, Entry, KernelFault, Processor, Reporter};
+use tairix_arch_api::fatal::{
+    self, Cause, Entry, KernelFault, Processor, Reporter, StackCorruption,
+};
 use tairix_arch_api::CpuStateCapture as _;
 
 use crate::backtrace::Backtracer;
@@ -65,6 +67,16 @@ pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
         format_args!("{}", crate::fault::Decoded(fault)),
         || Backtracer::new().boot_stack_verdict(fault.sp),
     );
+    halt_current_cpu()
+}
+
+/// Report a task's corrupt kernel stack and park the CPU.
+pub fn report_stack_corruption(corruption: &StackCorruption) -> ! {
+    let entry = enter(&Cause::Stack(*corruption));
+    REPORTER.stack_corruption(&mut ConsoleWriter, entry, processor(), corruption, || {
+        let bt = Backtracer::new();
+        bt.boot_stack_verdict(Some(bt.capture().sp))
+    });
     halt_current_cpu()
 }
 

@@ -53,7 +53,8 @@ path = "src/lib.rs"
 # region in memory the test owns: a port's own can only be described by
 # minting a pointer from an address, which no interpreter can follow.
 # `fatal::reset_for_tests` returns the fatal latch to its boot state between
-# the reports a test drives. The feature must not be enabled in production
+# the reports a test drives, and `fatal::kept_image` is the memory a debugger
+# reads once it has kept a cause. The feature must not be enabled in production
 # kernel builds — a port always reserves its regions, and a machine dies once.
 host-tests = []
 

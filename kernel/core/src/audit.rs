@@ -26,6 +26,7 @@
 //! | 4006 | Info/Warn | `KERNEL_HEAP_GROWTH`      | log    | Whether the heap grows past its bootstrap arena (`growth`), with the arena's `bootstrap_bytes` and boot's `peak_bytes` of it; `failed` emits at `Warn`. |
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
 //! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, `fault_pc`, and `fault_sp` fields name the port's exception syndrome, the faulting address, the faulting instruction, and the kernel stack it ran on, each `null` where the CPU gave none; the register and `frame_N` blocks are the panic dump's. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
+//! | 4012 | Error | `KERNEL_STACK_CORRUPT`        | audit  | A task's kernel stack was found corrupt as it switched back, and the kernel halted. `check` is `guard` (its guard canary disturbed) or `suspension` (its saved stack pointer off the stack); `task`, `task_sp`, `stack_base`, and `stack_top` name the task, where it was suspended, and the stack's bounds; the register and `frame_N` blocks are the dispatcher's. A nested bare record names its own cause and, under `first`, the one the first report was entered for. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
@@ -126,6 +127,10 @@ pub enum AuditEvent {
     /// location, a fault names the hardware syndrome, the faulting address,
     /// and the faulting instruction. Neither is fabricated for the other.
     KernelFault,
+    /// A task's kernel stack was found corrupt as the task switched back —
+    /// its guard canary disturbed, or its saved stack pointer off the stack —
+    /// so the kernel halts rather than run on memory that may be damaged.
+    KernelStackCorrupt,
     /// A syscall handler's backing subsystem is intentionally not yet
     /// wired in.
     ///
@@ -883,6 +888,7 @@ impl AuditEvent {
             Self::KernelHeapGrowth => 4006,
             Self::Panic => fatal::KERNEL_PANIC.id.0,
             Self::KernelFault => fatal::KERNEL_FAULT.id.0,
+            Self::KernelStackCorrupt => fatal::KERNEL_STACK_CORRUPT.id.0,
             Self::SyscallFeatureUnavailable => 4020,
             Self::SyscallNoCallerContext => 4021,
             Self::ProcessSpawned => 4030,
@@ -988,6 +994,7 @@ impl AuditEvent {
             Self::KernelHeapGrowth => "kernel heap growth decided",
             Self::Panic => fatal::KERNEL_PANIC.message,
             Self::KernelFault => fatal::KERNEL_FAULT.message,
+            Self::KernelStackCorrupt => fatal::KERNEL_STACK_CORRUPT.message,
             Self::SyscallFeatureUnavailable => "syscall feature unavailable",
             Self::SyscallNoCallerContext => "syscall has no caller context",
             Self::ProcessSpawned => "process spawned",
@@ -1130,6 +1137,7 @@ mod tests {
         AuditEvent::KernelHeapGrowth,
         AuditEvent::Panic,
         AuditEvent::KernelFault,
+        AuditEvent::KernelStackCorrupt,
         AuditEvent::SyscallFeatureUnavailable,
         AuditEvent::SyscallNoCallerContext,
         AuditEvent::ProcessSpawned,
@@ -1224,7 +1232,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 96, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 97, "a new event belongs in `ALL`");
     }
 
     #[test]

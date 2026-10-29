@@ -1,12 +1,12 @@
-//! The fatal report: the two records a dying kernel ends with, the latch
-//! every report path enters first, and the one writer the ports share for the
+//! The fatal report: the records a dying kernel ends with, the latch every
+//! report path enters first, and the one writer the ports share for the
 //! reports their own paths make.
 //!
 //! Every fatal report — the kernel's full post-mortem (`kernel/core`) and a
 //! port's own report below — ends with exactly one record in the diagnostic
-//! line shape (`lib/log`): [`KERNEL_PANIC`] or [`KERNEL_FAULT`]. Whatever reads
-//! the console, a person or the QEMU harness, therefore has one line to find
-//! and knows nothing of the report follows it.
+//! line shape (`lib/log`), one of [`FATAL_RECORDS`]. Whatever reads the
+//! console, a person or the QEMU harness, therefore has one line to find and
+//! knows nothing of the report follows it.
 //!
 //! A machine dies once. Every report path takes an [`Entry`] from [`enter`]
 //! before it reads anything: the first writes the full report, the next one
@@ -24,6 +24,7 @@
 //! kernel's post-mortem to add.
 
 use core::fmt::{self, Write};
+use core::mem::{offset_of, size_of};
 use core::panic::Location;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -31,7 +32,7 @@ use tairix_log::{write_diag_line, Event, EventId, Field, FieldValue, Level};
 
 use crate::backtrace::BootStackGuard;
 
-/// One of the two records a fatal report ends with.
+/// One of the records a fatal report ends with.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FatalRecord {
     /// The record's stable event id.
@@ -56,6 +57,16 @@ pub const KERNEL_FAULT: FatalRecord = FatalRecord {
     message: "fatal kernel fault",
     nested: "fatal kernel fault (nested — re-entered the fatal-report path)",
 };
+
+/// The record a task's corrupt kernel stack ends with.
+pub const KERNEL_STACK_CORRUPT: FatalRecord = FatalRecord {
+    id: EventId(4012),
+    message: "kernel stack corrupt",
+    nested: "kernel stack corrupt (nested — re-entered the fatal-report path)",
+};
+
+/// Every record a fatal report can end with.
+pub const FATAL_RECORDS: [FatalRecord; 3] = [KERNEL_PANIC, KERNEL_FAULT, KERNEL_STACK_CORRUPT];
 
 /// What a fatal report may write, decided before it reads anything.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -96,6 +107,8 @@ pub enum Cause {
     },
     /// A fatal exception.
     Fault(KernelFault),
+    /// A task's kernel stack found corrupt.
+    Stack(StackCorruption),
 }
 
 impl Cause {
@@ -118,6 +131,41 @@ impl Cause {
         match self {
             Self::Panic { .. } => "panic",
             Self::Fault(_) => "fault",
+            Self::Stack(_) => "stack",
+        }
+    }
+}
+
+impl fmt::Display for Cause {
+    /// One line: the kind, then its fields under the keys a record uses.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.kind())?;
+        match self {
+            Self::Panic {
+                file,
+                len,
+                line,
+                column,
+            } => {
+                let file = file
+                    .get(..usize::from(*len))
+                    .and_then(|tail| core::str::from_utf8(tail).ok())
+                    .filter(|tail| !tail.is_empty())
+                    .unwrap_or("null");
+                let [file_key, line_key, column_key] = PANIC_KEYS;
+                write!(
+                    f,
+                    " {file_key}={file} {line_key}={line} {column_key}={column}"
+                )
+            }
+            Self::Fault(fault) => write!(f, " {fault}"),
+            Self::Stack(stack) => {
+                write!(f, " {}={}", OWN_KEYS.check, stack.check.label())?;
+                for (key, word) in OWN_KEYS.stack.iter().zip(stack.words()) {
+                    write!(f, " {key}={word:#018x}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -138,27 +186,149 @@ fn file_tail(path: &str) -> ([u8; FILE_TAIL], u8) {
 
 /// The first entry's cause, published as that entry is taken.
 ///
-/// Written only by the one entry the latch grants the full report, its words
-/// before its kind, and read only after the kind, so a reader never sees a
-/// half-written cause.
+/// Written by the entry the latch grants the full report, its words before
+/// its kind, and read only after the kind, so a reader never sees a cause half
+/// written. Two processors racing through [`enter_without_atomics`] can both be
+/// granted it and interleave their stores, so it is exact only while one
+/// processor reports, as that entry is.
+///
+/// Laid out in C order under [`KEPT_SYMBOL`], so a debugger can read it off a
+/// stopped machine whose report never reached the console ([`decode_kept`]).
+#[repr(C)]
 struct Kept {
     kind: AtomicU8,
-    words: [AtomicU64; FAULT_WORDS],
     /// Which of a fault's words the CPU gave, a bit each.
     given: AtomicU8,
+    /// Zero, filling what would be padding, so every byte read is defined.
+    filler: [AtomicU8; KEPT_FILLER],
+    words: [AtomicU64; CAUSE_WORDS],
     file: [AtomicU8; FILE_TAIL],
 }
+
+/// The bytes between the two flag bytes and the word-aligned words.
+const KEPT_FILLER: usize = size_of::<u64>() - 2;
+
+const _: () =
+    assert!(size_of::<Kept>() == size_of::<u64>() + CAUSE_WORDS * size_of::<u64>() + FILE_TAIL);
 
 const KEPT_NONE: u8 = 0;
 const KEPT_PANIC: u8 = 1;
 const KEPT_FAULT: u8 = 2;
+const KEPT_STACK_GUARD: u8 = 3;
+const KEPT_STACK_SUSPENSION: u8 = 4;
+
+/// The symbol the kept cause is exported under, once for both the attribute
+/// and [`KEPT_SYMBOL`].
+macro_rules! kept_symbol {
+    () => {
+        "tairix_fatal_first_cause"
+    };
+}
+
+/// The symbol a kernel image exports the kept cause under.
+pub const KEPT_SYMBOL: &str = kept_symbol!();
+
+/// Bytes of the kept cause at [`KEPT_SYMBOL`], a whole number of words.
+pub const KEPT_BYTES: usize = size_of::<Kept>();
+
+const _: () = assert!(KEPT_BYTES.is_multiple_of(size_of::<u64>()));
+
+/// A kept cause as plain values, from the latch's atomics or from the bytes a
+/// stopped machine holds, so the two are decoded alike.
+struct KeptImage {
+    kind: u8,
+    given: u8,
+    words: [u64; CAUSE_WORDS],
+    file: [u8; FILE_TAIL],
+}
+
+impl KeptImage {
+    fn cause(&self) -> Option<Cause> {
+        let word = |at: usize| self.words[at];
+        match self.kind {
+            KEPT_PANIC => Some(Cause::Panic {
+                file: self.file,
+                len: u8::try_from(word(2)).unwrap_or(0),
+                line: u32::try_from(word(0)).unwrap_or(0),
+                column: u32::try_from(word(1)).unwrap_or(0),
+            }),
+            KEPT_FAULT => {
+                let at = |bit: usize| (self.given & (1 << bit) != 0).then(|| word(bit));
+                Some(Cause::Fault(KernelFault {
+                    syndrome: at(0),
+                    address: at(1),
+                    pc: word(2),
+                    sp: at(3),
+                }))
+            }
+            kind @ (KEPT_STACK_GUARD | KEPT_STACK_SUSPENSION) => {
+                Some(Cause::Stack(StackCorruption {
+                    check: if kind == KEPT_STACK_GUARD {
+                        StackCheck::Guard
+                    } else {
+                        StackCheck::Suspension
+                    },
+                    task: word(0),
+                    task_sp: word(1),
+                    base: word(2),
+                    top: word(3),
+                }))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The cause a stopped machine's latch kept, from the [`KEPT_BYTES`] read at
+/// its [`KEPT_SYMBOL`] in memory order, its words in the byte order the image
+/// was built for. `None` for too few bytes, or nothing kept.
+#[must_use]
+pub fn decode_kept(bytes: &[u8], little_endian: bool) -> Option<Cause> {
+    let bytes = bytes.get(..KEPT_BYTES)?;
+    let byte = |at: usize| bytes.get(at).copied().unwrap_or(0);
+    let words_at = offset_of!(Kept, words);
+    let file_at = offset_of!(Kept, file);
+    KeptImage {
+        kind: byte(offset_of!(Kept, kind)),
+        given: byte(offset_of!(Kept, given)),
+        words: core::array::from_fn(|at| {
+            let start = words_at + at * size_of::<u64>();
+            let word: [u8; 8] = core::array::from_fn(|i| byte(start + i));
+            if little_endian {
+                u64::from_le_bytes(word)
+            } else {
+                u64::from_be_bytes(word)
+            }
+        }),
+        file: core::array::from_fn(|at| byte(file_at + at)),
+    }
+    .cause()
+}
+
+/// The bytes a machine holds at [`KEPT_SYMBOL`] once its latch has kept
+/// `cause`, in this machine's byte order.
+#[cfg(any(test, feature = "host-tests"))]
+#[must_use]
+pub fn kept_image(cause: &Cause) -> [u8; KEPT_BYTES] {
+    let kept = Kept::new();
+    kept.keep(cause);
+    // SAFETY: `Kept` is `repr(C)` with no padding, so all `KEPT_BYTES` of it
+    // are initialised integer bytes, and nothing stores to `kept` while the
+    // borrowed slice lives.
+    let bytes =
+        unsafe { core::slice::from_raw_parts(core::ptr::from_ref(&kept).cast::<u8>(), KEPT_BYTES) };
+    let mut image = [0; KEPT_BYTES];
+    image.copy_from_slice(bytes);
+    image
+}
 
 impl Kept {
     const fn new() -> Self {
         Self {
             kind: AtomicU8::new(KEPT_NONE),
-            words: [const { AtomicU64::new(0) }; FAULT_WORDS],
             given: AtomicU8::new(0),
+            filler: [const { AtomicU8::new(0) }; KEPT_FILLER],
+            words: [const { AtomicU64::new(0) }; CAUSE_WORDS],
             file: [const { AtomicU8::new(0) }; FILE_TAIL],
         }
     }
@@ -190,37 +360,28 @@ impl Kept {
                 self.given.store(given, Ordering::Relaxed);
                 KEPT_FAULT
             }
+            Cause::Stack(stack) => {
+                for (slot, word) in self.words.iter().zip(stack.words()) {
+                    slot.store(word, Ordering::Relaxed);
+                }
+                match stack.check {
+                    StackCheck::Guard => KEPT_STACK_GUARD,
+                    StackCheck::Suspension => KEPT_STACK_SUSPENSION,
+                }
+            }
         };
         self.kind.store(kind, Ordering::Release);
     }
 
     fn kept(&self) -> Option<Cause> {
-        let word = |at: usize| self.words[at].load(Ordering::Relaxed);
-        match self.kind.load(Ordering::Acquire) {
-            KEPT_PANIC => {
-                let mut file = [0; FILE_TAIL];
-                for (byte, slot) in file.iter_mut().zip(&self.file) {
-                    *byte = slot.load(Ordering::Relaxed);
-                }
-                Some(Cause::Panic {
-                    file,
-                    len: u8::try_from(word(2)).unwrap_or(0),
-                    line: u32::try_from(word(0)).unwrap_or(0),
-                    column: u32::try_from(word(1)).unwrap_or(0),
-                })
-            }
-            KEPT_FAULT => {
-                let given = self.given.load(Ordering::Relaxed);
-                let at = |bit: usize| (given & (1 << bit) != 0).then(|| word(bit));
-                Some(Cause::Fault(KernelFault {
-                    syndrome: at(0),
-                    address: at(1),
-                    pc: word(2),
-                    sp: at(3),
-                }))
-            }
-            _ => None,
+        let kind = self.kind.load(Ordering::Acquire);
+        KeptImage {
+            kind,
+            given: self.given.load(Ordering::Relaxed),
+            words: core::array::from_fn(|at| self.words[at].load(Ordering::Relaxed)),
+            file: core::array::from_fn(|at| self.file[at].load(Ordering::Relaxed)),
         }
+        .cause()
     }
 }
 
@@ -230,6 +391,7 @@ impl Kept {
 static ENTRIES: AtomicU32 = AtomicU32::new(0);
 
 /// What the boot's first fatal entry was taken for.
+#[export_name = kept_symbol!()]
 static FIRST: Kept = Kept::new();
 
 /// What the entry taken after `taken` others may write, keeping `cause` when
@@ -331,38 +493,142 @@ pub struct KernelFault {
 /// the faulting PC and the interrupted kernel stack pointer.
 pub const FAULT_WORDS: usize = 4;
 
+/// What the dispatcher's kernel-stack check found.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StackCheck {
+    /// The canary below the usable stack is disturbed: the task ran off its
+    /// bottom.
+    Guard,
+    /// The task's saved stack pointer lies off its own stack.
+    Suspension,
+}
+
+impl StackCheck {
+    /// The record's one-word name for the check.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Guard => "guard",
+            Self::Suspension => "suspension",
+        }
+    }
+}
+
+/// A task's kernel stack the dispatcher found corrupt. Memory beside it may
+/// already be damaged, so the kernel stops rather than go on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct StackCorruption {
+    /// What the check found.
+    pub check: StackCheck,
+    /// The task whose stack it is.
+    pub task: u64,
+    /// The task's saved kernel stack pointer.
+    pub task_sp: u64,
+    /// The usable stack's lowest byte.
+    pub base: u64,
+    /// One past the usable stack's highest byte.
+    pub top: u64,
+}
+
+/// Words a [`StackCorruption`] record carries: the task, its saved stack
+/// pointer, and the usable stack's bounds.
+const STACK_WORDS: usize = 4;
+
+/// Fields a [`StackCorruption`] record carries: the check, then its words.
+pub const STACK_FIELDS: usize = 1 + STACK_WORDS;
+
+/// Most fields one cause carries.
+pub const MAX_CAUSE_FIELDS: usize = max(max(PANIC_KEYS.len(), FAULT_WORDS), STACK_FIELDS);
+
+/// Most words one cause spells in hex.
+const CAUSE_WORDS: usize = max(FAULT_WORDS, STACK_WORDS);
+
+const fn max(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 /// The keys a fault's words are recorded under, in [`KernelFault`]'s order.
 pub const FAULT_KEYS: [&str; FAULT_WORDS] = ["syndrome", "fault_addr", "fault_pc", "fault_sp"];
 
 /// The keys a panic's location is recorded under: its file, line and column.
 pub const PANIC_KEYS: [&str; 3] = ["file", "line", "column"];
 
-/// The keys a bare record names the first entry's cause under.
-const FIRST_FAULT_KEYS: [&str; FAULT_WORDS] = [
-    "first_syndrome",
-    "first_fault_addr",
-    "first_fault_pc",
-    "first_fault_sp",
-];
-const FIRST_PANIC_KEYS: [&str; 3] = ["first_file", "first_line", "first_column"];
+/// The keys one cause's fields are recorded under.
+struct CauseKeys {
+    fault: [&'static str; FAULT_WORDS],
+    panic: [&'static str; 3],
+    check: &'static str,
+    stack: [&'static str; STACK_WORDS],
+}
 
-/// Stack storage [`KernelFault::fields`] spells its words into, so a fatal
-/// report allocates nothing.
+/// A record's own cause.
+const OWN_KEYS: CauseKeys = CauseKeys {
+    fault: FAULT_KEYS,
+    panic: PANIC_KEYS,
+    check: "check",
+    stack: ["task", "task_sp", "stack_base", "stack_top"],
+};
+
+/// The first entry's cause, as a bare record names it.
+const FIRST_KEYS: CauseKeys = CauseKeys {
+    fault: [
+        "first_syndrome",
+        "first_fault_addr",
+        "first_fault_pc",
+        "first_fault_sp",
+    ],
+    panic: ["first_file", "first_line", "first_column"],
+    check: "first_check",
+    stack: [
+        "first_task",
+        "first_task_sp",
+        "first_stack_base",
+        "first_stack_top",
+    ],
+};
+
+/// Stack storage a cause's words are spelled into, so a fatal report
+/// allocates nothing.
 #[derive(Debug)]
-pub struct FaultWords([[u8; HEX_WORD_LEN]; FAULT_WORDS]);
+pub struct CauseWords([[u8; HEX_WORD_LEN]; CAUSE_WORDS]);
 
-impl FaultWords {
+impl CauseWords {
     /// Storage for one record's words.
     #[must_use]
     pub const fn new() -> Self {
-        Self([[0; HEX_WORD_LEN]; FAULT_WORDS])
+        Self([[0; HEX_WORD_LEN]; CAUSE_WORDS])
     }
 }
 
-impl Default for FaultWords {
+impl Default for CauseWords {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// `words` under `keys`, spelled into `bufs`: a word not given is `null`,
+/// never a placeholder that reads as a value.
+fn hex_fields<'b, const N: usize>(
+    keys: &[&'static str; N],
+    words: [Option<u64>; N],
+    bufs: &'b mut CauseWords,
+) -> [Field<'b>; N] {
+    const { assert!(N <= CAUSE_WORDS) };
+    let mut fields = [Field::UNSET; N];
+    let named = keys.iter().copied().zip(words);
+    for ((field, (key, word)), buf) in fields.iter_mut().zip(named).zip(&mut bufs.0) {
+        *field = Field {
+            key,
+            value: word.map_or(FieldValue::Null, |value| {
+                FieldValue::Str(format_hex_word(value, buf))
+            }),
+        };
+    }
+    fields
 }
 
 impl KernelFault {
@@ -374,26 +640,39 @@ impl KernelFault {
     /// The record's cause fields, spelled into `words`: a word the CPU did not
     /// give is `null`, never a placeholder that reads as a value.
     #[must_use]
-    pub fn fields<'b>(&self, words: &'b mut FaultWords) -> [Field<'b>; FAULT_WORDS] {
-        self.fields_under(&FAULT_KEYS, words)
+    pub fn fields<'b>(&self, words: &'b mut CauseWords) -> [Field<'b>; FAULT_WORDS] {
+        hex_fields(&FAULT_KEYS, self.words(), words)
+    }
+}
+
+impl StackCorruption {
+    /// The four words in the order the record names them.
+    const fn words(&self) -> [u64; STACK_WORDS] {
+        [self.task, self.task_sp, self.base, self.top]
+    }
+
+    /// The record's cause fields, spelled into `words`.
+    #[must_use]
+    pub fn fields<'b>(&self, words: &'b mut CauseWords) -> [Field<'b>; STACK_FIELDS] {
+        self.fields_under(&OWN_KEYS, words)
     }
 
     fn fields_under<'b>(
         &self,
-        keys: &[&'static str; FAULT_WORDS],
-        words: &'b mut FaultWords,
-    ) -> [Field<'b>; FAULT_WORDS] {
-        let mut fields = [NULL_FIELD; FAULT_WORDS];
-        let named = keys.iter().copied().zip(self.words());
-        for ((field, (key, word)), buf) in fields.iter_mut().zip(named).zip(&mut words.0) {
-            *field = Field {
-                key,
-                value: word.map_or(FieldValue::Null, |value| {
-                    FieldValue::Str(format_hex_word(value, buf))
-                }),
-            };
-        }
-        fields
+        keys: &CauseKeys,
+        words: &'b mut CauseWords,
+    ) -> [Field<'b>; STACK_FIELDS] {
+        let [task, task_sp, base, top] = hex_fields(&keys.stack, self.words().map(Some), words);
+        [
+            Field {
+                key: keys.check,
+                value: FieldValue::Str(self.check.label()),
+            },
+            task,
+            task_sp,
+            base,
+            top,
+        ]
     }
 }
 
@@ -412,12 +691,6 @@ impl fmt::Display for KernelFault {
         Ok(())
     }
 }
-
-/// An unset slot in a field list under construction.
-const NULL_FIELD: Field<'static> = Field {
-    key: "",
-    value: FieldValue::Null,
-};
 
 /// The processor a report names.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -554,8 +827,52 @@ impl Reporter {
             ),
             guard,
         );
-        let mut words = FaultWords::new();
+        let mut words = CauseWords::new();
         record(w, KERNEL_FAULT, on, &fault.fields(&mut words), guard);
+    }
+
+    /// Write the report of a task's corrupt kernel stack found on `on`,
+    /// ending with its [`KERNEL_STACK_CORRUPT`] record, or the bare record or
+    /// nothing as `entry` allows. `guard` is asked only for the full report.
+    pub fn stack_corruption(
+        self,
+        w: &mut dyn Write,
+        entry: Entry,
+        on: Processor,
+        corruption: &StackCorruption,
+        guard: impl FnOnce() -> Option<BootStackGuard>,
+    ) {
+        if entry != Entry::Report {
+            nested(
+                w,
+                entry,
+                KERNEL_STACK_CORRUPT,
+                on,
+                &Cause::Stack(*corruption),
+            );
+            return;
+        }
+        let guard = guard();
+        banner(
+            w,
+            "STACK CORRUPTION",
+            on,
+            format_args!(
+                "{} task {:#x} failed its kernel-stack {} check on {on}",
+                self.port,
+                corruption.task,
+                corruption.check.label()
+            ),
+            guard,
+        );
+        let mut words = CauseWords::new();
+        record(
+            w,
+            KERNEL_STACK_CORRUPT,
+            on,
+            &corruption.fields(&mut words),
+            guard,
+        );
     }
 }
 
@@ -607,14 +924,14 @@ fn nested(w: &mut dyn Write, entry: Entry, kind: FatalRecord, on: Processor, own
 
 /// Fields a bare record can carry: the processor, the re-entering cause, and
 /// the first entry's kind and cause.
-pub const NESTED_FIELDS: usize = 1 + FAULT_WORDS + 1 + FAULT_WORDS;
+pub const NESTED_FIELDS: usize = 1 + MAX_CAUSE_FIELDS + 1 + MAX_CAUSE_FIELDS;
 
 /// Stack storage a bare record's words are spelled into, so it allocates
 /// nothing.
 #[derive(Debug, Default)]
 pub struct NestedWords {
-    own: FaultWords,
-    first: FaultWords,
+    own: CauseWords,
+    first: CauseWords,
 }
 
 impl NestedWords {
@@ -622,8 +939,8 @@ impl NestedWords {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            own: FaultWords::new(),
-            first: FaultWords::new(),
+            own: CauseWords::new(),
+            first: CauseWords::new(),
         }
     }
 }
@@ -649,16 +966,15 @@ impl<'b> NestedFields<'b> {
         }
     }
 
-    fn push_cause(
-        &mut self,
-        cause: &'b Cause,
-        fault_keys: &[&'static str; FAULT_WORDS],
-        panic_keys: &[&'static str; 3],
-        words: &'b mut FaultWords,
-    ) {
+    fn push_cause(&mut self, cause: &'b Cause, keys: &CauseKeys, words: &'b mut CauseWords) {
         match cause {
             Cause::Fault(fault) => {
-                for field in fault.fields_under(fault_keys, words) {
+                for field in hex_fields(&keys.fault, fault.words(), words) {
+                    self.push(field);
+                }
+            }
+            Cause::Stack(stack) => {
+                for field in stack.fields_under(keys, words) {
                     self.push(field);
                 }
             }
@@ -669,7 +985,7 @@ impl<'b> NestedFields<'b> {
                 column,
             } => {
                 let tail = file.get(..usize::from(*len)).unwrap_or(&[]);
-                let [file_key, line_key, column_key] = *panic_keys;
+                let [file_key, line_key, column_key] = keys.panic;
                 self.push(Field {
                     key: file_key,
                     value: match core::str::from_utf8(tail) {
@@ -701,29 +1017,24 @@ pub fn nested_fields<'b>(
     words: &'b mut NestedWords,
 ) -> NestedFields<'b> {
     let mut fields = NestedFields {
-        fields: [NULL_FIELD; NESTED_FIELDS],
+        fields: [Field::UNSET; NESTED_FIELDS],
         len: 0,
     };
     fields.push(on.field());
-    fields.push_cause(own, &FAULT_KEYS, &PANIC_KEYS, &mut words.own);
+    fields.push_cause(own, &OWN_KEYS, &mut words.own);
     fields.push(Field {
         key: "first",
         value: first.map_or(FieldValue::Null, |first| FieldValue::Str(first.kind())),
     });
     if let Some(first) = first {
-        fields.push_cause(
-            first,
-            &FIRST_FAULT_KEYS,
-            &FIRST_PANIC_KEYS,
-            &mut words.first,
-        );
+        fields.push_cause(first, &FIRST_KEYS, &mut words.first);
     }
     fields
 }
 
-/// Fields a record can carry: the processor, a fault's words (a panic has
-/// three), and the guard's verdict and overrun depth.
-const RECORD_FIELDS: usize = 1 + FAULT_WORDS + 2;
+/// Fields a record can carry: the processor, the widest cause's fields, and
+/// the guard's verdict and overrun depth.
+const RECORD_FIELDS: usize = 1 + MAX_CAUSE_FIELDS + 2;
 
 /// Write `kind`'s record: the processor, the cause fields, and the guard's
 /// verdict, in the keys the kernel's own post-mortem uses.
@@ -737,7 +1048,7 @@ fn record<const CAUSE: usize>(
     // Refused at build time: a wider cause would drop the record's last field.
     const { assert!(1 + CAUSE + 2 <= RECORD_FIELDS) };
     let mut overrun = [0u8; HEX_WORD_LEN];
-    let mut fields = [NULL_FIELD; RECORD_FIELDS];
+    let mut fields = [Field::UNSET; RECORD_FIELDS];
     let mut used = 0;
     let mut push = |field| {
         if let Some(slot) = fields.get_mut(used) {

@@ -181,7 +181,11 @@ log. Folds into `cargo xtask proptest --quick`/`--soak` (§19.7).
   test against `syscall_entry.rs::fmask_value()`: `IA32_FMASK` clears at minimum
   TF, DF, IF, AC, NT and the IOPL bits — a malicious user RFLAGS cannot carry
   `AC=1` (SMAP bypass) or `DF=1` (string direction) into the kernel. *Landable
-  today; pure host test.*
+  today; pure host test.* Interrupt, exception and trap-gate delivery clear no
+  `DF`, so each such stub clears it before Rust, as the boot entry does: host
+  tests `every_asynchronous_entry_stub_clears_the_direction_flag_before_rust`,
+  `the_boot_entries_clear_the_direction_flag_before_rust`, and
+  `every_naked_entry_is_classified`, which keeps a new stub from escaping them.
 - **Stack-pivot / missing GS swap (CVE-2019-1125, `swapgs`).** *Landed:*
   `enter_user_qemu_x86_64` drops to ring 3 through the HAL `iretq` primitive
   and issues a genuine ring-3 → ring-0 `syscall`, exercising the entry stub's

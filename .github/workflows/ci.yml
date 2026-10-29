@@ -133,8 +133,8 @@ jobs:
       - name: cargo xtask ci
         run: cargo xtask ci
 
-      # A failing QEMU vertical names its serial log and, when a guest hangs,
-      # a dump of every core's CPU state. Both are written under
+      # A failing QEMU vertical names its serial log and, when a guest hangs or
+      # its kernel dies, a dump of every core's CPU state. Both are written under
       # `CARGO_TARGET_DIR`, which nothing uploads and the next run's clean
       # wipes — so the one artefact a hang is diagnosable from is gone before
       # anyone reads the failure. Collect them beside the logs uploaded below.

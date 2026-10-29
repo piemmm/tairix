@@ -14,10 +14,10 @@ use std::string::String;
 use std::vec::Vec;
 
 use super::SideChannel;
-use crate::interrupts::stub_align_tests::{literal, stub};
+use crate::interrupts::stub_align_tests::{literal, reached_by, stub, Reached};
 
 /// Every source of the port that carries assembly.
-const ASM_SOURCES: &[(&str, &str)] = &[
+pub(crate) const ASM_SOURCES: &[(&str, &str)] = &[
     ("apic.rs", include_str!("apic.rs")),
     ("apic_timer.rs", include_str!("apic_timer.rs")),
     ("backtrace.rs", include_str!("backtrace.rs")),
@@ -55,7 +55,7 @@ const ASM_SOURCES: &[(&str, &str)] = &[
 ];
 
 /// Whether `name` is an assembly source rather than a Rust one.
-fn is_assembly(name: &str) -> bool {
+pub(crate) fn is_assembly(name: &str) -> bool {
     std::path::Path::new(name)
         .extension()
         .is_some_and(|extension| extension == "s")
@@ -63,7 +63,7 @@ fn is_assembly(name: &str) -> bool {
 
 /// The instructions of `source`, whitespace-normalised: every string
 /// literal line of a Rust source, every non-comment line of an assembly one.
-fn instructions(name: &str, source: &str) -> Vec<String> {
+pub(crate) fn instructions(name: &str, source: &str) -> Vec<String> {
     if is_assembly(name) {
         source
             .lines()
@@ -95,6 +95,46 @@ fn user_returns() -> Vec<(&'static str, Vec<String>, usize)> {
         }
     }
     out
+}
+
+/// Every source of the port that carries assembly is in [`ASM_SOURCES`], so no
+/// entry or return path escapes the scans that read it.
+#[test]
+fn every_source_carrying_assembly_is_inspected() {
+    let listed: BTreeSet<&str> = ASM_SOURCES.iter().map(|(name, _)| *name).collect();
+    let mut pending = Vec::from([std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src"
+    ))]);
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the port's sources") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let carries = if is_assembly(name) {
+                true
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !name.ends_with("_tests.rs")
+            {
+                std::fs::read_to_string(&path)
+                    .expect("a readable source")
+                    .contains("asm!(")
+            } else {
+                false
+            };
+            assert!(
+                !carries || listed.contains(name),
+                "{} carries assembly but is not inspected",
+                path.display()
+            );
+        }
+    }
 }
 
 #[test]
@@ -259,14 +299,7 @@ fn every_entry_stub_zeroes_what_it_saved_before_rust_runs() {
         return;
     }
     let all: BTreeSet<&str> = GPRS.iter().map(|(_, register)| *register).collect();
-    for anchor in [
-        "fn syscall_entry_stub()",
-        "macro_rules! define_isr",
-        "macro_rules! exception_isr_body",
-        "fn tairix_arch_x86_64_isr_default()",
-        "fn tairix_arch_x86_64_external_irq_common()",
-        "fn page_fault_isr()",
-    ] {
+    for anchor in reached_by(Reached::Syscall).chain(reached_by(Reached::Gate)) {
         let (zeroed, passed) = zeroed_and_passed(&stub(anchor, &[]));
         assert!(
             passed.iter().all(|r| SYSV_ARGUMENTS.contains(r)),

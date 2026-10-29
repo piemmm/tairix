@@ -10935,10 +10935,7 @@ where
         // `task` field the caller cannot forge — the trusted origin marker. It is prepended to the caller's own
         // fields, which the decoder bounds to `LOG_FIELDS_MAX`, so the
         // fixed array never overflows.
-        let mut fields_buf = [Field {
-            key: "",
-            value: tairix_log::FieldValue::Null,
-        }; LOG_FIELDS_MAX + 1];
+        let mut fields_buf = [Field::UNSET; LOG_FIELDS_MAX + 1];
         fields_buf[0] = Field {
             key: "task",
             value: tairix_log::FieldValue::UnsignedInt(caller.task_id.0),

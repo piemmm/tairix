@@ -46,13 +46,16 @@ use tairix_arch_api::backtrace::{
     MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
 use tairix_arch_api::fatal::{
-    self, format_hex_word, nested_fields, Cause, Entry, FatalRecord, FaultWords, KernelFault,
-    NestedWords, Processor, FAULT_WORDS, KERNEL_FAULT, KERNEL_PANIC, PANIC_KEYS,
+    self, format_hex_word, nested_fields, Cause, CauseWords, Entry, FatalRecord, KernelFault,
+    NestedWords, Processor, StackCorruption, KERNEL_FAULT, KERNEL_PANIC, KERNEL_STACK_CORRUPT,
+    MAX_CAUSE_FIELDS, PANIC_KEYS,
 };
+use tairix_arch_api::fault::SetFaultHandlerError;
 use tairix_arch_api::quiesce::StopOutcome;
 use tairix_arch_api::quiesce_stop_others_best_effort;
 use tairix_arch_api::{BootStackGuard, CpuId, KernelStackRegion};
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
+use tairix_sync::FnCell;
 
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
@@ -210,12 +213,14 @@ pub fn handle_panic<A: KernelArch>(info: &PanicInfo<'_>, ctx: &PanicContext<'_, 
 }
 
 /// What brought the kernel down — the only thing that differs between the
-/// two entries into [`dump`].
+/// entries into [`dump`].
 enum Fatal<'a> {
     /// A Rust `panic!`, with its source location when one is available.
     Panic(Option<&'a core::panic::Location<'a>>),
     /// A fatal kernel-mode CPU exception.
     Fault(KernelFault),
+    /// A task's kernel stack the dispatcher found corrupt.
+    Stack(StackCorruption),
 }
 
 impl Fatal<'_> {
@@ -224,6 +229,7 @@ impl Fatal<'_> {
         match *self {
             Self::Panic(location) => Cause::panic(location),
             Self::Fault(fault) => Cause::Fault(fault),
+            Self::Stack(stack) => Cause::Stack(stack),
         }
     }
 
@@ -232,6 +238,7 @@ impl Fatal<'_> {
         match self {
             Self::Panic(_) => AuditEvent::Panic,
             Self::Fault(_) => AuditEvent::KernelFault,
+            Self::Stack(_) => AuditEvent::KernelStackCorrupt,
         }
     }
 
@@ -241,15 +248,17 @@ impl Fatal<'_> {
         match self {
             Self::Panic(_) => KERNEL_PANIC,
             Self::Fault(_) => KERNEL_FAULT,
+            Self::Stack(_) => KERNEL_STACK_CORRUPT,
         }
     }
 
     /// The stack pointer the boot-stack guard is judged from: the one the
-    /// faulting code was running on, or for a panic the captured one. `None`
-    /// for a fault taken in user mode, which ran on no kernel stack.
+    /// faulting code was running on, or the captured one for a cause the
+    /// running code raised itself. `None` for a fault taken in user mode,
+    /// which ran on no kernel stack.
     fn guard_sp(&self, captured: u64) -> Option<u64> {
         match self {
-            Self::Panic(_) => Some(captured),
+            Self::Panic(_) | Self::Stack(_) => Some(captured),
             Self::Fault(fault) => fault.sp,
         }
     }
@@ -264,7 +273,7 @@ const FRAME_CAP: usize = BACKTRACE_MAX_FRAMES;
 /// stop-the-world outcome, the regime readings, the translation descriptors,
 /// the two guard fields, and the register and frame blocks.
 const FIELD_CAP: usize =
-    1 + CAUSE_FIELDS + 3 + REGIME_FIELDS + MAX_TABLE_LEVELS + 2 + REG_CAP + FRAME_CAP;
+    1 + MAX_CAUSE_FIELDS + 3 + REGIME_FIELDS + MAX_TABLE_LEVELS + 2 + REG_CAP + FRAME_CAP;
 
 /// Stack storage the register and backtrace fields are formatted into.
 ///
@@ -415,6 +424,64 @@ pub fn fault_dump<A: KernelArch>(fault: KernelFault, ctx: &PanicContext<'_, A>) 
     dump(&Fatal::Fault(fault), ctx)
 }
 
+/// Dump a task's **corrupt kernel stack** and halt the CPU.
+///
+/// The dispatcher found the task's saved stack pointer off its own stack as
+/// it was about to switch in, or the stack's guard canary disturbed once it
+/// switched back. Either way memory beside the stack may already be damaged,
+/// so the kernel stops with the same post-mortem a fault gets rather than run
+/// on.
+///
+/// # Emitted fields
+///
+/// | Key          | Value                                                 |
+/// | ------------ | ----------------------------------------------------- |
+/// | `cpu`        | Decimal CPU id returned by `arch.current_cpu()`.      |
+/// | `check`      | `guard` or `suspension`: what the dispatcher found.   |
+/// | `task`       | 64-bit hex of the task whose stack it is.             |
+/// | `task_sp`    | 64-bit hex of the task's saved kernel stack pointer.  |
+/// | `stack_base` | 64-bit hex of the usable stack's lowest byte.         |
+/// | `stack_top`  | 64-bit hex of one past its highest byte.              |
+///
+/// followed by the register and `frame_N` blocks [`panic_dump`] documents,
+/// which describe the dispatcher that found it.
+pub fn stack_corruption_dump<A: KernelArch>(
+    corruption: StackCorruption,
+    ctx: &PanicContext<'_, A>,
+) -> ! {
+    dump(&Fatal::Stack(corruption), ctx)
+}
+
+/// The kernel's report of a corrupt kernel stack, which only the bin crate
+/// can assemble: set once at boot entry, before any task is dispatched.
+static STACK_CORRUPTION_REPORT: FnCell<fn(StackCorruption) -> !> = FnCell::empty();
+
+/// Install the report a corrupt kernel stack is handed to.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] on a second install: the report
+/// published first keeps the machine's fatal policy.
+pub fn set_stack_corruption_report(
+    report: fn(StackCorruption) -> !,
+) -> Result<(), SetFaultHandlerError> {
+    STACK_CORRUPTION_REPORT
+        .claim(report)
+        .then_some(())
+        .ok_or(SetFaultHandlerError::AlreadyInstalled)
+}
+
+/// Stop the kernel over `corruption` through the installed report.
+pub(crate) fn report_stack_corruption(corruption: StackCorruption) -> ! {
+    match STACK_CORRUPTION_REPORT.load() {
+        Some(report) => report(corruption),
+        // SAFETY-INVARIANT: boot entry installs the report before the first
+        // dispatch, so only a boot that skipped it reaches here, and a panic
+        // is the one fatal path left without it.
+        None => panic!("kernel stack corrupt with no report installed: {corruption:?}"),
+    }
+}
+
 /// Stack storage the cause-specific fields are formatted into.
 ///
 /// Declared in [`dump`]'s frame so the formatted strings outlive the
@@ -422,7 +489,7 @@ pub fn fault_dump<A: KernelArch>(fault: KernelFault, ctx: &PanicContext<'_, A>) 
 struct CauseBufs {
     line: [u8; 11],
     column: [u8; 11],
-    words: FaultWords,
+    words: CauseWords,
 }
 
 impl CauseBufs {
@@ -430,25 +497,18 @@ impl CauseBufs {
         Self {
             line: [0; 11],
             column: [0; 11],
-            words: FaultWords::new(),
+            words: CauseWords::new(),
         }
     }
 }
 
-/// Most cause-specific fields a record carries: a fault's words.
-const CAUSE_FIELDS: usize = FAULT_WORDS;
-
 /// Format the cause-specific fields and say how many there are: a panic's
-/// source position, or the words of a kernel-mode fault. Never both, and
-/// neither is fabricated for the other.
+/// source position, a kernel-mode fault's words, or a corrupt stack's check
+/// and words. Never two, and none is fabricated for another.
 fn cause_fields<'b>(
     fatal: &Fatal<'b>,
     bufs: &'b mut CauseBufs,
-) -> ([Field<'b>; CAUSE_FIELDS], usize) {
-    let unset = Field {
-        key: "",
-        value: FieldValue::Null,
-    };
+) -> ([Field<'b>; MAX_CAUSE_FIELDS], usize) {
     match *fatal {
         Fatal::Panic(location) => {
             let (file_str, line_str, col_str) = match location {
@@ -460,27 +520,35 @@ fn cause_fields<'b>(
                 None => ("<unknown>", "0", "0"),
             };
             let [file_key, line_key, column_key] = PANIC_KEYS;
-            (
-                [
-                    Field {
-                        key: file_key,
-                        value: FieldValue::Str(file_str),
-                    },
-                    Field {
-                        key: line_key,
-                        value: FieldValue::Str(line_str),
-                    },
-                    Field {
-                        key: column_key,
-                        value: FieldValue::Str(col_str),
-                    },
-                    unset,
-                ],
-                3,
-            )
+            padded([
+                Field {
+                    key: file_key,
+                    value: FieldValue::Str(file_str),
+                },
+                Field {
+                    key: line_key,
+                    value: FieldValue::Str(line_str),
+                },
+                Field {
+                    key: column_key,
+                    value: FieldValue::Str(col_str),
+                },
+            ])
         }
-        Fatal::Fault(fault) => (fault.fields(&mut bufs.words), CAUSE_FIELDS),
+        Fatal::Fault(fault) => padded(fault.fields(&mut bufs.words)),
+        Fatal::Stack(stack) => padded(stack.fields(&mut bufs.words)),
     }
+}
+
+/// `cause` at the front of a list as wide as the widest cause, and how many
+/// of its slots it fills.
+fn padded<const N: usize>(cause: [Field<'_>; N]) -> ([Field<'_>; MAX_CAUSE_FIELDS], usize) {
+    const { assert!(N <= MAX_CAUSE_FIELDS) };
+    let mut fields = [Field::UNSET; MAX_CAUSE_FIELDS];
+    for (slot, field) in fields.iter_mut().zip(cause) {
+        *slot = field;
+    }
+    (fields, N)
 }
 
 /// Take the display surface back from a graphical session that holds a seat.
@@ -573,10 +641,7 @@ fn regime_fields<'b>(
     bufs: &'b mut RegimeBufs,
     want_descs: &mut bool,
 ) -> ([Field<'b>; REGIME_FIELDS], usize) {
-    let mut fields = [Field {
-        key: "",
-        value: FieldValue::Str(""),
-    }; REGIME_FIELDS];
+    let mut fields = [Field::UNSET; REGIME_FIELDS];
     let Some(bt) = bt else {
         return (fields, 0);
     };
@@ -657,7 +722,7 @@ fn regime_fields<'b>(
 fn fault_address(fatal: &Fatal<'_>) -> Option<u64> {
     match fatal {
         Fatal::Fault(fault) => fault.address,
-        Fatal::Panic(_) => None,
+        Fatal::Panic(_) | Fatal::Stack(_) => None,
     }
 }
 
@@ -695,10 +760,7 @@ fn desc_fields<'b>(
         let _ = format_hex_word(*desc, &mut bufs.values[i]);
         bufs.key_lens[i] = format_desc_key(i, &mut bufs.keys[i]);
     }
-    let mut fields = [Field {
-        key: "",
-        value: FieldValue::Str(""),
-    }; MAX_TABLE_LEVELS];
+    let mut fields = [Field::UNSET; MAX_TABLE_LEVELS];
     for (i, field) in fields.iter_mut().enumerate().take(read) {
         *field = Field {
             key: core::str::from_utf8(&bufs.keys[i][..bufs.key_lens[i]]).unwrap_or("desc_?"),
@@ -739,10 +801,7 @@ struct Fields<'b> {
 impl<'b> Fields<'b> {
     fn new() -> Self {
         Self {
-            slots: [Field {
-                key: "",
-                value: FieldValue::Str(""),
-            }; FIELD_CAP],
+            slots: [Field::UNSET; FIELD_CAP],
             len: 0,
         }
     }
@@ -849,13 +908,7 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let mut desc_bufs = DescBufs::new();
     let (descs, n_descs) = match (want_descs, ctx.backtrace, fault_address(fatal)) {
         (true, Some(bt), Some(address)) => desc_fields(bt, address, &mut desc_bufs),
-        _ => (
-            [Field {
-                key: "",
-                value: FieldValue::Str(""),
-            }; MAX_TABLE_LEVELS],
-            0,
-        ),
+        _ => ([Field::UNSET; MAX_TABLE_LEVELS], 0),
     };
 
     // A port that published no post-mortem handle gets the base record
@@ -990,6 +1043,7 @@ fn format_desc_key(index: usize, buf: &mut [u8; 16]) -> usize {
 mod tests {
     use super::*;
     use core::ptr::NonNull;
+    use tairix_arch_api::fatal::StackCheck;
     use tairix_arch_api::BootStackGuardRegion;
 
     /// The process-wide quiesce liveness tables the stop-request tests
@@ -1727,6 +1781,99 @@ mod tests {
         assert_eq!(field("fault_pc"), Some("0x0000000080101234"));
     }
 
+    /// The cause fields of a corrupt stack, and none of another cause's.
+    #[test]
+    fn stack_corruption_dump_emits_one_record_with_documented_fields() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = TestArch::on_cpu(cpu);
+        let sink = &TestSink::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink);
+            stack_corruption_dump(
+                StackCorruption {
+                    check: StackCheck::Suspension,
+                    task: 0x2a,
+                    task_sp: 0x8040_8f00,
+                    base: 0x8040_0000,
+                    top: 0x8040_4000,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err(), "the corrupt-stack path must halt");
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1, "expected exactly one corrupt-stack record");
+        let ev = &events[0];
+        assert_eq!(ev.id, AuditEvent::KernelStackCorrupt.id());
+        assert_eq!(ev.level, Level::Error);
+        assert_eq!(ev.message, AuditEvent::KernelStackCorrupt.message());
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("cpu"), Some(cpu.to_string().as_str()));
+        assert_eq!(field("check"), Some("suspension"));
+        assert_eq!(field("task"), Some("0x000000000000002a"));
+        assert_eq!(field("task_sp"), Some("0x0000000080408f00"));
+        assert_eq!(field("stack_base"), Some("0x0000000080400000"));
+        assert_eq!(field("stack_top"), Some("0x0000000080404000"));
+        for other in PANIC_KEYS.iter().chain(&tairix_arch_api::fatal::FAULT_KEYS) {
+            assert_eq!(field(other), None, "`{other}` is another cause's");
+        }
+        assert_eq!(arch.halt_count(), 1);
+        reset_panic_guard();
+    }
+
+    /// Hands the corruption back through the unwind, so a test sees what the
+    /// slot was given.
+    fn unwinding_report(corruption: StackCorruption) -> ! {
+        std::panic::panic_any(corruption)
+    }
+
+    /// The one test of the process-wide report slot, so no two race on it.
+    #[test]
+    fn a_corrupt_stack_reaches_the_report_installed_once() {
+        let corruption = StackCorruption {
+            check: StackCheck::Guard,
+            task: 9,
+            task_sp: 0x1f00,
+            base: 0x1000,
+            top: 0x2000,
+        };
+        STACK_CORRUPTION_REPORT.clear();
+        let unreported = catch_unwind(|| {
+            report_stack_corruption(corruption);
+        })
+        .expect_err("with no report installed the kernel still stops");
+        assert!(unreported
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.starts_with("kernel stack corrupt")));
+
+        let report: fn(StackCorruption) -> ! = unwinding_report;
+        assert_eq!(set_stack_corruption_report(report), Ok(()));
+        assert_eq!(
+            set_stack_corruption_report(report),
+            Err(SetFaultHandlerError::AlreadyInstalled)
+        );
+        let reported = catch_unwind(|| {
+            report_stack_corruption(corruption);
+        })
+        .expect_err("the report never returns");
+        assert_eq!(
+            reported.downcast_ref::<StackCorruption>(),
+            Some(&corruption)
+        );
+        STACK_CORRUPTION_REPORT.clear();
+    }
+
     /// A report that dies inside itself ends in one terse record naming what
     /// re-entered and what the first report was written for: the machine's
     /// cause survives the report that could not describe it.
@@ -2308,6 +2455,31 @@ mod tests {
             guard_fields_below(false, fault(None)),
             (Some("intact".into()), None),
             "a user-mode fault names no kernel stack"
+        );
+    }
+
+    /// A corrupt stack is found by the dispatcher, so the guard is judged
+    /// from the stack the dispatcher runs on, never from the task's.
+    #[test]
+    fn a_corrupt_stack_is_judged_from_the_dispatcher_s_stack() {
+        let corrupt = |ctx: &PanicContext<'_, TestArch>, _captured: u64| {
+            stack_corruption_dump(
+                StackCorruption {
+                    check: StackCheck::Guard,
+                    task: 1,
+                    task_sp: u64::MAX,
+                    base: u64::MAX - 0x1000,
+                    top: u64::MAX,
+                },
+                ctx,
+            )
+        };
+        let (verdict, extent) = guard_fields_below(false, corrupt);
+        assert_eq!(verdict.as_deref(), Some("sp_below_stack"));
+        assert!(extent.is_some());
+        assert_eq!(
+            guard_fields_below(true, corrupt),
+            (Some("intact".into()), None)
         );
     }
 

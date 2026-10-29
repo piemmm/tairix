@@ -64,6 +64,7 @@ use alloc::sync::Arc;
 use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::Ordering;
 
+use tairix_arch_api::fatal::{StackCheck, StackCorruption};
 use tairix_arch_api::{
     AddressTag, AddressTags, ContextSwitch, KernelStackRegion, TaskContext, STACK_ALIGN,
 };
@@ -116,10 +117,11 @@ use crate::procspace::ProcessSpace;
 /// *below* the usable region, so an overrun runs off the bottom of the stack
 /// into the guard instead of straight into the neighbouring heap allocation.
 /// A contiguous overrun trips the guard's canary, which `dispatch_step`
-/// checks every time the task hands the CPU back, and the task is then failed
-/// closed rather than allowed to run on a corrupt stack. The sizing still matters — the guard absorbs an overrun but a
-/// generous stack avoids one in the first place — so each profile's bound
-/// must comfortably exceed that profile's deepest syscall-handler call depth.
+/// checks every time the task hands the CPU back, and the kernel then stops
+/// with a fatal report rather than run on memory the overrun may have reached.
+/// The sizing still matters — the guard catches an overrun but a generous stack
+/// avoids one in the first place — so each profile's bound must comfortably
+/// exceed that profile's deepest syscall-handler call depth.
 #[cfg(debug_assertions)]
 pub const KTHREAD_STACK_BYTES: usize = 64 * 1024;
 
@@ -147,8 +149,8 @@ const STACK_GUARD_BYTES: usize = 4096;
 ///
 /// Returned by [`KernelStack::check_guard`]. On real hardware the overrun
 /// faults on the unmapped guard page; the software emulation surfaces the
-/// same condition through this value so `dispatch_step` can fail the task
-/// closed identically either way.
+/// same condition through this value, and `dispatch_step` turns it into the
+/// same fatal stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StackGuardViolation;
 
@@ -207,10 +209,9 @@ pub unsafe trait KernelStack {
     ///
     /// Returns [`StackGuardViolation`] if the task has run off the bottom of
     /// its usable stack into the guard region. `dispatch_step` calls this
-    /// each time the task switches back to the dispatcher and fails the task
-    /// closed on a violation, so an overrun is
-    /// caught at the next reschedule instead of silently corrupting the
-    /// lower-addressed neighbour.
+    /// each time the task switches back to the dispatcher and stops the
+    /// kernel with a fatal report on a violation, so an overrun is caught at
+    /// the next reschedule instead of being run on.
     ///
     /// The default returns `Ok(())`: a stack source without a guard (a
     /// slab-backed or static test stack) has nothing to check. [`BoxStack`]
@@ -1203,7 +1204,10 @@ where
         // reach a task that is no longer running here.
         #[cfg(feature = "watchdog-diagnostics")]
         crate::latency::publish(step.cpu, step.task_id);
-        let action = dispatch_step(&mut control, step.cpu);
+        let action = match dispatch_step(&mut control, step.cpu, step.task_id) {
+            Ok(action) => action,
+            Err(corruption) => crate::panic::report_stack_corruption(corruption),
+        };
         #[cfg(feature = "watchdog-diagnostics")]
         crate::latency::unpublish(step.cpu);
         // The task body returned; the CFQ post-run accounting tail
@@ -1248,7 +1252,17 @@ pub enum Admission {
 /// it directly. It seeds the first frame on the first step, switches into
 /// the task, and returns the [`TaskAction`] the task requested when it
 /// switched back.
-fn dispatch_step<C, S>(control: &mut ThreadControl<C, S>, cpu: CpuId) -> TaskAction
+///
+/// # Errors
+///
+/// The corruption found on `task`'s kernel stack — a foreign suspension point
+/// before the switch, a disturbed guard after it — which the kernel may not run
+/// past.
+fn dispatch_step<C, S>(
+    control: &mut ThreadControl<C, S>,
+    cpu: CpuId,
+    task: TaskId,
+) -> Result<TaskAction, StackCorruption>
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
@@ -1269,7 +1283,7 @@ where
     match unsafe { (*ctl).state } {
         // A task that has already exited reports `Exit` every time the
         // scheduler asks again, and is never switched into.
-        RunState::Finished => return TaskAction::Exit,
+        RunState::Finished => return Ok(TaskAction::Exit),
         RunState::NotStarted => {
             let cs = unsafe { (*ctl).cs };
             let stack = unsafe { (*ctl).stack.region() };
@@ -1290,7 +1304,7 @@ where
                 unsafe {
                     (*ctl).state = RunState::Finished;
                 }
-                return TaskAction::Exit;
+                return Ok(TaskAction::Exit);
             }
             unsafe {
                 (*ctl).state = RunState::Running;
@@ -1300,25 +1314,20 @@ where
     }
 
     // A suspension point must lie on this task's *own* kernel stack. Anything
-    // else is a foreign continuation somebody wrote into this save area, and
-    // switching into it would run another task's kernel context — unwinding
-    // that task's syscall handler and `eret`ing its user registers — under
-    // *this* task's page-table root, so the innocent task dies on a fault it
-    // never took (`plans/OPEN-DEFECTS.md` D44). Fail the task closed instead:
-    // its context can no longer be trusted, exactly as a guard violation.
+    // else is a foreign continuation somebody wrote into this save area
+    // (`plans/OPEN-DEFECTS.md` D44): another task's context is already lost,
+    // so the kernel stops rather than switch into it.
     //
-    // Checked here, before the switch-in hook activates the user root and
-    // before either per-CPU publication below, so a refused task leaves this
-    // CPU naming nothing: a resume handle or live-space pointer published for a
-    // task the scheduler then reaps would dangle into its freed control block.
+    // Checked before the switch-in hook activates the user root and before
+    // either per-CPU publication below, so nothing names the task when the
+    // report reads this CPU's state.
     // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
     let saved = unsafe { (*ctl).task_ctx.stack_pointer };
     // SAFETY: as above.
     if !unsafe { (*ctl).stack.carries(saved) } {
-        unsafe {
-            (*ctl).state = RunState::Finished;
-        }
-        return TaskAction::Exit;
+        // SAFETY: as above.
+        let stack = unsafe { &(*ctl).stack };
+        return Err(corruption(StackCheck::Suspension, task, saved, stack));
     }
 
     // A loading task that finished building its user image deposited the
@@ -1450,22 +1459,35 @@ where
         }
     }
 
-    // The task ran on its kernel stack; verify it did not run off the bottom
-    // into the guard region before we trust it again. A violation means a
-    // stack overrun — on real hardware the unmapped guard page would already
-    // have faulted; the software emulation catches it here. Fail the task
-    // closed: mark it terminal and report `Exit` so the scheduler never
-    // switches into its corrupted context again.
+    // An overrun that reached the guard may have run on past it, so what lies
+    // below the stack can no longer be trusted either.
     // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
     if unsafe { (*ctl).stack.check_guard() }.is_err() {
-        unsafe {
-            (*ctl).state = RunState::Finished;
-        }
-        return TaskAction::Exit;
+        // SAFETY: as above.
+        let (sp, stack) = unsafe { ((*ctl).task_ctx.stack_pointer, &(*ctl).stack) };
+        return Err(corruption(StackCheck::Guard, task, sp, stack));
     }
 
     // Report the action the task requested.
-    unsafe { (*ctl).action }
+    Ok(unsafe { (*ctl).action })
+}
+
+/// What `check` found on `stack`, the kernel stack of `task` suspended at
+/// `sp`.
+fn corruption<S: KernelStack>(
+    check: StackCheck,
+    task: TaskId,
+    sp: u64,
+    stack: &S,
+) -> StackCorruption {
+    let top = stack.top();
+    StackCorruption {
+        check,
+        task,
+        task_sp: sp,
+        base: top.saturating_sub(stack.usable_bytes()),
+        top,
+    }
 }
 
 /// The port's address-space tags, which load the park root and discard a
@@ -1904,6 +1926,9 @@ mod tests {
     use crate::sched::Scheduler;
     use crate::test_arch::TestArch;
 
+    /// The task the hand-driven dispatch steps run.
+    const TASK: TaskId = 7;
+
     /// What a [`RecordingCs`] saw — one recorder per test, so parallel
     /// test threads never share state.
     struct Recorder {
@@ -2131,7 +2156,7 @@ mod tests {
         let mut control = control_with(cs, stack);
         let ctl_addr = addr_of_mut!(*control) as u64;
 
-        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu());
+        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu(), TASK);
 
         // One prepare, with the stack's top and the control block's exposed
         // address as the entry argument. That the *entry* is `trampoline` is
@@ -2148,7 +2173,7 @@ mod tests {
         assert_eq!(rec.switches.load(Ordering::SeqCst), 1);
         assert_eq!(control.state, RunState::Running);
         // The no-op double leaves the action at its initial value.
-        assert_eq!(action, TaskAction::Yield);
+        assert_eq!(action, Ok(TaskAction::Yield));
     }
 
     /// A quantum that expires after the scheduler arms the timer but before
@@ -2164,7 +2189,7 @@ mod tests {
         // Model the timer firing in EL1 after the policy arm and before the
         // context switch into user mode.
         crate::preempt::note_preempt_tick(cpu);
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
 
         assert!(crate::preempt::take_preempt_pending(cpu));
     }
@@ -2193,7 +2218,7 @@ mod tests {
             hits,
         );
 
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
 
         assert_eq!(
             rec.crumb_during_switch.load(Ordering::SeqCst),
@@ -2215,8 +2240,8 @@ mod tests {
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         let cpu = crate::test_boot::claim_cpu();
-        let _ = dispatch_step(&mut control, cpu);
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
+        let _ = dispatch_step(&mut control, cpu, TASK);
 
         // Prepare happens once; each step switches in.
         assert_eq!(rec.prepares.load(Ordering::SeqCst), 1);
@@ -2228,11 +2253,11 @@ mod tests {
     fn failed_prepare_exits_without_switching() {
         let mut control = control_with(FailingCs, BoxStack::new().expect("stack allocates"));
 
-        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu());
+        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu(), TASK);
 
         // Fail closed: report Exit, mark terminal, never switch into an
         // unrunnable context.
-        assert_eq!(action, TaskAction::Exit);
+        assert_eq!(action, Ok(TaskAction::Exit));
         assert_eq!(control.state, RunState::Finished);
     }
 
@@ -2242,9 +2267,9 @@ mod tests {
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         control.state = RunState::Finished;
 
-        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu());
+        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu(), TASK);
 
-        assert_eq!(action, TaskAction::Exit);
+        assert_eq!(action, Ok(TaskAction::Exit));
         // A terminal task is never prepared or switched into again.
         assert_eq!(rec.prepares.load(Ordering::SeqCst), 0);
         assert_eq!(rec.switches.load(Ordering::SeqCst), 0);
@@ -2452,85 +2477,120 @@ mod tests {
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
     }
 
+    /// The corruption `check` found on `control`'s stack with the task
+    /// suspended at `task_sp`.
+    fn corruption_of<C: ContextSwitch + Copy, S: KernelStack>(
+        check: StackCheck,
+        control: &ThreadControl<C, S>,
+        task_sp: u64,
+    ) -> StackCorruption {
+        let region = control.stack.region();
+        StackCorruption {
+            check,
+            task: TASK,
+            task_sp,
+            base: region.base_addr(),
+            top: region.top_addr(),
+        }
+    }
+
+    /// `plans/OPEN-DEFECTS.md` D44's backstop: a saved kernel stack pointer
+    /// off the task's own stack is a foreign continuation somebody wrote into
+    /// this save area. Another task's context is already lost, so the step
+    /// reports the corruption rather than switch into it.
     #[test]
     fn dispatch_step_refuses_a_suspension_point_on_a_foreign_stack() {
-        // `plans/OPEN-DEFECTS.md` D44's fail-closed backstop: a saved kernel
-        // stack pointer that does not lie on the task's own stack is a foreign
-        // continuation somebody wrote into this save area. Switching into it
-        // would run another task's kernel context under this task's page-table
-        // root, so the step fails the task closed instead.
         let rec = recorder!();
         let cpu = crate::test_boot::claim_cpu();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // One ordinary step seeds a real, in-bounds suspension point.
-        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Yield);
+        assert_eq!(
+            dispatch_step(&mut control, cpu, TASK),
+            Ok(TaskAction::Yield)
+        );
         let switches = rec.switches.load(Ordering::SeqCst);
         assert!(control.stack.carries(control.task_ctx.stack_pointer));
 
         // Now poke a pointer into a *different* stack, exactly as a park
         // against a foreign control block would have left behind.
         let foreign = BoxStack::new().expect("stack allocates");
-        control.task_ctx.stack_pointer = foreign.top() - 64;
-        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
+        let poked = foreign.top() - 64;
+        control.task_ctx.stack_pointer = poked;
+        assert_eq!(
+            dispatch_step(&mut control, cpu, TASK),
+            Err(corruption_of(StackCheck::Suspension, &control, poked))
+        );
         assert_eq!(
             rec.switches.load(Ordering::SeqCst),
             switches,
             "a foreign suspension point must not be switched into"
         );
-        // The task is terminal: every later step reports `Exit` and never
-        // switches in again.
-        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
-        assert_eq!(rec.switches.load(Ordering::SeqCst), switches);
     }
 
-    /// A refused task leaves this CPU naming nothing.
-    ///
-    /// The refusal above reports `Exit`, so the scheduler reaps the task and
-    /// drops its control block — and with it the `Arc<ProcessSpace>` clone the
-    /// live-space publication borrows from. A resume handle or live-space
-    /// pointer published before the refusal therefore dangles into freed
-    /// memory, and the next `reschedule_current` on this CPU would switch into
-    /// a reaped context. The check runs before either publication for exactly
-    /// that reason.
+    /// A refused task leaves this CPU naming nothing, so the report that
+    /// follows walks the dispatcher's stack rather than the corrupt one.
     #[test]
     fn a_refused_dispatch_step_publishes_nothing_for_the_cpu() {
-        let rec = recorder!();
-        let hits = pre_resume_counter!();
         let cpu = crate::test_boot::claim_cpu();
+        let names_nothing = |sp: u64| {
+            assert!(
+                current_process_space(cpu).is_none(),
+                "a refused task must leave no live-space publication"
+            );
+            assert!(
+                !reschedule_current(cpu, RescheduleAction::Yield),
+                "a refused task must leave no resume handle to switch into"
+            );
+            assert!(
+                running_stack(cpu, sp).is_none(),
+                "a refused task's stack must not be the one the report walks"
+            );
+        };
+        let live = || {
+            Some(Arc::new(crate::procspace::ProcessSpace::for_test(
+                crate::procspace::host_test_space!(),
+            )))
+        };
+
+        // Refused before the switch, at a foreign suspension point.
+        let hits = pre_resume_counter!();
         let mut control = user_control_with(
-            RecordingCs(rec),
+            RecordingCs(recorder!()),
             BoxStack::new().expect("stack allocates"),
             hits,
         );
-        control.live = Some(Arc::new(crate::procspace::ProcessSpace::for_test(
-            crate::procspace::host_test_space!(),
-        )));
-
+        control.live = live();
         // One ordinary step seeds a real suspension point, publishes both
         // handles across the switch, and clears them on the way back.
-        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Yield);
+        assert_eq!(
+            dispatch_step(&mut control, cpu, TASK),
+            Ok(TaskAction::Yield)
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-
-        // Poke in a foreign suspension point, as a park against another task's
-        // control block would have left behind.
         let foreign = BoxStack::new().expect("stack allocates");
         control.task_ctx.stack_pointer = foreign.top() - 64;
-        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
+        assert!(dispatch_step(&mut control, cpu, TASK).is_err());
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
             "a refused task's switch-in hook must not run, so its user root is \
              never activated"
         );
-        assert!(
-            current_process_space(cpu).is_none(),
-            "a refused task must leave no live-space publication to dangle"
+        names_nothing(control.stack.top() - 64);
+
+        // Refused after the switch, at a disturbed guard.
+        let mut guarded = user_control_with(
+            RecordingCs(recorder!()),
+            GuardDouble {
+                inner: BoxStack::new().expect("stack allocates"),
+                violated: true,
+            },
+            pre_resume_counter!(),
         );
-        assert!(
-            !reschedule_current(cpu, RescheduleAction::Yield),
-            "a refused task must leave no resume handle to switch into"
-        );
+        guarded.live = live();
+        assert!(dispatch_step(&mut guarded, cpu, TASK).is_err());
+        names_nothing(guarded.stack.top() - 64);
     }
 
     #[test]
@@ -2631,14 +2691,14 @@ mod tests {
         // The host switch is a no-op that returns immediately, so a step
         // publishes the handle, runs `pre_resume`, switches in, and clears
         // the handle before returning.
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         // Handle retired: nothing to reschedule on this CPU now.
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
 
         // `pre_resume` runs again on the next switch-in (every step
         // reactivates the user address space).
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
@@ -2665,7 +2725,7 @@ mod tests {
             live: None,
         });
 
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
 
         // The deposited hook is now the task's own `pre_resume`, the pending
         // slot is drained, and the dispatcher ran the hook this very step
@@ -2676,7 +2736,7 @@ mod tests {
 
         // The upgrade is one-shot: a later step runs the installed hook
         // again (an ordinary user step) but installs nothing new.
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
         assert!(control.pending_upgrade.is_none());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
@@ -2692,7 +2752,7 @@ mod tests {
         // a user task's syscall trap — and retired the instant it switches
         // back.
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
-        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu, TASK);
         // The host double's `switch` observed the published slot while the
         // task was "running".
         assert!(
@@ -2790,7 +2850,7 @@ mod tests {
 
         let mut kernel = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         rec.park_on_switch.store(true, Ordering::SeqCst);
-        assert_eq!(dispatch_step(&mut kernel, cpu), TaskAction::Park);
+        assert_eq!(dispatch_step(&mut kernel, cpu, TASK), Ok(TaskAction::Park));
         assert_eq!(rec.brackets.load(Ordering::SeqCst), 0, "a kernel body");
 
         let mut user = user_control_with(
@@ -2799,7 +2859,7 @@ mod tests {
             pre_resume_counter!(),
         );
         rec.park_on_switch.store(true, Ordering::SeqCst);
-        assert_eq!(dispatch_step(&mut user, cpu), TaskAction::Park);
+        assert_eq!(dispatch_step(&mut user, cpu, TASK), Ok(TaskAction::Park));
         assert_eq!(
             rec.brackets.load(Ordering::SeqCst),
             0,
@@ -2809,7 +2869,7 @@ mod tests {
         // SAFETY: the control block is live and nothing else reaches it.
         unsafe { yielder_of(addr_of_mut!(*user)) }.note_user_entry();
         rec.park_on_switch.store(true, Ordering::SeqCst);
-        assert_eq!(dispatch_step(&mut user, cpu), TaskAction::Park);
+        assert_eq!(dispatch_step(&mut user, cpu, TASK), Ok(TaskAction::Park));
         assert_eq!(
             rec.brackets.load(Ordering::SeqCst),
             2,
@@ -2873,7 +2933,7 @@ mod tests {
         }));
         user.live = Some(Arc::clone(&space));
 
-        let _ = dispatch_step(&mut user, cpu);
+        let _ = dispatch_step(&mut user, cpu, TASK);
         assert!(
             joined.load(Ordering::SeqCst),
             "the CPU joined the set before the hook loaded the space's root"
@@ -2906,8 +2966,8 @@ mod tests {
             record.lock().push(tag);
         }));
         user.live = Some(Arc::clone(&space));
-        let _ = dispatch_step(&mut user, cpu);
-        let _ = dispatch_step(&mut user, cpu);
+        let _ = dispatch_step(&mut user, cpu, TASK);
+        let _ = dispatch_step(&mut user, cpu, TASK);
         let page = space
             .with(|live| live.reserve_anonymous(1))
             .expect("a page reserves");
@@ -2917,7 +2977,7 @@ mod tests {
         space
             .with(|live| live.unmap_anonymous(page, 1, &mut tairix_kernel_mem::Unpublished))
             .expect("the page unmaps");
-        let _ = dispatch_step(&mut user, cpu);
+        let _ = dispatch_step(&mut user, cpu, TASK);
         let tag = loaded
             .lock()
             .first()
@@ -2991,7 +3051,7 @@ mod tests {
         }
 
         fn step(&mut self) {
-            let _ = dispatch_step(&mut self.user, self.cpu);
+            let _ = dispatch_step(&mut self.user, self.cpu, TASK);
         }
 
         /// The tag of every switch so far, all of them one tag.
@@ -3060,7 +3120,7 @@ mod tests {
         );
         let cpu = crate::test_boot::claim_cpu();
         let before = PARKS.with(core::cell::Cell::get);
-        let _ = dispatch_step(&mut user, cpu);
+        let _ = dispatch_step(&mut user, cpu, TASK);
         assert_eq!(
             PARKS.with(core::cell::Cell::get),
             before + 1,
@@ -3070,7 +3130,7 @@ mod tests {
         let rec = recorder!();
         let mut kernel = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         let before = PARKS.with(core::cell::Cell::get);
-        let _ = dispatch_step(&mut kernel, cpu);
+        let _ = dispatch_step(&mut kernel, cpu, TASK);
         assert_eq!(
             PARKS.with(core::cell::Cell::get),
             before,
@@ -3160,26 +3220,22 @@ mod tests {
         assert!(guardless.check_guard().is_ok());
     }
 
+    /// An overrun that reached the guard may have run on past it, so the
+    /// switch-back check reports the corruption rather than trust the task.
     #[test]
-    fn dispatch_step_fails_closed_on_a_guard_violation() {
-        let rec = recorder!();
+    fn dispatch_step_reports_a_guard_violation() {
         let stack = GuardDouble {
             inner: BoxStack::new().expect("stack allocates"),
             violated: true,
         };
-        let mut control = control_with(RecordingCs(rec), stack);
-        let cpu = crate::test_boot::claim_cpu();
+        let mut control = control_with(RecordingCs(recorder!()), stack);
 
-        // The first step prepares the frame and switches in (a host no-op),
-        // then the switch-back guard check trips: the task is failed closed
-        // (terminal + `Exit`) rather than trusted on a corrupt stack.
-        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
-        assert_eq!(control.state, RunState::Finished);
-
-        // It stays terminal and is never switched into again.
-        let before = rec.switches.load(Ordering::SeqCst);
-        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
-        assert_eq!(rec.switches.load(Ordering::SeqCst), before);
+        let step = dispatch_step(&mut control, crate::test_boot::claim_cpu(), TASK);
+        let suspended = control.task_ctx.stack_pointer;
+        assert_eq!(
+            step,
+            Err(corruption_of(StackCheck::Guard, &control, suspended))
+        );
     }
 
     #[test]
@@ -3194,8 +3250,8 @@ mod tests {
         // With the guard intact the shim reports the task's requested action
         // (the default `Yield`) and the task stays runnable.
         assert_eq!(
-            dispatch_step(&mut control, crate::test_boot::claim_cpu()),
-            TaskAction::Yield
+            dispatch_step(&mut control, crate::test_boot::claim_cpu(), TASK),
+            Ok(TaskAction::Yield)
         );
         assert_eq!(control.state, RunState::Running);
     }

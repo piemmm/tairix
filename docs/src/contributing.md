@@ -347,15 +347,21 @@ rather than quietly ignored. The QEMU verticals keep their own per-guest
 budgets — this is an outer backstop, not a replacement for them.
 
 A guest killed for falling silent, for reaching its runtime ceiling, or because
-its kernel wrote a fatal record, is interrogated over its QEMU monitor first:
-every vCPU's registers and 32 KiB of its stack are read and the addresses named
-against the kernel ELF's symbol table, then reported inline and kept beside the
-transcript as `<binary>.cpu.txt`. The stack's return addresses say how each
-core reached where it stopped — for a fatal stop, through the report and
-whatever it was reporting, which the record alone cannot. That is what separates a
-machine whose cores are all halted in a wait-for-interrupt — nothing runnable,
-so a wake-up was lost — from one still executing inside an interrupt-masked
-section. Without it a hang can only be diagnosed by re-running it, which
+its kernel wrote a fatal record, is stopped and interrogated over its QEMU
+monitor first. Every vCPU's registers and 32 KiB of its stack are read — and,
+for a fatal record, the stack it names, through the CPU it names — along with
+the cause the kernel's fatal latch kept, which survives a report that never
+reached the console. The addresses are named against the kernel ELF's symbol
+table; the registers, the kept cause and the names are reported inline, and
+everything is kept beside the transcript as `<binary>.cpu.txt`. Each reply is
+read to the prompt that ends it, so a slow one is neither cut short nor taken
+for the next command's, and the whole interrogation has one deadline, so a
+wedged QEMU cannot hang the run. The stack's
+return addresses say how each core reached where it stopped — for a fatal
+stop, through the report and whatever it was reporting, which the record alone
+cannot. That is what separates a machine whose cores are all halted in a
+wait-for-interrupt — nothing runnable, so a wake-up was lost — from one still
+executing inside an interrupt-masked section. Without it a hang can only be diagnosed by re-running it, which
 [§7][test] forbids as a diagnosis. The transcript then ends with a
 `tairix-qemu:` line naming where each scripted exchange stopped: the step each
 cursor was on and how often that step's marker had appeared. A choreography

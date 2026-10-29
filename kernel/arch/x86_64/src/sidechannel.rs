@@ -90,16 +90,13 @@ macro_rules! scrub_nonargument_gprs {
     };
 }
 
-/// Template text clearing the direction flag on entry, before any call into
-/// Rust. The System V AMD64 ABI requires `DF=0` at a function's entry, and the
-/// compiler emits `memcpy`/`memset` as `rep movs`/`rep stos`, which read `DF`
-/// to pick their direction. A `syscall` clears `DF` through `IA32_FMASK`, but
-/// interrupt, exception, and trap-gate delivery do not — so an interrupt taken
-/// inside the brief `std`…`cld` window of a backward `memmove`
-/// (`compiler_builtins`' `copy_backward`) would otherwise enter the dispatcher
-/// with `DF=1` and run its string ops backward, corrupting the interrupted
-/// stack. A stub splices this in after its saves and before its call; the
-/// interrupted context's own `DF` is untouched, restored by `iretq`.
+/// Template text clearing the direction flag before a stub's first call into
+/// Rust. Interrupt, exception, and trap-gate delivery keep the interrupted
+/// context's `DF` — only `syscall` clears it, through `IA32_FMASK` — while the
+/// System V AMD64 ABI requires `DF=0` at every function's entry, and the
+/// kernel's `memcpy`/`memset` (`compiler_builtins`) are `rep movs`/`rep stos`
+/// loops that read it. The interrupted context's own `DF` comes back with
+/// `iretq`.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! clear_direction_flag {
@@ -129,7 +126,7 @@ macro_rules! iret_clearing_for_ring3 {
 
 #[cfg(test)]
 #[path = "sidechannel_tests.rs"]
-mod sidechannel_tests;
+pub(crate) mod sidechannel_tests;
 
 #[cfg(test)]
 mod tests {

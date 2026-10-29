@@ -68,11 +68,12 @@ ci_stamp() {
 #
 # `cargo xtask test --qemu` writes each guest's full serial log and, when a
 # guest hangs or its kernel dies, a dump of every core's CPU state and stack,
-# and names both in its failure message. They land under `CARGO_TARGET_DIR`, which is a build cache the
-# workflows do not upload and `cargo xtask clean` wipes at the start of the
-# next run — so the one artefact a hang is diagnosable from is discarded
-# before anyone reads the failure. Copying them beside the logs that *are*
-# uploaded is what makes the next hang answerable instead of merely observed.
+# and names both in its failure message. They land under `CARGO_TARGET_DIR`,
+# which is a build cache the workflows do not upload and `cargo xtask clean`
+# wipes at the start of the next run — so the one artefact a hang is
+# diagnosable from is discarded before anyone reads the failure. Copying them
+# beside the logs that *are* uploaded is what makes the next hang answerable
+# instead of merely observed.
 #
 # Never fails the caller: a missing target tree or an unreadable file leaves
 # the diagnosis thinner, and losing a whole run over it would be worse.

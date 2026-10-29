@@ -39,3 +39,7 @@ tairix-arch-api = { path = "../../kernel/arch/api", version = "=0.0.0" }
 # The audio vertical's rate and channel count, which the capture backend is
 # set to, are defined once beside the signal both ends of it check.
 tairix-test-audio-wire = { path = "../../tests/integration/audio_wire", version = "=0.0.0" }
+
+[dev-dependencies]
+# The kept-cause read is checked against the bytes a latch really holds.
+tairix-arch-api = { path = "../../kernel/arch/api", version = "=0.0.0", features = ["host-tests"] }

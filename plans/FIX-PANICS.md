@@ -12,11 +12,15 @@ A fatal **kernel-mode CPU exception** now enters the same path through
 `None` — in place of a source location and recorded as
 `AuditEvent::KernelFault` (`4011`); everything below it — the register
 block, the bounded walk, the fatal latch, the halt — is the one shared body.
+A task's kernel stack the dispatcher finds corrupt (its saved stack pointer off
+the stack before a switch in, or its guard canary disturbed after one) enters
+it through `kernel_core::stack_corruption_dump`, recorded as
+`AuditEvent::KernelStackCorrupt` (`4012`).
 The per-port glue (the published arch handle, the sink, the backtracer, the
 console list, and the port's own reports for the pre-init window) is one
 `tairix_kernel::fatal_bridge::FatalReport` impl per port, shared by the
-`#[panic_handler]` and the fault handler installed in
-`tairix_arch_api::fault`. See
+`#[panic_handler]`, the fault handler installed in `tairix_arch_api::fault`,
+and the corrupt-stack report installed in `kernel_core`. See
 `plans/OPEN-DEFECTS.md` D13 for why it was missing, D79 for the one port
 still only partly covered, and D128 for the one open defect in this path: the
 walk's reader rebuilds a pointer from each validated address instead of
@@ -34,7 +38,9 @@ on aarch64): once the world is stopped, so the lead-up precedes the record,
 and again *after* the record and before the halt; a nested entry drains its
 bare record once written. Every drain runs behind the fatal latch, so one that
 faults is a nested entry, never a re-entry. The latch keeps the first entry's
-cause, so that bare record names it beside its own. Nothing that can itself fault may
+cause, so that bare record names it beside its own, and exports it as
+`tairix_fatal_first_cause` for a debugger to read off a machine whose report
+never printed. Nothing that can itself fault may
 sit between capturing this core's state and writing the record either, which
 is why the display-surface reclaim happens once, as the first entry's first
 act, and is not repeated after the stop.

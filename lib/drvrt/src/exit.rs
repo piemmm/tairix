@@ -48,10 +48,7 @@ pub fn error(err: DriverError) -> Field<'static> {
 #[must_use]
 pub fn end_with(sink: &dyn Sink, node: Option<u32>, exit: DriverExit, detail: &[Field<'_>]) -> i32 {
     let (id, level) = record(exit);
-    let mut fields = [Field {
-        key: "",
-        value: FieldValue::Null,
-    }; 2 + MAX_DETAIL];
+    let mut fields = [Field::UNSET; 2 + MAX_DETAIL];
     fields[0] = Field {
         key: "exit",
         value: FieldValue::Str(exit.name()),
